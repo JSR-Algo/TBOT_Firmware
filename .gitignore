@@ -1,0 +1,48 @@
+# Build & dependency outputs
+build/
+dist/
+tmp/
+components/
+managed_components/
+dependencies.lock
+releases/
+dl_temp/
+
+# Generated headers / assets
+main/assets/lang_config.h
+main/mmap_generate_emoji.h
+mmap_generate_*.h
+*.bin
+
+# sdkconfig (project uses sdkconfig.defaults.* instead)
+sdkconfig
+sdkconfig.old
+
+# Editor / tooling
+.vscode/
+.devcontainer/
+.clangd
+.cache
+.claude/
+.idea/
+*.swp
+
+# Environment
+.env
+
+# Logs
+logs/
+*.log
+build_log*.txt
+eim_install.log
+
+# Python bytecode
+*.pyc
+__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MS Office lock / temp files
+~$*

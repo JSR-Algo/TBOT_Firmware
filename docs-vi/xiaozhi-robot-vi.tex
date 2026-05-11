@@ -1,0 +1,836 @@
+% !TEX program = xelatex
+% Compile: xelatex xiaozhi-robot-vi.tex   (chạy 2 lần để TOC chuẩn)
+% Yêu cầu: XeLaTeX + font Times New Roman / Cambria (có sẵn trên Windows)
+
+\documentclass[11pt,a4paper]{article}
+
+% ===== Encoding & Language =====
+\usepackage{polyglossia}
+\setdefaultlanguage{vietnamese}
+\setotherlanguage{english}
+
+% ===== Fonts (XeLaTeX) =====
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\setsansfont{Calibri}
+\setmonofont{Consolas}[Scale=0.85]
+
+% ===== Layout =====
+\usepackage[margin=2.2cm,headheight=14pt]{geometry}
+\usepackage{titling}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\setlist{topsep=4pt,itemsep=2pt,parsep=0pt}
+\usepackage{parskip}
+\usepackage{microtype}
+
+% ===== Colors & Boxes =====
+\usepackage[dvipsnames,svgnames]{xcolor}
+\definecolor{codebg}{RGB}{245,247,250}
+\definecolor{codeborder}{RGB}{200,210,220}
+\definecolor{kw}{RGB}{0,90,160}
+\definecolor{cmt}{RGB}{120,140,160}
+\definecolor{str}{RGB}{40,140,80}
+\definecolor{boxhead}{RGB}{30,90,160}
+\definecolor{boxbg}{RGB}{235,242,252}
+\definecolor{warnhead}{RGB}{180,90,20}
+\definecolor{warnbg}{RGB}{255,245,225}
+
+\usepackage[most]{tcolorbox}
+\tcbset{
+  notebox/.style={
+    enhanced, colback=boxbg, colframe=boxhead, coltitle=white, fonttitle=\bfseries,
+    boxrule=0.6pt, arc=2pt, top=2pt, bottom=2pt, left=4pt, right=4pt
+  },
+  warnbox/.style={
+    enhanced, colback=warnbg, colframe=warnhead, coltitle=white, fonttitle=\bfseries,
+    boxrule=0.6pt, arc=2pt, top=2pt, bottom=2pt, left=4pt, right=4pt
+  }
+}
+
+% ===== Code listings =====
+\usepackage{listings}
+\lstdefinestyle{cstyle}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{kw}\bfseries,
+  commentstyle=\color{cmt}\itshape,
+  stringstyle=\color{str},
+  numberstyle=\tiny\color{cmt},
+  numbers=left, numbersep=8pt,
+  frame=single, rulecolor=\color{codeborder},
+  breaklines=true, breakatwhitespace=true,
+  showstringspaces=false,
+  tabsize=2, captionpos=b,
+  inputencoding=utf8,
+  extendedchars=true
+}
+\lstset{style=cstyle}
+\lstdefinelanguage{json}{
+  basicstyle=\ttfamily\small,
+  string=[s]{"}{"},
+  stringstyle=\color{str},
+  comment=[l]{//},
+  commentstyle=\color{cmt},
+  keywordstyle=\color{kw}\bfseries,
+  morekeywords={true,false,null}
+}
+
+% ===== Tables =====
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{tabularx}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\renewcommand{\arraystretch}{1.15}
+
+% ===== Hyperlinks =====
+\usepackage[bookmarks=true,colorlinks=true,linkcolor=NavyBlue,urlcolor=NavyBlue,citecolor=NavyBlue]{hyperref}
+
+% ===== Header/Footer =====
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small\textit{Xiaozhi Robot — Tài liệu tích hợp}}
+\lhead{\small\textit{ESP32-S3 / ES3C28P}}
+\rfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ===== Titles =====
+\titleformat{\section}{\Large\bfseries\color{boxhead}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\large\bfseries\color{boxhead!85}}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{0.5em}{}
+
+% ===== Title page =====
+\title{
+  \vspace*{1cm}
+  \textbf{\Huge Xiaozhi AI Robot}\\[6pt]
+  \Large Tài liệu tích hợp \& kế hoạch tùy biến\\[2pt]
+  \large ESP32-S3 + ES3C28P + 3× Servo MG996R + WebSocket Server tự host
+}
+\author{Tài liệu kỹ thuật nội bộ}
+\date{\today}
+
+% =====================================================================
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+
+\vspace{0.6cm}
+\begin{tcolorbox}[notebox,title={Tóm tắt}]
+Tài liệu này map toàn bộ source code dự án \texttt{xiaozhi-esp32}, giải thích các khái niệm cốt lõi (build pipeline, ESP-IDF, MCP, WebSocket, AFE wake word), liệt kê pin GPIO còn rảnh trên board ES3C28P, và đề xuất kế hoạch tích hợp:
+\begin{itemize}
+  \item Tự host WebSocket backend (đã có người làm) thay thế \texttt{xiaozhi.me} cloud.
+  \item Thêm 3 servo MG996R (đầu, tay, chân) qua MCP tool — LLM gọi xuống device.
+  \item Build + flash + iterate.
+\end{itemize}
+Văn bản dùng cho cả người triển khai (con người) và Claude (AI assistant) làm tài liệu tham chiếu.
+\end{tcolorbox}
+
+\newpage
+\tableofcontents
+\newpage
+
+% =====================================================================
+\section{Mục đích \& phạm vi}
+\subsection{Bài toán}
+Bạn có:
+\begin{itemize}
+  \item Board phần cứng \textbf{ES3C28P / ES3N28P} (LCD wiki) với chip ESP32-S3, màn 2.8\textquotesingle{} ILI9341 240×320, codec ES8311 (mic + loa), pin sạc.
+  \item Source code \texttt{xiaozhi-esp32} (C++, ESP-IDF) — assistant AI bằng giọng nói, dùng MQTT/WebSocket để giao tiếp cloud.
+  \item Một WebSocket server tự host (do người khác viết, gọi API Google) — sẽ thay thế \texttt{api.tenclass.net}.
+  \item Kế hoạch lắp 3 servo MG996R làm robot có chuyển động (đầu xoay, tay vẫy, chân di chuyển).
+\end{itemize}
+
+\subsection{Mục tiêu của tài liệu}
+\begin{enumerate}
+  \item Cung cấp \textbf{từ điển khái niệm} các thuật ngữ ESP-IDF / firmware / IoT.
+  \item Chỉ rõ \textbf{vai trò từng folder} trong source code xiaozhi.
+  \item Liệt kê \textbf{pin GPIO đang dùng \& còn rảnh} (trích từ tài liệu chính thức của kit).
+  \item Đề xuất \textbf{kế hoạch tích hợp servo + WebSocket custom} từng bước.
+  \item Cung cấp \textbf{workflow build/flash/test} có thể lặp lại.
+\end{enumerate}
+
+% =====================================================================
+\section{Khái niệm nền tảng}
+\subsection{ESP32-S3 là gì?}
+\textbf{ESP32-S3} là vi điều khiển hệ thống-trên-chip (SoC) của Espressif, kiến trúc Xtensa LX7 dual-core 32-bit @ 240 MHz, tích hợp Wi-Fi 802.11 b/g/n và Bluetooth LE 5.0. Phiên bản dùng cho board này là \texttt{ESP32-S3-WROOM-1}, có:
+\begin{itemize}
+  \item 16 MB Flash QSPI (lưu firmware + assets).
+  \item 8 MB PSRAM Octal (RAM mở rộng — dùng cho LVGL framebuffer + audio buffer + AI model).
+  \item 45 GPIO (nhưng không phải tất cả đều exposed trên kit ES3C28P — xem mục~\ref{sec:gpio}).
+  \item Hardware accelerator cho I2S, USB JTAG/Serial native, AES, SHA, RSA.
+\end{itemize}
+
+\subsection{ESP-IDF là gì?}
+\textbf{ESP-IDF} (Espressif IoT Development Framework) là framework chính thức để lập trình các chip ESP32 (S3, C3, P4, \ldots). Nó cung cấp:
+\begin{itemize}
+  \item Trình biên dịch chuyên dụng (\texttt{xtensa-esp-elf-gcc}).
+  \item Bootloader 2 stage + partition table.
+  \item FreeRTOS làm nhân hệ điều hành.
+  \item Driver cho tất cả ngoại vi (I2C, I2S, SPI, USB, Wi-Fi, BLE).
+  \item Component manager (giống npm/pip) để tải driver bên thứ 3.
+\end{itemize}
+Phiên bản đang dùng: \texttt{ESP-IDF v5.5.4} — cài qua \textbf{EIM} (ESP-IDF Installation Manager) tại \texttt{C:\textbackslash esp\textbackslash v5.5.4\textbackslash esp-idf}.
+
+\subsection{Firmware là gì?}
+\textbf{Firmware} = phần mềm chạy trên vi điều khiển. Khác app PC ở chỗ:
+\begin{itemize}
+  \item Không có hệ điều hành đầy đủ (Linux/Windows). Thay vào là \textbf{FreeRTOS} (hệ điều hành nhẹ, real-time, dạng task scheduler).
+  \item Khi flash xong, chip chạy ngay không cần \textit{install}.
+  \item Toàn bộ logic, driver, asset (ảnh, âm thanh) đóng gói thành \textbf{1 file \texttt{.bin}} ghi vào Flash.
+\end{itemize}
+Trong dự án xiaozhi, file output cuối là \texttt{build/merged-binary.bin} (\textasciitilde 10.4 MB), chứa:
+\begin{enumerate}
+  \item Bootloader (\texttt{0x0000})
+  \item Partition table (\texttt{0x8000})
+  \item OTA data (\texttt{0xD000})
+  \item App chính \texttt{xiaozhi.bin} (\texttt{0x20000})
+  \item Assets (\texttt{0x800000}) — chứa file \texttt{.ogg} + \texttt{language.json}
+\end{enumerate}
+
+\subsection{Build pipeline là gì?}
+\textbf{Build pipeline} = chuỗi các bước biến source code (C/C++) thành file firmware sẵn sàng nạp vào chip. Trong xiaozhi, pipeline được tự động hóa qua \texttt{scripts/release.py}:
+
+\begin{enumerate}
+  \item \textbf{Set target}: \texttt{idf.py set-target esp32s3} — chỉ định chip đích, sinh \texttt{sdkconfig} từ \texttt{sdkconfig.defaults}.
+  \item \textbf{Áp dụng board config}: đọc \texttt{boards/<board>/config.json}, append các \texttt{CONFIG\_\ldots=y} vào \texttt{sdkconfig}.
+  \item \textbf{Resolve dependencies}: ESP-IDF Component Manager đọc \texttt{idf\_component.yml}, tải các thư viện cần (LVGL, esp-sr, esp-codec-dev\ldots) vào \texttt{managed\_components/}.
+  \item \textbf{CMake configure}: sinh \texttt{build.ninja} từ \texttt{CMakeLists.txt}.
+  \item \textbf{Compile}: \texttt{ninja} biên dịch \textasciitilde 1500 file \texttt{.c/.cc} → \texttt{.o} → link thành \texttt{xiaozhi.elf}.
+  \item \textbf{Convert} \texttt{.elf} → \texttt{.bin}: \texttt{esptool.py elf2image}.
+  \item \textbf{Generate assets partition}: nén \texttt{main/assets/locales/<lang>/*.ogg} thành \texttt{generated\_assets.bin}.
+  \item \textbf{Merge bin}: gộp 5 file (bootloader, partition table, ota data, xiaozhi, assets) thành 1 file duy nhất \texttt{merged-binary.bin}.
+  \item \textbf{Zip}: đóng gói vào \texttt{releases/v<version>\_<board>.zip}.
+\end{enumerate}
+
+\begin{tcolorbox}[notebox,title={Tại sao có 2 protocol song song (MQTT \& WebSocket)?}]
+xiaozhi.me cloud dùng \textbf{MQTT broker} làm trục giao tiếp chính (lý do: scale tốt cho hàng ngàn device cùng lúc). Tuy nhiên với server tự host, đa số dev ưa \textbf{WebSocket} hơn vì đơn giản, không cần broker, dùng port 443/80 dễ xuyên firewall. Project xiaozhi hỗ trợ cả 2 — chọn protocol động dựa trên config server trả về.
+\end{tcolorbox}
+
+\subsection{Default config là gì?}
+\textbf{Default config} = giá trị mặc định cho hàng trăm setting của ESP-IDF (kích thước heap, log level, partition layout, Wi-Fi buffer, \ldots). Trong xiaozhi có nhiều cấp:
+\begin{itemize}
+  \item \texttt{sdkconfig.defaults} — chung cho mọi target.
+  \item \texttt{sdkconfig.defaults.esp32s3} — riêng cho chip S3 (vd. \texttt{CONFIG\_SPIRAM\_MODE\_OCT=y} bật octal PSRAM).
+  \item \texttt{boards/<board>/config.json} — riêng cho board (vd. \texttt{CONFIG\_ESPTOOLPY\_FLASHSIZE\_16MB=y}).
+  \item Khi chạy \texttt{idf.py menuconfig} — user override interactive.
+\end{itemize}
+Khi build, ESP-IDF merge tất cả file trên thành \texttt{sdkconfig} cuối cùng (build/config/sdkconfig.h).
+
+\subsection{Bootloader là gì?}
+\textbf{Bootloader} = đoạn code nhỏ (\textasciitilde 30 KB) chạy đầu tiên khi chip cấp điện. Chức năng:
+\begin{enumerate}
+  \item Khởi tạo clock, PSRAM, flash.
+  \item Đọc \textbf{partition table} để biết app nằm ở đâu (\texttt{ota\_0} hoặc \texttt{ota\_1}).
+  \item Verify checksum/signature của app.
+  \item Nhảy vào app entry point.
+\end{enumerate}
+Nếu app corrupt (vd. flash hỏng giữa chừng), bootloader sẽ \textbf{reset chip} → bootloop. Đó là lý do hôm trước khi \texttt{esptool} flash failed 50\%, board bootloop liên tục.
+
+\subsection{Partition table là gì?}
+\textbf{Partition table} = bảng phân bổ vùng nhớ trên Flash 16MB:
+\begin{lstlisting}[language=, caption={partitions/v2/16m.csv (rút gọn)}]
+# Name,    Type, SubType,  Offset,   Size
+nvs,       data, nvs,      0x9000,   0x4000   # WiFi creds, settings
+otadata,   data, ota,      0xd000,   0x2000   # OTA slot indicator
+phy_init,  data, phy,      0xf000,   0x1000   # WiFi RF calibration
+ota_0,     app,  ota_0,    0x20000,  0x7E0000 # ~8MB app slot 1
+ota_1,     app,  ota_1,    0x800000, 0x7E0000 # ~8MB app slot 2 (OTA)
+assets,    data, spiffs,   0xFE0000, 0x20000  # voice .ogg + language strings
+\end{lstlisting}
+2 slot \texttt{ota\_0} và \texttt{ota\_1} cho phép update OTA (Over-The-Air): chip ghi app mới vào slot rảnh, verify, switch active slot, reboot. Nếu fail → fallback slot cũ.
+
+\subsection{NVS (Non-Volatile Storage) là gì?}
+\textbf{NVS} = key-value store nhỏ (16 KB) trên flash, lưu các thông tin cần persist qua reboot:
+\begin{itemize}
+  \item Wi-Fi SSID + password.
+  \item Server URL (sau khi nhận từ OTA endpoint).
+  \item User preferences (volume, brightness).
+  \item Activation token, device ID.
+\end{itemize}
+Trong xiaozhi, đọc/ghi NVS qua class \texttt{Settings} (\texttt{main/settings.cc}). Khi erase flash → mất hết → board phải config lại Wi-Fi từ đầu.
+
+\subsection{WebSocket là gì \& hoạt động sao?}
+\textbf{WebSocket} (RFC 6455) = giao thức truyền tin 2 chiều (full-duplex) trên port HTTP/HTTPS. Khác HTTP thông thường ở chỗ:
+\begin{itemize}
+  \item HTTP: client gửi request, server trả response, đóng kết nối.
+  \item WebSocket: client gửi 1 request HTTP đặc biệt (\texttt{Upgrade: websocket}), server chấp nhận → kết nối TCP \textbf{giữ mở vĩnh viễn} → 2 phía gửi tin nhắn bất cứ lúc nào.
+\end{itemize}
+
+\subsubsection*{Quy trình xiaozhi dùng WebSocket}
+\begin{enumerate}
+  \item Device kết nối Wi-Fi → có IP.
+  \item Device gọi \texttt{POST https://server.com/ota} với header \texttt{Device-Id}, \texttt{Client-Id}.
+  \item Server trả JSON, trong đó có \texttt{websocket\_url} (vd. \texttt{wss://server.com/ws}).
+  \item Device mở WebSocket tới URL đó, header có \texttt{Authorization: Bearer <token>}, \texttt{Protocol-Version: 1}.
+  \item Device gửi \texttt{hello} JSON (audio params).
+  \item Server reply \texttt{hello} (sample rate, session\_id).
+  \item Khi user nói "Hi, ESP" → device wake → bắt đầu gửi \textbf{audio Opus binary} qua WS.
+  \item Server STT → LLM → TTS → gửi \textbf{audio Opus binary} ngược về.
+  \item Song song: text JSON cho TTS state, MCP commands.
+\end{enumerate}
+
+\begin{lstlisting}[language=json, caption={Hello message device gửi}]
+{
+  "type": "hello",
+  "version": 1,
+  "features": { "mcp": true, "aec": true },
+  "transport": "websocket",
+  "audio_params": {
+    "format": "opus",
+    "sample_rate": 16000,
+    "channels": 1,
+    "frame_duration": 60
+  }
+}
+\end{lstlisting}
+
+\begin{lstlisting}[language=json, caption={Hello reply server gửi về}]
+{
+  "type": "hello",
+  "transport": "websocket",
+  "session_id": "xxx",
+  "audio_params": {
+    "format": "opus",
+    "sample_rate": 24000,
+    "channels": 1,
+    "frame_duration": 60
+  }
+}
+\end{lstlisting}
+
+\subsection{MCP (Model Context Protocol) là gì?}
+\textbf{MCP} = giao thức chuẩn cho AI gọi \textbf{tool} ở thiết bị/server. Anthropic công bố cuối 2024, đang thành chuẩn industry. Trong xiaozhi:
+\begin{itemize}
+  \item Device đăng ký \textbf{tool} (như \texttt{set\_volume}, \texttt{take\_photo}).
+  \item Backend gọi \texttt{tools/list} → device trả schema (tên, mô tả, params).
+  \item LLM (Qwen/DeepSeek) đọc schema, quyết định gọi tool nào khi cần.
+  \item Backend gọi \texttt{tools/call} với args → device thực thi → trả kết quả.
+\end{itemize}
+
+\subsubsection*{Code mẫu MCP tool (lấy từ board ESP-Hi robot dog)}
+\begin{lstlisting}[language=C++, caption={InitializeTools() trong main/boards/esp-hi/esp\_hi.cc}]
+void InitializeTools() {
+    auto& mcp_server = McpServer::GetInstance();
+
+    mcp_server.AddTool("self.dog.basic_control",
+        "Robot basic motion: forward/backward/left/right/idle",
+        PropertyList({
+            Property("action", kPropertyTypeString)
+        }),
+        [this](const PropertyList& args) -> ReturnValue {
+            std::string action = args["action"].value<std::string>();
+            if (action == "forward") {
+                servo_dog_ctrl_send(DOG_STATE_FORWARD, NULL);
+            } else if (action == "backward") {
+                servo_dog_ctrl_send(DOG_STATE_BACKWARD, NULL);
+            }
+            return true;
+        });
+}
+\end{lstlisting}
+
+\subsection{AFE (Audio Front-End) \& Wake Word}
+\textbf{AFE} = Espressif's audio pipeline gồm AEC (echo cancel) + NS (noise suppress) + VAD (voice activity detect) + WakeNet (wake word detection). Chạy trên chip S3 không cần cloud.
+
+\textbf{Wake word} hiện tại: \texttt{wn9s\_hiesp} (nhỏ, "Hi, ESP" English) + \texttt{wn9\_hiesp} (chuẩn). Không có wake word offline cho tiếng Việt — Espressif chưa ra. Phải dùng "Hi, ESP" hoặc "Nǐ hǎo, xiǎo zhì" (你好小智).
+
+% =====================================================================
+\section{Phần cứng — board ES3C28P}\label{sec:gpio}
+\subsection{Tổng quan}
+Board của bạn từ LCD wiki (\url{https://www.lcdwiki.com/2.8inch_ESP32-S3_Display}) — kit \texttt{ES3C28P} (touch capacitive) hoặc \texttt{ES3N28P} (touch resistive / không touch). Match 100\% với \texttt{freenove-esp32s3-display-2.8-lcd} trong xiaozhi project.
+
+\subsubsection*{Linh kiện chính}
+\begin{itemize}
+  \item Chip: ESP32-S3-WROOM-1-N16R8 (16MB Flash, 8MB PSRAM)
+  \item Màn: ILI9341V 2.8\textquotesingle{} IPS 240×320, SPI 4-line
+  \item Touch: FT6336G I2C (chỉ trên ES3C28P)
+  \item Audio codec: ES8311 (mono, mic + DAC)
+  \item Mic: MEMS LMA2718B381-OA7
+  \item Loa amp: FM8002E (class-D)
+  \item LDO: ME6217 (3.3V)
+  \item Sạc pin: TP4054 (Li-ion 1S)
+  \item LED RGB: WS2812B
+\end{itemize}
+
+\subsection{Pin assignment chính thức}
+Trích từ \texttt{ESP32-S3芯片IO资源分配表.xlsx} của kit. Cột "Exposed" = có pad hàn được trên PCB.
+
+\begin{longtable}{c|c|l|c}
+\toprule
+\textbf{GPIO} & \textbf{Exposed?} & \textbf{Đang dùng cho} & \textbf{Có thể dùng IO?}\\
+\midrule
+\endhead
+0    & N & BOOT button & ✗\\
+1    & N & PA enable (loa) & ✗\\
+\textbf{2}    & \textbf{Y} & --- & \textbf{✓ FREE}\\
+\textbf{3}    & \textbf{Y} & --- & \textbf{✓ FREE}\\
+4    & N & I2S MCLK & ✗\\
+5    & N & I2S BCLK & ✗\\
+6    & N & I2S DIN (mic) & ✗\\
+7    & N & I2S WS / LRCK & ✗\\
+8    & N & I2S DOUT (loa) & ✗\\
+9    & N & ADC8 (battery) & ✗\\
+10   & N & LCD CS & ✗\\
+11   & N & LCD MOSI & ✗\\
+12   & N & LCD SCK & ✗\\
+13   & N & LCD MISO & ✗\\
+\textbf{14}   & \textbf{Y} & --- & \textbf{✓ FREE}\\
+15   & Y & I2C SCL (codec/touch) & △ chỉ I2C\\
+16   & Y & I2C SDA (codec/touch) & △ chỉ I2C\\
+17   & N & Touch INT & ✗\\
+18   & N & Touch RST & ✗\\
+19   & N & USB D− & ✗\\
+20   & N & USB D+ & ✗\\
+\textbf{21}   & \textbf{Y} & --- & \textbf{✓ FREE}\\
+26-37 & N & Internal flash/PSRAM & ✗ (cấm tuyệt đối)\\
+38-41 & N & SD card SDIO (chưa hàn) & ✗\\
+42   & N & RGB LED WS2812B & ✗\\
+\textbf{43}   & \textbf{Y} & UART0 TX (debug) & △ nếu không dùng UART\\
+\textbf{44}   & \textbf{Y} & UART0 RX (debug) & △ nếu không dùng UART\\
+45   & N & LCD backlight & ✗\\
+46   & N & LCD DC & ✗\\
+47   & N & SD SDIO DATA3 & ✗\\
+48   & N & SD SDIO DATA2 & ✗\\
+\bottomrule
+\caption{Pin assignment ES3C28P (nguồn: kit official xlsx)}
+\end{longtable}
+
+\begin{tcolorbox}[warnbox,title={Cảnh báo strap pin}]
+GPIO 0, 3, 45, 46 là \textbf{strap pin} — quyết định boot mode lúc reset. Sau khi boot xong, có thể dùng làm IO bình thường, nhưng \textbf{trạng thái lúc cấp điện} ảnh hưởng:
+\begin{itemize}
+  \item GPIO 0 = LOW lúc reset → vào download mode (dùng cho flash).
+  \item GPIO 3 = float lúc reset (không kéo lên/xuống ngoài).
+  \item GPIO 45, 46 = liên quan voltage regulator config.
+\end{itemize}
+Khi nối servo vào GPIO 2 hay 3, đảm bảo dây tín hiệu từ board tới servo có điện trở pull-down 10k để tránh ảnh hưởng strap. Hoặc đơn giản: \textbf{ưu tiên GPIO 14 và 21 trước}, GPIO 2/3 chỉ dùng nếu thiếu.
+\end{tcolorbox}
+
+\subsection{Pad hàn ở mặt sau board}
+Theo bảng IO chính thức, \textbf{board có sẵn pad hàn (是否引出 = Y)} cho các chân: \textbf{GPIO 2, 3, 14, 15, 16, 21, 43, 44}. Xem schematic PDF \texttt{2.8inch\_ESP32-S3\_Display\_Schematic.pdf} để xác định vị trí vật lý mỗi pad.
+
+\subsection{Kế hoạch dây servo MG996R}
+\textbf{Phân chia chân:}
+\begin{center}
+\begin{tabular}{l|c|l}
+\toprule
+\textbf{Servo} & \textbf{GPIO} & \textbf{Lý do}\\
+\midrule
+Đầu (Head) & 14 & Hoàn toàn rảnh, không strap, gần khu vực vào USB\\
+Tay (Arm)  & 21 & Hoàn toàn rảnh, không strap\\
+Chân (Leg) & 2  & Strap pin nhưng OK sau boot, exposed\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Cấp nguồn servo MG996R:}
+\begin{itemize}
+  \item Mỗi servo MG996R cần 4.8–7.2V, dòng peak \textasciitilde 1.5–2A.
+  \item 3 servo đồng thời = up to 6A peak.
+  \item \textbf{Tuyệt đối không lấy từ pin board}. Cấp nguồn riêng:
+  \begin{itemize}
+    \item Pin Li-ion 2S (7.4V) → buck converter → 6V cấp servo.
+    \item HOẶC pin Li-ion 1S (3.7V) → boost converter → 5V/6A cấp servo.
+    \item Tách \textbf{GND chung} với ESP32 board (mass chung), KHÔNG nối Vcc chung.
+  \end{itemize}
+  \item Dây tín hiệu PWM từ GPIO của ESP32 → trực tiếp vào servo signal pin (không cần level shifter — servo thấy 3.3V là logic HIGH).
+  \item Nên có tụ \textbf{1000µF} ở đầu Vcc của mỗi servo để hấp thu dòng inrush.
+\end{itemize}
+
+% =====================================================================
+\section{Bản đồ source code xiaozhi-esp32}
+\subsection{Cấu trúc cấp gốc}
+\begin{lstlisting}
+xiaozhi-esp32-main/
+|-- CMakeLists.txt           # version 2.2.6, MINIMAL_BUILD on
+|-- docs/                    # documentation chinh thuc
+|-- main/                    # source code (chinh)
+|-- managed_components/      # deps tu tai (LVGL, esp-sr, ...)
+|-- partitions/v2/16m.csv    # partition table 16MB
+|-- scripts/release.py       # build pipeline
+|-- sdkconfig                # ESP-IDF config (auto-generated)
+|-- sdkconfig.defaults       # default cho moi target
+|-- sdkconfig.defaults.esp32s3 # default cho chip S3
+|-- build/merged-binary.bin  # output cuoi (10.4MB)
+`-- releases/v2.2.6_*.zip    # zip release
+\end{lstlisting}
+
+\subsection{Folder \texttt{docs/} — đọc trước khi code}
+\begin{tabularx}{\textwidth}{l|Y}
+\toprule
+\textbf{File} & \textbf{Nội dung}\\
+\midrule
+\texttt{websocket.md} & Spec WebSocket protocol — quan trọng cho integrate server\\
+\texttt{mqtt-udp.md} & Spec MQTT (default xiaozhi.me)\\
+\texttt{mcp-protocol.md} & Spec MCP\\
+\texttt{mcp-usage.md} & Hướng dẫn viết MCP tool — quan trọng cho servo\\
+\texttt{custom-board.md} & Cách thêm board mới\\
+\texttt{code\_style.md} & Convention code\\
+\bottomrule
+\end{tabularx}
+
+\subsection{Folder \texttt{main/} — chi tiết}
+
+\subsubsection{File cấp gốc}
+\begin{tabularx}{\textwidth}{l|Y}
+\toprule
+\textbf{File} & \textbf{Vai trò}\\
+\midrule
+\texttt{main.cc} & Entry point, gọi \texttt{app\_main()}\\
+\texttt{application.cc/h} & Singleton chính. Init mọi thứ. Vòng lặp event chính.\\
+\texttt{device\_state.h} & Enum \texttt{DeviceState} (idle, connecting, listening, speaking, \ldots)\\
+\texttt{device\_state\_machine.cc/h} & State transitions với guard\\
+\texttt{settings.cc/h} & Đọc/ghi NVS (Wi-Fi, server URL, prefs)\\
+\texttt{ota.cc/h} & Gọi /ota endpoint, NHẬN URL websocket/mqtt từ server\\
+\texttt{system\_info.cc/h} & UUID, MAC, free heap, version\\
+\texttt{mcp\_server.cc/h} & MCP singleton — đăng ký tool cho LLM gọi\\
+\texttt{assets.cc/h} & Load file .ogg + language strings từ flash partition\\
+\texttt{idf\_component.yml} & Khai báo dependency (lvgl, esp-sr, \ldots)\\
+\texttt{Kconfig.projbuild} & Menu config (chọn board, lang, wake-word)\\
+\texttt{CMakeLists.txt} & Build rules + register source\\
+\bottomrule
+\end{tabularx}
+
+\subsubsection{Folder \texttt{boards/}}
+Mỗi board 1 folder. Folder của bạn:
+\begin{lstlisting}
+boards/freenove-esp32s3-display-2.8-lcd/
+|-- config.h          # GPIO pinout
+|-- config.json       # build config (LANG=VI_VN dang dung)
+|-- freenove-esp32s3-display-2.8-lcd.cc   # class init board
+`-- ReadMe.md
+\end{lstlisting}
+
+\textbf{Folder \texttt{boards/common/}} — class chung dùng được cho mọi board:
+\begin{tabularx}{\textwidth}{l|Y}
+\toprule
+\textbf{File} & \textbf{Vai trò}\\
+\midrule
+\texttt{board.cc/h} & Base class \texttt{Board}\\
+\texttt{wifi\_board.cc/h} & Board WiFi-only (kế thừa Board)\\
+\texttt{button.cc/h} & Driver nút bấm (GPIO + click/long-press)\\
+\texttt{backlight.cc/h} & PWM cho LCD backlight\\
+\texttt{adc\_battery\_monitor.cc/h} & Đo pin qua ADC\\
+\texttt{ml307\_board.cc/h} & Board 4G (cho board dùng modem ML307)\\
+\bottomrule
+\end{tabularx}
+
+\textbf{Board \texttt{esp-hi/}} — robot dog mẫu, có 11 MCP tool điều khiển servo. Sẽ copy logic này khi làm robot 3-servo.
+
+\subsubsection{Folder \texttt{audio/}}
+\begin{tabularx}{\textwidth}{l|Y}
+\toprule
+\textbf{File/folder} & \textbf{Vai trò}\\
+\midrule
+\texttt{audio\_codec.cc/h} & Base class codec\\
+\texttt{audio\_service.cc/h} & I2S read/write loop, pipeline orchestration\\
+\texttt{codecs/es8311\_audio\_codec.cc/h} & Driver ES8311 (đang dùng)\\
+\texttt{codecs/no\_audio\_codec.cc} & Cho board không codec (raw I2S)\\
+\texttt{wake\_words/afe\_wake\_word.cc/h} & Espressif AFE pipeline\\
+\texttt{processors/audio\_debugger.cc} & Gửi raw audio qua UDP để debug\\
+\texttt{demuxer/ogg\_demuxer.cc} & Parse file .ogg\\
+\bottomrule
+\end{tabularx}
+
+\subsubsection{Folder \texttt{display/}}
+\begin{tabularx}{\textwidth}{l|Y}
+\toprule
+\textbf{File/folder} & \textbf{Vai trò}\\
+\midrule
+\texttt{display.cc/h} & Base class\\
+\texttt{lcd\_display.cc/h} & LCD SPI (board của bạn dùng)\\
+\texttt{oled\_display.cc/h} & OLED I2C (board nhỏ)\\
+\texttt{emote\_display.cc/h} & Display có animation (esp-hi)\\
+\texttt{lvgl\_display/lvgl\_theme.cc/h} & Theme dark/light, màu sắc\\
+\texttt{lvgl\_display/lvgl\_font.cc/h} & Font register\\
+\texttt{lvgl\_display/emoji\_collection.cc/h} & List emoji\\
+\texttt{lvgl\_display/gif/, jpg/} & Decoder ảnh\\
+\bottomrule
+\end{tabularx}
+
+\subsubsection{Folder \texttt{protocols/} — chỗ tích hợp WebSocket custom}
+\begin{lstlisting}
+protocols/
+|-- protocol.cc/h            # base abstract class
+|-- mqtt_protocol.cc/h       # MQTT impl (xiaozhi.me dung)
+`-- websocket_protocol.cc/h  # WebSocket impl - DUNG CHO SERVER CUA BAN
+\end{lstlisting}
+
+\subsubsection{Folder \texttt{assets/}}
+\begin{lstlisting}
+assets/
+|-- lang_config.h          # include language tuong ung
+|-- common/                # .ogg dung chung (popup, success, ...)
+`-- locales/<lang>/        # .ogg + language.json
+    |-- vi-VN/             # TIENG VIET (dang dung)
+    |-- en-US/, zh-CN/, ...
+\end{lstlisting}
+
+% =====================================================================
+\section{Cơ chế chọn protocol \& kế hoạch switch sang server custom}
+\subsection{Cơ chế hiện tại}
+File \texttt{main/application.cc} dòng 473–487:
+\begin{lstlisting}[language=C++, caption={Auto-select protocol dựa OTA response}]
+void Application::InitializeProtocol() {
+    if (ota_->HasMqttConfig()) {
+        protocol_ = std::make_unique<MqttProtocol>();
+    } else if (ota_->HasWebsocketConfig()) {
+        protocol_ = std::make_unique<WebsocketProtocol>();
+    } else {
+        ESP_LOGW(TAG, "No protocol specified, using MQTT");
+        protocol_ = std::make_unique<MqttProtocol>();
+    }
+    // ... attach callbacks ...
+}
+\end{lstlisting}
+
+Logic:
+\begin{enumerate}
+  \item Device gọi OTA URL (mặc định \texttt{https://api.tenclass.net/xiaozhi/ota/}).
+  \item Server trả JSON config có thể chứa: \texttt{mqtt\_endpoint} HOẶC \texttt{websocket\_url}.
+  \item Device chọn protocol tương ứng.
+  \item Lưu config vào NVS để dùng cho session sau.
+\end{enumerate}
+
+\subsection{Spec OTA response server custom cần trả}
+T cần đọc kỹ \texttt{main/ota.cc} để chốt format chính xác. Gợi ý sơ:
+\begin{lstlisting}[language=json, caption={OTA response cho WebSocket-only server}]
+{
+  "server_time": { "timestamp": 1728000000000, "timezone_offset": 420 },
+  "firmware": {
+    "version": "2.2.6",
+    "url": ""
+  },
+  "websocket": {
+    "url": "wss://your-server.com/ws/xiaozhi",
+    "version": 1,
+    "token": "your-bearer-token"
+  },
+  "activation": {
+    "code": "123456",
+    "message": "Goto https://your-server.com to activate"
+  }
+}
+\end{lstlisting}
+
+\subsection{3 cách switch}
+\begin{enumerate}
+  \item \textbf{Đổi OTA URL trỏ tới server custom} (sạch nhất). Sửa \texttt{Kconfig.projbuild} → \texttt{CONFIG\_OTA\_URL}. Server custom phải implement endpoint /ota.
+  \item \textbf{Hard-code WebSocket URL}, bỏ qua OTA. Sửa \texttt{application.cc} luôn dùng \texttt{WebsocketProtocol}, đọc URL từ \texttt{Settings} (NVS) thay vì OTA response.
+  \item \textbf{Proxy OTA}. Server custom đứng giữa, fetch OTA gốc từ xiaozhi.me, override field \texttt{websocket\_url}. Không cần sửa firmware.
+\end{enumerate}
+
+\textbf{Khuyến nghị: Cách 1.} Vì:
+\begin{itemize}
+  \item Đã có người làm WebSocket server.
+  \item Chỉ cần thêm 1 endpoint /ota trả JSON.
+  \item Firmware sạch, dễ chuyển server sau.
+\end{itemize}
+
+% =====================================================================
+\section{Kế hoạch tích hợp servo + MCP}
+\subsection{Cần code thêm gì?}
+\begin{enumerate}
+  \item File mới: \texttt{main/boards/freenove-esp32s3-display-2.8-lcd/servo\_controller.cc/h}
+  \begin{itemize}
+    \item Wrapper LEDC peripheral cho 3 channel PWM 50Hz.
+    \item Convert angle (-90 → +90) ra pulse width (0.5ms → 2.5ms = duty 2.5\% → 12.5\%).
+    \item API: \texttt{ServoController::SetAngle(int channel, int angle)}.
+  \end{itemize}
+  \item Sửa \texttt{freenove-esp32s3-display-2.8-lcd.cc}:
+  \begin{itemize}
+    \item Thêm member \texttt{ServoController servos\_;}.
+    \item Init trong constructor.
+    \item Thêm hàm \texttt{InitializeTools()} đăng ký MCP tool.
+  \end{itemize}
+  \item Sửa \texttt{config.h}:
+  \begin{itemize}
+    \item \texttt{\#define SERVO\_HEAD\_PIN GPIO\_NUM\_14}
+    \item \texttt{\#define SERVO\_ARM\_PIN GPIO\_NUM\_21}
+    \item \texttt{\#define SERVO\_LEG\_PIN GPIO\_NUM\_2}
+  \end{itemize}
+  \item Sửa \texttt{main/CMakeLists.txt} thêm source mới.
+\end{enumerate}
+
+\subsection{MCP tool đăng ký}
+\begin{lstlisting}[language=C++, caption={Skeleton InitializeTools()}]
+void InitializeTools() {
+    auto& mcp = McpServer::GetInstance();
+
+    mcp.AddTool("self.robot.set_head_angle",
+        "Quay dau robot. angle: -90 (trai) den 90 (phai), 0 = giua",
+        PropertyList({
+            Property("angle", kPropertyTypeInteger, -90, 90)
+        }),
+        [this](const PropertyList& p) -> ReturnValue {
+            servos_.SetAngle(SERVO_CH_HEAD, p["angle"].value<int>());
+            return true;
+        });
+
+    mcp.AddTool("self.robot.wave_arm",
+        "Vay tay 3 lan",
+        PropertyList(),
+        [this](const PropertyList&) -> ReturnValue {
+            for (int i = 0; i < 3; i++) {
+                servos_.SetAngle(SERVO_CH_ARM, 30); vTaskDelay(pdMS_TO_TICKS(300));
+                servos_.SetAngle(SERVO_CH_ARM, 90); vTaskDelay(pdMS_TO_TICKS(300));
+            }
+            return true;
+        });
+
+    mcp.AddTool("self.robot.kick_leg",
+        "Da chan 1 lan",
+        PropertyList(),
+        [this](const PropertyList&) -> ReturnValue {
+            servos_.SetAngle(SERVO_CH_LEG, 60); vTaskDelay(pdMS_TO_TICKS(400));
+            servos_.SetAngle(SERVO_CH_LEG, 0);
+            return true;
+        });
+}
+\end{lstlisting}
+
+\subsection{Phía LLM (server tự host) — prompt nên có}
+\begin{lstlisting}[caption={System prompt cần thêm cho server hiểu robot}]
+Ban la robot voi 3 servo: dau (xoay trai-phai), tay (vay), chan (da).
+Khi nguoi dung yeu cau hanh dong vat ly, hay goi MCP tool tuong ung:
+- "nhin sang trai/phai" -> self.robot.set_head_angle(angle)
+- "vay tay/chao" -> self.robot.wave_arm
+- "da/dam chan" -> self.robot.kick_leg
+\end{lstlisting}
+
+% =====================================================================
+\section{Workflow build, flash, test}
+\subsection{Build}
+Trên máy Windows này, ESP-IDF v5.5.4 đã cài tại \texttt{C:\textbackslash esp\textbackslash v5.5.4\textbackslash esp-idf}. Wrapper bat đã tạo: \texttt{idf\_env.bat}.
+
+\begin{lstlisting}[caption={Lệnh build}]
+cd E:\downloads\xiaozhi-esp32-main\xiaozhi-esp32-main
+cmd.exe /c "idf_env.bat python scripts\release.py freenove-esp32s3-display-2.8-lcd"
+\end{lstlisting}
+
+Output:
+\begin{itemize}
+  \item \texttt{build/merged-binary.bin} — file flash chính (\textasciitilde 10.4 MB).
+  \item \texttt{releases/v2.2.6\_freenove-esp32s3-display-2.8-lcd.zip} — zip release.
+  \item \texttt{build/xiaozhi.elf} — debug symbols cho stack trace.
+\end{itemize}
+
+\subsection{Flash (Flash Download Tool)}
+\begin{enumerate}
+  \item Mở \texttt{Flash\_download.zip} trong kit, chạy \texttt{flash\_download\_tool\_3.9.9\_R2.exe}.
+  \item Chip: \textbf{ESP32-S3}, WorkMode: \textbf{Develop}, LoadMode: \textbf{UART}.
+  \item File: \texttt{build/merged-binary.bin}, Address: \texttt{0x0}, tick checkbox đầu dòng.
+  \item Tick \texttt{DoNotChgBin}, FLASH SIZE 128Mbit, SPI MODE DIO, SPI SPEED 80MHz.
+  \item COM port (vd. COM9), BAUD 460800.
+  \item Click \textbf{ERASE} trước (tránh rác từ flash cũ), sau đó \textbf{START}.
+  \item Đợi đến khi báo \textbf{FINISH} xanh.
+\end{enumerate}
+
+\subsection{Manual bootloader entry (nếu fail)}
+\begin{enumerate}
+  \item Giữ nút \textbf{BOOT (IO0)} trên board.
+  \item Vẫn giữ BOOT → nhấn \textbf{RST/EN} 1 cái rồi thả.
+  \item Thả BOOT.
+  \item Click \textbf{START} trong FDT.
+\end{enumerate}
+
+\subsection{Monitor serial sau khi flash}
+\begin{lstlisting}[caption={PowerShell monitor đơn giản}]
+$p = New-Object System.IO.Ports.SerialPort 'COM9',115200,'None',8,'One'
+$p.Open(); while ($true) { try { Write-Host $p.ReadLine() } catch {} }
+\end{lstlisting}
+
+Hoặc dùng \texttt{idf.py monitor}:
+\begin{lstlisting}
+cmd.exe /c "idf_env.bat idf.py -p COM9 monitor"
+\end{lstlisting}
+(\texttt{Ctrl+]} để thoát)
+
+% =====================================================================
+\section{Plan tổng — chia phase}
+\begin{tabularx}{\textwidth}{c|Y|c|Y}
+\toprule
+\textbf{Phase} & \textbf{Việc} & \textbf{Thời gian} & \textbf{Phụ thuộc}\\
+\midrule
+0 & Đọc tài liệu này, hiểu kiến trúc & 1h & --\\
+1 & Xác nhận: WS server URL + servo wiring & --- & --\\
+2 & Code \texttt{servo\_controller.cc/h} & 30p & 1\\
+3 & Sửa \texttt{InitializeTools()} đăng ký 3 MCP tool & 20p & 2\\
+4 & Sửa \texttt{ota.cc} hoặc \texttt{Kconfig} cho server custom & 30p & 1\\
+5 & Build + flash + smoke test (LCD lên, MQTT/WS connect) & 15p & 3,4\\
+6 & Test chain end-to-end: nói "vẫy tay" → robot vẫy & 30p & 5\\
+7 & Optimize: AEC, latency, watchdog, persona prompt & lặp & 6\\
+\bottomrule
+\end{tabularx}
+
+% =====================================================================
+\section{Câu hỏi cần xác nhận trước khi code}
+\begin{enumerate}
+  \item Server WebSocket có endpoint \texttt{/ota} chưa, hay chỉ raw WebSocket?
+  \item URL server: \texttt{wss://example.com/ws} hay IP nội bộ \texttt{ws://192.168.x.x:port}?
+  \item Authentication: server check token Bearer không?
+  \item Servo cấp nguồn riêng nguồn nào? (2S Li-ion + buck 6V là tối ưu)
+  \item GPIO 14, 21, 2 layout phần cứng OK chứ?
+  \item Server có hỗ trợ MCP \texttt{tools/list} \& \texttt{tools/call} JSON-RPC chưa? Nếu chưa, người làm server cần thêm.
+\end{enumerate}
+
+% =====================================================================
+\section{Glossary — từ điển}
+\begin{description}[leftmargin=2.4cm,style=nextline]
+  \item[ADC] Analog-to-Digital Converter — đọc voltage analog (vd. điện áp pin).
+  \item[AEC] Acoustic Echo Cancellation — khử tiếng vọng (loa vào mic).
+  \item[AFE] Audio Front-End — pipeline xử lý audio gồm AEC + NS + VAD + WakeNet.
+  \item[ASR] Automatic Speech Recognition — giọng → text.
+  \item[BLE] Bluetooth Low Energy.
+  \item[Bootloader] Code chạy đầu tiên khi cấp điện, load app từ flash.
+  \item[Codec (audio)] Chip mã hóa/giải mã audio analog ↔ digital. Board dùng ES8311.
+  \item[ESP-IDF] Framework chính thức Espressif lập trình ESP32.
+  \item[FreeRTOS] Real-Time OS chạy trên ESP32, scheduler đa task.
+  \item[I2C] Inter-Integrated Circuit — bus 2 dây config codec/touch.
+  \item[I2S] Inter-IC Sound — bus truyền audio digital.
+  \item[LDO] Low-Dropout Regulator — chip ổn áp.
+  \item[LEDC] LED Controller peripheral của ESP32, dùng làm PWM.
+  \item[LVGL] Light and Versatile Graphics Library — UI framework cho LCD.
+  \item[MCP] Model Context Protocol — chuẩn AI gọi tool.
+  \item[MCU] Microcontroller Unit.
+  \item[MQTT] Message Queuing Telemetry Transport — pub/sub broker protocol.
+  \item[NVS] Non-Volatile Storage — KV store nhỏ trên flash, persist qua reboot.
+  \item[Opus] Audio codec lossy (giống MP3 nhưng tốt hơn cho voice).
+  \item[OTA] Over-The-Air update — update firmware qua mạng.
+  \item[PA] Power Amplifier — khuếch đại ra loa.
+  \item[Partition table] Bảng phân bổ vùng flash.
+  \item[PSRAM] Pseudo-SRAM — RAM mở rộng ngoài chip (board có 8MB octal).
+  \item[PWM] Pulse Width Modulation — điều khiển servo bằng độ rộng xung.
+  \item[QSPI] Quad SPI — bus 4-line tốc độ cao cho flash.
+  \item[SoC] System-on-Chip — vi điều khiển tích hợp đủ Wi-Fi, BLE, RAM.
+  \item[SPI] Serial Peripheral Interface — bus 4-dây cho LCD.
+  \item[STT] Speech-To-Text = ASR.
+  \item[Strap pin] GPIO mà trạng thái lúc reset quyết định boot mode.
+  \item[TTS] Text-To-Speech — text → giọng.
+  \item[UART] Universal Asynchronous Receiver-Transmitter — serial truyền tin.
+  \item[USB-Serial-JTAG] Native USB của ESP32-S3, không cần chip CP210x/CH340.
+  \item[VAD] Voice Activity Detection — phát hiện có người nói.
+  \item[WakeNet] Mạng nơ-ron offline phát hiện wake word ("Hi, ESP").
+  \item[WebSocket] Protocol giữ kết nối TCP 2 chiều mở vĩnh viễn.
+\end{description}
+
+% =====================================================================
+\section{Tài liệu tham khảo}
+\begin{enumerate}
+  \item Xiaozhi-esp32 GitHub: \url{https://github.com/78/xiaozhi-esp32}
+  \item ESP-IDF Programming Guide: \url{https://docs.espressif.com/projects/esp-idf/en/v5.5.4/}
+  \item ESP32-S3 Technical Reference: \url{https://www.espressif.com/sites/default/files/documentation/esp32-s3_technical_reference_manual_en.pdf}
+  \item Kit ES3C28P (LCD wiki): \url{https://www.lcdwiki.com/2.8inch_ESP32-S3_Display}
+  \item Anthropic MCP Spec: \url{https://modelcontextprotocol.io/}
+  \item LVGL Documentation: \url{https://docs.lvgl.io/}
+  \item ESP-SR (AFE/WakeNet): \url{https://github.com/espressif/esp-sr}
+\end{enumerate}
+
+\vfill
+\begin{center}
+\small\itshape Tài liệu này được tạo tự động bởi Claude (Anthropic). Cập nhật lần cuối: \today.\\
+Liên hệ chỉnh sửa: re-prompt Claude với yêu cầu cụ thể.
+\end{center}
+
+\end{document}
