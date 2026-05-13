@@ -24,6 +24,7 @@ sdkconfig.old
 .clangd
 .cache
 .claude/
+.omc/
 .idea/
 *.swp
 
