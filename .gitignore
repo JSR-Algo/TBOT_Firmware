@@ -28,6 +28,10 @@ sdkconfig.old
 .idea/
 *.swp
 
+# Git backup directories (e.g. .git.bak-pre-tbot-push/)
+.git.bak*/
+.git.bak*
+
 # Environment
 .env
 
