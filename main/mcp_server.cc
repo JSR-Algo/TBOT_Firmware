@@ -62,6 +62,14 @@ void McpServer::AddCommonTools() {
             codec->SetOutputVolume(properties["volume"].value<int>());
             return true;
         });
+
+    AddTool("self.robot.left_arm_raise",
+        "Raise the robot left arm by sending a UART command to the servant controller. Use when the user asks to raise the left hand or left arm.",
+        PropertyList(),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            return app.SendLeftArmRaise();
+        });
     
     auto backlight = board.GetBacklight();
     if (backlight) {

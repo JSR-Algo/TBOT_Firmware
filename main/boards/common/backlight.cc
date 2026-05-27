@@ -31,15 +31,22 @@ Backlight::~Backlight() {
 
 void Backlight::RestoreBrightness() {
     // Load brightness from settings
-    Settings settings("display");  
+    Settings settings("display");
     int saved_brightness = settings.GetInt("brightness", 75);
-    
+
     // 检查亮度值是否为0或过小，设置默认值
-    if (saved_brightness <= 0) {
-        ESP_LOGW(TAG, "Brightness value (%d) is too small, setting to default (10)", saved_brightness);
-        saved_brightness = 10;  // 设置一个较低的默认值
+    // PATCH: minimum 50 instead of 10 so screen is actually visible. The
+    // previous default of 10 produced a near-black display that users
+    // reported as "screen black" when an MCP set_brightness call or NVS
+    // corruption left a low value.
+    if (saved_brightness < 50) {
+        ESP_LOGW(TAG, "Brightness value (%d) too low, clamping to 75", saved_brightness);
+        saved_brightness = 75;
+        // Persist the corrected value so subsequent boots use it.
+        Settings persisted("display", true);
+        persisted.SetInt("brightness", saved_brightness);
     }
-    
+
     SetBrightness(saved_brightness);
 }
 

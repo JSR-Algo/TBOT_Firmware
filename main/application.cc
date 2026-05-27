@@ -9,6 +9,7 @@
 #include "mcp_server.h"
 #include "assets.h"
 #include "settings.h"
+#include "robot_uart.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -72,6 +73,7 @@ void Application::Initialize() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
     audio_service_.Start();
+    robot_uart_.Initialize();
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {
@@ -81,6 +83,12 @@ void Application::Initialize() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
     callbacks.on_vad_change = [this](bool speaking) {
+        // Record monotonic timestamp when VAD detects speech start. This is
+        // consumed by HandleWakeWordDetectedEvent() to reject wake-word
+        // false-positives on noise (no recent VAD-speaking window).
+        if (speaking) {
+            last_vad_speech_ms_ = esp_timer_get_time() / 1000;
+        }
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
     audio_service_.SetCallbacks(callbacks);
@@ -529,12 +537,25 @@ void Application::InitializeProtocol() {
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                int64_t t_recv = esp_timer_get_time() / 1000;
+                ESP_LOGI(TAG, "tts_stop_received ts=%lld", t_recv);
+                // NOTE: ResetDecoder() removed here — it caused the final
+                // 200-500ms of every response to be cut because the server
+                // sends `tts state=stop` immediately after audio_end, but the
+                // device's audio_playback_queue still has buffered frames
+                // that haven't reached the speaker yet. User reported:
+                // "phản hồi không ổn định chưa trả lời hết cầu chuyển sang
+                // đang lắng nghe". Trade-off: barge-in latency increases
+                // (~500ms) because we now rely on natural queue drain, but
+                // response audio integrity is preserved.
                 Schedule([this]() {
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
+                            ESP_LOGI(TAG, "mic_loop_resumed ts=%lld",
+                                     esp_timer_get_time() / 1000);
                         }
                     }
                 });
@@ -589,11 +610,18 @@ void Application::InitializeProtocol() {
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
             }
+        } else if (strcmp(type->valuestring, "robot_action") == 0) {
+            if (!HandleRobotActionMessage(root)) {
+                ESP_LOGW(TAG, "Unsupported robot action");
+            }
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
             ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
             if (cJSON_IsObject(payload)) {
+                if (HandleRobotActionMessage(payload)) {
+                    return;
+                }
                 Schedule([this, display, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
                     display->SetChatMessage("system", payload_str.c_str());
                 });
@@ -607,6 +635,26 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->Start();
+}
+
+bool Application::HandleRobotActionMessage(const cJSON* root) {
+    auto action = cJSON_GetObjectItem(root, "action");
+    if (!cJSON_IsString(action)) {
+        return false;
+    }
+
+    if (strcmp(action->valuestring, "left_arm_raise") == 0) {
+        Schedule([this]() {
+            SendLeftArmRaise();
+        });
+        return true;
+    }
+
+    return false;
+}
+
+bool Application::SendLeftArmRaise() {
+    return robot_uart_.SendLeftArmRaise();
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -783,6 +831,13 @@ void Application::HandleWakeWordDetectedEvent() {
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
 
     if (state == kDeviceStateIdle) {
+        // NOTE: VAD-gate approach was attempted but failed — VAD runs inside
+        // AudioProcessor which is only active in Listening state. In Idle,
+        // raw mic data feeds the wake-word engine directly (audio_service.cc
+        // line 274), so on_vad_change never fires before wake-word does.
+        // To reduce false-positives, raise wake-word threshold in sdkconfig
+        // (CONFIG_USE_AFE_WAKE_WORD_THRESHOLD) or add post-wake RMS check
+        // on the buffered wake-word audio. Both are out of scope here.
         audio_service_.EncodeWakeWord();
         auto wake_word = audio_service_.GetLastWakeWord();
 
@@ -911,6 +966,10 @@ void Application::HandleStateChangedEvent() {
                 // Only AFE wake word can be detected in speaking mode
                 audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
             }
+            // NOTE: in Realtime mode we KEEP wake-word + voice-processing
+            // running so user can barge in. Echo from speaker is suppressed
+            // by device-side AEC (CONFIG_USE_DEVICE_AEC=y) BEFORE the
+            // signal reaches the wake-word ML, so echo no longer false-fires.
             audio_service_.ResetDecoder();
             break;
         case kDeviceStateWifiConfiguring:
@@ -1113,4 +1172,3 @@ void Application::ResetProtocol() {
         protocol_.reset();
     });
 }
-

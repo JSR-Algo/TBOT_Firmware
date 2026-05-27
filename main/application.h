@@ -16,6 +16,7 @@
 #include "audio_service.h"
 #include "device_state.h"
 #include "device_state_machine.h"
+#include "robot_uart.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -108,6 +109,7 @@ public:
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
+    bool SendLeftArmRaise();
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
@@ -134,6 +136,7 @@ private:
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
+    RobotUart robot_uart_;
     std::unique_ptr<Ota> ota_;
 
     bool has_server_time_ = false;
@@ -142,6 +145,11 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+
+    // Monotonic ms timestamp of last VAD speech-start. Used to gate wake-word
+    // transitions: if no human-voice VAD trigger occurred recently, drop the
+    // wake-word event as a likely false-positive on ambient noise.
+    int64_t last_vad_speech_ms_ = 0;
 
 
     // Event handlers
@@ -163,6 +171,7 @@ private:
     void CheckAssetsVersion();
     void CheckNewVersion();
     void InitializeProtocol();
+    bool HandleRobotActionMessage(const cJSON* root);
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;

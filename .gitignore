@@ -16,6 +16,7 @@ mmap_generate_*.h
 
 # sdkconfig (project uses sdkconfig.defaults.* instead)
 sdkconfig
+sdkconfig.bak
 sdkconfig.old
 
 # Editor / tooling

@@ -24,6 +24,15 @@
 #define BOOT_BUTTON_GPIO GPIO_NUM_0
 #define BUILTIN_LED_GPIO GPIO_NUM_42
 
+// UART bridge to the servant ESP32-S3 that drives robot servos.
+#define ROBOT_UART_NUM       UART_NUM_1
+#define ROBOT_UART_TX_PIN      GPIO_NUM_17
+#define ROBOT_UART_RX_PIN      GPIO_NUM_18
+#define ROBOT_UART_BAUD_RATE   115200
+#define ROBOT_UART_ALT_NUM     UART_NUM_2
+#define ROBOT_UART_ALT_TX_PIN  GPIO_NUM_43
+#define ROBOT_UART_ALT_RX_PIN  GPIO_NUM_44
+
 //屏幕显示部分
 #define DISPLAY_BACKLIGHT_PIN GPIO_NUM_45
 

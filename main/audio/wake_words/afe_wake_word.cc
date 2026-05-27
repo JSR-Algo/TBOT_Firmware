@@ -2,6 +2,7 @@
 #include "audio_service.h"
 #include <esp_log.h>
 #include <sstream>
+#include <cmath>
 
 #define DETECTION_RUNNING_EVENT 1
 
@@ -162,6 +163,24 @@ void AfeWakeWord::AudioDetectionTask() {
         StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
 
         if (res->wakeup_state == WAKENET_DETECTED) {
+            // RMS measurement (log-only mode): compute RMS so we can tune
+            // the human-voice threshold from real user data, but DO NOT
+            // reject — let every wake through. Once we observe real RMS
+            // values from genuine "Hi ESP" vs noise, change the policy.
+            int16_t* samples = res->data;
+            int sample_count = (int)(res->data_size / sizeof(int16_t));
+            int64_t sum_sq = 0;
+            for (int i = 0; i < sample_count; ++i) {
+                int32_t s = (int32_t)samples[i];
+                sum_sq += (int64_t)(s * s);
+            }
+            int rms = 0;
+            if (sample_count > 0) {
+                rms = (int)sqrt((double)(sum_sq / (int64_t)sample_count));
+            }
+            ESP_LOGI(TAG, "Wake DETECTED rms=%d samples=%d (log-only mode)",
+                     rms, sample_count);
+
             Stop();
             last_detected_wake_word_ = wake_words_[res->wakenet_model_index - 1];
 

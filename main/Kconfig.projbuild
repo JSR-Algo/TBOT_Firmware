@@ -2,9 +2,15 @@ menu "Xiaozhi Assistant"
 
 config OTA_URL
     string "Default OTA URL"
-    default "https://api.tenclass.net/xiaozhi/ota/"
+    default "https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
     help
         The application will access this URL to check for new firmwares and server address.
+
+config WEBSOCKET_URL
+    string "Default WebSocket URL"
+    default "wss://perform-elvis-specifically-nominated.trycloudflare.com/tbot/v1/"
+    help
+        The application will use this URL when no websocket URL has been saved from OTA.
 
 choice
     prompt "Flash Assets"

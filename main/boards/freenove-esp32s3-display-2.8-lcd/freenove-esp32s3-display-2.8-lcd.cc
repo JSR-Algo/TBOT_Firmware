@@ -25,6 +25,31 @@
 
 #define TAG "FreenoveESP32S3Display"
 
+namespace {
+constexpr int kFreenoveOutputVolume = 100;
+constexpr float kFreenoveInputGain = 70.0f;
+
+class FreenoveBoostedAudioCodec : public Es8311AudioCodec {
+public:
+    FreenoveBoostedAudioCodec(void* i2c_master_handle, i2c_port_t i2c_port, int input_sample_rate,
+        int output_sample_rate, gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout,
+        gpio_num_t din, gpio_num_t pa_pin, uint8_t es8311_addr, bool use_mclk = true,
+        bool pa_inverted = false)
+        : Es8311AudioCodec(i2c_master_handle, i2c_port, input_sample_rate, output_sample_rate,
+            mclk, bclk, ws, dout, din, pa_pin, es8311_addr, use_mclk, pa_inverted) {
+        input_gain_ = kFreenoveInputGain;
+    }
+
+    void Start() override {
+        Es8311AudioCodec::Start();
+        SetInputGain(kFreenoveInputGain);
+        if (output_volume() != kFreenoveOutputVolume) {
+            SetOutputVolume(kFreenoveOutputVolume);
+        }
+    }
+};
+} // namespace
+
 class TouchDriver {
 public:
     TouchDriver() : dev_(nullptr) {}
@@ -218,7 +243,7 @@ public:
     }
 
     virtual AudioCodec* GetAudioCodec() override {
-        static Es8311AudioCodec audio_codec(codec_i2c_bus_, AUDIO_CODEC_I2C_NUM,
+        static FreenoveBoostedAudioCodec audio_codec(codec_i2c_bus_, AUDIO_CODEC_I2C_NUM,
             AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE, AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK,
             AUDIO_I2S_GPIO_WS, AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN, AUDIO_CODEC_PA_PIN,
             AUDIO_CODEC_ES8311_ADDR, true, true);
