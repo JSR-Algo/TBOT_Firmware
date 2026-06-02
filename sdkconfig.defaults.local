@@ -12,3 +12,8 @@ CONFIG_SR_WN_WN9_HIESP=y
 # robot via "Hi ESP" mid-response).
 # CONFIG_USE_SERVER_AEC=n
 CONFIG_USE_DEVICE_AEC=y
+
+# WiFi provisioning qua HOTSPOT (máy phát WiFi "Xiaozhi-xxxx" để điện thoại nối vào +
+# nhập SSID/mật khẩu). Mặc định TBOT dùng BLUFI (Bluetooth) -> không thấy WiFi để nối.
+CONFIG_USE_HOTSPOT_WIFI_PROVISIONING=y
+# CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING is not set

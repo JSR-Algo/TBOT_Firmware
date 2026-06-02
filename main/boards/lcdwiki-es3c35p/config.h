@@ -44,8 +44,9 @@
 
 // ---- LCD ST77922 (QSPI) ----
 #define DISPLAY_SPI_HOST  SPI2_HOST
-#define DISPLAY_WIDTH     320
-#define DISPLAY_HEIGHT    480
+// Panel vật lý 320x480 portrait. UI hiển thị NGANG 480x320 bằng xoay phần mềm LVGL.
+#define DISPLAY_WIDTH     480
+#define DISPLAY_HEIGHT    320
 
 #define DISPLAY_CS_PIN    GPIO_NUM_10
 #define DISPLAY_CLK_PIN   GPIO_NUM_12
@@ -64,7 +65,7 @@
 
 #define DISPLAY_RGB_ORDER   LCD_RGB_ELEMENT_ORDER_RGB
 #define DISPLAY_INVERT_COLOR false
-#define DISPLAY_SWAP_XY      false
+#define DISPLAY_SWAP_XY      true    // true = landscape (xoay 90° phần mềm LVGL)
 #define DISPLAY_MIRROR_X     false
 #define DISPLAY_MIRROR_Y     false
 #define DISPLAY_OFFSET_X     0

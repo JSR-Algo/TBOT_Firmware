@@ -33,27 +33,107 @@
 
 namespace {
 
-// ST77922 ở chế độ QSPI yêu cầu cửa sổ vẽ căn theo cột bội số 4.
-// LVGL có thể gửi vùng bẩn lệch cột -> căn lại tại đây để tránh nhiễu/xé hình.
+// ST77922 init sequence cho panel HMX035CTFT-001 (320x480 QSPI) của LCDWiki ES3C35P.
+// Trích nguyên xi từ firmware Xiaozhi v1.7.6 chính chủ LCDWiki/QDtech (init mặc định của
+// component esp_lcd_st77922 dành cho panel ~532x300 khác -> gây sọc dọc).
+// 0xF1/0xF2/0xF0 = chuyển bank lệnh (PAGE_CMD2/3/1). CASET=320, RASET=480.
+const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
+    {0xF1, (uint8_t []){0x00}, 1, 0},
+    {0x60, (uint8_t []){0x00, 0x00, 0x00}, 3, 0},
+    {0x65, (uint8_t []){0x80}, 1, 0},
+    {0x79, (uint8_t []){0x06}, 1, 0},
+    {0x7B, (uint8_t []){0x00, 0x08, 0x08}, 3, 0},
+    {0x80, (uint8_t []){0x55, 0x62, 0x2F, 0x17, 0xF0, 0x52, 0x70, 0xD2, 0x52, 0x62, 0xEA}, 11, 0},
+    {0x81, (uint8_t []){0x26, 0x52, 0x72, 0x27}, 4, 0},
+    {0x84, (uint8_t []){0x92, 0x25}, 2, 0},
+    {0x87, (uint8_t []){0x10, 0x10, 0x58, 0x00, 0x02, 0x3A}, 6, 0},
+    {0x88, (uint8_t []){0x00, 0x00, 0x2C, 0x10, 0x04, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x06}, 15, 0},
+    {0x89, (uint8_t []){0x00, 0x00, 0x00}, 3, 0},
+    {0x8A, (uint8_t []){0x13, 0x00, 0x2C, 0x00, 0x00, 0x2C, 0x10, 0x10, 0x00, 0x3E, 0x19}, 11, 0},
+    {0x8B, (uint8_t []){0x15, 0xB1, 0xB1, 0x44, 0x96, 0x2C, 0x10, 0x97, 0x8E}, 9, 0},
+    {0x8C, (uint8_t []){0x1D, 0xB1, 0xB1, 0x44, 0x96, 0x2C, 0x10, 0x50, 0x0F, 0x01, 0xC5, 0x12, 0x09}, 13, 0},
+    {0x8D, (uint8_t []){0x0C}, 1, 0},
+    {0x8E, (uint8_t []){0x33, 0x01, 0x0C, 0x13, 0x01, 0x01}, 6, 0},
+    {0xB3, (uint8_t []){0x00, 0x30}, 2, 0},
+    {0xF1, (uint8_t []){0x00}, 1, 0},
+    {0x71, (uint8_t []){0xC0}, 1, 0},
+    {0x66, (uint8_t []){0x02, 0x3F}, 2, 0},
+    {0xBE, (uint8_t []){0x1E, 0x00, 0x9D}, 3, 0},
+    {0x70, (uint8_t []){0x01, 0xA6, 0x11, 0x40, 0xE0, 0x00, 0x11, 0x60, 0x11, 0x00, 0x00, 0x1A}, 12, 0},
+    {0x90, (uint8_t []){0x04, 0x04, 0x55, 0x74, 0x00, 0x40, 0x43, 0x2D, 0x2D}, 9, 0},
+    {0x91, (uint8_t []){0x04, 0x04, 0x55, 0x75, 0x00, 0x40, 0x42, 0x2D, 0x2D}, 9, 0},
+    {0x92, (uint8_t []){0x04, 0x44, 0x55, 0xC0, 0x06, 0x00, 0x07, 0x05, 0x90, 0x2D}, 10, 0},
+    {0x93, (uint8_t []){0x04, 0x43, 0x11, 0x00, 0x00, 0x00, 0x00, 0x05, 0x90, 0x2D}, 10, 0},
+    {0x94, (uint8_t []){0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, 6, 0},
+    {0x95, (uint8_t []){0x96, 0x16, 0x00, 0x00, 0xFF}, 5, 0},
+    {0x96, (uint8_t []){0x44, 0x53, 0x03, 0x12, 0x23, 0x24, 0x06, 0x05, 0x9A, 0x2D, 0x00, 0x44}, 12, 0},
+    {0x97, (uint8_t []){0x44, 0x53, 0x47, 0x56, 0x20, 0x20, 0x02, 0x01, 0x9A, 0x2D, 0x00, 0x44}, 12, 0},
+    {0xBA, (uint8_t []){0x55, 0x9A, 0x2D, 0x9A, 0x2D}, 5, 0},
+    {0x9A, (uint8_t []){0x40, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00}, 7, 0},
+    {0x9B, (uint8_t []){0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00}, 7, 0},
+    {0x9C, (uint8_t []){0x5C, 0x12, 0x00, 0x00, 0x10, 0x12, 0x00, 0x00, 0x10, 0x02, 0x00, 0x00, 0x00}, 13, 0},
+    {0x9D, (uint8_t []){0x8A, 0x51, 0x00, 0x00, 0x00, 0x80, 0x1E, 0x01}, 8, 0},
+    {0x9E, (uint8_t []){0x51, 0x00, 0x00, 0x00, 0x80, 0x1E, 0x01}, 7, 0},
+    {0xB4, (uint8_t []){0x1D, 0x1C, 0x1E, 0x0B, 0x14, 0x02, 0x13, 0x09, 0x1E, 0x00, 0x1E, 0x10}, 12, 0},
+    {0xB5, (uint8_t []){0x1D, 0x1C, 0x1E, 0x0A, 0x15, 0x03, 0x11, 0x08, 0x1E, 0x01, 0x1E, 0x12}, 12, 0},
+    {0xB6, (uint8_t []){0x77, 0x77, 0x00, 0x0A, 0xFF, 0x0A, 0xFF}, 7, 0},
+    {0x86, (uint8_t []){0xC6, 0x04, 0xB1, 0x02, 0x58, 0x12, 0x58, 0x0C, 0x13, 0x01, 0xA5, 0x00, 0xA5, 0xA5}, 14, 0},
+    {0xB7, (uint8_t []){0x07, 0x0A, 0x0E, 0x06, 0x05, 0x03, 0x2B, 0x03, 0x03, 0x42, 0x07, 0x10, 0x10, 0x2E, 0x3F, 0x0D}, 16, 0},
+    {0xB8, (uint8_t []){0x07, 0x0A, 0x0D, 0x05, 0x05, 0x02, 0x2B, 0x02, 0x03, 0x42, 0x06, 0x10, 0x0F, 0x2E, 0x3F, 0x0D}, 16, 0},
+    {0xB9, (uint8_t []){0x23, 0x23}, 2, 0},
+    {0xBF, (uint8_t []){0x10, 0x14, 0x14, 0x0B, 0x0B, 0x0B}, 6, 0},
+    {0xF2, (uint8_t []){0x00}, 1, 0},
+    {0x73, (uint8_t []){0x04, 0xDA, 0x12, 0x54, 0x47}, 5, 0},
+    {0x77, (uint8_t []){0x6B, 0x5B, 0xFD, 0xC3, 0xC5}, 5, 0},
+    {0x7A, (uint8_t []){0x15, 0x27}, 2, 0},
+    {0x7B, (uint8_t []){0x04, 0x57}, 2, 0},
+    {0x7E, (uint8_t []){0x01, 0x0E}, 2, 0},
+    {0xBF, (uint8_t []){0x36}, 1, 0},
+    {0xE3, (uint8_t []){0x40, 0x40}, 2, 0},
+    {0xF0, (uint8_t []){0x00}, 1, 0},
+    {0xD0, (uint8_t []){0x00}, 1, 0},
+    {0x2A, (uint8_t []){0x00, 0x00, 0x01, 0x3F}, 4, 0},
+    {0x2B, (uint8_t []){0x00, 0x00, 0x01, 0xDF}, 4, 0},
+    {0x21, (uint8_t []){0x00}, 0, 0},
+    {0x11, (uint8_t []){0x00}, 0, 120},
+    {0x29, (uint8_t []){0x00}, 0, 0},
+    {0x2C, (uint8_t []){0x00}, 0, 0},
+    {0x3A, (uint8_t []){0x01}, 1, 0},
+    {0x36, (uint8_t []){0x00}, 1, 0},   // MADCTL portrait (panel không hỗ trợ MV swap)
+    {0x35, (uint8_t []){0x01}, 1, 20},
+};
+
+// ST77922 QSPI yêu cầu cột (trục native) căn theo bội số 4. Khi xoay phần mềm, trục
+// native có thể ứng với x HOẶC y của toạ độ logic -> căn CẢ HAI trục cho chắc.
 void St77922RounderCallback(lv_area_t* area) {
     area->x1 = (area->x1 >> 2) << 2;
+    area->y1 = (area->y1 >> 2) << 2;
     area->x2 = ((area->x2 >> 2) << 2) + 3;
+    area->y2 = ((area->y2 >> 2) << 2) + 3;
     area->x1 = std::max<int32_t>(0, area->x1);
+    area->y1 = std::max<int32_t>(0, area->y1);
     area->x2 = std::min<int32_t>(DISPLAY_WIDTH - 1, area->x2);
+    area->y2 = std::min<int32_t>(DISPLAY_HEIGHT - 1, area->y2);
 }
 
-// Bản sao của SpiLcdDisplay (cùng cấu hình LVGL/font/theme qua base LcdDisplay),
-// nhưng bổ sung rounder_cb cần cho ST77922 QSPI.
+// Hiển thị NGANG (landscape) bằng XOAY PHẦN MỀM của LVGL (panel ST77922 không xoay
+// được bằng phần cứng). Panel vật lý 320x480; khi landscape, UI là 480x320 và LVGL
+// xoay 90° từng mảnh khi flush. Rounder căn cột 4px (cả 2 trục) để ST77922 QSPI không nhiễu.
 class St77922QspiDisplay : public LcdDisplay {
 public:
+    // width/height = kích thước LOGIC của UI (480x320 khi landscape).
     St77922QspiDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
-        int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
+        int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool landscape)
         : LcdDisplay(panel_io, panel, width, height) {
 
-        // Vẽ trắng toàn màn để xác nhận panel sống.
-        std::vector<uint16_t> buffer(width_, 0xFFFF);
-        for (int y = 0; y < height_; y++) {
-            esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
+        // Kích thước VẬT LÝ của panel (luôn 320x480 portrait).
+        const int native_w = landscape ? height : width;
+        const int native_h = landscape ? width : height;
+
+        // Xoá nền (đen) toàn panel (toạ độ native) trước khi LVGL tiếp quản.
+        std::vector<uint16_t> line(native_w, 0x0000);
+        for (int y = 0; y < native_h; y++) {
+            esp_lcd_panel_draw_bitmap(panel_, 0, y, native_w, y + 1, line.data());
         }
 
         ESP_LOGI(TAG, "Turning display on");
@@ -86,19 +166,21 @@ public:
 #endif
         lvgl_port_init(&port_cfg);
 
-        ESP_LOGI(TAG, "Adding ST77922 QSPI LCD display");
-        const lvgl_port_display_cfg_t display_cfg = {
+        ESP_LOGI(TAG, "Adding ST77922 QSPI LCD (native %dx%d, %s)", native_w, native_h,
+            landscape ? "landscape/sw-rotate" : "portrait");
+        // hres/vres = native (panel vật lý). LVGL set_rotation(90) -> UI thành 480x320.
+        lvgl_port_display_cfg_t display_cfg = {
             .io_handle = panel_io_,
             .panel_handle = panel_,
             .control_handle = nullptr,
-            .buffer_size = static_cast<uint32_t>(width_ * 20),
+            .buffer_size = static_cast<uint32_t>(native_w * 20),
             .double_buffer = false,
             .trans_size = 0,
-            .hres = static_cast<uint32_t>(width_),
-            .vres = static_cast<uint32_t>(height_),
+            .hres = static_cast<uint32_t>(native_w),
+            .vres = static_cast<uint32_t>(native_h),
             .monochrome = false,
             .rotation = {
-                .swap_xy = swap_xy,
+                .swap_xy = false,
                 .mirror_x = mirror_x,
                 .mirror_y = mirror_y,
             },
@@ -113,11 +195,18 @@ public:
                 .direct_mode = 0,
             },
         };
+        display_cfg.flags.sw_rotate = landscape ? 1 : 0;  // gán runtime (tránh narrowing bitfield)
 
         display_ = lvgl_port_add_disp(&display_cfg);
         if (display_ == nullptr) {
             ESP_LOGE(TAG, "Failed to add display");
             return;
+        }
+
+        if (landscape) {
+            lvgl_port_lock(0);
+            lv_display_set_rotation(display_, LV_DISPLAY_ROTATION_90);  // đổi 270 nếu lộn đầu
+            lvgl_port_unlock();
         }
 
         if (offset_x != 0 || offset_y != 0) {
@@ -195,6 +284,8 @@ private:
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(DISPLAY_SPI_HOST, &io_config, &panel_io));
 
         const st77922_vendor_config_t vendor_config = {
+            .init_cmds = kSt77922InitCmds,
+            .init_cmds_size = sizeof(kSt77922InitCmds) / sizeof(kSt77922InitCmds[0]),
             .flags = {
                 .use_qspi_interface = 1,
             },
