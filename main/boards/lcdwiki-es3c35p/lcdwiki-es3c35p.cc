@@ -25,6 +25,7 @@
 #include <esp_psram.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <src/misc/cache/lv_cache.h>
 
 #define TAG "LCDWikiES3C35P"
 
