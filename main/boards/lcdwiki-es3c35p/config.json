@@ -1,0 +1,13 @@
+{
+    "manufacturer": "lcdwiki",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "lcdwiki-es3c35p",
+            "sdkconfig_append": [
+                "CONFIG_USE_WECHAT_MESSAGE_STYLE=y",
+                "CONFIG_USE_DEVICE_AEC=y"
+            ]
+        }
+    ]
+}
