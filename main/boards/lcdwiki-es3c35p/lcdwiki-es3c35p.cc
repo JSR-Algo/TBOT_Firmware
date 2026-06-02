@@ -20,6 +20,8 @@
 #include <esp_lcd_touch.h>
 #include <esp_lcd_touch_ft5x06.h>
 #include <esp_lcd_touch_gt911.h>
+#include <esp_lcd_touch_cst816s.h>
+#include <esp_lcd_touch_st7123.h>
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
@@ -144,6 +146,20 @@ private:
             },
         };
         ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_cfg, &i2c_bus_));
+    }
+
+    // Thả reset cho touch: drive CẢ GPIO47 và GPIO48 (vì còn nghi ngờ chân nào là RST).
+    void ReleaseTouchReset() {
+        gpio_config_t cfg = {};
+        cfg.pin_bit_mask = (1ULL << 47) | (1ULL << 48);
+        cfg.mode = GPIO_MODE_OUTPUT;
+        gpio_config(&cfg);
+        gpio_set_level((gpio_num_t)47, 0);
+        gpio_set_level((gpio_num_t)48, 0);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        gpio_set_level((gpio_num_t)47, 1);
+        gpio_set_level((gpio_num_t)48, 1);
+        vTaskDelay(pdMS_TO_TICKS(120));
     }
 
     void InitializeSpi() {
@@ -283,12 +299,83 @@ private:
         return true;
     }
 
+    bool TryInitCst816(uint8_t address) {
+        esp_lcd_panel_io_handle_t io = nullptr;
+        const esp_lcd_panel_io_i2c_config_t io_cfg = {
+            .dev_addr = address,
+            .on_color_trans_done = nullptr,
+            .user_ctx = nullptr,
+            .control_phase_bytes = 1,
+            .dc_bit_offset = 0,
+            .lcd_cmd_bits = 8,
+            .lcd_param_bits = 0,
+            .flags = { .disable_control_phase = 1 },
+            .scl_speed_hz = 400 * 1000,
+        };
+        if (esp_lcd_new_panel_io_i2c(i2c_bus_, &io_cfg, &io) != ESP_OK) return false;
+
+        const esp_lcd_touch_config_t tp_cfg = {
+            .x_max = DISPLAY_WIDTH,
+            .y_max = DISPLAY_HEIGHT,
+            .rst_gpio_num = TOUCH_RST_PIN,
+            .int_gpio_num = TOUCH_INT_PIN,
+            .levels = { .reset = 0, .interrupt = 0 },
+            .flags = { .swap_xy = DISPLAY_SWAP_XY, .mirror_x = DISPLAY_MIRROR_X, .mirror_y = DISPLAY_MIRROR_Y },
+        };
+        esp_lcd_touch_handle_t tp = nullptr;
+        if (esp_lcd_touch_new_i2c_cst816s(io, &tp_cfg, &tp) != ESP_OK) {
+            esp_lcd_panel_io_del(io);
+            return false;
+        }
+        const lvgl_port_touch_cfg_t touch_cfg = { .disp = lv_display_get_default(), .handle = tp };
+        lvgl_port_add_touch(&touch_cfg);
+        ESP_LOGI(TAG, "CST816 touch initialized addr=0x%02x", address);
+        return true;
+    }
+
+    // Sitronix ST7123 @ 0x55 — touch thực tế của panel HMX035CTFT-001 (cặp với LCD ST77922).
+    bool TryInitSt7123() {
+        esp_lcd_panel_io_handle_t io = nullptr;
+        const esp_lcd_panel_io_i2c_config_t io_cfg = {
+            .dev_addr = ESP_LCD_TOUCH_IO_I2C_ST7123_ADDRESS,
+            .on_color_trans_done = nullptr,
+            .user_ctx = nullptr,
+            .control_phase_bytes = 1,
+            .dc_bit_offset = 0,
+            .lcd_cmd_bits = 16,
+            .lcd_param_bits = 0,
+            .flags = { .disable_control_phase = 1 },
+            .scl_speed_hz = 400 * 1000,
+        };
+        if (esp_lcd_new_panel_io_i2c(i2c_bus_, &io_cfg, &io) != ESP_OK) return false;
+
+        const esp_lcd_touch_config_t tp_cfg = {
+            .x_max = DISPLAY_WIDTH,
+            .y_max = DISPLAY_HEIGHT,
+            .rst_gpio_num = TOUCH_RST_PIN,
+            .int_gpio_num = TOUCH_INT_PIN,
+            .levels = { .reset = 0, .interrupt = 0 },
+            .flags = { .swap_xy = DISPLAY_SWAP_XY, .mirror_x = DISPLAY_MIRROR_X, .mirror_y = DISPLAY_MIRROR_Y },
+        };
+        esp_lcd_touch_handle_t tp = nullptr;
+        if (esp_lcd_touch_new_i2c_st7123(io, &tp_cfg, &tp) != ESP_OK) {
+            esp_lcd_panel_io_del(io);
+            return false;
+        }
+        const lvgl_port_touch_cfg_t touch_cfg = { .disp = lv_display_get_default(), .handle = tp };
+        lvgl_port_add_touch(&touch_cfg);
+        ESP_LOGI(TAG, "ST7123 touch initialized addr=0x%02x", ESP_LCD_TOUCH_IO_I2C_ST7123_ADDRESS);
+        return true;
+    }
+
     void InitializeTouch() {
         if (lv_display_get_default() == nullptr) {
             ESP_LOGW(TAG, "LVGL display missing; skipping touch");
             return;
         }
+        if (TryInitSt7123()) return;
         if (TryInitFt5x06()) return;
+        if (TryInitCst816(ESP_LCD_TOUCH_IO_I2C_CST816S_ADDRESS)) return;
         if (TryInitGt911(ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS)) return;
         if (TryInitGt911(ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP)) return;
         ESP_LOGW(TAG, "Touch controller not detected; continuing without touch");
@@ -316,6 +403,8 @@ public:
             fflush(stdout);
             esp_restart();
         }
+        // Touch ST7123 lên nguồn cùng panel sau khi LCD init -> thả reset rồi dò.
+        ReleaseTouchReset();
         InitializeTouch();
         InitializeButtons();
         GetBacklight()->RestoreBrightness();
