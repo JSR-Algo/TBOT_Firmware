@@ -13,6 +13,7 @@
 #include <driver/i2c_master.h>
 #include <driver/spi_master.h>
 #include <esp_err.h>
+#include <esp_system.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
 #include <esp_lcd_st77922.h>
@@ -24,45 +25,13 @@
 #include <esp_psram.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <src/misc/cache/lv_cache.h>
 
 #define TAG "LCDWikiES3C35P"
 
 namespace {
 
-constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
-constexpr bool kHoldBootProbePattern = true;
-
-void EnableBacklightForBoot() {
-    const gpio_config_t backlight_gpio_config = {
-        .pin_bit_mask = 1ULL << DISPLAY_BACKLIGHT_PIN,
-        .mode = GPIO_MODE_INPUT_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&backlight_gpio_config));
-    ESP_ERROR_CHECK(gpio_set_level(DISPLAY_BACKLIGHT_PIN, 1));
-    ESP_LOGI(TAG, "LCDWiki backlight GPIO%d forced high for boot, level=%d",
-        DISPLAY_BACKLIGHT_PIN, gpio_get_level(DISPLAY_BACKLIGHT_PIN));
-}
-
-class LcdWikiBacklight : public Backlight {
-public:
-    LcdWikiBacklight() {
-        EnableBacklightForBoot();
-    }
-
-protected:
-    void SetBrightnessImpl(uint8_t brightness) override {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(DISPLAY_BACKLIGHT_PIN, brightness > 0 ? 1 : 0));
-        if (brightness == 0 || brightness == 100) {
-            ESP_LOGI(TAG, "LCDWiki backlight GPIO%d brightness=%u level=%d",
-                DISPLAY_BACKLIGHT_PIN, brightness, gpio_get_level(DISPLAY_BACKLIGHT_PIN));
-        }
-    }
-};
-
+// ST77922 ở chế độ QSPI yêu cầu cửa sổ vẽ căn theo cột bội số 4.
+// LVGL có thể gửi vùng bẩn lệch cột -> căn lại tại đây để tránh nhiễu/xé hình.
 void St77922RounderCallback(lv_area_t* area) {
     area->x1 = (area->x1 >> 2) << 2;
     area->x2 = ((area->x2 >> 2) << 2) + 3;
@@ -70,11 +39,19 @@ void St77922RounderCallback(lv_area_t* area) {
     area->x2 = std::min<int32_t>(DISPLAY_WIDTH - 1, area->x2);
 }
 
+// Bản sao của SpiLcdDisplay (cùng cấu hình LVGL/font/theme qua base LcdDisplay),
+// nhưng bổ sung rounder_cb cần cho ST77922 QSPI.
 class St77922QspiDisplay : public LcdDisplay {
 public:
     St77922QspiDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_handle_t panel,
         int width, int height, int offset_x, int offset_y, bool mirror_x, bool mirror_y, bool swap_xy)
         : LcdDisplay(panel_io, panel, width, height) {
+
+        // Vẽ trắng toàn màn để xác nhận panel sống.
+        std::vector<uint16_t> buffer(width_, 0xFFFF);
+        for (int y = 0; y < height_; y++) {
+            esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y + 1, buffer.data());
+        }
 
         ESP_LOGI(TAG, "Turning display on");
         esp_err_t err = esp_lcd_panel_disp_on_off(panel_, true);
@@ -83,16 +60,6 @@ public:
         } else {
             ESP_ERROR_CHECK(err);
         }
-
-        DrawBootProbePattern();
-        if (kHoldBootProbePattern) {
-            ESP_LOGW(TAG, "LCDWiki boot probe hold active; LVGL/application display init skipped");
-            while (true) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                DrawBootProbePattern();
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(300));
 
         ESP_LOGI(TAG, "Initialize LVGL library");
         lv_init();
@@ -154,21 +121,6 @@ public:
             lv_display_set_offset(display_, offset_x, offset_y);
         }
     }
-
-private:
-    void DrawBootProbePattern() {
-        constexpr int kChunkLines = 20;
-        constexpr uint16_t kColors[] = {0xFFFF, 0xF800, 0x07E0, 0x001F, 0xFFE0};
-
-        std::vector<uint16_t> buffer(width_ * kChunkLines);
-        for (int y = 0; y < height_; y += kChunkLines) {
-            int y_end = std::min(y + kChunkLines, height_);
-            uint16_t color = kColors[(y * static_cast<int>(std::size(kColors))) / height_];
-            std::fill(buffer.begin(), buffer.begin() + (y_end - y) * width_, color);
-            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y_end, buffer.data()));
-        }
-        ESP_LOGI(TAG, "Boot probe pattern drawn");
-    }
 };
 
 class LCDWikiES3C35PBoard : public WifiBoard {
@@ -206,7 +158,7 @@ private:
             .data6_io_num = GPIO_NUM_NC,
             .data7_io_num = GPIO_NUM_NC,
             .data_io_default_level = false,
-            .max_transfer_sz = DISPLAY_WIDTH * 80 * sizeof(uint16_t),
+            .max_transfer_sz = DISPLAY_WIDTH * 80 * static_cast<int>(sizeof(uint16_t)),
             .flags = 0,
             .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
             .intr_flags = 0,
@@ -220,11 +172,9 @@ private:
 
         ESP_LOGI(TAG, "Install ST77922 QSPI panel IO");
         esp_lcd_panel_io_spi_config_t io_config = ST77922_PANEL_IO_QSPI_CONFIG(
-            DISPLAY_CS_PIN,
-            nullptr,
-            nullptr);
-        io_config.pclk_hz = kLcdQspiClockHz;
-        ESP_LOGI(TAG, "ST77922 QSPI clock: %d Hz", io_config.pclk_hz);
+            DISPLAY_CS_PIN, nullptr, nullptr);
+        io_config.pclk_hz = DISPLAY_QSPI_PCLK_HZ;
+        ESP_LOGI(TAG, "ST77922 QSPI clock: %d Hz", (int)io_config.pclk_hz);
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(DISPLAY_SPI_HOST, &io_config, &panel_io));
 
         const st77922_vendor_config_t vendor_config = {
@@ -259,9 +209,12 @@ private:
             DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y, DISPLAY_SWAP_XY);
     }
 
-    bool TryInitializeFt5x06Touch() {
-        esp_lcd_panel_io_handle_t tp_io_handle = nullptr;
-        const esp_lcd_panel_io_i2c_config_t tp_io_config = {
+    // ---- Touch: panel HMX035CTFT-001 dùng controller tích hợp. LCDWiki không công bố
+    // tên IC, nên dò lần lượt FT5x06 -> GT911 (2 địa chỉ). Touch không bắt buộc cho
+    // voice chat; nếu không nhận thì firmware vẫn chạy bình thường, chỉ mất cảm ứng.
+    bool TryInitFt5x06() {
+        esp_lcd_panel_io_handle_t io = nullptr;
+        const esp_lcd_panel_io_i2c_config_t io_cfg = {
             .dev_addr = ESP_LCD_TOUCH_IO_I2C_FT5x06_ADDRESS,
             .on_color_trans_done = nullptr,
             .user_ctx = nullptr,
@@ -269,53 +222,33 @@ private:
             .dc_bit_offset = 0,
             .lcd_cmd_bits = 8,
             .lcd_param_bits = 0,
-            .flags = {
-                .disable_control_phase = 1,
-            },
+            .flags = { .disable_control_phase = 1 },
             .scl_speed_hz = 400 * 1000,
         };
-        esp_err_t ret = esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "FT5x06 touch IO init failed: %s", esp_err_to_name(ret));
-            return false;
-        }
+        if (esp_lcd_new_panel_io_i2c(i2c_bus_, &io_cfg, &io) != ESP_OK) return false;
 
         const esp_lcd_touch_config_t tp_cfg = {
             .x_max = DISPLAY_WIDTH,
             .y_max = DISPLAY_HEIGHT,
             .rst_gpio_num = TOUCH_RST_PIN,
             .int_gpio_num = TOUCH_INT_PIN,
-            .levels = {
-                .reset = 0,
-                .interrupt = 0,
-            },
-            .flags = {
-                .swap_xy = DISPLAY_SWAP_XY,
-                .mirror_x = DISPLAY_MIRROR_X,
-                .mirror_y = DISPLAY_MIRROR_Y,
-            },
+            .levels = { .reset = 0, .interrupt = 0 },
+            .flags = { .swap_xy = DISPLAY_SWAP_XY, .mirror_x = DISPLAY_MIRROR_X, .mirror_y = DISPLAY_MIRROR_Y },
         };
-
         esp_lcd_touch_handle_t tp = nullptr;
-        ret = esp_lcd_touch_new_i2c_ft5x06(tp_io_handle, &tp_cfg, &tp);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "FT5x06 touch not detected: %s", esp_err_to_name(ret));
-            esp_lcd_panel_io_del(tp_io_handle);
+        if (esp_lcd_touch_new_i2c_ft5x06(io, &tp_cfg, &tp) != ESP_OK) {
+            esp_lcd_panel_io_del(io);
             return false;
         }
-
-        const lvgl_port_touch_cfg_t touch_cfg = {
-            .disp = lv_display_get_default(),
-            .handle = tp,
-        };
+        const lvgl_port_touch_cfg_t touch_cfg = { .disp = lv_display_get_default(), .handle = tp };
         lvgl_port_add_touch(&touch_cfg);
         ESP_LOGI(TAG, "FT5x06 touch initialized");
         return true;
     }
 
-    bool TryInitializeGt911Touch(uint8_t address) {
-        esp_lcd_panel_io_handle_t tp_io_handle = nullptr;
-        const esp_lcd_panel_io_i2c_config_t tp_io_config = {
+    bool TryInitGt911(uint8_t address) {
+        esp_lcd_panel_io_handle_t io = nullptr;
+        const esp_lcd_panel_io_i2c_config_t io_cfg = {
             .dev_addr = address,
             .on_color_trans_done = nullptr,
             .user_ctx = nullptr,
@@ -323,49 +256,27 @@ private:
             .dc_bit_offset = 0,
             .lcd_cmd_bits = 16,
             .lcd_param_bits = 0,
-            .flags = {
-                .disable_control_phase = 1,
-            },
+            .flags = { .disable_control_phase = 1 },
             .scl_speed_hz = 400 * 1000,
         };
-        esp_err_t ret = esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "GT911 touch IO init failed addr=0x%02x: %s", address, esp_err_to_name(ret));
-            return false;
-        }
+        if (esp_lcd_new_panel_io_i2c(i2c_bus_, &io_cfg, &io) != ESP_OK) return false;
 
-        esp_lcd_touch_io_gt911_config_t gt911_config = {
-            .dev_addr = address,
-        };
+        esp_lcd_touch_io_gt911_config_t gt911_cfg = { .dev_addr = address };
         esp_lcd_touch_config_t tp_cfg = {
             .x_max = DISPLAY_WIDTH,
             .y_max = DISPLAY_HEIGHT,
             .rst_gpio_num = TOUCH_RST_PIN,
             .int_gpio_num = TOUCH_INT_PIN,
-            .levels = {
-                .reset = 0,
-                .interrupt = 0,
-            },
-            .flags = {
-                .swap_xy = DISPLAY_SWAP_XY,
-                .mirror_x = DISPLAY_MIRROR_X,
-                .mirror_y = DISPLAY_MIRROR_Y,
-            },
-            .driver_data = &gt911_config,
+            .levels = { .reset = 0, .interrupt = 0 },
+            .flags = { .swap_xy = DISPLAY_SWAP_XY, .mirror_x = DISPLAY_MIRROR_X, .mirror_y = DISPLAY_MIRROR_Y },
+            .driver_data = &gt911_cfg,
         };
-
         esp_lcd_touch_handle_t tp = nullptr;
-        ret = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, &tp);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "GT911 touch not detected addr=0x%02x: %s", address, esp_err_to_name(ret));
-            esp_lcd_panel_io_del(tp_io_handle);
+        if (esp_lcd_touch_new_i2c_gt911(io, &tp_cfg, &tp) != ESP_OK) {
+            esp_lcd_panel_io_del(io);
             return false;
         }
-
-        const lvgl_port_touch_cfg_t touch_cfg = {
-            .disp = lv_display_get_default(),
-            .handle = tp,
-        };
+        const lvgl_port_touch_cfg_t touch_cfg = { .disp = lv_display_get_default(), .handle = tp };
         lvgl_port_add_touch(&touch_cfg);
         ESP_LOGI(TAG, "GT911 touch initialized addr=0x%02x", address);
         return true;
@@ -376,15 +287,9 @@ private:
             ESP_LOGW(TAG, "LVGL display missing; skipping touch");
             return;
         }
-        if (TryInitializeFt5x06Touch()) {
-            return;
-        }
-        if (TryInitializeGt911Touch(ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS)) {
-            return;
-        }
-        if (TryInitializeGt911Touch(ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP)) {
-            return;
-        }
+        if (TryInitFt5x06()) return;
+        if (TryInitGt911(ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS)) return;
+        if (TryInitGt911(ESP_LCD_TOUCH_IO_I2C_GT911_ADDRESS_BACKUP)) return;
         ESP_LOGW(TAG, "Touch controller not detected; continuing without touch");
     }
 
@@ -401,13 +306,18 @@ private:
 
 public:
     LCDWikiES3C35PBoard() : boot_button_(BOOT_BUTTON_GPIO) {
-        EnableBacklightForBoot();
         InitializeI2c();
         InitializeSpi();
         InitializeLcdDisplay();
+        // Workaround "màn đen khi cấp nguồn lạnh" cho dòng panel này: restart 1 lần
+        // sau cold boot (chỉ chạy đúng 1 lần vì reset reason đổi thành SW).
+        if (esp_reset_reason() == ESP_RST_POWERON) {
+            fflush(stdout);
+            esp_restart();
+        }
         InitializeTouch();
         InitializeButtons();
-        GetBacklight()->SetBrightness(100);
+        GetBacklight()->RestoreBrightness();
     }
 
     Led* GetLed() override {
@@ -420,7 +330,8 @@ public:
             AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
             AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
-            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR);
+            AUDIO_CODEC_PA_PIN, AUDIO_CODEC_ES8311_ADDR,
+            /*use_mclk=*/true, /*pa_inverted=*/AUDIO_CODEC_PA_INVERTED);
         return &audio_codec;
     }
 
@@ -429,7 +340,7 @@ public:
     }
 
     Backlight* GetBacklight() override {
-        static LcdWikiBacklight backlight;
+        static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
         return &backlight;
     }
 };
