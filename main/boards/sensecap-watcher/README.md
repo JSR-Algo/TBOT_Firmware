@@ -21,7 +21,7 @@ idf.py menuconfig
 选择板子
 
 ```
-Xiaozhi Assistant -> Board Type -> SenseCAP Watcher
+Tbot Assistant -> Board Type -> SenseCAP Watcher
 ```
 
 watcher 中一些额外的配置项如下，需要在menuconfig 中选择.
@@ -41,7 +41,7 @@ CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 idf.py -DBOARD_NAME=sensecap-watcher build flash
 ```
 
-注意: 如果当前设备出货之前是SenseCAP 固件(非小智版本),请特别小心处理闪存固件分区地址，以避免错误擦除 SenseCAP Watcher 的自身设备信息（EUI 等），否则设备即使恢复成SenseCAP固件也无法正确连接到 SenseCraft 服务器！所以在刷写固件之前，请务必记录设备的相关必要信息，以确保有恢复的方法！
+注意: 如果当前设备出货之前是SenseCAP 固件(非Tbot版本),请特别小心处理闪存固件分区地址，以避免错误擦除 SenseCAP Watcher 的自身设备信息（EUI 等），否则设备即使恢复成SenseCAP固件也无法正确连接到 SenseCraft 服务器！所以在刷写固件之前，请务必记录设备的相关必要信息，以确保有恢复的方法！
 
 您可以使用以下命令备份生产信息
 

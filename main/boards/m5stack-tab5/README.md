@@ -4,7 +4,7 @@
 
 ## 快速体验
 
-到 [M5Burner](https://docs.m5stack.com/zh_CN/uiflow/m5burner/intro) 选择 Tab5 搜索小智下载固件
+到 [M5Burner](https://docs.m5stack.com/zh_CN/uiflow/m5burner/intro) 选择 Tab5 搜索Tbot下载固件
 
 ## 基础使用
 

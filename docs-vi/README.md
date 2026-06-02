@@ -1,4 +1,4 @@
-# Tài liệu tích hợp Xiaozhi Robot (Tiếng Việt)
+# Tài liệu tích hợp Tbot Robot (Tiếng Việt)
 
 File chính: `xiaozhi-robot-vi.tex`
 

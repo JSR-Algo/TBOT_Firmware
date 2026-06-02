@@ -21,7 +21,7 @@ idf.py menuconfig
 Select the board:
 
 ```
-Xiaozhi Assistant -> Board Type -> SenseCAP Watcher
+Tbot Assistant -> Board Type -> SenseCAP Watcher
 ```
 
 There are some additional configuration options for the watcher. Please select them in menuconfig:
@@ -43,7 +43,7 @@ CONFIG_SR_WN_WN9_JARVIS_TTS=y
 idf.py -DBOARD_NAME=sensecap-watcher-en build flash
 ```
 
-Note: If your device was previously shipped with the SenseCAP firmware (not the Xiaozhi version), please be very careful with the flash partition addresses to avoid accidentally erasing the device information (such as EUI) of the SenseCAP Watcher. Otherwise, even if you restore the SenseCAP firmware, the device may not be able to connect to the SenseCraft server correctly! Therefore, before flashing the firmware, be sure to record the necessary device information to ensure you have a way to recover it!
+Note: If your device was previously shipped with the SenseCAP firmware (not the Tbot version), please be very careful with the flash partition addresses to avoid accidentally erasing the device information (such as EUI) of the SenseCAP Watcher. Otherwise, even if you restore the SenseCAP firmware, the device may not be able to connect to the SenseCraft server correctly! Therefore, before flashing the firmware, be sure to record the necessary device information to ensure you have a way to recover it!
 
 You can use the following command to back up the factory information:
 

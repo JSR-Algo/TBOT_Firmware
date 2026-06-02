@@ -34,6 +34,12 @@ CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=n
 
 CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 
+# New robot onboarding defaults to local BLE/BluFi Wi-Fi provisioning.
+# Hotspot remains available as an explicit fallback profile, not default firmware.
+# CONFIG_USE_HOTSPOT_WIFI_PROVISIONING is not set
+CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y
+CONFIG_BT_BLUEDROID_ENABLED=y
+
 # Fix ML307 FIFO Overflow
 CONFIG_UART_ISR_IN_IRAM=y
 
@@ -75,4 +81,3 @@ CONFIG_LV_USE_WIN=n
 
 CONFIG_LV_BUILD_EXAMPLES=n
 CONFIG_LV_BUILD_DEMOS=n
-

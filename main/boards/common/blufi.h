@@ -16,6 +16,16 @@
 class Blufi {
 public:
     /**
+     * @brief BLE setup state for heartbeat / observability.
+     */
+    enum class BleState {
+        kOff,
+        kAdvertising,
+        kConnected,
+        kTimeout,
+    };
+
+    /**
      * @brief Get the singleton instance of the Blufi class.
      */
     static Blufi &GetInstance();
@@ -41,6 +51,53 @@ public:
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t deinit();
+
+    /**
+     * @brief Returns the bootstrap token received via BluFi custom-data (tag=0x01).
+     * Empty string if no token has been received yet.
+     */
+    const std::string& GetBootstrapToken() const { return bootstrap_token_; }
+
+    /**
+     * @brief Returns the provisioning code received via BluFi custom-data (tag=0x02).
+     * Empty string if no code has been received yet.
+     */
+    const std::string& GetProvisioningCode() const { return provisioning_code_; }
+
+    /**
+     * @brief Zeroizes bootstrap_token_ and provisioning_code_ (call after successful report).
+     */
+    void ClearProvisioningSecrets();
+
+    /**
+     * @brief Arm the BLE setup hard-timeout timer.
+     *
+     * Must be called from the Application task (or any task) immediately after
+     * Blufi::init() succeeds.  When the timer fires without provisioning having
+     * completed, the teardown is posted to the Application task (NOT executed
+     * inside the timer callback) to avoid WDT/race conditions.
+     *
+     * @param seconds  Wall-clock budget for BLE provisioning (e.g. CONFIG_BLE_SETUP_TIMEOUT_SEC).
+     */
+    void StartBleSetupTimeout(int seconds);
+
+    /**
+     * @brief Cancel the BLE setup timeout timer (call on provisioning success or Wi-Fi connect).
+     *
+     * Safe to call even if the timer has already fired or was never started.
+     */
+    void CancelBleSetupTimeout();
+
+    /**
+     * @brief Return the current BLE state for heartbeat / observability.
+     */
+    BleState GetBleState() const;
+
+    /**
+     * @brief Return the current BLE state as a JSON-safe string.
+     * @return One of "off", "advertising", "connected", "timeout".
+     */
+    const char* GetBleStateString() const;
 
     // Delete copy constructor and assignment operator for singleton
     Blufi(const Blufi &) = delete;
@@ -128,6 +185,11 @@ private:
 
     BlufiSecurity *m_sec;
 
+    // Bootstrap token received via BluFi custom-data TLV tag=0x01 (RAM only, never written to NVS)
+    std::string bootstrap_token_;
+    // Provisioning code received via BluFi custom-data TLV tag=0x02
+    std::string provisioning_code_;
+
     // State variables
     wifi_config_t m_sta_config{};
     bool m_ble_is_connected;
@@ -140,6 +202,13 @@ private:
     int m_sta_ssid_len;
     bool m_sta_is_connecting;
     esp_blufi_extra_info_t m_sta_conn_info{};
+
+    // BLE hard-timeout safety gate (#1)
+    esp_timer_handle_t ble_setup_timer_ = nullptr;  // one-shot timer; nullptr when not armed
+    bool ble_timed_out_ = false;                    // set by timer callback; prevents adv restart
+
+    // Static trampoline for the esp_timer callback
+    static void _ble_setup_timeout_cb(void* arg);
 
     // WiFi scan related
     std::vector<wifi_ap_record_t> m_ap_records;

@@ -45,7 +45,7 @@ idf.py menuconfig
 **选择板子**
 
 ```bash
-- `Xiaozhi Assistant` → `Board Type` → 选择 `无名科技星智1.54 METAL(wifi)`
+- `Tbot Assistant` → `Board Type` → 选择 `无名科技星智1.54 METAL(wifi)`
 ```
 
 **编译**

@@ -28,7 +28,7 @@ Partition Table -> Custom partition CSV file -> partitions/v2/8m.csv
 ### 开发板选择：
 
 ```
-Xiaozhi Assistant -> Board Type -> Movecall CuiCan 璀璨·AI吊坠
+Tbot Assistant -> Board Type -> Movecall CuiCan 璀璨·AI吊坠
 ```
 
 ### 启用编译优化：

@@ -21,7 +21,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> zhengchen-1.54tft-wifi
+Tbot Assistant -> Board Type -> zhengchen-1.54tft-wifi
 ```
 
 ```

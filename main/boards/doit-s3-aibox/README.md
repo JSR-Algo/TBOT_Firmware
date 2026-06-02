@@ -26,7 +26,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> 四博智联AI陪伴盒子
+Tbot Assistant -> Board Type -> 四博智联AI陪伴盒子
 ```
 
 **修改 psram 配置：**

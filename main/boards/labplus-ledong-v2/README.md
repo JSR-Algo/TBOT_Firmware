@@ -35,7 +35,7 @@ idf.py menuconfig
 ***选择板子：***
 
 ```
-Xiaozhi Assistant -> Board Type -> labplus Ledong_v2 board
+Tbot Assistant -> Board Type -> labplus Ledong_v2 board
 ```
 
 ***修改 psram 配置：***

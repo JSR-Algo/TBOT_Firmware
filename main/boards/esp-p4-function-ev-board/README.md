@@ -14,7 +14,7 @@ Board support for ESP-P4-Function-EV-Board. Wi‑Fi uses ESP‑Hosted via the on
 - Fonts: Custom font support with Unicode characters (Vietnamese, Chinese, etc.)
 
 ## Configure
-In `menuconfig`: Xiaozhi Assistant -> Board Type -> ESP-P4-Function-EV-Board
+In `menuconfig`: Tbot Assistant -> Board Type -> ESP-P4-Function-EV-Board
 
 Ensure these are set (auto-set when building via config.json):
 - `CONFIG_SLAVE_IDF_TARGET_ESP32C6=y`
@@ -37,5 +37,5 @@ idf.py menuconfig
 idf.py build
 ```
 
-Tip: In menuconfig, choose Xiaozhi Assistant -> Board Type -> ESP-P4-Function-EV-Board.
+Tip: In menuconfig, choose Tbot Assistant -> Board Type -> ESP-P4-Function-EV-Board.
 If building a release via scripts, the `config.json` in this folder appends the required Hosted options.

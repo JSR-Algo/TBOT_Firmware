@@ -15,7 +15,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> LILYGO T-Circle-S3
+Tbot Assistant -> Board Type -> LILYGO T-Circle-S3
 ```
 
 

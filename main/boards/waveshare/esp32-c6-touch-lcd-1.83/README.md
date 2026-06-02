@@ -33,7 +33,7 @@ idf.py menuconfig
 **选择板子**
 
 ```bash
-Xiaozhi Assistant -> Board Type -> Waveshare ESP32-C6-Touch-LCD-1.83
+Tbot Assistant -> Board Type -> Waveshare ESP32-C6-Touch-LCD-1.83
 ```
 
 **编译**

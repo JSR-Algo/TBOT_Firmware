@@ -658,11 +658,26 @@ bool AudioService::IsIdle() {
     return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
 }
 
-void AudioService::WaitForPlaybackQueueEmpty() {
+bool AudioService::WaitForPlaybackQueueEmpty(uint32_t timeout_ms) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-    audio_queue_cv_.wait(lock, [this]() { 
+    auto playback_drained = [this]() {
         return service_stopped_ || (audio_decode_queue_.empty() && audio_playback_queue_.empty()); 
-    });
+    };
+    if (timeout_ms == 0) {
+        audio_queue_cv_.wait(lock, playback_drained);
+        return playback_drained();
+    }
+    bool drained = audio_queue_cv_.wait_for(
+        lock,
+        std::chrono::milliseconds(timeout_ms),
+        playback_drained);
+    if (!drained) {
+        ESP_LOGW(TAG, "playback_queue_drain_timeout timeout_ms=%lu decode_queue=%u playback_queue=%u",
+                 static_cast<unsigned long>(timeout_ms),
+                 static_cast<unsigned>(audio_decode_queue_.size()),
+                 static_cast<unsigned>(audio_playback_queue_.size()));
+    }
+    return drained;
 }
 
 void AudioService::ResetDecoder() {

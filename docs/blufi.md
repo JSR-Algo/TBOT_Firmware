@@ -1,6 +1,6 @@
 # BluFi Provisioning (with `esp-wifi-connect`)
 
-This document explains how to enable and use BluFi (BLE-based WiFi provisioning) in the XiaoZhi firmware, together with the in-tree `esp-wifi-connect` component that handles WiFi connection and credential storage. See the official [Espressif BluFi documentation](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/ble/blufi.html) for the protocol details.
+This document explains how to enable and use BluFi (BLE-based WiFi provisioning) in the Tbot firmware, together with the in-tree `esp-wifi-connect` component that handles WiFi connection and credential storage. See the official [Espressif BluFi documentation](https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/ble/blufi.html) for the protocol details.
 
 ## Prerequisites
 
@@ -31,4 +31,4 @@ This document explains how to enable and use BluFi (BLE-based WiFi provisioning)
 - When running repeated tests, clear or overwrite the stored SSID (`wifi` NVS namespace) to avoid stale credentials interfering with the next run.
 - If you write your own BluFi client, follow the official protocol frame format linked above.
 - The EspBlufi app download links are listed in the official documentation.
-- Because the BluFi API changed in IDF 5.5.2, firmware built with 5.5.2 advertises the Bluetooth name as `"Xiaozhi-Blufi"`, while 5.5.1 uses `"BLUFI_DEVICE"`.
+- Because the BluFi API changed in IDF 5.5.2, TBOT firmware built with 5.5.2 advertises the Bluetooth name as `"TBot-Blufi"`, while 5.5.1 uses `"BLUFI_DEVICE"`.

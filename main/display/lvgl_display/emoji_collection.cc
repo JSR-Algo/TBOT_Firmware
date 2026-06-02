@@ -1,10 +1,29 @@
 #include "emoji_collection.h"
 
 #include <esp_log.h>
+#include <cstdint>
+#include <cstring>
 #include <unordered_map>
 #include <string>
 
 #define TAG "EmojiCollection"
+
+class LvglStaticGifImage : public LvglImage {
+public:
+    LvglStaticGifImage(const uint8_t* data, size_t size) {
+        memset(&image_dsc_, 0, sizeof(image_dsc_));
+        image_dsc_.data_size = size;
+        image_dsc_.data = data;
+        image_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
+        image_dsc_.header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
+    }
+
+    const lv_img_dsc_t* image_dsc() const override { return &image_dsc_; }
+    bool IsGif() const override { return true; }
+
+private:
+    lv_img_dsc_t image_dsc_;
+};
 
 void EmojiCollection::AddEmoji(const std::string& name, LvglImage* image) {
     emoji_collection_[name] = image;
@@ -120,4 +139,46 @@ Twemoji64::Twemoji64() {
     AddEmoji("sleepy", new LvglSourceImage(&emoji_1f634_64));
     AddEmoji("silly", new LvglSourceImage(&emoji_1f61c_64));
     AddEmoji("confused", new LvglSourceImage(&emoji_1f644_64));
+}
+
+extern "C" {
+extern const lv_image_dsc_t eye_openeyes;
+extern const lv_image_dsc_t eye_sleepeyes;
+extern const lv_image_dsc_t eye_halfsleepeyes;
+extern const lv_image_dsc_t eye_lefteyes;
+extern const lv_image_dsc_t eye_righteyes;
+extern const lv_image_dsc_t eye_lookdoweyes;
+extern const lv_image_dsc_t eye_sadeyes;
+extern const unsigned int eye_happy_gif_size;
+extern const uint8_t eye_happy_gif_data[];
+}
+
+EyesEmojiCollection::EyesEmojiCollection() {
+    AddEmoji("neutral", new LvglSourceImage(&eye_openeyes));
+    AddEmoji("open", new LvglSourceImage(&eye_openeyes));
+    AddEmoji("idle", new LvglSourceImage(&eye_openeyes));
+    AddEmoji("microchip_ai", new LvglSourceImage(&eye_openeyes));
+    AddEmoji("happy", new LvglStaticGifImage(eye_happy_gif_data, eye_happy_gif_size));
+    AddEmoji("laughing", new LvglStaticGifImage(eye_happy_gif_data, eye_happy_gif_size));
+    AddEmoji("funny", new LvglSourceImage(&eye_lefteyes));
+    AddEmoji("loving", new LvglSourceImage(&eye_righteyes));
+    AddEmoji("confident", new LvglSourceImage(&eye_righteyes));
+    AddEmoji("cool", new LvglSourceImage(&eye_lefteyes));
+    AddEmoji("delicious", new LvglSourceImage(&eye_lookdoweyes));
+    AddEmoji("kissy", new LvglSourceImage(&eye_righteyes));
+    AddEmoji("silly", new LvglSourceImage(&eye_lefteyes));
+    AddEmoji("sad", new LvglSourceImage(&eye_sadeyes));
+    AddEmoji("crying", new LvglSourceImage(&eye_sadeyes));
+    AddEmoji("angry", new LvglSourceImage(&eye_sadeyes));
+    AddEmoji("sleepy", new LvglSourceImage(&eye_sleepeyes));
+    AddEmoji("relaxed", new LvglSourceImage(&eye_halfsleepeyes));
+    AddEmoji("thinking", new LvglSourceImage(&eye_lookdoweyes));
+    AddEmoji("confused", new LvglSourceImage(&eye_halfsleepeyes));
+    AddEmoji("embarrassed", new LvglSourceImage(&eye_halfsleepeyes));
+    AddEmoji("winking", new LvglSourceImage(&eye_lefteyes));
+    AddEmoji("left", new LvglSourceImage(&eye_lefteyes));
+    AddEmoji("right", new LvglSourceImage(&eye_righteyes));
+    AddEmoji("lookdown", new LvglSourceImage(&eye_lookdoweyes));
+    AddEmoji("surprised", new LvglSourceImage(&eye_openeyes));
+    AddEmoji("shocked", new LvglSourceImage(&eye_openeyes));
 }

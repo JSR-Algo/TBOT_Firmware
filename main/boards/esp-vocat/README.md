@@ -25,13 +25,13 @@ idf.py menuconfig
 分别配置如下选项：
 
 ### 基本配置
-- `Xiaozhi Assistant` → `Board Type` → 选择 `Espressif ESP-VoCat`
+- `Tbot Assistant` → `Board Type` → 选择 `Espressif ESP-VoCat`
 
 ### UI风格选择
 
 ESP-VoCat 支持多种不同的 UI 显示风格，通过 menuconfig 配置选择：
 
-- `Xiaozhi Assistant` → `Select display style` → 选择显示风格
+- `Tbot Assistant` → `Select display style` → 选择显示风格
 
 #### 可选风格
 
@@ -43,8 +43,8 @@ ESP-VoCat 支持多种不同的 UI 显示风格，通过 menuconfig 配置选择
 - **类**: `emote::EmoteDisplay`
 
 **⚠️ 重要**: 选择此风格需要额外配置自定义资源文件：
-1. `Xiaozhi Assistant` → `Flash Assets` → 选择 `Flash Custom Assets`
-2. `Xiaozhi Assistant` → `Custom Assets File` → 填入资源文件地址：
+1. `Tbot Assistant` → `Flash Assets` → 选择 `Flash Custom Assets`
+2. `Tbot Assistant` → `Custom Assets File` → 填入资源文件地址：
    ```
    https://dl.espressif.com/AE/wn9_nihaoxiaozhi_tts-font_puhui_common_20_4-echoear.bin
    ```

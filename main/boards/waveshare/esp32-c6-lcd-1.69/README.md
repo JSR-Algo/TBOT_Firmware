@@ -32,7 +32,7 @@ idf.py menuconfig
 **选择板子**
 
 ```bash
-Xiaozhi Assistant -> Board Type -> Waveshare ESP32-C6-LCD-1.69
+Tbot Assistant -> Board Type -> Waveshare ESP32-C6-LCD-1.69
 ```
 
 **编译**

@@ -1,18 +1,24 @@
 #include "blufi.h"
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
+#ifdef CONFIG_TBOT_PROVISIONING_REPORT_ENABLED
+#include "provisioning_status_reporter.h"
+#endif
+#include "application.h"
 #include "esp_bt.h"
 #include "esp_event.h"
+#include "esp_efuse.h"
+#include "esp_efuse_table.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/task.h"
 #include "wifi_manager.h"
-
-#define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
 #include "esp_bt_device.h"
@@ -63,6 +69,36 @@ void esp_blufi_btc_deinit(void);
 
 static const char* BLUFI_TAG = "BLUFI_CLASS";
 
+static std::string SanitizedSerial(const uint8_t* bytes, size_t max_len) {
+    std::string serial;
+    for (size_t i = 0; i < max_len && bytes[i] != 0; ++i) {
+        const char ch = static_cast<char>(bytes[i]);
+        if ((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
+            (ch >= 'a' && ch <= 'z') || ch == '-') {
+            serial.push_back(ch);
+        }
+    }
+    return serial;
+}
+
+static std::string GetBlufiDeviceName() {
+#ifdef ESP_EFUSE_BLOCK_USR_DATA
+    uint8_t serial_number[33] = {0};
+    if (esp_efuse_read_field_blob(ESP_EFUSE_USER_DATA, serial_number, 32 * 8) == ESP_OK) {
+        const std::string serial = SanitizedSerial(serial_number, 32);
+        if (!serial.empty()) {
+            return serial;
+        }
+    }
+#endif
+
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_BT);
+    char name[24] = {0};
+    snprintf(name, sizeof(name), "TBOT-%02X%02X%02X%02X%02X%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return std::string(name);
+}
+
 static wifi_mode_t GetWifiModeWithFallback(const WifiManager& wifi) {
     if (wifi.IsConfigMode()) {
         return WIFI_MODE_AP;
@@ -89,7 +125,9 @@ Blufi::Blufi()
       m_provisioned(false),
       m_deinited(false),
       m_sta_ssid_len(0),
-      m_sta_is_connecting(false) {
+      m_sta_is_connecting(false),
+      ble_setup_timer_(nullptr),
+      ble_timed_out_(false) {
     memset(&m_sta_config, 0, sizeof(m_sta_config));
     memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
     memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
@@ -663,7 +701,11 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
     switch (event) {
         case ESP_BLUFI_EVENT_INIT_FINISH:
             ESP_LOGI(BLUFI_TAG, "BLUFI init finish");
-            esp_ble_gap_set_device_name(BLUFI_DEVICE_NAME);
+            {
+                static const std::string device_name = GetBlufiDeviceName();
+                ESP_LOGI(BLUFI_TAG, "BLUFI advertised name: %s", device_name.c_str());
+                esp_ble_gap_set_device_name(device_name.c_str());
+            }
             esp_blufi_adv_start();
             break;
         case ESP_BLUFI_EVENT_DEINIT_FINISH:
@@ -680,7 +722,15 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             m_ble_is_connected = false;
             _security_deinit();
             if (!m_provisioned) {
-                esp_blufi_adv_start();
+                // Only restart advertising if the hard-timeout has NOT fired.
+                // If ble_timed_out_ is true the timer callback has already
+                // posted (or is about to post) a deinit to the Application
+                // task — restarting advertising here would be unsafe.
+                if (!ble_timed_out_) {
+                    esp_blufi_adv_start();
+                } else {
+                    ESP_LOGW(BLUFI_TAG, "BLE disconnect after timeout — NOT restarting advertising");
+                }
             } else {
                 esp_blufi_adv_stop();
                 if (!m_deinited) {
@@ -797,6 +847,31 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                                                         softap_conn_num, &info);
                         ESP_LOGI(BLUFI_TAG, "connected to WiFi");
 
+#ifdef CONFIG_TBOT_PROVISIONING_REPORT_ENABLED
+                        {
+                            const std::string& token = self->bootstrap_token_;
+                            const std::string& code  = self->provisioning_code_;
+                            ESP_LOGI(BLUFI_TAG,
+                                     "BluFi success: token_empty=%d code_empty=%d — attempting Report()",
+                                     (int)token.empty(), (int)code.empty());
+                            if (!token.empty() && !code.empty()) {
+                                bool ok = ProvisioningStatusReporter::Report(
+                                    ProvisioningStatusReporter::Status::DeviceAuthenticated,
+                                    token, code);
+                                if (ok) {
+                                    ESP_LOGI(BLUFI_TAG, "Provisioning report succeeded in BluFi success branch");
+                                    self->ClearProvisioningSecrets();
+                                } else {
+                                    ESP_LOGW(BLUFI_TAG, "Provisioning report failed in BluFi success branch; secrets retained");
+                                }
+                            } else {
+                                ESP_LOGW(BLUFI_TAG,
+                                         "Skip Report() on success: token_empty=%d code_empty=%d",
+                                         (int)token.empty(), (int)code.empty());
+                            }
+                        }
+#endif
+
                         if (self->m_ble_is_connected) {
                             esp_blufi_disconnect();
                         }
@@ -811,6 +886,19 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                         esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
                                                         softap_conn_num, &info);
                         ESP_LOGE(BLUFI_TAG, "Failed to connect to WiFi via esp-wifi-connect");
+#ifdef CONFIG_TBOT_PROVISIONING_REPORT_ENABLED
+                        {
+                            const std::string& token = self->bootstrap_token_;
+                            const std::string& code  = self->provisioning_code_;
+                            if (!token.empty()) {
+                                ESP_LOGI(BLUFI_TAG, "Reporting provisioning status: failed");
+                                ProvisioningStatusReporter::Report(
+                                    ProvisioningStatusReporter::Status::Failed,
+                                    token, code, "wifi_connect_failed");
+                                self->ClearProvisioningSecrets();
+                            }
+                        }
+#endif
                     }
                     vTaskDelete(nullptr);
                 },
@@ -874,7 +962,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             strncpy((char*)m_sta_config.sta.password, (char*)param->sta_passwd.passwd,
                     param->sta_passwd.passwd_len);
             m_sta_config.sta.password[param->sta_passwd.passwd_len] = '\0';
-            ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD : %s", m_sta_config.sta.password);
+            ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD");
             break;
         case ESP_BLUFI_EVENT_GET_WIFI_LIST: {
             ESP_LOGI(BLUFI_TAG, "BLUFI get wifi list");
@@ -903,10 +991,150 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             }
             break;
         }
+        case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA: {
+            // Parse TLV stream: [tag(1) | len(1) | value(len)] ...
+            // tag=0x01 → bootstrap_token (base64url ASCII, max 64 chars)
+            // tag=0x02 → provisioning_code (max 16 chars)
+            const uint8_t* data = param->custom_data.data;
+            int data_len = static_cast<int>(param->custom_data.data_len);
+            ESP_LOGI(BLUFI_TAG, "BLUFI recv custom data, len=%d", data_len);
+
+            int offset = 0;
+            while (offset + 2 <= data_len) {
+                uint8_t tag = data[offset];
+                uint8_t len = data[offset + 1];
+                offset += 2;
+
+                // Bounds check: ensure value bytes are within payload
+                if (offset + static_cast<int>(len) > data_len) {
+                    ESP_LOGW(BLUFI_TAG, "TLV truncated at tag=0x%02x, len=%u, remaining=%d",
+                             tag, len, data_len - offset);
+                    break;
+                }
+
+                const char* value = reinterpret_cast<const char*>(data + offset);
+                offset += static_cast<int>(len);
+
+                if (tag == 0x01) {
+                    // Bootstrap token: cap at 64 chars, no null terminator expected
+                    uint8_t safe_len = (len > 64) ? 64 : len;
+                    bootstrap_token_.assign(value, safe_len);
+                    ESP_LOGI(BLUFI_TAG, "Received bootstrap token (%u bytes)", safe_len);
+                } else if (tag == 0x02) {
+                    // Provisioning code: cap at 16 chars
+                    uint8_t safe_len = (len > 16) ? 16 : len;
+                    provisioning_code_.assign(value, safe_len);
+                    ESP_LOGI(BLUFI_TAG, "Received provisioning code (%u bytes)", safe_len);
+                } else {
+                    ESP_LOGD(BLUFI_TAG, "Unknown TLV tag=0x%02x, len=%u, skipping", tag, len);
+                }
+            }
+            break;
+        }
         default:
             ESP_LOGW(BLUFI_TAG, "Unhandled event: %d", event);
             break;
     }
+}
+
+// ---------------------------------------------------------------------------
+// BLE hard-timeout safety gate (#1)
+// ---------------------------------------------------------------------------
+
+void Blufi::_ble_setup_timeout_cb(void* arg) {
+    // IMPORTANT: This callback runs in the esp_timer task context.
+    // Calling deinit() here would race with BLE stack tasks and risk a WDT
+    // crash (§9 of master plan). We only set the flag and post the teardown
+    // to the Application task where it is safe.
+    Blufi* self = static_cast<Blufi*>(arg);
+    ESP_LOGW(BLUFI_TAG, "BLE setup TIMEOUT -> teardown posted to Application task");
+    self->ble_timed_out_ = true;
+
+    Application::GetInstance().Schedule([self]() {
+        ESP_LOGW(BLUFI_TAG, "BLE setup TIMEOUT teardown executing on Application task");
+        // Stop advertising before tearing down to minimise the window where
+        // the radio is on but we are about to pull the stack.
+        esp_blufi_adv_stop();
+        self->deinit();
+    });
+}
+
+void Blufi::StartBleSetupTimeout(int seconds) {
+    if (ble_setup_timer_ != nullptr) {
+        // Already armed — stop and delete so we can re-create cleanly.
+        esp_timer_stop(ble_setup_timer_);
+        esp_timer_delete(ble_setup_timer_);
+        ble_setup_timer_ = nullptr;
+    }
+    ble_timed_out_ = false;
+
+    esp_timer_create_args_t args = {
+        .callback = _ble_setup_timeout_cb,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "ble_setup_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_err_t err = esp_timer_create(&args, &ble_setup_timer_);
+    if (err != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Failed to create BLE setup timer: %s", esp_err_to_name(err));
+        ble_setup_timer_ = nullptr;
+        return;
+    }
+    err = esp_timer_start_once(ble_setup_timer_, static_cast<uint64_t>(seconds) * 1000000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Failed to start BLE setup timer: %s", esp_err_to_name(err));
+        esp_timer_delete(ble_setup_timer_);
+        ble_setup_timer_ = nullptr;
+        return;
+    }
+    ESP_LOGI(BLUFI_TAG, "BLE setup timer armed %ds", seconds);
+}
+
+void Blufi::CancelBleSetupTimeout() {
+    if (ble_setup_timer_ == nullptr) {
+        return;  // Never armed or already cancelled — no-op.
+    }
+    esp_timer_stop(ble_setup_timer_);
+    esp_timer_delete(ble_setup_timer_);
+    ble_setup_timer_ = nullptr;
+    ESP_LOGI(BLUFI_TAG, "BLE setup cancelled (provisioned)");
+}
+
+Blufi::BleState Blufi::GetBleState() const {
+    if (ble_timed_out_) {
+        return BleState::kTimeout;
+    }
+    if (!inited_ || m_deinited) {
+        return BleState::kOff;
+    }
+    if (m_ble_is_connected) {
+        return BleState::kConnected;
+    }
+    return BleState::kAdvertising;
+}
+
+const char* Blufi::GetBleStateString() const {
+    switch (GetBleState()) {
+        case BleState::kAdvertising:  return "advertising";
+        case BleState::kConnected:    return "connected";
+        case BleState::kTimeout:      return "timeout";
+        case BleState::kOff:
+        default:                      return "off";
+    }
+}
+
+void Blufi::ClearProvisioningSecrets() {
+    // Zeroize in-place before clearing (defense-in-depth)
+    if (!bootstrap_token_.empty()) {
+        std::fill(bootstrap_token_.begin(), bootstrap_token_.end(), '\0');
+        bootstrap_token_.clear();
+    }
+    if (!provisioning_code_.empty()) {
+        std::fill(provisioning_code_.begin(), provisioning_code_.end(), '\0');
+        provisioning_code_.clear();
+    }
+    ESP_LOGI(BLUFI_TAG, "Provisioning secrets cleared");
 }
 
 void Blufi::_event_callback_trampoline(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* param) {

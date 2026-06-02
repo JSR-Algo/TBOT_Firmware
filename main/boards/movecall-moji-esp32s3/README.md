@@ -15,7 +15,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> Movecall Moji 小智AI衍生版
+Tbot Assistant -> Board Type -> Movecall Moji TbotAI衍生版
 ```
 
 

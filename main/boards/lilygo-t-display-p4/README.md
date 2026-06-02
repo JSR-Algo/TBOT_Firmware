@@ -23,15 +23,15 @@ Official github: [T-Display-P4](https://github.com/Xinyuan-LilyGO/T-Display-P4)
 
 * Select the board
 
-        Xiaozhi Assistant -> Board Type -> LILYGO T-Display-P4
+        Tbot Assistant -> Board Type -> LILYGO T-Display-P4
 
 * Select the screen type
 
-        Xiaozhi Assistant -> Select the screen type -> (Select the screen type you need to configure)
+        Tbot Assistant -> Select the screen type -> (Select the screen type you need to configure)
 
 * Screen the screen pixel format
 
-        Xiaozhi Assistant -> Select the color format of the screen -> (Select the screen pixel format you need to configure)
+        Tbot Assistant -> Select the color format of the screen -> (Select the screen pixel format you need to configure)
 
 * Build
 

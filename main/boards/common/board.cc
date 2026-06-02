@@ -12,6 +12,8 @@
 
 #define TAG "Board"
 
+static constexpr const char* TBOT_APPLICATION_NAME = "TBot";
+
 Board::Board() {
     Settings settings("board", true);
     uuid_ = settings.GetString("uuid");
@@ -124,7 +126,7 @@ std::string Board::GetSystemInfoJson() {
 
     auto app_desc = esp_app_get_description();
     json += R"("application":{)";
-    json += R"("name":")" + std::string(app_desc->project_name) + R"(",)";
+    json += R"("name":")" + std::string(TBOT_APPLICATION_NAME) + R"(",)";
     json += R"("version":")" + std::string(app_desc->version) + R"(",)";
     json += R"("compile_time":")" + std::string(app_desc->date) + R"(T)" + std::string(app_desc->time) + R"(Z",)";
     json += R"("idf_version":")" + std::string(app_desc->idf_ver) + R"(",)";

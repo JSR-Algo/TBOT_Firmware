@@ -15,7 +15,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> M5Stack AtomS3R + Echo Pyramid
+Tbot Assistant -> Board Type -> M5Stack AtomS3R + Echo Pyramid
 ```
 
 **修改 flash 大小：**

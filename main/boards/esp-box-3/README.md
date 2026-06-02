@@ -34,13 +34,13 @@ idf.py menuconfig
 分别配置如下选项：
 
 ### 基本配置
-- `Xiaozhi Assistant` → `Board Type` → 选择 `ESP BOX 3`
+- `Tbot Assistant` → `Board Type` → 选择 `ESP BOX 3`
 
 ### UI风格选择
 
 ESP-BOX-3 支持多种不同的 UI 显示风格，通过 menuconfig 配置选择：
 
-- `Xiaozhi Assistant` → `Select display style` → 选择显示风格
+- `Tbot Assistant` → `Select display style` → 选择显示风格
 
 #### 可选风格
 
@@ -52,8 +52,8 @@ ESP-BOX-3 支持多种不同的 UI 显示风格，通过 menuconfig 配置选择
 - **类**: `emote::EmoteDisplay`
 
 **⚠️ 重要**: 选择此风格需要额外配置自定义资源文件：
-1. `Xiaozhi Assistant` → `Flash Assets` → 选择 `Flash Custom Assets`
-2. `Xiaozhi Assistant` → `Custom Assets File` → 填入资源文件地址：
+1. `Tbot Assistant` → `Flash Assets` → 选择 `Flash Custom Assets`
+2. `Tbot Assistant` → `Custom Assets File` → 填入资源文件地址：
    ```
    https://dl.espressif.com/AE/wn9_nihaoxiaozhi_tts-font_puhui_common_20_4-esp-box-3.bin
    ```
@@ -75,7 +75,7 @@ ESP-BOX-3 支持多种不同的 UI 显示风格，通过 menuconfig 配置选择
 ### 音频功能配置
 
 #### 设备端回声消除 (AEC)
-- `Xiaozhi Assistant` → `Enable Device-Side AEC` → 启用
+- `Tbot Assistant` → `Enable Device-Side AEC` → 启用
 
 ESP-BOX-3 硬件支持设备端 AEC 功能，可有效消除扬声器播放声音对麦克风的干扰，提升语音识别准确率。
 
@@ -87,7 +87,7 @@ ESP-BOX-3 硬件支持设备端 AEC 功能，可有效消除扬声器播放声�
 
 ESP-BOX-3 支持多种唤醒词实现方式：
 
-- `Xiaozhi Assistant` → `Wake Word Implementation Type` → 选择唤醒词类型
+- `Tbot Assistant` → `Wake Word Implementation Type` → 选择唤醒词类型
 
 推荐选择：
 - **Wakenet model with AFE** (`USE_AFE_WAKE_WORD`) - 支持 AEC 的唤醒词检测

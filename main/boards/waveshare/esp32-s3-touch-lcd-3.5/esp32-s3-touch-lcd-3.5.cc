@@ -14,6 +14,7 @@
 #include <esp_lcd_panel_vendor.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_lcd_st7796.h>
 
 #include <esp_timer.h>
 #include "esp_io_expander_tca9554.h"
@@ -60,21 +61,6 @@ class Pmic : public Axp2101 {
         }
     };
 
-typedef struct {
-    int cmd;                /*<! The specific LCD command */
-    const void *data;       /*<! Buffer that holds the command specific data */
-    size_t data_bytes;      /*<! Size of `data` in memory, in bytes */
-    unsigned int delay_ms;  /*<! Delay in milliseconds after this command */
-} st7796_lcd_init_cmd_t;
-
-typedef struct {
-    const st7796_lcd_init_cmd_t *init_cmds;     /*!< Pointer to initialization commands array. Set to NULL if using default commands.
-                                                 *   The array should be declared as `static const` and positioned outside the function.
-                                                 *   Please refer to `vendor_specific_init_default` in source file.
-                                                 */
-    uint16_t init_cmds_size;                    /*<! Number of commands in above array */
-} st7796_vendor_config_t;
-
 st7796_lcd_init_cmd_t st7796_lcd_init_cmds[] = {
     {0x11, (uint8_t []){ 0x00 }, 0, 120},
 
@@ -119,7 +105,9 @@ private:
             GetBacklight()->RestoreBrightness();
         });
         power_save_timer_->OnShutdownRequest([this]() {
-            pmic_->PowerOff();
+            if (pmic_ != nullptr) {
+                pmic_->PowerOff();
+            }
         });
         power_save_timer_->SetEnabled(true);
     }
@@ -144,8 +132,11 @@ private:
     void InitializeTca9554(void)
     {
         esp_err_t ret = esp_io_expander_new_i2c_tca9554(i2c_bus_, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
-        if(ret != ESP_OK)
-        ESP_LOGE(TAG, "TCA9554 create returned error");        
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "TCA9554 not detected; continuing without IO expander power sequencing");
+            io_expander = nullptr;
+            return;
+        }
         ret = esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1, IO_EXPANDER_OUTPUT);         
         ESP_ERROR_CHECK(ret);
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -157,8 +148,8 @@ private:
     }
 
     void InitializeAxp2101() {
-        ESP_LOGI(TAG, "Init AXP2101");
-        pmic_ = new Pmic(i2c_bus_, 0x34);
+        ESP_LOGW(TAG, "AXP2101 disabled for this robot LCD variant; battery and PMIC power-off disabled");
+        pmic_ = nullptr;
     }
 
     void InitializeSpi() {
@@ -243,9 +234,17 @@ private:
             }
         };
         tp_io_config.scl_speed_hz = 400 * 1000;
-        ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle));
+        esp_err_t ret = esp_lcd_new_panel_io_i2c(i2c_bus_, &tp_io_config, &tp_io_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Touch IO init failed; continuing without touch");
+            return;
+        }
         ESP_LOGI(TAG, "Initialize touch controller");
-        ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft5x06(tp_io_handle, &tp_cfg, &tp));
+        ret = esp_lcd_touch_new_i2c_ft5x06(tp_io_handle, &tp_cfg, &tp);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Touch controller not detected; continuing without touch");
+            return;
+        }
         const lvgl_port_touch_cfg_t touch_cfg = {
             .disp = lv_display_get_default(), 
             .handle = tp,
@@ -282,7 +281,7 @@ private:
         panel_config.bits_per_pixel = 16;
         panel_config.vendor_config = &st7796_vendor_config;
 
-        ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(panel_io, &panel_config, &panel));
+        ESP_ERROR_CHECK(esp_lcd_new_panel_st7796(panel_io, &panel_config, &panel));
 
         esp_lcd_panel_reset(panel);
  
@@ -355,6 +354,12 @@ public:
         return &backlight;
     }
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging) override {
+        if (pmic_ == nullptr) {
+            charging = false;
+            discharging = false;
+            level = 0;
+            return false;
+        }
         static bool last_discharging = false;
         charging = pmic_->IsCharging();
         discharging = pmic_->IsDischarging();

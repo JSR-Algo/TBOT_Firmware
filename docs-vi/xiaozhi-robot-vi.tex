@@ -91,7 +91,7 @@
 \usepackage{fancyhdr}
 \pagestyle{fancy}
 \fancyhf{}
-\rhead{\small\textit{Xiaozhi Robot — Tài liệu tích hợp}}
+\rhead{\small\textit{Tbot Robot — Tài liệu tích hợp}}
 \lhead{\small\textit{ESP32-S3 / ES3C28P}}
 \rfoot{\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -104,7 +104,7 @@
 % ===== Title page =====
 \title{
   \vspace*{1cm}
-  \textbf{\Huge Xiaozhi AI Robot}\\[6pt]
+  \textbf{\Huge Tbot AI Robot}\\[6pt]
   \Large Tài liệu tích hợp \& kế hoạch tùy biến\\[2pt]
   \large ESP32-S3 + ES3C28P + 3× Servo MG996R + WebSocket Server tự host
 }
@@ -334,7 +334,7 @@ void InitializeTools() {
 \subsection{AFE (Audio Front-End) \& Wake Word}
 \textbf{AFE} = Espressif's audio pipeline gồm AEC (echo cancel) + NS (noise suppress) + VAD (voice activity detect) + WakeNet (wake word detection). Chạy trên chip S3 không cần cloud.
 
-\textbf{Wake word} hiện tại: \texttt{wn9s\_hiesp} (nhỏ, "Hi, ESP" English) + \texttt{wn9\_hiesp} (chuẩn). Không có wake word offline cho tiếng Việt — Espressif chưa ra. Phải dùng "Hi, ESP" hoặc "Nǐ hǎo, xiǎo zhì" (你好小智).
+\textbf{Wake word} hiện tại: \texttt{wn9s\_hiesp} (nhỏ, "Hi, ESP" English) + \texttt{wn9\_hiesp} (chuẩn). Không có wake word offline cho tiếng Việt — Espressif chưa ra. Phải dùng "Hi, ESP" hoặc "Nǐ hǎo, xiǎo zhì" (你好Tbot).
 
 % =====================================================================
 \section{Phần cứng — board ES3C28P}\label{sec:gpio}
@@ -818,7 +818,7 @@ cmd.exe /c "idf_env.bat idf.py -p COM9 monitor"
 % =====================================================================
 \section{Tài liệu tham khảo}
 \begin{enumerate}
-  \item Xiaozhi-esp32 GitHub: \url{https://github.com/78/xiaozhi-esp32}
+  \item Tbot-esp32 GitHub: \url{https://github.com/78/xiaozhi-esp32}
   \item ESP-IDF Programming Guide: \url{https://docs.espressif.com/projects/esp-idf/en/v5.5.4/}
   \item ESP32-S3 Technical Reference: \url{https://www.espressif.com/sites/default/files/documentation/esp32-s3_technical_reference_manual_en.pdf}
   \item Kit ES3C28P (LCD wiki): \url{https://www.lcdwiki.com/2.8inch_ESP32-S3_Display}

@@ -31,4 +31,9 @@ public:
     Twemoji64();
 };
 
+class EyesEmojiCollection : public EmojiCollection {
+public:
+    EyesEmojiCollection();
+};
+
 #endif

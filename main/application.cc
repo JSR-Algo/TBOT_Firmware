@@ -20,6 +20,8 @@
 
 #define TAG "Application"
 
+static constexpr uint32_t kListenPlaybackDrainTimeoutMs = 650;
+
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -579,8 +581,9 @@ void Application::InitializeProtocol() {
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
+                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
                     display->SetEmotion(emotion_str.c_str());
+                    HandleEmotionGesture(emotion_str.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
@@ -643,18 +646,69 @@ bool Application::HandleRobotActionMessage(const cJSON* root) {
         return false;
     }
 
-    if (strcmp(action->valuestring, "left_arm_raise") == 0) {
-        Schedule([this]() {
-            SendLeftArmRaise();
-        });
-        return true;
+    using RobotActionHandler = bool (Application::*)();
+    static const struct {
+        const char* action;
+        RobotActionHandler handler;
+    } handlers[] = {
+        {"left_arm_raise", &Application::SendLeftArmRaise},
+        {"right_arm_raise", &Application::SendRightArmRaise},
+        {"left_arm_lower", &Application::SendLeftArmLower},
+        {"right_arm_lower", &Application::SendRightArmLower},
+        {"both_arms_raise", &Application::SendBothArmsRaise},
+        {"both_arms_lower", &Application::SendBothArmsLower},
+    };
+
+    for (const auto& handler : handlers) {
+        if (strcmp(action->valuestring, handler.action) == 0) {
+            Schedule([this, method = handler.handler]() {
+                (this->*method)();
+            });
+            return true;
+        }
     }
 
     return false;
 }
 
+void Application::HandleEmotionGesture(const char* emotion) {
+    if (emotion == nullptr) {
+        return;
+    }
+
+    if (strcmp(emotion, "happy") == 0) {
+        SendBothArmsRaise();
+        return;
+    }
+
+    if (strcmp(emotion, "sad") == 0) {
+        SendLeftArmRaise();
+        return;
+    }
+}
+
 bool Application::SendLeftArmRaise() {
     return robot_uart_.SendLeftArmRaise();
+}
+
+bool Application::SendRightArmRaise() {
+    return robot_uart_.SendRightArmRaise();
+}
+
+bool Application::SendLeftArmLower() {
+    return robot_uart_.SendLeftArmLower();
+}
+
+bool Application::SendRightArmLower() {
+    return robot_uart_.SendRightArmLower();
+}
+
+bool Application::SendBothArmsRaise() {
+    return robot_uart_.SendBothArmsRaise();
+}
+
+bool Application::SendBothArmsLower() {
+    return robot_uart_.SendBothArmsLower();
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -935,8 +989,13 @@ void Application::HandleStateChangedEvent() {
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
                 // For auto mode, wait for playback queue to be empty before enabling voice processing
                 // This prevents audio truncation when STOP arrives late due to network jitter
-                if (listening_mode_ == kListeningModeAutoStop) {
-                    audio_service_.WaitForPlaybackQueueEmpty();
+                if (listening_mode_ == kListeningModeAutoStop && !aborted_) {
+                    bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kListenPlaybackDrainTimeoutMs);
+                    if (!playback_drained) {
+                        ESP_LOGW(TAG,
+                                 "playback_queue_drain_timeout timeout_ms=%lu action=force_listening",
+                                 static_cast<unsigned long>(kListenPlaybackDrainTimeoutMs));
+                    }
                 }
                 
                 // Send the start listening command
@@ -993,6 +1052,7 @@ void Application::Schedule(std::function<void()>&& callback) {
 void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
+    audio_service_.ResetDecoder();
     if (protocol_) {
         protocol_->SendAbortSpeaking(reason);
     }

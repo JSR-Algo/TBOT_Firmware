@@ -110,6 +110,11 @@ public:
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload);
     bool SendLeftArmRaise();
+    bool SendRightArmRaise();
+    bool SendLeftArmLower();
+    bool SendRightArmLower();
+    bool SendBothArmsRaise();
+    bool SendBothArmsLower();
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
@@ -172,6 +177,7 @@ private:
     void CheckNewVersion();
     void InitializeProtocol();
     bool HandleRobotActionMessage(const cJSON* root);
+    void HandleEmotionGesture(const char* emotion);
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
     ListeningMode GetDefaultListeningMode() const;

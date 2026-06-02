@@ -9,7 +9,7 @@
 - 物理按键交互：独立 Boot 功能键、音量加减键，支持单击、双击、长按、五击多阶操作
 - 扩展能力：内置 Micro SD 卡插槽，支持本地存储扩展；可预留震动马达，实现按键操作触觉反馈
 - 完善的电源管理：支持电池电量 ADC 检测、充电状态实时监测、自动休眠与深度睡眠节能控制
-- 生态兼容：完全适配小智 ESP32 项目固件，支持 Qwen/DeepSeek 等大模型，兼容 MCP 协议设备控制
+- 生态兼容：完全适配Tbot ESP32 项目固件，支持 Qwen/DeepSeek 等大模型，兼容 MCP 协议设备控制
 - 由于硬件差异，UI显示上对底部表情和文本的显示位置稍有改动
 
 ## 与铝合金版本（XINGZHI_METAL_1_54_WIFI）核心差异
@@ -62,7 +62,7 @@ idf.py menuconfig
 **选择板子**
 
 ```bash
-- `Xiaozhi Assistant` → `Board Type` → 选择 `无名科技星智ABS 2.0`
+- `Tbot Assistant` → `Board Type` → 选择 `无名科技星智ABS 2.0`
 ```
 
 **编译**

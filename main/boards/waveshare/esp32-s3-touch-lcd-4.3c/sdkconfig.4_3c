@@ -595,7 +595,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
-# Xiaozhi Assistant
+# Tbot Assistant
 #
 CONFIG_OTA_URL="https://api.tenclass.net/xiaozhi/ota/"
 # CONFIG_FLASH_NONE_ASSETS is not set
@@ -743,7 +743,7 @@ CONFIG_USE_DEVICE_AEC=y
 # CONFIG_XIAOZHI_ENABLE_CAMERA_ENDIANNESS_SWAP is not set
 # CONFIG_XIAOZHI_ENABLE_ROTATE_CAMERA_IMAGE is not set
 # end of Camera Configuration
-# end of Xiaozhi Assistant
+# end of Tbot Assistant
 
 #
 # ESP Speech Recognition

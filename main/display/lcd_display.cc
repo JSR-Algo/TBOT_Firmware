@@ -41,6 +41,9 @@ void LcdDisplay::InitializeLcdThemes() {
     light_theme->set_text_font(text_font);
     light_theme->set_icon_font(icon_font);
     light_theme->set_large_icon_font(large_icon_font);
+#if CONFIG_BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD
+    light_theme->set_emoji_collection(std::make_shared<EyesEmojiCollection>());
+#endif
 
     // dark theme
     auto dark_theme = new LvglTheme("dark");
@@ -56,6 +59,9 @@ void LcdDisplay::InitializeLcdThemes() {
     dark_theme->set_text_font(text_font);
     dark_theme->set_icon_font(icon_font);
     dark_theme->set_large_icon_font(large_icon_font);
+#if CONFIG_BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD
+    dark_theme->set_emoji_collection(std::make_shared<EyesEmojiCollection>());
+#endif
 
     auto& theme_manager = LvglThemeManager::GetInstance();
     theme_manager.RegisterTheme("light", light_theme);

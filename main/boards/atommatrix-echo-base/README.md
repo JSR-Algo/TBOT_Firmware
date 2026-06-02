@@ -15,7 +15,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> AtomMatrix + Echo Base
+Tbot Assistant -> Board Type -> AtomMatrix + Echo Base
 ```
 
 **编译：**

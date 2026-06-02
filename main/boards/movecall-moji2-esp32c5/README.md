@@ -1,6 +1,6 @@
 # Build and Configuration Guide
 
-This document provides instructions on how to configure and build the firmware for **Movecall Moji2.0 (Xiaozhi AI Edition)**.
+This document provides instructions on how to configure and build the firmware for **Movecall Moji2.0 (Tbot AI Edition)**.
 
 ## 🛠 Prerequisites
 *   **ESP-IDF Version**: v5.5
@@ -27,7 +27,7 @@ idf.py menuconfig
 ```
 
 **Navigate to the following path to select your board:**
-> **Xiaozhi Assistant** -> **Board Type** -> **Movecall Moji2.0 小智AI衍生版**
+> **Tbot Assistant** -> **Board Type** -> **Movecall Moji2.0 TbotAI衍生版**
 
 *Note: After selecting, press **S** to save (then Enter to confirm) and press **Q** to exit.*
 

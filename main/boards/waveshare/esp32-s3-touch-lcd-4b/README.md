@@ -8,5 +8,5 @@
 
 Configuration in `menuconfig`.
 
-Selection Board Type `Xiaozhi Assistant --> Board Type`
+Selection Board Type `Tbot Assistant --> Board Type`
 - Waveshare ESP32-S3-Touch-LCD-4B

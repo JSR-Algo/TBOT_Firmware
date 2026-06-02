@@ -21,7 +21,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> DFRobot 行空板 K10
+Tbot Assistant -> Board Type -> DFRobot 行空板 K10
 ```
 
 **修改 psram 配置：**
@@ -33,7 +33,7 @@ Component config -> ESP PSRAM -> SPI RAM config -> Mode (QUAD/OCT) -> Octal Mode
 **使能摄像头缓冲区大小端交换：**
 
 ```
-Xiaozhi Assistant -> Camera Configuration -> Enable software camera buffer endianness swapping
+Tbot Assistant -> Camera Configuration -> Enable software camera buffer endianness swapping
 ```
 
 **配置摄像头：**

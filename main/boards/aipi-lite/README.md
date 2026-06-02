@@ -21,7 +21,7 @@ idf.py menuconfig
 选择板子
 
 ```
-Xiaozhi Assistant -> Board Type -> AIPI-Lite
+Tbot Assistant -> Board Type -> AIPI-Lite
 ```
 
 ## 编译烧入
@@ -30,7 +30,7 @@ Xiaozhi Assistant -> Board Type -> AIPI-Lite
 idf.py -DBOARD_NAME=aipi-lite build flash
 ```
 
-注意: 如果当前设备出货之前是AiPi-Lite 固件(非小智版本),请特别小心处理闪存固件分区地址，以避免错误擦除 AiPi-Lite 的自身设备信息（EUI 等），否则设备即使恢复成Xorigin固件也无法正确连接到 服务器！所以在刷写固件之前，请务必记录设备的相关必要信息，以确保有恢复的方法！
+注意: 如果当前设备出货之前是AiPi-Lite 固件(非Tbot版本),请特别小心处理闪存固件分区地址，以避免错误擦除 AiPi-Lite 的自身设备信息（EUI 等），否则设备即使恢复成Xorigin固件也无法正确连接到 服务器！所以在刷写固件之前，请务必记录设备的相关必要信息，以确保有恢复的方法！
 
 您可以使用以下命令备份生产信息
 

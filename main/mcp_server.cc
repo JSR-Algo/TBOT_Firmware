@@ -63,13 +63,33 @@ void McpServer::AddCommonTools() {
             return true;
         });
 
-    AddTool("self.robot.left_arm_raise",
+    auto add_robot_arm_tool = [this](const std::string& name, const std::string& description,
+                                    bool (Application::*handler)()) {
+        AddTool(name, description, PropertyList(),
+            [handler](const PropertyList& properties) -> ReturnValue {
+                (void)properties;
+                auto& app = Application::GetInstance();
+                return (app.*handler)();
+            });
+    };
+    add_robot_arm_tool("self.robot.left_arm_raise",
         "Raise the robot left arm by sending a UART command to the servant controller. Use when the user asks to raise the left hand or left arm.",
-        PropertyList(),
-        [](const PropertyList& properties) -> ReturnValue {
-            auto& app = Application::GetInstance();
-            return app.SendLeftArmRaise();
-        });
+        &Application::SendLeftArmRaise);
+    add_robot_arm_tool("self.robot.right_arm_raise",
+        "Raise the robot right arm by sending a UART command to the servant controller. Use when the user asks to raise the right hand or right arm.",
+        &Application::SendRightArmRaise);
+    add_robot_arm_tool("self.robot.left_arm_lower",
+        "Lower the robot left arm by sending a UART command to the servant controller. Use when the user asks to lower the left hand or left arm.",
+        &Application::SendLeftArmLower);
+    add_robot_arm_tool("self.robot.right_arm_lower",
+        "Lower the robot right arm by sending a UART command to the servant controller. Use when the user asks to lower the right hand or right arm.",
+        &Application::SendRightArmLower);
+    add_robot_arm_tool("self.robot.both_arms_raise",
+        "Raise both robot arms by sending UART commands to the servant controller. Use when the user asks to raise both hands or both arms.",
+        &Application::SendBothArmsRaise);
+    add_robot_arm_tool("self.robot.both_arms_lower",
+        "Lower both robot arms by sending UART commands to the servant controller. Use when the user asks to lower both hands or both arms.",
+        &Application::SendBothArmsLower);
     
     auto backlight = board.GetBacklight();
     if (backlight) {

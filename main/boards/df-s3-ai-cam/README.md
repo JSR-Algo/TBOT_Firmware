@@ -32,7 +32,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> DFRobot ESP32-S3 AI智能摄像头模块
+Tbot Assistant -> Board Type -> DFRobot ESP32-S3 AI智能摄像头模块
 ```
 
 **修改 psram 配置：**

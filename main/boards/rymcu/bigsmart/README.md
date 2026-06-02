@@ -22,7 +22,7 @@ idf.py menuconfig
 
 在菜单中选择：
 
-`Xiaozhi Assistant -> Board Type -> RYMCU BigSmart`
+`Tbot Assistant -> Board Type -> RYMCU BigSmart`
 
 然后执行：
 

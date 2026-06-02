@@ -4,7 +4,7 @@
 
 - `CONFIG_WAKE_WORD_DETECTION_IN_LISTENING=y` — wake-word luôn active
 - `application.cc:kDeviceStateSpeaking` — explicitly enable wake-word in realtime mode
-- Wake words active: **"Hi ESP"** (English) và **"Nĩ hảo Xiǎo Zhì"** (Chinese, "你好小智")
+- Wake words active: **"Hi ESP"** (English) và **"Nĩ hảo Xiǎo Zhì"** (Chinese, "你好Tbot")
 
 Binary mới ở `build/xiaozhi.bin` (2.5MB).
 
@@ -49,7 +49,7 @@ Firmware lấy WS từ OTA JSON. Khi build/flash, `CONFIG_OTA_URL` đang trỏ t
 
 Robot có wake-word barge-in. Khi robot đang nói:
 - **Nói "Hi ESP"** → robot dừng nói, vào listening mode, sẵn sàng câu mới
-- **Hoặc nói "Nĩ hảo Xiǎo Zhì"** (你好小智, đọc gần "ni hao shao chi") → cùng tác dụng
+- **Hoặc nói "Nĩ hảo Xiǎo Zhì"** (你好Tbot, đọc gần "ni hao shao chi") → cùng tác dụng
 - Sau wake word → user nói câu mới → robot trả lời câu mới
 
 ## Verify đã chạy đúng firmware mới

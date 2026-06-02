@@ -19,15 +19,15 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> 太极小派esp32s3
+Tbot Assistant -> Board Type -> 太极小派esp32s3
 
-Xiaozhi Assistant -> TAIJIPAI_S3_CONFIG -> taiji-pi-S3 I2S Type -> I2S Type PDM
+Tbot Assistant -> TAIJIPAI_S3_CONFIG -> taiji-pi-S3 I2S Type -> I2S Type PDM
 ```
 
 **如果需要选择双声道：**
 ```
 
-Xiaozhi Assistant -> TAIJIPAI_S3_CONFIG -> Enabel use 2 slot
+Tbot Assistant -> TAIJIPAI_S3_CONFIG -> Enabel use 2 slot
 ```
 
 

@@ -31,7 +31,7 @@ idf.py menuconfig
 **选择板子**
 
 ```bash
-Xiaozhi Assistant -> Board Type -> Waveshare ESP32-S3-LCD-0.85
+Tbot Assistant -> Board Type -> Waveshare ESP32-S3-LCD-0.85
 ```
 
 **修改 flash 大小：**

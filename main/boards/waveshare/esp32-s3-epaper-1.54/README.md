@@ -37,7 +37,7 @@ idf.py menuconfig
 **选择板子**
 
 ```bash
-Xiaozhi Assistant -> Board Type -> Waveshare ESP32-S3-ePaper-1.54_v2
+Tbot Assistant -> Board Type -> Waveshare ESP32-S3-ePaper-1.54_v2
 ```
 
 **编译**

@@ -31,7 +31,7 @@ idf.py menuconfig
 **选择板子**
 
 ```bash
-Xiaozhi Assistant -> Board Type -> Waveshare ESP32-S3-Touch-AMOLED-1.43C
+Tbot Assistant -> Board Type -> Waveshare ESP32-S3-Touch-AMOLED-1.43C
 ```
 
 **编译**

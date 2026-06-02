@@ -43,7 +43,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> 元控·青春
+Tbot Assistant -> Board Type -> 元控·青春
 ```
 
 **修改 psram 配置：**

@@ -1,6 +1,6 @@
 # Custom Board Guide
 
-This guide describes how to add a new board to the XiaoZhi AI voice assistant project. XiaoZhi AI supports 70+ ESP32-series boards; each one lives in its own directory under `main/boards/`.
+This guide describes how to add a new board to the Tbot AI voice assistant project. Tbot AI supports 70+ ESP32-series boards; each one lives in its own directory under `main/boards/`.
 
 ## Important
 
@@ -348,7 +348,7 @@ Emoji collections:
    ```bash
    idf.py menuconfig
    ```
-   Navigate to `Xiaozhi Assistant -> Board Type` and choose your board.
+   Navigate to `Tbot Assistant -> Board Type` and choose your board.
 
 4. Build and flash:
    ```bash

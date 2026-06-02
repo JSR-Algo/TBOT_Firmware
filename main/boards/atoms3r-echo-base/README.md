@@ -15,7 +15,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> AtomS3R + Echo Base
+Tbot Assistant -> Board Type -> AtomS3R + Echo Base
 ```
 
 **修改 flash 大小：**

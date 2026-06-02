@@ -1,6 +1,6 @@
 # BluFi 配网（集成 esp-wifi-connect）
 
-本文档说明如何在小智固件中启用和使用 BluFi（BLE Wi‑Fi 配网），并结合项目内置的 `esp-wifi-connect` 组件完成 Wi‑Fi 连接与存储。官方
+本文档说明如何在Tbot固件中启用和使用 BluFi（BLE Wi‑Fi 配网），并结合项目内置的 `esp-wifi-connect` 组件完成 Wi‑Fi 连接与存储。官方
 BluFi
 协议说明请参考 [Espressif 文档](https://docs.espressif.com/projects/esp-idf/zh_CN/stable/esp32/api-guides/ble/blufi.html)。
 
@@ -34,4 +34,4 @@ BluFi
 - 若多次测试，建议清除或覆盖存储的 SSID（`wifi` 命名空间），避免旧配置干扰。
 - 如果使用自定义 BluFi 客户端，需遵循官方协议帧格式，参考上文官方文档链接。
 - 官方文档中已提供EspBlufi APP下载地址
-- 由于IDF5.5.2的blufi接口发生变化,5.5.2版本编译后蓝牙名称为"Xiaozhi-Blufi",5.5.1版本中蓝牙名称为"BLUFI_DEVICE"
+- 由于IDF5.5.2的blufi接口发生变化,TBOT 固件在 5.5.2 版本编译后蓝牙名称为"TBot-Blufi",5.5.1版本中蓝牙名称为"BLUFI_DEVICE"

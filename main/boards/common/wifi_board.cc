@@ -20,6 +20,9 @@
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "blufi.h"
 #endif
+#ifdef CONFIG_TBOT_PROVISIONING_REPORT_ENABLED
+#include "provisioning_status_reporter.h"
+#endif
 
 static const char *TAG = "WifiBoard";
 
@@ -54,7 +57,7 @@ void WifiBoard::StartNetwork() {
 
     // Initialize WiFi manager
     WifiManagerConfig config;
-    config.ssid_prefix = "Xiaozhi";
+    config.ssid_prefix = "TBot";
     config.language = Lang::CODE;
     wifi_manager.Initialize(config);
 
@@ -108,9 +111,31 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
         case NetworkEvent::Connected:
             // Stop timeout timer
             esp_timer_stop(connect_timer_);
-#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-            // make sure blufi resources has been released
-            Blufi::GetInstance().deinit();
+#if defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING) && defined(CONFIG_TBOT_PROVISIONING_REPORT_ENABLED)
+            {
+                auto& blufi = Blufi::GetInstance();
+                const std::string& token = blufi.GetBootstrapToken();
+                const std::string& code  = blufi.GetProvisioningCode();
+                // Report() now lives in blufi.cpp success branch (single owner).
+                // Do not call Report() here to avoid duplicate POST + prior-reconnect race.
+                ESP_LOGI(TAG,
+                         "NetworkEvent::Connected token_empty=%d code_empty=%d — report owned by BluFi success branch",
+                         (int)token.empty(), (int)code.empty());
+                // Cancel the BLE hard-timeout before releasing BLE resources so
+                // the timer cannot post a redundant teardown after deinit().
+                blufi.CancelBleSetupTimeout();
+                // Release BLE resources
+                blufi.deinit();
+            }
+#elif defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
+            {
+                auto& blufi = Blufi::GetInstance();
+                // Cancel BLE hard-timeout before deinit to prevent a stale
+                // timer callback from posting a redundant teardown.
+                blufi.CancelBleSetupTimeout();
+                // make sure blufi resources has been released
+                blufi.deinit();
+            }
 #endif
             in_config_mode_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
@@ -178,6 +203,11 @@ void WifiBoard::StartWifiConfigMode() {
     auto &blufi = Blufi::GetInstance();
     // initialize esp-blufi protocol
     blufi.init();
+    // Arm the hard-timeout safety gate immediately after init so that BLE
+    // advertising cannot run forever if provisioning never completes.
+    // Teardown is posted to the Application task inside the timer callback
+    // (never in callback context) to avoid WDT/race conditions (§9).
+    blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
 #endif
 #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
     // Start acoustic provisioning task

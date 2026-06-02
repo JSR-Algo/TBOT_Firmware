@@ -1,4 +1,4 @@
-menu "Xiaozhi Assistant"
+menu "Tbot Assistant"
 
 config OTA_URL
     string "Default OTA URL"
@@ -353,6 +353,9 @@ choice BOARD_TYPE
     config BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_5
         bool "Waveshare ESP32-S3-Touch-LCD-3.5"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_LCDWIKI_ES3C35P
+        bool "LCDWiki ES3C35P ESP32-S3 3.5 LCD"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_WAVESHARE_ESP32_S3_ePaper_1_54_v1
         bool "Waveshare ESP32-S3-ePaper-1.54_v1"
         depends on IDF_TARGET_ESP32S3
@@ -426,10 +429,10 @@ choice BOARD_TYPE
         bool "LILYGO T-Display-P4"
         depends on IDF_TARGET_ESP32P4
     config BOARD_TYPE_MOVECALL_MOJI_ESP32S3
-        bool "Movecall Moji 小智AI衍生版"
+        bool "Movecall Moji TbotAI衍生版"
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_MOVECALL_MOJI2_ESP32C5
-        bool "Movecall Moji2.0 小智AI衍生版"
+        bool "Movecall Moji2.0 TbotAI衍生版"
         depends on IDF_TARGET_ESP32C5
     config BOARD_TYPE_MOVECALL_CUICAN_ESP32S3
         bool "Movecall CuiCan 璀璨·AI吊坠"
@@ -546,7 +549,7 @@ choice BOARD_TYPE
         bool "Surfer-C3-1.14TFT"
         depends on IDF_TARGET_ESP32C3
     config BOARD_TYPE_YUNLIAO_S3
-        bool "小智云聊-S3"
+        bool "Tbot云聊-S3"
         depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_WIRELESS_TAG_WTP4C5MP07S
         bool "Wireless-Tag WTP4C5MP07S"
@@ -709,7 +712,7 @@ choice DISPLAY_STYLE
     prompt "Select display style"
     default USE_DEFAULT_MESSAGE_STYLE
     help
-        Select display style for Xiaozhi device
+        Select display style for Tbot device
 
     config USE_DEFAULT_MESSAGE_STYLE
         bool "Enable default message style"
@@ -861,6 +864,18 @@ menu "WiFi Configuration Method"
         select BT_BLE_42_FEATURES_SUPPORTED
         select BT_BLE_BLUFI_ENABLE
         select MBEDTLS_DHM_C
+
+config BLE_SETUP_TIMEOUT_SEC
+    int "BLE setup hard-timeout (seconds)"
+    depends on USE_ESP_BLUFI_WIFI_PROVISIONING
+    default 120
+    range 60 600
+    help
+        Maximum wall-clock time (seconds) that BLE advertising is allowed to
+        run while waiting for Wi-Fi provisioning.  After this timeout the BLE
+        stack is torn down via the Application task (NOT the timer callback)
+        to avoid watchdog/race conditions.  The device will no longer advertise
+        after the timeout fires.  Minimum 60 s, maximum 600 s (10 min).
 endmenu
 
 config AUDIO_DEBUG_UDP_SERVER
@@ -973,5 +988,23 @@ menu "TAIJIPAI_S3_CONFIG"
     help
         启动双声道
 endmenu
+
+config TBOT_PROVISIONING_REPORT_ENABLED
+    bool "Enable provisioning status reporting"
+    default y
+    depends on USE_ESP_BLUFI_WIFI_PROVISIONING
+    help
+        When enabled, the firmware POSTs provisioning status to the backend
+        after Wi-Fi join (device_authenticated) or on Wi-Fi connect failure.
+        Uses bootstrap token received via BluFi custom-data TLV.
+        Token is kept in RAM only and zeroized after successful report.
+
+config PROVISIONING_STATUS_URL
+    string "Provisioning status endpoint URL"
+    default "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
+    depends on TBOT_PROVISIONING_REPORT_ENABLED
+    help
+        Backend endpoint to POST provisioning status.
+        Must accept Authorization: Bearer <bootstrap_token>.
 
 endmenu

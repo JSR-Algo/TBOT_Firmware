@@ -21,7 +21,7 @@ idf.py menuconfig
 Select the board:
 
 ```
-Xiaozhi Assistant -> Board Type -> AiPi-Lite
+Tbot Assistant -> Board Type -> AiPi-Lite
 ```
 
 ## Build and Flash
@@ -30,7 +30,7 @@ Xiaozhi Assistant -> Board Type -> AiPi-Lite
 idf.py -DBOARD_NAME=aipi-lite build flash
 ```
 
-Note: If your device was previously shipped with the AiPi-Lite firmware (not the Xiaozhi version), please be very careful with the flash partition addresses to avoid accidentally erasing the device information (such as EUI) of the AiPi-Lite. Otherwise, even if you restore the AiPi-Lite firmware, the device may not be able to connect to the Xorigin server correctly! Therefore, before flashing the firmware, be sure to record the necessary device information to ensure you have a way to recover it!
+Note: If your device was previously shipped with the AiPi-Lite firmware (not the Tbot version), please be very careful with the flash partition addresses to avoid accidentally erasing the device information (such as EUI) of the AiPi-Lite. Otherwise, even if you restore the AiPi-Lite firmware, the device may not be able to connect to the Xorigin server correctly! Therefore, before flashing the firmware, be sure to record the necessary device information to ensure you have a way to recover it!
 
 You can use the following command to back up the factory information:
 

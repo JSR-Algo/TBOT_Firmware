@@ -1,6 +1,6 @@
-# ogg_covertor 小智AI OGG 音效批量转换器
+# ogg_covertor TbotAI OGG 音效批量转换器
 
-本脚本为OGG批量转换工具，支持将输入的音频文件转换为小智可使用的OGG格式
+本脚本为OGG批量转换工具，支持将输入的音频文件转换为Tbot可使用的OGG格式
 
 基于Python第三方库 `ffmpeg-python` 实现，**需要** `ffmpeg` 环境  
 

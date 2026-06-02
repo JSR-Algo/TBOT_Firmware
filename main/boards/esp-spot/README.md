@@ -31,7 +31,7 @@ idf.py menuconfig
 
 分别配置如下选项：
 
-- `Xiaozhi Assistant` → `Board Type` → 选择 `ESP-Spot-S3` / `ESP-Spot-C5`
+- `Tbot Assistant` → `Board Type` → 选择 `ESP-Spot-S3` / `ESP-Spot-C5`
 
 按 `S` 保存，按 `Q` 退出。
 

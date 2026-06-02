@@ -15,7 +15,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> 面包板 ESP32 DevKit
+Tbot Assistant -> Board Type -> 面包板 ESP32 DevKit
 ```
 
 **编译：**

@@ -7,7 +7,7 @@
 
 Configuration in `menuconfig`.
 
-Selection Board Type `Xiaozhi Assistant --> Board Type`
+Selection Board Type `Tbot Assistant --> Board Type`
 - Waveshare ESP32-P4-WIFI6-Touch-LCD-4B
 - Waveshare ESP32-P4-WIFI6-Touch-LCD-4.3
 - Waveshare ESP32-P4-WIFI6-Touch-LCD-7B

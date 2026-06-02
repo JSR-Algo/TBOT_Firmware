@@ -20,7 +20,7 @@ idf.py menuconfig
 **选择板子：**
 
 ```
-Xiaozhi Assistant -> Board Type -> ESP32 CGC 144
+Tbot Assistant -> Board Type -> ESP32 CGC 144
 ```
 
 **编译：**

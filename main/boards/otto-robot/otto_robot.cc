@@ -215,6 +215,10 @@ private:
             }
             app.ToggleChatState();
         });
+        boot_button_.OnLongPress([this]() {
+            ESP_LOGI(TAG, "Boot button long-press -> EnterWifiConfigMode");
+            EnterWifiConfigMode();
+        });
     }
 
     void InitializeOttoController() { ::InitializeOttoController(hw_config_); }

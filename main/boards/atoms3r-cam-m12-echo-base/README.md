@@ -30,8 +30,8 @@ idf.py menuconfig
 
 分别配置如下选项：
 
-- `Xiaozhi Assistant` → `Board Type` → 选择 `AtomS3R CAM/M12 + Echo Base`
-- `Xiaozhi Assistant` → `IoT Protocol` → 选择 `MCP协议` 可开启摄像头识别功能
+- `Tbot Assistant` → `Board Type` → 选择 `AtomS3R CAM/M12 + Echo Base`
+- `Tbot Assistant` → `IoT Protocol` → 选择 `MCP协议` 可开启摄像头识别功能
 - `Partition Table` → `Custom partition CSV file` → 删除原有内容，输入 `partitions/v2/8m.csv`
 - `Serial flasher config` → `Flash size` → 选择 `8 MB`
 

@@ -191,7 +191,7 @@ WebSocket text frames carry JSON. The most common `"type"` values and their sema
        "session_id": "xxx",
        "type": "listen",
        "state": "detect",
-       "text": "Hi XiaoZhi"
+       "text": "Hi Tbot"
      }
      ```
 

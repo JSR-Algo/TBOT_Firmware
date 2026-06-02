@@ -1,10 +1,11 @@
 # Build & dependency outputs
-build/
+/build/
+/build-*/
 dist/
 tmp/
-components/
-managed_components/
-dependencies.lock
+/components/
+/managed_components/
+/dependencies.lock
 releases/
 dl_temp/
 
@@ -16,8 +17,9 @@ mmap_generate_*.h
 
 # sdkconfig (project uses sdkconfig.defaults.* instead)
 sdkconfig
-sdkconfig.bak
-sdkconfig.old
+sdkconfig.*
+!sdkconfig.defaults
+!sdkconfig.defaults.*
 
 # Editor / tooling
 .vscode/

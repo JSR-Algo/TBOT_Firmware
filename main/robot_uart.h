@@ -7,9 +7,15 @@ class RobotUart {
 public:
     bool Initialize();
     bool SendLeftArmRaise();
-    bool SendServoSweep(const std::string& part, int from, int to, int step, int delay_ms);
+    bool SendRightArmRaise();
+    bool SendLeftArmLower();
+    bool SendRightArmLower();
+    bool SendBothArmsRaise();
+    bool SendBothArmsLower();
+    bool SendServoSweep(const std::string& part, const std::string& action, int from, int to, int step, int delay_ms);
 
 private:
+    bool SendArmAction(const std::string& part, const std::string& action);
     bool WaitForAck(std::string* ack, int timeout_ms);
     bool initialized_ = false;
     bool primary_ready_ = false;

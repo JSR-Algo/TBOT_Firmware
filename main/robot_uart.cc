@@ -93,16 +93,51 @@ bool RobotUart::Initialize() {
 }
 
 bool RobotUart::SendLeftArmRaise() {
-    return SendServoSweep("left_arm", 0, 60, 2, 20);
+    return SendArmAction("left_arm", "raise");
 }
 
-bool RobotUart::SendServoSweep(const std::string& part, int from, int to, int step, int delay_ms) {
+bool RobotUart::SendRightArmRaise() {
+    return SendArmAction("right_arm", "raise");
+}
+
+bool RobotUart::SendLeftArmLower() {
+    return SendArmAction("left_arm", "lower");
+}
+
+bool RobotUart::SendRightArmLower() {
+    return SendArmAction("right_arm", "lower");
+}
+
+bool RobotUart::SendBothArmsRaise() {
+    bool left_ok = SendLeftArmRaise();
+    bool right_ok = SendRightArmRaise();
+    return left_ok && right_ok;
+}
+
+bool RobotUart::SendBothArmsLower() {
+    bool left_ok = SendLeftArmLower();
+    bool right_ok = SendRightArmLower();
+    return left_ok && right_ok;
+}
+
+bool RobotUart::SendArmAction(const std::string& part, const std::string& action) {
+    if (action == "raise") {
+        return SendServoSweep(part, action, 0, 60, 2, 20);
+    }
+    if (action == "lower") {
+        return SendServoSweep(part, action, 60, 0, 2, 20);
+    }
+    ESP_LOGW(TAG, "Unsupported arm action: %s", action.c_str());
+    return false;
+}
+
+bool RobotUart::SendServoSweep(const std::string& part, const std::string& action, int from, int to, int step, int delay_ms) {
     if (!Initialize()) {
         return false;
     }
 
     std::string payload = "{\"cmd\":\"servo\",\"part\":\"" + part +
-        "\",\"action\":\"raise\",\"from\":" + std::to_string(from) +
+        "\",\"action\":\"" + action + "\",\"from\":" + std::to_string(from) +
         ",\"to\":" + std::to_string(to) +
         ",\"step\":" + std::to_string(step) +
         ",\"delay_ms\":" + std::to_string(delay_ms) + "}\n";
