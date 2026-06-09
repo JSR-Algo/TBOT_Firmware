@@ -76,16 +76,23 @@ namespace audio_wifi_config
             if (data_buffer.ProcessProbabilityData(probabilities, 0.5f)) {
                 // If complete data was received, extract WiFi credentials
                 if (data_buffer.decoded_text.has_value()) {
-                    ESP_LOGI(kLogTag, "Received text data: %s", data_buffer.decoded_text->c_str());
-                    display->SetChatMessage("system", data_buffer.decoded_text->c_str());
-                    
+                    // SECURITY (TBOT policy: no raw secret values logged or displayed).
+                    // decoded_text is "SSID\npassword"; never emit it verbatim. Log only a
+                    // byte count here, then log/display non-secret fields after the split.
+                    ESP_LOGI(kLogTag, "Received credential payload (%u bytes)",
+                             (unsigned)data_buffer.decoded_text->length());
+
                     // Split SSID and password by newline character
                     std::string wifi_ssid, wifi_password;
                     size_t newline_position = data_buffer.decoded_text->find('\n');
                     if (newline_position != std::string::npos) {
                         wifi_ssid = data_buffer.decoded_text->substr(0, newline_position);
                         wifi_password = data_buffer.decoded_text->substr(newline_position + 1);
-                        ESP_LOGI(kLogTag, "WiFi SSID: %s, Password: %s", wifi_ssid.c_str(), wifi_password.c_str());
+                        // SSID is not a secret; redact the password to its length only.
+                        ESP_LOGI(kLogTag, "WiFi SSID: %s, Password: [redacted len=%u]",
+                                 wifi_ssid.c_str(), (unsigned)wifi_password.length());
+                        // Show only the non-secret SSID on the LCD, never the password.
+                        display->SetChatMessage("system", wifi_ssid.c_str());
                     } else {
                         ESP_LOGE(kLogTag, "Invalid data format, no newline character found");
                         continue;
