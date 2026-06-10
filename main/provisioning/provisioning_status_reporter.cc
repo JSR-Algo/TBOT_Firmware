@@ -7,6 +7,7 @@
 
 #include "board.h"
 #include "system_info.h"
+#include "settings.h"
 
 static const char* TAG = "ProvisioningReporter";
 
@@ -47,7 +48,16 @@ bool ProvisioningStatusReporter::Report(Status status,
     cJSON_free(raw);
     cJSON_Delete(root);
 
-    const std::string url = CONFIG_PROVISIONING_STATUS_URL;
+    // NVS-first override, mirroring Ota::GetCheckVersionUrl(): an operator can
+    // seed a stable provisioning endpoint into NVS (wifi namespace, key
+    // "provisioning_url") so a device survives a backend/tunnel host change
+    // without a reflash. When NVS is empty we fall back to the compile-time
+    // default, preserving existing behavior.
+    Settings provisioning_settings("wifi", false);
+    std::string url = provisioning_settings.GetString("provisioning_url");
+    if (url.empty()) {
+        url = CONFIG_PROVISIONING_STATUS_URL;
+    }
     const std::string user_agent = SystemInfo::GetUserAgent();
     const std::string mac = SystemInfo::GetMacAddress();
 
