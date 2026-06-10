@@ -236,10 +236,16 @@ bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
 }
 
 std::string BuildTbotDeviceBootstrapUrl() {
-    // Derive {origin}/v1/device/bootstrap from the compiled provisioning-status
-    // URL {origin}/v1/device/provisioning/status (same backend surface). Pure
-    // string surgery so we add no new Kconfig and never diverge from the host.
-    const std::string status_url = CONFIG_PROVISIONING_STATUS_URL;
+    // Derive {origin}/v1/device/bootstrap from the provisioning-status URL
+    // {origin}/v1/device/provisioning/status (same backend surface). Pure string
+    // surgery so we add no new Kconfig and never diverge from the host. Resolve
+    // NVS-first (wifi/provisioning_url), mirroring provisioning_status_reporter, so
+    // a backend/tunnel host change carries through here too without a reflash.
+    Settings provisioning_settings("wifi", false);
+    std::string status_url = provisioning_settings.GetString("provisioning_url");
+    if (status_url.empty()) {
+        status_url = CONFIG_PROVISIONING_STATUS_URL;
+    }
     static const char* kSuffix = "provisioning/status";
     const std::size_t pos = status_url.rfind(kSuffix);
     if (pos == std::string::npos) {
