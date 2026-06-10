@@ -171,6 +171,10 @@ esp_err_t Ota::CheckVersion() {
         cJSON *item = NULL;
         cJSON_ArrayForEach(item, websocket) {
             if (cJSON_IsString(item)) {
+                if (std::strcmp(item->string, "token") == 0) {
+                    ESP_LOGI(TAG, "Received websocket token: empty=%d",
+                             item->valuestring[0] == '\0');
+                }
                 if (settings.GetString(item->string) != item->valuestring) {
                     settings.SetString(item->string, item->valuestring);
                 }
@@ -183,6 +187,14 @@ esp_err_t Ota::CheckVersion() {
         has_websocket_config_ = true;
     } else {
         ESP_LOGI(TAG, "No websocket section found!");
+    }
+
+    cJSON *api_url = cJSON_GetObjectItem(root, "api_url");
+    if (cJSON_IsString(api_url) && api_url->valuestring[0] != '\0') {
+        Settings settings("backend", true);
+        if (settings.GetString("api_url") != api_url->valuestring) {
+            settings.SetString("api_url", api_url->valuestring);
+        }
     }
 
     has_server_time_ = false;
@@ -292,6 +304,14 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     size_t content_length = http->GetBodyLength();
     if (content_length == 0) {
         ESP_LOGE(TAG, "Failed to get content length");
+        http->Close();
+        return false;
+    }
+
+    if (content_length > update_partition->size) {
+        ESP_LOGE(TAG, "Firmware image too large: content_length=%zu partition_size=%lu partition=%s",
+                 content_length, static_cast<unsigned long>(update_partition->size), update_partition->label);
+        http->Close();
         return false;
     }
 
@@ -333,10 +353,14 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
                 esp_app_desc_t new_app_info;
                 memcpy(&new_app_info, image_header.data() + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t), sizeof(esp_app_desc_t));
 
-                if (esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle)) {
+                ESP_LOGI(TAG, "New firmware image version: %s", new_app_info.version);
+
+                esp_err_t begin_err = esp_ota_begin(update_partition, OTA_WITH_SEQUENTIAL_WRITES, &update_handle);
+                if (begin_err != ESP_OK) {
                     esp_ota_abort(update_handle);
-                    ESP_LOGE(TAG, "Failed to begin OTA");
+                    ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(begin_err));
                     heap_caps_free(buffer);
+                    http->Close();
                     return false;
                 }
 
@@ -363,6 +387,20 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
             break;
         }
     }
+
+    if (total_read != content_length) {
+        ESP_LOGE(TAG, "Firmware download size mismatch: total_read=%zu content_length=%zu",
+                 total_read, content_length);
+        if (update_handle != 0) {
+            esp_ota_abort(update_handle);
+        }
+        http->Close();
+        heap_caps_free(buffer);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Firmware download complete: total_read=%zu content_length=%zu",
+             total_read, content_length);
     http->Close();
     heap_caps_free(buffer);
 

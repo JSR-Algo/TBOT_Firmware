@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TeeBot RIG STATE REFERENCE — NOT imported into the app.
+  This is the visual spec the Rive author rebuilds: every EYE state and every
+  MOUTH viseme the state machine needs. Each tile shows the target shape.
+  Geometry is in the same 400x400 face space as teebot-face.svg so values map 1:1.
+
+  EYE STATES (the EyeLeft/EyeRight group swaps to these):
+    open      r44 ring, core r30      (idle / talk / listen)
+    blink     squashed to ry6 bar     (timed blink, ~120ms)
+    half      ry28 ring               (thinking / sleepy-ish)
+    sparkle   r46 ring + 4-pt star    (celebrate)
+    wide      r48 ring, core r28      (surprise / fly-in pop)
+
+  MOUTH VISEMES (Mouth group swaps shape by the `viseme` number input 0..13):
+    0 SIL  gentle smile      7 SS  small flat
+    1 PP   thin closed line  8 RR  small oval
+    2 FF   small flat        9 AA  wide open oval
+    3 TH   small oval        10 E  mid ellipse (wide)
+    4 DD   small open        11 I  wide thin smile
+    5 KK   small open        12 O  round O
+    6 CH   round small       13 U  small round (pucker)
+  Plus expression mouths used by the emotion enum:
+    smileBig (celebrate/happy), neutral (listen)
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" font-family="-apple-system, sans-serif">
+  <defs>
+    <linearGradient id="c" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8BF4FF"/><stop offset="100%" stop-color="#2FC8F0"/>
+    </linearGradient>
+    <filter id="g" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1200" height="760" fill="#0a0f14"/>
+  <text x="24" y="36" fill="#9fe9ff" font-size="22" font-weight="700">TeeBot rig states — eyes (row 1) + mouth visemes (rows 2-3)</text>
+
+  <!-- ===== EYE STATES ===== -->
+  <g transform="translate(0,60)">
+    <!-- open -->
+    <g transform="translate(60,0)">
+      <circle cx="60" cy="60" r="34" fill="none" stroke="url(#c)" stroke-width="11" filter="url(#g)"/>
+      <circle cx="60" cy="60" r="23" fill="#05090E"/>
+      <circle cx="51" cy="50" r="5" fill="#fff" opacity=".9"/>
+      <text x="60" y="135" fill="#cfe" font-size="15" text-anchor="middle">open</text>
+    </g>
+    <!-- blink -->
+    <g transform="translate(220,0)">
+      <rect x="26" y="54" width="68" height="12" rx="6" fill="url(#c)" filter="url(#g)"/>
+      <text x="60" y="135" fill="#cfe" font-size="15" text-anchor="middle">blink</text>
+    </g>
+    <!-- half -->
+    <g transform="translate(380,0)">
+      <path d="M26 60 a34 22 0 0 1 68 0" fill="none" stroke="url(#c)" stroke-width="11" filter="url(#g)"/>
+      <circle cx="60" cy="60" r="20" fill="#05090E"/>
+      <text x="60" y="135" fill="#cfe" font-size="15" text-anchor="middle">half</text>
+    </g>
+    <!-- sparkle -->
+    <g transform="translate(540,0)">
+      <circle cx="60" cy="60" r="35" fill="none" stroke="url(#c)" stroke-width="11" filter="url(#g)"/>
+      <circle cx="60" cy="60" r="23" fill="#05090E"/>
+      <path d="M60 40 L64 56 L80 60 L64 64 L60 80 L56 64 L40 60 L56 56 Z" fill="#fff" opacity=".95"/>
+      <text x="60" y="135" fill="#cfe" font-size="15" text-anchor="middle">sparkle</text>
+    </g>
+    <!-- wide -->
+    <g transform="translate(700,0)">
+      <circle cx="60" cy="60" r="37" fill="none" stroke="url(#c)" stroke-width="11" filter="url(#g)"/>
+      <circle cx="60" cy="60" r="21" fill="#05090E"/>
+      <circle cx="50" cy="49" r="5" fill="#fff" opacity=".9"/>
+      <text x="60" y="135" fill="#cfe" font-size="15" text-anchor="middle">wide</text>
+    </g>
+  </g>
+
+  <!-- ===== MOUTH VISEMES 0..13 ===== -->
+  <g transform="translate(0,260)" stroke="url(#c)" stroke-width="7" stroke-linecap="round" fill="none">
+    <!-- row layout helper: 7 per row, 160px apart -->
+    <!-- 0 SIL gentle smile -->
+    <g transform="translate(60,0)"><path d="M30 30 Q60 52 90 30" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none" fill-opacity="1">0 SIL</text></g>
+    <!-- 1 PP closed line -->
+    <g transform="translate(220,0)"><path d="M34 34 L86 34" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">1 PP</text></g>
+    <!-- 2 FF small flat -->
+    <g transform="translate(380,0)"><path d="M40 34 L80 34" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">2 FF</text></g>
+    <!-- 3 TH small oval -->
+    <g transform="translate(540,0)"><ellipse cx="60" cy="34" rx="13" ry="9" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">3 TH</text></g>
+    <!-- 4 DD small open -->
+    <g transform="translate(700,0)"><ellipse cx="60" cy="34" rx="15" ry="11" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">4 DD</text></g>
+    <!-- 5 KK small open -->
+    <g transform="translate(860,0)"><ellipse cx="60" cy="34" rx="14" ry="12" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">5 KK</text></g>
+    <!-- 6 CH round small -->
+    <g transform="translate(1020,0)"><circle cx="60" cy="34" r="12" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">6 CH</text></g>
+  </g>
+
+  <g transform="translate(0,420)" stroke="url(#c)" stroke-width="7" stroke-linecap="round" fill="none">
+    <!-- 7 SS small flat -->
+    <g transform="translate(60,0)"><path d="M42 34 L78 34" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">7 SS</text></g>
+    <!-- 8 RR small oval -->
+    <g transform="translate(220,0)"><ellipse cx="60" cy="34" rx="13" ry="10" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">8 RR</text></g>
+    <!-- 9 AA wide open oval -->
+    <g transform="translate(380,0)"><ellipse cx="60" cy="36" rx="20" ry="18" filter="url(#g)"/><text x="60" y="98" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">9 AA</text></g>
+    <!-- 10 E mid ellipse wide -->
+    <g transform="translate(540,0)"><ellipse cx="60" cy="34" rx="22" ry="11" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">10 E</text></g>
+    <!-- 11 I wide thin smile -->
+    <g transform="translate(700,0)"><path d="M34 30 Q60 42 86 30" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">11 I</text></g>
+    <!-- 12 O round O -->
+    <g transform="translate(860,0)"><circle cx="60" cy="36" r="16" filter="url(#g)"/><text x="60" y="98" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">12 O</text></g>
+    <!-- 13 U small round pucker -->
+    <g transform="translate(1020,0)"><circle cx="60" cy="34" r="11" filter="url(#g)"/><text x="60" y="92" fill="#cfe" font-size="13" text-anchor="middle" stroke="none">13 U</text></g>
+  </g>
+
+  <!-- expression mouths -->
+  <g transform="translate(0,600)" stroke="url(#c)" stroke-width="8" stroke-linecap="round" fill="none">
+    <g transform="translate(60,0)"><path d="M28 28 Q60 60 92 28" filter="url(#g)"/><text x="60" y="92" fill="#ffd" font-size="13" text-anchor="middle" stroke="none">smileBig (happy/celebrate)</text></g>
+    <g transform="translate(380,0)"><path d="M38 34 L82 34" filter="url(#g)"/><text x="60" y="92" fill="#ffd" font-size="13" text-anchor="middle" stroke="none">neutral (listen)</text></g>
+  </g>
+</svg>

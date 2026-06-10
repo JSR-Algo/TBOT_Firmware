@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,8 @@ def test_main_firmware_declares_robot_uart_bridge():
     assert "uart_write_bytes" in source
     assert "WaitForAck" in source
     assert "No UART ACK from servant" in source
+    assert "Retrying robot command on alternate UART pins" in source
+    assert "SendPayloadOnProfile" in header
     assert '\\"cmd\\":\\"servo\\"' in source
     assert '\\"part\\":\\"' in source
     assert 'left_arm' in source
@@ -57,10 +60,37 @@ def test_application_triggers_left_arm_from_websocket_and_mcp():
     ]:
         assert f'"{action}"' in app_cc
         assert f"self.robot.{action}" in mcp_cc
-    assert '"happy"' in app_cc
-    assert '"sad"' in app_cc
     assert "SendBothArmsRaise" in app_cc
     assert "SendLeftArmRaise" in app_cc
+    assert "dơ tay trái" in mcp_cc
+    assert "dơ tay phải" in mcp_cc
+    assert "dơ cả hai tay" in mcp_cc
+
+def test_llm_emotion_messages_do_not_trigger_arm_gestures():
+    app_cc = read("main/application.cc")
+    match = re.search(
+        r"void Application::HandleEmotionGesture\(const char\* emotion\) \{(?P<body>.*?)\n\}",
+        app_cc,
+        re.S,
+    )
+    assert match, "HandleEmotionGesture function missing"
+
+    body = match.group("body")
+    assert "SendLeftArmRaise" not in body
+    assert "SendRightArmRaise" not in body
+    assert "SendBothArmsRaise" not in body
+    assert "SendLeftArmLower" not in body
+    assert "SendRightArmLower" not in body
+    assert "SendBothArmsLower" not in body
+
+
+def test_right_arm_uses_mirrored_servo_sweep_direction():
+    source = read("main/robot_uart.cc")
+
+    assert 'part == "right_arm" && action == "raise"' in source
+    assert 'return SendServoSweep(part, action, 60, 0, 2, 20);' in source
+    assert 'part == "right_arm" && action == "lower"' in source
+    assert 'return SendServoSweep(part, action, 0, 60, 2, 20);' in source
 
 
 def test_freenove_board_exposes_uart_pins_not_used_by_lcd_audio():
@@ -72,6 +102,16 @@ def test_freenove_board_exposes_uart_pins_not_used_by_lcd_audio():
     assert "ROBOT_UART_ALT_TX_PIN  GPIO_NUM_43" in config
     assert "ROBOT_UART_ALT_RX_PIN  GPIO_NUM_44" in config
     assert "ROBOT_UART_BAUD_RATE   115200" in config
+
+def test_lcdwiki_board_retries_swapped_uart_pins_for_servant_ack():
+    config = read("main/boards/lcdwiki-es3c35p/config.h")
+
+    assert "ROBOT_UART_NUM        UART_NUM_1" in config
+    assert "ROBOT_UART_TX_PIN     GPIO_NUM_44" in config
+    assert "ROBOT_UART_RX_PIN     GPIO_NUM_43" in config
+    assert "ROBOT_UART_ALT_NUM    UART_NUM_1" in config
+    assert "ROBOT_UART_ALT_TX_PIN GPIO_NUM_43" in config
+    assert "ROBOT_UART_ALT_RX_PIN GPIO_NUM_44" in config
 
 
 def test_servant_firmware_has_uart_servo_controller():

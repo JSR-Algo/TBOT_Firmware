@@ -10,6 +10,7 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -17,6 +18,8 @@
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "robot_uart.h"
+#include "claim_confirmation_reporter.h"
+#include "tbot_connect_mapper.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -126,6 +129,7 @@ public:
      * This includes closing audio channel, resetting protocol and ota objects
      */
     void ResetProtocol();
+    void SchedulePendingTbotClaimRefresh();
 
 private:
     Application();
@@ -143,6 +147,63 @@ private:
     AudioService audio_service_;
     RobotUart robot_uart_;
     std::unique_ptr<Ota> ota_;
+    // OQ1: main-task-only. pending_tbot_claim_ / claim_substate_ (and the
+    // pending_tbot_claim_*_ companions below) are read and written ONLY from the
+    // Application task — timer callbacks never touch them directly, they post
+    // work back via Schedule(). That serialization is the lock; do not access
+    // these from another task without re-routing through Schedule().
+    PendingTbotClaim pending_tbot_claim_;
+    std::string pending_tbot_claim_api_url_;
+    std::string pending_tbot_claim_token_;
+
+    // TBOT claim runtime FSM sub-state (drives the connect-state mapper).
+    // main-task-only (see OQ1 note above).
+    TbotClaimSubstate claim_substate_ = TbotClaimSubstate::None;
+
+    // Claim poll (C4): re-fetch /device/config every few seconds while the robot
+    // is unclaimed. The backend's 5-minute cap applies only after a pending
+    // claim exists; standby keeps polling so late phone scans still work. Posts
+    // work to the Application task via Schedule().
+    esp_timer_handle_t claim_poll_timer_ = nullptr;       // periodic, ~4s
+    int64_t claim_poll_started_ms_ = 0;                   // monotonic window start
+    bool claim_poll_active_ = false;
+    // L2: consecutive /device/config fetch failures. After a couple of misses the
+    // standby copy becomes "Server unavailable. Retrying..." instead of the
+    // misleading "Ready to connect"; reset to 0 on any successful fetch.
+    int claim_fetch_failures_ = 0;
+
+    // Local claim-expiry timer (C4): fires when the parsed expires_at elapses
+    // (or the poll window cap is reached) -> CLAIM_CONFIRM_TIMEOUT / "Setup
+    // expired". Separate one-shot so the deadline is enforced even between polls.
+    esp_timer_handle_t claim_expiry_timer_ = nullptr;     // one-shot
+
+    // Heartbeat (C5): periodic POST /v1/device/heartbeat while claimed/online,
+    // carrying backend DTO fields plus ble_state/ap_state/temp from board status.
+    esp_timer_handle_t heartbeat_timer_ = nullptr;        // periodic, ~20s
+    bool heartbeat_active_ = false;
+
+    // T1/SM-1: connect runs on a short-lived worker so the long blocking
+    // OpenAudioChannel() (TCP+TLS handshake + server hello, up to ~20s) never
+    // freezes the app task. connect_generation_ invalidates a stale result;
+    // connect_in_flight_ gates double-workers and defers ResetProtocol;
+    // reset_pending_ honors a reset that arrived mid-connect.
+    std::atomic<uint32_t> connect_generation_{0};
+    std::atomic<bool> connect_in_flight_{false};
+    std::atomic<bool> reset_pending_{false};
+    esp_timer_handle_t connect_watchdog_timer_ = nullptr;   // one-shot (SM-3)
+    // T2/WSS-4: bounded auto-reconnect with exponential backoff + jitter.
+    esp_timer_handle_t reconnect_timer_ = nullptr;          // one-shot
+    int reconnect_attempt_ = 0;
+    ListeningMode reconnect_mode_ = kListeningModeAutoStop;
+    // Sustained operation: true while we WANT an open audio channel. Set on
+    // OnAudioChannelOpened; cleared by CloseAudioChannelByIntent() for every
+    // user/system-initiated close. An UNEXPECTED drop leaves it true ->
+    // OnAudioChannelClosed auto-reconnects so long talks aren't cut off.
+    std::atomic<bool> online_intent_{false};
+
+    // Set on a backend/ws error, cleared on (re)connect. Lets the connect mapper
+    // tell ONLINE apart from OFFLINE_RETRY ("Server unavailable. Retrying...").
+    std::atomic<bool> backend_offline_{false};
 
     bool has_server_time_ = false;
     bool aborted_ = false;
@@ -150,6 +211,11 @@ private:
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
+    std::atomic<bool> tts_audio_accepting_{false};
+    std::atomic<uint32_t> speaking_generation_{0};
+    std::atomic<int64_t> last_speaking_activity_ms_{0};
+    std::atomic<uint32_t> interrupt_count_{0};   // OBS-2: barge-in / abort count
+    std::atomic<uint32_t> reconnect_count_{0};   // OBS-2: WS reconnect attempts
 
     // Monotonic ms timestamp of last VAD speech-start. Used to gate wake-word
     // transitions: if no human-voice VAD trigger occurred recently, drop the
@@ -166,7 +232,18 @@ private:
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
+    static void SpeakingTimeoutTask(void* arg);
+    void ArmSpeakingTimeout();
+    void HandleSpeakingTimeout(uint32_t generation);
     void ContinueOpenAudioChannel(ListeningMode mode);
+    static void OpenChannelTask(void* arg);            // T1: blocking connect, off app task
+    void DoResetProtocol();                            // T1: actual reset (worker-safe)
+    void ArmConnectWatchdog();                         // SM-3: bound CONNECTING
+    void CancelConnectWatchdog();
+    void HandleConnectWatchdog(uint32_t generation);
+    void ScheduleReconnect(ListeningMode mode);        // T2/WSS-4: backoff+jitter
+    void HandleReconnectTick();
+    void CloseAudioChannelByIntent();                  // intentional close -> clears online_intent_
     void ContinueWakeWordInvoke(const std::string& wake_word);
 
     // Activation task (runs in background)
@@ -176,7 +253,47 @@ private:
     void CheckAssetsVersion();
     void CheckNewVersion();
     void InitializeProtocol();
+    void RefreshPendingTbotClaim();
+    bool ConfirmPendingTbotClaim(bool trust_backend_expiry = false);
+
+    // --- TBOT claim runtime FSM helpers (C4) ---
+    // Render the screen copy for the current claim sub-state from the connect
+    // mapper (single source of truth = kTbotConnectStateSpecs).
+    void RenderClaimSubstate(TbotClaimSubstate substate);
+    // Begin / stop the bounded /device/config poll for the claim window.
+    void StartClaimPoll();
+    void StopClaimPoll();
+    void PollPendingTbotClaimTick();
+    // Arm / cancel the local expires_at deadline for a pending claim.
+    void ArmClaimExpiryTimer();
+    void CancelClaimExpiryTimer();
+    void HandleClaimConfirmTimeout();
+
+    // --- BLE discoverability for unclaimed standby / explicit setup ---
+    // The mobile app pairs BLE-first: it scans for the BluFi advertisement
+    // "TBOT-<MAC>" to find the robot, then drives claim or Wi-Fi setup. Keep
+    // advertising available for unclaimed standby. Claimed online uses the BOOT
+    // Wi-Fi-config path to reopen BluFi so BLE does not contend with AFE audio.
+    // No-ops in non-BluFi builds.
+    void EnsureBleAdvertisingForStandby();
+    void StopBleAdvertising();
+    // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
+    // Claimed robots suppress claim polling and keep normal online BLE off;
+    // explicit BOOT Wi-Fi-config mode reopens BluFi for owner reconnect/setup.
+    bool IsDeviceClaimed() const;
+
+    // --- Heartbeat (C5) ---
+    void StartHeartbeat();
+    void StopHeartbeat();
+    bool SendDeviceHeartbeat();
+
+    // Current BLE setup sub-state for the connect mapper (Off in AP/other builds).
+    TbotBleSubstate GetBleSubstate() const;
     bool HandleRobotActionMessage(const cJSON* root);
+    // US-006 Slice-01 (S10): additive lesson_* renderer entry — see lesson_handler.cc.
+    // Reached only via the additive `lesson_` branch in OnIncomingJson, above the
+    // unknown-type no-op. Never touches the 8 legacy types / voice / MCP arm tools.
+    void HandleLessonMessage(const cJSON* root);
     void HandleEmotionGesture(const char* emotion);
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);

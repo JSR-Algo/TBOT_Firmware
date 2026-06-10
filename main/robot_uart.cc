@@ -36,6 +36,10 @@
 
 #define TAG "RobotUart"
 
+static bool has_uart_profile(gpio_num_t tx_pin, gpio_num_t rx_pin) {
+    return tx_pin != GPIO_NUM_NC && rx_pin != GPIO_NUM_NC;
+}
+
 static bool configure_uart(uart_port_t port, gpio_num_t tx_pin, gpio_num_t rx_pin) {
     if (tx_pin == GPIO_NUM_NC || rx_pin == GPIO_NUM_NC) {
         return false;
@@ -82,7 +86,17 @@ bool RobotUart::Initialize() {
     }
 
     primary_ready_ = configure_uart(ROBOT_UART_NUM, ROBOT_UART_TX_PIN, ROBOT_UART_RX_PIN);
-    alt_ready_ = configure_uart(ROBOT_UART_ALT_NUM, ROBOT_UART_ALT_TX_PIN, ROBOT_UART_ALT_RX_PIN);
+    if (has_uart_profile(ROBOT_UART_ALT_TX_PIN, ROBOT_UART_ALT_RX_PIN)) {
+        if (ROBOT_UART_ALT_NUM == ROBOT_UART_NUM) {
+            alt_ready_ = primary_ready_;
+            if (alt_ready_) {
+                ESP_LOGI(TAG, "Alternate UART profile ready: port=%d tx=%d rx=%d baud=%d",
+                    ROBOT_UART_ALT_NUM, ROBOT_UART_ALT_TX_PIN, ROBOT_UART_ALT_RX_PIN, ROBOT_UART_BAUD_RATE);
+            }
+        } else {
+            alt_ready_ = configure_uart(ROBOT_UART_ALT_NUM, ROBOT_UART_ALT_TX_PIN, ROBOT_UART_ALT_RX_PIN);
+        }
+    }
     if (!primary_ready_ && !alt_ready_) {
         ESP_LOGE(TAG, "No robot UART port ready");
         return false;
@@ -121,6 +135,12 @@ bool RobotUart::SendBothArmsLower() {
 }
 
 bool RobotUart::SendArmAction(const std::string& part, const std::string& action) {
+    if (part == "right_arm" && action == "raise") {
+        return SendServoSweep(part, action, 60, 0, 2, 20);
+    }
+    if (part == "right_arm" && action == "lower") {
+        return SendServoSweep(part, action, 0, 60, 2, 20);
+    }
     if (action == "raise") {
         return SendServoSweep(part, action, 0, 60, 2, 20);
     }
@@ -142,44 +162,88 @@ bool RobotUart::SendServoSweep(const std::string& part, const std::string& actio
         ",\"step\":" + std::to_string(step) +
         ",\"delay_ms\":" + std::to_string(delay_ms) + "}\n";
 
-    bool wrote_any = false;
-    if (primary_ready_) {
-        uart_flush_input(ROBOT_UART_NUM);
-        int written = uart_write_bytes(ROBOT_UART_NUM, payload.data(), payload.size());
-        wrote_any = wrote_any || written == static_cast<int>(payload.size());
-        if (written != static_cast<int>(payload.size())) {
-            ESP_LOGW(TAG, "Primary UART write incomplete: %d/%d", written, static_cast<int>(payload.size()));
+    if (using_alt_profile_ && alt_ready_) {
+        if (SendPayloadOnProfile("alternate", ROBOT_UART_ALT_NUM, ROBOT_UART_ALT_TX_PIN,
+                ROBOT_UART_ALT_RX_PIN, alt_ready_, payload, 2500)) {
+            return true;
+        }
+        ESP_LOGW(TAG, "Retrying robot command on primary UART pins: port=%d tx=%d rx=%d",
+            ROBOT_UART_NUM, ROBOT_UART_TX_PIN, ROBOT_UART_RX_PIN);
+        if (SendPayloadOnProfile("primary", ROBOT_UART_NUM, ROBOT_UART_TX_PIN,
+                ROBOT_UART_RX_PIN, primary_ready_, payload, 2500)) {
+            using_alt_profile_ = false;
+            return true;
+        }
+    } else {
+        if (SendPayloadOnProfile("primary", ROBOT_UART_NUM, ROBOT_UART_TX_PIN,
+                ROBOT_UART_RX_PIN, primary_ready_, payload, 2500)) {
+            return true;
+        }
+        if (alt_ready_) {
+            ESP_LOGW(TAG, "Retrying robot command on alternate UART pins: port=%d tx=%d rx=%d",
+                ROBOT_UART_ALT_NUM, ROBOT_UART_ALT_TX_PIN, ROBOT_UART_ALT_RX_PIN);
+            if (SendPayloadOnProfile("alternate", ROBOT_UART_ALT_NUM, ROBOT_UART_ALT_TX_PIN,
+                    ROBOT_UART_ALT_RX_PIN, alt_ready_, payload, 2500)) {
+                using_alt_profile_ = true;
+                return true;
+            }
         }
     }
-    if (alt_ready_) {
-        uart_flush_input(ROBOT_UART_ALT_NUM);
-        int written = uart_write_bytes(ROBOT_UART_ALT_NUM, payload.data(), payload.size());
-        wrote_any = wrote_any || written == static_cast<int>(payload.size());
-        if (written != static_cast<int>(payload.size())) {
-            ESP_LOGW(TAG, "Alt UART write incomplete: %d/%d", written, static_cast<int>(payload.size()));
-        }
+
+    ESP_LOGW(TAG, "No UART ACK from servant after command");
+    return false;
+}
+
+bool RobotUart::SendPayloadOnProfile(const char* profile_name, uart_port_t port, gpio_num_t tx_pin, gpio_num_t rx_pin,
+        bool ready, const std::string& payload, int timeout_ms) {
+    if (!ready) {
+        ESP_LOGW(TAG, "%s UART profile is not ready", profile_name);
+        return false;
     }
-    if (!wrote_any) {
-        ESP_LOGW(TAG, "UART write failed on all robot ports");
+    if (!SelectUartProfile(profile_name, port, tx_pin, rx_pin)) {
         return false;
     }
 
-    ESP_LOGI(TAG, "Sent robot command: %s", payload.c_str());
+    uart_flush_input(port);
+    int written = uart_write_bytes(port, payload.data(), payload.size());
+    if (written != static_cast<int>(payload.size())) {
+        ESP_LOGW(TAG, "%s UART write incomplete: %d/%d", profile_name, written, static_cast<int>(payload.size()));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Sent robot command via %s UART: %s", profile_name, payload.c_str());
     std::string ack;
-    if (!WaitForAck(&ack, 2500)) {
-        ESP_LOGW(TAG, "No UART ACK from servant after command");
+    if (!WaitForAck(port, &ack, timeout_ms)) {
+        ESP_LOGW(TAG, "No UART ACK from servant on %s UART", profile_name);
         return false;
     }
 
-    ESP_LOGI(TAG, "Received servant ACK: %s", ack.c_str());
+    ESP_LOGI(TAG, "Received servant ACK on %s UART: %s", profile_name, ack.c_str());
     if (ack.find("\"ok\":true") == std::string::npos) {
-        ESP_LOGW(TAG, "Servant returned non-OK ACK: %s", ack.c_str());
+        ESP_LOGW(TAG, "Servant returned non-OK ACK on %s UART: %s", profile_name, ack.c_str());
         return false;
     }
     return true;
 }
 
-bool RobotUart::WaitForAck(std::string* ack, int timeout_ms) {
+bool RobotUart::SelectUartProfile(const char* profile_name, uart_port_t port, gpio_num_t tx_pin, gpio_num_t rx_pin) {
+    if (!has_uart_profile(tx_pin, rx_pin)) {
+        ESP_LOGW(TAG, "%s UART profile has invalid pins", profile_name);
+        return false;
+    }
+
+    esp_err_t err = uart_set_pin(port, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "uart_set_pin for %s profile port=%d tx=%d rx=%d failed: %s",
+            profile_name, port, tx_pin, rx_pin, esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Using %s UART profile: port=%d tx=%d rx=%d", profile_name, port, tx_pin, rx_pin);
+    return true;
+}
+
+bool RobotUart::WaitForAck(uart_port_t port, std::string* ack, int timeout_ms) {
     if (ack == nullptr) {
         return false;
     }
@@ -190,38 +254,18 @@ bool RobotUart::WaitForAck(std::string* ack, int timeout_ms) {
     uint8_t byte = 0;
 
     while ((xTaskGetTickCount() - start) < timeout_ticks) {
-        if (primary_ready_) {
-            int len = uart_read_bytes(ROBOT_UART_NUM, &byte, 1, pdMS_TO_TICKS(10));
-            if (len > 0) {
-                if (byte == '\n') {
-                    if (ack->find("\"ok\":true") != std::string::npos ||
-                        ack->find("\"ok\":false") != std::string::npos) {
-                        return true;
-                    }
-                    ack->clear();
-                    continue;
+        int len = uart_read_bytes(port, &byte, 1, pdMS_TO_TICKS(10));
+        if (len > 0) {
+            if (byte == '\n') {
+                if (ack->find("\"ok\":true") != std::string::npos ||
+                    ack->find("\"ok\":false") != std::string::npos) {
+                    return true;
                 }
-                if (byte != '\r' && ack->size() < 256) {
-                    ack->push_back(static_cast<char>(byte));
-                }
+                ack->clear();
                 continue;
             }
-        }
-
-        if (alt_ready_) {
-            int len = uart_read_bytes(ROBOT_UART_ALT_NUM, &byte, 1, pdMS_TO_TICKS(10));
-            if (len > 0) {
-                if (byte == '\n') {
-                    if (ack->find("\"ok\":true") != std::string::npos ||
-                        ack->find("\"ok\":false") != std::string::npos) {
-                        return true;
-                    }
-                    ack->clear();
-                    continue;
-                }
-                if (byte != '\r' && ack->size() < 256) {
-                    ack->push_back(static_cast<char>(byte));
-                }
+            if (byte != '\r' && ack->size() < 256) {
+                ack->push_back(static_cast<char>(byte));
             }
         }
     }

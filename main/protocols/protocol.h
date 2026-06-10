@@ -11,6 +11,7 @@ struct AudioStreamPacket {
     int sample_rate = 0;
     int frame_duration = 0;
     uint32_t timestamp = 0;
+    uint32_t generation = 0;   // response/turn generation, stamped at intake for barge-in gen-gating
     std::vector<uint8_t> payload;
 };
 
@@ -73,6 +74,10 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    // US-006 Slice-01: send a pre-built lesson_* control frame (a complete envelope)
+    // over the realtime channel. Additive PUBLIC sender — SendText is protected.
+    // Inherited unchanged by both the WebSocket and MQTT transports.
+    bool SendLessonFrame(const std::string& frame);
 
 protected:
     std::function<void(const cJSON* root)> on_incoming_json_;

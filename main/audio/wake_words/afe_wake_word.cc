@@ -17,6 +17,12 @@ AfeWakeWord::AfeWakeWord()
 }
 
 AfeWakeWord::~AfeWakeWord() {
+    Stop();
+    if (audio_detection_task_handle_ != nullptr) {
+        vTaskDelete(audio_detection_task_handle_);
+        audio_detection_task_handle_ = nullptr;
+    }
+
     if (afe_data_ != nullptr) {
         afe_iface_->destroy(afe_data_);
     }
@@ -76,9 +82,9 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     for (int i = 0; i < ref_num; i++) {
         input_format.push_back('R');
     }
-    afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_HIGH_PERF);
+    afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_LOW_COST);
     afe_config->aec_init = codec_->input_reference();
-    afe_config->aec_mode = AEC_MODE_SR_HIGH_PERF;
+    afe_config->aec_mode = AEC_MODE_SR_LOW_COST;
     afe_config->afe_perferred_core = 1;
     afe_config->afe_perferred_priority = 1;
     afe_config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
@@ -87,17 +93,21 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     afe_config->vad_min_speech_ms = 64;   // detect speech faster (default 80)
     afe_config->vad_min_noise_ms = 800;   // tolerate brief pauses (default 1000)
     afe_config->vad_delay_ms = 128;       // smaller pre-speech buffer
-    // Aggressive noise suppression for noisy environments
-    afe_config->ns_init = true;
+    // Keep wake-word inference light enough for feed/fetch to stay balanced on S3.
+    afe_config->ns_init = false;
     
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
 
+    // Wake-word fetch task. Do NOT pin to core 1 / raise above the AFE's own
+    // process priority — that starves the AFE pipeline (FEED ringbuffer full).
+    // Wake-word starvation is addressed at the source: stopping the blocking
+    // claim-config HTTP poll that was hogging the main task (see application.cc).
     xTaskCreate([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
         vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, 3, nullptr);
+    }, "audio_detection", 4096, this, tskIDLE_PRIORITY, &audio_detection_task_handle_);
 
     return true;
 }
@@ -156,6 +166,7 @@ void AfeWakeWord::AudioDetectionTask() {
 
         auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
         if (res == nullptr || res->ret_value == ESP_FAIL) {
+            vTaskDelay(pdMS_TO_TICKS(1));
             continue;;
         }
 
@@ -188,6 +199,7 @@ void AfeWakeWord::AudioDetectionTask() {
                 wake_word_detected_callback_(last_detected_wake_word_);
             }
         }
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 

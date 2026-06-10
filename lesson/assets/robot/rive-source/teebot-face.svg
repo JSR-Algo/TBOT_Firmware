@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TeeBot FACE — Rive import source (base / neutral state).
+
+  This is the ON-SCREEN FACE only (dark visor + glowing ring eyes + smile),
+  meant to be composited over the existing white PNG body in the app
+  (hybrid: PNG body + Rive face). viewBox is 400x400 to match the visor
+  region; in the app the Rive view is sized/anchored over the head.
+
+  LAYER NAMING IS THE CONTRACT. The Rive state machine + app inputs key off
+  these names — keep them when importing. See docs/RIVE-INTEGRATION.md.
+
+  Eyes are RINGS (hollow donut), not filled blobs — this matches the source
+  art bright-idle.png. Glow = a larger, blurred, lower-opacity ring behind
+  the crisp ring. In Rive you reproduce the glow with a blurred duplicate
+  shape or a radial gradient; the static blur filter here is just for preview.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <!-- Soft emissive bloom for the cyan strokes (preview only; recreate in Rive as a blurred layer). -->
+    <filter id="cyanGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="9" result="b" />
+      <feMerge>
+        <feMergeNode in="b" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    <!-- Visor screen gradient: near-black with a faint cool top sheen. -->
+    <linearGradient id="visor" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0C141C" />
+      <stop offset="55%" stop-color="#05090E" />
+      <stop offset="100%" stop-color="#020407" />
+    </linearGradient>
+    <!-- Eye ring stroke gradient (bright cyan, slightly brighter at top). -->
+    <linearGradient id="eyeCyan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8BF4FF" />
+      <stop offset="100%" stop-color="#2FC8F0" />
+    </linearGradient>
+  </defs>
+
+  <!-- LAYER: Visor  (the dark face screen) -->
+  <g id="Visor">
+    <rect x="40" y="60" width="320" height="240" rx="110" ry="110"
+          fill="url(#visor)" stroke="#0A1822" stroke-width="3" />
+    <!-- top glass sheen -->
+    <ellipse cx="200" cy="96" rx="120" ry="22" fill="#1B3340" opacity="0.35" />
+  </g>
+
+  <!-- LAYER: EyeLeft  (glow ring + crisp ring + hollow core + catchlight) -->
+  <g id="EyeLeft">
+    <!-- glow (blurred, recreate in Rive as a blurred duplicate / radial gradient) -->
+    <circle cx="142" cy="170" r="46" fill="none" stroke="#3FD2F5" stroke-width="20"
+            opacity="0.30" filter="url(#cyanGlow)" />
+    <!-- crisp ring -->
+    <circle cx="142" cy="170" r="44" fill="none" stroke="url(#eyeCyan)" stroke-width="13" />
+    <!-- hollow core (lets the dark visor show through — the donut hole) -->
+    <circle cx="142" cy="170" r="30" fill="#05090E" />
+    <!-- catchlight -->
+    <circle cx="130" cy="156" r="6.5" fill="#FFFFFF" opacity="0.92" />
+  </g>
+
+  <!-- LAYER: EyeRight -->
+  <g id="EyeRight">
+    <circle cx="258" cy="170" r="46" fill="none" stroke="#3FD2F5" stroke-width="20"
+            opacity="0.30" filter="url(#cyanGlow)" />
+    <circle cx="258" cy="170" r="44" fill="none" stroke="url(#eyeCyan)" stroke-width="13" />
+    <circle cx="258" cy="170" r="30" fill="#05090E" />
+    <circle cx="246" cy="156" r="6.5" fill="#FFFFFF" opacity="0.92" />
+  </g>
+
+  <!-- LAYER: Mouth_SIL  (neutral gentle smile — viseme 0 / resting) -->
+  <g id="Mouth_SIL">
+    <path d="M170 238 Q200 262 230 238" fill="none" stroke="url(#eyeCyan)"
+          stroke-width="9" stroke-linecap="round" filter="url(#cyanGlow)" />
+  </g>
+</svg>

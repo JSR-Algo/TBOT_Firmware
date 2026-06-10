@@ -73,10 +73,10 @@ void McpServer::AddCommonTools() {
             });
     };
     add_robot_arm_tool("self.robot.left_arm_raise",
-        "Raise the robot left arm by sending a UART command to the servant controller. Use when the user asks to raise the left hand or left arm.",
+        "Raise the robot left arm by sending a UART command to the servant controller. Use when the user asks to raise the left hand or left arm, including Vietnamese phrases like nâng tay trái, giơ tay trái, or dơ tay trái.",
         &Application::SendLeftArmRaise);
     add_robot_arm_tool("self.robot.right_arm_raise",
-        "Raise the robot right arm by sending a UART command to the servant controller. Use when the user asks to raise the right hand or right arm.",
+        "Raise the robot right arm by sending a UART command to the servant controller. Use when the user asks to raise the right hand or right arm, including Vietnamese phrases like nâng tay phải, giơ tay phải, or dơ tay phải.",
         &Application::SendRightArmRaise);
     add_robot_arm_tool("self.robot.left_arm_lower",
         "Lower the robot left arm by sending a UART command to the servant controller. Use when the user asks to lower the left hand or left arm.",
@@ -85,7 +85,7 @@ void McpServer::AddCommonTools() {
         "Lower the robot right arm by sending a UART command to the servant controller. Use when the user asks to lower the right hand or right arm.",
         &Application::SendRightArmLower);
     add_robot_arm_tool("self.robot.both_arms_raise",
-        "Raise both robot arms by sending UART commands to the servant controller. Use when the user asks to raise both hands or both arms.",
+        "Raise both robot arms by sending UART commands to the servant controller. Use when the user asks to raise both hands or both arms, including Vietnamese phrases like nâng hai tay, giơ cả hai tay, or dơ cả hai tay.",
         &Application::SendBothArmsRaise);
     add_robot_arm_tool("self.robot.both_arms_lower",
         "Lower both robot arms by sending UART commands to the servant controller. Use when the user asks to lower both hands or both arms.",

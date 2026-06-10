@@ -1,0 +1,177 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  TeeBot FACE IMPORT v2 - Rive-ready source.
+
+  Purpose:
+  - Import this SVG into the Rive editor as the premium companion face source.
+  - Keep the layer names. The runtime/state-machine contract refers to them.
+  - Default visible state is neutral/open. Alternate eye and mouth groups are
+    opacity 0 so they import but do not show until animated in Rive.
+
+  Runtime contract:
+  Artboard: TeeBot
+  State machine: TeeBot
+  Inputs: talking:boolean, listening:boolean, viseme:number 0..13,
+          celebrate:trigger, flyIn:trigger, emotion:number optional.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400" width="400" height="400">
+  <defs>
+    <radialGradient id="visorGlass" cx="50%" cy="28%" r="76%">
+      <stop offset="0%" stop-color="#152B36"/>
+      <stop offset="44%" stop-color="#071017"/>
+      <stop offset="100%" stop-color="#010306"/>
+    </radialGradient>
+    <linearGradient id="visorRim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1E4657"/>
+      <stop offset="48%" stop-color="#0A1822"/>
+      <stop offset="100%" stop-color="#020509"/>
+    </linearGradient>
+    <linearGradient id="eyeCyan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#A8FBFF"/>
+      <stop offset="42%" stop-color="#5CEBFF"/>
+      <stop offset="100%" stop-color="#18A9D7"/>
+    </linearGradient>
+    <radialGradient id="eyeBloom" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#8CF8FF" stop-opacity="0.55"/>
+      <stop offset="60%" stop-color="#35D7F5" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#35D7F5" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="softGlow" x="-70%" y="-70%" width="240%" height="240%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <filter id="mouthGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <g id="Eye_Open_Symbol">
+      <ellipse cx="0" cy="0" rx="43" ry="45" fill="url(#eyeBloom)"/>
+      <circle cx="0" cy="0" r="39" fill="none" stroke="url(#eyeCyan)" stroke-width="13" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="26" fill="#05090E"/>
+      <circle cx="-12" cy="-14" r="5.8" fill="#FFFFFF" opacity="0.95"/>
+      <circle cx="-3" cy="-20" r="2.3" fill="#FFFFFF" opacity="0.6"/>
+    </g>
+    <g id="Eye_Wide_Symbol">
+      <ellipse cx="0" cy="0" rx="49" ry="51" fill="url(#eyeBloom)"/>
+      <circle cx="0" cy="0" r="44" fill="none" stroke="url(#eyeCyan)" stroke-width="14" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="27" fill="#05090E"/>
+      <circle cx="-13" cy="-16" r="6.4" fill="#FFFFFF" opacity="0.95"/>
+    </g>
+    <g id="Eye_Half_Symbol">
+      <ellipse cx="0" cy="-1" rx="43" ry="26" fill="url(#eyeBloom)"/>
+      <path d="M -35 1 C -22 -25, 22 -25, 35 1" fill="none" stroke="url(#eyeCyan)" stroke-width="13" stroke-linecap="round" filter="url(#softGlow)"/>
+      <path d="M -28 1 C -18 -12, 18 -12, 28 1" fill="none" stroke="#05090E" stroke-width="16" stroke-linecap="round"/>
+      <circle cx="-11" cy="-12" r="4.8" fill="#FFFFFF" opacity="0.82"/>
+    </g>
+    <g id="Eye_Blink_Symbol">
+      <ellipse cx="0" cy="0" rx="44" ry="15" fill="url(#eyeBloom)"/>
+      <rect x="-36" y="-6" width="72" height="12" rx="6" fill="url(#eyeCyan)" filter="url(#softGlow)"/>
+    </g>
+    <g id="Eye_Sparkle_Symbol">
+      <ellipse cx="0" cy="0" rx="49" ry="51" fill="url(#eyeBloom)"/>
+      <circle cx="0" cy="0" r="41" fill="none" stroke="url(#eyeCyan)" stroke-width="13" filter="url(#softGlow)"/>
+      <circle cx="0" cy="0" r="25" fill="#05090E"/>
+      <path d="M 0 -22 L 5 -6 L 22 0 L 5 6 L 0 22 L -5 6 L -22 0 L -5 -6 Z" fill="#FFFFFF" opacity="0.96"/>
+      <circle cx="-15" cy="-17" r="4.2" fill="#FFFFFF" opacity="0.72"/>
+    </g>
+  </defs>
+
+  <g id="TeeBot_Face_Rig_v2">
+    <g id="Visor">
+      <rect x="38" y="58" width="324" height="244" rx="112" ry="112" fill="url(#visorGlass)" stroke="url(#visorRim)" stroke-width="5"/>
+      <path d="M 85 91 C 129 67, 271 67, 315 91" fill="none" stroke="#3E7386" stroke-width="10" stroke-linecap="round" opacity="0.24"/>
+      <path d="M 73 260 C 117 288, 283 288, 327 260" fill="none" stroke="#000000" stroke-width="10" stroke-linecap="round" opacity="0.32"/>
+    </g>
+
+    <g id="EyeLeft_Open" transform="translate(141 168)">
+      <use href="#Eye_Open_Symbol"/>
+    </g>
+    <g id="EyeRight_Open" transform="translate(259 168)">
+      <use href="#Eye_Open_Symbol"/>
+    </g>
+
+    <g id="EyeLeft_Blink" opacity="0" transform="translate(141 168)">
+      <use href="#Eye_Blink_Symbol"/>
+    </g>
+    <g id="EyeRight_Blink" opacity="0" transform="translate(259 168)">
+      <use href="#Eye_Blink_Symbol"/>
+    </g>
+
+    <g id="EyeLeft_Half" opacity="0" transform="translate(141 168)">
+      <use href="#Eye_Half_Symbol"/>
+    </g>
+    <g id="EyeRight_Half" opacity="0" transform="translate(259 168)">
+      <use href="#Eye_Half_Symbol"/>
+    </g>
+
+    <g id="EyeLeft_Wide" opacity="0" transform="translate(141 168)">
+      <use href="#Eye_Wide_Symbol"/>
+    </g>
+    <g id="EyeRight_Wide" opacity="0" transform="translate(259 168)">
+      <use href="#Eye_Wide_Symbol"/>
+    </g>
+
+    <g id="EyeLeft_Sparkle" opacity="0" transform="translate(141 168)">
+      <use href="#Eye_Sparkle_Symbol"/>
+    </g>
+    <g id="EyeRight_Sparkle" opacity="0" transform="translate(259 168)">
+      <use href="#Eye_Sparkle_Symbol"/>
+    </g>
+
+    <g id="Mouth_SIL">
+      <path d="M 169 239 C 184 259, 216 259, 231 239" fill="none" stroke="url(#eyeCyan)" stroke-width="9" stroke-linecap="round" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_PP" opacity="0">
+      <path d="M 173 244 L 227 244" fill="none" stroke="url(#eyeCyan)" stroke-width="9" stroke-linecap="round" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_FF" opacity="0">
+      <path d="M 178 243 L 222 243" fill="none" stroke="url(#eyeCyan)" stroke-width="7" stroke-linecap="round" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_TH" opacity="0">
+      <ellipse cx="200" cy="243" rx="14" ry="9" fill="none" stroke="url(#eyeCyan)" stroke-width="7" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_DD" opacity="0">
+      <ellipse cx="200" cy="244" rx="16" ry="11" fill="url(#eyeCyan)" opacity="0.96" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_KK" opacity="0">
+      <ellipse cx="200" cy="244" rx="15" ry="12" fill="url(#eyeCyan)" opacity="0.96" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_CH" opacity="0">
+      <circle cx="200" cy="244" r="13" fill="none" stroke="url(#eyeCyan)" stroke-width="7" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_SS" opacity="0">
+      <path d="M 181 243 L 219 243" fill="none" stroke="url(#eyeCyan)" stroke-width="6" stroke-linecap="round" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_RR" opacity="0">
+      <ellipse cx="200" cy="244" rx="14" ry="10" fill="none" stroke="url(#eyeCyan)" stroke-width="7" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_AA" opacity="0">
+      <ellipse cx="200" cy="246" rx="22" ry="20" fill="url(#eyeCyan)" opacity="0.96" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_E" opacity="0">
+      <ellipse cx="200" cy="244" rx="24" ry="11" fill="url(#eyeCyan)" opacity="0.96" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_I" opacity="0">
+      <path d="M 170 238 C 187 250, 213 250, 230 238" fill="none" stroke="url(#eyeCyan)" stroke-width="8" stroke-linecap="round" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_O" opacity="0">
+      <circle cx="200" cy="246" r="18" fill="none" stroke="url(#eyeCyan)" stroke-width="8" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_U" opacity="0">
+      <circle cx="200" cy="244" r="12" fill="none" stroke="url(#eyeCyan)" stroke-width="7" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_SmileBig" opacity="0">
+      <path d="M 165 235 C 183 269, 217 269, 235 235" fill="none" stroke="url(#eyeCyan)" stroke-width="10" stroke-linecap="round" filter="url(#mouthGlow)"/>
+    </g>
+    <g id="Mouth_Neutral" opacity="0">
+      <path d="M 177 244 L 223 244" fill="none" stroke="url(#eyeCyan)" stroke-width="7" stroke-linecap="round" filter="url(#mouthGlow)"/>
+    </g>
+  </g>
+</svg>

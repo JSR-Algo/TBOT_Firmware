@@ -5,12 +5,19 @@ config OTA_URL
     default "https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
     help
         The application will access this URL to check for new firmwares and server address.
+        This is the fresh-flash BOOTSTRAP SEED: with empty NVS the device must reach this
+        host to obtain websocket.url. NOTE: trycloudflare tunnels are EPHEMERAL and rotate —
+        replace with the stable *.skylabs.vn host when available, or seed ota_url into NVS at
+        provisioning. See docs/connection-flow-inspection-and-plan.md (C-OTA).
 
 config WEBSOCKET_URL
     string "Default WebSocket URL"
-    default "wss://perform-elvis-specifically-nominated.trycloudflare.com/tbot/v1/"
+    default "ws://your-ip-or-domain:port/tbot/v1/"
     help
-        The application will use this URL when no websocket URL has been saved from OTA.
+        Intentionally a PLACEHOLDER, not a real endpoint (endpoint rule: do not hardcode the
+        final WS URL). The device uses the websocket.url returned by OTA/bootstrap, persisted to
+        NVS; this compile-time value is only the fallback when NVS is empty. Keeping it a
+        placeholder forces OTA-driven discovery. See tests/test_tbot_connect_config.py.
 
 choice
     prompt "Flash Assets"
@@ -868,7 +875,7 @@ menu "WiFi Configuration Method"
 config BLE_SETUP_TIMEOUT_SEC
     int "BLE setup hard-timeout (seconds)"
     depends on USE_ESP_BLUFI_WIFI_PROVISIONING
-    default 120
+    default 300
     range 60 600
     help
         Maximum wall-clock time (seconds) that BLE advertising is allowed to
@@ -876,6 +883,20 @@ config BLE_SETUP_TIMEOUT_SEC
         stack is torn down via the Application task (NOT the timer callback)
         to avoid watchdog/race conditions.  The device will no longer advertise
         after the timeout fires.  Minimum 60 s, maximum 600 s (10 min).
+
+config AP_SETUP_TIMEOUT_SEC
+    int "AP setup hard-timeout (seconds)"
+    depends on USE_HOTSPOT_WIFI_PROVISIONING
+    default 600
+    range 60 900
+    help
+        Maximum wall-clock time (seconds) that the SoftAP setup hotspot is
+        allowed to run while waiting for Wi-Fi provisioning.  After this timeout
+        the AP is torn down (StopConfigAp) via the Application task (NOT the
+        timer callback) to avoid watchdog/race conditions.  The hotspot will no
+        longer be available after the timeout fires; re-entering setup requires
+        an explicit user action.  Default 600 s (10 min); minimum 60 s,
+        maximum 900 s (15 min).
 endmenu
 
 config AUDIO_DEBUG_UDP_SERVER

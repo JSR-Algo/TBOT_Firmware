@@ -1,0 +1,187 @@
+{
+  "contractId": "teebot-lesson-render-pack.v1",
+  "exportedAt": "2026-06-02T15:36:58+07:00",
+  "lessonId": "w01-d01-barn-say-it",
+  "lessonTitle": "This Is a Barn",
+  "sourceComponents": {
+    "player": "TBot-Child-Companion/app/(main)/lesson-player.tsx",
+    "stage": "TBot-Child-Companion/src/components/VideoLessonStage.tsx",
+    "robotOverlay": "TBot-Child-Companion/src/components/LessonRobotOverlay.tsx",
+    "character": "TBot-Child-Companion/src/components/TeeBotCharacter.tsx",
+    "subject": "TBot-Child-Companion/src/components/lesson/AnimatedSubject.tsx"
+  },
+  "layerOrder": [
+    "backgroundVideo",
+    "teachingObject",
+    "robotOverlay",
+    "lessonUi"
+  ],
+  "backgroundVideo": {
+    "slug": "barn-round-field",
+    "file": "assets/background/barn-round-field.mp4",
+    "poster": "assets/background/barn-round-field-poster.jpg",
+    "fit": "cover",
+    "loop": true,
+    "muted": true,
+    "width": 1280,
+    "height": 720,
+    "fps": 24,
+    "durationSeconds": 6.041667,
+    "codec": "h264",
+    "altCaption": "A clay barn floating in a bright sky",
+    "sha256": "b7a66d2cc21d31bab6a7699b2545f2dfd8c136f3db47336d1338da7bf134e798"
+  },
+  "teachingObject": {
+    "primaryWord": "barn",
+    "supportWords": ["farm", "hay"],
+    "asset": "assets/objects/barn.png",
+    "supportAssets": {
+      "farm": "assets/objects/farm.png",
+      "hay": "assets/objects/hay.png"
+    },
+    "rawCandidates": {
+      "barn": "assets/objects/barn-raw-candidate-0.png",
+      "farm": "assets/objects/farm-raw-candidate-0.png",
+      "hay": "assets/objects/hay-raw-candidate-0.png"
+    },
+    "objectPng": {
+      "width": 512,
+      "height": 512,
+      "format": "png-rgba",
+      "sha256": "eac30a7ddf3f14df79f27c3eb39f2114f3a780d5670bb11ef62446f5fa5dcbb9"
+    },
+    "appPlacement": {
+      "anchor": "center",
+      "paddingTopPercent": 8,
+      "sizePxFormula": "clamp(140, stageWidth * 0.38, 300)",
+      "reduceMotionBehavior": "entry scale only; no looping motion"
+    },
+    "motion": {
+      "source": "subjectMotionKind('barn')",
+      "intent": "gentle subject animation from AnimatedSubject; safe to simplify to a light bob on constrained robot displays"
+    },
+    "tapTarget": {
+      "activeWindows": [
+        {
+          "tStart": 0.5,
+          "tEnd": 5.5,
+          "x": 0.5,
+          "y": 0.5,
+          "w": 0.42,
+          "h": 0.42
+        }
+      ],
+      "successUtterance": "Yes! barn!",
+      "missUtterance": "Look here"
+    },
+    "primitiveFallbackCard": {
+      "glyph": "barn",
+      "label": "barn",
+      "normalPlacement": { "x": 0.79, "y": 0.34, "scale": 1.0 },
+      "celebratePlacement": { "x": 0.5, "y": 0.26, "scale": 1.08 },
+      "source": "SceneObject barn glyph"
+    }
+  },
+  "robot": {
+    "rendererContract": "teebot-renderer.v1",
+    "schemaVersion": "1.0.0",
+    "character": "bright-no-feet-screen-tee",
+    "canonicalSize": { "width": 384, "height": 384 },
+    "pivot": { "x": 0.5, "y": 1.0 },
+    "profiles": {
+      "mobile": { "maxBodyPx": 384, "frameRate": 30 },
+      "raspberryPiTft": { "maxBodyPx": 384, "frameRate": 24 },
+      "espTft": { "maxBodyPx": 192, "frameRate": 12 }
+    },
+    "overlay": {
+      "anchor": "bottomLeft",
+      "leftPercent": 6,
+      "bottomPx": 0,
+      "sizePortraitPx": 132,
+      "sizeLandscapePx": 118,
+      "pointerEvents": "none"
+    },
+    "poseAssets": {
+      "idle": "assets/robot/poses/bright-idle.png",
+      "wave": "assets/robot/poses/bright-wave.png",
+      "teach": "assets/robot/poses/bright-teach.png",
+      "cards": "assets/robot/poses/bright-cards.png",
+      "listening": "assets/robot/poses/bright-listening.png",
+      "thinking": "assets/robot/poses/bright-thinking.png",
+      "celebrate": "assets/robot/poses/bright-celebrate.png",
+      "side": "assets/robot/poses/bright-side.png"
+    },
+    "atlas": {
+      "image": "assets/robot/bright-sprite-atlas.png",
+      "metadata": "assets/robot/bright-sprite-atlas.json",
+      "sourceSheet": "assets/robot/bright-black-sprite-sheet-source.png",
+      "cellWidth": 384,
+      "cellHeight": 384,
+      "columns": 4,
+      "rows": 2,
+      "order": ["idle", "wave", "teach", "cards", "listening", "thinking", "celebrate", "side"]
+    },
+    "face": {
+      "default": "procedural face overlay on top of PNG pose",
+      "riveSourceSvg": "assets/robot/rive-source/teebot-face-import-v2.svg",
+      "baseFaceSvg": "assets/robot/rive-source/teebot-face.svg",
+      "stateReferenceSvg": "assets/robot/rive-source/teebot-states-reference.svg",
+      "rivRuntimeIncluded": false
+    },
+    "poseFaceMetadata": {
+      "teach": {
+        "faceRect": { "x": 0.2, "y": 0.14, "width": 0.6, "height": 0.33 },
+        "eyeAnchor": { "x": 0.5, "y": 0.31 },
+        "eyeSpacing": 0.28,
+        "mouthAnchor": { "x": 0.5, "y": 0.4 },
+        "visibleEyeCount": 2,
+        "mouthVisible": true
+      },
+      "listening": {
+        "faceRect": { "x": 0.2, "y": 0.15, "width": 0.6, "height": 0.33 },
+        "faceRectRotationDeg": -3,
+        "eyeAnchor": { "x": 0.49, "y": 0.32 },
+        "eyeSpacing": 0.28,
+        "mouthAnchor": { "x": 0.5, "y": 0.41 },
+        "visibleEyeCount": 2,
+        "mouthVisible": true
+      },
+      "thinking": {
+        "faceRect": { "x": 0.2, "y": 0.15, "width": 0.6, "height": 0.33 },
+        "faceRectRotationDeg": 2,
+        "eyeAnchor": { "x": 0.5, "y": 0.32 },
+        "eyeSpacing": 0.27,
+        "mouthAnchor": { "x": 0.5, "y": 0.41 },
+        "visibleEyeCount": 2,
+        "mouthVisible": true
+      },
+      "celebrate": {
+        "faceRect": { "x": 0.2, "y": 0.14, "width": 0.6, "height": 0.33 },
+        "eyeAnchor": { "x": 0.5, "y": 0.31 },
+        "eyeSpacing": 0.28,
+        "mouthAnchor": { "x": 0.5, "y": 0.4 },
+        "visibleEyeCount": 2,
+        "mouthVisible": true
+      }
+    }
+  },
+  "stepRenderMap": [
+    { "stepId": "s1", "stepType": "greeting", "robotState": "talking", "pose": "teach", "expression": "teaching", "phaseWhenSpeaking": "talk", "entrance": "flyIn", "subject": "barn" },
+    { "stepId": "s2", "stepType": "review", "robotState": "talking", "pose": "teach", "expression": "teaching", "phaseWhenSpeaking": "talk", "entrance": "none", "subject": "barn" },
+    { "stepId": "s3", "stepType": "focus", "robotState": "talking", "pose": "teach", "expression": "teaching", "phaseWhenSpeaking": "talk", "entrance": "none", "subject": "barn" },
+    { "stepId": "s4", "stepType": "model", "robotState": "modeling", "pose": "teach", "expression": "teaching", "phaseWhenSpeaking": "talk", "entrance": "none", "subject": "barn" },
+    { "stepId": "s5", "stepType": "listen", "robotState": "listening", "pose": "listening", "expression": "listening", "phaseWhenAwaitingChild": "listen", "entrance": "none", "subject": "barn" },
+    { "stepId": "s6", "stepType": "repeat", "robotState": "listening", "pose": "listening", "expression": "listening", "phaseWhenAwaitingChild": "listen", "entrance": "none", "subject": "barn" },
+    { "stepId": "s7", "stepType": "fillBlank", "robotState": "thinking", "pose": "thinking", "expression": "thinking", "phase": "idle", "entrance": "none", "subject": "barn" },
+    { "stepId": "s8", "stepType": "feedback", "robotState": "talking", "pose": "teach", "expression": "teaching", "phaseWhenSpeaking": "talk", "entrance": "none", "subject": "barn" },
+    { "stepId": "s9", "stepType": "celebrate", "robotState": "celebrating", "pose": "celebrate", "expression": "celebrating", "phase": "celebrate", "entrance": "none", "subject": "barn" }
+  ],
+  "referenceImages": [
+    "assets/reference/lesson-w01-barn.png",
+    "assets/reference/barn-step-1.png",
+    "assets/reference/barn-step-2.png",
+    "assets/reference/barn-step-3.png",
+    "assets/reference/barn-celebrate.png"
+  ]
+}
+

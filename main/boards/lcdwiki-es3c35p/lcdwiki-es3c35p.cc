@@ -103,6 +103,102 @@ const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
     {0x35, (uint8_t []){0x01}, 1, 20},
 };
 
+constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
+constexpr bool kHoldBootProbePattern = false;
+constexpr int kLcdWikiOutputVolume = 70;
+
+void EnableBacklightForBoot() {
+    const gpio_config_t backlight_gpio_config = {
+        .pin_bit_mask = 1ULL << DISPLAY_BACKLIGHT_PIN,
+        .mode = GPIO_MODE_INPUT_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&backlight_gpio_config));
+    ESP_ERROR_CHECK(gpio_set_level(DISPLAY_BACKLIGHT_PIN, 1));
+    ESP_LOGI(TAG, "LCDWiki backlight GPIO%d forced high for boot, level=%d",
+        DISPLAY_BACKLIGHT_PIN, gpio_get_level(DISPLAY_BACKLIGHT_PIN));
+}
+
+class LcdWikiBacklight : public Backlight {
+public:
+    LcdWikiBacklight() {
+        EnableBacklightForBoot();
+    }
+
+protected:
+    void SetBrightnessImpl(uint8_t brightness) override {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(DISPLAY_BACKLIGHT_PIN, brightness > 0 ? 1 : 0));
+        if (brightness == 0 || brightness == 100) {
+            ESP_LOGI(TAG, "LCDWiki backlight GPIO%d brightness=%u level=%d",
+                DISPLAY_BACKLIGHT_PIN, brightness, gpio_get_level(DISPLAY_BACKLIGHT_PIN));
+        }
+    }
+};
+
+class LcdWikiAudioCodec : public Es8311AudioCodec {
+private:
+    std::vector<int16_t> BuildDiagnosticTone(int tone_hz, int duration_ms) {
+        const int sample_rate = output_sample_rate();
+        const int amplitude = 8000;
+        const int tone_samples = sample_rate * duration_ms / 1000;
+        const int period = std::max(1, sample_rate / tone_hz);
+        std::vector<int16_t> tone(tone_samples);
+        for (int i = 0; i < tone_samples; ++i) {
+            tone[i] = ((i % period) < (period / 2)) ? amplitude : -amplitude;
+        }
+        return tone;
+    }
+
+    void PlayDiagnosticSegment(const char* name, int pa_level, int tone_hz) {
+        if (AUDIO_CODEC_PA_PIN != GPIO_NUM_NC) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(AUDIO_CODEC_PA_PIN, pa_level));
+        }
+
+        std::vector<int16_t> tone = BuildDiagnosticTone(tone_hz, 450);
+        ESP_LOGI(TAG, "LCDWiki audio diagnostic segment start name=%s sample_rate=%d samples=%u volume=%d pa_pin=%d pa_level=%d pa_gpio_level=%d",
+                 name, output_sample_rate(), static_cast<unsigned>(tone.size()),
+                 output_volume(), AUDIO_CODEC_PA_PIN, pa_level,
+                 AUDIO_CODEC_PA_PIN == GPIO_NUM_NC ? -1 : gpio_get_level(AUDIO_CODEC_PA_PIN));
+        OutputData(tone);
+
+        std::vector<int16_t> silence(output_sample_rate() / 10, 0);
+        OutputData(silence);
+    }
+
+    void RunDiagnosticTone() {
+        EnableOutput(true);
+
+        PlayDiagnosticSegment("pa_low", 0, 660);
+        PlayDiagnosticSegment("pa_high", 1, 880);
+        PlayDiagnosticSegment("configured", AUDIO_CODEC_PA_INVERTED ? 0 : 1, 1100);
+
+        std::vector<int16_t> silence(output_sample_rate() / 10, 0);
+        OutputData(silence);
+        ESP_LOGI(TAG, "LCDWiki audio diagnostic tone sequence end");
+    }
+
+public:
+    LcdWikiAudioCodec(void* i2c_master_handle, i2c_port_t i2c_port, int input_sample_rate,
+        int output_sample_rate, gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws,
+        gpio_num_t dout, gpio_num_t din, gpio_num_t pa_pin, uint8_t es8311_addr,
+        bool use_mclk = true, bool pa_inverted = false)
+        : Es8311AudioCodec(i2c_master_handle, i2c_port, input_sample_rate, output_sample_rate,
+            mclk, bclk, ws, dout, din, pa_pin, es8311_addr, use_mclk, pa_inverted) {
+        input_channels_ = 2;
+        output_channels_ = 2;
+    }
+
+    void Start() override {
+        Es8311AudioCodec::Start();
+        if (output_volume() != kLcdWikiOutputVolume) {
+            SetOutputVolume(kLcdWikiOutputVolume);
+        }
+        RunDiagnosticTone();
+    }
+};
+
 // ST77922 QSPI yêu cầu cột (trục native) căn theo bội số 4. Khi xoay phần mềm, trục
 // native có thể ứng với x HOẶC y của toạ độ logic -> căn CẢ HAI trục cho chắc.
 void St77922RounderCallback(lv_area_t* area) {
@@ -143,6 +239,16 @@ public:
         } else {
             ESP_ERROR_CHECK(err);
         }
+
+        DrawBootProbePattern();
+        if (kHoldBootProbePattern) {
+            ESP_LOGW(TAG, "LCDWiki boot probe diagnostic hold active");
+            while (true) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                DrawBootProbePattern();
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(300));
 
         ESP_LOGI(TAG, "Initialize LVGL library");
         lv_init();
@@ -213,6 +319,21 @@ public:
             lv_display_set_offset(display_, offset_x, offset_y);
         }
     }
+
+private:
+    void DrawBootProbePattern() {
+        constexpr int kChunkLines = 20;
+        constexpr uint16_t kColors[] = {0xFFFF, 0xF800, 0x07E0, 0x001F, 0xFFE0};
+
+        std::vector<uint16_t> buffer(width_ * kChunkLines);
+        for (int y = 0; y < height_; y += kChunkLines) {
+            int y_end = std::min(y + kChunkLines, height_);
+            uint16_t color = kColors[(y * static_cast<int>(std::size(kColors))) / height_];
+            std::fill(buffer.begin(), buffer.begin() + (y_end - y) * width_, color);
+            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_draw_bitmap(panel_, 0, y, width_, y_end, buffer.data()));
+        }
+        ESP_LOGI(TAG, "Boot probe pattern drawn");
+    }
 };
 
 class LCDWikiES3C35PBoard : public WifiBoard {
@@ -279,7 +400,7 @@ private:
         ESP_LOGI(TAG, "Install ST77922 QSPI panel IO");
         esp_lcd_panel_io_spi_config_t io_config = ST77922_PANEL_IO_QSPI_CONFIG(
             DISPLAY_CS_PIN, nullptr, nullptr);
-        io_config.pclk_hz = DISPLAY_QSPI_PCLK_HZ;
+        io_config.pclk_hz = kLcdQspiClockHz;
         ESP_LOGI(TAG, "ST77922 QSPI clock: %d Hz", (int)io_config.pclk_hz);
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(DISPLAY_SPI_HOST, &io_config, &panel_io));
 
@@ -460,6 +581,9 @@ private:
     }
 
     void InitializeTouch() {
+        ESP_LOGW(TAG, "Touch disabled for LCDWiki stability; ST7123 read errors can abort lvgl_port_touchpad_read");
+        return;
+
         if (lv_display_get_default() == nullptr) {
             ESP_LOGW(TAG, "LVGL display missing; skipping touch");
             return;
@@ -475,11 +599,17 @@ private:
     void InitializeButtons() {
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateStarting) {
+            auto state = app.GetDeviceState();
+            if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring ||
+                state == kDeviceStateActivating || state == kDeviceStateConnecting) {
                 EnterWifiConfigMode();
                 return;
             }
             app.ToggleChatState();
+        });
+        boot_button_.OnLongPress([this]() {
+            ESP_LOGI(TAG, "LCDWiki BOOT long-press -> EnterWifiConfigMode");
+            EnterWifiConfigMode();
         });
     }
 
@@ -507,7 +637,7 @@ public:
     }
 
     AudioCodec* GetAudioCodec() override {
-        static Es8311AudioCodec audio_codec(i2c_bus_, AUDIO_CODEC_I2C_NUM,
+        static LcdWikiAudioCodec audio_codec(i2c_bus_, AUDIO_CODEC_I2C_NUM,
             AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE,
             AUDIO_I2S_GPIO_MCLK, AUDIO_I2S_GPIO_BCLK, AUDIO_I2S_GPIO_WS,
             AUDIO_I2S_GPIO_DOUT, AUDIO_I2S_GPIO_DIN,
@@ -521,7 +651,7 @@ public:
     }
 
     Backlight* GetBacklight() override {
-        static PwmBacklight backlight(DISPLAY_BACKLIGHT_PIN, DISPLAY_BACKLIGHT_OUTPUT_INVERT);
+        static LcdWikiBacklight backlight;
         return &backlight;
     }
 };

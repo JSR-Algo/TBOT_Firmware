@@ -54,6 +54,15 @@
         "FOUND_NEW_ASSETS": "Found new assets: %s",
         "DOWNLOAD_ASSETS_FAILED": "Failed to download assets",
         "LOADING_ASSETS": "Loading assets...",
-        "HELLO_MY_FRIEND": "Hello, my friend!"
+        "HELLO_MY_FRIEND": "Hello, my friend!",
+        "READY_TO_CONNECT": "Ready to connect",
+        "OPEN_TBOT_APP": "Open TBot app",
+        "PRESS_BUTTON_TO_CONFIRM": "Press button to confirm",
+        "TBOT_CONNECT": "TBot Connect",
+        "CONNECTED": "Connected.",
+        "CONNECTION_CONFIRM_FAILED": "Connection confirmation failed. Try again.",
+        "SETUP_EXPIRED": "Setup expired",
+        "SERVER_UNAVAILABLE_RETRYING": "Server unavailable. Retrying...",
+        "WIFI_FAILED_CHECK_PASSWORD": "Wi-Fi failed. Check password."
     }
 }

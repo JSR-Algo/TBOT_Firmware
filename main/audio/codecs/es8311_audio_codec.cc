@@ -1,6 +1,9 @@
 #include "es8311_audio_codec.h"
 
+#include <algorithm>
+#include <esp_err.h>
 #include <esp_log.h>
+#include <vector>
 
 #define TAG "Es8311AudioCodec"
 
@@ -68,6 +71,7 @@ Es8311AudioCodec::~Es8311AudioCodec() {
 }
 
 void Es8311AudioCodec::UpdateDeviceState() {
+    bool opened = false;
     if ((input_enabled_ || output_enabled_) && dev_ == nullptr) {
         esp_codec_dev_cfg_t dev_cfg = {
             .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
@@ -79,7 +83,7 @@ void Es8311AudioCodec::UpdateDeviceState() {
 
         esp_codec_dev_sample_info_t fs = {
             .bits_per_sample = 16,
-            .channel = 1,
+            .channel = static_cast<uint8_t>(std::max(input_channels_, output_channels_)),
             .channel_mask = 0,
             .sample_rate = (uint32_t)input_sample_rate_,
             .mclk_multiple = 0,
@@ -87,13 +91,27 @@ void Es8311AudioCodec::UpdateDeviceState() {
         ESP_ERROR_CHECK(esp_codec_dev_open(dev_, &fs));
         ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, input_gain_));
         ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, output_volume_));
+        opened = true;
     } else if (!input_enabled_ && !output_enabled_ && dev_ != nullptr) {
         esp_codec_dev_close(dev_);
         dev_ = nullptr;
     }
+    if (dev_ != nullptr && input_enabled_) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_in_gain(dev_, input_gain_));
+    }
+    if (dev_ != nullptr && output_enabled_) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_out_vol(dev_, output_volume_));
+    }
     if (pa_pin_ != GPIO_NUM_NC) {
         int level = output_enabled_ ? 1 : 0;
-        gpio_set_level(pa_pin_, pa_inverted_ ? !level : level);
+        int pa_level = pa_inverted_ ? !level : level;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(pa_pin_, pa_level));
+        ESP_LOGI(TAG, "es8311_state opened=%d input_enabled=%d output_enabled=%d dev=%p pa_pin=%d pa_level=%d pa_gpio_level=%d pa_inverted=%d volume=%d",
+                 opened, input_enabled_, output_enabled_, dev_, pa_pin_, pa_level,
+                 gpio_get_level(pa_pin_), pa_inverted_, output_volume_);
+    } else {
+        ESP_LOGI(TAG, "es8311_state opened=%d input_enabled=%d output_enabled=%d dev=%p pa_pin=-1 volume=%d",
+                 opened, input_enabled_, output_enabled_, dev_, output_volume_);
     }
 }
 
@@ -196,7 +214,31 @@ int Es8311AudioCodec::Read(int16_t* dest, int samples) {
 
 int Es8311AudioCodec::Write(const int16_t* data, int samples) {
     if (output_enabled_) {
-        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_write(dev_, (void*)data, samples * sizeof(int16_t)));
+        if (dev_ == nullptr) {
+            ESP_LOGE(TAG, "es8311_write failed reason=device_not_open samples=%d", samples);
+            return 0;
+        }
+        const int16_t* write_data = data;
+        int write_samples = samples;
+        std::vector<int16_t> stereo_data;
+        if (output_channels_ == 2) {
+            stereo_data.resize(samples * 2);
+            for (int i = 0; i < samples; ++i) {
+                stereo_data[i * 2] = data[i];
+                stereo_data[i * 2 + 1] = data[i];
+            }
+            write_data = stereo_data.data();
+            write_samples = static_cast<int>(stereo_data.size());
+        }
+        esp_err_t ret = esp_codec_dev_write(dev_, (void*)write_data, write_samples * sizeof(int16_t));
+        write_count_++;
+        if (write_count_ <= 5 || (write_count_ % 20) == 0 || ret != ESP_OK) {
+            ESP_LOGI(TAG, "es8311_write count=%lu samples=%d write_samples=%d bytes=%u channels=%d ret=%s(%d) output_enabled=%d volume=%d",
+                     static_cast<unsigned long>(write_count_), samples, write_samples,
+                     static_cast<unsigned>(write_samples * sizeof(int16_t)), output_channels_,
+                     esp_err_to_name(ret), ret, output_enabled_, output_volume_);
+        }
+        ESP_ERROR_CHECK_WITHOUT_ABORT(ret);
     }
     return samples;
 }

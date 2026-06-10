@@ -1,8 +1,10 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = ROOT.parent
 FORBIDDEN_BRAND_TEXT = ("Xiaozhi", "XiaoZhi", "小智")
+CJK_SCRIPT_PATTERN = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]")
 
 
 def read(path: str) -> str:
@@ -33,6 +35,41 @@ def test_blufi_never_logs_wifi_password_values():
     ]
 
 
+def test_wifi_config_page_defaults_to_vietnamese_without_chinese_locale():
+    html = read("managed_components/78__esp-wifi-connect/assets/wifi_configuration.html")
+    wifi_manager_h = read("managed_components/78__esp-wifi-connect/include/wifi_manager.h")
+    wifi_config_ap = read("managed_components/78__esp-wifi-connect/wifi_configuration_ap.cc")
+
+    assert "return 'vi-VN';" in html
+    assert "defaulting to Vietnamese" in html
+    assert 'std::string language = "vi-VN";' in wifi_manager_h
+    assert 'language_ = "vi-VN";' in wifi_config_ap
+    assert 'std::string language = "zh-CN";' not in wifi_manager_h
+    assert 'language_ = "zh-CN";' not in wifi_config_ap
+    assert '<option value="zh-CN">' not in html
+    assert '<option value="zh-TW">' not in html
+    assert "'zh-CN':" not in html
+    assert "'zh-TW':" not in html
+    assert "简体中文" not in html
+    assert "繁體中文" not in html
+    assert "网络配置" not in html
+    assert "连接 Wi-Fi 时记住 BSSID" not in html
+
+def test_wifi_config_pages_do_not_render_cjk_locale_text():
+    config_html = read("managed_components/78__esp-wifi-connect/assets/wifi_configuration.html")
+    done_html = read("managed_components/78__esp-wifi-connect/assets/wifi_configuration_done.html")
+
+    assert '<option value="ja-JP">' not in config_html
+    assert '<option value="ko-KR">' not in config_html
+    assert "'ja-JP':" not in config_html
+    assert "'ko-KR':" not in config_html
+    assert "'ja': 'ja-JP'" not in config_html
+    assert "'ko': 'ko-KR'" not in config_html
+    assert CJK_SCRIPT_PATTERN.search(config_html) is None
+    assert CJK_SCRIPT_PATTERN.search(done_html) is None
+    assert "Cấu hình Wi-Fi thành công" in done_html
+
+
 def test_blufi_config_mode_is_wired_into_firmware():
     wifi_board = read("main/boards/common/wifi_board.cc")
     cmake = read("main/CMakeLists.txt")
@@ -49,6 +86,87 @@ def test_blufi_config_mode_is_wired_into_firmware():
     assert '# CONFIG_USE_HOTSPOT_WIFI_PROVISIONING is not set' in defaults
     assert 'CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y' in defaults
     assert 'CONFIG_BT_BLUEDROID_ENABLED=y' in defaults
+
+def test_blufi_config_mode_reopens_robot_scan_after_ble_timeout():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
+
+    assert "Blufi::BleState::kTimeout" in body
+    timeout_idx = body.index("Blufi::BleState::kTimeout")
+    init_idx = body.index("blufi.init();")
+    timer_idx = body.index("blufi.StartBleSetupTimeout")
+    assert timeout_idx < init_idx < timer_idx
+
+def test_wifi_config_releases_wake_word_resources_before_ble_init():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    audio_h = read("main/audio/audio_service.h")
+    audio_cc = read("main/audio/audio_service.cc")
+    afe_h = read("main/audio/wake_words/afe_wake_word.h")
+    afe_cc = read("main/audio/wake_words/afe_wake_word.cc")
+
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
+    release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
+    init_idx = body.index("blufi.init();")
+    assert release_idx < init_idx
+
+    assert "void ReleaseWakeWordResourcesForWifiConfig();" in audio_h
+    release_start = audio_cc.index("void AudioService::ReleaseWakeWordResourcesForWifiConfig()")
+    release_body = audio_cc[release_start:audio_cc.index("void AudioService::EnableVoiceProcessing", release_start)]
+    assert "EnableWakeWordDetection(false);" in release_body
+    assert "wake_word_.reset();" in release_body
+    assert "wake_word_initialized_ = false;" in release_body
+
+    enable_start = audio_cc.index("void AudioService::EnableWakeWordDetection")
+    enable_body = audio_cc[enable_start:audio_cc.index("void AudioService::EnableVoiceProcessing", enable_start)]
+    assert "CreateWakeWordIfAvailable();" in enable_body
+
+    assert "TaskHandle_t audio_detection_task_handle_" in afe_h
+    dtor_start = afe_cc.index("AfeWakeWord::~AfeWakeWord()")
+    dtor_body = afe_cc[dtor_start:afe_cc.index("bool AfeWakeWord::Initialize", dtor_start)]
+    assert "vTaskDelete(audio_detection_task_handle_)" in dtor_body
+    assert dtor_body.index("vTaskDelete(audio_detection_task_handle_)") < dtor_body.index("afe_iface_->destroy")
+
+def test_wifi_config_mode_accepts_startup_activation_window():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    enter_start = wifi_board.index("void WifiBoard::EnterWifiConfigMode()")
+    enter_body = wifi_board[enter_start : wifi_board.index("bool WifiBoard::IsInWifiConfigMode()", enter_start)]
+
+    assert "state == kDeviceStateActivating" in enter_body
+    assert "state == kDeviceStateConnecting" in enter_body
+    assert enter_body.index("state == kDeviceStateConnecting") < enter_body.index("device state is not allowed for WiFi config")
+    assert "device state is not allowed for WiFi config" in enter_body
+
+def test_wifi_config_mode_can_be_rearmed_while_already_configuring():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    enter_start = wifi_board.index("void WifiBoard::EnterWifiConfigMode()")
+    enter_body = wifi_board[enter_start : wifi_board.index("bool WifiBoard::IsInWifiConfigMode()", enter_start)]
+
+    assert "state == kDeviceStateWifiConfiguring" in enter_body
+    assert enter_body.index("state == kDeviceStateWifiConfiguring") < enter_body.index(
+        "device state is not allowed for WiFi config"
+    )
+    wifi_config_idx = enter_body.index("state == kDeviceStateWifiConfiguring")
+    allowed_branch = enter_body[wifi_config_idx:enter_body.index("device state is not allowed for WiFi config")]
+    assert "StartWifiConfigMode();" in allowed_branch
+
+def test_runtime_state_machine_can_interrupt_backend_connect_for_wifi_config():
+    state_machine = read("main/device_state_machine.cc")
+    connecting_start = state_machine.index("case kDeviceStateConnecting:")
+    connecting_body = state_machine[connecting_start : state_machine.index("case kDeviceStateListening:", connecting_start)]
+
+    assert "to == kDeviceStateWifiConfiguring" in connecting_body
+
+
+def test_start_network_preserves_boot_reprovisioning_during_startup():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    start = wifi_board.index("void WifiBoard::StartNetwork()")
+    start_body = wifi_board[start : wifi_board.index("void WifiBoard::TryWifiConnect()", start)]
+
+    assert "StartNetwork skipped auto-connect because config mode is already active" in start_body
+    assert "if (in_config_mode_)" in start_body
+    assert start_body.index("if (in_config_mode_)") < start_body.index("TryWifiConnect();")
 
 
 def test_system_info_reports_tbot_application_name():

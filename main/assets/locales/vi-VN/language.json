@@ -54,6 +54,15 @@
         "HELLO_MY_FRIEND": "Xin chào, bạn của tôi!",
         "FLIGHT_MODE_OFF": "Chế độ máy bay đang tắt",
         "FLIGHT_MODE_ON": "Chế độ máy bay đang bật",
-        "MODEM_INIT_ERROR": "Khởi tạo modem thất bại"
+        "MODEM_INIT_ERROR": "Khởi tạo modem thất bại",
+        "READY_TO_CONNECT": "Sẵn sàng kết nối",
+        "OPEN_TBOT_APP": "Mở ứng dụng TBot",
+        "PRESS_BUTTON_TO_CONFIRM": "Nhấn nút để xác nhận",
+        "TBOT_CONNECT": "TBot Connect",
+        "CONNECTED": "Đã kết nối.",
+        "CONNECTION_CONFIRM_FAILED": "Xác nhận kết nối thất bại. Thử lại.",
+        "SETUP_EXPIRED": "Hết hạn thiết lập",
+        "SERVER_UNAVAILABLE_RETRYING": "Máy chủ không khả dụng. Đang thử lại...",
+        "WIFI_FAILED_CHECK_PASSWORD": "Wi-Fi thất bại. Kiểm tra mật khẩu."
     }
 }

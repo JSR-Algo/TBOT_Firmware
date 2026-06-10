@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <mutex>
+#include <atomic>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -37,9 +38,18 @@
  */
 
 #define OPUS_FRAME_DURATION_MS 60
-#define MAX_ENCODE_TASKS_IN_QUEUE 2
+// Give the low-priority Opus codec task slack so a brief stall on the mic path
+// doesn't immediately drop PCM (was 2 -> tiny, caused growing encode_drop).
+#define MAX_ENCODE_TASKS_IN_QUEUE 4
 #define MAX_PLAYBACK_TASKS_IN_QUEUE 2
-#define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
+// TTS jitter buffer restored to 7200ms. The server bursts a whole response
+// faster than realtime (~6s seen), and a 720ms cap dropped ~95 frames mid-burst
+// -> choppy/stuttering speech. Barge-in stays INSTANT regardless of depth: the
+// codec drops stale-generation packets at dequeue (gen-gating) and AbortSpeaking
+// clears the queue, so a large backlog never delays an interrupt.
+#define MAX_DECODE_PACKETS_IN_QUEUE (7200 / OPUS_FRAME_DURATION_MS)
+// Mic uplink backlog restored to 2400ms so a transient codec stall buffers
+// rather than dropping the user's question (was 720ms -> growing encode_drop).
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 #define MAX_TIMESTAMPS_IN_QUEUE 3
@@ -97,9 +107,14 @@ struct AudioTask {
 
 struct DebugStatistics {
     uint32_t input_count = 0;
+    uint32_t incoming_decode_packet_count = 0;
+    uint32_t decode_drop_count = 0;
     uint32_t decode_count = 0;
+    uint32_t decode_fail_count = 0;
     uint32_t encode_count = 0;
     uint32_t playback_count = 0;
+    uint32_t encode_drop_count = 0;   // mic frames dropped when encode queue stayed full
+    uint32_t stale_frame_count = 0;   // decode frames dropped by barge-in gen-gate
 };
 
 class AudioService {
@@ -124,6 +139,7 @@ public:
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
+    void ReleaseWakeWordResourcesForWifiConfig();
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
@@ -133,6 +149,13 @@ public:
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
+    // Publish the active response generation. Decode frames whose stamped
+    // generation differs are dropped at dequeue (barge-in stale-frame guard).
+    void SetPlaybackGeneration(uint32_t generation) { playback_generation_.store(generation); }
+    // Periodic-observability snapshot, read from the app task. The counters copy
+    // is racy-but-benign (aligned 32-bit reads); queue depths take the lock.
+    DebugStatistics GetDebugStatistics() const { return debug_statistics_; }
+    void GetQueueDepths(uint32_t& decode, uint32_t& send, uint32_t& playback);
 
 private:
     AudioCodec* codec_ = nullptr;
@@ -180,6 +203,10 @@ private:
     bool service_stopped_ = true;
     bool audio_input_need_warmup_ = false;
 
+    // Active response generation for barge-in gen-gating. Written via
+    // SetPlaybackGeneration() (app/WS task), read on the codec task at dequeue.
+    std::atomic<uint32_t> playback_generation_{0};
+
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;
     std::chrono::steady_clock::time_point last_output_time_;
@@ -187,6 +214,7 @@ private:
     void AudioInputTask();
     void AudioOutputTask();
     void OpusCodecTask();
+    void CreateWakeWordIfAvailable();
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();

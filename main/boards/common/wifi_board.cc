@@ -46,6 +46,11 @@ WifiBoard::~WifiBoard() {
         esp_timer_stop(connect_timer_);
         esp_timer_delete(connect_timer_);
     }
+    if (ap_setup_timer_) {
+        esp_timer_stop(ap_setup_timer_);
+        esp_timer_delete(ap_setup_timer_);
+        ap_setup_timer_ = nullptr;
+    }
 }
 
 std::string WifiBoard::GetBoardType() {
@@ -85,6 +90,11 @@ void WifiBoard::StartNetwork() {
         }
     });
 
+    if (in_config_mode_) {
+        ESP_LOGI(TAG, "StartNetwork skipped auto-connect because config mode is already active");
+        return;
+    }
+
     // Try to connect or enter config mode
     TryWifiConnect();
 }
@@ -111,6 +121,10 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
         case NetworkEvent::Connected:
             // Stop timeout timer
             esp_timer_stop(connect_timer_);
+            // Provisioning succeeded → AP (if it was open) must stop. Cancel the
+            // AP hard-timeout so a stale callback cannot post a redundant
+            // StopConfigAp after we have already moved on.
+            CancelApSetupTimeout();
 #if defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING) && defined(CONFIG_TBOT_PROVISIONING_REPORT_ENABLED)
             {
                 auto& blufi = Blufi::GetInstance();
@@ -156,6 +170,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
         case NetworkEvent::WifiConfigModeExit:
             ESP_LOGI(TAG, "WiFi config mode exited");
             in_config_mode_ = false;
+            // Leaving config mode (credentials received) is a successful exit of
+            // AP setup — cancel the hard-timeout before attempting connection.
+            CancelApSetupTimeout();
             // Try to connect with the new credentials
             TryWifiConnect();
             break;
@@ -181,6 +198,77 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
     board->StartWifiConfigMode();
 }
 
+// ---------------------------------------------------------------------------
+// AP-setup hard-timeout safety gate (mirrors the BLE gate in blufi.cpp).
+// SoftAP must not run forever: §"AP must not run forever" / "AP setup timeout
+// default: 10 minutes". The timer callback runs in the esp_timer task; tearing
+// down the AP there would race the Wi-Fi/event tasks, so we only latch the flag
+// and post StopConfigAp() to the Application task.
+// ---------------------------------------------------------------------------
+
+void WifiBoard::OnApSetupTimeout(void* arg) {
+    auto* board = static_cast<WifiBoard*>(arg);
+    ESP_LOGW(TAG, "AP setup TIMEOUT -> StopConfigAp posted to Application task");
+    board->ap_timed_out_ = true;
+
+    Application::GetInstance().Schedule([board]() {
+        ESP_LOGW(TAG, "AP setup TIMEOUT teardown executing on Application task");
+        WifiManager::GetInstance().StopConfigAp();
+        board->in_config_mode_ = false;
+    });
+}
+
+void WifiBoard::StartApSetupTimeout(int seconds) {
+    if (ap_setup_timer_ != nullptr) {
+        // Already armed — stop and delete so we can re-create cleanly.
+        esp_timer_stop(ap_setup_timer_);
+        esp_timer_delete(ap_setup_timer_);
+        ap_setup_timer_ = nullptr;
+    }
+    ap_timed_out_ = false;
+
+    esp_timer_create_args_t args = {
+        .callback = OnApSetupTimeout,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "ap_setup_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_err_t err = esp_timer_create(&args, &ap_setup_timer_);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create AP setup timer: %s", esp_err_to_name(err));
+        ap_setup_timer_ = nullptr;
+        return;
+    }
+    err = esp_timer_start_once(ap_setup_timer_, static_cast<uint64_t>(seconds) * 1000000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start AP setup timer: %s", esp_err_to_name(err));
+        esp_timer_delete(ap_setup_timer_);
+        ap_setup_timer_ = nullptr;
+        return;
+    }
+    ESP_LOGI(TAG, "AP setup timer armed %ds", seconds);
+}
+
+void WifiBoard::CancelApSetupTimeout() {
+    if (ap_setup_timer_ == nullptr) {
+        return;  // Never armed or already cancelled — no-op.
+    }
+    esp_timer_stop(ap_setup_timer_);
+    esp_timer_delete(ap_setup_timer_);
+    ap_setup_timer_ = nullptr;
+    ESP_LOGI(TAG, "AP setup cancelled (provisioned)");
+}
+
+const char* WifiBoard::GetApStateString() const {
+    // AP timeout tears the SoftAP down, so the backend-safe radio state is off.
+    // The explicit AP_SETUP_TIMEOUT connection state carries the timeout detail.
+    if (in_config_mode_ && WifiManager::GetInstance().IsConfigMode()) {
+        return "active";
+    }
+    return "off";
+}
+
 void WifiBoard::StartWifiConfigMode() {
     in_config_mode_ = true;
     // Transition to wifi configuring state
@@ -189,6 +277,12 @@ void WifiBoard::StartWifiConfigMode() {
     auto& wifi_manager = WifiManager::GetInstance();
 
     wifi_manager.StartConfigAp();
+
+    // Arm the AP-setup hard-timeout safety gate immediately after opening the
+    // SoftAP so it cannot run forever if provisioning never completes. Teardown
+    // is posted to the Application task inside the timer callback (never in
+    // callback context) to avoid WDT/race conditions — mirrors the BLE gate.
+    StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC);
 
     // Show config prompt after a short delay
     Application::GetInstance().Schedule([&wifi_manager]() {
@@ -201,12 +295,26 @@ void WifiBoard::StartWifiConfigMode() {
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
-    // initialize esp-blufi protocol
-    blufi.init();
+    Application::GetInstance().GetAudioService().ReleaseWakeWordResourcesForWifiConfig();
+    // initialize esp-blufi protocol.
+    // Guard against double-init: the Application now also brings BLE up while the
+    // robot is unclaimed in claimable standby (so the app can discover it over
+    // BLE). If we entered config mode from that state the BLE stack is already
+    // advertising; calling init() again would leak the controller/host. A prior
+    // hard-timeout is equivalent to off for an explicit BOOT setup entry: the
+    // stack was torn down and must be initialized again so the phone can scan it.
+    const auto ble_state = blufi.GetBleState();
+    if (ble_state == Blufi::BleState::kOff ||
+        ble_state == Blufi::BleState::kTimeout) {
+        blufi.init();
+    }
     // Arm the hard-timeout safety gate immediately after init so that BLE
     // advertising cannot run forever if provisioning never completes.
     // Teardown is posted to the Application task inside the timer callback
-    // (never in callback context) to avoid WDT/race conditions (§9).
+    // (never in callback context) to avoid WDT/race conditions (§9). Re-arming
+    // is safe even if BLE was already up (StartBleSetupTimeout recreates the
+    // timer cleanly), and it correctly switches the timeout to this explicit
+    // setup window.
     blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
 #endif
 #if CONFIG_USE_ACOUSTIC_WIFI_PROVISIONING
@@ -233,7 +341,16 @@ void WifiBoard::EnterWifiConfigMode() {
     auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
 
-    if (state == kDeviceStateSpeaking || state == kDeviceStateListening || state == kDeviceStateIdle) {
+    if (state == kDeviceStateWifiConfiguring) {
+        esp_timer_stop(connect_timer_);
+        WifiManager::GetInstance().StopStation();
+        StartWifiConfigMode();
+        return;
+    }
+
+    if (state == kDeviceStateSpeaking || state == kDeviceStateListening ||
+        state == kDeviceStateIdle || state == kDeviceStateActivating ||
+        state == kDeviceStateConnecting) {
         // Reset protocol (close audio channel, reset protocol)
         Application::GetInstance().ResetProtocol();
 
@@ -256,7 +373,7 @@ void WifiBoard::EnterWifiConfigMode() {
     }
 
     if (state != kDeviceStateStarting) {
-        ESP_LOGE(TAG, "EnterWifiConfigMode called but device state is not starting or speaking, device state: %d", state);
+        ESP_LOGE(TAG, "EnterWifiConfigMode called but device state is not allowed for WiFi config: %d", state);
         return;
     }
 
@@ -368,8 +485,16 @@ std::string WifiBoard::GetDeviceStatusJson() {
     cJSON_AddStringToObject(network, "ssid", wifi.GetSsid().c_str());
     int rssi = wifi.GetRssi();
     const char* signal = rssi >= -60 ? "strong" : (rssi >= -70 ? "medium" : "weak");
+    cJSON_AddNumberToObject(network, "rssi", rssi);
     cJSON_AddStringToObject(network, "signal", signal);
     cJSON_AddItemToObject(root, "network", network);
+
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    cJSON_AddStringToObject(root, "ble_state", Blufi::GetInstance().GetBleStateString());
+#else
+    cJSON_AddStringToObject(root, "ble_state", "off");
+#endif
+    cJSON_AddStringToObject(root, "ap_state", GetApStateString());
 
     // Chip temperature
     float temp = 0.0f;

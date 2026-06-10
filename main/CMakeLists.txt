@@ -34,6 +34,7 @@ set(SOURCES "audio/audio_codec.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
+            "lesson_handler.cc"
             "ota.cc"
             "settings.cc"
             "device_state_machine.cc"
@@ -843,9 +844,11 @@ endif()
 if (CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
     list(APPEND SOURCES "boards/common/blufi.cpp")
 endif ()
+list(APPEND SOURCES "provisioning/claim_confirmation_reporter.cc")
+list(APPEND SOURCES "tbot_connect_mapper.cc")
+list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/provisioning)
 if (CONFIG_TBOT_PROVISIONING_REPORT_ENABLED)
     list(APPEND SOURCES "provisioning/provisioning_status_reporter.cc")
-    list(APPEND INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/provisioning)
 endif ()
 # Select language directory according to Kconfig
 if(CONFIG_LANGUAGE_ZH_CN)
@@ -929,6 +932,8 @@ endif()
 # Define generation path
 set(LANG_JSON "${CMAKE_CURRENT_SOURCE_DIR}/assets/locales/${LANG_DIR}/language.json")
 set(LANG_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/assets/lang_config.h")
+set(LANG_STAMP "${CMAKE_CURRENT_BINARY_DIR}/lang_config_language.stamp")
+file(WRITE "${LANG_STAMP}" "${LANG_DIR}\n")
 
 # Collect current language audio files
 file(GLOB LANG_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/locales/${LANG_DIR}/*.ogg)
@@ -1033,6 +1038,7 @@ add_custom_command(
             --output "${LANG_HEADER}"
     DEPENDS
         ${LANG_JSON}
+        ${LANG_STAMP}
         ${PROJECT_DIR}/scripts/gen_lang.py
     COMMENT "Generating ${LANG_DIR} language config"
 )
@@ -1041,6 +1047,7 @@ add_custom_command(
 add_custom_target(lang_header ALL
     DEPENDS ${LANG_HEADER}
 )
+add_dependencies(${COMPONENT_LIB} lang_header)
 
 # Find ESP-SR component dynamically
 find_component_by_pattern("espressif__esp-sr" ESP_SR_COMPONENT ESP_SR_COMPONENT_PATH)

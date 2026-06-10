@@ -1,0 +1,172 @@
+{
+  "image": "bright-sprite-atlas.png",
+  "source": "bright-black-sprite-sheet-source.png",
+  "cellWidth": 384,
+  "cellHeight": 384,
+  "columns": 4,
+  "rows": 2,
+  "order": [
+    "idle",
+    "wave",
+    "teach",
+    "cards",
+    "listening",
+    "thinking",
+    "celebrate",
+    "side"
+  ],
+  "frames": {
+    "idle": {
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-idle.png",
+      "spriteSourceSize": {
+        "x": 30,
+        "y": 21,
+        "w": 323,
+        "h": 363
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    },
+    "wave": {
+      "frame": {
+        "x": 384,
+        "y": 0,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-wave.png",
+      "spriteSourceSize": {
+        "x": 9,
+        "y": 23,
+        "w": 366,
+        "h": 361
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    },
+    "teach": {
+      "frame": {
+        "x": 768,
+        "y": 0,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-teach.png",
+      "spriteSourceSize": {
+        "x": 18,
+        "y": 26,
+        "w": 348,
+        "h": 358
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    },
+    "cards": {
+      "frame": {
+        "x": 1152,
+        "y": 0,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-cards.png",
+      "spriteSourceSize": {
+        "x": 46,
+        "y": 30,
+        "w": 291,
+        "h": 354
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    },
+    "listening": {
+      "frame": {
+        "x": 0,
+        "y": 384,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-listening.png",
+      "spriteSourceSize": {
+        "x": 37,
+        "y": 33,
+        "w": 310,
+        "h": 351
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    },
+    "thinking": {
+      "frame": {
+        "x": 384,
+        "y": 384,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-thinking.png",
+      "spriteSourceSize": {
+        "x": 73,
+        "y": 36,
+        "w": 237,
+        "h": 348
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    },
+    "celebrate": {
+      "frame": {
+        "x": 768,
+        "y": 384,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-celebrate.png",
+      "spriteSourceSize": {
+        "x": 11,
+        "y": 25,
+        "w": 362,
+        "h": 359
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    },
+    "side": {
+      "frame": {
+        "x": 1152,
+        "y": 384,
+        "w": 384,
+        "h": 384
+      },
+      "source": "bright-side.png",
+      "spriteSourceSize": {
+        "x": 85,
+        "y": 41,
+        "w": 213,
+        "h": 343
+      },
+      "pivot": {
+        "x": 0.5,
+        "y": 1.0
+      }
+    }
+  }
+}

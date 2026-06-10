@@ -1,0 +1,119 @@
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def kconfig_default(text: str, config_name: str) -> str:
+    match = re.search(
+        rf"config\s+{re.escape(config_name)}\b(?P<body>.*?)(?=\nconfig\s+|\nchoice\b|\nmenu\b|\nendmenu\b)",
+        text,
+        re.DOTALL,
+    )
+    assert match, f"missing config {config_name}"
+    default = re.search(r'^\s*default\s+"(?P<value>[^"]*)"', match.group("body"), re.MULTILINE)
+    assert default, f"missing default for {config_name}"
+    return default.group("value")
+
+
+def test_firmware_does_not_compile_a_final_websocket_endpoint_fallback():
+    kconfig = read("main/Kconfig.projbuild")
+
+    websocket_default = kconfig_default(kconfig, "WEBSOCKET_URL")
+
+    assert websocket_default in {
+        "",
+        "ws://your-ip-or-domain:port/tbot/v1/",
+        "wss://your-ip-or-domain:port/tbot/v1/",
+    }
+    assert "trycloudflare.com" not in websocket_default
+    assert "tbot-backend-8wmh.onrender.com" not in websocket_default
+
+
+def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
+    local_configs = sorted(path for path in ROOT.glob("sdkconfig*") if path.is_file())
+    assert local_configs
+
+    for sdkconfig in local_configs:
+        contents = sdkconfig.read_text(encoding="utf-8")
+        if "CONFIG_WEBSOCKET_URL=" not in contents:
+            continue
+
+        assert "trycloudflare.com/tbot/v1/" not in contents, sdkconfig.name
+        assert "tbot-backend-8wmh.onrender.com/tbot/v1/" not in contents, sdkconfig.name
+        assert 'CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"' in contents, sdkconfig.name
+
+
+def test_firmware_prefers_ota_returned_websocket_url_before_compile_fallback():
+    ota_cc = read("main/ota.cc")
+    websocket_cc = read("main/protocols/websocket_protocol.cc")
+
+    websocket_parse_start = ota_cc.index('cJSON *websocket = cJSON_GetObjectItem(root, "websocket")')
+    websocket_parse_end = ota_cc.index("has_server_time_ = false", websocket_parse_start)
+    websocket_parse_body = ota_cc[websocket_parse_start:websocket_parse_end]
+
+    assert 'Settings settings("websocket", true);' in websocket_parse_body
+    assert "cJSON_ArrayForEach(item, websocket)" in websocket_parse_body
+    assert "settings.SetString(item->string, item->valuestring);" in websocket_parse_body
+    assert "has_websocket_config_ = true;" in websocket_parse_body
+
+    open_start = websocket_cc.index("bool WebsocketProtocol::OpenAudioChannel()")
+    open_end = websocket_cc.index("websocket_->SetHeader", open_start)
+    open_body = websocket_cc[open_start:open_end]
+
+    assert 'Settings settings("websocket", false);' in open_body
+    assert 'settings.GetString("url", CONFIG_WEBSOCKET_URL)' in open_body
+
+def test_firmware_persists_ota_returned_backend_api_url_for_device_config_polling():
+    ota_cc = read("main/ota.cc")
+
+    assert 'cJSON *api_url = cJSON_GetObjectItem(root, "api_url")' in ota_cc
+    assert 'Settings settings("backend", true);' in ota_cc
+    assert 'settings.SetString("api_url", api_url->valuestring);' in ota_cc
+
+def test_firmware_preserves_ota_returned_websocket_url_even_when_tunnel_hosts_differ():
+    ota_cc = read("main/ota.cc")
+
+    assert "NormalizeOtaWebsocketUrl" not in ota_cc
+    assert "DeriveWebsocketUrlFromOtaUrl" not in ota_cc
+    assert "normalizing stale OTA websocket URL" not in ota_cc
+
+    websocket_parse_start = ota_cc.index('cJSON *websocket = cJSON_GetObjectItem(root, "websocket")')
+    websocket_parse_end = ota_cc.index("has_server_time_ = false", websocket_parse_start)
+    websocket_parse_body = ota_cc[websocket_parse_start:websocket_parse_end]
+
+    assert "settings.SetString(item->string, item->valuestring);" in websocket_parse_body
+    assert "NormalizeOtaWebsocketUrl" not in websocket_parse_body
+
+def test_ble_setup_timeout_matches_contract_in_local_blufi_configs():
+    for sdkconfig_name in ("sdkconfig", "sdkconfig.blufi"):
+        contents = read(sdkconfig_name)
+        assert "CONFIG_BLE_SETUP_TIMEOUT_SEC=300" in contents, sdkconfig_name
+
+def test_websocket_protocol_does_not_send_identity_or_auth_headers():
+    websocket_cc = read("main/protocols/websocket_protocol.cc")
+
+    assert 'websocket_->SetHeader("protocol-version", std::to_string(version_).c_str());' in websocket_cc
+    assert 'websocket_->SetHeader("authorization", token.c_str());' not in websocket_cc
+    assert 'websocket_->SetHeader("device-id", device_id.c_str());' not in websocket_cc
+    assert 'websocket_->SetHeader("client-id", client_id.c_str());' not in websocket_cc
+    assert 'websocket_->SetHeader("Authorization", token.c_str());' not in websocket_cc
+    assert 'websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());' not in websocket_cc
+    assert 'websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());' not in websocket_cc
+
+def test_websocket_protocol_adds_server_supported_identity_query_params_without_logging_token():
+    websocket_cc = read("main/protocols/websocket_protocol.cc")
+
+    assert "UrlEncodeQueryValue" in websocket_cc
+    assert "AppendWebsocketQueryParam" in websocket_cc
+    assert 'AppendWebsocketQueryParam(connect_url, "device-id", device_id);' in websocket_cc
+    assert 'AppendWebsocketQueryParam(connect_url, "client-id", client_id);' in websocket_cc
+    assert 'AppendWebsocketQueryParam(connect_url, "authorization", token);' in websocket_cc
+    assert "websocket_->Connect(connect_url.c_str())" in websocket_cc
+    assert 'ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_)' in websocket_cc
+    assert 'ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", connect_url.c_str(), version_)' not in websocket_cc

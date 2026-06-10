@@ -77,9 +77,13 @@ bool ProvisioningStatusReporter::Report(Status status,
         std::string body_copy = body;
         http->SetContent(std::move(body_copy));
 
-        ESP_LOGI(TAG, "Reporting attempt=%d status=%d url=%s token_prefix=%.8s body=%s",
+        // Never log the bootstrap token or the request body: the
+        // device_authenticated body carries the provisioning code, and the token
+        // is a credential. Log only non-secret routing fields plus the body
+        // length for diagnostics.
+        ESP_LOGI(TAG, "Reporting attempt=%d status=%d url=%s body_len=%u",
                  attempt + 1, static_cast<int>(status), url.c_str(),
-                 token.c_str(), body.c_str());
+                 static_cast<unsigned>(body.size()));
 
         if (!http->Open("POST", url)) {
             int err = http->GetLastError();
@@ -102,8 +106,11 @@ bool ProvisioningStatusReporter::Report(Status status,
             return true;
         }
 
-        ESP_LOGW(TAG, "Provisioning status report failed (HTTP %d) body=%s, will retry",
-                 status_code, resp_body.c_str());
+        // Redact the response body to a length only: a misbehaving backend could
+        // reflect the submitted request body (which carries the provisioning
+        // code) in an error response, so never log it verbatim.
+        ESP_LOGW(TAG, "Provisioning status report failed (HTTP %d) resp_len=%u, will retry",
+                 status_code, static_cast<unsigned>(resp_body.size()));
     }
 
     ESP_LOGE(TAG, "All %d provisioning report attempts failed", kMaxAttempts);

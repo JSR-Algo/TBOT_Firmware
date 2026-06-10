@@ -93,6 +93,9 @@ void Settings::EraseKey(const std::string& key) {
         auto ret = nvs_erase_key(nvs_handle_, key.c_str());
         if (ret != ESP_ERR_NVS_NOT_FOUND) {
             ESP_ERROR_CHECK(ret);
+            // An erase is a mutation: mark dirty so the destructor commits it,
+            // otherwise the removal is staged but never persisted across reboot.
+            dirty_ = true;
         }
     } else {
         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
@@ -102,6 +105,8 @@ void Settings::EraseKey(const std::string& key) {
 void Settings::EraseAll() {
     if (read_write_) {
         ESP_ERROR_CHECK(nvs_erase_all(nvs_handle_));
+        // Mark dirty so the destructor commits the wipe (else it never persists).
+        dirty_ = true;
     } else {
         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
     }

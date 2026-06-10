@@ -6,6 +6,7 @@
 #include <vector>
 #include "esp_blufi_api.h"
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -142,6 +143,10 @@ private:
     static int _get_softap_conn_num();
 
     // WiFi scan methods
+    bool EnsureWifiScanEventHandlerRegistered();
+    bool IsWifiScanCacheFresh() const;
+    void ScheduleClaimRefreshAfterTokenHandoff();
+    void TryReportProvisioningAuthenticated(const char* reason);
     void _send_wifi_list();
     void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
@@ -189,6 +194,7 @@ private:
     std::string bootstrap_token_;
     // Provisioning code received via BluFi custom-data TLV tag=0x02
     std::string provisioning_code_;
+    bool provisioning_report_in_flight_ = false;
 
     // State variables
     wifi_config_t m_sta_config{};
@@ -207,12 +213,22 @@ private:
     esp_timer_handle_t ble_setup_timer_ = nullptr;  // one-shot timer; nullptr when not armed
     bool ble_timed_out_ = false;                    // set by timer callback; prevents adv restart
 
+    // BLE re-advertise cap (C8): bound how many times advertising is restarted
+    // after a peer disconnect so a flapping/aborting central cannot make BLE
+    // tight-loop restart. Reset to 0 in init(); the 300s hard-timeout is the
+    // outer backstop. After the cap BLE stays down until the next setup entry.
+    int ble_readvertise_count_ = 0;
+    static constexpr int kMaxBleReadvertiseAttempts = 5;
+
     // Static trampoline for the esp_timer callback
     static void _ble_setup_timeout_cb(void* arg);
 
     // WiFi scan related
     std::vector<wifi_ap_record_t> m_ap_records;
+    int64_t m_ap_records_updated_us = 0;
+    static constexpr int64_t kWifiScanCacheMaxAgeUs = 10LL * 1000 * 1000;
     bool m_scan_in_progress = false;
+    esp_event_handler_instance_t scan_event_instance_ = nullptr;
     // When true, scan results are stored in m_ap_records on scan completion.
     // Cleared during connect-to-AP so that the connect-time scan does not
     // overwrite the cache with results gathered for connection purposes.

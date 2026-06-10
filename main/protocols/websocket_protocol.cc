@@ -3,6 +3,7 @@
 #include "system_info.h"
 #include "application.h"
 #include "settings.h"
+#include "lesson_handler.h"  // US-006 Slice-01: kLessonRendererName (D-CAP-FLAG)
 
 #include <cstring>
 #include <cJSON.h>
@@ -11,6 +12,37 @@
 #include "assets/lang_config.h"
 
 #define TAG "WS"
+
+static bool IsUrlUnreserved(char ch) {
+    return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+           (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+           ch == '.' || ch == '~';
+}
+
+static std::string UrlEncodeQueryValue(const std::string& value) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(value.size());
+    for (unsigned char ch : value) {
+        if (IsUrlUnreserved(static_cast<char>(ch))) {
+            encoded.push_back(static_cast<char>(ch));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(hex[ch >> 4]);
+            encoded.push_back(hex[ch & 0x0F]);
+        }
+    }
+    return encoded;
+}
+
+static void AppendWebsocketQueryParam(std::string& url,
+                                      const std::string& name,
+                                      const std::string& value) {
+    url.push_back(url.find('?') == std::string::npos ? '?' : '&');
+    url += name;
+    url.push_back('=');
+    url += UrlEncodeQueryValue(value);
+}
 
 WebsocketProtocol::WebsocketProtocol() {
     event_group_handle_ = xEventGroupCreate();
@@ -21,7 +53,13 @@ WebsocketProtocol::~WebsocketProtocol() {
 }
 
 bool WebsocketProtocol::Start() {
-    // Only connect to server when audio channel is needed
+    // Warm the websocket session during activation so the first wake word does
+    // not block in the cold TLS/WebSocket handshake path.
+    ESP_LOGI(TAG, "Preconnecting websocket audio channel");
+    bool opened = OpenAudioChannel();
+    if (!opened) {
+        ESP_LOGW(TAG, "Websocket preconnect failed; wake word will retry on demand");
+    }
     return true;
 }
 
@@ -88,6 +126,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
     if (version != 0) {
         version_ = version;
     }
+    const std::string device_id = SystemInfo::GetMacAddress();
+    const std::string client_id = Board::GetInstance().GetUuid();
 
     error_occurred_ = false;
 
@@ -103,11 +143,17 @@ bool WebsocketProtocol::OpenAudioChannel() {
         if (token.find(" ") == std::string::npos) {
             token = "Bearer " + token;
         }
-        websocket_->SetHeader("Authorization", token.c_str());
     }
-    websocket_->SetHeader("Protocol-Version", std::to_string(version_).c_str());
-    websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());
-    websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());
+    websocket_->SetHeader("protocol-version", std::to_string(version_).c_str());
+
+    std::string connect_url = url;
+    AppendWebsocketQueryParam(connect_url, "device-id", device_id);
+    AppendWebsocketQueryParam(connect_url, "client-id", client_id);
+    if (!token.empty()) {
+        AppendWebsocketQueryParam(connect_url, "authorization", token);
+    }
+    ESP_LOGI(TAG, "Websocket auth identity: device-id=%s client-id=%s token_empty=%d",
+             device_id.c_str(), client_id.c_str(), token.empty());
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
@@ -166,14 +212,17 @@ bool WebsocketProtocol::OpenAudioChannel() {
     });
 
     websocket_->OnDisconnected([this]() {
-        ESP_LOGI(TAG, "Websocket disconnected");
+        // OBS-1: log WHY the channel dropped (last error code + whether the
+        // app-level idle timeout tripped) so reconnect storms are debuggable.
+        int err_code = websocket_ != nullptr ? websocket_->GetLastError() : -1;
+        ESP_LOGW(TAG, "ws_disconnect err_code=%d idle_timeout=%d", err_code, IsTimeout() ? 1 : 0);
         if (on_audio_channel_closed_ != nullptr) {
             on_audio_channel_closed_();
         }
     });
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
-    if (!websocket_->Connect(url.c_str())) {
+    if (!websocket_->Connect(connect_url.c_str())) {
         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
@@ -210,6 +259,11 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddBoolToObject(features, "aec", true);
 #endif
     cJSON_AddBoolToObject(features, "mcp", true);
+    // US-006 Slice-01 (D-CAP-FLAG, ADR 0013 §I): advertise lesson-render capability.
+    // Absence == no support; the ESP Server MUST NOT send lesson_prepare to firmware
+    // that did not advertise this. Purely additive — does not disturb aec/mcp/voice.
+    cJSON_AddBoolToObject(features, "lesson", true);
+    cJSON_AddStringToObject(features, "renderer", kLessonRendererName);
     cJSON_AddItemToObject(root, "features", features);
     cJSON_AddStringToObject(root, "transport", "websocket");
     cJSON* audio_params = cJSON_CreateObject();

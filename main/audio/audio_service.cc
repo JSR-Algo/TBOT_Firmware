@@ -37,6 +37,10 @@
 
 #define TAG "AudioService"
 
+static bool ShouldLogAudioDiagnostic(uint32_t count) {
+    return count <= 5 || (count % 20) == 0;
+}
+
 AudioService::AudioService() {
     event_group_ = xEventGroupCreate();
 }
@@ -276,6 +280,7 @@ void AudioService::AudioInputTask() {
                 if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
                     audio_processor_->Feed(std::move(data));
                 }
+                vTaskDelay(pdMS_TO_TICKS(1));
                 continue;
             }
         }
@@ -306,11 +311,18 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
 
+        uint32_t playback_count = debug_statistics_.playback_count + 1;
+        if (ShouldLogAudioDiagnostic(playback_count)) {
+            ESP_LOGD(TAG, "tts_packet_playback count=%lu pcm_samples=%u output_enabled=%d volume=%d",
+                     static_cast<unsigned long>(playback_count),
+                     static_cast<unsigned>(task->pcm.size()),
+                     codec_->output_enabled(), codec_->output_volume());
+        }
         codec_->OutputData(task->pcm);
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
-        debug_statistics_.playback_count++;
+        debug_statistics_.playback_count = playback_count;
 
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
@@ -340,6 +352,18 @@ void AudioService::OpusCodecTask() {
         if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
             auto packet = std::move(audio_decode_queue_.front());
             audio_decode_queue_.pop_front();
+            // Barge-in gen-gate: drop frames belonging to a cancelled response,
+            // even ones already queued before the interrupt. Still holding the
+            // lock; notify so a producer waiting on queue space never stalls,
+            // then continue to re-evaluate the wait predicate next iteration.
+            if (packet->generation != playback_generation_.load()) {
+                debug_statistics_.stale_frame_count++;
+                audio_queue_cv_.notify_all();
+                continue;
+            }
+            uint32_t encoded_size = packet->payload.size();
+            int packet_sample_rate = packet->sample_rate;
+            int packet_frame_duration = packet->frame_duration;
             audio_queue_cv_.notify_all();
             lock.unlock();
 
@@ -379,17 +403,27 @@ void AudioService::OpusCodecTask() {
                     }
                     lock.lock();
                     audio_playback_queue_.push_back(std::move(task));
+                    uint32_t playback_queue_size = audio_playback_queue_.size();
                     audio_queue_cv_.notify_all();
                     debug_statistics_.decode_count++;
+                    if (ShouldLogAudioDiagnostic(debug_statistics_.decode_count)) {
+                        ESP_LOGD(TAG, "tts_packet_decoded count=%lu encoded_bytes=%lu sample_rate=%d frame_duration=%d pcm_samples=%u playback_queue=%lu",
+                                 static_cast<unsigned long>(debug_statistics_.decode_count),
+                                 static_cast<unsigned long>(encoded_size),
+                                 packet_sample_rate, packet_frame_duration,
+                                 static_cast<unsigned>(audio_playback_queue_.back()->pcm.size()),
+                                 static_cast<unsigned long>(playback_queue_size));
+                    }
                 } else {
+                    debug_statistics_.decode_fail_count++;
                     ESP_LOGE(TAG, "Failed to decode audio after resize, error code: %d", ret);
                     lock.lock();
                 }
             } else {
+                debug_statistics_.decode_fail_count++;
                 ESP_LOGE(TAG, "Audio decoder is not configured");
                 lock.lock();
             }
-            debug_statistics_.decode_count++;
         }
         /* Encode the audio to send queue */
         if (!audio_encode_queue_.empty() && audio_send_queue_.size() < MAX_SEND_PACKETS_IN_QUEUE) {
@@ -498,21 +532,53 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
         timestamp_queue_.pop_front();
     }
 
-    audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
+    // Do NOT block indefinitely while holding audio_queue_mutex_. If the codec
+    // task is wedged (e.g. the send queue stays full because WS egress stalled),
+    // an unbounded wait here freezes the whole audio subsystem — decode,
+    // playback and abort all take this same mutex. Bound the wait and, on
+    // timeout, drop the oldest mic frame (realtime: stale uplink is worthless).
+    bool has_space = audio_queue_cv_.wait_for(lock, std::chrono::milliseconds(100), [this]() {
+        return service_stopped_ || audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE;
+    });
+    if (service_stopped_) {
+        return;
+    }
+    if (!has_space && !audio_encode_queue_.empty()) {
+        audio_encode_queue_.pop_front();
+        debug_statistics_.encode_drop_count++;
+    }
     audio_encode_queue_.push_back(std::move(task));
     audio_queue_cv_.notify_all();
 }
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
+    if (packet == nullptr) {
+        return false;
+    }
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    size_t payload_size = packet->payload.size();
+    int sample_rate = packet->sample_rate;
+    int frame_duration = packet->frame_duration;
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
             audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
         } else {
+            debug_statistics_.decode_drop_count++;
+            ESP_LOGW(TAG, "tts_packet_dropped reason=decode_queue_full drops=%lu payload_bytes=%lu sample_rate=%d frame_duration=%d decode_queue=%lu",
+                     static_cast<unsigned long>(debug_statistics_.decode_drop_count),
+                     static_cast<unsigned long>(payload_size), sample_rate, frame_duration,
+                     static_cast<unsigned long>(audio_decode_queue_.size()));
             return false;
         }
     }
     audio_decode_queue_.push_back(std::move(packet));
+    debug_statistics_.incoming_decode_packet_count++;
+    if (ShouldLogAudioDiagnostic(debug_statistics_.incoming_decode_packet_count)) {
+        ESP_LOGD(TAG, "tts_packet_queued count=%lu payload_bytes=%lu sample_rate=%d frame_duration=%d decode_queue=%lu wait=%d",
+                 static_cast<unsigned long>(debug_statistics_.incoming_decode_packet_count),
+                 static_cast<unsigned long>(payload_size), sample_rate, frame_duration,
+                 static_cast<unsigned long>(audio_decode_queue_.size()), wait ? 1 : 0);
+    }
     audio_queue_cv_.notify_all();
     return true;
 }
@@ -547,6 +613,9 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
 }
 
 void AudioService::EnableWakeWordDetection(bool enable) {
+    if (!wake_word_ && enable) {
+        CreateWakeWordIfAvailable();
+    }
     if (!wake_word_) {
         return;
     }
@@ -574,6 +643,20 @@ void AudioService::EnableWakeWordDetection(bool enable) {
         wake_word_->Stop();
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
     }
+}
+
+void AudioService::ReleaseWakeWordResourcesForWifiConfig() {
+    if (!wake_word_) {
+        return;
+    }
+
+    EnableWakeWordDetection(false);
+    // Give the audio input task one scheduling slice to observe the stopped bit
+    // before destroying the AFE object. This path runs only on explicit setup.
+    vTaskDelay(pdMS_TO_TICKS(80));
+    wake_word_.reset();
+    wake_word_initialized_ = false;
+    ESP_LOGI(TAG, "Wake word resources released for WiFi config");
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {
@@ -694,6 +777,13 @@ void AudioService::ResetDecoder() {
     audio_queue_cv_.notify_all();
 }
 
+void AudioService::GetQueueDepths(uint32_t& decode, uint32_t& send, uint32_t& playback) {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    decode = static_cast<uint32_t>(audio_decode_queue_.size());
+    send = static_cast<uint32_t>(audio_send_queue_.size());
+    playback = static_cast<uint32_t>(audio_playback_queue_.size());
+}
+
 void AudioService::CheckAndUpdateAudioPowerState() {
     auto now = std::chrono::steady_clock::now();
     auto input_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_input_time_).count();
@@ -715,6 +805,10 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
 
+    CreateWakeWordIfAvailable();
+}
+
+void AudioService::CreateWakeWordIfAvailable() {
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
     if (esp_srmodel_filter(models_list_, ESP_MN_PREFIX, NULL) != nullptr) {
         wake_word_ = std::make_unique<CustomWakeWord>();
@@ -738,6 +832,7 @@ void AudioService::SetModelsList(srmodel_list_t* models_list) {
             }
         });
     }
+    wake_word_initialized_ = false;
 }
 
 bool AudioService::IsAfeWakeWord() {

@@ -78,8 +78,17 @@ void Protocol::SendMcpMessage(const std::string& payload) {
     SendText(message);
 }
 
+bool Protocol::SendLessonFrame(const std::string& frame) {
+    // US-006 Slice-01: the lesson frame is already a complete envelope (built by
+    // lesson_handler.cc); send it verbatim. Additive — does not touch the voice/MCP
+    // send paths; reuses the existing protected SendText.
+    return SendText(frame);
+}
+
 bool Protocol::IsTimeout() const {
-    const int kTimeoutSeconds = 120;
+    // WSS-3: 30s for the realtime audio channel (was 120s). A half-open WS that
+    // stops delivering data is detected far sooner -> faster reconnect.
+    const int kTimeoutSeconds = 30;
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
     bool timeout = duration.count() > kTimeoutSeconds;

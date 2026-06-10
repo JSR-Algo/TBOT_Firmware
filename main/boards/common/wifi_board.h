@@ -12,6 +12,34 @@ protected:
     bool in_config_mode_ = false;
     NetworkEventCallback network_event_callback_ = nullptr;
 
+    // AP-setup hard-timeout safety gate (mirrors the BLE gate in blufi.cpp).
+    // SoftAP/Hotspot provisioning must NOT run forever: when this one-shot timer
+    // fires without provisioning completing, StopConfigAp() is posted to the
+    // Application task (never executed in the timer callback) to avoid WDT/race
+    // conditions, and ap_timed_out_ latches so the AP is not re-opened.
+    esp_timer_handle_t ap_setup_timer_ = nullptr;  // one-shot; nullptr when not armed
+    bool ap_timed_out_ = false;                    // set by timer cb; blocks AP re-open
+
+    /**
+     * @brief Arm the AP-setup hard-timeout timer.
+     * @param seconds Wall-clock budget for SoftAP provisioning (CONFIG_AP_SETUP_TIMEOUT_SEC).
+     */
+    void StartApSetupTimeout(int seconds);
+
+    /**
+     * @brief Cancel the AP-setup timeout (call on Wi-Fi connect / config-mode exit).
+     * Safe to call when never armed or already fired.
+     */
+    void CancelApSetupTimeout();
+
+    /**
+     * @brief AP state string for heartbeat / observability.
+     * @return "off" | "active" | "timeout".
+     */
+    const char* GetApStateString() const;
+
+    static void OnApSetupTimeout(void* arg);
+
     virtual std::string GetBoardJson() override;
 
     /**

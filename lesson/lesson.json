@@ -1,0 +1,169 @@
+{
+  "exportedAt": "2026-06-02T15:36:58+07:00",
+  "sourceApp": {
+    "project": "TBot-Child-Companion",
+    "lessonFile": "TBot-Child-Companion/src/store/useLessonStore.ts",
+    "lessonRoute": "/(main)/lesson-player",
+    "lessonListRoute": "/(main)/lessons",
+    "lessonIndex": 0
+  },
+  "lesson": {
+    "id": "w01-d01-barn-say-it",
+    "title": "This Is a Barn",
+    "theme": "Barn Farm Place Words",
+    "focusItems": ["barn", "farm", "hay"],
+    "ageBand": "4-6",
+    "durationMinutes": 5,
+    "l1TransferTarget": "final_consonants",
+    "media": {
+      "videoSrc": "backgrounds/scenes/barn-round-field.mp4",
+      "subjectSlug": "barn",
+      "loop": true,
+      "duration_s": 12,
+      "tap_moments": [
+        {
+          "tStart": 0.5,
+          "tEnd": 5.5,
+          "x": 0.5,
+          "y": 0.5,
+          "w": 0.42,
+          "h": 0.42
+        }
+      ],
+      "alt_caption": "A clay barn floating in a bright sky",
+      "license": "user-upload"
+    },
+    "steps": [
+      {
+        "id": "s1",
+        "type": "greeting",
+        "title": "Hello from TeeBot",
+        "prompt": "Hey there! TeeBot is so happy to see you today. Are you ready to explore?",
+        "robotState": "talking",
+        "videoHint": "lesson"
+      },
+      {
+        "id": "s2",
+        "type": "review",
+        "title": "Warm-Up",
+        "prompt": "Do you remember how to say hello? Wave and say \"Hello, TeeBot!\"",
+        "robotState": "talking",
+        "helperText": "Big smile and a wave!"
+      },
+      {
+        "id": "s3",
+        "type": "focus",
+        "title": "New Words",
+        "prompt": "Today we are visiting a barn! A barn is a big house for farm animals. We will also learn \"farm\" and \"hay.\"",
+        "robotState": "talking",
+        "helperText": "Look at the picture and listen."
+      },
+      {
+        "id": "s4",
+        "type": "model",
+        "title": "TeeBot Shows You",
+        "prompt": "This is a barn. Watch my mouth: \"barn.\" Make a strong /b/ sound and keep the /n/ at the end!",
+        "robotState": "modeling",
+        "helperText": "Look at the barn and make a strong /b/ sound.",
+        "videoHint": "lesson"
+      },
+      {
+        "id": "s5",
+        "type": "listen",
+        "title": "Listen Carefully",
+        "prompt": "Listen to \"barn\" one more time. Hear the ending sound? b-a-r-n.",
+        "robotState": "listening",
+        "helperText": "Listen for the last sound."
+      },
+      {
+        "id": "s6",
+        "type": "repeat",
+        "title": "Your Barn Word",
+        "prompt": "Now you say it: \"barn.\"",
+        "robotState": "listening",
+        "helperText": "Short and strong: barn. Say the ending sound clearly!",
+        "l1TransferHint": "In Vietnamese we say \"chu\u1ed3ng,\" but in English we must say the whole word \"barn\" - don't drop the ending /n/ sound!"
+      },
+      {
+        "id": "s7",
+        "type": "fillBlank",
+        "title": "What do you see?",
+        "prompt": "At the ___, I see animals.",
+        "robotState": "thinking",
+        "choices": [
+          {
+            "id": "c1",
+            "label": "barn",
+            "isCorrect": true
+          },
+          {
+            "id": "c2",
+            "label": "house",
+            "isCorrect": false
+          },
+          {
+            "id": "c3",
+            "label": "tree",
+            "isCorrect": false
+          }
+        ]
+      },
+      {
+        "id": "s8",
+        "type": "feedback",
+        "title": "Great Listening!",
+        "prompt": "Wonderful! Remember: in English, every word needs its ending sound. \"Barn\" has a strong /n/ at the end. You did it!",
+        "robotState": "talking",
+        "helperText": "Final consonants make English clear."
+      },
+      {
+        "id": "s9",
+        "type": "celebrate",
+        "title": "Barn Star!",
+        "prompt": "You found the barn with TeeBot! Look how your garden is growing!",
+        "robotState": "celebrating",
+        "videoHint": "celebration",
+        "parentSummary": "Today your child practiced place words (barn, farm, hay) and worked on final consonants - a common challenge for Vietnamese learners. Try asking \"What is this?\" while looking at farm picture books."
+      }
+    ],
+    "sourceReferences": [
+      {
+        "type": "open_educational_resource",
+        "title": "Oxford Phonics World - Sample Pages",
+        "publisher": "Oxford University Press",
+        "country": "United Kingdom",
+        "ageBand": ["4-6", "7-9"],
+        "level": "Starter",
+        "CEFR": "Pre-A1",
+        "skills": ["phonics", "listening", "speaking"],
+        "structure": {
+          "stepCount": { "min": 4, "max": 6 },
+          "durationMinutes": { "min": 5, "max": 10 },
+          "sequence": ["warm_up", "model", "practice", "review"],
+          "presentationPattern": "spiral",
+          "assessmentType": "formative",
+          "l1Support": "none"
+        },
+        "vietnameseRelevance": {
+          "score": 7,
+          "transferTargets": ["final_consonants", "consonant_clusters"],
+          "hasVietnameseSupport": false,
+          "testedWithVietnameseLearners": false,
+          "notes": "Phonics sequence addresses Vietnamese final consonant deletion."
+        },
+        "takeaway": "Use 4-step spiral: warm-up -> model -> practice -> review. Focus on final consonant awareness.",
+        "limitations": "No Vietnamese L1 support. English-only audio. Requires adaptation for stress patterns.",
+        "urls": [
+          {
+            "url": "https://elt.oup.com/catalogue/items/global/young_learners/oxford_phonics_world/",
+            "urlType": "landing_page",
+            "lastVerifiedAt": "2026-05-22T00:00:00Z",
+            "verificationStatus": "200_ok"
+          }
+        ],
+        "status": "APPROVED"
+      }
+    ]
+  }
+}
+

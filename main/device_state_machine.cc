@@ -78,9 +78,10 @@ bool DeviceStateMachine::IsValidTransition(DeviceState from, DeviceState to) con
                    to == kDeviceStateWifiConfiguring;
 
         case kDeviceStateConnecting:
-            // Can go to idle (failed) or listening (success)
+            // Can go to idle (failed), listening (success), or wifi config when the user interrupts backend connect
             return to == kDeviceStateIdle ||
-                   to == kDeviceStateListening;
+                   to == kDeviceStateListening ||
+                   to == kDeviceStateWifiConfiguring;
 
         case kDeviceStateListening:
             // Can go to speaking or idle

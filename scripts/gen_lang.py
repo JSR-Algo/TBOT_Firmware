@@ -10,19 +10,19 @@ HEADER_TEMPLATE = """// Auto-generated language config
 #include <string_view>
 
 #ifndef {lang_code_for_font}
-    #define {lang_code_for_font}  // 預設語言
+    #define {lang_code_for_font}  // Default language
 #endif
 
 namespace Lang {{
-    // 语言元数据
+    // Language metadata
     constexpr const char* CODE = "{lang_code}";
 
-    // 字符串资源 (en-US as fallback for missing keys)
+    // String resources (en-US as fallback for missing keys)
     namespace Strings {{
 {strings}
     }}
 
-    // 音效资源 (en-US as fallback for missing audio files)
+    // Sound resources (en-US as fallback for missing audio files)
     namespace Sounds {{
 {sounds}
     }}

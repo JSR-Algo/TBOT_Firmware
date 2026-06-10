@@ -71,7 +71,7 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();
         vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, 3, NULL);
+    }, "audio_communication", 4096, this, tskIDLE_PRIORITY, NULL);
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
@@ -149,6 +149,7 @@ void AfeAudioProcessor::AudioProcessorTask() {
             if (res != nullptr) {
                 ESP_LOGI(TAG, "Error code: %d", res->ret_value);
             }
+            vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
 
@@ -183,6 +184,7 @@ void AfeAudioProcessor::AudioProcessorTask() {
                 }
             }
         }
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
