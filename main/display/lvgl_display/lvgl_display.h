@@ -21,6 +21,13 @@ public:
     virtual void ShowNotification(const char* notification, int duration_ms = 3000);
     virtual void ShowNotification(const std::string &notification, int duration_ms = 3000);
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image);
+    // US-006 lesson image render: a full-screen, PERSISTENT background image draw,
+    // distinct from SetPreviewImage (which is centered, half-screen, and auto-hides
+    // after PREVIEW_IMAGE_DURATION_MS). The lesson background must stay up for the
+    // whole step, so it has no auto-hide timer. Default no-op (only LcdDisplay, the
+    // class that owns the LVGL object tree, implements it); pass nullptr to clear it
+    // and restore the realtime emoji face. Reuses the same LvglImage/decoder path.
+    virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) {}
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);

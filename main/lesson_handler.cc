@@ -13,13 +13,20 @@
 #include "assets.h"
 #include "protocol.h"
 #include "lesson_handler.h"
+// US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
+// SetLessonBackground (the new persistent full-screen draw) and LvglAllocatedImage is
+// the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
+#include "lvgl_display.h"
+#include "lvgl_image.h"
 
 #include <ctime>
 #include <cstring>
 #include <string>
+#include <memory>
 
 #include <cJSON.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 
 #define TAG "Lesson"
 
@@ -171,6 +178,78 @@ bool AssetAvailable(const char* name) {
     void* ptr = nullptr;
     size_t size = 0;
     return Assets::GetInstance().GetAssetData(std::string(name), ptr, size) && size > 0;
+}
+
+// US-006 image render — HTTP GET a lesson image URL and DECODE it into an LvglImage.
+// This is the firmware half the recon flagged as missing: the backend already emits
+// resolved scene.*.src URLs and the ESP server downloads/sha256-verifies the bytes,
+// but the firmware previously only probed the flashed asset image. We now fetch the
+// authored URL over the existing network stack and hand the raw bytes to
+// LvglAllocatedImage, REUSING the exact proven pipeline in mcp_server.cc:332-361
+// (HTTP GET -> heap_caps_malloc -> LvglAllocatedImage). The LVGL PNG/JPEG decoder is
+// already compiled in (CONFIG_LV_USE_LODEPNG=y), so LvglAllocatedImage's ctor decodes
+// via lv_image_decoder_get_info on first draw.
+//
+// FAILURE IS NEVER FATAL: any error (no URL, no network, bad status, alloc fail, short
+// read) returns nullptr and the caller falls back to the caption-only ladder. We run
+// on the protocol receive task (HandleLessonMessage), so this blocking download does
+// NOT stall the LVGL/app task; the decoded draw is then marshalled via Schedule().
+std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
+    if (url == nullptr || url[0] == '\0') return nullptr;
+
+    auto* network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        ESP_LOGW(TAG, "lesson image fetch: no network");
+        return nullptr;
+    }
+    auto http = network->CreateHttp(3);
+    if (!http) return nullptr;
+
+    if (!http->Open("GET", url)) {
+        ESP_LOGW(TAG, "lesson image fetch: open failed");
+        return nullptr;
+    }
+    if (http->GetStatusCode() != 200) {
+        ESP_LOGW(TAG, "lesson image fetch: status %d", http->GetStatusCode());
+        http->Close();
+        return nullptr;
+    }
+
+    size_t content_length = http->GetBodyLength();
+    if (content_length == 0) {
+        ESP_LOGW(TAG, "lesson image fetch: empty body");
+        http->Close();
+        return nullptr;
+    }
+    char* data = static_cast<char*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
+    if (data == nullptr) {
+        ESP_LOGW(TAG, "lesson image fetch: alloc %u failed", (unsigned)content_length);
+        http->Close();
+        return nullptr;
+    }
+    size_t total_read = 0;
+    while (total_read < content_length) {
+        int ret = http->Read(data + total_read, content_length - total_read);
+        if (ret < 0) {
+            ESP_LOGW(TAG, "lesson image fetch: read error");
+            heap_caps_free(data);
+            http->Close();
+            return nullptr;
+        }
+        if (ret == 0) break;  // server closed early
+        total_read += ret;
+    }
+    http->Close();
+    if (total_read < content_length) {
+        ESP_LOGW(TAG, "lesson image fetch: short read %u/%u",
+                 (unsigned)total_read, (unsigned)content_length);
+        heap_caps_free(data);
+        return nullptr;
+    }
+
+    // LvglAllocatedImage takes ownership of `data` (frees it in its dtor, which runs
+    // when the cached unique_ptr in LcdDisplay is replaced/reset).
+    return std::make_unique<LvglAllocatedImage>(data, content_length);
 }
 
 }  // namespace
@@ -326,9 +405,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.running = false;
         g_session.prepared = false;
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
-        // Return the robot display to its idle realtime state (protocol §4.6).
+        // Return the robot display to its idle realtime state (protocol §4.6): clear any
+        // persistent lesson background poster (US-006) and restore the neutral face.
         Display* display = Board::GetInstance().GetDisplay();
-        if (display) Schedule([display]() { display->SetEmotion("neutral"); });
+        LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+        if (display) {
+            Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                display->SetEmotion("neutral");
+            });
+        }
         return;
     }
     if (strcmp(type, "lesson_step") != 0) {
@@ -361,12 +447,51 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
 
     // Degraded fallback ladder: poster -> teachingObject PNG -> primitive glyph
-    // card -> emoji-face + caption. The image rungs probe the on-device asset image
-    // (D-PRELOAD-OWNER); absent in slice-01 -> fall through (see lesson_handler.h).
+    // card -> emoji-face + caption. US-006 image render: instead of only probing the
+    // on-device flashed asset image (which never holds per-assignment lesson posters),
+    // we now FETCH the authored URL (scene.backgroundScene.poster.src) over HTTP and
+    // DECODE it, reusing the proven mcp_server.cc download->LvglAllocatedImage path.
+    // The fetched bytes are drawn as a full-screen, persistent background via the new
+    // LcdDisplay::SetLessonBackground (distinct from the centered 5s auto-hide preview).
+    // The teachingObject PNG (object_src) is NOT drawn as a foreground object in this
+    // slice — there is one full-screen background draw target; teachingObject still
+    // contributes its label/glyph to the caption below. AssetAvailable() is retained as
+    // a cheap on-device fallback for the (rare) case a poster is also flashed.
     const char* poster_src = Str(Obj(bg, "poster"), "src");
     const char* object_src = Str(Obj(to, "asset"), "src");
-    const bool poster_drew = AssetAvailable(poster_src);   // slice-01: false (not flashed)
-    const bool object_drew = AssetAvailable(object_src);   // slice-01: false (not flashed)
+
+    // Resolve the display once and require it to be an LvglDisplay (the only class with
+    // a real image draw path; OledDisplay/NoDisplay get caption-only). dynamic_cast
+    // mirrors mcp_server.cc:255 and yields nullptr on non-LVGL boards.
+    Display* base_display = Board::GetInstance().GetDisplay();
+    LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(base_display);
+
+    // Try to fetch + decode the authored poster. On any failure FetchLessonImage
+    // returns nullptr and we fall through to the caption-only render (never crash).
+    bool poster_drew = false;
+    if (lvgl_display != nullptr && poster_src != nullptr) {
+        std::unique_ptr<LvglImage> bg_image = FetchLessonImage(poster_src);
+        if (bg_image != nullptr) {
+            // Marshal the persistent full-screen draw onto the LVGL/app task (the LVGL
+            // object tree is owned there). Schedule() takes a COPYABLE std::function, so
+            // we cannot capture the move-only unique_ptr directly; hand off ownership as
+            // a raw pointer (release) and re-wrap it in a unique_ptr inside the lambda,
+            // which then transfers ownership to SetLessonBackground. The lambda runs
+            // exactly once, so the raw pointer is always re-owned (no leak).
+            LvglImage* raw_bg = bg_image.release();
+            Schedule([lvgl_display, raw_bg]() {
+                lvgl_display->SetLessonBackground(std::unique_ptr<LvglImage>(raw_bg));
+            });
+            poster_drew = true;
+            ESP_LOGI(TAG, "lesson_step poster fetched+drawn from URL");
+        } else {
+            ESP_LOGW(TAG, "lesson_step poster fetch failed; caption-only fallback");
+        }
+    }
+    // On-device fallback: if no URL poster drew but the poster IS flashed locally, the
+    // existing build-time asset image still satisfies the rung (slice-01: usually false).
+    if (!poster_drew && AssetAvailable(poster_src)) poster_drew = true;
+    const bool object_drew = AssetAvailable(object_src);   // teachingObject still flash-only
 
     const cJSON* card = Obj(to, "primitiveFallbackCard");
     const char* glyph = Str(card, "glyph");
@@ -396,10 +521,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool degraded = !(poster_drew && object_drew);
 
     // Marshal the draw onto the LVGL task, exactly like the TTS-display pattern
-    // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption.
-    Display* display = Board::GetInstance().GetDisplay();
+    // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption are
+    // ALWAYS drawn (over the poster background when one fetched). If THIS step drew no
+    // poster, clear any background a previous step left up so a caption-only step is not
+    // shown over a stale picture.
+    Display* display = base_display;
     if (display) {
-        Schedule([display, emo = std::string(emotion), cap = caption]() {
+        const bool clear_bg = !poster_drew;
+        Schedule([display, lvgl_display, clear_bg,
+                  emo = std::string(emotion), cap = caption]() {
+            if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             display->SetEmotion(emo.c_str());
             if (!cap.empty()) display->SetChatMessage("assistant", cap.c_str());
         });

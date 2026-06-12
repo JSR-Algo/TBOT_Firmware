@@ -306,6 +306,9 @@ LcdDisplay::~LcdDisplay() {
     if (preview_image_ != nullptr) {
         lv_obj_del(preview_image_);
     }
+    if (lesson_background_ != nullptr) {
+        lv_obj_del(lesson_background_);
+    }
     if (chat_message_label_ != nullptr) {
         lv_obj_del(chat_message_label_);
     }
@@ -387,6 +390,17 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_pad_row(container_, 0, 0);
     lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
+
+    /* US-006 lesson background: full-screen, persistent poster. Created on `screen`
+     * (NOT inside the flex `container_`) so it underlays the whole chat layout and is
+     * not subject to flex sizing; moved to the back of the z-order so the chat bars
+     * stay on top. Hidden until a lesson_step draws into it (SetLessonBackground);
+     * no auto-hide timer (distinct from the centered chat-bubble preview). */
+    lesson_background_ = lv_image_create(screen);
+    lv_obj_set_size(lesson_background_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_to_index(lesson_background_, 0);  // behind container_ (the chat UI)
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(container_);
@@ -787,6 +801,34 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     lv_obj_scroll_to_view_recursive(img_bubble, LV_ANIM_ON);
 }
 
+// US-006 lesson image render: full-screen PERSISTENT background poster (wechat-style
+// build). Distinct from SetPreviewImage above (a transient chat bubble inside the
+// scrolling content_): this draws into the screen-level lesson_background_ object,
+// fills the panel, stays up for the whole step, and has NO auto-hide. nullptr clears.
+void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
+    DisplayLockGuard lock(this);
+    if (lesson_background_ == nullptr) {
+        ESP_LOGE(TAG, "Lesson background object is not initialized");
+        return;
+    }
+
+    if (image == nullptr) {
+        lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+        lesson_background_cached_.reset();
+        return;
+    }
+
+    lesson_background_cached_ = std::move(image);
+    auto img_dsc = lesson_background_cached_->image_dsc();
+    lv_image_set_src(lesson_background_, img_dsc);
+    if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
+        lv_image_set_scale(lesson_background_, 256 * width_ / img_dsc->header.w);
+    }
+    lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_move_to_index(lesson_background_, 0);  // keep it behind the chat UI
+    lv_obj_remove_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+}
+
 void LcdDisplay::ClearChatMessages() {
     DisplayLockGuard lock(this);
     if (content_ == nullptr) {
@@ -834,6 +876,16 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_border_width(container_, 0, 0);
     lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
+
+    /* US-006 lesson background: full-screen, persistent poster behind everything.
+     * Created right after container_ so it sits at the BOTTOM of the z-order — the
+     * emoji face, top/status bars and chat caption are all created after it and stay
+     * on top, readable over the poster. Hidden until a lesson_step draws into it
+     * (SetLessonBackground); has no auto-hide timer (distinct from preview_image_). */
+    lesson_background_ = lv_image_create(screen);
+    lv_obj_set_size(lesson_background_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
 
     /* Bottom layer: emoji_box_ - centered display */
     emoji_box_ = lv_obj_create(screen);
@@ -1034,6 +1086,36 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     lv_obj_remove_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
     esp_timer_stop(preview_timer_);
     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, PREVIEW_IMAGE_DURATION_MS * 1000));
+}
+
+// US-006 lesson image render: full-screen PERSISTENT background poster. Unlike
+// SetPreviewImage (centered, half-screen, 5s auto-hide), this fills the screen and
+// stays up for the whole lesson step — there is NO preview_timer_ involvement. Pass
+// nullptr to clear it (lesson_stop / fetch failure) and return to the realtime face.
+void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
+    DisplayLockGuard lock(this);
+    if (lesson_background_ == nullptr) {
+        ESP_LOGE(TAG, "Lesson background object is not initialized");
+        return;
+    }
+
+    if (image == nullptr) {
+        lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+        lesson_background_cached_.reset();
+        return;
+    }
+
+    lesson_background_cached_ = std::move(image);
+    auto img_dsc = lesson_background_cached_->image_dsc();
+    lv_image_set_src(lesson_background_, img_dsc);
+    // Scale the decoded poster to FILL the panel width (full-screen background),
+    // not 0.5x like the centered preview. 256 == LV_SCALE_NONE (1:1); width_/w gives
+    // the fill factor. Guard against a zero-dimension descriptor.
+    if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
+        lv_image_set_scale(lesson_background_, 256 * width_ / img_dsc->header.w);
+    }
+    lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_remove_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
 }
 
 void LcdDisplay::SetChatMessage(const char* role, const char* content) {
