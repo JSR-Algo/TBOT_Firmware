@@ -216,40 +216,100 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
     }
 
     size_t content_length = http->GetBodyLength();
-    if (content_length == 0) {
-        ESP_LOGW(TAG, "lesson image fetch: empty body");
-        http->Close();
-        return nullptr;
-    }
-    char* data = static_cast<char*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
-    if (data == nullptr) {
-        ESP_LOGW(TAG, "lesson image fetch: alloc %u failed", (unsigned)content_length);
-        http->Close();
-        return nullptr;
-    }
+    char* data = nullptr;
     size_t total_read = 0;
-    while (total_read < content_length) {
-        int ret = http->Read(data + total_read, content_length - total_read);
-        if (ret < 0) {
-            ESP_LOGW(TAG, "lesson image fetch: read error");
-            heap_caps_free(data);
+    if (content_length > 0) {
+        // Known Content-Length: one pre-sized allocation.
+        data = static_cast<char*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
+        if (data == nullptr) {
+            ESP_LOGW(TAG, "lesson image fetch: alloc %u failed", (unsigned)content_length);
             http->Close();
             return nullptr;
         }
-        if (ret == 0) break;  // server closed early
-        total_read += ret;
+        while (total_read < content_length) {
+            int ret = http->Read(data + total_read, content_length - total_read);
+            if (ret < 0) {
+                ESP_LOGW(TAG, "lesson image fetch: read error");
+                heap_caps_free(data);
+                http->Close();
+                return nullptr;
+            }
+            if (ret == 0) break;  // server closed early
+            total_read += ret;
+        }
+        http->Close();
+        if (total_read < content_length) {
+            ESP_LOGW(TAG, "lesson image fetch: short read %u/%u",
+                     (unsigned)total_read, (unsigned)content_length);
+            heap_caps_free(data);
+            return nullptr;
+        }
+    } else {
+        // No Content-Length (Transfer-Encoding: chunked — common for CDN-transcoded
+        // images): grow-as-you-read until EOF, capped (deep-audit #5: GetBodyLength()
+        // == 0 was misread as "empty body" so chunked posters never rendered).
+        const size_t kMaxImageBytes = 512 * 1024;
+        size_t cap = 16 * 1024;
+        data = static_cast<char*>(heap_caps_malloc(cap, MALLOC_CAP_8BIT));
+        if (data == nullptr) {
+            ESP_LOGW(TAG, "lesson image fetch: alloc %u failed", (unsigned)cap);
+            http->Close();
+            return nullptr;
+        }
+        for (;;) {
+            if (total_read == cap) {
+                if (cap >= kMaxImageBytes) {
+                    ESP_LOGW(TAG, "lesson image fetch: body exceeds %u cap; dropping",
+                             (unsigned)kMaxImageBytes);
+                    heap_caps_free(data);
+                    http->Close();
+                    return nullptr;
+                }
+                size_t new_cap = cap * 2;
+                if (new_cap > kMaxImageBytes) new_cap = kMaxImageBytes;
+                char* grown = static_cast<char*>(heap_caps_realloc(data, new_cap, MALLOC_CAP_8BIT));
+                if (grown == nullptr) {
+                    ESP_LOGW(TAG, "lesson image fetch: realloc %u failed", (unsigned)new_cap);
+                    heap_caps_free(data);
+                    http->Close();
+                    return nullptr;
+                }
+                data = grown;
+                cap = new_cap;
+            }
+            int ret = http->Read(data + total_read, cap - total_read);
+            if (ret < 0) {
+                ESP_LOGW(TAG, "lesson image fetch: read error");
+                heap_caps_free(data);
+                http->Close();
+                return nullptr;
+            }
+            if (ret == 0) break;  // EOF
+            total_read += ret;
+        }
+        http->Close();
+        if (total_read == 0) {
+            ESP_LOGW(TAG, "lesson image fetch: empty body");
+            heap_caps_free(data);
+            return nullptr;
+        }
+        content_length = total_read;
     }
-    http->Close();
-    if (total_read < content_length) {
-        ESP_LOGW(TAG, "lesson image fetch: short read %u/%u",
-                 (unsigned)total_read, (unsigned)content_length);
+
+    // LvglAllocatedImage takes ownership of `data` (frees it in its dtor when the
+    // cached unique_ptr is replaced/reset). Its ctor THROWS std::runtime_error if
+    // LVGL can't decode the bytes (truncated/unsupported image, HTML error page
+    // served as 200, etc.) and does NOT free data on throw — catch it so an
+    // undecodable poster is a non-fatal skip instead of an exception escaping the
+    // WS receive task (deep-audit #1 CRITICAL). catch(...) avoids any <exception>
+    // include dependency.
+    try {
+        return std::make_unique<LvglAllocatedImage>(data, content_length);
+    } catch (...) {
+        ESP_LOGW(TAG, "lesson image fetch: undecodable image; skipping");
         heap_caps_free(data);
         return nullptr;
     }
-
-    // LvglAllocatedImage takes ownership of `data` (frees it in its dtor, which runs
-    // when the cached unique_ptr in LcdDisplay is replaced/reset).
-    return std::make_unique<LvglAllocatedImage>(data, content_length);
 }
 
 }  // namespace

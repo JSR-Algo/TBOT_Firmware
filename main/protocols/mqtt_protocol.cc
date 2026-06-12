@@ -321,8 +321,10 @@ std::string MqttProtocol::GetHelloMessage() {
 
 void MqttProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "udp") != 0) {
-        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
+    // cJSON_IsString guards the missing-key + non-string (valuestring==NULL) cases;
+    // strcmp(NULL, ...) faulted before (deep-audit, same as websocket_protocol.cc).
+    if (!cJSON_IsString(transport) || strcmp(transport->valuestring, "udp") != 0) {
+        ESP_LOGE(TAG, "Unsupported or invalid transport in server hello");
         return;
     }
 

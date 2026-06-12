@@ -159,11 +159,25 @@ bool WebsocketProtocol::OpenAudioChannel() {
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
+                    // Bounds-check the server-supplied frame before any deref: the
+                    // header must fit, and payload_size must not exceed the bytes that
+                    // actually arrived — else the vector copy over-reads the heap
+                    // (deep-audit: payload_size is attacker/server-controlled).
+                    if (len < sizeof(BinaryProtocol2)) {
+                        ESP_LOGE(TAG, "binary v2 frame too short: %u", (unsigned)len);
+                        return;
+                    }
                     BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
                     bp2->version = ntohs(bp2->version);
                     bp2->type = ntohs(bp2->type);
                     bp2->timestamp = ntohl(bp2->timestamp);
                     bp2->payload_size = ntohl(bp2->payload_size);
+                    size_t bp2_avail = len - sizeof(BinaryProtocol2);
+                    if (bp2->payload_size > bp2_avail) {
+                        ESP_LOGE(TAG, "binary v2 payload_size %u > avail %u; dropping",
+                                 (unsigned)bp2->payload_size, (unsigned)bp2_avail);
+                        return;
+                    }
                     auto payload = (uint8_t*)bp2->payload;
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -172,9 +186,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
                     }));
                 } else if (version_ == 3) {
+                    if (len < sizeof(BinaryProtocol3)) {
+                        ESP_LOGE(TAG, "binary v3 frame too short: %u", (unsigned)len);
+                        return;
+                    }
                     BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
                     bp3->type = bp3->type;
                     bp3->payload_size = ntohs(bp3->payload_size);
+                    size_t bp3_avail = len - sizeof(BinaryProtocol3);
+                    if (bp3->payload_size > bp3_avail) {
+                        ESP_LOGE(TAG, "binary v3 payload_size %u > avail %u; dropping",
+                                 (unsigned)bp3->payload_size, (unsigned)bp3_avail);
+                        return;
+                    }
                     auto payload = (uint8_t*)bp3->payload;
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -281,8 +305,11 @@ std::string WebsocketProtocol::GetHelloMessage() {
 
 void WebsocketProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
-        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
+    // cJSON_IsString guards both the missing-key (null node) and wrong-type
+    // (number/null JSON -> valuestring==NULL) cases; strcmp(NULL, ...) faulted before
+    // (deep-audit). Don't log the raw valuestring (it may be NULL).
+    if (!cJSON_IsString(transport) || strcmp(transport->valuestring, "websocket") != 0) {
+        ESP_LOGE(TAG, "Unsupported or invalid transport in server hello");
         return;
     }
 
