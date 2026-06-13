@@ -480,6 +480,17 @@ void AudioService::OpusCodecTask() {
 }
 
 void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
+    // Defense in depth: the (sample_rate, frame_duration) pair originates from
+    // the server hello and is validated at both protocol boundaries, but a
+    // non-positive value reaching here would make decoder_frame_size_ <= 0 and
+    // the subsequent task->pcm.resize(decoder_frame_size_) OOM (huge size_t cast)
+    // or crash. Reject non-positive inputs so decoder_frame_size_ stays > 0 and
+    // the decode loop skips work it cannot do (opus_decoder_ left null).
+    if (sample_rate <= 0 || frame_duration <= 0) {
+        ESP_LOGE(TAG, "Refusing invalid decode params: sample_rate=%d frame_duration=%d",
+                 sample_rate, frame_duration);
+        return;
+    }
     if (decoder_sample_rate_ == sample_rate && decoder_duration_ms_ == frame_duration) {
         return;
     }
@@ -498,6 +509,19 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
     decoder_sample_rate_ = sample_rate;
     decoder_duration_ms_ = frame_duration;
     decoder_frame_size_ = decoder_sample_rate_ / 1000 * frame_duration;
+    // Guard against integer truncation making the frame size non-positive (e.g.
+    // sample_rate < 1000). A zero/negative size passed to vector::resize in the
+    // decode loop would crash; close the decoder and bail so the loop skips it.
+    if (decoder_frame_size_ <= 0) {
+        ESP_LOGE(TAG, "Computed non-positive decoder_frame_size_ (%d) for rate=%d dur=%d; disabling decoder",
+                 decoder_frame_size_, decoder_sample_rate_, frame_duration);
+        std::unique_lock<std::mutex> close_lock(decoder_mutex_);
+        if (opus_decoder_ != nullptr) {
+            esp_opus_dec_close(opus_decoder_);
+            opus_decoder_ = nullptr;
+        }
+        return;
+    }
 
     auto codec = Board::GetInstance().GetAudioCodec();
     if (decoder_sample_rate_ != codec->output_sample_rate()) {

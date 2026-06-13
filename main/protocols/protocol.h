@@ -42,6 +42,24 @@ enum ListeningMode {
     kListeningModeRealtime // 需要 AEC 支持
 };
 
+// Validate a server-advertised (sample_rate, frame_duration) pair from the
+// server hello before it is trusted downstream. A hostile/buggy server could
+// send a negative or zero sample_rate, which propagates into
+// AudioService::SetDecodeSampleRate where decoder_frame_size_ = rate/1000*dur
+// goes <= 0 and then vector::resize(decoder_frame_size_) either OOMs (huge
+// unsigned cast) or crashes. Restrict to the Opus-legal set the firmware
+// actually supports; reject everything else so the caller keeps the safe
+// default. Free function (not a member) so both transport implementations and
+// any future caller share one source of truth.
+inline bool IsValidOpusSampleRate(int sample_rate) {
+    return sample_rate == 8000 || sample_rate == 16000 ||
+           sample_rate == 24000 || sample_rate == 48000;
+}
+inline bool IsValidOpusFrameDuration(int frame_duration) {
+    return frame_duration == 10 || frame_duration == 20 ||
+           frame_duration == 40 || frame_duration == 60;
+}
+
 class Protocol {
 public:
     virtual ~Protocol() = default;

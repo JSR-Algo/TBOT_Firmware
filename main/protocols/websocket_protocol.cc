@@ -321,13 +321,27 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
 
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");
     if (cJSON_IsObject(audio_params)) {
+        // Validate before trusting: an out-of-range sample_rate flows into
+        // AudioService::SetDecodeSampleRate -> decoder_frame_size_ (<=0) ->
+        // vector::resize OOM/crash. Reject anything outside the Opus-legal set
+        // and keep the safe default. (deep-audit: server-controlled decoder cfg)
         auto sample_rate = cJSON_GetObjectItem(audio_params, "sample_rate");
         if (cJSON_IsNumber(sample_rate)) {
-            server_sample_rate_ = sample_rate->valueint;
+            if (IsValidOpusSampleRate(sample_rate->valueint)) {
+                server_sample_rate_ = sample_rate->valueint;
+            } else {
+                ESP_LOGE(TAG, "Invalid sample_rate %d in server hello; keeping %d",
+                         sample_rate->valueint, server_sample_rate_);
+            }
         }
         auto frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
         if (cJSON_IsNumber(frame_duration)) {
-            server_frame_duration_ = frame_duration->valueint;
+            if (IsValidOpusFrameDuration(frame_duration->valueint)) {
+                server_frame_duration_ = frame_duration->valueint;
+            } else {
+                ESP_LOGE(TAG, "Invalid frame_duration %d in server hello; keeping %d",
+                         frame_duration->valueint, server_frame_duration_);
+            }
         }
     }
 

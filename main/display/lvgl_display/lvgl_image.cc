@@ -20,6 +20,9 @@ LvglRawImage::LvglRawImage(void* data, size_t size) {
 }
 
 bool LvglRawImage::IsGif() const {
+    if (image_dsc_.data == nullptr || image_dsc_.data_size < 3) {
+        return false;
+    }
     auto ptr = (const uint8_t*)image_dsc_.data;
     return ptr[0] == 'G' && ptr[1] == 'I' && ptr[2] == 'F';
 }
