@@ -118,6 +118,14 @@ public:
     bool SendRightArmLower();
     bool SendBothArmsRaise();
     bool SendBothArmsLower();
+    bool SendLeftArmSetPercent(int percent);
+    bool SendRightArmSetPercent(int percent);
+    bool SendBothArmsSetPercent(int percent);
+    bool SendHeadTurnLeft();
+    bool SendHeadTurnRight();
+    bool SendHeadCenter();
+    bool SendHeadSetAngle(int angle);
+    bool SendHeadSetPercent(int percent);
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
@@ -130,6 +138,13 @@ public:
      */
     void ResetProtocol();
     void SchedulePendingTbotClaimRefresh();
+
+    // BOOT long-press "re-pair": forget the current claim/ownership and re-enter
+    // BLE pairing standby so a (possibly different) parent phone can connect and
+    // re-claim the robot. Thread-safe (marshals all work onto the Application task).
+    // Does NOT block on Wi-Fi/cloud at press time — cloud ownership release is
+    // deferred via backend.release_pending (see MaybeDispatchDeferredCloudRelease).
+    void EnterRepairPairingMode();
 
 private:
     Application();
@@ -167,6 +182,20 @@ private:
     esp_timer_handle_t claim_poll_timer_ = nullptr;       // periodic, ~4s
     int64_t claim_poll_started_ms_ = 0;                   // monotonic window start
     bool claim_poll_active_ = false;
+    // Interval the periodic claim poll timer is currently armed at. StartClaimPoll
+    // picks the 10s confirm cadence while offline/confirming and a backed-off 60s
+    // cadence once the realtime WS is up, so a residual poll can never materially
+    // starve live audio. Initialized in StartClaimPoll (the .cc owns the actual
+    // kClaimPollInterval*Us values). main-task-only (see OQ1 note above).
+    uint64_t claim_poll_interval_us_ = 0;
+    // "Hi ESP needs many tries" fix: single-flight guard for the off-task claim
+    // fetch worker. The 10s timer must never stack overlapping ClaimFetchTask
+    // workers when the flaky backend is slow (leaked tasks/heap). Set true when a
+    // worker is spawned, cleared when its continuation runs (or the spawn fails).
+    std::atomic<bool> claim_poll_inflight_{false};
+    // Single-flight guard for the deferred BOOT re-pair cloud-ownership release
+    // worker (CloudReleaseTask), mirroring claim_poll_inflight_.
+    std::atomic<bool> cloud_release_inflight_{false};
     // L2: consecutive /device/config fetch failures. After a couple of misses the
     // standby copy becomes "Server unavailable. Retrying..." instead of the
     // misleading "Ready to connect"; reset to 0 on any successful fetch.
@@ -181,6 +210,10 @@ private:
     // carrying backend DTO fields plus ble_state/ap_state/temp from board status.
     esp_timer_handle_t heartbeat_timer_ = nullptr;        // periodic, ~20s
     bool heartbeat_active_ = false;
+    // "Hi ESP needs many tries" fix: single-flight guard for the off-task
+    // heartbeat worker, same pattern as claim_poll_inflight_. The 20s timer must
+    // never stack overlapping HeartbeatTask workers when the backend is slow.
+    std::atomic<bool> heartbeat_inflight_{false};
 
     // T1/SM-1: connect runs on a short-lived worker so the long blocking
     // OpenAudioChannel() (TCP+TLS handshake + server hello, up to ~20s) never
@@ -245,6 +278,7 @@ private:
     void HandleReconnectTick();
     void CloseAudioChannelByIntent();                  // intentional close -> clears online_intent_
     void ContinueWakeWordInvoke(const std::string& wake_word);
+    void FinishWakeWordInvoke(const std::string& wake_word);
 
     // Activation task (runs in background)
     void ActivationTask();
@@ -254,7 +288,41 @@ private:
     void CheckNewVersion();
     void InitializeProtocol();
     void RefreshPendingTbotClaim();
+    // BluFi reported STA-connected success after a (re-)provisioning. The BLE
+    // build never leaves kDeviceStateWifiConfiguring on its own (no ConfigModeExit
+    // and HandleNetworkConnectedEvent ignores Connected in that state), so the
+    // claim FSM would otherwise dead-end in setup and the claim would only
+    // complete after an extra manual power-cycle. This drives the FSM out of
+    // WifiConfiguring via the proven normal-boot path (Activating -> ActivationTask
+    // -> Idle -> RefreshPendingTbotClaim) on the genuine provisioning-success entry
+    // point only; the stale-event guards on HandleNetworkConnectedEvent/
+    // RefreshPendingTbotClaim are left untouched.
+    void PromoteFromWifiConfigAfterProvisioning();
     bool ConfirmPendingTbotClaim(bool trust_backend_expiry = false);
+    // "Hi ESP needs many tries" fix: the blocking ~3s /device/config HTTP/TLS
+    // fetch is split out of RefreshPendingTbotClaim() so it can run on a
+    // dedicated low-priority worker instead of the priority-10 Application task
+    // (which starved the wake-word AFE fetch/feed pipeline during the
+    // boot-to-first-WS window). DispatchPendingTbotClaimFetch() spawns the
+    // worker (single-flight); ClaimFetchTask() does ONLY the blocking fetch and
+    // Schedule()s ApplyPendingTbotClaimFetchResult() back onto the Application
+    // task, where all claim_substate_/BLE/SetDeviceState mutation stays serialized.
+    void DispatchPendingTbotClaimFetch(const std::string& api_url, const std::string& token);
+    static void ClaimFetchTask(void* arg);
+    void ApplyPendingTbotClaimFetchResult(const std::string& api_url,
+                                          const std::string& token,
+                                          const PendingTbotClaim& pending_claim,
+                                          bool fetched, int device_config_status);
+
+    // Deferred cloud-ownership release for the BOOT re-pair flow.
+    // EnterRepairPairingMode() sets backend.release_pending and KEEPS the device
+    // credentials; once the robot is online + unclaimed,
+    // MaybeDispatchDeferredCloudRelease() (called from RefreshPendingTbotClaim)
+    // spawns a low-prio worker that POSTs /v1/devices/:id/factory-reset off the
+    // prio-10 task (same single-flight pattern as the claim fetch), then clears
+    // release_pending + device_secret so a different parent account can re-claim.
+    void MaybeDispatchDeferredCloudRelease();
+    static void CloudReleaseTask(void* arg);
 
     // --- TBOT claim runtime FSM helpers (C4) ---
     // Render the screen copy for the current claim sub-state from the connect
@@ -285,7 +353,19 @@ private:
     // --- Heartbeat (C5) ---
     void StartHeartbeat();
     void StopHeartbeat();
-    bool SendDeviceHeartbeat();
+    void HandleHeartbeatAuthFailure(int status_code);
+    // "Hi ESP needs many tries" fix: the heartbeat does a blocking ~5s HTTP/TLS
+    // POST. Like the claim poll, run it OFF the priority-10 Application task so a
+    // slow backend can never freeze the core-0 wake-word AFE feed/fetch pipeline.
+    // DispatchDeviceHeartbeat() runs on the Application task (gating + body build),
+    // HeartbeatTask() does ONLY the blocking POST, and any auth-failure handling is
+    // Schedule()d back onto the Application task (OQ1: all state stays serialized).
+    void DispatchDeviceHeartbeat();
+    static void HeartbeatTask(void* arg);
+    // Off-task worker body: the blocking POST. Returns the HTTP status code (0 on
+    // transport failure); the caller Schedule()s auth-failure handling back.
+    int SendDeviceHeartbeat(const std::string& url, const std::string& device_secret,
+                            std::string body);
 
     // Current BLE setup sub-state for the connect mapper (Off in AP/other builds).
     TbotBleSubstate GetBleSubstate() const;

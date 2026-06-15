@@ -607,9 +607,13 @@ private:
             }
             app.ToggleChatState();
         });
-        boot_button_.OnLongPress([this]() {
-            ESP_LOGI(TAG, "LCDWiki BOOT long-press -> EnterWifiConfigMode");
-            EnterWifiConfigMode();
+        boot_button_.OnLongPress([]() {
+            // Re-pair: forget the current parent/claim and re-enter BLE pairing so a
+            // (possibly different) parent phone can connect & re-claim the robot. Does
+            // not block on Wi-Fi/cloud at press time — cloud ownership release is
+            // deferred until the robot is back online (see EnterRepairPairingMode).
+            ESP_LOGI(TAG, "LCDWiki BOOT long-press -> EnterRepairPairingMode (re-pair)");
+            Application::GetInstance().EnterRepairPairingMode();
         });
     }
 

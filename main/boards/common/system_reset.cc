@@ -84,8 +84,8 @@ static std::string BuildFactoryResetUrl(const std::string& api_url, const std::s
 bool SystemReset::ReleaseCloudOwnership() {
     Settings backend_settings("backend", false);
     const std::string api_url = backend_settings.GetString("api_url");
+    const std::string device_id = backend_settings.GetString("device_id");
     const std::string device_secret = backend_settings.GetString("device_secret");
-    const std::string device_id = Board::GetInstance().GetUuid();
 
     if (api_url.empty() || device_secret.empty() || device_id.empty()) {
         ESP_LOGI(TAG, "No cloud ownership credentials present; local factory reset can continue");

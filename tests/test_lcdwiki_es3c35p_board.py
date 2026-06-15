@@ -131,14 +131,21 @@ def test_lcdwiki_es3c35p_does_not_register_flaky_touch_controller():
     assert "return;" in init_touch
     assert "lvgl_port_add_touch" not in init_touch
 
-def test_lcdwiki_es3c35p_boot_long_press_reopens_ble_wifi_provisioning():
+def test_lcdwiki_es3c35p_boot_long_press_reenters_repair_pairing():
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
 
     init_start = board.index("void InitializeButtons()")
     init_buttons = board[init_start : board.index("public:", init_start)]
     assert "boot_button_.OnLongPress" in init_buttons
-    assert "LCDWiki BOOT long-press -> EnterWifiConfigMode" in init_buttons
-    assert "EnterWifiConfigMode();" in init_buttons
+
+    # Long-press is the "re-pair" gesture: forget the current claim/owner and
+    # re-enter pairing so a (possibly different) parent phone can connect. It must
+    # NOT merely reopen Wi-Fi config -- that left the device claimed/owned and
+    # therefore "stuck" to the previously connected phone/account.
+    long_press_body = init_buttons[init_buttons.index("boot_button_.OnLongPress"):]
+    assert "LCDWiki BOOT long-press -> EnterRepairPairingMode" in long_press_body
+    assert "Application::GetInstance().EnterRepairPairingMode();" in long_press_body
+    assert "EnterWifiConfigMode();" not in long_press_body
 
 def test_lcdwiki_es3c35p_boot_click_rearms_ble_wifi_config_mode():
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
