@@ -132,6 +132,7 @@ Blufi& Blufi::GetInstance() {
 
 Blufi::Blufi()
     : m_sec(nullptr),
+      m_blufi_security_negotiated(false),
       m_ble_is_connected(false),
       m_sta_connected(false),
       m_sta_got_ip(false),
@@ -184,6 +185,7 @@ esp_err_t Blufi::init() {
     ret = _controller_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "BLUFI controller init failed: %s", esp_err_to_name(ret));
+        _controller_deinit();
         inited_ = false;
         m_deinited = true;
         return ret;
@@ -193,6 +195,9 @@ esp_err_t Blufi::init() {
     ret = _host_and_cb_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "BLUFI host and cb init failed: %s", esp_err_to_name(ret));
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+        _controller_deinit();
+#endif
         inited_ = false;
         m_deinited = true;
         return ret;
@@ -423,6 +428,7 @@ static int myrand(void* rng_state, unsigned char* output, size_t len) {
 }
 
 void Blufi::_security_init() {
+    m_blufi_security_negotiated = false;
     m_sec = new BlufiSecurity();
     if (m_sec == nullptr) {
         ESP_LOGE(BLUFI_TAG, "Failed to allocate security context");
@@ -439,6 +445,7 @@ void Blufi::_security_init() {
 }
 
 void Blufi::_security_deinit() {
+    m_blufi_security_negotiated = false;
     if (m_sec == nullptr)
         return;
 
@@ -531,6 +538,7 @@ void Blufi::_dh_negotiate_data_handler(uint8_t* data, int len, uint8_t** output_
                 btc_blufi_report_error(ESP_BLUFI_ENCRYPT_ERROR);
                 return;
             }
+            m_blufi_security_negotiated = true;
             *output_data = m_sec->self_public_key;
             *output_len = dhm_len;
             *need_free = false;
@@ -592,6 +600,15 @@ int Blufi::_aes_decrypt(uint8_t iv8, uint8_t* crypt_data, int crypt_len) {
 
 uint16_t Blufi::_crc_checksum(uint8_t iv8, uint8_t* data, int len) {
     return esp_crc16_be(0, data, len);
+}
+
+bool Blufi::_require_secure_session_for_credentials() {
+    if (m_blufi_security_negotiated && m_sec != nullptr && m_sec->aes != nullptr) {
+        return true;
+    }
+    ESP_LOGW(BLUFI_TAG, "Rejecting BluFi Wi-Fi credential frame before DH/AES negotiation");
+    esp_blufi_send_error_info(ESP_BLUFI_DATA_FORMAT_ERROR);
+    return false;
 }
 
 int Blufi::_get_softap_conn_num() {
@@ -669,6 +686,18 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason) {
     (void)reason;
     return;
 #else
+    Settings websocket_settings("websocket", false);
+    if (!websocket_settings.GetString("claim_device_id").empty()) {
+        // The mobile claim flow uses the same single-use bootstrap token for
+        // /claim/confirm. Do not spend it on the legacy provisioning-status
+        // report first, or the robot can fetch a pending claim but then fail the
+        // strict confirm auth with a consumed token.
+        ESP_LOGI(BLUFI_TAG,
+                 "Skipping provisioning authenticated report during claim flow: reason=%s",
+                 reason ? reason : "unknown");
+        return;
+    }
+
     const bool wifi_connected = WifiManager::GetInstance().IsConnected();
     const bool token_empty = bootstrap_token_.empty();
     const bool code_empty = provisioning_code_.empty();
@@ -1172,6 +1201,9 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             ESP_LOGI(BLUFI_TAG, "Recv STA BSSID");
             break;
         case ESP_BLUFI_EVENT_RECV_STA_SSID: {
+            if (!_require_secure_session_for_credentials()) {
+                break;
+            }
             // Bound the copy: a NUL written at [len] overflows when the frame
             // reports len >= sizeof(buffer). Clamp to sizeof()-1.
             size_t ssid_n = std::min<size_t>(param->sta_ssid.ssid_len,
@@ -1179,10 +1211,16 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             memcpy(m_sta_config.sta.ssid, param->sta_ssid.ssid, ssid_n);
             m_sta_config.sta.ssid[ssid_n] = '\0';
             m_sta_is_connecting = true;
-            ESP_LOGI(BLUFI_TAG, "Recv STA SSID: %s", m_sta_config.sta.ssid);
+            // Do NOT log the SSID value: the home network name is user PII and a
+            // serial/log dump would leak it. Mirror the RECV_STA_PASSWD handler
+            // below, which deliberately logs no credential value.
+            ESP_LOGI(BLUFI_TAG, "Recv STA SSID (len=%u)", static_cast<unsigned>(ssid_n));
             break;
         }
         case ESP_BLUFI_EVENT_RECV_STA_PASSWD: {
+            if (!_require_secure_session_for_credentials()) {
+                break;
+            }
             // Bound the copy as above. Never log the password value.
             size_t passwd_n = std::min<size_t>(param->sta_passwd.passwd_len,
                                                sizeof(m_sta_config.sta.password) - 1);
@@ -1230,6 +1268,30 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             int data_len = static_cast<int>(param->custom_data.data_len);
             ESP_LOGI(BLUFI_TAG, "BLUFI recv custom data, len=%d", data_len);
 
+            // Claim TLV payloads may arrive as token/code/device_id in a single
+            // custom-data frame. Persist device_id before handling token/code so
+            // TryReportProvisioningAuthenticated() can reliably identify claim
+            // flow and avoid spending the single-use claim token on the legacy
+            // provisioning-status endpoint.
+            int prescan_offset = 0;
+            while (prescan_offset + 2 <= data_len) {
+                uint8_t tag = data[prescan_offset];
+                uint8_t len = data[prescan_offset + 1];
+                prescan_offset += 2;
+                if (prescan_offset + static_cast<int>(len) > data_len) {
+                    break;
+                }
+                if (tag == 0x03) {
+                    uint8_t safe_len = (len > 64) ? 64 : len;
+                    const char* value = reinterpret_cast<const char*>(data + prescan_offset);
+                    Settings websocket_settings("websocket", true);
+                    websocket_settings.SetString("claim_device_id", std::string(value, safe_len));
+                    ESP_LOGI(BLUFI_TAG, "Received claim device_id (%u bytes)", safe_len);
+                    break;
+                }
+                prescan_offset += static_cast<int>(len);
+            }
+
             int offset = 0;
             while (offset + 2 <= data_len) {
                 uint8_t tag = data[offset];
@@ -1263,6 +1325,14 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                     provisioning_code_.assign(value, safe_len);
                     TryReportProvisioningAuthenticated("custom_data_code");
                     ESP_LOGI(BLUFI_TAG, "Received provisioning code (%u bytes)", safe_len);
+                } else if (tag == 0x03) {
+                    // Claim device_id: the backend's serial-keyed device id the
+                    // phone resolved. The robot MUST claim/confirm under THIS id
+                    // (see GetTbotClaimDeviceId in claim_confirmation_reporter) —
+                    // its random Board UUID otherwise mismatches the phone's claim
+                    // attempt and pairing hangs forever. UUIDs are 36 chars; cap
+                    // at 64 defensively.
+                    ESP_LOGD(BLUFI_TAG, "Claim device_id already persisted by custom-data prescan");
                 } else {
                     ESP_LOGD(BLUFI_TAG, "Unknown TLV tag=0x%02x, len=%u, skipping", tag, len);
                 }
@@ -1372,20 +1442,16 @@ void Blufi::ClearProvisioningSecrets() {
         std::fill(provisioning_code_.begin(), provisioning_code_.end(), '\0');
         provisioning_code_.clear();
     }
-    // The bootstrap token has a durable NVS home (it is persisted to the
-    // "websocket"/"bootstrap_token" key when the custom-data frame arrives).
-    // Clearing only the in-RAM copy would leave a stale, single-attempt
-    // credential at rest after a successful report and after a factory reset,
-    // contradicting the contract (docs/product/device-provisioning.md: a
-    // successful backend report "zeroizes and clears the bootstrap token").
-    // This runs ONLY on report SUCCESS — the failure/retry path never calls
-    // ClearProvisioningSecrets(), so a failed report still retains the at-rest
-    // token for retry. The claim flow reads the NVS token before this clear
-    // (the wifi-success lane schedules the claim refresh first) and already
-    // erases this same key on its own terminal outcomes, so erasing here is
-    // safe and consistent.
     Settings websocket_settings("websocket", true);
-    websocket_settings.EraseKey("bootstrap_token");
+    if (websocket_settings.GetString("claim_device_id").empty()) {
+        // Legacy provisioning owns this token, so a successful provisioning-status
+        // report may clear the at-rest copy. In claim flow the same token is
+        // single-use auth for /claim/confirm; only the claim terminal path may
+        // erase it.
+        websocket_settings.EraseKey("bootstrap_token");
+    } else {
+        ESP_LOGI(BLUFI_TAG, "Claim flow active; preserving NVS bootstrap token for claim confirm");
+    }
     ESP_LOGI(BLUFI_TAG, "Provisioning secrets cleared");
 }
 

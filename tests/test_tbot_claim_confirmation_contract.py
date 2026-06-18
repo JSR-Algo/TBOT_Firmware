@@ -55,11 +55,15 @@ def test_device_config_polling_uses_backend_api_url_and_robot_identity():
 
     poll_url = function_body(source, "std::string BuildTbotDeviceConfigUrl")
     poll_body = function_body(source, "bool FetchPendingTbotClaimFromDeviceConfig")
+    identity_body = function_body(source, "static std::string GetTbotClaimDeviceId")
 
     assert '/device/config?device_id=' in poll_url
     assert 'UrlEncodeQueryParam(device_id)' in poll_url
     assert '+ device_id' not in poll_url
-    assert 'Board::GetInstance().GetUuid()' in poll_body
+    assert 'GetTbotClaimDeviceId()' in poll_body
+    assert 'Settings websocket_settings("websocket", false);' in identity_body
+    assert 'websocket_settings.GetString("claim_device_id")' in identity_body
+    assert 'Board::GetInstance().GetUuid()' in identity_body
     assert 'http->Open("GET", url)' in poll_body
     assert 'ParsePendingTbotClaimFromDeviceConfigJson' in poll_body
     assert 'tbot-backend-8wmh.onrender.com/tbot/v1/' not in source
@@ -78,11 +82,24 @@ def test_claim_confirm_reporter_uses_device_identity_and_bootstrap_token():
     source = read("main/provisioning/claim_confirmation_reporter.cc")
     report_body = function_body(source, "bool ClaimConfirmationReporter::Confirm")
 
-    assert 'Board::GetInstance().GetUuid()' in report_body
+    assert 'GetTbotClaimDeviceId()' in report_body
     assert 'BuildTbotClaimConfirmBody(claim.claim_id, device_id' in report_body
     assert 'http->SetHeader("Authorization", "Bearer " + bootstrap_token)' in report_body
     assert 'http->SetHeader("Content-Type", "application/json")' in report_body
     assert 'http->Open("POST", url)' in report_body
+
+
+def test_claim_confirm_failure_logs_backend_error_code_without_raw_body():
+    source = read("main/provisioning/claim_confirmation_reporter.cc")
+    helper_body = function_body(source, "static std::string ExtractTbotClaimErrorSummary")
+    report_body = function_body(source, "bool ClaimConfirmationReporter::Confirm")
+
+    assert 'cJSON_GetObjectItem(root, "code")' in helper_body
+    assert 'cJSON_GetObjectItem(root, "message")' in helper_body
+    assert 'device_secret' in helper_body
+    assert 'Claim confirmation failed (HTTP %d) resp_len=%u%s' in report_body
+    assert 'ExtractTbotClaimErrorSummary(response_body)' in report_body
+    assert 'ESP_LOGW(TAG, "Claim confirmation failed (HTTP %d) body=%s"' not in source
 
 
 def test_claim_confirm_response_persists_device_secret_and_websocket_url():
@@ -91,11 +108,14 @@ def test_claim_confirm_response_persists_device_secret_and_websocket_url():
     persist_body = function_body(source, "bool PersistTbotClaimConfirmationResponse")
     confirm_body = function_body(source, "bool ClaimConfirmationReporter::Confirm")
 
+    assert 'cJSON_GetObjectItem(root, "device_id")' in persist_body
     assert 'cJSON_GetObjectItem(root, "device_secret")' in persist_body
     assert 'cJSON_GetObjectItem(root, "ws_url")' in persist_body
+    assert 'cJSON_IsString(device_id)' in persist_body
     assert 'Settings websocket_settings("websocket", true);' in persist_body
     assert 'websocket_settings.SetString("url", ws_url->valuestring);' in persist_body
     assert 'Settings backend_settings("backend", true);' in persist_body
+    assert 'backend_settings.SetString("device_id", device_id->valuestring);' in persist_body
     assert 'backend_settings.SetString("device_secret", device_secret->valuestring);' in persist_body
     assert 'SetString("token", device_secret->valuestring)' not in persist_body
     assert 'PersistTbotClaimConfirmationResponse(response_body)' in confirm_body

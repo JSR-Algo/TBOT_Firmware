@@ -815,6 +815,15 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
     if (image == nullptr) {
         lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
         lesson_background_cached_.reset();
+        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        if (container_ != nullptr) {
+            lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
+        }
+        if (content_ != nullptr) {
+            lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(content_, lvgl_theme->chat_background_color(), 0);
+        }
         return;
     }
 
@@ -825,8 +834,15 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
         lv_image_set_scale(lesson_background_, 256 * width_ / img_dsc->header.w);
     }
     lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_move_to_index(lesson_background_, 0);  // keep it behind the chat UI
+    if (container_ != nullptr) {
+        lv_obj_set_style_bg_opa(container_, LV_OPA_TRANSP, 0);
+    }
+    if (content_ != nullptr) {
+        lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
+    }
     lv_obj_remove_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+    if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
+    if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
 }
 
 void LcdDisplay::ClearChatMessages() {
@@ -1102,6 +1118,15 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
     if (image == nullptr) {
         lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
         lesson_background_cached_.reset();
+        auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
+        if (container_ != nullptr) {
+            lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
+        }
+        if (content_ != nullptr) {
+            lv_obj_set_style_bg_opa(content_, LV_OPA_COVER, 0);
+            lv_obj_set_style_bg_color(content_, lvgl_theme->chat_background_color(), 0);
+        }
         return;
     }
 
@@ -1115,7 +1140,16 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
         lv_image_set_scale(lesson_background_, 256 * width_ / img_dsc->header.w);
     }
     lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
+    if (container_ != nullptr) {
+        lv_obj_set_style_bg_opa(container_, LV_OPA_TRANSP, 0);
+    }
+    if (content_ != nullptr) {
+        lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
+    }
     lv_obj_remove_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+    if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
+    if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
+    if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
 }
 
 void LcdDisplay::SetChatMessage(const char* role, const char* content) {

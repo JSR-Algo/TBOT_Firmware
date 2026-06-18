@@ -18,13 +18,16 @@
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
 #include "lvgl_display.h"
 #include "lvgl_image.h"
+#include "jpeg_to_image.h"
 
 #include <ctime>
+#include <cstdint>
 #include <cstring>
 #include <string>
 #include <memory>
 
 #include <cJSON.h>
+#include <esp_err.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 
@@ -180,15 +183,19 @@ bool AssetAvailable(const char* name) {
     return Assets::GetInstance().GetAssetData(std::string(name), ptr, size) && size > 0;
 }
 
+bool IsJpegImage(const void* data, size_t size) {
+    if (data == nullptr || size < 3) return false;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    return bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff;
+}
+
 // US-006 image render — HTTP GET a lesson image URL and DECODE it into an LvglImage.
 // This is the firmware half the recon flagged as missing: the backend already emits
 // resolved scene.*.src URLs and the ESP server downloads/sha256-verifies the bytes,
-// but the firmware previously only probed the flashed asset image. We now fetch the
-// authored URL over the existing network stack and hand the raw bytes to
-// LvglAllocatedImage, REUSING the exact proven pipeline in mcp_server.cc:332-361
-// (HTTP GET -> heap_caps_malloc -> LvglAllocatedImage). The LVGL PNG/JPEG decoder is
-// already compiled in (CONFIG_LV_USE_LODEPNG=y), so LvglAllocatedImage's ctor decodes
-// via lv_image_decoder_get_info on first draw.
+// but the firmware previously only probed the flashed asset image. We now fetch and
+// decode the authored URL over the existing network stack. PNG and other LVGL-native
+// formats still go through LvglAllocatedImage's decoder probe; JPEG is decoded here
+// with the firmware JPEG helper because LVGL is not built with a JPEG decoder.
 //
 // FAILURE IS NEVER FATAL: any error (no URL, no network, bad status, alloc fail, short
 // read) returns nullptr and the caller falls back to the caption-only ladder. We run
@@ -294,6 +301,38 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
             return nullptr;
         }
         content_length = total_read;
+    }
+
+    if (IsJpegImage(data, content_length)) {
+        uint8_t* decoded_data = nullptr;
+        size_t decoded_len = 0;
+        size_t width = 0;
+        size_t height = 0;
+        size_t stride = 0;
+
+        esp_err_t ret = jpeg_to_image(reinterpret_cast<const uint8_t*>(data), content_length,
+                                      &decoded_data, &decoded_len, &width, &height, &stride);
+        heap_caps_free(data);
+        data = nullptr;
+
+        if (ret != ESP_OK || decoded_data == nullptr || decoded_len == 0 ||
+            width == 0 || height == 0 || stride == 0) {
+            ESP_LOGW(TAG, "lesson image fetch: JPEG decode failed: %d", (int)ret);
+            if (decoded_data != nullptr) heap_caps_free(decoded_data);
+            return nullptr;
+        }
+
+        try {
+            return std::make_unique<LvglAllocatedImage>(decoded_data, decoded_len,
+                                                        static_cast<int>(width),
+                                                        static_cast<int>(height),
+                                                        static_cast<int>(stride),
+                                                        LV_COLOR_FORMAT_RGB565);
+        } catch (...) {
+            ESP_LOGW(TAG, "lesson image fetch: decoded JPEG rejected; skipping");
+            heap_caps_free(decoded_data);
+            return nullptr;
+        }
     }
 
     // LvglAllocatedImage takes ownership of `data` (frees it in its dtor when the

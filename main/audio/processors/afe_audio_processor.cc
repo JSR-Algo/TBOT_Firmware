@@ -1,9 +1,64 @@
 #include "afe_audio_processor.h"
+#include <algorithm>
 #include <esp_log.h>
 
 #define PROCESSOR_RUNNING 0x01
 
 #define TAG "AfeAudioProcessor"
+
+std::vector<int16_t> AfeAudioProcessor::SelectDominantMonoChannel(const std::vector<int16_t>& data,
+                                                                 int channels) {
+    if (channels <= 1 || data.empty()) {
+        return data;
+    }
+
+    const size_t frames = data.size() / channels;
+    if (frames == 0) {
+        return {};
+    }
+
+    // Per-chunk energy per channel.
+    std::vector<int64_t> energy(channels, 0);
+    for (size_t frame = 0; frame < frames; ++frame) {
+        for (int channel = 0; channel < channels; ++channel) {
+            int32_t sample = data[frame * channels + channel];
+            energy[channel] += static_cast<int64_t>(sample) * sample;
+        }
+    }
+
+    // Smooth across chunks (EMA, alpha = 1/8) so the pick reflects the mic slot's
+    // SUSTAINED energy, not one quiet/noisy chunk.
+    if (static_cast<int>(channel_energy_ema_.size()) != channels) {
+        channel_energy_ema_.assign(channels, 0);
+        dominant_channel_ = -1;
+    }
+    int best = 0;
+    for (int channel = 0; channel < channels; ++channel) {
+        channel_energy_ema_[channel] +=
+            (energy[channel] - channel_energy_ema_[channel]) >> 3;
+        if (channel_energy_ema_[channel] > channel_energy_ema_[best]) {
+            best = channel;
+        }
+    }
+
+    // Hysteresis: only move the sticky slot when another is clearly (>50%) louder
+    // on the smoothed energy, so a noisy idle chunk can't bounce it mid-utterance.
+    if (dominant_channel_ < 0 || dominant_channel_ >= channels) {
+        dominant_channel_ = best;
+    } else if (best != dominant_channel_ &&
+               channel_energy_ema_[best] >
+                   channel_energy_ema_[dominant_channel_] +
+                       (channel_energy_ema_[dominant_channel_] >> 1)) {
+        dominant_channel_ = best;
+    }
+
+    const int selected = dominant_channel_;
+    std::vector<int16_t> mono(frames);
+    for (size_t frame = 0; frame < frames; ++frame) {
+        mono[frame] = data[frame * channels + selected];
+    }
+    return mono;
+}
 
 AfeAudioProcessor::AfeAudioProcessor()
     : afe_data_(nullptr) {
@@ -13,6 +68,7 @@ AfeAudioProcessor::AfeAudioProcessor()
 void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srmodel_list_t* models_list) {
     codec_ = codec;
     frame_samples_ = frame_duration_ms * 16000 / 1000;
+    codec_input_channels_ = std::max(1, codec_->input_channels());
 
     // Pre-allocate output buffer capacity
     output_buffer_.reserve(frame_samples_);
@@ -20,11 +76,17 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
     int ref_num = codec_->input_reference() ? 1 : 0;
 
     std::string input_format;
-    for (int i = 0; i < codec_->input_channels() - ref_num; i++) {
-        input_format.push_back('M');
-    }
-    for (int i = 0; i < ref_num; i++) {
-        input_format.push_back('R');
+    if (!codec_->input_reference() && codec_input_channels_ > 1) {
+        input_format = "M";
+        afe_feed_channels_ = 1;
+    } else {
+        for (int i = 0; i < codec_input_channels_ - ref_num; i++) {
+            input_format.push_back('M');
+        }
+        for (int i = 0; i < ref_num; i++) {
+            input_format.push_back('R');
+        }
+        afe_feed_channels_ = codec_input_channels_;
     }
 
     srmodel_list_t *models;
@@ -71,7 +133,7 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();
         vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, tskIDLE_PRIORITY, NULL);
+    }, "audio_communication", 4096, this, tskIDLE_PRIORITY + 9, NULL);
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
@@ -98,8 +160,14 @@ void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
     if (!IsRunning()) {
         return;
     }
-    input_buffer_.insert(input_buffer_.end(), data.begin(), data.end());
-    size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * codec_->input_channels();
+    const std::vector<int16_t>* feed_data = &data;
+    std::vector<int16_t> mono_data;
+    if (!codec_->input_reference() && codec_input_channels_ > 1) {
+        mono_data = SelectDominantMonoChannel(data, codec_input_channels_);
+        feed_data = &mono_data;
+    }
+    input_buffer_.insert(input_buffer_.end(), feed_data->begin(), feed_data->end());
+    size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * afe_feed_channels_;
     while (input_buffer_.size() >= chunk_size) {
         afe_iface_->feed(afe_data_, input_buffer_.data());
         input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);

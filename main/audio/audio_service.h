@@ -136,6 +136,16 @@ public:
     bool IsAfeWakeWord();
 
     void EnableWakeWordDetection(bool enable);
+    // Materialize the AFE wake-word pipeline (create_from_config + spawn the
+    // audio_detection fetch task) WITHOUT starting it. Hoisted off the Idle-time
+    // prio-10 state transition onto the prio-2 activation task so the expensive
+    // one-time AFE build overlaps the OTA/protocol network waits before Idle.
+    // After this, the Idle EnableWakeWordDetection(true) only has to Start()
+    // (cheap), so the very first "Hi ESP" lands first try instead of racing AFE
+    // init. Must NOT Start() / set AS_EVENT_WAKE_WORD_RUNNING — the FEED ring
+    // stays empty until the locked Idle gate enables the mic, so the BLE/AFE
+    // contention gate is untouched. Caller MUST gate on IsDeviceClaimed().
+    void PrewarmWakeWord();
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);

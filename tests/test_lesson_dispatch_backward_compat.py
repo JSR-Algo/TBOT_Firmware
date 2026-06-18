@@ -53,9 +53,14 @@ def test_unknown_type_noop_is_unchanged():
 
 def test_handle_robot_action_message_untouched_and_mcp_arm_tools_have_no_lesson_leak():
     # The lesson path must reuse robot_action for arm motion, never fork it, and the
-    # MCP arm tools (mcp_server.cc) must carry zero lesson coupling.
+    # MCP arm tools (mcp_server.cc) must carry zero lesson control coupling. A source
+    # comment may reference the shared image-fetch hardening, but MCP must not dispatch
+    # lesson frames or call the lesson handler.
     assert "bool Application::HandleRobotActionMessage(const cJSON* root)" in read("main/application.cc")
-    assert "lesson" not in read("main/mcp_server.cc").lower()
+    mcp = read("main/mcp_server.cc")
+    assert "HandleLessonMessage" not in mcp
+    assert "SendLessonFrame" not in mcp
+    assert '"lesson_' not in mcp
 
 
 def test_hello_features_advertises_lesson_capability_additively():

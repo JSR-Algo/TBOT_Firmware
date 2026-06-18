@@ -669,6 +669,32 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     }
 }
 
+void AudioService::PrewarmWakeWord() {
+    // Runs the one-time lazy-init body from EnableWakeWordDetection(true) MINUS
+    // Start(): build the AFE (esp_afe create_from_config) and spawn the
+    // audio_detection fetch task ahead of Idle, on the prio-2 activation task,
+    // so the first wake-word check at Idle is just a cheap Start() instead of a
+    // synchronous AFE create on the prio-10 transition that drops the first
+    // "Hi ESP". Deliberately does NOT call wake_word_->Start() and does NOT set
+    // AS_EVENT_WAKE_WORD_RUNNING: the FEED ring must stay empty until the locked
+    // IsDeviceClaimed()-gated Idle gate enables the mic, preserving the BLE/AFE
+    // contention fix. Callers gate this on IsDeviceClaimed().
+    if (!wake_word_) {
+        CreateWakeWordIfAvailable();
+    }
+    if (!wake_word_) {
+        return;
+    }
+    if (!wake_word_initialized_) {
+        if (!wake_word_->Initialize(codec_, models_list_)) {
+            ESP_LOGE(TAG, "Failed to prewarm wake word");
+            return;
+        }
+        wake_word_initialized_ = true;
+        ESP_LOGI(TAG, "Wake word prewarmed (AFE built; not started)");
+    }
+}
+
 void AudioService::ReleaseWakeWordResourcesForWifiConfig() {
     if (!wake_word_) {
         return;
@@ -828,8 +854,6 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
-
-    CreateWakeWordIfAvailable();
 }
 
 void AudioService::CreateWakeWordIfAvailable() {

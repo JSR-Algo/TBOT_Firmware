@@ -134,8 +134,14 @@ def test_lcdwiki_es3c35p_does_not_register_flaky_touch_controller():
 def test_lcdwiki_es3c35p_boot_long_press_reenters_repair_pairing():
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
 
+    assert "boot_button_(BOOT_BUTTON_GPIO, false, 5000)" in board
+
     init_start = board.index("void InitializeButtons()")
     init_buttons = board[init_start : board.index("public:", init_start)]
+    assert "boot_button_.OnPressDown" in init_buttons
+    assert "boot_button_.OnPressUp" in init_buttons
+    assert "LCDWiki BOOT press down" in init_buttons
+    assert "LCDWiki BOOT press up" in init_buttons
     assert "boot_button_.OnLongPress" in init_buttons
 
     # Long-press is the "re-pair" gesture: forget the current claim/owner and

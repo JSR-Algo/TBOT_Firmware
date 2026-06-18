@@ -386,6 +386,28 @@ def test_fw12_init_marks_inited_only_on_success_path():
     )
 
 
+def test_fw12b_init_cleans_controller_after_partial_init_failures():
+    blufi = read("main/boards/common/blufi.cpp")
+
+    fn_idx = blufi.index("esp_err_t Blufi::init()")
+    fn_end = blufi.index("esp_err_t Blufi::deinit()", fn_idx)
+    body = blufi[fn_idx:fn_end]
+
+    # If controller init partially succeeds and later fails, or if host/Bluedroid
+    # init fails after controller enable, leaving the controller allocated makes
+    # the next standby retry fail with ESP_ERR_INVALID_STATE. Every init failure
+    # path that can follow _controller_init() must deinit the controller before
+    # reporting BLE off to callers.
+    controller_fail = body.index("BLUFI controller init failed")
+    controller_return = body.index("return ret;", controller_fail)
+    controller_branch = body[controller_fail:controller_return]
+    assert "_controller_deinit();" in controller_branch
+
+    host_fail = body.index("BLUFI host and cb init failed")
+    host_return = body.index("return ret;", host_fail)
+    host_branch = body[host_fail:host_return]
+    assert "_controller_deinit();" in host_branch
+
 # ---------------------------------------------------------------------------
 # FW13: blufi.cpp — the RECV_STA_SSID / RECV_STA_PASSWD copy must be
 #       length-bounded. A raw `buf[param->..._len] = '\0'` overflows when len

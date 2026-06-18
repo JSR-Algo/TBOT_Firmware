@@ -233,6 +233,9 @@ private:
     // user/system-initiated close. An UNEXPECTED drop leaves it true ->
     // OnAudioChannelClosed auto-reconnects so long talks aren't cut off.
     std::atomic<bool> online_intent_{false};
+    // Passive lesson/nudge WebSocket: keep a claimed robot reachable by ESP
+    // server without entering Listening or scheduling listen-mode reconnects.
+    std::atomic<bool> passive_ws_intent_{false};
 
     // Set on a backend/ws error, cleared on (re)connect. Lets the connect mapper
     // tell ONLINE apart from OFFLINE_RETRY ("Server unavailable. Retrying...").
@@ -269,6 +272,7 @@ private:
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);
     void ContinueOpenAudioChannel(ListeningMode mode);
+    void StartPassiveLessonWebsocket();
     static void OpenChannelTask(void* arg);            // T1: blocking connect, off app task
     void DoResetProtocol();                            // T1: actual reset (worker-safe)
     void ArmConnectWatchdog();                         // SM-3: bound CONNECTING

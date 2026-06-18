@@ -138,6 +138,8 @@ private:
 
     static uint16_t _crc_checksum(uint8_t iv8, uint8_t *data, int len);
 
+    bool _require_secure_session_for_credentials();
+
     void _handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param);
 
     static int _get_softap_conn_num();
@@ -189,6 +191,7 @@ private:
     };
 
     BlufiSecurity *m_sec;
+    bool m_blufi_security_negotiated;
 
     // Bootstrap token received via BluFi custom-data TLV tag=0x01 (RAM only, never written to NVS)
     std::string bootstrap_token_;

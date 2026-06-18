@@ -597,6 +597,12 @@ private:
     }
 
     void InitializeButtons() {
+        boot_button_.OnPressDown([]() {
+            ESP_LOGI(TAG, "LCDWiki BOOT press down");
+        });
+        boot_button_.OnPressUp([]() {
+            ESP_LOGI(TAG, "LCDWiki BOOT press up");
+        });
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             auto state = app.GetDeviceState();
@@ -618,7 +624,7 @@ private:
     }
 
 public:
-    LCDWikiES3C35PBoard() : boot_button_(BOOT_BUTTON_GPIO) {
+    LCDWikiES3C35PBoard() : boot_button_(BOOT_BUTTON_GPIO, false, 5000) {
         InitializeI2c();
         InitializeSpi();
         InitializeLcdDisplay();

@@ -36,6 +36,8 @@ static constexpr uint32_t kListenPlaybackDrainTimeoutMs = 650;
 static constexpr uint32_t kSpeakingTimeoutMs = 12000;
 static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
+static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
+static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 
 // TBOT claim poll (C4): cadence 10s. The backend's 5-minute cap applies only
 // after a pending claim exists; unclaimed standby must keep polling so a late
@@ -291,11 +293,22 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
-            while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+            uint32_t sent_packets = 0;
+            while (sent_packets < kMaxAudioPacketsPerMainLoop) {
+                auto packet = audio_service_.PopPacketFromSendQueue();
+                if (!packet) {
+                    break;
+                }
                 if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
                     break;
                 }
+                ++sent_packets;
+                esp_task_wdt_reset();
             }
+            if (sent_packets == kMaxAudioPacketsPerMainLoop) {
+                xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
 
         if (bits & MAIN_EVENT_WAKE_WORD_DETECTED) {
@@ -466,17 +479,11 @@ void Application::RefreshPendingTbotClaim() {
         return;
     }
 
-    // Once the realtime WS is up the device is fully functional. The claim-config
-    // backend (onrender) is a SEPARATE, flaky service; each poll is a blocking
-    // ~3s HTTP/TLS round-trip on the app task. Re-armed every ~10s it starves the
-    // Opus codec (encode/decode drops -> choppy speech, dropped questions),
-    // delays the wake-word event ("Hi ESP" needs several tries) and stalls state
-    // transitions ("văng lỗi" mid-talk). The giveup-on-failures guard never fires
-    // because fetches SUCCEED (device just unclaimed) so failures reset to 0.
-    // Stop the blocking claim poll while claimed+online. Keep the normal online
-    // audio path stable by also tearing down standby BLE; explicit BOOT
-    // Wi-Fi-config mode reopens BluFi for phone reconnect when needed.
-    if (online_intent_.load() && IsDeviceClaimed()) {
+    // Claimed devices are no longer part of the claim/BluFi state machine. This
+    // must use IsDeviceClaimed() directly, not online_intent_, because rebooted
+    // devices can recover their claimed state from backend credentials before
+    // the realtime online path has started.
+    if (IsDeviceClaimed()) {
         StopClaimPoll();
         StopBleAdvertising();
         return;
@@ -987,9 +994,13 @@ void Application::ClaimFetchTask(void* arg) {
     // next tick can dispatch again.
     self->Schedule([self, api_url, token, pending_claim, fetched, device_config_status]() {
         self->claim_poll_inflight_.store(false);
-        // The poll may have been stopped (claimed+online / WiFiConfiguring) while
-        // this fetch was outstanding; honor that and drop the stale result.
-        if (!self->claim_poll_active_) {
+        // The periodic poll may have been stopped (claimed+online / WiFiConfiguring)
+        // while this fetch was outstanding; honor that and drop stale no-claim
+        // results. But a Wi-Fi provisioning completion dispatches a one-shot
+        // fetch before the poll timer is active. If that fetch already found an
+        // authenticated pending claim, it must still be applied or mobile stays
+        // stuck at WAITING_PHYSICAL_CONFIRM forever.
+        if (!self->claim_poll_active_ && !(fetched && pending_claim.active && !token.empty())) {
             return;
         }
         self->ApplyPendingTbotClaimFetchResult(api_url, token, pending_claim,
@@ -1175,14 +1186,21 @@ void Application::HandleClaimConfirmTimeout() {
 // ---------------------------------------------------------------------------
 
 bool Application::IsDeviceClaimed() const {
-    // Authoritative claimed-signal: a DEDICATED flag written ONLY by a successful
-    // physical-claim confirm (PersistTbotClaimConfirmationResponse). We must NOT
-    // key off websocket "token": the OTA CheckVersion response also writes that
-    // key (a realtime-WS auth token) on every boot (observed: "Received websocket
-    // token: empty=0"), so an unclaimed-but-online robot would falsely look
-    // claimed and silently stop advertising/polling for pairing.
+    // Primary claimed-signal: a DEDICATED flag written ONLY by a successful
+    // physical-claim confirm (PersistTbotClaimConfirmationResponse). Recovery
+    // signal: backend device_id + device_secret are also written only by that
+    // successful confirm, so after a reboot/marker loss they are enough to keep
+    // the robot on the claimed online path. We must NOT key off websocket
+    // "token": OTA CheckVersion can write that realtime-WS token on every boot.
     Settings claim_state("tbot_claim", false);
-    return claim_state.GetInt("confirmed", 0) != 0;
+    if (claim_state.GetInt("confirmed", 0) != 0) {
+        return true;
+    }
+
+    Settings backend_settings("backend", false);
+    const std::string device_id = backend_settings.GetString("device_id");
+    const std::string device_secret = backend_settings.GetString("device_secret");
+    return !device_id.empty() && !device_secret.empty();
 }
 
 void Application::EnsureBleAdvertisingForStandby() {
@@ -1704,6 +1722,11 @@ void Application::ActivationTask() {
     // Check for new firmware version
     CheckNewVersion();
 
+    // Claimed devices can override the OTA-provided websocket.url from the
+    // backend's authenticated runtime config. If this fails, keep the existing
+    // OTA/NVS value and compile-time placeholder fallback chain.
+    RefreshWebsocketUrlFromConfigFetch();
+
     // Initialize the protocol
     InitializeProtocol();
 
@@ -1924,10 +1947,12 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
-        // Channel is up (including the boot-time preconnect, which bypasses
-        // ContinueOpenAudioChannel) -> mark intent so an unexpected drop while
-        // idle auto-reconnects instead of stranding the device offline.
-        online_intent_.store(true);
+        // User-driven listen/wake sessions own reconnect intent. Passive lesson
+        // preconnect only makes the device reachable for server lesson pull/nudge;
+        // it must not later reconnect into Listening without a wake/button action.
+        if (!passive_ws_intent_.load()) {
+            online_intent_.store(true);
+        }
         backend_offline_.store(false);
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         StartHeartbeat();
@@ -1961,6 +1986,15 @@ void Application::InitializeProtocol() {
             // WSS-7: drop stale mic backlog so a future session does not replay
             // seconds-old uplink audio after the channel reopens.
             while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+            // Claimed idle robots keep a passive lesson socket so admin/backend
+            // nudges can reach the LCD without putting the device into Listening.
+            // Idle WebSocket timeout is an unexpected drop for that passive path;
+            // reopen the same passive channel instead of using voice reconnect.
+            if (passive_ws_intent_.load()) {
+                ESP_LOGW(TAG, "passive_lesson_ws_dropped_unexpected -> passive reconnect");
+                StartPassiveLessonWebsocket();
+                return;
+            }
             // Sustained operation: an UNEXPECTED drop (server/tunnel closed the WS,
             // NOT a user/system close) leaves online_intent_ true -> auto-reconnect
             // with backoff so a 20-60 min conversation is not permanently cut off.
@@ -2138,14 +2172,18 @@ void Application::InitializeProtocol() {
         }
     });
     
-    // WebSocket Start() opens the realtime audio channel. Do not auto-start it
-    // at boot: an idle preconnect owns online_intent_, and a later tunnel/server
-    // drop can schedule reconnect into Listening without a wake phrase. Keep the
-    // protocol object wired, but open the channel only from wake-word or an
-    // explicit listen/click action. MQTT Start() is a control-channel connect,
-    // so it still runs here.
+    // WebSocket Start() opens the realtime audio channel. Unclaimed devices keep
+    // it closed until wake/button so BLE claim and local wake-word setup own the
+    // radio. Claimed devices open a PASSIVE channel so ESP-server connect-time
+    // lesson pull and backend lesson nudges have a route without entering
+    // Listening. MQTT Start() is a control-channel connect, so it still runs here.
     if (is_websocket_protocol) {
-        ESP_LOGI(TAG, "WebSocket audio starts on wake word or explicit listen");
+        if (IsDeviceClaimed()) {
+            ESP_LOGI(TAG, "Claimed device: opening passive WebSocket for lesson/nudge");
+            StartPassiveLessonWebsocket();
+        } else {
+            ESP_LOGI(TAG, "WebSocket audio starts on wake word or explicit listen");
+        }
     } else {
         protocol_->Start();
     }
@@ -2430,8 +2468,33 @@ struct ConnectContext {
     uint32_t generation;
     std::string wake_word;
     bool wake_word_invoke = false;
+    bool passive_preconnect = false;
 };
 }  // namespace
+
+void Application::StartPassiveLessonWebsocket() {
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "Protocol not initialized");
+        return;
+    }
+    if (protocol_->IsAudioChannelOpened() || connect_in_flight_.load()) {
+        return;
+    }
+    passive_ws_intent_.store(true);
+    online_intent_.store(false);
+    uint32_t gen = ++connect_generation_;
+    connect_in_flight_.store(true);
+    ArmConnectWatchdog();
+    auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
+    if (xTaskCreate(&Application::OpenChannelTask, "lesson_ws", 4096, ctx,
+                    tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+        delete ctx;
+        connect_in_flight_.store(false);
+        passive_ws_intent_.store(false);
+        CancelConnectWatchdog();
+        ESP_LOGE(TAG, "lesson_ws task create failed");
+    }
+}
 
 void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     // Check state again in case it was changed during scheduling
@@ -2460,7 +2523,8 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     uint32_t gen = ++connect_generation_;
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
-    auto* ctx = new ConnectContext{this, mode, gen, std::string(), false};
+    passive_ws_intent_.store(false);
+    auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
     if (xTaskCreate(&Application::OpenChannelTask, "ws_open", 4096, ctx,
                     tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
         delete ctx;
@@ -2478,6 +2542,7 @@ void Application::OpenChannelTask(void* arg) {
     uint32_t gen = ctx->generation;
     std::string wake_word = ctx->wake_word;
     bool wake_word_invoke = ctx->wake_word_invoke;
+    bool passive_preconnect = ctx->passive_preconnect;
     delete ctx;
 
     // The ONLY blocking call, now off the app task.
@@ -2503,7 +2568,7 @@ void Application::OpenChannelTask(void* arg) {
     }
     self->connect_in_flight_.store(false);  // worker is done using protocol_
 
-    self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke]() {
+    self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
         self->CancelConnectWatchdog();
         // A ResetProtocol arrived while we were mid-connect and deferred the
         // actual reset to us (now safe: the worker no longer touches protocol_).
@@ -2514,19 +2579,24 @@ void Application::OpenChannelTask(void* arg) {
         if (gen != self->connect_generation_.load()) {
             return;  // superseded by a newer connect or the watchdog
         }
-        if (self->GetDeviceState() != kDeviceStateConnecting) {
+        if (!passive_preconnect && self->GetDeviceState() != kDeviceStateConnecting) {
             return;
         }
         if (ok) {
             self->backend_offline_.store(false);
             self->reconnect_attempt_ = 0;
-            if (wake_word_invoke) {
+            if (passive_preconnect) {
+                ESP_LOGI(TAG, "passive_lesson_websocket_opened");
+            } else if (wake_word_invoke) {
                 self->FinishWakeWordInvoke(wake_word);
             } else {
                 self->SetListeningMode(mode);
             }
         } else {
-            if (wake_word_invoke) {
+            if (passive_preconnect) {
+                ESP_LOGW(TAG, "passive_lesson_websocket_failed");
+                self->passive_ws_intent_.store(false);
+            } else if (wake_word_invoke) {
                 ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");
             } else {
                 ESP_LOGW(TAG, "open_audio_channel_failed -> idle + backoff");
@@ -2535,8 +2605,10 @@ void Application::OpenChannelTask(void* arg) {
             if (wake_word_invoke) {
                 self->audio_service_.EnableWakeWordDetection(true);
             }
-            self->SetDeviceState(kDeviceStateIdle);
-            if (!wake_word_invoke) {
+            if (self->GetDeviceState() == kDeviceStateConnecting) {
+                self->SetDeviceState(kDeviceStateIdle);
+            }
+            if (!wake_word_invoke && !passive_preconnect) {
                 self->ScheduleReconnect(mode);   // WSS-4: bounded retry
             }
         }
@@ -2560,7 +2632,10 @@ void Application::ArmConnectWatchdog() {
         }
     }
     esp_timer_stop(connect_watchdog_timer_);
-    esp_timer_start_once(connect_watchdog_timer_, 12000000);  // 12s > sum of dep waits
+    // OpenAudioChannel can spend up to 10s waiting for server hello after the
+    // socket connect. Wake-word invokes may retry; the watchdog must outlive that
+    // budget or the first valid "Hi ESP" is reset to Idle before success returns.
+    esp_timer_start_once(connect_watchdog_timer_, kConnectWatchdogTimeoutUs);
 }
 
 void Application::CancelConnectWatchdog() {
@@ -2760,7 +2835,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         uint32_t gen = ++connect_generation_;
         connect_in_flight_.store(true);
         ArmConnectWatchdog();
-        auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true};
+        passive_ws_intent_.store(false);
+        auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
         if (xTaskCreate(&Application::OpenChannelTask, "wake_ws_open", 4096, ctx,
                         tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
             delete ctx;
@@ -2796,12 +2872,12 @@ void Application::FinishWakeWordInvoke(const std::string& wake_word) {
     }
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
-    SetListeningMode(GetDefaultListeningMode());
+    SetListeningMode(kListeningModeAutoStop);
 #else
     // Set flag to play popup sound after state changes to listening
     // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
     play_popup_on_listening_ = true;
-    SetListeningMode(GetDefaultListeningMode());
+    SetListeningMode(kListeningModeAutoStop);
 #endif
 }
 
@@ -3057,6 +3133,8 @@ void Application::AbortSpeaking(AbortReason reason) {
 }
 
 void Application::SetListeningMode(ListeningMode mode) {
+    passive_ws_intent_.store(false);
+    online_intent_.store(true);
     listening_mode_ = mode;
     SetDeviceState(kDeviceStateListening);
 }
@@ -3223,6 +3301,7 @@ void Application::PlaySound(const std::string_view& sound) {
 void Application::CloseAudioChannelByIntent() {
     // User/system-initiated close: we no longer want an open channel, so
     // OnAudioChannelClosed must NOT auto-reconnect. Cancel any pending retry.
+    passive_ws_intent_.store(false);
     online_intent_.store(false);
     reconnect_attempt_ = 0;
     if (reconnect_timer_ != nullptr) {

@@ -97,6 +97,23 @@ def _crc_checksum_body() -> str:
     cpp = read(BLUFI_CPP)
     return _slice(cpp, "uint16_t Blufi::_crc_checksum(", "int Blufi::_get_softap_conn_num()")
 
+def _credential_guard_body() -> str:
+    cpp = read(BLUFI_CPP)
+    return _slice(cpp, "bool Blufi::_require_secure_session_for_credentials()", "int Blufi::_get_softap_conn_num()")
+
+def _handle_event_body() -> str:
+    cpp = read(BLUFI_CPP)
+    return _slice(cpp, "void Blufi::_handle_event(", "void Blufi::_ble_setup_timeout_cb")
+
+def _event_case_body(case_name: str) -> str:
+    body = _handle_event_body()
+    start = body.index(f"case {case_name}")
+    next_case = body.find("\n        case ", start + 1)
+    default_case = body.find("\n        default:", start + 1)
+    candidates = [idx for idx in (next_case, default_case) if idx != -1]
+    end = min(candidates) if candidates else len(body)
+    return body[start:end]
+
 
 # ===========================================================================
 # SanitizedSerial — allowed-char filter [0-9A-Za-z-], stop-at-NUL.
@@ -842,3 +859,37 @@ def test_sec28_blufi_security_struct_widths_match_cpp_expectations():
     # The mbedtls sub-contexts are heap pointers (constructed in _security_init).
     assert "mbedtls_dhm_context *dhm;" in struct
     assert "esp_aes_context *aes;" in struct
+
+# ---------------------------------------------------------------------------
+# SEC29: Wi-Fi credentials must only be accepted after BluFi DH/AES completed.
+#        The SSID and password handlers must reject first, before copying bytes
+#        into m_sta_config, so plaintext BLE credential frames are dropped.
+# ---------------------------------------------------------------------------
+def test_sec29_sta_credentials_are_rejected_before_copy_without_secure_session():
+    assert "esp_blufi_send_error_info(" in _credential_guard_body()
+    for case_name, destination in (
+        ("ESP_BLUFI_EVENT_RECV_STA_SSID", "m_sta_config.sta.ssid"),
+        ("ESP_BLUFI_EVENT_RECV_STA_PASSWD", "m_sta_config.sta.password"),
+    ):
+        case_body = _event_case_body(case_name)
+        guard_idx = case_body.index("_require_secure_session_for_credentials()")
+        memcpy_idx = case_body.index(f"memcpy({destination}")
+        assert guard_idx < memcpy_idx, f"{case_name} must check secure session before memcpy"
+        assert "break;" in case_body[guard_idx:memcpy_idx]
+
+# ---------------------------------------------------------------------------
+# SEC30: The secure-session predicate must prove both DH completion and an AES
+#        context, not just allocation of the BlufiSecurity struct on BLE connect.
+# ---------------------------------------------------------------------------
+def test_sec30_secure_session_flag_set_only_after_dh_aes_success():
+    cpp = read(BLUFI_CPP)
+    h = read(BLUFI_H)
+    dh_body = _dh_handler_body()
+
+    assert "bool m_blufi_security_negotiated;" in h
+    assert "m_blufi_security_negotiated = false;" in _security_init_body()
+    assert "m_blufi_security_negotiated = false;" in _security_deinit_body()
+    setkey_idx = dh_body.index("mbedtls_aes_setkey_enc")
+    flag_idx = dh_body.index("m_blufi_security_negotiated = true;")
+    assert setkey_idx < flag_idx
+    assert "bool Blufi::_require_secure_session_for_credentials()" in cpp

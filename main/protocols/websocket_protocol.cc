@@ -101,7 +101,7 @@ bool WebsocketProtocol::SendText(const std::string& text) {
     }
 
     if (!websocket_->Send(text)) {
-        ESP_LOGE(TAG, "Failed to send text: %s", text.c_str());
+        ESP_LOGE(TAG, "Failed to send text frame bytes=%u", (unsigned)text.size());
         SetError(Lang::Strings::SERVER_ERROR);
         return false;
     }
