@@ -51,7 +51,7 @@ def function_body(text: str, signature: str) -> str:
 
 def test_heartbeat_http_client_caps_blocking_open_to_5s():
     source = read("main/application.cc")
-    send_body = function_body(source, "bool Application::SendDeviceHeartbeat")
+    send_body = function_body(source, "int Application::SendDeviceHeartbeat")
     # The timeout must be set on the heartbeat client BEFORE Open() so a slow
     # backend cannot stall audio on the main task.
     assert "http->SetTimeout(5000);" in send_body
@@ -131,16 +131,42 @@ def test_heartbeat_is_stopped_on_backend_error_and_started_only_on_connect():
 
 def test_heartbeat_sender_is_gated_on_a_live_online_device_state():
     source = read("main/application.cc")
-    send_body = function_body(source, "bool Application::SendDeviceHeartbeat")
+    dispatch_body = function_body(source, "void Application::DispatchDeviceHeartbeat")
 
     # Must check a live online DeviceState, not merely token presence.
-    assert "GetDeviceState()" in send_body
-    assert "kDeviceStateIdle" in send_body
-    assert "kDeviceStateListening" in send_body
-    assert "kDeviceStateSpeaking" in send_body
-    # The state gate runs before the network call.
-    assert send_body.index("kDeviceStateSpeaking") < send_body.index('http->Open("POST", url)')
+    assert "GetDeviceState()" in dispatch_body
+    assert "kDeviceStateIdle" in dispatch_body
+    assert "kDeviceStateListening" in dispatch_body
+    assert "kDeviceStateSpeaking" in dispatch_body
+    # The state gate runs before the heartbeat worker can be queued.
+    assert dispatch_body.index("kDeviceStateSpeaking") < dispatch_body.index("xTaskCreate")
 
+
+def test_heartbeat_auth_failure_clears_stale_claim_credentials_and_reopens_setup():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    heartbeat_task_body = function_body(source, "void Application::HeartbeatTask")
+    recovery_body = function_body(source, "void Application::HandleHeartbeatAuthFailure")
+
+    # A 401/403 heartbeat means the backend rejects the locally-persisted
+    # device_secret or claimed flag. Keeping the robot locally claimed here
+    # reproduces the field symptom: robot says connected, mobile keeps waiting.
+    assert "void HandleHeartbeatAuthFailure(int status_code);" in header
+    assert "status_code == 401 || status_code == 403" in heartbeat_task_body
+    assert "HandleHeartbeatAuthFailure(status_code);" in heartbeat_task_body
+    assert heartbeat_task_body.index("status_code == 401 || status_code == 403") < heartbeat_task_body.index("vTaskDelete")
+
+    assert 'Settings backend_settings("backend", true);' in recovery_body
+    assert 'backend_settings.SetString("device_secret", "");' in recovery_body
+    assert 'Settings claim_state("tbot_claim", true);' in recovery_body
+    assert 'claim_state.SetInt("confirmed", 0);' in recovery_body
+    assert "pending_tbot_claim_ = PendingTbotClaim{};" in recovery_body
+    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby;" in recovery_body
+    assert "StopHeartbeat();" in recovery_body
+    assert "CloseAudioChannelByIntent();" in recovery_body
+    assert "EnsureBleAdvertisingForStandby();" in recovery_body
+    assert "StartClaimPoll();" in recovery_body
+    assert "RenderClaimSubstate(claim_substate_);" in recovery_body
 
 # ---------------------------------------------------------------------------
 # H3 — all-21 mapper routing in HandleStateChangedEvent (text-scrapable)
@@ -298,27 +324,27 @@ def test_claim_expiry_arm_is_guarded_on_a_synced_clock():
 def test_repeated_fetch_failure_renders_server_unavailable_copy():
     app = read("main/application.cc")
     header = read("main/application.h")
-    refresh_body = function_body(app, "void Application::RefreshPendingTbotClaim")
+    apply_body = function_body(app, "void Application::ApplyPendingTbotClaimFetchResult")
 
     # A consecutive-failure counter distinguishes "backend down" from "no claim".
     assert "claim_fetch_failures_" in header
-    assert "++claim_fetch_failures_;" in refresh_body
-    assert "Lang::Strings::SERVER_UNAVAILABLE_RETRYING" in refresh_body
+    assert "++claim_fetch_failures_;" in apply_body
+    assert "Lang::Strings::SERVER_UNAVAILABLE_RETRYING" in apply_body
     # A successful fetch resets the streak (so a single transient miss is benign).
-    assert "claim_fetch_failures_ = 0;" in refresh_body
+    assert "claim_fetch_failures_ = 0;" in apply_body
 
 
 def test_successful_fetch_after_server_retry_restores_ready_to_connect_copy():
     app = read("main/application.cc")
-    refresh_body = function_body(app, "void Application::RefreshPendingTbotClaim")
+    apply_body = function_body(app, "void Application::ApplyPendingTbotClaimFetchResult")
 
     # Once the backend recovers and /device/config succeeds with no active claim,
     # the visible retry banner must be replaced by the claimable standby copy.
     # Otherwise the robot stays stuck on "Server unavailable. Retrying..." even
     # though it is again scannable/connectable from the phone.
-    assert "had_claim_fetch_failures" in refresh_body
-    assert "had_claim_fetch_failures" in refresh_body[refresh_body.index("claim_fetch_failures_ = 0;"):]
-    assert "RenderClaimSubstate(claim_substate_);" in refresh_body
+    assert "had_claim_fetch_failures" in apply_body
+    assert "had_claim_fetch_failures" in apply_body[apply_body.index("claim_fetch_failures_ = 0;"):]
+    assert "RenderClaimSubstate(claim_substate_);" in apply_body
 
 
 def test_boot_tap_on_unclaimed_idle_reenters_phone_scan_standby_not_audio():
@@ -377,7 +403,7 @@ def test_wifi_config_mode_suppresses_claim_backend_poll():
     # intentionally waiting for mobile provisioning.
     assert "GetDeviceState() == kDeviceStateWifiConfiguring" in refresh_body
     assert refresh_body.index("kDeviceStateWifiConfiguring") < refresh_body.index(
-        "FetchPendingTbotClaimFromDeviceConfig"
+        "DispatchPendingTbotClaimFetch"
     )
 
     wifi_case_start = state_changed_body.index("case kDeviceStateWifiConfiguring:")

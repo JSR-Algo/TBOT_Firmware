@@ -2,13 +2,26 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PROJECT_ROOT = ROOT.parent
 FORBIDDEN_BRAND_TEXT = ("Xiaozhi", "XiaoZhi", "小智")
 CJK_SCRIPT_PATTERN = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]")
 
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
+
+def function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:index]
+    raise AssertionError(f"unterminated function {signature}")
 
 
 def test_wifi_provisioning_uses_tbot_brand_names():
@@ -128,6 +141,18 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     assert "vTaskDelete(audio_detection_task_handle_)" in dtor_body
     assert dtor_body.index("vTaskDelete(audio_detection_task_handle_)") < dtor_body.index("afe_iface_->destroy")
 
+def test_assets_model_load_does_not_create_afe_before_claimed_audio_gate():
+    audio_cc = read("main/audio/audio_service.cc")
+
+    set_models_body = function_body(audio_cc, "void AudioService::SetModelsList")
+    assert "models_list_ = models_list;" in set_models_body
+    assert "CreateWakeWordIfAvailable" not in set_models_body
+
+    enable_body = function_body(audio_cc, "void AudioService::EnableWakeWordDetection")
+    prewarm_body = function_body(audio_cc, "void AudioService::PrewarmWakeWord")
+    assert "CreateWakeWordIfAvailable();" in enable_body
+    assert "CreateWakeWordIfAvailable();" in prewarm_body
+
 def test_wifi_config_mode_accepts_startup_activation_window():
     wifi_board = read("main/boards/common/wifi_board.cc")
     enter_start = wifi_board.index("void WifiBoard::EnterWifiConfigMode()")
@@ -182,10 +207,10 @@ def test_user_facing_brand_text_uses_tbot():
     ignored_dirs = {".git", "build", "managed_components", "node_modules", "target"}
     files = [
         path
-        for path in PROJECT_ROOT.rglob("*")
+        for path in ROOT.rglob("*")
         if path.is_file()
         and path.suffix in text_suffixes
-        and ignored_dirs.isdisjoint(path.relative_to(PROJECT_ROOT).parts)
+        and ignored_dirs.isdisjoint(path.relative_to(ROOT).parts)
     ]
     files.append(ROOT / "main" / "Kconfig.projbuild")
 
@@ -194,6 +219,6 @@ def test_user_facing_brand_text_uses_tbot():
         text = path.read_text(encoding="utf-8")
         for forbidden in FORBIDDEN_BRAND_TEXT:
             if forbidden in text:
-                offenders.append(f"{path.relative_to(PROJECT_ROOT)} contains {forbidden}")
+                offenders.append(f"{path.relative_to(ROOT)} contains {forbidden}")
 
     assert offenders == []

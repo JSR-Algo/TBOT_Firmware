@@ -1,10 +1,7 @@
 CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
-# NOTE: OTA_URL is the fresh-flash bootstrap SEED and must be a reachable host. The current
-# value is an EPHEMERAL trycloudflare tunnel — update it as the tunnel rotates, or move to the
-# stable *.skylabs.vn host. WEBSOCKET_URL stays a PLACEHOLDER on purpose (endpoint rule): the
-# device uses the websocket.url returned by OTA/bootstrap, persisted to NVS. See
-# docs/connection-flow-inspection-and-plan.md (C-OTA) + tests/test_tbot_connect_config.py.
-CONFIG_OTA_URL="https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
+# Stable backend bootstrap seed. The OTA response returns the final websocket.url.
+CONFIG_OTA_URL="https://tbot-backend-8wmh.onrender.com/tbot/ota/"
+CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
 CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"
 # BLE setup hard-timeout: spec default 5 min (was 120s); range 60-600 (max 10 min).
 CONFIG_BLE_SETUP_TIMEOUT_SEC=300

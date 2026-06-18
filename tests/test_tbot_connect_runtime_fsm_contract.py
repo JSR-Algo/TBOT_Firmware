@@ -41,7 +41,8 @@ def function_body(text: str, signature: str) -> str:
 def test_application_has_a_periodic_device_heartbeat_sender():
     header = read("main/application.h")
     source = read("main/application.cc")
-    send_body = function_body(source, "bool Application::SendDeviceHeartbeat")
+    dispatch_body = function_body(source, "void Application::DispatchDeviceHeartbeat")
+    send_body = function_body(source, "int Application::SendDeviceHeartbeat")
     start_body = function_body(source, "void Application::StartHeartbeat")
 
     # Periodic timer plumbing exists.
@@ -54,9 +55,12 @@ def test_application_has_a_periodic_device_heartbeat_sender():
 
     # POSTs to /device/heartbeat carrying the backend heartbeat DTO. Radio and
     # temperature telemetry still come from the board status JSON.
-    assert '"/device/heartbeat"' in send_body
-    assert "Board::GetInstance().GetDeviceStatusJson()" in send_body
-    assert 'cJSON_AddStringToObject(root, "device_id", Board::GetInstance().GetUuid().c_str())' in source
+    assert '"/device/heartbeat"' in dispatch_body
+    assert "Board::GetInstance().GetDeviceStatusJson()" in dispatch_body
+    assert 'const std::string backend_device_id = backend_settings.GetString("device_id");' in dispatch_body
+    assert 'BuildTbotHeartbeatBody(status_json, backend_device_id)' in dispatch_body
+    assert 'cJSON_AddStringToObject(root, "device_id", device_id.c_str())' in source
+    assert 'Board::GetInstance().GetUuid().c_str()' not in function_body(source, "std::string BuildTbotHeartbeatBody")
     assert 'cJSON_AddStringToObject(root, "firmware_version",' in source
     assert 'cJSON_AddNumberToObject(root, "battery_level", battery_level)' in source
     assert 'cJSON_AddItemToObject(root, "connectivity_metrics", connectivity)' in source
@@ -70,9 +74,9 @@ def test_application_has_a_periodic_device_heartbeat_sender():
     # Claimed/online-gated: no backend device secret -> no heartbeat. The
     # realtime websocket token belongs to the ESP WS auth path, not backend API
     # heartbeat auth.
-    assert 'backend_settings.GetString("device_secret")' in send_body
-    assert "if (device_secret.empty())" in send_body
-    assert 'websocket_settings.GetString("token")' not in send_body
+    assert 'backend_settings.GetString("device_secret")' in dispatch_body
+    assert "if (device_secret.empty())" in dispatch_body
+    assert 'websocket_settings.GetString("token")' not in dispatch_body
     assert 'http->SetHeader("X-Device-Token", device_secret)' in send_body
     assert 'http->SetHeader("Authorization", "Bearer " + device_secret)' not in send_body
     assert 'ESP_LOGI(TAG, "Heartbeat accepted (HTTP %d)", status_code);' in send_body
@@ -107,6 +111,46 @@ def test_websocket_audio_channel_open_starts_and_close_stops_heartbeat():
     closed_end = source.index("protocol_->OnIncomingJson", closed_start)
     closed_body = source[closed_start:closed_end]
     assert "StopHeartbeat();" in closed_body
+
+def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_session():
+    source = read("main/application.cc")
+    confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
+
+    # A fresh claim must make the robot ready for the next explicit wake phrase.
+    # Opening the realtime channel here can drive the normal connect path into
+    # Listening, where CONFIG_WAKE_WORD_DETECTION_IN_LISTENING is disabled for
+    # this board. That leaves the user saying "Hi ESP" while the wake-word path
+    # is off.
+    assert "SetDeviceState(kDeviceStateIdle);" in confirm_body
+    assert "audio_service_.EnableWakeWordDetection(true);" in confirm_body
+    assert "protocol_->Start()" not in confirm_body
+    assert "Claim confirmed: warming realtime audio WS" not in confirm_body
+
+def test_websocket_protocol_does_not_auto_start_until_wake_or_explicit_click():
+    source = read("main/application.cc")
+    initialize_body = function_body(source, "void Application::InitializeProtocol")
+
+    # WebSocket Start() opens an audio channel. If boot preconnect owns
+    # online_intent_, a later idle websocket drop schedules reconnect and can
+    # drive the robot into Listening without a wake phrase. Keep WebSocket idle
+    # until wake-word or an explicit button/chat action opens it.
+    assert "if (is_websocket_protocol)" in initialize_body
+    assert "WebSocket audio starts on wake word or explicit listen" in initialize_body
+    assert "else {\n        protocol_->Start();\n    }" in initialize_body
+    assert "is_websocket_protocol && !IsDeviceClaimed()" not in initialize_body
+
+def test_late_activation_done_does_not_cut_wake_connect_or_voice_session_to_idle():
+    source = read("main/application.cc")
+    body = function_body(source, "void Application::HandleActivationDoneEvent")
+
+    # Activation can finish after a wake phrase has already moved the runtime to
+    # Connecting. It must not force Idle and drop the wake-open completion path.
+    assert "kDeviceStateConnecting" in body
+    assert "kDeviceStateListening" in body
+    assert "kDeviceStateSpeaking" in body
+    guard = body.index("Activation done ignored because runtime audio is active")
+    set_idle = body.index("SetDeviceState(kDeviceStateIdle);")
+    assert guard < set_idle
 
 
 # ---------------------------------------------------------------------------
