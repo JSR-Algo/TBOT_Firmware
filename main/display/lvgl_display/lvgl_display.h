@@ -28,6 +28,10 @@ public:
     // class that owns the LVGL object tree, implements it); pass nullptr to clear it
     // and restore the realtime emoji face. Reuses the same LvglImage/decoder path.
     virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) {}
+    // Foreground teaching-object layer for lesson steps. It stacks above the lesson
+    // background and below the persistent system/status bars. Default no-op for
+    // non-LVGL displays; pass nullptr to clear stale step objects.
+    virtual void SetLessonObject(std::unique_ptr<LvglImage> image) {}
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);

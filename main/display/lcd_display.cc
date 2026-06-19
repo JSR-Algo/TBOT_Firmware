@@ -309,6 +309,9 @@ LcdDisplay::~LcdDisplay() {
     if (lesson_background_ != nullptr) {
         lv_obj_del(lesson_background_);
     }
+    if (lesson_object_ != nullptr) {
+        lv_obj_del(lesson_object_);
+    }
     if (chat_message_label_ != nullptr) {
         lv_obj_del(chat_message_label_);
     }
@@ -401,6 +404,12 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_to_index(lesson_background_, 0);  // behind container_ (the chat UI)
+
+    /* US-006 teaching object: foreground layer above the poster. Hidden until a
+     * lesson_step draws scene.teachingObject.asset.src into it. */
+    lesson_object_ = lv_image_create(screen);
+    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(container_);
@@ -845,6 +854,34 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
     if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
 }
 
+void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
+    DisplayLockGuard lock(this);
+    if (lesson_object_ == nullptr) {
+        ESP_LOGE(TAG, "Lesson object layer is not initialized");
+        return;
+    }
+
+    if (image == nullptr) {
+        lv_obj_add_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
+        lesson_object_cached_.reset();
+        return;
+    }
+
+    lesson_object_cached_ = std::move(image);
+    auto img_dsc = lesson_object_cached_->image_dsc();
+    lv_image_set_src(lesson_object_, img_dsc);
+    if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
+        int scale_w = 256 * width_ * 3 / 5 / img_dsc->header.w;
+        int scale_h = 256 * height_ * 3 / 5 / img_dsc->header.h;
+        lv_image_set_scale(lesson_object_, std::max(1, std::min(scale_w, scale_h)));
+    }
+    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, height_ / 12);
+    lv_obj_remove_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(lesson_object_);
+    if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
+    if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
+}
+
 void LcdDisplay::ClearChatMessages() {
     DisplayLockGuard lock(this);
     if (content_ == nullptr) {
@@ -902,6 +939,11 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_size(lesson_background_, LV_HOR_RES, LV_VER_RES);
     lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
     lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+
+    /* US-006 teaching object: foreground layer above the poster. */
+    lesson_object_ = lv_image_create(screen);
+    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
 
     /* Bottom layer: emoji_box_ - centered display */
     emoji_box_ = lv_obj_create(screen);
@@ -1147,6 +1189,35 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
         lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
     }
     lv_obj_remove_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+    if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
+    if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
+    if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
+}
+
+void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
+    DisplayLockGuard lock(this);
+    if (lesson_object_ == nullptr) {
+        ESP_LOGE(TAG, "Lesson object layer is not initialized");
+        return;
+    }
+
+    if (image == nullptr) {
+        lv_obj_add_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
+        lesson_object_cached_.reset();
+        return;
+    }
+
+    lesson_object_cached_ = std::move(image);
+    auto img_dsc = lesson_object_cached_->image_dsc();
+    lv_image_set_src(lesson_object_, img_dsc);
+    if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
+        int scale_w = 256 * width_ * 3 / 5 / img_dsc->header.w;
+        int scale_h = 256 * height_ * 3 / 5 / img_dsc->header.h;
+        lv_image_set_scale(lesson_object_, std::max(1, std::min(scale_w, scale_h)));
+    }
+    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, height_ / 12);
+    lv_obj_remove_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(lesson_object_);
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
     if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
     if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);

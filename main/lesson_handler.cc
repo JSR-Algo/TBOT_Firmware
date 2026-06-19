@@ -511,6 +511,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (display) {
             Schedule([display, lvgl_display]() {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 display->SetEmotion("neutral");
             });
         }
@@ -550,12 +551,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // on-device flashed asset image (which never holds per-assignment lesson posters),
     // we now FETCH the authored URL (scene.backgroundScene.poster.src) over HTTP and
     // DECODE it, reusing the proven mcp_server.cc download->LvglAllocatedImage path.
-    // The fetched bytes are drawn as a full-screen, persistent background via the new
+    // The fetched poster bytes are drawn as a full-screen, persistent background via
     // LcdDisplay::SetLessonBackground (distinct from the centered 5s auto-hide preview).
-    // The teachingObject PNG (object_src) is NOT drawn as a foreground object in this
-    // slice — there is one full-screen background draw target; teachingObject still
-    // contributes its label/glyph to the caption below. AssetAvailable() is retained as
-    // a cheap on-device fallback for the (rare) case a poster is also flashed.
+    // The teachingObject asset is fetched through the same verified local URL and drawn
+    // as the foreground object layer via LcdDisplay::SetLessonObject. AssetAvailable()
+    // is retained as a cheap on-device fallback for the rare case a poster is flashed.
     const char* poster_src = Str(Obj(bg, "poster"), "src");
     const char* object_src = Str(Obj(to, "asset"), "src");
 
@@ -590,7 +590,20 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // On-device fallback: if no URL poster drew but the poster IS flashed locally, the
     // existing build-time asset image still satisfies the rung (slice-01: usually false).
     if (!poster_drew && AssetAvailable(poster_src)) poster_drew = true;
-    const bool object_drew = AssetAvailable(object_src);   // teachingObject still flash-only
+    bool object_drew = false;
+    if (lvgl_display != nullptr && object_src != nullptr) {
+        std::unique_ptr<LvglImage> object_image = FetchLessonImage(object_src);
+        if (object_image != nullptr) {
+            LvglImage* raw_object = object_image.release();
+            Schedule([lvgl_display, raw_object]() {
+                lvgl_display->SetLessonObject(std::unique_ptr<LvglImage>(raw_object));
+            });
+            object_drew = true;
+            ESP_LOGI(TAG, "lesson_step teaching object fetched+drawn from URL");
+        } else {
+            ESP_LOGW(TAG, "lesson_step teaching object fetch failed; caption fallback");
+        }
+    }
 
     const cJSON* card = Obj(to, "primitiveFallbackCard");
     const char* glyph = Str(card, "glyph");
@@ -621,15 +634,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
 
     // Marshal the draw onto the LVGL task, exactly like the TTS-display pattern
     // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption are
-    // ALWAYS drawn (over the poster background when one fetched). If THIS step drew no
-    // poster, clear any background a previous step left up so a caption-only step is not
-    // shown over a stale picture.
+    // ALWAYS drawn (over the poster/object layers when fetched). If THIS step drew no
+    // media layer, clear any previous lesson layer so a caption-only step is not shown
+    // over a stale picture.
     Display* display = base_display;
     if (display) {
         const bool clear_bg = !poster_drew;
-        Schedule([display, lvgl_display, clear_bg,
+        const bool clear_object = !object_drew;
+        Schedule([display, lvgl_display, clear_bg, clear_object,
                   emo = std::string(emotion), cap = caption]() {
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+            if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
             display->SetEmotion(emo.c_str());
             if (!cap.empty()) display->SetChatMessage("assistant", cap.c_str());
         });

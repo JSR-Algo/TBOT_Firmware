@@ -29,6 +29,8 @@ protected:
     lv_obj_t* preview_image_ = nullptr;
     lv_obj_t* lesson_background_ = nullptr;  // US-006: full-screen, persistent lesson poster
     std::unique_ptr<LvglImage> lesson_background_cached_ = nullptr;
+    lv_obj_t* lesson_object_ = nullptr;  // US-006: foreground teaching object layer
+    std::unique_ptr<LvglImage> lesson_object_cached_ = nullptr;
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
     std::unique_ptr<LvglGif> gif_controller_ = nullptr;
@@ -53,6 +55,7 @@ public:
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) override;
+    virtual void SetLessonObject(std::unique_ptr<LvglImage> image) override;
     virtual void SetupUI() override;
     // Add theme switching function
     virtual void SetTheme(Theme* theme) override;

@@ -138,6 +138,7 @@ public:
      */
     void ResetProtocol();
     void SchedulePendingTbotClaimRefresh();
+    void EnsureBleAdvertisingForUnclaimedSavedWifi();
 
     // BOOT long-press "re-pair": forget the current claim/ownership and re-enter
     // BLE pairing standby so a (possibly different) parent phone can connect and

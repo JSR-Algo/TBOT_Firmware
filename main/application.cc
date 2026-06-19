@@ -848,6 +848,11 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     if (IsDeviceClaimed()) {
         SetDeviceState(kDeviceStateIdle);
         audio_service_.EnableWakeWordDetection(true);
+        // On first claim, the realtime session may already have connected while
+        // unclaimed, before backend credentials existed. Start and fire one
+        // heartbeat now so the claimed online device reports immediately.
+        StartHeartbeat();
+        DispatchDeviceHeartbeat();
     }
 
     Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTED, "link", Lang::Sounds::OGG_SUCCESS);
@@ -1230,6 +1235,15 @@ void Application::EnsureBleAdvertisingForStandby() {
     // (kMaxBleReadvertiseAttempts) is untouched and still bounds a flapping peer.
     blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
 #endif
+}
+
+void Application::EnsureBleAdvertisingForUnclaimedSavedWifi() {
+    if (IsDeviceClaimed()) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Stored WiFi exists but device is unclaimed; keeping BLE advertising open for setup");
+    EnsureBleAdvertisingForStandby();
 }
 
 void Application::StopBleAdvertising() {
@@ -1619,7 +1633,7 @@ void Application::DispatchDeviceHeartbeat() {
     // Low priority (tskIDLE_PRIORITY+1) and NOT pinned to core 0 so the worker
     // simply WAITS on the network at low priority while the wake-word AFE
     // fetch/feed pipeline keeps the CPU (same pattern as ClaimFetchTask).
-    if (xTaskCreate(&Application::HeartbeatTask, "heartbeat_http", 6144, ctx,
+    if (xTaskCreate(&Application::HeartbeatTask, "heartbeat_http", 8192, ctx,
                     tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
         ESP_LOGE(TAG, "heartbeat task create failed; retrying next tick");
         delete ctx;
@@ -1924,6 +1938,7 @@ void Application::InitializeProtocol() {
         // Device session is up -> begin periodic heartbeat (C5). The sender is
         // self-gated: it only POSTs once claim backend credentials are in NVS.
         StartHeartbeat();
+        DispatchDeviceHeartbeat();
     });
 
     protocol_->OnNetworkError([this](const std::string& message) {
@@ -1950,12 +1965,16 @@ void Application::InitializeProtocol() {
         // User-driven listen/wake sessions own reconnect intent. Passive lesson
         // preconnect only makes the device reachable for server lesson pull/nudge;
         // it must not later reconnect into Listening without a wake/button action.
-        if (!passive_ws_intent_.load()) {
+        if (passive_ws_intent_.load()) {
+            ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
+            StopHeartbeat();
+        } else {
             online_intent_.store(true);
+            StartHeartbeat();
+            DispatchDeviceHeartbeat();
         }
         backend_offline_.store(false);
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        StartHeartbeat();
         // Once the realtime WS is up, STOP the blocking claim-config HTTP/TLS poll.
         // It runs on the main task and was starving the Opus codec task (growing
         // encode_drop -> dropped mic uplink -> "I speak but no response"). The

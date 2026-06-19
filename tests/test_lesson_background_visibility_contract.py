@@ -73,3 +73,53 @@ def test_lesson_step_uses_background_layer_not_transient_preview_image():
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
     assert "SetLessonBackground" in step_branch
     assert "SetPreviewImage" not in step_branch
+
+def test_lesson_object_foreground_layer_exists_and_stacks_above_background():
+    source = SOURCE.read_text(encoding="utf-8")
+    header = (ROOT / "main/display/lcd_display.h").read_text(encoding="utf-8")
+    base_header = (ROOT / "main/display/lvgl_display/lvgl_display.h").read_text(encoding="utf-8")
+
+    assert "lesson_object_" in header
+    assert "lesson_object_cached_" in header
+    assert "virtual void SetLessonObject(std::unique_ptr<LvglImage> image)" in base_header
+    assert "virtual void SetLessonObject(std::unique_ptr<LvglImage> image) override;" in header
+
+    bodies = []
+    offset = 0
+    while True:
+        try:
+            start = source.index("void LcdDisplay::SetLessonObject", offset)
+        except ValueError:
+            break
+        bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonObject"))
+        offset = start + 1
+
+    assert len(bodies) >= 2, "both LCD UI variants must implement the foreground lesson object"
+    for body in bodies:
+        assert "lv_image_set_src(lesson_object_" in body
+        assert "lv_obj_remove_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN)" in body
+        assert "lv_obj_move_foreground(lesson_object_)" in body
+        assert "lv_obj_move_foreground(top_bar_)" in body
+        assert "lv_obj_move_foreground(status_bar_)" in body
+
+def test_lesson_step_fetches_and_draws_teaching_object_foreground_layer():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+
+    step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
+    assert 'const char* object_src = Str(Obj(to, "asset"), "src")' in step_branch
+    assert "FetchLessonImage(object_src)" in step_branch
+    assert "SetLessonObject" in step_branch
+    assert "object_drew" in step_branch
+    assert "SetPreviewImage" not in step_branch
+
+def test_lesson_stop_and_caption_only_steps_clear_foreground_object():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+
+    stop_branch = body[body.index('strcmp(type, "lesson_stop") == 0') : body.index('strcmp(type, "lesson_step") != 0')]
+    assert "SetLessonObject(nullptr)" in stop_branch
+
+    step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
+    assert "clear_object" in step_branch
+    assert "SetLessonObject(nullptr)" in step_branch
