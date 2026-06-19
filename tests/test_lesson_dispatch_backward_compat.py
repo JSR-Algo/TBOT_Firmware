@@ -39,11 +39,33 @@ def test_lesson_branch_is_additive_above_the_unknown_type_noop():
     custom = app.index('strcmp(type->valuestring, "custom") == 0')
     lesson = app.index('strncmp(type->valuestring, "lesson_", 7) == 0')
     noop = app.index('ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring)')
-    # The lesson branch dispatches to the new handler...
-    assert "HandleLessonMessage(root);" in app
+    branch = app[lesson:noop]
+    # The lesson branch dispatches through the serialized worker instead of doing
+    # blocking HTTP/TLS asset fetches on the WebSocket receive callback stack.
+    assert "EnqueueLessonMessage(root);" in branch
+    assert "HandleLessonMessage(root);" not in branch
     # ...sits BELOW the custom branch and ABOVE the unchanged unknown-type no-op,
     # so un-upgraded firmware keeps dropping lesson_* silently (backward compat).
     assert custom < lesson < noop
+
+def test_lesson_frames_are_serialized_off_websocket_receive_stack():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    initialize = app[app.index("void Application::Initialize()") : app.index("void Application::Run()")]
+    initialize_protocol = app[app.index("void Application::InitializeProtocol()") : app.index("protocol_->OnConnected")]
+
+    assert "QueueHandle_t lesson_message_queue_" in header
+    assert "static void LessonMessageTask(void* arg);" in header
+    assert "void EnqueueLessonMessage(const cJSON* root);" in header
+    assert "kLessonMessageWorkerStackBytes = 12288" in app
+    assert 'xTaskCreateWithCaps(&Application::LessonMessageTask, "lesson_worker"' in initialize_protocol
+    assert "kLessonMessageWorkerStackBytes, this" in initialize_protocol
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in initialize_protocol
+    assert "lesson_worker" not in initialize
+    assert "xQueueSend(lesson_message_queue_, &payload" in app
+    worker = app[app.index("void Application::LessonMessageTask") : app.index("bool Application::SetDeviceState")]
+    assert "xQueueReceive" in worker
+    assert "HandleLessonMessage(root);" in worker
 
 
 def test_unknown_type_noop_is_unchanged():

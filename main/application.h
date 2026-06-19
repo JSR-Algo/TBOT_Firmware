@@ -3,6 +3,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <freertos/queue.h>
 #include <freertos/task.h>
 #include <esp_timer.h>
 
@@ -237,6 +238,8 @@ private:
     // Passive lesson/nudge WebSocket: keep a claimed robot reachable by ESP
     // server without entering Listening or scheduling listen-mode reconnects.
     std::atomic<bool> passive_ws_intent_{false};
+    QueueHandle_t lesson_message_queue_ = nullptr;
+    TaskHandle_t lesson_message_task_handle_ = nullptr;
 
     // Set on a backend/ws error, cleared on (re)connect. Lets the connect mapper
     // tell ONLINE apart from OFFLINE_RETRY ("Server unavailable. Retrying...").
@@ -375,6 +378,8 @@ private:
     // Current BLE setup sub-state for the connect mapper (Off in AP/other builds).
     TbotBleSubstate GetBleSubstate() const;
     bool HandleRobotActionMessage(const cJSON* root);
+    void EnqueueLessonMessage(const cJSON* root);
+    static void LessonMessageTask(void* arg);
     // US-006 Slice-01 (S10): additive lesson_* renderer entry — see lesson_handler.cc.
     // Reached only via the additive `lesson_` branch in OnIncomingJson, above the
     // unknown-type no-op. Never touches the 8 legacy types / voice / MCP arm tools.

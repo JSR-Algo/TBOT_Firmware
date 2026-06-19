@@ -22,6 +22,7 @@
 #include <cstring>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
 #include <esp_random.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>
@@ -38,6 +39,8 @@ static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
+static constexpr UBaseType_t kLessonMessageQueueDepth = 16;
+static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
 
 // TBOT claim poll (C4): cadence 10s. The backend's 5-minute cap applies only
 // after a pending claim exists; unclaimed standby must keep polling so a late
@@ -97,7 +100,56 @@ Application::~Application() {
         esp_timer_stop(heartbeat_timer_);
         esp_timer_delete(heartbeat_timer_);
     }
+    if (lesson_message_task_handle_ != nullptr) {
+        vTaskDelete(lesson_message_task_handle_);
+        lesson_message_task_handle_ = nullptr;
+    }
+    if (lesson_message_queue_ != nullptr) {
+        char* payload = nullptr;
+        while (xQueueReceive(lesson_message_queue_, &payload, 0) == pdTRUE) {
+            if (payload != nullptr) cJSON_free(payload);
+        }
+        vQueueDelete(lesson_message_queue_);
+        lesson_message_queue_ = nullptr;
+    }
     vEventGroupDelete(event_group_);
+}
+
+void Application::EnqueueLessonMessage(const cJSON* root) {
+    if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
+        ESP_LOGW(TAG, "lesson_* dropped: worker unavailable");
+        return;
+    }
+
+    char* payload = cJSON_PrintUnformatted(root);
+    if (payload == nullptr) {
+        ESP_LOGW(TAG, "lesson_* dropped: serialize failed");
+        return;
+    }
+
+    if (xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "lesson_* dropped: worker queue full");
+        cJSON_free(payload);
+    }
+}
+
+void Application::LessonMessageTask(void* arg) {
+    auto* self = static_cast<Application*>(arg);
+    char* payload = nullptr;
+    for (;;) {
+        if (xQueueReceive(self->lesson_message_queue_, &payload, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        cJSON* root = cJSON_Parse(payload);
+        if (root != nullptr) {
+            self->HandleLessonMessage(root);
+            cJSON_Delete(root);
+        } else {
+            ESP_LOGW(TAG, "lesson_* dropped: worker parse failed");
+        }
+        cJSON_free(payload);
+        payload = nullptr;
+    }
 }
 
 bool Application::SetDeviceState(DeviceState state) {
@@ -1932,6 +1984,22 @@ void Application::InitializeProtocol() {
         protocol_ = std::make_unique<MqttProtocol>();
     }
 
+    if (is_websocket_protocol && lesson_message_queue_ == nullptr &&
+        lesson_message_task_handle_ == nullptr) {
+        lesson_message_queue_ = xQueueCreate(kLessonMessageQueueDepth, sizeof(char*));
+        if (lesson_message_queue_ == nullptr) {
+            ESP_LOGE(TAG, "lesson_worker queue create failed");
+        } else if (xTaskCreateWithCaps(&Application::LessonMessageTask, "lesson_worker",
+                                       kLessonMessageWorkerStackBytes, this,
+                                       tskIDLE_PRIORITY + 2, &lesson_message_task_handle_,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+            ESP_LOGE(TAG, "lesson_worker task create failed");
+            vQueueDelete(lesson_message_queue_);
+            lesson_message_queue_ = nullptr;
+            lesson_message_task_handle_ = nullptr;
+        }
+    }
+
     protocol_->OnConnected([this]() {
         backend_offline_.store(false);  // healthy session -> ONLINE, not retry
         DismissAlert();
@@ -2184,8 +2252,9 @@ void Application::InitializeProtocol() {
         } else if (strncmp(type->valuestring, "lesson_", 7) == 0) {
             // US-006 Slice-01 (S10): additive lesson_* dispatch. Placed immediately
             // ABOVE the unknown-type no-op so un-upgraded firmware keeps dropping
-            // lesson_* silently (backward-compat). Do NOT move the no-op below it.
-            HandleLessonMessage(root);
+            // lesson_* silently (backward-compat). Queue it so HTTP/TLS image fetch
+            // and decode never run on the WebSocket receive callback / lwIP stack.
+            EnqueueLessonMessage(root);
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
