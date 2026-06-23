@@ -219,7 +219,7 @@ esp_err_t Ota::CheckVersion() {
         if (should_reset_local_claim && cJSON_IsString(nonce) && nonce->valuestring[0] != '\0') {
             const std::string reset_nonce = nonce->valuestring;
             Settings reset_state("tbot_reset", true);
-            if (reset_state.GetString("claim_reset_nonce") != reset_nonce) {
+            if (reset_state.GetString("claim_nonce") != reset_nonce) {
                 ESP_LOGW(TAG, "OTA claim reset requested; clearing local ownership state and rebooting");
                 {
                     Settings claim_state("tbot_claim", true);
@@ -239,7 +239,7 @@ esp_err_t Ota::CheckVersion() {
                     websocket_settings.SetString("url", "");
                     websocket_settings.SetString("claim_device_id", "");
                 }
-                reset_state.SetString("claim_reset_nonce", reset_nonce);
+                reset_state.SetString("claim_nonce", reset_nonce);
                 cJSON_Delete(root);
                 vTaskDelay(pdMS_TO_TICKS(500));
                 esp_restart();
