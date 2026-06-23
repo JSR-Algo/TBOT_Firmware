@@ -204,7 +204,7 @@ def test_sec4_device_name_serial_branch_requires_nonempty_serial():
     # the !serial.empty() block leaks past it to skip the MAC path). The MAC
     # fallback must sit AFTER the #endif so it is the unconditional default.
     endif_idx = body.index("#endif")
-    mac_idx = body.index("esp_read_mac(mac, ESP_MAC_BT);")
+    mac_idx = body.index("esp_read_mac(mac, ESP_MAC_WIFI_STA);")
     assert endif_idx < mac_idx, "the MAC fallback must follow the #ifdef serial branch"
 
 
@@ -274,15 +274,18 @@ def test_sec6_device_name_size_check_precedes_index_read():
 
 
 # ---------------------------------------------------------------------------
-# SEC7: the MAC fallback advertises "TBOT-<12 hex>" from the BT MAC, with a
-#       buffer large enough for the formatted name. "TBOT-" (5) + 12 hex + NUL =
-#       18 bytes; the name buffer is 24, so snprintf cannot truncate the name.
+# SEC7: the MAC fallback advertises "TBOT-<12 hex>" from the Wi-Fi STA MAC,
+#       with a buffer large enough for the formatted name. "TBOT-" (5) +
+#       12 hex + NUL = 18 bytes; the name buffer is 24, so snprintf cannot
+#       truncate the name. Wi-Fi STA is the backend/device identity; BT MAC can
+#       differ by +2 on ESP32-S3 and breaks mobile claim/assignment matching.
 # ---------------------------------------------------------------------------
 def test_sec7_device_name_mac_fallback_format_and_buffer():
     body = _device_name_body()
 
     assert "uint8_t mac[6] = {0};" in body
-    assert "esp_read_mac(mac, ESP_MAC_BT);" in body
+    assert "esp_read_mac(mac, ESP_MAC_WIFI_STA);" in body
+    assert "esp_read_mac(mac, ESP_MAC_BT);" not in body
 
     # The MAC name buffer must be >= 18 (we assert the concrete declared size and
     # that the format string is the documented TBOT- + 6 hex bytes).

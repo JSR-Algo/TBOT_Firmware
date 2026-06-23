@@ -2,12 +2,25 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
+option(TBOT_NATIVE_COVERAGE "Instrument firmware sources for ESP-IDF gcov coverage" OFF)
+
 # Add this line to disable the specific warning
 add_compile_options(-Wno-missing-field-initializers)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-# "Trim" the build. Include the minimal set of components, main, and anything it depends on.
-idf_build_set_property(MINIMAL_BUILD ON)
+if(TBOT_NATIVE_COVERAGE)
+    idf_build_set_property(MINIMAL_BUILD OFF)
+else()
+    # "Trim" the build. Include the minimal set of components, main, and anything it depends on.
+    idf_build_set_property(MINIMAL_BUILD ON)
+endif()
 
-set(PROJECT_VER "2.2.30")
+set(PROJECT_VER "2.2.34")
 project(xiaozhi)
+
+if(TBOT_NATIVE_COVERAGE)
+    include($ENV{IDF_PATH}/components/app_trace/project_include.cmake)
+    file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/coverage_report" TBOT_COVERAGE_REPORT_DIR)
+    idf_create_coverage_report(${TBOT_COVERAGE_REPORT_DIR})
+    idf_clean_coverage_report(${TBOT_COVERAGE_REPORT_DIR})
+endif()

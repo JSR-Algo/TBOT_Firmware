@@ -2,7 +2,7 @@ menu "Tbot Assistant"
 
 config OTA_URL
     string "Default OTA URL"
-    default "https://tbot-backend-8wmh.onrender.com/tbot/ota/"
+    default "https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
     help
         The application will access this URL to check for new firmwares and server address.
         This is the fresh-flash BOOTSTRAP SEED: with empty NVS the device must reach this

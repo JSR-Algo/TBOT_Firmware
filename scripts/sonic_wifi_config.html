@@ -171,8 +171,8 @@
 
     function generate() {
       stopPlay();
-      const ssid = document.getElementById('ssid').value.trim();
-      const pwd = document.getElementById('pwd').value.trim();
+      const ssid = document.getElementById('ssid').value;
+      const pwd = document.getElementById('pwd').value;
       const dataStr = ssid + '\n' + pwd;
       const textBytes = Array.from(new TextEncoder().encode(dataStr));
       const fullBytes = [...START_BYTES, ...textBytes, checksum(textBytes), ...END_BYTES];

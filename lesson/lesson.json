@@ -14,7 +14,9 @@
     "focusItems": ["barn", "farm", "hay"],
     "ageBand": "4-6",
     "durationMinutes": 5,
-    "l1TransferTarget": "final_consonants",
+    "practiceMode": "guided_speaking",
+    "immediatePronunciationAssessment": false,
+    "l1TransferTarget": "guided_speaking_confidence",
     "media": {
       "videoSrc": "backgrounds/scenes/barn-round-field.mp4",
       "subjectSlug": "barn",
@@ -37,22 +39,25 @@
       {
         "id": "s1",
         "type": "greeting",
+        "completionClass": "passive",
         "title": "Hello from TeeBot",
-        "prompt": "Hey there! TeeBot is so happy to see you today. Are you ready to explore?",
+        "prompt": "Hey there! TeeBot is so happy to see you today. Let us explore together.",
         "robotState": "talking",
         "videoHint": "lesson"
       },
       {
         "id": "s2",
         "type": "review",
+        "completionClass": "passive",
         "title": "Warm-Up",
-        "prompt": "Do you remember how to say hello? Wave and say \"Hello, TeeBot!\"",
+        "prompt": "TeeBot gives a big hello wave before we start.",
         "robotState": "talking",
         "helperText": "Big smile and a wave!"
       },
       {
         "id": "s3",
         "type": "focus",
+        "completionClass": "passive",
         "title": "New Words",
         "prompt": "Today we are visiting a barn! A barn is a big house for farm animals. We will also learn \"farm\" and \"hay.\"",
         "robotState": "talking",
@@ -61,35 +66,40 @@
       {
         "id": "s4",
         "type": "model",
+        "completionClass": "interactive",
         "title": "TeeBot Shows You",
-        "prompt": "This is a barn. Watch my mouth: \"barn.\" Make a strong /b/ sound and keep the /n/ at the end!",
+        "prompt": "This is a barn. Listen: \"barn.\" TeeBot will say it first, then you can try.",
         "robotState": "modeling",
-        "helperText": "Look at the barn and make a strong /b/ sound.",
+        "helperText": "Look at the barn and listen to TeeBot.",
         "videoHint": "lesson"
       },
       {
         "id": "s5",
         "type": "listen",
+        "completionClass": "interactive",
         "title": "Listen Carefully",
-        "prompt": "Listen to \"barn\" one more time. Hear the ending sound? b-a-r-n.",
+        "prompt": "Your turn. You try: \"barn.\" TeeBot is listening.",
         "robotState": "listening",
-        "helperText": "Listen for the last sound."
+        "helperText": "Say the word when you are ready."
       },
       {
         "id": "s6",
         "type": "repeat",
+        "completionClass": "interactive",
         "title": "Your Barn Word",
-        "prompt": "Now you say it: \"barn.\"",
+        "prompt": "Say it with TeeBot: \"barn.\"",
         "robotState": "listening",
-        "helperText": "Short and strong: barn. Say the ending sound clearly!",
-        "l1TransferHint": "In Vietnamese we say \"chu\u1ed3ng,\" but in English we must say the whole word \"barn\" - don't drop the ending /n/ sound!"
+        "helperText": "TeeBot waits for your voice.",
+        "l1TransferHint": "Let the child try freely first. Give support later if the parent asks for practice tips."
       },
       {
         "id": "s7",
         "type": "fillBlank",
+        "completionClass": "interactive",
         "title": "What do you see?",
-        "prompt": "At the ___, I see animals.",
+        "prompt": "TeeBot says: This is a ___. You can say barn.",
         "robotState": "thinking",
+        "helperText": "TeeBot waits for your voice.",
         "choices": [
           {
             "id": "c1",
@@ -111,19 +121,21 @@
       {
         "id": "s8",
         "type": "feedback",
+        "completionClass": "passive",
         "title": "Great Listening!",
-        "prompt": "Wonderful! Remember: in English, every word needs its ending sound. \"Barn\" has a strong /n/ at the end. You did it!",
+        "prompt": "I heard you. Nice speaking with TeeBot. That word is \"barn.\"",
         "robotState": "talking",
-        "helperText": "Final consonants make English clear."
+        "helperText": "Support the child for responding, without judging the sound."
       },
       {
         "id": "s9",
         "type": "celebrate",
+        "completionClass": "passive",
         "title": "Barn Star!",
         "prompt": "You found the barn with TeeBot! Look how your garden is growing!",
         "robotState": "celebrating",
         "videoHint": "celebration",
-        "parentSummary": "Today your child practiced place words (barn, farm, hay) and worked on final consonants - a common challenge for Vietnamese learners. Try asking \"What is this?\" while looking at farm picture books."
+        "parentSummary": "Today your child practiced place words (barn, farm, hay) by listening, trying, and speaking back to TeeBot. Try asking \"What is this?\" while looking at farm picture books."
       }
     ],
     "sourceReferences": [
@@ -141,18 +153,18 @@
           "durationMinutes": { "min": 5, "max": 10 },
           "sequence": ["warm_up", "model", "practice", "review"],
           "presentationPattern": "spiral",
-          "assessmentType": "formative",
+          "assessmentType": "guided_practice",
           "l1Support": "none"
         },
         "vietnameseRelevance": {
-          "score": 7,
-          "transferTargets": ["final_consonants", "consonant_clusters"],
+          "relevanceLevel": "useful",
+          "transferTargets": ["guided_speaking", "place_words"],
           "hasVietnameseSupport": false,
           "testedWithVietnameseLearners": false,
-          "notes": "Phonics sequence addresses Vietnamese final consonant deletion."
+          "notes": "Use the spiral sequence for low-pressure listening and speaking turns."
         },
-        "takeaway": "Use 4-step spiral: warm-up -> model -> practice -> review. Focus on final consonant awareness.",
-        "limitations": "No Vietnamese L1 support. English-only audio. Requires adaptation for stress patterns.",
+        "takeaway": "Use 4-step spiral: warm-up -> model -> child practice -> supportive review.",
+        "limitations": "No Vietnamese L1 support. English-only audio. Requires adaptation for low-pressure child turns.",
         "urls": [
           {
             "url": "https://elt.oup.com/catalogue/items/global/young_learners/oxford_phonics_world/",
@@ -166,4 +178,3 @@
     ]
   }
 }
-

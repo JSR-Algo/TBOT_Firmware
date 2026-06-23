@@ -27,12 +27,36 @@ def test_lcdwiki_es3c35p_board_is_selected_and_registered():
     assert "# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set" in sdkconfig
     assert "CONFIG_ESP_CONSOLE_UART_NUM=-1" in sdkconfig
 
+def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_gates_flash():
+    script = read("build-lcdwiki.sh")
+    flash_instructions = read("FLASH_INSTRUCTIONS.md")
+
+    assert 'export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.local"' in script
+    assert "rm -f sdkconfig" in script
+    assert "idf.py set-target esp32s3" in script
+    assert "grep -q '^CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y$' sdkconfig" in script
+    assert "BLACK-SCREEN" in script
+    assert "idf.py -p \"$PORT\" flash" in script
+    assert "./build-lcdwiki.sh" in flash_instructions
+    assert "KHÔNG dùng `idf.py flash` trần" in flash_instructions
+    assert "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y" in flash_instructions
+
 def test_lcdwiki_es3c35p_local_defaults_keep_mobile_ble_discovery_enabled():
     local_defaults = read("sdkconfig.defaults.local")
 
     assert "# CONFIG_USE_HOTSPOT_WIFI_PROVISIONING is not set" in local_defaults
     assert "CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y" in local_defaults
     assert "CONFIG_BT_BLUEDROID_ENABLED=y" in local_defaults
+
+
+def test_lcdwiki_es3c35p_bluedroid_uses_psram_backed_dynamic_heap():
+    sdkconfig = read("sdkconfig.es3c35p")
+
+    assert "CONFIG_SPIRAM=y" in sdkconfig
+    assert "CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y" in sdkconfig
+    assert "# CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST is not set" not in sdkconfig
+    assert "CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y" in sdkconfig
+    assert "# CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY is not set" not in sdkconfig
 
 
 def test_lcdwiki_es3c35p_generated_language_matches_vietnamese_sdkconfig():

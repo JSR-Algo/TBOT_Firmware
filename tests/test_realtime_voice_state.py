@@ -240,6 +240,82 @@ def test_main_loop_bounds_audio_send_work_and_feeds_watchdog_between_packets():
     assert "vTaskDelay(pdMS_TO_TICKS(1));" in send_body
     assert "xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);" in send_body
 
+def test_audio_uplink_pipeline_has_send_boundary_diagnostics():
+    app_cc = read("main/application.cc")
+    audio_cc = read("main/audio/audio_service.cc")
+    ws_cc = read("main/protocols/websocket_protocol.cc")
+
+    assert "audio_uplink_packet_queued" in audio_cc
+    assert "MAIN_EVENT_SEND_AUDIO protocol_unavailable" in app_cc
+    assert "MAIN_EVENT_SEND_AUDIO packet" in app_cc
+    assert "Websocket SendAudio" in ws_cc
+
+def test_start_listening_rearms_when_already_listening():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    marker = "state == kDeviceStateListening"
+    assert marker in body
+    listening = body[body.index(marker) :]
+
+    assert "lesson/manual listening rearm" in listening
+    assert "listening_mode_ = kListeningModeManualStop;" in listening
+    assert "protocol_->SendStartListening(kListeningModeManualStop);" in listening
+    assert "audio_service_.EnableVoiceProcessing(true);" in listening
+
+
+def test_lesson_prompt_tts_stop_rearms_interactive_listening_instead_of_idling():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+    lesson_handler = read("main/lesson_handler.cc")
+
+    assert "lesson_interactive_listen_pending_" in app_h
+    assert "PrepareLessonInteractiveListening" in lesson_handler
+
+    stop_start = app_cc.index('} else if (strcmp(state->valuestring, "stop") == 0)')
+    stop_end = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop_start)
+    stop_body = app_cc[stop_start:stop_end]
+    manual_body = stop_body[stop_body.index("listening_mode_ == kListeningModeManualStop") :]
+
+    assert "lesson_interactive_listen_pending_.exchange(false)" in manual_body
+    assert "SetDeviceState(kDeviceStateListening);" in manual_body
+    assert "protocol_->SendStartListening(kListeningModeManualStop);" in manual_body
+    assert "audio_service_.EnableVoiceProcessing(true);" in manual_body
+    assert "SetDeviceState(kDeviceStateIdle);" in manual_body
+    assert manual_body.index("SetDeviceState(kDeviceStateListening);") < manual_body.index("SetDeviceState(kDeviceStateIdle);")
+
+
+def test_lesson_prompt_start_listening_event_does_not_abort_speaking_prompt():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    speaking = body[body.index("state == kDeviceStateSpeaking") : body.index("state == kDeviceStateListening")]
+
+    assert "lesson_interactive_listen_pending_.load()" in speaking
+    assert "lesson prompt still speaking; defer listening" in speaking
+    assert speaking.index("lesson_interactive_listen_pending_.load()") < speaking.index("AbortSpeaking(kAbortReasonNone);")
+
+def test_lesson_interactive_listening_pending_is_cleared_on_cancel_paths():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+    lesson_handler = read("main/lesson_handler.cc")
+
+    assert "CancelLessonInteractiveListening" in app_h
+    assert "void Application::CancelLessonInteractiveListening()" in app_cc
+    assert "lesson_interactive_listen_pending_.store(false);" in app_cc
+
+    stop_listening = app_cc[app_cc.index("void Application::StopListening") : app_cc.index("void Application::HandleToggleChatEvent")]
+    assert "CancelLessonInteractiveListening();" in stop_listening
+
+    lesson_stop = lesson_handler[lesson_handler.index('strcmp(type, "lesson_stop") == 0') : lesson_handler.index('strcmp(type, "lesson_error") == 0')]
+    assert "Application::GetInstance().CancelLessonInteractiveListening();" in lesson_stop
+
+    lesson_error = lesson_handler[lesson_handler.index('strcmp(type, "lesson_error") == 0') : lesson_handler.index('strcmp(type, "lesson_step") != 0')]
+    assert "Application::GetInstance().CancelLessonInteractiveListening();" in lesson_error
 
 def test_wake_word_afe_uses_low_cost_processing_to_keep_feed_and_fetch_balanced():
     wake_word = read("main/audio/wake_words/afe_wake_word.cc")

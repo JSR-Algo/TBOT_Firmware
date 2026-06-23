@@ -156,7 +156,7 @@ def test_one_shot_claim_fetch_after_wifi_success_applies_active_claim_even_witho
 
 def test_blufi_waits_for_full_wifi_board_connect_timeout_before_reporting_failure():
     source = read("main/boards/common/blufi.cpp")
-    branch_start = source.index("BLUFI request wifi connect to AP via esp-wifi-connect")
+    branch_start = source.index("void Blufi::StartStationConnectFromCredentials")
     failure_log_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", branch_start)
     connect_body = source[branch_start:failure_log_idx]
 
@@ -219,8 +219,16 @@ def test_claimed_devices_leave_claim_fsm_before_standby_ble_advertising():
     ensure_body = function_body(source, "void Application::EnsureBleAdvertisingForStandby")
     stop_ble_body = function_body(source, "void Application::StopBleAdvertising")
 
+    assert "IsDeviceClaimed()" in refresh_body
+    assert "StopClaimPoll();" in refresh_body
+    assert "StopBleAdvertising();" in refresh_body
+    assert "return;" in refresh_body[refresh_body.index("if (IsDeviceClaimed())") :]
+    assert "IsDeviceClaimed()" in ensure_body
+    assert "StopBleAdvertising();" in ensure_body
+    assert "blufi.deinit();" in stop_ble_body
+
     claimed_idx = refresh_body.index("if (IsDeviceClaimed())")
-    standby_idx = refresh_body.index("if (!pending_tbot_claim_.active && token.empty())")
+    standby_idx = refresh_body.index("Blufi::GetInstance().GetBleState()")
     claimed_branch = refresh_body[claimed_idx:refresh_body.index("return;", claimed_idx)]
 
     assert claimed_idx < standby_idx
@@ -232,6 +240,52 @@ def test_claimed_devices_leave_claim_fsm_before_standby_ble_advertising():
     assert "CancelBleSetupTimeout();" in stop_ble_body
     assert "StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);" in ensure_body
 
+
+def test_factory_test_claimed_is_ota_controlled_and_requires_ws_token():
+    ota = read("main/ota.cc")
+    app = read("main/application.cc")
+    ota_body = function_body(ota, "esp_err_t Ota::CheckVersion")
+    claimed_body = function_body(app, "bool Application::IsDeviceClaimed")
+
+    assert 'factory_test_claimed' in ota_body
+    assert 'Settings claim_state("tbot_claim", true);' in ota_body
+    assert 'claim_state.SetInt("factory_test",' in ota_body
+    assert 'claim_state.SetInt("factory_test", 0);' in ota_body
+    assert 'websocket_settings.GetString("token")' in claimed_body
+    assert 'claim_state.GetInt("factory_test", 0) != 0' in claimed_body
+    assert 'factory_test_claimed && !websocket_token.empty()' in claimed_body
+
+def test_factory_test_claimed_nvs_key_fits_esp_idf_limit():
+    ota = read("main/ota.cc")
+    app = read("main/application.cc")
+    ota_body = function_body(ota, "esp_err_t Ota::CheckVersion")
+    claimed_body = function_body(app, "bool Application::IsDeviceClaimed")
+    websocket_section = ota_body[
+        ota_body.index('cJSON *websocket') : ota_body.index('cJSON *api_url')
+    ]
+
+    # ESP-IDF NVS keys are limited to 15 chars. The OTA JSON field can keep the
+    # descriptive protocol name, but the persisted key must stay short or the
+    # device aborts during OTA parsing before it can enter the claimed path.
+    assert 'SetInt("factory_test_claimed"' not in ota_body
+    assert 'GetInt("factory_test_claimed"' not in claimed_body
+    assert 'settings.SetInt(item->string, item->valueint);' not in websocket_section
+    assert 'std::strcmp(item->string, "factory_test_claimed") == 0' in websocket_section
+    assert 'claim_state.SetInt("factory_test",' in websocket_section
+    assert len("factory_test") <= 15
+
+
+def test_saved_wifi_recovery_public_entry_keeps_claim_gate_inside_application():
+    header = read("main/application.h")
+    source = read("main/application.cc")
+    recovery_body = function_body(source, "void Application::EnsureBleAdvertisingForUnclaimedSavedWifi")
+
+    assert "void EnsureBleAdvertisingForUnclaimedSavedWifi();" in header
+    assert "if (IsDeviceClaimed())" in recovery_body
+    claimed_branch = recovery_body[recovery_body.index("if (IsDeviceClaimed())"):]
+    assert "return;" in claimed_branch[:claimed_branch.index("EnsureBleAdvertisingForStandby();")]
+    assert "Stored WiFi exists but device is unclaimed" in recovery_body
+    assert "EnsureBleAdvertisingForStandby();" in recovery_body
 
 def test_application_enforces_local_claim_expiry_against_a_clock():
     # C4: expires_at must be compared to a clock and drive CLAIM_CONFIRM_TIMEOUT.
@@ -423,38 +477,30 @@ def test_unclaimed_standby_without_bootstrap_token_never_polls_backend_config_ev
     pre_network = refresh_body[token_read:min(fallback_idx, dispatch_idx)]
 
     # If BLE init failed or was already off, GetBleState() no longer protects the
-    # no-token path. Standby must retry BLE setup and wait for the BluFi token;
-    # polling /device/config without claim auth can block the app task and still
-    # cannot confirm anything.
-    assert "if (!pending_tbot_claim_.active && token.empty())" in pre_network
-    branch = pre_network[pre_network.index("if (!pending_tbot_claim_.active && token.empty())"):]
-    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby;" in branch
-    assert "EnsureBleAdvertisingForStandby();" in branch
-    assert "StartClaimPoll();" in branch
-    assert branch.index("EnsureBleAdvertisingForStandby();") < branch.index("StartClaimPoll();")
-    assert "return;" in branch[:branch.index("FetchBackendApiUrlFromBootstrap") if "FetchBackendApiUrlFromBootstrap" in branch else len(branch)]
+    # no-token path. Standby must still reach backend /device/config without an
+    # Authorization header so ClaimService.refreshSetupSignalIfUnclaimed keeps the
+    # robot visible to the mobile claim list. The low-priority ClaimFetchTask owns
+    # the blocking TLS fetch, so this no longer wedges the Application task.
+    assert "Skipping claim config fetch until BluFi token handoff" not in pre_network
+    assert "if (!pending_tbot_claim_.active && token.empty())" not in pre_network
 
-def test_unclaimed_standby_does_not_poll_https_while_ble_is_active_without_bootstrap_token():
+def test_unclaimed_standby_polls_device_config_without_bootstrap_token_to_refresh_mobile_discovery():
     source = read("main/application.cc")
     refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
     token_read = refresh_body.index('std::string token = websocket_settings.GetString("bootstrap_token");')
     dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token);")
     pre_fetch = refresh_body[token_read:dispatch_idx]
 
-    no_token_idx = pre_fetch.index("if (!pending_tbot_claim_.active && token.empty())")
     ble_state_idx = pre_fetch.index("Blufi::GetInstance().GetBleState()")
-    no_token_branch = pre_fetch[no_token_idx:ble_state_idx]
 
-    # The generic no-token guard runs before the BLE-state check, so BLE-off
-    # retry and BLE-active standby both avoid the blocking backend fetch.
-    assert no_token_idx < ble_state_idx
-    assert "Skipping claim config fetch until BluFi token handoff" in no_token_branch
-    assert "EnsureBleAdvertisingForStandby();" in no_token_branch
-    assert "StartClaimPoll();" in no_token_branch
-    assert "return;" in no_token_branch
-
+    # There must be no generic early-return for an empty bootstrap token before
+    # the backend config fetch is dispatched. FetchPendingTbotClaimFromDeviceConfig
+    # omits the Authorization header when token is empty, and the backend accepts
+    # that as an unclaimed setup-liveness poll.
+    assert "if (!pending_tbot_claim_.active && token.empty())" not in pre_fetch[:ble_state_idx]
+    assert "Skipping claim config fetch until BluFi token handoff" not in pre_fetch
     assert "Blufi::GetInstance().GetBleState()" in pre_fetch
-    assert "FetchPendingTbotClaimFromDeviceConfig" not in no_token_branch
+    assert "DispatchPendingTbotClaimFetch(api_url, token);" in refresh_body
 
 def test_unclaimed_standby_with_bootstrap_token_stops_ble_before_claim_fetch():
     source = read("main/application.cc")
@@ -464,16 +510,14 @@ def test_unclaimed_standby_with_bootstrap_token_stops_ble_before_claim_fetch():
     dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token);")
     pre_network = refresh_body[token_read:min(fallback_idx, dispatch_idx)]
 
-    # No token: the generic guard above the BLE-state check waits for the BluFi
-    # custom-data handoff and keeps BLE open.
     # Token present: do not strand mobile on WAITING_PHYSICAL_CONFIRM if BLE did
     # not cleanly deinit after Wi-Fi success. Stop BLE first, then fall through
-    # to the backend claim fetch/confirm path so TLS never overlaps BLE.
+    # to the backend claim fetch/confirm path so TLS never overlaps BLE. Empty
+    # token is now allowed to fall through to the config poll for setup liveness.
     assert "Blufi::GetInstance().GetBleState()" in pre_network
     assert "pending_tbot_claim_.active" in pre_network
-    assert "Skipping claim config fetch until BluFi token handoff" in pre_network
-    assert "StartClaimPoll();" in pre_network
-    assert "if (!pending_tbot_claim_.active && token.empty())" in pre_network
+    assert "Skipping claim config fetch until BluFi token handoff" not in pre_network
+    assert "if (!pending_tbot_claim_.active && token.empty())" not in pre_network
     ble_branch_start = pre_network.index("Blufi::GetInstance().GetBleState()")
     ble_branch = pre_network[ble_branch_start:]
     token_present_branch = ble_branch[ble_branch.index("Bootstrap token present but BLE still active"):]

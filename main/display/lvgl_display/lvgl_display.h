@@ -32,6 +32,9 @@ public:
     // background and below the persistent system/status bars. Default no-op for
     // non-LVGL displays; pass nullptr to clear stale step objects.
     virtual void SetLessonObject(std::unique_ptr<LvglImage> image) {}
+    // Robot overlay image layer for lesson steps. It stacks above the teaching
+    // object and below system/status bars; pass nullptr to clear stale overlays.
+    virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {}
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);

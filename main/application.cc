@@ -116,20 +116,31 @@ Application::~Application() {
 }
 
 void Application::EnqueueLessonMessage(const cJSON* root) {
+    const cJSON* type = cJSON_GetObjectItem(root, "type");
+    const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
+    const char* type_value = cJSON_IsString(type) ? type->valuestring : "(missing)";
+    const int sequence_value = cJSON_IsNumber(sequence) ? sequence->valueint : -1;
+
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
-        ESP_LOGW(TAG, "lesson_* dropped: worker unavailable");
+        ESP_LOGW(TAG, "lesson_* dropped: worker unavailable type=%s seq=%d",
+                 type_value, sequence_value);
         return;
     }
 
     char* payload = cJSON_PrintUnformatted(root);
     if (payload == nullptr) {
-        ESP_LOGW(TAG, "lesson_* dropped: serialize failed");
+        ESP_LOGW(TAG, "lesson_* dropped: serialize failed type=%s seq=%d",
+                 type_value, sequence_value);
         return;
     }
 
     if (xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "lesson_* dropped: worker queue full");
+        ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d",
+                 type_value, sequence_value);
         cJSON_free(payload);
+    } else {
+        ESP_LOGI(TAG, "lesson_* enqueued type=%s seq=%d bytes=%u",
+                 type_value, sequence_value, (unsigned)strlen(payload));
     }
 }
 
@@ -142,6 +153,11 @@ void Application::LessonMessageTask(void* arg) {
         }
         cJSON* root = cJSON_Parse(payload);
         if (root != nullptr) {
+            const cJSON* type = cJSON_GetObjectItem(root, "type");
+            const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
+            ESP_LOGI(TAG, "lesson_worker handling type=%s seq=%d",
+                     cJSON_IsString(type) ? type->valuestring : "(missing)",
+                     cJSON_IsNumber(sequence) ? sequence->valueint : -1);
             self->HandleLessonMessage(root);
             cJSON_Delete(root);
         } else {
@@ -345,14 +361,38 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
+            static uint32_t send_event_count = 0;
+            static uint32_t send_packet_count = 0;
+            send_event_count++;
             uint32_t sent_packets = 0;
             while (sent_packets < kMaxAudioPacketsPerMainLoop) {
                 auto packet = audio_service_.PopPacketFromSendQueue();
                 if (!packet) {
                     break;
                 }
-                if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
+                const uint32_t timestamp = packet->timestamp;
+                const size_t payload_size = packet->payload.size();
+                if (!protocol_) {
+                    ESP_LOGW(TAG, "MAIN_EVENT_SEND_AUDIO protocol_unavailable event=%lu payload_bytes=%u timestamp=%lu",
+                             static_cast<unsigned long>(send_event_count),
+                             static_cast<unsigned>(payload_size),
+                             static_cast<unsigned long>(timestamp));
                     break;
+                }
+                bool sent = protocol_->SendAudio(std::move(packet));
+                if (!sent) {
+                    ESP_LOGW(TAG, "MAIN_EVENT_SEND_AUDIO send_failed event=%lu payload_bytes=%u timestamp=%lu",
+                             static_cast<unsigned long>(send_event_count),
+                             static_cast<unsigned>(payload_size),
+                             static_cast<unsigned long>(timestamp));
+                    break;
+                }
+                send_packet_count++;
+                if (send_packet_count == 1 || send_packet_count % 25 == 0) {
+                    ESP_LOGI(TAG, "MAIN_EVENT_SEND_AUDIO packet count=%lu payload_bytes=%u timestamp=%lu",
+                             static_cast<unsigned long>(send_packet_count),
+                             static_cast<unsigned>(payload_size),
+                             static_cast<unsigned long>(timestamp));
                 }
                 ++sent_packets;
                 esp_task_wdt_reset();
@@ -548,30 +588,10 @@ void Application::RefreshPendingTbotClaim() {
     Settings websocket_settings("websocket", false);
     std::string token = websocket_settings.GetString("bootstrap_token");
 
-    if (!pending_tbot_claim_.active && token.empty()) {
-        // No claim auth yet -> wait for the BluFi custom-data handoff before
-        // spending a blocking TLS fetch. This guard is intentionally independent
-        // of the current BLE state: if BLE init failed and reports Off, falling
-        // through to /device/config polling cannot confirm anything and can wedge
-        // the Application task on a weak network.
-        ESP_LOGI(TAG, "Skipping claim config fetch until BluFi token handoff");
-        pending_tbot_claim_api_url_.clear();
-        pending_tbot_claim_token_.clear();
-        claim_fetch_failures_ = 0;
-        const bool render_standby = claim_substate_ != TbotClaimSubstate::AvailableStandby;
-        claim_substate_ = TbotClaimSubstate::AvailableStandby;
-        EnsureBleAdvertisingForStandby();
-        if (render_standby) {
-            RenderClaimSubstate(claim_substate_);
-        }
-        StartClaimPoll();
-        return;
-    }
-
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     {
         const auto ble_state = Blufi::GetInstance().GetBleState();
-        if (!pending_tbot_claim_.active &&
+        if (!pending_tbot_claim_.active && !token.empty() &&
             (ble_state == Blufi::BleState::kAdvertising ||
              ble_state == Blufi::BleState::kConnected)) {
             // We ALREADY hold a bootstrap token but BLE is still active - e.g. a
@@ -1251,6 +1271,13 @@ bool Application::IsDeviceClaimed() const {
     // "token": OTA CheckVersion can write that realtime-WS token on every boot.
     Settings claim_state("tbot_claim", false);
     if (claim_state.GetInt("confirmed", 0) != 0) {
+        return true;
+    }
+
+    Settings websocket_settings("websocket", false);
+    const std::string websocket_token = websocket_settings.GetString("token");
+    const bool factory_test_claimed = claim_state.GetInt("factory_test", 0) != 0;
+    if (factory_test_claimed && !websocket_token.empty()) {
         return true;
     }
 
@@ -2161,7 +2188,16 @@ void Application::InitializeProtocol() {
                     last_speaking_activity_ms_.store(0);
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
+                            if (lesson_interactive_listen_pending_.exchange(false)) {
+                                SetDeviceState(kDeviceStateListening);
+                                if (protocol_) {
+                                    protocol_->SendStartListening(kListeningModeManualStop);
+                                }
+                                audio_service_.EnableVoiceProcessing(true);
+                                ESP_LOGI(TAG, "lesson prompt complete -> listening");
+                            } else {
+                                SetDeviceState(kDeviceStateIdle);
+                            }
                         } else {
                             SetDeviceState(kDeviceStateListening);
                             ESP_LOGI(TAG, "mic_loop_resumed ts=%lld",
@@ -2466,7 +2502,17 @@ void Application::StartListening() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
+void Application::PrepareLessonInteractiveListening() {
+    lesson_interactive_listen_pending_.store(true);
+    StartListening();
+}
+
+void Application::CancelLessonInteractiveListening() {
+    lesson_interactive_listen_pending_.store(false);
+}
+
 void Application::StopListening() {
+    CancelLessonInteractiveListening();
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
@@ -2833,8 +2879,18 @@ void Application::HandleStartListeningEvent() {
         }
         SetListeningMode(kListeningModeManualStop);
     } else if (state == kDeviceStateSpeaking) {
+        if (lesson_interactive_listen_pending_.load()) {
+            ESP_LOGI(TAG, "lesson prompt still speaking; defer listening");
+            listening_mode_ = kListeningModeManualStop;
+            return;
+        }
         AbortSpeaking(kAbortReasonNone);
         SetListeningMode(kListeningModeManualStop);
+    } else if (state == kDeviceStateListening) {
+        ESP_LOGI(TAG, "lesson/manual listening rearm");
+        listening_mode_ = kListeningModeManualStop;
+        protocol_->SendStartListening(kListeningModeManualStop);
+        audio_service_.EnableVoiceProcessing(true);
     }
 }
 

@@ -31,6 +31,8 @@ protected:
     std::unique_ptr<LvglImage> lesson_background_cached_ = nullptr;
     lv_obj_t* lesson_object_ = nullptr;  // US-006: foreground teaching object layer
     std::unique_ptr<LvglImage> lesson_object_cached_ = nullptr;
+    lv_obj_t* lesson_robot_overlay_ = nullptr;  // US-006: robot overlay image layer
+    std::unique_ptr<LvglImage> lesson_robot_overlay_cached_ = nullptr;
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
     std::unique_ptr<LvglGif> gif_controller_ = nullptr;
@@ -56,6 +58,7 @@ public:
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonObject(std::unique_ptr<LvglImage> image) override;
+    virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
     virtual void SetupUI() override;
     // Add theme switching function
     virtual void SetTheme(Theme* theme) override;

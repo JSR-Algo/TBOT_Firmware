@@ -29,12 +29,16 @@ def function_body(text: str, signature: str) -> str:
 
 def test_lesson_image_fetch_decodes_jpeg_to_rgb565_before_lvgl_wrap():
     source = SOURCE.read_text(encoding="utf-8")
-    body = function_body(source, "std::unique_ptr<LvglImage> FetchLessonImage")
+    decode_body = function_body(source, "std::unique_ptr<LvglImage> DecodeLessonImageBytes")
+    fetch_body = function_body(source, "std::unique_ptr<LvglImage> FetchLessonImage")
+    local_body = function_body(source, "std::unique_ptr<LvglImage> FetchLessonLocalImage")
 
     assert '#include "jpeg_to_image.h"' in source
     assert "bool IsJpegImage" in source
-    assert "IsJpegImage(data, content_length)" in body
-    assert "jpeg_to_image(" in body
-    assert "LV_COLOR_FORMAT_RGB565" in body
-    assert "std::make_unique<LvglAllocatedImage>(decoded_data, decoded_len" in body
-    assert "heap_caps_free(data);" in body
+    assert "IsJpegImage(data, content_length)" in decode_body
+    assert "jpeg_to_image(" in decode_body
+    assert "LV_COLOR_FORMAT_RGB565" in decode_body
+    assert "std::make_unique<LvglAllocatedImage>(decoded_data, decoded_len" in decode_body
+    assert "heap_caps_free(data);" in decode_body
+    assert "DecodeLessonImageBytes(data, content_length, \"lesson image fetch\")" in fetch_body
+    assert "DecodeLessonImageBytes(data, content_length, \"lesson image file\")" in local_body

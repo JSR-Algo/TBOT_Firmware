@@ -3,6 +3,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_PRODUCTION_OTA_URL = "https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
+CURRENT_OTA_BUILD_VERSION = "2.2.34"
 
 
 def read(path: str) -> str:
@@ -34,9 +36,17 @@ def test_firmware_does_not_compile_a_final_websocket_endpoint_fallback():
     assert "trycloudflare.com" not in websocket_default
     assert "tbot-backend-8wmh.onrender.com" not in websocket_default
 
+def test_project_version_advances_past_current_production_lcdwiki_ota():
+    cmake = read("CMakeLists.txt")
+
+    assert f'set(PROJECT_VER "{CURRENT_OTA_BUILD_VERSION}")' in cmake
+
 
 def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
-    local_configs = sorted(path for path in ROOT.glob("sdkconfig*") if path.is_file())
+    local_configs = sorted(
+        path for path in ROOT.glob("sdkconfig*")
+        if path.is_file() and not path.name.endswith((".bak", ".old"))
+    )
     assert local_configs
 
     for sdkconfig in local_configs:
@@ -49,8 +59,11 @@ def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
         assert 'CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"' in contents, sdkconfig.name
 
 
-def test_local_firmware_build_configs_do_not_compile_quick_tunnel_ota_seeds():
-    local_configs = sorted(path for path in ROOT.glob("sdkconfig*") if path.is_file())
+def test_local_firmware_build_configs_compile_only_current_production_ota_seed():
+    local_configs = sorted(
+        path for path in ROOT.glob("sdkconfig*")
+        if path.is_file() and not path.name.endswith((".bak", ".old"))
+    )
     assert local_configs
 
     for sdkconfig in local_configs:
@@ -60,10 +73,17 @@ def test_local_firmware_build_configs_do_not_compile_quick_tunnel_ota_seeds():
             continue
 
         ota_url = match.group("value")
-        assert "trycloudflare.com" not in ota_url, sdkconfig.name
+        assert ota_url == CURRENT_PRODUCTION_OTA_URL, sdkconfig.name
         assert "ngrok" not in ota_url, sdkconfig.name
         assert "loca.lt" not in ota_url, sdkconfig.name
         assert "serveo.net" not in ota_url, sdkconfig.name
+
+def test_prod_flash_script_rejects_tiny_placeholder_artifacts():
+    script = read("scripts/flash_prod_new_robot.sh")
+
+    assert "MIN_ARTIFACT_BYTES" in script
+    assert "stat -f%z" in script or "stat -c%s" in script
+    assert "artifact too small" in script
 
 
 def test_firmware_prefers_ota_returned_websocket_url_before_compile_fallback():

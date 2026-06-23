@@ -103,11 +103,19 @@ void AudioService::Initialize(AudioCodec* codec) {
 #endif
 
     audio_processor_->OnOutput([this](std::vector<int16_t>&& data) {
+        static uint32_t output_count = 0;
+        output_count++;
+        if (output_count == 1 || output_count % 25 == 0) {
+            ESP_LOGI(TAG, "voice_processor_output count=%lu samples=%u",
+                     static_cast<unsigned long>(output_count),
+                     static_cast<unsigned>(data.size()));
+        }
         PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(data));
     });
 
     audio_processor_->OnVadStateChange([this](bool speaking) {
         voice_detected_ = speaking;
+        ESP_LOGI(TAG, "voice_vad_state speaking=%d", speaking ? 1 : 0);
         if (callbacks_.on_vad_change) {
             callbacks_.on_vad_change(speaking);
         }
@@ -453,6 +461,14 @@ void AudioService::OpusCodecTask() {
                     packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
 
                     if (task->type == kAudioTaskTypeEncodeToSendQueue) {
+                        static uint32_t uplink_packet_count = 0;
+                        uplink_packet_count++;
+                        if (uplink_packet_count == 1 || uplink_packet_count % 25 == 0) {
+                            ESP_LOGI(TAG, "audio_uplink_packet_queued count=%lu payload_bytes=%u timestamp=%lu",
+                                     static_cast<unsigned long>(uplink_packet_count),
+                                     static_cast<unsigned>(packet->payload.size()),
+                                     static_cast<unsigned long>(packet->timestamp));
+                        }
                         {
                             std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
                             audio_send_queue_.push_back(std::move(packet));

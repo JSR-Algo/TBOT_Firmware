@@ -149,6 +149,8 @@ private:
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason);
+    void StartStationConnectFromCredentials(const char* reason);
+    void ScheduleStationConnectFallback();
     void _send_wifi_list();
     void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
@@ -210,6 +212,7 @@ private:
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;
     bool m_sta_is_connecting;
+    bool m_wifi_connect_task_started = false;
     esp_blufi_extra_info_t m_sta_conn_info{};
 
     // BLE hard-timeout safety gate (#1)

@@ -101,6 +101,8 @@ public:
      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
      */
     void StartListening();
+    void PrepareLessonInteractiveListening();
+    void CancelLessonInteractiveListening();
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -159,6 +161,7 @@ private:
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
+    std::atomic<bool> lesson_interactive_listen_pending_{false};
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;

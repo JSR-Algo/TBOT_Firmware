@@ -112,6 +112,23 @@ def test_websocket_audio_channel_open_starts_and_close_stops_heartbeat():
     closed_body = source[closed_start:closed_end]
     assert "StopHeartbeat();" in closed_body
 
+def test_websocket_online_paths_dispatch_first_heartbeat_immediately():
+    source = read("main/application.cc")
+
+    connected_start = source.index("protocol_->OnConnected(")
+    connected_end = source.index("protocol_->OnNetworkError(", connected_start)
+    connected_body = source[connected_start:connected_end]
+    connected_start_index = connected_body.index("StartHeartbeat();")
+    connected_dispatch_index = connected_body.index("DispatchDeviceHeartbeat();")
+    assert connected_start_index < connected_dispatch_index
+
+    opened_start = source.index("protocol_->OnAudioChannelOpened")
+    opened_end = source.index("protocol_->OnAudioChannelClosed", opened_start)
+    opened_body = source[opened_start:opened_end]
+    opened_start_index = opened_body.index("StartHeartbeat();")
+    opened_dispatch_index = opened_body.index("DispatchDeviceHeartbeat();")
+    assert opened_start_index < opened_dispatch_index
+
 def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_session():
     source = read("main/application.cc")
     confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
@@ -125,6 +142,21 @@ def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_s
     assert "audio_service_.EnableWakeWordDetection(true);" in confirm_body
     assert "protocol_->Start()" not in confirm_body
     assert "Claim confirmed: warming realtime audio WS" not in confirm_body
+
+def test_claim_confirm_starts_heartbeat_after_credentials_are_persisted():
+    source = read("main/application.cc")
+    confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
+
+    success_start = confirm_body.index("CancelClaimExpiryTimer();")
+    success_body = confirm_body[success_start:]
+
+    idle_index = success_body.index("SetDeviceState(kDeviceStateIdle);")
+    wake_index = success_body.index("audio_service_.EnableWakeWordDetection(true);")
+    heartbeat_index = success_body.index("StartHeartbeat();")
+    dispatch_index = success_body.index("DispatchDeviceHeartbeat();")
+
+    assert idle_index < wake_index < heartbeat_index < dispatch_index
+    assert "protocol_->Start()" not in success_body[:heartbeat_index]
 
 def test_websocket_protocol_does_not_auto_start_until_wake_or_explicit_click():
     source = read("main/application.cc")
