@@ -183,12 +183,49 @@ std::string BuildTbotDeviceConfigUrl(const std::string& api_base_url,
     return base + "/device/config?device_id=" + UrlEncodeQueryParam(device_id);
 }
 
+std::string BuildTbotConfigFetchUrl(const std::string& api_base_url) {
+    if (api_base_url.empty()) {
+        return "";
+    }
+
+    std::string base = api_base_url;
+    while (!base.empty() && base.back() == '/') {
+        base.pop_back();
+    }
+    if (base.find("/v1") == std::string::npos) {
+        base += "/v1";
+    }
+    return base + "/config/fetch";
+}
+
+// The device_id the claim flow must use. The phone resolves the backend's
+// serial-keyed device record and pushes that id to us over BLE custom-data
+// (TLV tag 0x03 -> NVS websocket.claim_device_id). We MUST claim/confirm under
+// that same id, otherwise the robot answers /device/config + /claim/confirm
+// with its random Board UUID (board.cc GenerateUuid) while the phone created
+// the claim attempt under the backend id -> the two never match and pairing
+// hangs at "waiting for robot to authenticate". Fall back to the Board UUID
+// only when the phone did not provide one (older app), preserving legacy
+// behavior.
+static std::string GetTbotClaimDeviceId() {
+    Settings websocket_settings("websocket", false);
+    const std::string pushed = websocket_settings.GetString("claim_device_id");
+    if (!pushed.empty()) {
+        return pushed;
+    }
+    return Board::GetInstance().GetUuid();
+}
+
 bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
                                            const std::string& bootstrap_token,
-                                           PendingTbotClaim& pending_claim) {
+                                           PendingTbotClaim& pending_claim,
+                                           int* http_status_code) {
     pending_claim = PendingTbotClaim{};
+    if (http_status_code) {
+        *http_status_code = 0;
+    }
 
-    const std::string device_id = Board::GetInstance().GetUuid();
+    const std::string device_id = GetTbotClaimDeviceId();
     const std::string url = BuildTbotDeviceConfigUrl(api_base_url, device_id);
     if (url.empty()) {
         ESP_LOGW(TAG, "Cannot fetch device config: missing API URL or device id");
@@ -220,6 +257,9 @@ bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
     }
 
     const int status_code = http->GetStatusCode();
+    if (http_status_code) {
+        *http_status_code = status_code;
+    }
     const std::string response_body = http->ReadAll();
     http->Close();
 
@@ -232,7 +272,18 @@ bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
         return false;
     }
 
-    return ParsePendingTbotClaimFromDeviceConfigJson(response_body, pending_claim);
+    const bool parsed = ParsePendingTbotClaimFromDeviceConfigJson(response_body, pending_claim);
+    ESP_LOGI(TAG, "Device config fetch result http=%d parsed=%d active=%d token=%d claim_present=%d",
+             status_code, static_cast<int>(parsed), static_cast<int>(pending_claim.active),
+             static_cast<int>(!bootstrap_token.empty()), static_cast<int>(!pending_claim.claim_id.empty()));
+    return parsed;
+}
+
+bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
+                                           const std::string& bootstrap_token,
+                                           PendingTbotClaim& pending_claim) {
+    return FetchPendingTbotClaimFromDeviceConfig(api_base_url, bootstrap_token,
+                                                 pending_claim, nullptr);
 }
 
 std::string BuildTbotDeviceBootstrapUrl() {
@@ -319,15 +370,85 @@ std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token) 
     return result;
 }
 
+bool RefreshWebsocketUrlFromConfigFetch() {
+    Settings backend_settings("backend", false);
+    const std::string api_url = backend_settings.GetString("api_url");
+    const std::string device_id = backend_settings.GetString("device_id");
+    const std::string device_secret = backend_settings.GetString("device_secret");
+    if (api_url.empty() || device_id.empty() || device_secret.empty()) {
+        ESP_LOGI(TAG, "Skipping config-fetch websocket refresh: claimed backend credentials incomplete");
+        return false;
+    }
+
+    const std::string url = BuildTbotConfigFetchUrl(api_url);
+    if (url.empty()) {
+        ESP_LOGW(TAG, "Cannot fetch runtime config: backend api_url is empty");
+        return false;
+    }
+
+    auto* network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(2);
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client for config fetch");
+        return false;
+    }
+
+    http->SetTimeout(5000);
+    http->SetHeader("X-Device-Id", device_id);
+    http->SetHeader("X-Device-Token", device_secret);
+    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+
+    ESP_LOGI(TAG, "Fetching runtime config via %s", url.c_str());
+    if (!http->Open("GET", url)) {
+        ESP_LOGW(TAG, "Config fetch HTTP open failed: 0x%x", http->GetLastError());
+        http->Close();
+        return false;
+    }
+
+    const int status_code = http->GetStatusCode();
+    const std::string response_body = http->ReadAll();
+    http->Close();
+
+    if (status_code < 200 || status_code >= 300) {
+        ESP_LOGW(TAG, "Config fetch failed (HTTP %d) resp_len=%u",
+                 status_code, static_cast<unsigned>(response_body.size()));
+        return false;
+    }
+
+    cJSON* root = cJSON_Parse(response_body.c_str());
+    if (root == nullptr) {
+        ESP_LOGW(TAG, "Config fetch response is not valid JSON");
+        return false;
+    }
+
+    cJSON* config_blob = cJSON_GetObjectItem(root, "configBlob");
+    cJSON* websocket = cJSON_IsObject(config_blob) ? cJSON_GetObjectItem(config_blob, "websocket") : nullptr;
+    cJSON* ws_url = cJSON_IsObject(websocket) ? cJSON_GetObjectItem(websocket, "url") : nullptr;
+    if (!cJSON_IsString(ws_url) || ws_url->valuestring[0] == '\0') {
+        cJSON_Delete(root);
+        ESP_LOGW(TAG, "Config fetch response did not carry configBlob.websocket.url");
+        return false;
+    }
+
+    Settings websocket_settings("websocket", true);
+    if (websocket_settings.GetString("url") != ws_url->valuestring) {
+        websocket_settings.SetString("url", ws_url->valuestring);
+    }
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "Websocket URL refreshed from config fetch");
+    return true;
+}
+
 bool PersistTbotClaimConfirmationResponse(const std::string& json) {
     cJSON* root = cJSON_Parse(json.c_str());
     if (root == nullptr) {
         return false;
     }
 
+    cJSON* device_id = cJSON_GetObjectItem(root, "device_id");
     cJSON* device_secret = cJSON_GetObjectItem(root, "device_secret");
     cJSON* ws_url = cJSON_GetObjectItem(root, "ws_url");
-    if (!cJSON_IsString(device_secret) || !cJSON_IsString(ws_url)) {
+    if (!cJSON_IsString(device_id) || !cJSON_IsString(device_secret) || !cJSON_IsString(ws_url)) {
         cJSON_Delete(root);
         return false;
     }
@@ -336,6 +457,7 @@ bool PersistTbotClaimConfirmationResponse(const std::string& json) {
     websocket_settings.SetString("url", ws_url->valuestring);
 
     Settings backend_settings("backend", true);
+    backend_settings.SetString("device_id", device_id->valuestring);
     backend_settings.SetString("device_secret", device_secret->valuestring);
 
     // Mark the device claimed with a DEDICATED flag. websocket "token" alone is
@@ -349,6 +471,43 @@ bool PersistTbotClaimConfirmationResponse(const std::string& json) {
 
     cJSON_Delete(root);
     return true;
+}
+
+static std::string ExtractTbotClaimErrorSummary(const std::string& response_body) {
+    cJSON* root = cJSON_Parse(response_body.c_str());
+    if (root == nullptr) {
+        return "";
+    }
+
+    if (cJSON_GetObjectItem(root, "device_secret") != nullptr) {
+        cJSON_Delete(root);
+        return " code=REDACTED_SECRET_BODY";
+    }
+
+    std::string summary;
+    cJSON* code = cJSON_GetObjectItem(root, "code");
+    if (cJSON_IsString(code) && code->valuestring != nullptr && code->valuestring[0] != '\0') {
+        summary += " code=";
+        summary += code->valuestring;
+    }
+
+    cJSON* message = cJSON_GetObjectItem(root, "message");
+    if (cJSON_IsString(message) && message->valuestring != nullptr && message->valuestring[0] != '\0') {
+        std::string safe_message = message->valuestring;
+        for (char& ch : safe_message) {
+            if (ch == '\r' || ch == '\n') {
+                ch = ' ';
+            }
+        }
+        if (safe_message.size() > 160) {
+            safe_message.resize(160);
+        }
+        summary += " message=";
+        summary += safe_message;
+    }
+
+    cJSON_Delete(root);
+    return summary;
 }
 
 bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
@@ -367,7 +526,7 @@ bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
         return false;
     }
 
-    const std::string device_id = Board::GetInstance().GetUuid();
+    const std::string device_id = GetTbotClaimDeviceId();
     std::string body = BuildTbotClaimConfirmBody(claim.claim_id, device_id, "button_press");
 
     auto* network = Board::GetInstance().GetNetwork();
@@ -405,9 +564,11 @@ bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
         return true;
     }
 
-    // Never log the verbatim response body: the /claim/confirm response carries
-    // device_secret, so log only the HTTP status + response length.
-    ESP_LOGW(TAG, "Claim confirmation failed (HTTP %d) resp_len=%u",
-             status_code, static_cast<unsigned>(response_body.size()));
+    // Never log the verbatim response body: the /claim/confirm success response
+    // carries device_secret. For non-2xx diagnostics, expose only redacted
+    // backend code/message fields so field debugging can identify the branch.
+    const std::string error_summary = ExtractTbotClaimErrorSummary(response_body);
+    ESP_LOGW(TAG, "Claim confirmation failed (HTTP %d) resp_len=%u%s",
+             status_code, static_cast<unsigned>(response_body.size()), error_summary.c_str());
     return false;
 }

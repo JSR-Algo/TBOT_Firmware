@@ -35,9 +35,22 @@ std::string BuildTbotClaimConfirmBody(const std::string& claim_id,
 std::string BuildTbotDeviceConfigUrl(const std::string& api_base_url,
                                      const std::string& device_id);
 
+std::string BuildTbotConfigFetchUrl(const std::string& api_base_url);
+
+// Post-claim boot refresh for the active runtime config. Uses backend.{api_url,
+// device_id,device_secret} from NVS and persists configBlob.websocket.url into
+// Settings("websocket"). Returns false on any missing credential, transport,
+// auth, or parse failure so callers keep the existing OTA/NVS fallback.
+bool RefreshWebsocketUrlFromConfigFetch();
+
 bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
                                            const std::string& bootstrap_token,
                                            PendingTbotClaim& pending_claim);
+
+bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
+                                           const std::string& bootstrap_token,
+                                           PendingTbotClaim& pending_claim,
+                                           int* http_status_code);
 
 // Derive the device-bootstrap URL ({origin}/v1/device/bootstrap) from the
 // compiled provisioning-status URL ({origin}/v1/device/provisioning/status).

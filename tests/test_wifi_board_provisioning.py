@@ -451,6 +451,32 @@ def test_wb12_try_wifi_connect_branches_on_stored_ssids():
 
 
 # ---------------------------------------------------------------------------
+# WB12b: Half-provisioned recovery. If a previous BluFi attempt saved Wi-Fi
+#        credentials but never completed TBOT claim confirmation, startup must
+#        not disappear into station-only mode. Keep BLE advertising open for the
+#        phone before starting the station reconnect, while claimed devices keep
+#        the normal BLE-off reconnect path.
+# ---------------------------------------------------------------------------
+def test_wb12b_unclaimed_saved_ssid_keeps_ble_advertising_before_station_connect():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _func_body(
+        wifi_board,
+        "void WifiBoard::TryWifiConnect()",
+        "void WifiBoard::OnNetworkEvent(",
+    )
+
+    have_idx = body.index("if (have_ssid)")
+    ensure_idx = body.index("app.EnsureBleAdvertisingForUnclaimedSavedWifi();", have_idx)
+    start_idx = body.index("WifiManager::GetInstance().StartStation();", ensure_idx)
+
+    assert "auto& app = Application::GetInstance();" in body[have_idx:ensure_idx]
+    assert "IsDeviceClaimed()" not in body
+    assert have_idx < ensure_idx < start_idx, (
+        "unclaimed saved-SSID startup must reopen BLE before starting station "
+        "mode so Android can rediscover and send a fresh claim token"
+    )
+
+# ---------------------------------------------------------------------------
 # WB13: WifiConfigModeExit re-attempts the connection with the new credentials
 #       via TryWifiConnect() and cancels the AP hard-timeout first. This is the
 #       level-triggered convergence: credentials arriving (config-mode exit)

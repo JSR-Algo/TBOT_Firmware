@@ -20,6 +20,10 @@
 
 #define TAG "MCP"
 
+namespace {
+constexpr size_t kMcpToolsListMaxPayloadBytes = 2500;
+}
+
 McpServer::McpServer() {
 }
 
@@ -90,6 +94,60 @@ void McpServer::AddCommonTools() {
     add_robot_arm_tool("self.robot.both_arms_lower",
         "Lower both robot arms by sending UART commands to the servant controller. Use when the user asks to lower both hands or both arms.",
         &Application::SendBothArmsLower);
+    AddTool("self.robot.left_arm_set_percent",
+        "Set the robot left arm position as a percentage by sending a UART command to the servant controller. Use when the user asks to nâng tay trái 50%, hạ tay trái 30%, đưa tay trái lên 75%, or set the left arm/hand to a percentage. 0% is fully lowered and 100% is fully raised.",
+        PropertyList({
+            Property("percent", kPropertyTypeInteger, 100, 0, 100)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            return app.SendLeftArmSetPercent(properties["percent"].value<int>());
+        });
+    AddTool("self.robot.right_arm_set_percent",
+        "Set the robot right arm position as a percentage by sending a UART command to the servant controller. Use when the user asks to nâng tay phải 50%, hạ tay phải 30%, đưa tay phải lên 75%, or set the right arm/hand to a percentage. 0% is fully lowered and 100% is fully raised.",
+        PropertyList({
+            Property("percent", kPropertyTypeInteger, 100, 0, 100)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            return app.SendRightArmSetPercent(properties["percent"].value<int>());
+        });
+    AddTool("self.robot.both_arms_set_percent",
+        "Set both robot arm positions as a percentage by sending UART commands to the servant controller. Use when the user asks to nâng hai tay 50%, hạ hai tay 30%, đưa cả hai tay lên 75%, or set both arms/hands to a percentage. 0% is fully lowered and 100% is fully raised.",
+        PropertyList({
+            Property("percent", kPropertyTypeInteger, 100, 0, 100)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            return app.SendBothArmsSetPercent(properties["percent"].value<int>());
+        });
+    add_robot_arm_tool("self.robot.head_turn_left",
+        "Turn the robot head left by sending a UART command to the servant controller. Use when the user asks to turn the head left, look left, or Vietnamese phrases like quay đầu trái, nhìn sang trái, or quay mặt sang trái.",
+        &Application::SendHeadTurnLeft);
+    add_robot_arm_tool("self.robot.head_turn_right",
+        "Turn the robot head right by sending a UART command to the servant controller. Use when the user asks to turn the head right, look right, or Vietnamese phrases like quay đầu phải, nhìn sang phải, or quay mặt sang phải.",
+        &Application::SendHeadTurnRight);
+    add_robot_arm_tool("self.robot.head_center",
+        "Center the robot head by sending a UART command to the servant controller. Use when the user asks to center the head, face forward, or Vietnamese phrases like đưa đầu về giữa, nhìn thẳng, or quay đầu về giữa.",
+        &Application::SendHeadCenter);
+    AddTool("self.robot.head_set_angle",
+        "Set the robot head servo angle by sending a UART command to the servant controller. Use when the user asks to chỉnh góc quay đầu, quay đầu 120 độ, xoay đầu sang trái 45 độ, xoay đầu sang phải 135 độ, or any requested head angle. Angle is 0 to 180 degrees, with 90 degrees centered.",
+        PropertyList({
+            Property("angle", kPropertyTypeInteger, 90, 0, 180)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            return app.SendHeadSetAngle(properties["angle"].value<int>());
+        });
+    AddTool("self.robot.head_set_percent",
+        "Set the robot head position as a percentage by sending a UART command to the servant controller. Use when the user asks to quay đầu 50%, xoay đầu sang trái 50%, xoay đầu sang phải 75%, or set the head/face turn as a percentage. 0% is fully left, 50% is center, and 100% is fully right.",
+        PropertyList({
+            Property("percent", kPropertyTypeInteger, 50, 0, 100)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            return app.SendHeadSetPercent(properties["percent"].value<int>());
+        });
     
     auto backlight = board.GetBacklight();
     if (backlight) {
@@ -285,26 +343,105 @@ void McpServer::AddUserOnlyTools() {
                     throw std::runtime_error("Unexpected status code: " + std::to_string(status_code));
                 }
 
+                // The custom HttpClient reports GetBodyLength()==0 for ANY
+                // Transfer-Encoding: chunked response (http_client.cc:709-710) — the
+                // length is unknown up front, not necessarily empty. Two cases:
+                //   content_length > 0  -> fixed Content-Length; read exactly that many.
+                //   content_length == 0 -> chunked OR genuinely empty; the chunked parser
+                //                          still buffers the de-chunked bytes, so read
+                //                          until Read() returns 0 (EOF) into a growing,
+                //                          capped buffer. (Same gap as lesson_handler.cc's
+                //                          FetchLessonImage.)
                 size_t content_length = http->GetBodyLength();
-                char* data = (char*)heap_caps_malloc(content_length, MALLOC_CAP_8BIT);
-                if (data == nullptr) {
-                    throw std::runtime_error("Failed to allocate memory for image: " + url);
-                }
-                size_t total_read = 0;
-                while (total_read < content_length) {
-                    int ret = http->Read(data + total_read, content_length - total_read);
-                    if (ret < 0) {
-                        heap_caps_free(data);
-                        throw std::runtime_error("Failed to download image: " + url);
-                    }
-                    if (ret == 0) {
-                        break;
-                    }
-                    total_read += ret;
-                }
-                http->Close();
+                char* data = nullptr;
 
-                auto image = std::make_unique<LvglAllocatedImage>(data, content_length);
+                if (content_length > 0) {
+                    // Fast path: server advertised a fixed length.
+                    data = (char*)heap_caps_malloc(content_length, MALLOC_CAP_8BIT);
+                    if (data == nullptr) {
+                        throw std::runtime_error("Failed to allocate memory for image: " + url);
+                    }
+                    size_t total_read = 0;
+                    while (total_read < content_length) {
+                        int ret = http->Read(data + total_read, content_length - total_read);
+                        if (ret < 0) {
+                            heap_caps_free(data);
+                            throw std::runtime_error("Failed to download image: " + url);
+                        }
+                        if (ret == 0) {
+                            break;  // server closed early
+                        }
+                        total_read += ret;
+                    }
+                    http->Close();
+                    if (total_read < content_length) {
+                        // Truncated download: the tail of `data` is uninitialized, so
+                        // decoding it would feed garbage to LVGL. Reject instead of
+                        // rendering a corrupt image.
+                        heap_caps_free(data);
+                        throw std::runtime_error("Short read for image: " + url);
+                    }
+                } else {
+                    // Chunked / unknown-length 200: grow a buffer until EOF. The cap is a
+                    // heap backstop against a runaway/oversized stream; on a no-PSRAM
+                    // board the realloc failure below fires long before it.
+                    constexpr size_t kMaxImageBytes = 4 * 1024 * 1024;
+                    size_t capacity = 32 * 1024;
+                    data = (char*)heap_caps_malloc(capacity, MALLOC_CAP_8BIT);
+                    if (data == nullptr) {
+                        throw std::runtime_error("Failed to allocate memory for image: " + url);
+                    }
+                    size_t total_read = 0;
+                    while (true) {
+                        if (total_read == capacity) {
+                            if (capacity >= kMaxImageBytes) {
+                                heap_caps_free(data);
+                                throw std::runtime_error("Image exceeds max size: " + url);
+                            }
+                            size_t new_capacity = std::min(capacity * 2, kMaxImageBytes);
+                            char* grown = (char*)heap_caps_realloc(data, new_capacity, MALLOC_CAP_8BIT);
+                            if (grown == nullptr) {
+                                heap_caps_free(data);
+                                throw std::runtime_error("Failed to grow image buffer: " + url);
+                            }
+                            data = grown;
+                            capacity = new_capacity;
+                        }
+                        int ret = http->Read(data + total_read, capacity - total_read);
+                        if (ret < 0) {
+                            heap_caps_free(data);
+                            throw std::runtime_error("Failed to download image: " + url);
+                        }
+                        if (ret == 0) {
+                            break;  // EOF
+                        }
+                        total_read += ret;
+                    }
+                    http->Close();
+                    if (total_read == 0) {
+                        heap_caps_free(data);
+                        throw std::runtime_error("Empty image body: " + url);
+                    }
+                    // Shrink the over-allocated buffer to the exact payload so the cached
+                    // image doesn't hold spare capacity for its whole lifetime; keep the
+                    // original block if the shrink can't be satisfied in place.
+                    char* shrunk = (char*)heap_caps_realloc(data, total_read, MALLOC_CAP_8BIT);
+                    if (shrunk != nullptr) {
+                        data = shrunk;
+                    }
+                    content_length = total_read;
+                }
+
+                // LvglAllocatedImage takes ownership of `data` and frees it in its dtor.
+                // Its ctor decodes the header and THROWS on undecodable bytes; on that
+                // path the dtor never runs, so free `data` ourselves before rethrowing.
+                std::unique_ptr<LvglAllocatedImage> image;
+                try {
+                    image = std::make_unique<LvglAllocatedImage>(data, content_length);
+                } catch (...) {
+                    heap_caps_free(data);
+                    throw;
+                }
                 display->SetPreviewImage(std::move(image));
                 return true;
             });
@@ -478,7 +615,6 @@ void McpServer::ReplyError(int id, const std::string& message) {
 }
 
 void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools) {
-    const int max_payload_size = 8000;
     std::string json = "{\"tools\":[";
     
     bool found_cursor = cursor.empty();
@@ -503,7 +639,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
         
         // 添加tool前检查大小
         std::string tool_json = (*it)->to_json() + ",";
-        if (json.length() + tool_json.length() + 30 > max_payload_size) {
+        if (json.length() + tool_json.length() + 30 > kMcpToolsListMaxPayloadBytes) {
             // 如果添加这个tool会超出大小限制，设置next_cursor并退出循环
             next_cursor = (*it)->name();
             break;
@@ -529,6 +665,9 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     } else {
         json += "],\"nextCursor\":\"" + next_cursor + "\"}";
     }
+
+    ESP_LOGI(TAG, "tools/list page bytes=%u next_cursor=%s", (unsigned)json.size(),
+             next_cursor.empty() ? "(none)" : next_cursor.c_str());
     
     ReplyResult(id, json);
 }

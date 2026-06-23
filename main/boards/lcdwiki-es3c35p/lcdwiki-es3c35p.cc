@@ -597,6 +597,12 @@ private:
     }
 
     void InitializeButtons() {
+        boot_button_.OnPressDown([]() {
+            ESP_LOGI(TAG, "LCDWiki BOOT press down");
+        });
+        boot_button_.OnPressUp([]() {
+            ESP_LOGI(TAG, "LCDWiki BOOT press up");
+        });
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             auto state = app.GetDeviceState();
@@ -607,14 +613,18 @@ private:
             }
             app.ToggleChatState();
         });
-        boot_button_.OnLongPress([this]() {
-            ESP_LOGI(TAG, "LCDWiki BOOT long-press -> EnterWifiConfigMode");
-            EnterWifiConfigMode();
+        boot_button_.OnLongPress([]() {
+            // Re-pair: forget the current parent/claim and re-enter BLE pairing so a
+            // (possibly different) parent phone can connect & re-claim the robot. Does
+            // not block on Wi-Fi/cloud at press time — cloud ownership release is
+            // deferred until the robot is back online (see EnterRepairPairingMode).
+            ESP_LOGI(TAG, "LCDWiki BOOT long-press -> EnterRepairPairingMode (re-pair)");
+            Application::GetInstance().EnterRepairPairingMode();
         });
     }
 
 public:
-    LCDWikiES3C35PBoard() : boot_button_(BOOT_BUTTON_GPIO) {
+    LCDWikiES3C35PBoard() : boot_button_(BOOT_BUTTON_GPIO, false, 5000) {
         InitializeI2c();
         InitializeSpi();
         InitializeLcdDisplay();

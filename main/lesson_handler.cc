@@ -18,13 +18,19 @@
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
 #include "lvgl_display.h"
 #include "lvgl_image.h"
+#include "jpeg_to_image.h"
 
 #include <ctime>
+#include <cstdint>
+#include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <memory>
+#include <set>
 
 #include <cJSON.h>
+#include <esp_err.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 
@@ -37,6 +43,14 @@ const char* Str(const cJSON* o, const char* k) {
     if (o == nullptr) return nullptr;
     const cJSON* v = cJSON_GetObjectItem(o, k);
     return cJSON_IsString(v) ? v->valuestring : nullptr;
+}
+bool Blank(const char* value) {
+    if (value == nullptr) return true;
+    while (*value != '\0') {
+        if (*value != ' ' && *value != '\t' && *value != '\n' && *value != '\r') return false;
+        ++value;
+    }
+    return true;
 }
 bool Num(const cJSON* o, const char* k, double& out) {
     if (o == nullptr) return false;
@@ -73,6 +87,7 @@ int64_t NowMs() { return static_cast<int64_t>(time(nullptr)) * 1000LL; }
 // starting at 1 — fixture sequenceStreams F->S).
 struct LessonSession {
     std::string assignment_id;
+    std::string session_id;
     double      assignment_version = -1.0;  // staleness guard (plan §7.2)
     int64_t     last_in_sequence   = 0;     // highest processed S->F sequence (0 = none)
     int64_t     fs_sequence        = 0;     // firmware F->S counter, pre-inc on emit
@@ -86,6 +101,7 @@ struct LessonSession {
     int64_t     last_ack_sequence  = 0;     // S->F sequence this cached ack acked (0 = none)
     bool        last_ack_rendered  = false;
     bool        last_ack_degraded  = false;
+    std::string last_ack_asset_pack_json;
 };
 LessonSession g_session;
 
@@ -127,12 +143,12 @@ cJSON* MakeErrorBody(const char* code, const char* message, bool retryable, cons
 // FW-01 / FW-LESSON-01 — per-step completion class. The frozen contract splits the 9
 // authorable step types into two classes ON THE WIRE (fixture multiStep._meta
 // .completionClasses; multiStepThread steps 7-10): a PASSIVE narration step gets an
-// ack ONLY (it auto-advances on that ack and the firmware NEVER emits step_completed),
-// while an INTERACTIVE step gets an ack AND a lesson_progress step_completed. The
-// firmware previously emitted step_completed UNCONDITIONALLY, sending a spurious
-// step_completed for every passive step — the very bug the ESP runtime defends against
-// (runtime.py:80-88, latch-contamination guard runtime.py:284-300) and whose
-// un-mitigated failure mode is off-by-one step-skipping (test_lesson_runtime.py:979).
+// ack ONLY and auto-advances on that ack, while an INTERACTIVE step gets render ack
+// plus a listening window. Child response completion is owned by the transcript/tap
+// response path, so the renderer must never fabricate lesson_progress from draw
+// success. The old unconditional step_completed emission contaminated the ESP latch
+// (runtime.py:80-88, latch-contamination guard runtime.py:284-300) and could skip
+// steps (test_lesson_runtime.py:979).
 //
 // Classifier mirrors the ESP _is_passive_step (runtime.py:90-111) EXACTLY so both
 // sides agree: explicit body.completionClass ('passive'|'interactive') is authoritative
@@ -168,27 +184,244 @@ const char* ExpressionToEmotion(const char* expr) {
     return "neutral";
 }
 
-// Is a named asset present in the on-device read-only (build-time) asset image?
-// D-PRELOAD-OWNER: the firmware never downloads/checksums; it renders only bytes
-// already on-device. In slice-01 the poster/teachingObject PNG are not flashed and
-// no ESP->firmware byte channel exists, so this returns false for them and the
-// ladder degrades to the always-available rungs (see lesson_handler.h).
-bool AssetAvailable(const char* name) {
-    if (name == nullptr) return false;
-    void* ptr = nullptr;
-    size_t size = 0;
-    return Assets::GetInstance().GetAssetData(std::string(name), ptr, size) && size > 0;
+// (Removed AssetAvailable(): a presence-only flashed-asset probe that previously fed the
+// poster_drew rung. It only checked GetAssetData() presence and discarded the bytes, never
+// decoding nor calling SetLessonBackground(), so a flashed-only poster was acked as drawn
+// without any real draw. The renderer now draws exclusively through FetchLessonImage()
+// (HTTP fetch or verified SD pack path), so the presence-only probe is dead and removed.)
+
+bool IsJpegImage(const void* data, size_t size) {
+    if (data == nullptr || size < 3) return false;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    return bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff;
+}
+
+constexpr size_t kMaxLessonImageBytes = 512 * 1024;
+constexpr size_t kMaxLessonDecodedImageBytes = 320 * 240 * 2;
+
+bool LessonDecodedImageFitsBudget(size_t decoded_len, size_t width, size_t height, size_t stride) {
+    if (decoded_len == 0 || width == 0 || height == 0 || stride == 0) return false;
+    if (width > SIZE_MAX / 2) return false;
+    if (stride < width * 2) return false;
+    if (height > SIZE_MAX / stride) return false;
+    const size_t footprint = stride * height;
+    if (footprint == 0 || decoded_len < footprint) return false;
+    return footprint <= kMaxLessonDecodedImageBytes && decoded_len <= kMaxLessonDecodedImageBytes;
+}
+
+std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_length,
+                                                  const char* log_prefix) {
+    if (data == nullptr || content_length == 0) return nullptr;
+    if (IsJpegImage(data, content_length)) {
+        uint8_t* decoded_data = nullptr;
+        size_t decoded_len = 0;
+        size_t width = 0;
+        size_t height = 0;
+        size_t stride = 0;
+
+        esp_err_t ret = jpeg_to_image(reinterpret_cast<const uint8_t*>(data), content_length,
+                                      &decoded_data, &decoded_len, &width, &height, &stride);
+        heap_caps_free(data);
+        data = nullptr;
+
+        if (ret != ESP_OK || decoded_data == nullptr ||
+            !LessonDecodedImageFitsBudget(decoded_len, width, height, stride)) {
+            ESP_LOGW(TAG, "%s: JPEG decode failed: %d", log_prefix, (int)ret);
+            if (decoded_data != nullptr) heap_caps_free(decoded_data);
+            return nullptr;
+        }
+
+        try {
+            return std::make_unique<LvglAllocatedImage>(decoded_data, decoded_len,
+                                                        static_cast<int>(width),
+                                                        static_cast<int>(height),
+                                                        static_cast<int>(stride),
+                                                        LV_COLOR_FORMAT_RGB565);
+        } catch (...) {
+            ESP_LOGW(TAG, "%s: decoded JPEG rejected; skipping", log_prefix);
+            heap_caps_free(decoded_data);
+            return nullptr;
+        }
+    }  // GCOVR_EXCL_LINE: every JPEG branch path returns before this structural brace.
+
+    // LvglAllocatedImage takes ownership of `data` (frees it in its dtor when the
+    // cached unique_ptr is replaced/reset). Its ctor THROWS std::runtime_error if
+    // LVGL can't decode the bytes (truncated/unsupported image, HTML error page
+    // served as 200, etc.) and does NOT free data on throw — catch it so an
+    // undecodable poster is a non-fatal skip instead of an exception escaping the
+    // WS receive task (deep-audit #1 CRITICAL). catch(...) avoids any <exception>
+    // include dependency.
+    try {
+        return std::make_unique<LvglAllocatedImage>(data, content_length);
+    } catch (...) {
+        ESP_LOGW(TAG, "%s: undecodable image; skipping", log_prefix);
+        heap_caps_free(data);
+        return nullptr;
+    }
+}
+
+constexpr const char* kLessonAssetPackRoot = "/sdcard/tbot/lesson-assets/";
+
+std::string LessonPackFileSystemPath(const std::string& canonical_path) {
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+    const char* host_root_env = std::getenv("TBOT_HOST_LESSON_ASSET_ROOT");
+    if (!Blank(host_root_env) && canonical_path.rfind(kLessonAssetPackRoot, 0) == 0) {
+        std::string host_root(host_root_env);
+        if (!host_root.empty() && host_root.back() != '/') host_root.push_back('/');
+        return host_root + canonical_path.substr(strlen(kLessonAssetPackRoot));
+    }
+#endif
+    return canonical_path;
+}
+
+std::string ValidateLessonPackPath(std::string path) {
+    if (path.empty()) return "";
+    if (path.find("..") != std::string::npos || path.find("\\") != std::string::npos) {
+        ESP_LOGW(TAG, "lesson image file: rejected unsafe local path");
+        return "";
+    }
+    if (path.rfind(kLessonAssetPackRoot, 0) != 0) {
+        ESP_LOGW(TAG, "lesson image file: rejected non-pack local path");
+        return "";
+    }
+    return path;
+}
+
+std::string LessonLocalPath(const char* url) {
+    if (url == nullptr) return "";
+    if (strncmp(url, "sd://", 5) == 0) {
+        const char* tail = url + 5;
+        if (strncmp(tail, "sdcard/", 7) == 0) return ValidateLessonPackPath(std::string("/") + tail);
+        if (tail[0] == '/') return ValidateLessonPackPath(tail);
+        return ValidateLessonPackPath(std::string("/sdcard/") + tail);
+    }
+    if (strncmp(url, "file://", 7) == 0) return ValidateLessonPackPath(std::string(url + 7));
+    return "";
+}
+
+std::unique_ptr<LvglImage> FetchLessonLocalImage(const char* url) {
+    std::string path = LessonLocalPath(url);
+    if (path.empty()) return nullptr;
+    std::string fs_path = LessonPackFileSystemPath(path);
+
+    FILE* fp = fopen(fs_path.c_str(), "rb");
+    if (fp == nullptr) {
+        ESP_LOGW(TAG, "lesson image file: open failed %s", path.c_str());
+        return nullptr;
+    }
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return nullptr;
+    }
+    long file_size = ftell(fp);
+    if (file_size <= 0 || static_cast<size_t>(file_size) > kMaxLessonImageBytes) {
+        ESP_LOGW(TAG, "lesson image file: invalid size %ld", file_size);
+        fclose(fp);
+        return nullptr;
+    }
+    rewind(fp);
+
+    size_t content_length = static_cast<size_t>(file_size);
+    char* data = static_cast<char*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
+    if (data == nullptr) {
+        ESP_LOGW(TAG, "lesson image file: alloc %u failed", (unsigned)content_length);
+        fclose(fp);
+        return nullptr;
+    }
+    size_t read = fread(data, 1, content_length, fp);
+    fclose(fp);
+    if (read != content_length) {
+        ESP_LOGW(TAG, "lesson image file: short read %u/%u", (unsigned)read, (unsigned)content_length);
+        heap_caps_free(data);
+        return nullptr;
+    }
+    return DecodeLessonImageBytes(data, content_length, "lesson image file");
+}
+
+bool LessonLocalFileReady(const char* url, size_t expected_size = 0) {
+    std::string path = LessonLocalPath(url);
+    if (path.empty()) return false;
+    std::string fs_path = LessonPackFileSystemPath(path);
+    FILE* fp = fopen(fs_path.c_str(), "rb");
+    if (fp == nullptr) return false;
+    bool ready = false;
+    if (fseek(fp, 0, SEEK_END) == 0) {
+        long file_size = ftell(fp);
+        ready = file_size > 0 && static_cast<size_t>(file_size) <= kMaxLessonImageBytes;
+        if (ready && expected_size > 0) {
+            ready = static_cast<size_t>(file_size) == expected_size;
+        }
+    }
+    fclose(fp);
+    return ready;
+}
+
+cJSON* BuildAssetPackAck(const cJSON* body) {
+    const cJSON* pack = Obj(body, "assetPack");
+    if (pack == nullptr) return nullptr;
+
+    const char* cache_key = Str(pack, "cacheKey");
+    const cJSON* manifest_ref = Obj(body, "manifestRef");
+    const char* manifest_checksum = Str(manifest_ref, "manifestChecksum");
+    const bool manifest_checksum_required = !Blank(manifest_checksum);
+    const bool cache_key_has_manifest_checksum =
+        manifest_checksum_required && cache_key != nullptr && strstr(cache_key, manifest_checksum) != nullptr;
+    const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
+    const cJSON* critical_assets = cJSON_GetObjectItem(body, "criticalAssets");
+    bool ready = manifest_checksum_required && cache_key_has_manifest_checksum &&
+                 cJSON_IsArray(assets) && cJSON_GetArraySize(assets) > 0;
+    std::set<std::string> ready_asset_keys;
+    if (ready) {
+        const cJSON* asset = nullptr;
+        cJSON_ArrayForEach(asset, assets) {
+            const char* asset_key = Str(asset, "key");
+            const char* state = Str(asset, "state");
+            const cJSON* checksum_ok = cJSON_GetObjectItem(asset, "checksumOk");
+            const bool asset_verified =
+                state != nullptr && strcmp(state, "READY") == 0 && cJSON_IsTrue(checksum_ok);
+            const char* local_path = Str(asset, "localPath");
+            double size_value = 0.0;
+            bool has_declared_size = Num(asset, "size", size_value) && size_value > 0.0;
+            size_t expected_size = 0;
+            if (has_declared_size && size_value > 0.0) {
+                expected_size = static_cast<size_t>(size_value);
+            }
+            if (asset_key == nullptr || asset_key[0] == '\0' || !asset_verified ||
+                !has_declared_size || !LessonLocalFileReady(local_path, expected_size) ||
+                !ready_asset_keys.insert(asset_key).second || !manifest_checksum_required ||
+                !cache_key_has_manifest_checksum) {
+                ready = false;
+                break;
+            }
+        }
+    }
+    if (ready) {
+        if (cJSON_IsArray(critical_assets) && cJSON_GetArraySize(critical_assets) > 0) {
+            const cJSON* critical_asset = nullptr;
+            cJSON_ArrayForEach(critical_asset, critical_assets) {
+                const char* critical_key = Str(critical_asset, "key");
+                if (critical_key == nullptr || critical_key[0] == '\0' ||
+                    ready_asset_keys.find(critical_key) == ready_asset_keys.end()) {
+                    ready = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    cJSON* out = cJSON_CreateObject();
+    cJSON_AddBoolToObject(out, "ready", ready);
+    if (cache_key != nullptr) cJSON_AddStringToObject(out, "cacheKey", cache_key);
+    return out;
 }
 
 // US-006 image render — HTTP GET a lesson image URL and DECODE it into an LvglImage.
 // This is the firmware half the recon flagged as missing: the backend already emits
 // resolved scene.*.src URLs and the ESP server downloads/sha256-verifies the bytes,
-// but the firmware previously only probed the flashed asset image. We now fetch the
-// authored URL over the existing network stack and hand the raw bytes to
-// LvglAllocatedImage, REUSING the exact proven pipeline in mcp_server.cc:332-361
-// (HTTP GET -> heap_caps_malloc -> LvglAllocatedImage). The LVGL PNG/JPEG decoder is
-// already compiled in (CONFIG_LV_USE_LODEPNG=y), so LvglAllocatedImage's ctor decodes
-// via lv_image_decoder_get_info on first draw.
+// but the firmware previously only probed the flashed asset image. We now fetch and
+// decode the authored URL over the existing network stack. PNG and other LVGL-native
+// formats still go through LvglAllocatedImage's decoder probe; JPEG is decoded here
+// with the firmware JPEG helper because LVGL is not built with a JPEG decoder.
 //
 // FAILURE IS NEVER FATAL: any error (no URL, no network, bad status, alloc fail, short
 // read) returns nullptr and the caller falls back to the caption-only ladder. We run
@@ -196,6 +429,10 @@ bool AssetAvailable(const char* name) {
 // NOT stall the LVGL/app task; the decoded draw is then marshalled via Schedule().
 std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
     if (url == nullptr || url[0] == '\0') return nullptr;
+
+    if (strncmp(url, "sd://", 5) == 0 || strncmp(url, "file://", 7) == 0) {
+        return FetchLessonLocalImage(url);
+    }
 
     auto* network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
@@ -220,6 +457,12 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
     size_t total_read = 0;
     if (content_length > 0) {
         // Known Content-Length: one pre-sized allocation.
+        if (content_length > kMaxLessonImageBytes) {
+            ESP_LOGW(TAG, "lesson image fetch: body exceeds %u cap; dropping",
+                     (unsigned)kMaxLessonImageBytes);
+            http->Close();
+            return nullptr;
+        }
         data = static_cast<char*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
         if (data == nullptr) {
             ESP_LOGW(TAG, "lesson image fetch: alloc %u failed", (unsigned)content_length);
@@ -248,7 +491,6 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         // No Content-Length (Transfer-Encoding: chunked — common for CDN-transcoded
         // images): grow-as-you-read until EOF, capped (deep-audit #5: GetBodyLength()
         // == 0 was misread as "empty body" so chunked posters never rendered).
-        const size_t kMaxImageBytes = 512 * 1024;
         size_t cap = 16 * 1024;
         data = static_cast<char*>(heap_caps_malloc(cap, MALLOC_CAP_8BIT));
         if (data == nullptr) {
@@ -258,15 +500,15 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         }
         for (;;) {
             if (total_read == cap) {
-                if (cap >= kMaxImageBytes) {
+                if (cap >= kMaxLessonImageBytes) {
                     ESP_LOGW(TAG, "lesson image fetch: body exceeds %u cap; dropping",
-                             (unsigned)kMaxImageBytes);
+                             (unsigned)kMaxLessonImageBytes);
                     heap_caps_free(data);
                     http->Close();
                     return nullptr;
                 }
                 size_t new_cap = cap * 2;
-                if (new_cap > kMaxImageBytes) new_cap = kMaxImageBytes;
+                if (new_cap > kMaxLessonImageBytes) new_cap = kMaxLessonImageBytes;
                 char* grown = static_cast<char*>(heap_caps_realloc(data, new_cap, MALLOC_CAP_8BIT));
                 if (grown == nullptr) {
                     ESP_LOGW(TAG, "lesson image fetch: realloc %u failed", (unsigned)new_cap);
@@ -296,20 +538,7 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         content_length = total_read;
     }
 
-    // LvglAllocatedImage takes ownership of `data` (frees it in its dtor when the
-    // cached unique_ptr is replaced/reset). Its ctor THROWS std::runtime_error if
-    // LVGL can't decode the bytes (truncated/unsupported image, HTML error page
-    // served as 200, etc.) and does NOT free data on throw — catch it so an
-    // undecodable poster is a non-fatal skip instead of an exception escaping the
-    // WS receive task (deep-audit #1 CRITICAL). catch(...) avoids any <exception>
-    // include dependency.
-    try {
-        return std::make_unique<LvglAllocatedImage>(data, content_length);
-    } catch (...) {
-        ESP_LOGW(TAG, "lesson image fetch: undecodable image; skipping");
-        heap_caps_free(data);
-        return nullptr;
-    }
+    return DecodeLessonImageBytes(data, content_length, "lesson image fetch");
 }
 
 }  // namespace
@@ -350,7 +579,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // the ack's own envelope.sequence is the firmware F->S counter; there is NO
     // ackFor field. stepId is echoed (null on lifecycle, "s4" on a step).
     auto emit_ack = [&emit](const cJSON* in, int64_t acked, bool rendered, bool degraded,
-                            bool cache = true) {
+                            cJSON* asset_pack_ack = nullptr, bool cache = true) {
         cJSON* b = cJSON_CreateObject();
         cJSON_AddNumberToObject(b, "acks", static_cast<double>(acked));
         cJSON_AddBoolToObject(b, "rendered", rendered);
@@ -362,11 +591,31 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.last_ack_sequence = acked;
             g_session.last_ack_rendered = rendered;
             g_session.last_ack_degraded = degraded;
+            g_session.last_ack_asset_pack_json.clear();
+            if (asset_pack_ack != nullptr) {
+                char* printed = cJSON_PrintUnformatted(asset_pack_ack);
+                if (printed != nullptr) {
+                    g_session.last_ack_asset_pack_json = printed;
+                    cJSON_free(printed);
+                }
+            }
         }
+        if (asset_pack_ack != nullptr) cJSON_AddItemToObject(b, "assetPack", asset_pack_ack);
         emit(in, "lesson_ack", b);
     };
 
     const bool is_prepare = strcmp(type, "lesson_prepare") == 0;
+    double prepare_assignment_version = 0.0;
+    const bool prepare_has_newer_assignment_version =
+        is_prepare &&
+        Num(body, "assignmentVersion", prepare_assignment_version) &&
+        prepare_assignment_version > g_session.assignment_version;
+    const bool duplicate_prepare =
+        is_prepare &&
+        g_session.assignment_id == assignment_id &&
+        g_session.session_id == session_id &&
+        sequence <= g_session.last_in_sequence &&
+        !prepare_has_newer_assignment_version;
 
     // FW-02: a session-opening lesson_prepare resets the F->S counter + inbound cursor
     // BEFORE the version/profile gate, so that even a REJECTED fresh prepare sources
@@ -377,11 +626,23 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // ESP's fresh inbound cursor. Mid-session lesson_step/lesson_start rejects (the case
     // the gate comment below protects) still ride the live continued counter because
     // they do NOT reset here.
-    if (is_prepare) {
+    if (is_prepare && !duplicate_prepare) {
         // lesson_prepare (re)establishes the single active session and resets the
         // F->S counter + the inbound sequence cursor for this assignment.
         g_session = LessonSession{};
         g_session.assignment_id = assignment_id;
+        g_session.session_id = session_id;
+    }
+
+    // --- session context (per (assignmentId,sessionId)) ---
+    // The session reset for a session-opening prepare already ran BEFORE the gate
+    // (FW-02). Here we reject non-prepare frames outside the active
+    // (assignmentId, sessionId) stream before version/profile errors,
+    // staleness/dedup, or render handling can mutate the active F->S stream.
+    if (!is_prepare && (g_session.assignment_id != assignment_id ||
+                        g_session.session_id != session_id)) {
+        ESP_LOGW(TAG, "lesson_%s for unknown session; dropping", type + 7);
+        return;
     }
 
     // --- contract-identity + profile gate (plan §7.2 / DO #6) ---
@@ -412,14 +673,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
         return;
     }
 
-    // --- session context (per (assignmentId,sessionId)) ---
-    // The session reset for a session-opening prepare already ran BEFORE the gate
-    // (FW-02). Here we only reject non-prepare frames for an unknown assignment.
-    if (!is_prepare && g_session.assignment_id != assignment_id) {
-        ESP_LOGW(TAG, "lesson_%s for unknown assignment; dropping", type + 7);
-        return;
-    }
-
     // Staleness drop (plan §7.2): ignore a frame carrying an older body.assignmentVersion.
     double av = 0.0;
     if (Num(body, "assignmentVersion", av)) {
@@ -443,17 +696,35 @@ void Application::HandleLessonMessage(const cJSON* root) {
                                      ? g_session.last_ack_rendered : false;
         const bool re_degraded = (sequence == g_session.last_ack_sequence)
                                      ? g_session.last_ack_degraded : false;
+        cJSON* re_asset_pack = nullptr;
+        if (sequence == g_session.last_ack_sequence && !g_session.last_ack_asset_pack_json.empty()) {
+            re_asset_pack = cJSON_Parse(g_session.last_ack_asset_pack_json.c_str());
+        }
         ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; re-acking rendered=%d degraded=%d",
                  (long long)sequence, re_rendered, re_degraded);
-        emit_ack(root, sequence, re_rendered, re_degraded, /*cache*/ false);
+        emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack, /*cache*/ false);
         return;
     }
     g_session.last_in_sequence = sequence;
 
     // --- slice subset dispatch ---
     if (is_prepare) {
+        const cJSON* asset_pack = Obj(body, "assetPack");
+        const cJSON* manifest_ref = Obj(body, "manifestRef");
+        const char* manifest_checksum = Str(manifest_ref, "manifestChecksum");
+        if (asset_pack != nullptr && Blank(manifest_checksum)) {
+            cJSON* eb = MakeErrorBody(
+                "ASSET_PACK_NOT_READY",
+                "lesson_prepare assetPack requires manifestRef.manifestChecksum",
+                true,
+                "assetPack");
+            emit(root, "lesson_error", eb);
+            ESP_LOGW(TAG, "lesson_prepare rejected: assetPack missing manifestChecksum");
+            return;
+        }
         g_session.prepared = true;
-        emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
+        cJSON* asset_pack_ack = BuildAssetPackAck(body);
+        emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false, asset_pack_ack);
         return;
     }
     if (strcmp(type, "lesson_start") == 0) {
@@ -462,6 +733,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         return;
     }
     if (strcmp(type, "lesson_stop") == 0) {
+        Application::GetInstance().CancelLessonInteractiveListening();
         g_session.running = false;
         g_session.prepared = false;
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
@@ -472,7 +744,29 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (display) {
             Schedule([display, lvgl_display]() {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
                 display->SetEmotion("neutral");
+            });
+        }
+        return;
+    }
+    if (strcmp(type, "lesson_error") == 0) {
+        Application::GetInstance().CancelLessonInteractiveListening();
+        // ESP can send a terminal lesson_error when it rejects an unsafe lesson payload
+        // before it reaches the renderer. Do not ack this status frame back; clear stale
+        // layers and show a child-safe failure message instead of leaving the last step
+        // frozen on screen.
+        g_session.running = false;
+        Display* display = Board::GetInstance().GetDisplay();
+        LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+        if (display) {
+            Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                display->SetEmotion("sad");
+                display->SetChatMessage("assistant", "Bài học chưa tải được.");
             });
         }
         return;
@@ -511,14 +805,26 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // on-device flashed asset image (which never holds per-assignment lesson posters),
     // we now FETCH the authored URL (scene.backgroundScene.poster.src) over HTTP and
     // DECODE it, reusing the proven mcp_server.cc download->LvglAllocatedImage path.
-    // The fetched bytes are drawn as a full-screen, persistent background via the new
+    // The fetched poster bytes are drawn as a full-screen, persistent background via
     // LcdDisplay::SetLessonBackground (distinct from the centered 5s auto-hide preview).
-    // The teachingObject PNG (object_src) is NOT drawn as a foreground object in this
-    // slice — there is one full-screen background draw target; teachingObject still
-    // contributes its label/glyph to the caption below. AssetAvailable() is retained as
-    // a cheap on-device fallback for the (rare) case a poster is also flashed.
+    // The teachingObject asset is fetched through the same verified local URL and drawn
+    // as the foreground object layer via LcdDisplay::SetLessonObject. Every layer draws
+    // only through FetchLessonImage(); a poster that is merely flashed-present but never
+    // decoded/drawn is treated as not-drawn (see the poster_drew block below).
     const char* poster_src = Str(Obj(bg, "poster"), "src");
     const char* object_src = Str(Obj(to, "asset"), "src");
+    const char* overlay_src = Str(Obj(ro, "asset"), "src");
+    const char* prompt = Str(body, "prompt");
+
+    if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||
+        Blank(poster_src) || Blank(object_src) || Blank(overlay_src)) {
+        cJSON* eb = MakeErrorBody("LESSON_FRAME_INVALID",
+                                  "lesson_step requires backgroundScene, teachingObject, and robotOverlay image sources",
+                                  false, "scene");
+        emit(root, "lesson_error", eb);
+        ESP_LOGW(TAG, "lesson_step rejected: missing required three-layer image source");
+        return;
+    }
 
     // Resolve the display once and require it to be an LvglDisplay (the only class with
     // a real image draw path; OledDisplay/NoDisplay get caption-only). dynamic_cast
@@ -548,10 +854,40 @@ void Application::HandleLessonMessage(const cJSON* root) {
             ESP_LOGW(TAG, "lesson_step poster fetch failed; caption-only fallback");
         }
     }
-    // On-device fallback: if no URL poster drew but the poster IS flashed locally, the
-    // existing build-time asset image still satisfies the rung (slice-01: usually false).
-    if (!poster_drew && AssetAvailable(poster_src)) poster_drew = true;
-    const bool object_drew = AssetAvailable(object_src);   // teachingObject still flash-only
+    // NOTE: a flashed-only poster is NOT treated as drawn here. AssetAvailable() merely
+    // probes GetAssetData() presence and discards the bytes; it never decodes nor calls
+    // SetLessonBackground(). Setting poster_drew=true on presence alone acked a blank,
+    // invisible poster as drawn (degraded=false) and suppressed the stale-poster clear
+    // (clear_bg = !poster_drew). A poster with no real draw path must stay not-drawn so
+    // the honest degraded ack fires and the previous-step background is cleared.
+    bool object_drew = false;
+    if (lvgl_display != nullptr && object_src != nullptr) {
+        std::unique_ptr<LvglImage> object_image = FetchLessonImage(object_src);
+        if (object_image != nullptr) {
+            LvglImage* raw_object = object_image.release();
+            Schedule([lvgl_display, raw_object]() {
+                lvgl_display->SetLessonObject(std::unique_ptr<LvglImage>(raw_object));
+            });
+            object_drew = true;
+            ESP_LOGI(TAG, "lesson_step teaching object fetched+drawn from URL");
+        } else {
+            ESP_LOGW(TAG, "lesson_step teaching object fetch failed; caption fallback");
+        }
+    }
+    bool overlay_drew = false;
+    if (lvgl_display != nullptr && overlay_src != nullptr) {
+        std::unique_ptr<LvglImage> overlay_image = FetchLessonImage(overlay_src);
+        if (overlay_image != nullptr) {
+            LvglImage* raw_overlay = overlay_image.release();
+            Schedule([lvgl_display, raw_overlay]() {
+                lvgl_display->SetLessonRobotOverlay(std::unique_ptr<LvglImage>(raw_overlay));
+            });
+            overlay_drew = true;
+            ESP_LOGI(TAG, "lesson_step robot overlay fetched+drawn from URL");
+        } else {
+            ESP_LOGW(TAG, "lesson_step robot overlay fetch failed; emoji fallback");
+        }
+    }
 
     const cJSON* card = Obj(to, "primitiveFallbackCard");
     const char* glyph = Str(card, "glyph");
@@ -563,34 +899,40 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // Caption line — AUTHORED lesson content only (COPPA-safe; never child speech,
     // never logged). When Layer-2 falls to the glyph card, fold glyph+label in.
     std::string caption;
-    if (!object_drew) {
-        if (glyph != nullptr) { caption += glyph; caption += ' '; }
-        if (label != nullptr) caption += label;
-    } else if (label != nullptr) {
-        caption = label;
-    }
-    if (alt != nullptr) {
-        if (!caption.empty()) caption += " - ";
-        caption += alt;
+    if (prompt != nullptr) caption = prompt;
+    if (prompt == nullptr) {
+        if (!object_drew) {
+            if (glyph != nullptr) { caption += glyph; caption += ' '; }
+            if (label != nullptr) caption += label;
+        } else if (label != nullptr) {
+            caption = label;
+        }
+        if (alt != nullptr) {
+            if (!caption.empty()) caption += " - ";
+            caption += alt;
+        }
     }
     if (caption.size() > 96) caption.resize(96);  // truncate for the 480px line (STORYBOARD §46-48)
 
-    // §7.5 degraded semantics: false only when poster+PNG+emoji+caption all drew;
-    // true for a glyph-card fallback or a dropped media layer. The step is counted
-    // regardless (rendered:true — emoji-face + caption always draw).
-    const bool degraded = !(poster_drew && object_drew);
+    // §7.5 degraded semantics: false only when required poster/object drew, and any
+    // authored robot overlay image drew. Emoji-face + caption still render as fallback.
+    const bool degraded = !(poster_drew && object_drew && (overlay_src == nullptr || overlay_drew));
 
     // Marshal the draw onto the LVGL task, exactly like the TTS-display pattern
     // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption are
-    // ALWAYS drawn (over the poster background when one fetched). If THIS step drew no
-    // poster, clear any background a previous step left up so a caption-only step is not
-    // shown over a stale picture.
+    // ALWAYS drawn (over the poster/object layers when fetched). If THIS step drew no
+    // media layer, clear any previous lesson layer so a caption-only step is not shown
+    // over a stale picture.
     Display* display = base_display;
     if (display) {
         const bool clear_bg = !poster_drew;
-        Schedule([display, lvgl_display, clear_bg,
+        const bool clear_object = !object_drew;
+        const bool clear_overlay = !overlay_drew;
+        Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
                   emo = std::string(emotion), cap = caption]() {
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+            if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
+            if (clear_overlay && lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
             display->SetEmotion(emo.c_str());
             if (!cap.empty()) display->SetChatMessage("assistant", cap.c_str());
         });
@@ -601,28 +943,21 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // so it is the ONLY F->S frame for such a step.
     emit_ack(root, sequence, /*rendered*/ true, degraded);
 
-    // FW-01 / FW-LESSON-01: emit lesson_progress step_completed ONLY for an INTERACTIVE
-    // step (fixture multiStepThread step 8 for s4 'model'); a PASSIVE narration step
-    // gets NO step_completed (fixture step 10 for s5 'review' — "the firmware never
-    // emits step_completed for narration"). Emitting it for a passive step would set the
-    // ESP completion latch on the WRONG step (latch-contamination, runtime.py:284-300)
-    // and skip downstream steps. Classify from body.completionClass, falling back to
-    // body.stepType membership in PASSIVE_STEP_TYPES — mirroring the ESP exactly.
+    // FW-01 / FW-LESSON-01: render ack is not child-response evidence. Passive
+    // narration steps auto-advance on this ack; interactive steps wait for the
+    // server voice transcript path (or a future explicit tap/listen response) to
+    // report step_completed. Do not fabricate result="success" with empty detail
+    // here, because that advances the lesson before the child answers.
     const char* step_type       = Str(body, "stepType");
     const char* completion_class = Str(body, "completionClass");
     const bool passive = IsPassiveStep(completion_class, step_type);
     const char* sid = Str(root, "stepId");
     if (!passive) {
-        // Child-observable progress for the rendered interactive step. Wire field is
-        // `result` (the ESP forwarder renames result->outcome before REST ingest —
-        // §5.7). Interactive tap scoring is DEFERRED (plan §7.4.2), so no tapTargetHit
-        // is fabricated; the step completes successfully by being demonstrated.
-        cJSON* pb = cJSON_CreateObject();
-        cJSON_AddStringToObject(pb, "event", "step_completed");
-        cJSON_AddStringToObject(pb, "stepType", step_type != nullptr ? step_type : "model");
-        cJSON_AddStringToObject(pb, "result", "success");
-        cJSON_AddItemToObject(pb, "detail", cJSON_CreateObject());
-        emit(root, "lesson_progress", pb);
+        ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",
+                 sid != nullptr ? sid : "?");
+        Schedule([]() {
+            Application::GetInstance().PrepareLessonInteractiveListening();
+        });
     }
     ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d",
              sid != nullptr ? sid : "?", passive, degraded);

@@ -65,9 +65,16 @@ bool WebsocketProtocol::Start() {
 
 bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        ESP_LOGW(TAG, "Websocket SendAudio unavailable websocket=%d connected=%d payload_bytes=%u version=%d",
+                 websocket_ != nullptr ? 1 : 0,
+                 (websocket_ != nullptr && websocket_->IsConnected()) ? 1 : 0,
+                 packet ? static_cast<unsigned>(packet->payload.size()) : 0,
+                 version_);
         return false;
     }
 
+    const size_t payload_size = packet->payload.size();
+    bool sent = false;
     if (version_ == 2) {
         std::string serialized;
         serialized.resize(sizeof(BinaryProtocol2) + packet->payload.size());
@@ -79,7 +86,7 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         bp2->payload_size = htonl(packet->payload.size());
         memcpy(bp2->payload, packet->payload.data(), packet->payload.size());
 
-        return websocket_->Send(serialized.data(), serialized.size(), true);
+        sent = websocket_->Send(serialized.data(), serialized.size(), true);
     } else if (version_ == 3) {
         std::string serialized;
         serialized.resize(sizeof(BinaryProtocol3) + packet->payload.size());
@@ -89,10 +96,18 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         bp3->payload_size = htons(packet->payload.size());
         memcpy(bp3->payload, packet->payload.data(), packet->payload.size());
 
-        return websocket_->Send(serialized.data(), serialized.size(), true);
+        sent = websocket_->Send(serialized.data(), serialized.size(), true);
     } else {
-        return websocket_->Send(packet->payload.data(), packet->payload.size(), true);
+        sent = websocket_->Send(packet->payload.data(), packet->payload.size(), true);
     }
+    static uint32_t send_audio_count = 0;
+    send_audio_count++;
+    if (!sent || send_audio_count == 1 || send_audio_count % 25 == 0) {
+        ESP_LOGI(TAG, "Websocket SendAudio count=%lu sent=%d payload_bytes=%u version=%d",
+                 static_cast<unsigned long>(send_audio_count), sent ? 1 : 0,
+                 static_cast<unsigned>(payload_size), version_);
+    }
+    return sent;
 }
 
 bool WebsocketProtocol::SendText(const std::string& text) {
@@ -101,7 +116,7 @@ bool WebsocketProtocol::SendText(const std::string& text) {
     }
 
     if (!websocket_->Send(text)) {
-        ESP_LOGE(TAG, "Failed to send text: %s", text.c_str());
+        ESP_LOGE(TAG, "Failed to send text frame bytes=%u", (unsigned)text.size());
         SetError(Lang::Strings::SERVER_ERROR);
         return false;
     }
@@ -223,6 +238,13 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 if (strcmp(type->valuestring, "hello") == 0) {
                     ParseServerHello(root);
                 } else {
+                    if (strncmp(type->valuestring, "lesson_", 7) == 0) {
+                        auto sequence = cJSON_GetObjectItem(root, "sequence");
+                        ESP_LOGI(TAG, "ws text lesson frame type=%s seq=%d bytes=%u",
+                                 type->valuestring,
+                                 cJSON_IsNumber(sequence) ? sequence->valueint : -1,
+                                 (unsigned)len);
+                    }
                     if (on_incoming_json_ != nullptr) {
                         on_incoming_json_(root);
                     }

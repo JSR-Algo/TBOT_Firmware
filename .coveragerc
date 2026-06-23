@@ -1,0 +1,13 @@
+[report]
+fail_under = 100
+show_missing = True
+skip_covered = True
+exclude_also =
+    raise AssertionError\(f"unterminated function .*
+    raise AssertionError\(f"unbalanced braces .*
+    raise AssertionError\("provisioning code value must never be logged with %s"\)
+    ^\s*if not line\.strip\(\):
+    ^\s*if not line or line\.startswith\("#"\) or "=" not in line:
+    ^\s*except ValueError:
+    ^\s*if "%s" in line:
+    ^\s*if forbidden in text:

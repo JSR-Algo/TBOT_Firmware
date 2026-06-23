@@ -20,27 +20,31 @@
 // ({"lesson":true,"renderer":"teebot-lesson-renderer.v1"}); absence == no support.
 // Contract negotiation is an EXACT-STRING match (NOT a semver) on protocolVersion.
 //
-// Asset bytes / image render (D-PRELOAD-OWNER, ADR §C): the firmware does NOT act as
-// the asset interpreter or sha256 verifier — the ESP Server remains the single
-// authoritative downloader + verifier and gates READY. The LVGL PNG/JPEG decoder is
+// Asset bytes / image render (D-PRELOAD-OWNER, ADR §C): the ESP Server remains the
+// authoritative sha256 VERIFIER and gates READY — the firmware does NOT checksum or
+// verify asset bytes and never owns the preload/READY decision. It DOES, at render
+// time, FETCH the already-ESP-verified bytes (see US-006 IMAGE RENDER below):
+// FetchLessonImage HTTP-GETs scene.*.src via Board::GetNetwork()->CreateHttp(), so the
+// firmware is a render-time downloader of verified bytes, NOT the authoritative
+// downloader/verifier. The LVGL PNG/JPEG decoder is
 // compiled in (CONFIG_LV_USE_LODEPNG=y, sdkconfig.defaults:62) and a full
 // download->decode->draw path already ships (mcp_server.cc preview_image ->
 // LvglAllocatedImage -> LcdDisplay::SetPreviewImage).
 //
 // US-006 IMAGE RENDER (IMPLEMENTED): the lesson_step renderer now FETCHES the authored
-// poster URL (scene.backgroundScene.poster.src, already carried in the lesson_step
-// body) over HTTP and DECODES it, REUSING that proven pipeline:
-//   FetchLessonImage(url) [lesson_handler.cc] = HTTP GET -> heap_caps_malloc ->
-//   LvglAllocatedImage  (mirrors mcp_server.cc:332-361),
+// poster/object source (scene.*.src, already carried in the lesson_step body) over HTTP
+// or reads a verified local SD/file path, then DECODES it, REUSING that proven pipeline:
+//   FetchLessonImage(src) [lesson_handler.cc] = HTTP GET or sd:// file read ->
+//   heap_caps_malloc -> LvglAllocatedImage  (mirrors mcp_server.cc:332-361),
 // then draws it full-screen via the NEW LcdDisplay::SetLessonBackground — a PERSISTENT
 // (non-auto-hiding) background, distinct from the centered 5s preview_image_
 // (PREVIEW_IMAGE_DURATION_MS). The verified bytes the ESP server already downloaded are
-// served back over the network; the firmware fetches them like any other URL. Failure
-// is non-fatal: FetchLessonImage returns nullptr on any error and the ladder falls back
-// to the caption-only render (no crash). The teachingObject PNG is still flash-probed
-// (AssetAvailable) and otherwise contributes only its caption in this slice — there is
-// one full-screen background draw target. The background is cleared on lesson_stop and
-// on any caption-only step so a stale poster never lingers into idle realtime.
+// served back over the network or referenced by their SD pack paths. Failure is
+// non-fatal: FetchLessonImage returns nullptr on any error and the ladder falls back
+// to the caption-only render (no crash). The teachingObject PNG uses the same fetch/decode
+// path and draws through LcdDisplay::SetLessonObject as a foreground layer. Background
+// and foreground are cleared on lesson_stop and caption-only fallback so stale lesson
+// media never lingers into idle realtime.
 //
 // VIDEO is OUT OF SCOPE on espTft (poster-only). A non-poster bg.mode or a non-null
 // bg.video is hard-rejected with ASSET_PROFILE_UNAVAILABLE (lesson_handler.cc) — lifting

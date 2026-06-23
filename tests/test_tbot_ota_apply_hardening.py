@@ -57,3 +57,47 @@ def test_ota_download_rejects_short_reads_before_esp_ota_end():
     assert "total_read != content_length" in upgrade_body
     assert "Firmware download size mismatch" in upgrade_body
     assert upgrade_body.index("total_read != content_length") < upgrade_body.index("esp_ota_end(update_handle)")
+
+def test_ota_claim_reset_clears_local_ownership_once_per_nonce():
+    source = read("main/ota.cc")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+
+    assert 'cJSON_GetObjectItem(root, "claim_reset")' in check_body
+    assert 'cJSON_GetObjectItem(claim_reset, "local_claim")' in check_body
+    assert 'cJSON_GetObjectItem(claim_reset, "nonce")' in check_body
+    assert 'Settings reset_state("tbot_reset", true);' in check_body
+    assert 'reset_state.GetString("claim_reset_nonce") != reset_nonce' in check_body
+
+    assert 'Settings claim_state("tbot_claim", true);' in check_body
+    assert 'claim_state.SetInt("confirmed", 0);' in check_body
+    assert 'claim_state.SetInt("factory_test", 0);' in check_body
+
+    assert 'Settings backend_settings("backend", true);' in check_body
+    assert 'backend_settings.SetString("device_id", "");' in check_body
+    assert 'backend_settings.SetString("device_secret", "");' in check_body
+    assert 'backend_settings.SetInt("release_pending", 0);' in check_body
+
+    assert 'Settings websocket_settings("websocket", true);' in check_body
+    assert 'websocket_settings.SetString("bootstrap_token", "");' in check_body
+    assert 'websocket_settings.SetString("token", "");' in check_body
+    assert 'websocket_settings.SetString("url", "");' in check_body
+    assert 'websocket_settings.SetString("claim_device_id", "");' in check_body
+
+    assert 'reset_state.SetString("claim_reset_nonce", reset_nonce);' in check_body
+    assert 'esp_restart();' in check_body
+
+def test_ota_claim_reset_does_not_log_reset_nonce_or_tokens():
+    source = read("main/ota.cc")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+    reset_region = check_body[
+        check_body.index('cJSON_GetObjectItem(root, "claim_reset")'):
+        check_body.index('has_server_time_ = false')
+    ]
+
+    for line in reset_region.splitlines():
+        if "ESP_LOG" not in line:
+            continue
+        assert "reset_nonce" not in line
+        assert "bootstrap_token" not in line
+        assert "device_secret" not in line
+        assert "token" not in line.lower()

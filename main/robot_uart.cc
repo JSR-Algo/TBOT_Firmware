@@ -40,6 +40,38 @@ static bool has_uart_profile(gpio_num_t tx_pin, gpio_num_t rx_pin) {
     return tx_pin != GPIO_NUM_NC && rx_pin != GPIO_NUM_NC;
 }
 
+static int clamp_servo_angle(int angle) {
+    if (angle < 0) {
+        return 0;
+    }
+    if (angle > 180) {
+        return 180;
+    }
+    return angle;
+}
+
+static int clamp_percent(int percent) {
+    if (percent < 0) {
+        return 0;
+    }
+    if (percent > 100) {
+        return 100;
+    }
+    return percent;
+}
+
+static int percent_to_left_arm_angle(int percent) {
+    return (clamp_percent(percent) * 60 + 50) / 100;
+}
+
+static int percent_to_right_arm_angle(int percent) {
+    return 60 - percent_to_left_arm_angle(percent);
+}
+
+static int percent_to_head_angle(int percent) {
+    return (clamp_percent(percent) * 180 + 50) / 100;
+}
+
 static bool configure_uart(uart_port_t port, gpio_num_t tx_pin, gpio_num_t rx_pin) {
     if (tx_pin == GPIO_NUM_NC || rx_pin == GPIO_NUM_NC) {
         return false;
@@ -132,6 +164,44 @@ bool RobotUart::SendBothArmsLower() {
     bool left_ok = SendLeftArmLower();
     bool right_ok = SendRightArmLower();
     return left_ok && right_ok;
+}
+
+bool RobotUart::SendLeftArmSetPercent(int percent) {
+    int target_angle = percent_to_left_arm_angle(percent);
+    return SendServoSweep("left_arm", "set_percent", 0, target_angle, 2, 20);
+}
+
+bool RobotUart::SendRightArmSetPercent(int percent) {
+    int target_angle = percent_to_right_arm_angle(percent);
+    return SendServoSweep("right_arm", "set_percent", 60, target_angle, 2, 20);
+}
+
+bool RobotUart::SendBothArmsSetPercent(int percent) {
+    bool left_ok = SendLeftArmSetPercent(percent);
+    bool right_ok = SendRightArmSetPercent(percent);
+    return left_ok && right_ok;
+}
+
+bool RobotUart::SendHeadTurnLeft() {
+    return SendServoSweep("head", "turn_left", 90, 45, 2, 20);
+}
+
+bool RobotUart::SendHeadTurnRight() {
+    return SendServoSweep("head", "turn_right", 90, 135, 2, 20);
+}
+
+bool RobotUart::SendHeadCenter() {
+    return SendServoSweep("head", "center", 90, 90, 2, 20);
+}
+
+bool RobotUart::SendHeadSetAngle(int angle) {
+    int target_angle = clamp_servo_angle(angle);
+    return SendServoSweep("head", "set_angle", 90, target_angle, 2, 20);
+}
+
+bool RobotUart::SendHeadSetPercent(int percent) {
+    int target_angle = percent_to_head_angle(percent);
+    return SendServoSweep("head", "set_percent", 90, target_angle, 2, 20);
 }
 
 bool RobotUart::SendArmAction(const std::string& part, const std::string& action) {

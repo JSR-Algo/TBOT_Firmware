@@ -401,16 +401,17 @@ def test_redact_no_raw_token_or_code_identifier_reaches_any_log_sink():
 
 
 def test_redact_open_failure_sinks_log_only_an_error_code():
-    # The three HTTP-open failure sites (device-config GET, bootstrap GET,
-    # claim-confirm POST) log only http->GetLastError() (a numeric esp_err),
+    # The HTTP-open failure sites (device-config GET, bootstrap GET,
+    # authenticated config refresh, claim-confirm POST) log only
+    # http->GetLastError() (a numeric esp_err),
     # never the Authorization header value, the bootstrap token, or the URL query
     # secret. Format-string text is blanked by _statements(), so we key off the
     # GetLastError() argument that survives blanking.
     src = read(SRC)
     open_fail_sinks = [s for s in _sink_statements(src) if "GetLastError()" in s]
-    # The source has exactly three Open()-failure log sites.
-    assert len(open_fail_sinks) == 3, (
-        f"expected 3 HTTP-open-failure sinks, found {len(open_fail_sinks)}: {open_fail_sinks}"
+    # The source has exactly four Open()-failure log sites.
+    assert len(open_fail_sinks) == 4, (
+        f"expected 4 HTTP-open-failure sinks, found {len(open_fail_sinks)}: {open_fail_sinks}"
     )
     for stmt in open_fail_sinks:
         assert "Bearer" not in stmt

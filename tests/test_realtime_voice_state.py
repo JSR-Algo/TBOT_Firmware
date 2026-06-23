@@ -139,12 +139,63 @@ def test_preconnected_wake_word_can_continue_from_idle_state():
     end = app_cc.index("void Application::HandleStateChangedEvent", start)
     body = app_cc[start:end]
     assert "state != kDeviceStateConnecting && state != kDeviceStateIdle" in body
-    assert "kWakeWordAudioChannelOpenMaxAttempts" in body
-    assert "wake_audio_channel_open_failed attempt=%d max=%d" in body
-    assert "vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));" in body
-    assert "SetDeviceState(kDeviceStateIdle);" in body
     assert "protocol_->SendWakeWordDetected(wake_word);" in body
-    assert "SetListeningMode(GetDefaultListeningMode());" in body
+    assert "SetListeningMode(kListeningModeAutoStop);" in body
+
+
+def test_wake_word_listening_uses_autostop_even_when_default_mode_is_realtime():
+    app_cc = read("main/application.cc")
+
+    default_mode = app_cc[app_cc.index("ListeningMode Application::GetDefaultListeningMode") :]
+    assert "return aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime;" in default_mode
+
+    start = app_cc.index("void Application::FinishWakeWordInvoke")
+    end = app_cc.index("// H3: localized screen copy", start)
+    body = app_cc[start:end]
+
+    # Wake-word turns should be finite. If this follows GetDefaultListeningMode(),
+    # CONFIG_USE_SERVER_AEC/DEVICE_AEC pushes the turn into realtime mode and the
+    # robot can stay Listening forever when the backend waits for a client stop.
+    assert "SetListeningMode(kListeningModeAutoStop);" in body
+    assert "SetListeningMode(GetDefaultListeningMode());" not in body
+
+
+def test_cold_wake_word_open_uses_worker_instead_of_blocking_app_task():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+
+    continue_start = app_cc.index("void Application::ContinueWakeWordInvoke")
+    continue_end = app_cc.index("void Application::HandleStateChangedEvent", continue_start)
+    continue_body = app_cc[continue_start:continue_end]
+
+    # The wake phrase callback runs on the Application task. A cold WebSocket
+    # open can block on TCP/TLS/server hello for seconds, so the cold path must
+    # use the same worker/generation/watchdog machinery as button/reconnect open.
+    assert "void FinishWakeWordInvoke(const std::string& wake_word);" in app_h
+    assert "connect_in_flight_.load()" in continue_body
+    assert "ArmConnectWatchdog();" in continue_body
+    assert "xTaskCreate(&Application::OpenChannelTask" in continue_body
+    assert "protocol_->OpenAudioChannel()" not in continue_body
+
+    open_start = app_cc.index("void Application::OpenChannelTask")
+    open_end = app_cc.index("void Application::ArmConnectWatchdog", open_start)
+    open_body = app_cc[open_start:open_end]
+    assert "ctx->wake_word" in open_body
+    assert "kWakeWordAudioChannelOpenMaxAttempts" in open_body
+    assert "FinishWakeWordInvoke(wake_word)" in open_body
+
+
+def test_wake_word_connect_watchdog_allows_slow_websocket_open_retries():
+    app_cc = read("main/application.cc")
+
+    # A wake-triggered cold WebSocket open can spend time in TCP/TLS connect plus
+    # the 10s server-hello wait. The watchdog must outlive the wake retry budget,
+    # otherwise the first valid "Hi ESP" gets reset to Idle before the worker can
+    # report success.
+    assert "kConnectWatchdogTimeoutUs" in app_cc
+    assert "35ULL * 1000000ULL" in app_cc
+    assert "esp_timer_start_once(connect_watchdog_timer_, kConnectWatchdogTimeoutUs)" in app_cc
+    assert "esp_timer_start_once(connect_watchdog_timer_, 12000000)" not in app_cc
 
 
 def test_afe_audio_loops_yield_to_avoid_watchdog_starvation():
@@ -174,8 +225,97 @@ def test_afe_background_tasks_do_not_starve_idle_watchdog():
     processor_task = processor[processor.index('"audio_communication"') - 180:processor.index('"audio_communication"') + 120]
 
     assert '"audio_detection", 4096, this, tskIDLE_PRIORITY' in wake_task
-    assert '"audio_communication", 4096, this, tskIDLE_PRIORITY' in processor_task
+    assert '"audio_communication", 4096, this, tskIDLE_PRIORITY + 9' in processor_task
 
+def test_main_loop_bounds_audio_send_work_and_feeds_watchdog_between_packets():
+    app_cc = read("main/application.cc")
+
+    assert "kMaxAudioPacketsPerMainLoop" in app_cc
+    send_start = app_cc.index("if (bits & MAIN_EVENT_SEND_AUDIO)")
+    send_end = app_cc.index("if (bits & MAIN_EVENT_WAKE_WORD_DETECTED)", send_start)
+    send_body = app_cc[send_start:send_end]
+
+    assert "sent_packets < kMaxAudioPacketsPerMainLoop" in send_body
+    assert "esp_task_wdt_reset();" in send_body
+    assert "vTaskDelay(pdMS_TO_TICKS(1));" in send_body
+    assert "xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);" in send_body
+
+def test_audio_uplink_pipeline_has_send_boundary_diagnostics():
+    app_cc = read("main/application.cc")
+    audio_cc = read("main/audio/audio_service.cc")
+    ws_cc = read("main/protocols/websocket_protocol.cc")
+
+    assert "audio_uplink_packet_queued" in audio_cc
+    assert "MAIN_EVENT_SEND_AUDIO protocol_unavailable" in app_cc
+    assert "MAIN_EVENT_SEND_AUDIO packet" in app_cc
+    assert "Websocket SendAudio" in ws_cc
+
+def test_start_listening_rearms_when_already_listening():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    marker = "state == kDeviceStateListening"
+    assert marker in body
+    listening = body[body.index(marker) :]
+
+    assert "lesson/manual listening rearm" in listening
+    assert "listening_mode_ = kListeningModeManualStop;" in listening
+    assert "protocol_->SendStartListening(kListeningModeManualStop);" in listening
+    assert "audio_service_.EnableVoiceProcessing(true);" in listening
+
+
+def test_lesson_prompt_tts_stop_rearms_interactive_listening_instead_of_idling():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+    lesson_handler = read("main/lesson_handler.cc")
+
+    assert "lesson_interactive_listen_pending_" in app_h
+    assert "PrepareLessonInteractiveListening" in lesson_handler
+
+    stop_start = app_cc.index('} else if (strcmp(state->valuestring, "stop") == 0)')
+    stop_end = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop_start)
+    stop_body = app_cc[stop_start:stop_end]
+    manual_body = stop_body[stop_body.index("listening_mode_ == kListeningModeManualStop") :]
+
+    assert "lesson_interactive_listen_pending_.exchange(false)" in manual_body
+    assert "SetDeviceState(kDeviceStateListening);" in manual_body
+    assert "protocol_->SendStartListening(kListeningModeManualStop);" in manual_body
+    assert "audio_service_.EnableVoiceProcessing(true);" in manual_body
+    assert "SetDeviceState(kDeviceStateIdle);" in manual_body
+    assert manual_body.index("SetDeviceState(kDeviceStateListening);") < manual_body.index("SetDeviceState(kDeviceStateIdle);")
+
+
+def test_lesson_prompt_start_listening_event_does_not_abort_speaking_prompt():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    speaking = body[body.index("state == kDeviceStateSpeaking") : body.index("state == kDeviceStateListening")]
+
+    assert "lesson_interactive_listen_pending_.load()" in speaking
+    assert "lesson prompt still speaking; defer listening" in speaking
+    assert speaking.index("lesson_interactive_listen_pending_.load()") < speaking.index("AbortSpeaking(kAbortReasonNone);")
+
+def test_lesson_interactive_listening_pending_is_cleared_on_cancel_paths():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+    lesson_handler = read("main/lesson_handler.cc")
+
+    assert "CancelLessonInteractiveListening" in app_h
+    assert "void Application::CancelLessonInteractiveListening()" in app_cc
+    assert "lesson_interactive_listen_pending_.store(false);" in app_cc
+
+    stop_listening = app_cc[app_cc.index("void Application::StopListening") : app_cc.index("void Application::HandleToggleChatEvent")]
+    assert "CancelLessonInteractiveListening();" in stop_listening
+
+    lesson_stop = lesson_handler[lesson_handler.index('strcmp(type, "lesson_stop") == 0') : lesson_handler.index('strcmp(type, "lesson_error") == 0')]
+    assert "Application::GetInstance().CancelLessonInteractiveListening();" in lesson_stop
+
+    lesson_error = lesson_handler[lesson_handler.index('strcmp(type, "lesson_error") == 0') : lesson_handler.index('strcmp(type, "lesson_step") != 0')]
+    assert "Application::GetInstance().CancelLessonInteractiveListening();" in lesson_error
 
 def test_wake_word_afe_uses_low_cost_processing_to_keep_feed_and_fetch_balanced():
     wake_word = read("main/audio/wake_words/afe_wake_word.cc")

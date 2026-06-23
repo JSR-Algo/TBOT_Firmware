@@ -994,6 +994,20 @@ if(CONFIG_BOARD_TYPE_ESP_VOCAT)
         espressif__touch_button_sensor
     )
 endif()
+if(TBOT_NATIVE_COVERAGE)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA app_trace)
+    set(SOURCES
+        "main.cc"
+        "boards/common/afsk_demod.cc"
+        "${PROJECT_DIR}/tests/native/afsk_demod_host_test.cc"
+    )
+    set(INCLUDE_DIRS
+        "${PROJECT_DIR}/tests/native_stubs"
+        "boards/common"
+    )
+    set(LANG_SOUNDS "")
+    set(COMMON_SOUNDS "")
+endif()
 
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
@@ -1019,6 +1033,22 @@ idf_component_register(SRCS ${SOURCES}
                         fatfs
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
+
+if(TBOT_NATIVE_COVERAGE)
+    set(TBOT_NATIVE_COVERAGE_SOURCES "" CACHE STRING "Semicolon-separated main component sources to instrument; empty instruments all main sources")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+        TBOT_NATIVE_COVERAGE=1
+        TBOT_ESP_NATIVE_COVERAGE=1
+        TBOT_HOST_NATIVE_COVERAGE=1
+    )
+    if(TBOT_NATIVE_COVERAGE_SOURCES)
+        set_source_files_properties(${TBOT_NATIVE_COVERAGE_SOURCES}
+            PROPERTIES COMPILE_FLAGS --coverage)
+    else()
+        target_compile_options(${COMPONENT_LIB} PRIVATE --coverage)
+    endif()
+    target_link_libraries(${COMPONENT_LIB} PRIVATE --coverage)
+endif()
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME
 # If BOARD_NAME is empty, use BOARD_TYPE
