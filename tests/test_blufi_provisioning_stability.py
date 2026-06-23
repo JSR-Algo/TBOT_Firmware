@@ -25,6 +25,20 @@ def _start_wifi_config_body(wifi_board: str) -> str:
     end = wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)
     return wifi_board[start:end]
 
+def _function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:index]
+    raise AssertionError(f"unterminated function {signature}")
+
 
 # ---------------------------------------------------------------------------
 # FW1: wifi_board.cc — ReleaseWakeWordResourcesForWifiConfig appears BEFORE
@@ -88,6 +102,139 @@ def test_fw3_station_connect_timeout_is_at_least_60s():
 
     # The poll loop must actually bound the wait on this constant.
     assert "waited_ms < kConnectTimeoutMs && !wifi.IsConnected()" in blufi
+
+# ---------------------------------------------------------------------------
+# FW3b: blufi.cpp — the BLE hard-timeout must not tear down an active phone
+#       GATT/BluFi session. Hardware proof on 2026-06-19 showed Android was
+#       connected and discovering services when the one-shot timer fired,
+#       causing `Device ... was disconnected` before Wi-Fi scan could complete.
+# ---------------------------------------------------------------------------
+def test_fw3b_ble_timeout_defers_teardown_while_phone_session_is_active():
+    blufi = read("main/boards/common/blufi.cpp")
+    timeout_body = _function_body(blufi, "void Blufi::_ble_setup_timeout_cb")
+
+    assert "m_ble_is_connected" in timeout_body
+    assert "m_sta_is_connecting" in timeout_body
+    assert "StartBleSetupTimeout" in timeout_body
+    active_idx = min(timeout_body.index("m_ble_is_connected"), timeout_body.index("m_sta_is_connecting"))
+    rearm_idx = timeout_body.index("StartBleSetupTimeout")
+    timed_out_idx = timeout_body.index("ble_timed_out_ = true")
+    deinit_idx = timeout_body.index("self->deinit();")
+
+    assert active_idx < rearm_idx < timed_out_idx < deinit_idx
+    assert "return;" in timeout_body[active_idx:timed_out_idx]
+
+
+# ---------------------------------------------------------------------------
+# FW3c: blufi.cpp — the AP list sent over BluFi must be small and strongest
+#       first. Hardware proof on 2026-06-19 showed sending 24 AP records made
+#       `esp_blufi_send_encap` back up and the BLE stack report malloc failures,
+#       so provisioning fell back to manual SSID entry even though scan worked.
+# ---------------------------------------------------------------------------
+def test_fw3c_wifi_list_sent_over_blufi_is_capped_and_strongest_first():
+    blufi = read("main/boards/common/blufi.cpp")
+    send_body = _function_body(blufi, "void Blufi::_send_wifi_list")
+
+    cap_match = re.search(
+        r"constexpr\s+size_t\s+kMaxBlufiWifiListApRecords\s*=\s*(\d+)\s*;",
+        blufi,
+    )
+    assert cap_match is not None, "BluFi Wi-Fi list cap is not declared"
+    assert 1 <= int(cap_match.group(1)) <= 4
+
+    assert "std::stable_sort" in send_body
+    assert ".rssi" in send_body
+    assert "seen_ssids" in send_body
+    assert "kMaxBlufiWifiListApRecords" in send_body
+    assert "resize(kMaxBlufiWifiListApRecords)" in send_body
+
+    sort_idx = send_body.index("std::stable_sort")
+    cap_idx = send_body.index("resize(kMaxBlufiWifiListApRecords)")
+    send_idx = send_body.index("esp_blufi_send_wifi_list")
+    assert sort_idx < cap_idx < send_idx
+
+
+# ---------------------------------------------------------------------------
+# FW3d: blufi.cpp — after dispatching the Wi-Fi list, do not immediately start
+#       another Wi-Fi scan from the same path. The phone already has a response
+#       pending over BLE; a concurrent refresh scan raises heap pressure during
+#       the fragile BluFi notification burst.
+# ---------------------------------------------------------------------------
+def test_fw3d_wifi_list_send_path_does_not_start_overlapping_refresh_scan():
+    blufi = read("main/boards/common/blufi.cpp")
+    send_body = _function_body(blufi, "void Blufi::_send_wifi_list")
+
+    assert "esp_blufi_send_wifi_list" in send_body
+    after_send = send_body[send_body.index("esp_blufi_send_wifi_list") :]
+    assert "start_wifi_scan()" not in after_send
+
+
+# ---------------------------------------------------------------------------
+# FW3e: blufi.cpp — scan completion must not log every AP while a phone is
+#       waiting for BluFi notifications. In dense RF environments this floods
+#       serial work and heap use immediately before esp_blufi_send_wifi_list().
+# ---------------------------------------------------------------------------
+def test_fw3e_wifi_scan_done_does_not_log_every_ap_before_blufi_send():
+    blufi = read("main/boards/common/blufi.cpp")
+    scan_body = _function_body(blufi, "void Blufi::_wifi_scan_event_handler")
+
+    assert "Found %d APs" in scan_body
+    assert "SSID: %s" not in scan_body
+    assert "for (const auto& ap : self->m_ap_records)" not in scan_body
+
+
+# ---------------------------------------------------------------------------
+# FW3f: blufi.cpp — hardware proof on 2026-06-19 showed Android delivered
+#       SSID/password, then the final CONNECT_TO_AP control frame was not
+#       observed by firmware before BLE disconnected. Receiving a secure
+#       password frame must therefore arm a delayed, duplicate-safe station
+#       connect fallback instead of leaving m_sta_is_connecting true forever.
+# ---------------------------------------------------------------------------
+def test_fw3f_password_frame_schedules_duplicate_safe_connect_fallback():
+    blufi = read("main/boards/common/blufi.cpp")
+    passwd_idx = blufi.index("case ESP_BLUFI_EVENT_RECV_STA_PASSWD:")
+    list_idx = blufi.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST", passwd_idx)
+    passwd_body = blufi[passwd_idx:list_idx]
+    fallback_body = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
+
+    assert "ScheduleStationConnectFallback();" in passwd_body
+    assert 'StartStationConnectFromCredentials("password_fallback")' in fallback_body
+    assert "m_wifi_connect_task_started" in fallback_body
+    assert "vTaskDelay" in fallback_body
+
+
+def test_fw3f_connect_fallback_task_deletes_itself_on_all_exits():
+    blufi = read("main/boards/common/blufi.cpp")
+    fallback_body = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
+    early_exit = fallback_body[
+        fallback_body.index("if (!self->m_sta_is_connecting") : fallback_body.index("ESP_LOGW")
+    ]
+
+    # FreeRTOS task entry functions must not return directly on ESP-IDF; doing
+    # so can abort/panic during the delayed password fallback path.
+    assert "vTaskDelete(nullptr);" in early_exit
+    assert early_exit.index("vTaskDelete(nullptr);") < early_exit.index("return;")
+    assert fallback_body.rfind("vTaskDelete(nullptr);") > fallback_body.index(
+        'StartStationConnectFromCredentials("password_fallback")'
+    )
+
+
+# ---------------------------------------------------------------------------
+# FW3g: blufi.cpp — explicit CONNECT_TO_AP and the delayed password fallback
+#       must share one guarded implementation so they cannot start duplicate
+#       Wi-Fi station tasks or drift in claim/report behavior.
+# ---------------------------------------------------------------------------
+def test_fw3g_connect_request_and_password_fallback_share_guarded_helper():
+    blufi = read("main/boards/common/blufi.cpp")
+    req = _req_connect_body()
+    helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+
+    assert 'StartStationConnectFromCredentials("blufi_connect_request")' in req
+    assert "SsidManager::GetInstance().AddSsid" in helper
+    assert "m_wifi_connect_task_started" in helper
+    assert "blufi_wifi_conn" in helper
+    assert "ESP_BLUFI_STA_CONN_SUCCESS" in helper
+    assert "ESP_BLUFI_STA_CONN_FAIL" in helper
 
 
 # ---------------------------------------------------------------------------
@@ -386,6 +533,28 @@ def test_fw12_init_marks_inited_only_on_success_path():
     )
 
 
+def test_fw12b_init_cleans_controller_after_partial_init_failures():
+    blufi = read("main/boards/common/blufi.cpp")
+
+    fn_idx = blufi.index("esp_err_t Blufi::init()")
+    fn_end = blufi.index("esp_err_t Blufi::deinit()", fn_idx)
+    body = blufi[fn_idx:fn_end]
+
+    # If controller init partially succeeds and later fails, or if host/Bluedroid
+    # init fails after controller enable, leaving the controller allocated makes
+    # the next standby retry fail with ESP_ERR_INVALID_STATE. Every init failure
+    # path that can follow _controller_init() must deinit the controller before
+    # reporting BLE off to callers.
+    controller_fail = body.index("BLUFI controller init failed")
+    controller_return = body.index("return ret;", controller_fail)
+    controller_branch = body[controller_fail:controller_return]
+    assert "_controller_deinit();" in controller_branch
+
+    host_fail = body.index("BLUFI host and cb init failed")
+    host_return = body.index("return ret;", host_fail)
+    host_branch = body[host_fail:host_return]
+    assert "_controller_deinit();" in host_branch
+
 # ---------------------------------------------------------------------------
 # FW13: blufi.cpp — the RECV_STA_SSID / RECV_STA_PASSWD copy must be
 #       length-bounded. A raw `buf[param->..._len] = '\0'` overflows when len
@@ -511,6 +680,11 @@ def _req_connect_body() -> str:
     end = blufi.index("case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:", start)
     return blufi[start:end]
 
+def _station_connect_helper_body() -> str:
+    """The shared BluFi station-connect helper used by CONNECT_TO_AP and fallback."""
+    blufi = read("main/boards/common/blufi.cpp")
+    return _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+
 
 # ---------------------------------------------------------------------------
 # FW15: blufi.cpp — TryReportProvisioningAuthenticated is LEVEL-TRIGGERED. It is
@@ -535,7 +709,7 @@ def test_fw15_authenticated_report_is_level_triggered_on_all_inputs():
     assert 'TryReportProvisioningAuthenticated("custom_data_code")' in custom, (
         "code TLV must re-attempt the authenticated report"
     )
-    req_connect = _req_connect_body()
+    req_connect = _station_connect_helper_body()
     assert (
         'TryReportProvisioningAuthenticated("wifi_success_after_ble_teardown")'
         in req_connect
@@ -704,7 +878,7 @@ def test_fw20_ble_active_defer_skips_reschedule_during_wifi_connect():
 #       executed inline in the wifi-connect FreeRTOS task).
 # ---------------------------------------------------------------------------
 def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect():
-    req = _req_connect_body()
+    req = _station_connect_helper_body()
 
     # Anchor on the success branch (wifi.IsConnected()).
     conn_idx = req.index("if (wifi.IsConnected())")
@@ -751,7 +925,7 @@ def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect
 #       — that lane is plain HTTP failure-status, not a claim/TLS poll.
 # ---------------------------------------------------------------------------
 def test_fw22_no_authenticated_post_or_claim_refresh_inline_while_ble_up():
-    req = _req_connect_body()
+    req = _station_connect_helper_body()
     conn_idx = req.index("if (wifi.IsConnected())")
     fail_idx = req.index("} else {", conn_idx)
     success = req[conn_idx:fail_idx]
@@ -930,7 +1104,7 @@ def test_fw27_get_ble_state_priority_timeout_dominates_then_off():
 #       WIFI_CONNECT_FAILED. (Complements FW10 which guards the secret-clear.)
 # ---------------------------------------------------------------------------
 def test_fw28_wifi_connect_fail_lane_resets_flags_and_reports_fail():
-    req = _req_connect_body()
+    req = _station_connect_helper_body()
     conn_idx = req.index("if (wifi.IsConnected())")
     else_idx = req.index("} else {", conn_idx)
     fail = req[else_idx:]

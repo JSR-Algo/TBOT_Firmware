@@ -114,8 +114,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
             ParseServerHello(root);
         } else if (strcmp(type->valuestring, "goodbye") == 0) {
             auto session_id = cJSON_GetObjectItem(root, "session_id");
-            ESP_LOGI(TAG, "Received goodbye message, session_id: %s", session_id ? session_id->valuestring : "null");
-            if (session_id == nullptr || session_id_ == session_id->valuestring) {
+            // cJSON_IsString guards the non-string (valuestring==NULL) case before strcmp/compare.
+            const char* sid = cJSON_IsString(session_id) ? session_id->valuestring : nullptr;
+            ESP_LOGI(TAG, "Received goodbye message, session_id: %s", sid ? sid : "null");
+            if (sid == nullptr || session_id_ == sid) {
                 auto alive = alive_;  // Capture alive flag
                 Application::GetInstance().Schedule([this, alive]() {
                     if (*alive) {
@@ -246,8 +248,10 @@ bool MqttProtocol::OpenAudioChannel() {
          * |type 1u|flags 1u|payload_len 2u|ssrc 4u|timestamp 4u|sequence 4u|
          * |payload payload_len|
          */
-        if (data.size() < sizeof(aes_nonce_)) {
-            ESP_LOGE(TAG, "Invalid audio packet size: %u", data.size());
+        // sizeof(aes_nonce_) is the size of the std::string object (~24/32B), not the
+        // 16-byte nonce; use .size() so the bound matches the actual nonce (deep-audit).
+        if (aes_nonce_.size() != 16 || data.size() < aes_nonce_.size()) {
+            ESP_LOGE(TAG, "Invalid audio packet size: %u", (unsigned)data.size());
             return;
         }
         if (data[0] != 0x01) {
@@ -321,8 +325,10 @@ std::string MqttProtocol::GetHelloMessage() {
 
 void MqttProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "udp") != 0) {
-        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
+    // cJSON_IsString guards the missing-key + non-string (valuestring==NULL) cases;
+    // strcmp(NULL, ...) faulted before (deep-audit, same as websocket_protocol.cc).
+    if (!cJSON_IsString(transport) || strcmp(transport->valuestring, "udp") != 0) {
+        ESP_LOGE(TAG, "Unsupported or invalid transport in server hello");
         return;
     }
 
@@ -335,13 +341,27 @@ void MqttProtocol::ParseServerHello(const cJSON* root) {
     // Get sample rate from hello message
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");
     if (cJSON_IsObject(audio_params)) {
+        // Validate before trusting: an out-of-range sample_rate flows into
+        // AudioService::SetDecodeSampleRate -> decoder_frame_size_ (<=0) ->
+        // vector::resize OOM/crash. Reject anything outside the Opus-legal set
+        // and keep the safe default. (deep-audit: server-controlled decoder cfg)
         auto sample_rate = cJSON_GetObjectItem(audio_params, "sample_rate");
         if (cJSON_IsNumber(sample_rate)) {
-            server_sample_rate_ = sample_rate->valueint;
+            if (IsValidOpusSampleRate(sample_rate->valueint)) {
+                server_sample_rate_ = sample_rate->valueint;
+            } else {
+                ESP_LOGE(TAG, "Invalid sample_rate %d in server hello; keeping %d",
+                         sample_rate->valueint, server_sample_rate_);
+            }
         }
         auto frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
         if (cJSON_IsNumber(frame_duration)) {
-            server_frame_duration_ = frame_duration->valueint;
+            if (IsValidOpusFrameDuration(frame_duration->valueint)) {
+                server_frame_duration_ = frame_duration->valueint;
+            } else {
+                ESP_LOGE(TAG, "Invalid frame_duration %d in server hello; keeping %d",
+                         frame_duration->valueint, server_frame_duration_);
+            }
         }
     }
 
@@ -350,16 +370,31 @@ void MqttProtocol::ParseServerHello(const cJSON* root) {
         ESP_LOGE(TAG, "UDP is not specified");
         return;
     }
-    udp_server_ = cJSON_GetObjectItem(udp, "server")->valuestring;
-    udp_port_ = cJSON_GetObjectItem(udp, "port")->valueint;
-    auto key = cJSON_GetObjectItem(udp, "key")->valuestring;
-    auto nonce = cJSON_GetObjectItem(udp, "nonce")->valuestring;
+    auto server = cJSON_GetObjectItem(udp, "server");
+    auto port = cJSON_GetObjectItem(udp, "port");
+    auto key = cJSON_GetObjectItem(udp, "key");
+    auto nonce = cJSON_GetObjectItem(udp, "nonce");
+    // cJSON_IsString/IsNumber guard the missing-key + non-string (valuestring==NULL) cases;
+    // the bare ->valuestring derefs faulted on a malformed server hello (deep-audit).
+    if (!cJSON_IsString(server) || !cJSON_IsNumber(port) || !cJSON_IsString(key) || !cJSON_IsString(nonce)) {
+        ESP_LOGE(TAG, "Malformed udp section in server hello");
+        return;
+    }
+    udp_server_ = server->valuestring;
+    udp_port_ = port->valueint;
 
     // auto encryption = cJSON_GetObjectItem(udp, "encryption")->valuestring;
     // ESP_LOGI(TAG, "UDP server: %s, port: %d, encryption: %s", udp_server_.c_str(), udp_port_, encryption);
-    aes_nonce_ = DecodeHexString(nonce);
+    aes_nonce_ = DecodeHexString(nonce->valuestring);
+    auto aes_key = DecodeHexString(key->valuestring);
+    // AES-128-CTR requires exactly 16-byte nonce + 16-byte key. Reject anything else
+    // before mbedtls/SendAudio do 16-byte OOB writes against a short buffer (deep-audit).
+    if (aes_nonce_.size() != 16 || aes_key.size() != 16) {
+        ESP_LOGE(TAG, "Invalid AES nonce/key length in server hello");
+        return;
+    }
     mbedtls_aes_init(&aes_ctx_);
-    mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)DecodeHexString(key).c_str(), 128);
+    mbedtls_aes_setkey_enc(&aes_ctx_, (const unsigned char*)aes_key.c_str(), 128);
     local_sequence_ = 0;
     remote_sequence_ = 0;
     xEventGroupSetBits(event_group_handle_, MQTT_PROTOCOL_SERVER_HELLO_EVENT);
@@ -377,7 +412,9 @@ static inline uint8_t CharToHex(char c) {
 std::string MqttProtocol::DecodeHexString(const std::string& hex_string) {
     std::string decoded;
     decoded.reserve(hex_string.size() / 2);
-    for (size_t i = 0; i < hex_string.size(); i += 2) {
+    // i+1<size (not i<size) so the hex_string[i+1] read can't go OOB / pull a phantom
+    // nibble on an odd-length input; the trailing half-byte is dropped (deep-audit).
+    for (size_t i = 0; i + 1 < hex_string.size(); i += 2) {
         char byte = (CharToHex(hex_string[i]) << 4) | CharToHex(hex_string[i + 1]);
         decoded.push_back(byte);
     }

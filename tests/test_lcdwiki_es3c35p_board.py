@@ -27,12 +27,36 @@ def test_lcdwiki_es3c35p_board_is_selected_and_registered():
     assert "# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set" in sdkconfig
     assert "CONFIG_ESP_CONSOLE_UART_NUM=-1" in sdkconfig
 
+def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_gates_flash():
+    script = read("build-lcdwiki.sh")
+    flash_instructions = read("FLASH_INSTRUCTIONS.md")
+
+    assert 'export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.local"' in script
+    assert "rm -f sdkconfig" in script
+    assert "idf.py set-target esp32s3" in script
+    assert "grep -q '^CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y$' sdkconfig" in script
+    assert "BLACK-SCREEN" in script
+    assert "idf.py -p \"$PORT\" flash" in script
+    assert "./build-lcdwiki.sh" in flash_instructions
+    assert "KHÔNG dùng `idf.py flash` trần" in flash_instructions
+    assert "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y" in flash_instructions
+
 def test_lcdwiki_es3c35p_local_defaults_keep_mobile_ble_discovery_enabled():
     local_defaults = read("sdkconfig.defaults.local")
 
     assert "# CONFIG_USE_HOTSPOT_WIFI_PROVISIONING is not set" in local_defaults
     assert "CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y" in local_defaults
     assert "CONFIG_BT_BLUEDROID_ENABLED=y" in local_defaults
+
+
+def test_lcdwiki_es3c35p_bluedroid_uses_psram_backed_dynamic_heap():
+    sdkconfig = read("sdkconfig.es3c35p")
+
+    assert "CONFIG_SPIRAM=y" in sdkconfig
+    assert "CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y" in sdkconfig
+    assert "# CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST is not set" not in sdkconfig
+    assert "CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y" in sdkconfig
+    assert "# CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY is not set" not in sdkconfig
 
 
 def test_lcdwiki_es3c35p_generated_language_matches_vietnamese_sdkconfig():
@@ -131,14 +155,27 @@ def test_lcdwiki_es3c35p_does_not_register_flaky_touch_controller():
     assert "return;" in init_touch
     assert "lvgl_port_add_touch" not in init_touch
 
-def test_lcdwiki_es3c35p_boot_long_press_reopens_ble_wifi_provisioning():
+def test_lcdwiki_es3c35p_boot_long_press_reenters_repair_pairing():
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
+
+    assert "boot_button_(BOOT_BUTTON_GPIO, false, 5000)" in board
 
     init_start = board.index("void InitializeButtons()")
     init_buttons = board[init_start : board.index("public:", init_start)]
+    assert "boot_button_.OnPressDown" in init_buttons
+    assert "boot_button_.OnPressUp" in init_buttons
+    assert "LCDWiki BOOT press down" in init_buttons
+    assert "LCDWiki BOOT press up" in init_buttons
     assert "boot_button_.OnLongPress" in init_buttons
-    assert "LCDWiki BOOT long-press -> EnterWifiConfigMode" in init_buttons
-    assert "EnterWifiConfigMode();" in init_buttons
+
+    # Long-press is the "re-pair" gesture: forget the current claim/owner and
+    # re-enter pairing so a (possibly different) parent phone can connect. It must
+    # NOT merely reopen Wi-Fi config -- that left the device claimed/owned and
+    # therefore "stuck" to the previously connected phone/account.
+    long_press_body = init_buttons[init_buttons.index("boot_button_.OnLongPress"):]
+    assert "LCDWiki BOOT long-press -> EnterRepairPairingMode" in long_press_body
+    assert "Application::GetInstance().EnterRepairPairingMode();" in long_press_body
+    assert "EnterWifiConfigMode();" not in long_press_body
 
 def test_lcdwiki_es3c35p_boot_click_rearms_ble_wifi_config_mode():
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")

@@ -13,6 +13,18 @@ namespace audio_wifi_config
 {
     static const char *kLogTag = "AUDIO_WIFI_CONFIG";
 
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+    std::vector<std::vector<float>>& HostInjectedProbabilityFrames() {
+        static std::vector<std::vector<float>> frames;
+        return frames;
+    }
+
+    bool& HostDropDecodedTextAfterProcess() {
+        static bool drop = false;
+        return drop;
+    }
+#endif
+
     void ReceiveWifiCredentialsFromAudio(Application *app,
                                         WifiManager *wifi_manager,
                                         Display *display,
@@ -71,9 +83,23 @@ namespace audio_wifi_config
             
             // Process audio samples to get probability data
             auto probabilities = signal_processor.ProcessAudioSamples(downsampled_data);
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+            auto& host_probability_frames = HostInjectedProbabilityFrames();
+            if (!host_probability_frames.empty()) {
+                probabilities = host_probability_frames.front();
+                host_probability_frames.erase(host_probability_frames.begin());
+            }
+#endif
             
             // Feed probability data to the data buffer
             if (data_buffer.ProcessProbabilityData(probabilities, 0.5f)) {
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+                if (HostDropDecodedTextAfterProcess()) {
+                    auto& decoded_text = data_buffer.decoded_text;
+                    decoded_text.reset();
+                    HostDropDecodedTextAfterProcess() = false;
+                }
+#endif
                 // If complete data was received, extract WiFi credentials
                 if (data_buffer.decoded_text.has_value()) {
                     // SECURITY (TBOT policy: no raw secret values logged or displayed).
@@ -145,7 +171,7 @@ namespace audio_wifi_config
 
     void FrequencyDetector::ProcessSample(float sample) {
         if (state_buffer_.size() < 2) {
-            return;
+            return; // LCOV_EXCL_LINE - defensive guard; constructors/reset always keep two slots.
         }
 
         float s_minus_2 = state_buffer_.front();  // S[-2]
@@ -161,7 +187,7 @@ namespace audio_wifi_config
 
     float FrequencyDetector::GetAmplitude() const {
         if (state_buffer_.size() < 2) {
-            return 0.0f;
+            return 0.0f; // LCOV_EXCL_LINE - defensive guard; constructors/reset always keep two slots.
         }
 
         float s_minus_1 = state_buffer_[1];                      // S[-1]
@@ -227,7 +253,7 @@ namespace audio_wifi_config
         }
 
         return result;
-    }
+    } // LCOV_EXCL_LINE - Xtensa gcov attributes this closing brace as uncovered after return.
 
     // AudioDataBuffer implementation
     AudioDataBuffer::AudioDataBuffer()
@@ -378,5 +404,5 @@ namespace audio_wifi_config
         }
 
         return bytes;
-    }
+    } // LCOV_EXCL_LINE - Xtensa gcov attributes this closing brace as uncovered after return.
 }

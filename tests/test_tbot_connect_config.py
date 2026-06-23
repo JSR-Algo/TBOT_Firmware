@@ -3,6 +3,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_PRODUCTION_OTA_URL = "https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
+CURRENT_OTA_BUILD_VERSION = "2.2.34"
 
 
 def read(path: str) -> str:
@@ -34,9 +36,17 @@ def test_firmware_does_not_compile_a_final_websocket_endpoint_fallback():
     assert "trycloudflare.com" not in websocket_default
     assert "tbot-backend-8wmh.onrender.com" not in websocket_default
 
+def test_project_version_advances_past_current_production_lcdwiki_ota():
+    cmake = read("CMakeLists.txt")
+
+    assert f'set(PROJECT_VER "{CURRENT_OTA_BUILD_VERSION}")' in cmake
+
 
 def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
-    local_configs = sorted(path for path in ROOT.glob("sdkconfig*") if path.is_file())
+    local_configs = sorted(
+        path for path in ROOT.glob("sdkconfig*")
+        if path.is_file() and not path.name.endswith((".bak", ".old"))
+    )
     assert local_configs
 
     for sdkconfig in local_configs:
@@ -47,6 +57,33 @@ def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
         assert "trycloudflare.com/tbot/v1/" not in contents, sdkconfig.name
         assert "tbot-backend-8wmh.onrender.com/tbot/v1/" not in contents, sdkconfig.name
         assert 'CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"' in contents, sdkconfig.name
+
+
+def test_local_firmware_build_configs_compile_only_current_production_ota_seed():
+    local_configs = sorted(
+        path for path in ROOT.glob("sdkconfig*")
+        if path.is_file() and not path.name.endswith((".bak", ".old"))
+    )
+    assert local_configs
+
+    for sdkconfig in local_configs:
+        contents = sdkconfig.read_text(encoding="utf-8")
+        match = re.search(r'^CONFIG_OTA_URL="(?P<value>[^"]*)"', contents, re.MULTILINE)
+        if not match:
+            continue
+
+        ota_url = match.group("value")
+        assert ota_url == CURRENT_PRODUCTION_OTA_URL, sdkconfig.name
+        assert "ngrok" not in ota_url, sdkconfig.name
+        assert "loca.lt" not in ota_url, sdkconfig.name
+        assert "serveo.net" not in ota_url, sdkconfig.name
+
+def test_prod_flash_script_rejects_tiny_placeholder_artifacts():
+    script = read("scripts/flash_prod_new_robot.sh")
+
+    assert "MIN_ARTIFACT_BYTES" in script
+    assert "stat -f%z" in script or "stat -c%s" in script
+    assert "artifact too small" in script
 
 
 def test_firmware_prefers_ota_returned_websocket_url_before_compile_fallback():
@@ -75,6 +112,48 @@ def test_firmware_persists_ota_returned_backend_api_url_for_device_config_pollin
     assert 'cJSON *api_url = cJSON_GetObjectItem(root, "api_url")' in ota_cc
     assert 'Settings settings("backend", true);' in ota_cc
     assert 'settings.SetString("api_url", api_url->valuestring);' in ota_cc
+
+def test_firmware_refreshes_websocket_url_from_authenticated_config_fetch_at_boot():
+    reporter_cc = read("main/provisioning/claim_confirmation_reporter.cc")
+    reporter_h = read("main/provisioning/claim_confirmation_reporter.h")
+    application_cc = read("main/application.cc")
+
+    assert "BuildTbotConfigFetchUrl" in reporter_h
+    assert "RefreshWebsocketUrlFromConfigFetch" in reporter_h
+
+    build_start = reporter_cc.index("std::string BuildTbotConfigFetchUrl")
+    build_end = reporter_cc.index("bool RefreshWebsocketUrlFromConfigFetch", build_start)
+    build_body = reporter_cc[build_start:build_end]
+    assert 'return base + "/config/fetch";' in build_body
+    assert 'if (base.find("/v1") == std::string::npos)' in build_body
+
+    refresh_start = reporter_cc.index("bool RefreshWebsocketUrlFromConfigFetch")
+    refresh_end = reporter_cc.index("bool PersistTbotClaimConfirmationResponse", refresh_start)
+    refresh_body = reporter_cc[refresh_start:refresh_end]
+
+    assert 'Settings backend_settings("backend", false);' in refresh_body
+    assert 'backend_settings.GetString("api_url")' in refresh_body
+    assert 'backend_settings.GetString("device_id")' in refresh_body
+    assert 'backend_settings.GetString("device_secret")' in refresh_body
+    assert "if (api_url.empty() || device_id.empty() || device_secret.empty())" in refresh_body
+    assert 'http->SetHeader("X-Device-Id", device_id);' in refresh_body
+    assert 'http->SetHeader("X-Device-Token", device_secret);' in refresh_body
+    assert 'cJSON_GetObjectItem(root, "configBlob")' in refresh_body
+    assert 'cJSON_GetObjectItem(config_blob, "websocket")' in refresh_body
+    assert 'cJSON_GetObjectItem(websocket, "url")' in refresh_body
+    assert 'Settings websocket_settings("websocket", true);' in refresh_body
+    assert 'websocket_settings.SetString("url", ws_url->valuestring);' in refresh_body
+    assert "response_body" not in "\n".join(
+        line for line in refresh_body.splitlines() if "ESP_LOG" in line
+    )
+
+    activation_start = application_cc.index("void Application::ActivationTask()")
+    activation_end = application_cc.index("void Application::CheckAssetsVersion()", activation_start)
+    activation_body = application_cc[activation_start:activation_end]
+    check_idx = activation_body.index("CheckNewVersion();")
+    refresh_idx = activation_body.index("RefreshWebsocketUrlFromConfigFetch();")
+    init_idx = activation_body.index("InitializeProtocol();")
+    assert check_idx < refresh_idx < init_idx
 
 def test_firmware_preserves_ota_returned_websocket_url_even_when_tunnel_hosts_differ():
     ota_cc = read("main/ota.cc")

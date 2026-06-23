@@ -6,6 +6,10 @@ tmp/
 /components/
 /managed_components/
 /dependencies.lock
+!/components/
+/components/*
+!/components/esp-wifi-connect/
+!/components/esp-wifi-connect/**
 releases/
 dl_temp/
 

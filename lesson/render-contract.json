@@ -45,10 +45,10 @@
       "hay": "assets/objects/hay-raw-candidate-0.png"
     },
     "objectPng": {
-      "width": 512,
-      "height": 512,
+      "width": 192,
+      "height": 192,
       "format": "png-rgba",
-      "sha256": "eac30a7ddf3f14df79f27c3eb39f2114f3a780d5670bb11ef62446f5fa5dcbb9"
+      "sha256": "bf3d88d17867f02872e3e6aff31b5d4d0a94977a5efa4214b7e831122938511b"
     },
     "appPlacement": {
       "anchor": "center",
@@ -184,4 +184,3 @@
     "assets/reference/barn-celebrate.png"
   ]
 }
-

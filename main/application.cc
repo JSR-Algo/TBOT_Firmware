@@ -13,14 +13,19 @@
 #include "tbot_connect_mapper.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
+#include "boards/common/system_reset.h"
+#include <ssid_manager.h>
+#include <wifi_manager.h>
 #endif
 
 #include <ctime>
 #include <cstring>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
+#include <freertos/idf_additions.h>
 #include <esp_random.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -32,11 +37,20 @@ static constexpr uint32_t kListenPlaybackDrainTimeoutMs = 650;
 static constexpr uint32_t kSpeakingTimeoutMs = 12000;
 static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
+static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
+static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
+static constexpr UBaseType_t kLessonMessageQueueDepth = 16;
+static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
 
 // TBOT claim poll (C4): cadence 10s. The backend's 5-minute cap applies only
 // after a pending claim exists; unclaimed standby must keep polling so a late
 // phone scan can still find and claim the robot.
 static constexpr uint64_t kClaimPollIntervalUs = 10ULL * 1000000ULL;      // 10s (was 4s: blocking HTTP/TLS poll was hammering main task + flaky backend)
+// "Hi ESP needs many tries" fix: once the realtime WS is up (online_intent_)
+// the device is fully functional and the claim poll is pure background. Back it
+// off hard so a residual still-polling state (e.g. online-but-not-yet-claimed)
+// cannot keep waking the network stack every 10s and jittering live audio.
+static constexpr uint64_t kClaimPollIntervalIdleUs = 60ULL * 1000000ULL;  // 60s while online
 static constexpr int64_t kClaimPollWindowMs = 5LL * 60LL * 1000LL;        // 5 min cap
 
 // TBOT heartbeat (C5): POST /v1/device/heartbeat every 20s while claimed/online.
@@ -86,7 +100,72 @@ Application::~Application() {
         esp_timer_stop(heartbeat_timer_);
         esp_timer_delete(heartbeat_timer_);
     }
+    if (lesson_message_task_handle_ != nullptr) {
+        vTaskDelete(lesson_message_task_handle_);
+        lesson_message_task_handle_ = nullptr;
+    }
+    if (lesson_message_queue_ != nullptr) {
+        char* payload = nullptr;
+        while (xQueueReceive(lesson_message_queue_, &payload, 0) == pdTRUE) {
+            if (payload != nullptr) cJSON_free(payload);
+        }
+        vQueueDelete(lesson_message_queue_);
+        lesson_message_queue_ = nullptr;
+    }
     vEventGroupDelete(event_group_);
+}
+
+void Application::EnqueueLessonMessage(const cJSON* root) {
+    const cJSON* type = cJSON_GetObjectItem(root, "type");
+    const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
+    const char* type_value = cJSON_IsString(type) ? type->valuestring : "(missing)";
+    const int sequence_value = cJSON_IsNumber(sequence) ? sequence->valueint : -1;
+
+    if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
+        ESP_LOGW(TAG, "lesson_* dropped: worker unavailable type=%s seq=%d",
+                 type_value, sequence_value);
+        return;
+    }
+
+    char* payload = cJSON_PrintUnformatted(root);
+    if (payload == nullptr) {
+        ESP_LOGW(TAG, "lesson_* dropped: serialize failed type=%s seq=%d",
+                 type_value, sequence_value);
+        return;
+    }
+
+    if (xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d",
+                 type_value, sequence_value);
+        cJSON_free(payload);
+    } else {
+        ESP_LOGI(TAG, "lesson_* enqueued type=%s seq=%d bytes=%u",
+                 type_value, sequence_value, (unsigned)strlen(payload));
+    }
+}
+
+void Application::LessonMessageTask(void* arg) {
+    auto* self = static_cast<Application*>(arg);
+    char* payload = nullptr;
+    for (;;) {
+        if (xQueueReceive(self->lesson_message_queue_, &payload, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        cJSON* root = cJSON_Parse(payload);
+        if (root != nullptr) {
+            const cJSON* type = cJSON_GetObjectItem(root, "type");
+            const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
+            ESP_LOGI(TAG, "lesson_worker handling type=%s seq=%d",
+                     cJSON_IsString(type) ? type->valuestring : "(missing)",
+                     cJSON_IsNumber(sequence) ? sequence->valueint : -1);
+            self->HandleLessonMessage(root);
+            cJSON_Delete(root);
+        } else {
+            ESP_LOGW(TAG, "lesson_* dropped: worker parse failed");
+        }
+        cJSON_free(payload);
+        payload = nullptr;
+    }
 }
 
 bool Application::SetDeviceState(DeviceState state) {
@@ -282,11 +361,46 @@ void Application::Run() {
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
-            while (auto packet = audio_service_.PopPacketFromSendQueue()) {
-                if (protocol_ && !protocol_->SendAudio(std::move(packet))) {
+            static uint32_t send_event_count = 0;
+            static uint32_t send_packet_count = 0;
+            send_event_count++;
+            uint32_t sent_packets = 0;
+            while (sent_packets < kMaxAudioPacketsPerMainLoop) {
+                auto packet = audio_service_.PopPacketFromSendQueue();
+                if (!packet) {
                     break;
                 }
+                const uint32_t timestamp = packet->timestamp;
+                const size_t payload_size = packet->payload.size();
+                if (!protocol_) {
+                    ESP_LOGW(TAG, "MAIN_EVENT_SEND_AUDIO protocol_unavailable event=%lu payload_bytes=%u timestamp=%lu",
+                             static_cast<unsigned long>(send_event_count),
+                             static_cast<unsigned>(payload_size),
+                             static_cast<unsigned long>(timestamp));
+                    break;
+                }
+                bool sent = protocol_->SendAudio(std::move(packet));
+                if (!sent) {
+                    ESP_LOGW(TAG, "MAIN_EVENT_SEND_AUDIO send_failed event=%lu payload_bytes=%u timestamp=%lu",
+                             static_cast<unsigned long>(send_event_count),
+                             static_cast<unsigned>(payload_size),
+                             static_cast<unsigned long>(timestamp));
+                    break;
+                }
+                send_packet_count++;
+                if (send_packet_count == 1 || send_packet_count % 25 == 0) {
+                    ESP_LOGI(TAG, "MAIN_EVENT_SEND_AUDIO packet count=%lu payload_bytes=%u timestamp=%lu",
+                             static_cast<unsigned long>(send_packet_count),
+                             static_cast<unsigned>(payload_size),
+                             static_cast<unsigned long>(timestamp));
+                }
+                ++sent_packets;
+                esp_task_wdt_reset();
             }
+            if (sent_packets == kMaxAudioPacketsPerMainLoop) {
+                xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
         }
 
         if (bits & MAIN_EVENT_WAKE_WORD_DETECTED) {
@@ -396,8 +510,15 @@ void Application::HandleNetworkDisconnectedEvent() {
 }
 
 void Application::HandleActivationDoneEvent() {
-    if (GetDeviceState() == kDeviceStateWifiConfiguring) {
+    auto state = GetDeviceState();
+    if (state == kDeviceStateWifiConfiguring) {
         ESP_LOGI(TAG, "Activation done ignored because WiFi config mode is active");
+        return;
+    }
+    if (state == kDeviceStateConnecting ||
+        state == kDeviceStateListening ||
+        state == kDeviceStateSpeaking) {
+        ESP_LOGI(TAG, "Activation done ignored because runtime audio is active");
         return;
     }
 
@@ -427,6 +548,18 @@ void Application::HandleActivationDoneEvent() {
 }
 
 void Application::RefreshPendingTbotClaim() {
+    // BOOT re-pair (offline path): if an earlier re-pair could not reach the
+    // cloud, backend.release_pending is still set and the robot rebooted into
+    // Wi-Fi setup (SsidManager::Clear() -> kDeviceStateWifiConfiguring). The
+    // deferred release MUST fire as soon as we are refreshing claim state on the
+    // NEW network, even while still in kDeviceStateWifiConfiguring (the exact
+    // post-re-pair-reboot state) -- so it runs BEFORE the WifiConfiguring
+    // early-return below, which would otherwise strand it and leave the backend
+    // devices row owned by the OLD parent (new parent's claim -> DEVICE_ALREADY_OWNED).
+    // Off-task + single-flight; it self-clears release_pending on success and is a
+    // no-op when release_pending is unset (every normal flow is untouched).
+    MaybeDispatchDeferredCloudRelease();
+
     // Explicit setup mode owns the screen + BLE radio. A stale claim poll from
     // the previous online/standby state must not keep fetching /device/config
     // after Wi-Fi station has been stopped, or it overwrites the BluFi setup UI
@@ -438,17 +571,11 @@ void Application::RefreshPendingTbotClaim() {
         return;
     }
 
-    // Once the realtime WS is up the device is fully functional. The claim-config
-    // backend (onrender) is a SEPARATE, flaky service; each poll is a blocking
-    // ~3s HTTP/TLS round-trip on the app task. Re-armed every ~10s it starves the
-    // Opus codec (encode/decode drops -> choppy speech, dropped questions),
-    // delays the wake-word event ("Hi ESP" needs several tries) and stalls state
-    // transitions ("văng lỗi" mid-talk). The giveup-on-failures guard never fires
-    // because fetches SUCCEED (device just unclaimed) so failures reset to 0.
-    // Stop the blocking claim poll while claimed+online. Keep the normal online
-    // audio path stable by also tearing down standby BLE; explicit BOOT
-    // Wi-Fi-config mode reopens BluFi for phone reconnect when needed.
-    if (online_intent_.load() && IsDeviceClaimed()) {
+    // Claimed devices are no longer part of the claim/BluFi state machine. This
+    // must use IsDeviceClaimed() directly, not online_intent_, because rebooted
+    // devices can recover their claimed state from backend credentials before
+    // the realtime online path has started.
+    if (IsDeviceClaimed()) {
         StopClaimPoll();
         StopBleAdvertising();
         return;
@@ -464,13 +591,18 @@ void Application::RefreshPendingTbotClaim() {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     {
         const auto ble_state = Blufi::GetInstance().GetBleState();
-        if (!pending_tbot_claim_.active &&
+        if (!pending_tbot_claim_.active && !token.empty() &&
             (ble_state == Blufi::BleState::kAdvertising ||
              ble_state == Blufi::BleState::kConnected)) {
-            ESP_LOGI(TAG, "Skipping claim config fetch while BLE is active; waiting for BluFi token handoff");
-            claim_substate_ = TbotClaimSubstate::AvailableStandby;
-            StartClaimPoll();
-            return;
+            // We ALREADY hold a bootstrap token but BLE is still active - e.g. a
+            // flaky BLE link (MIUI BLE contention) never reached the clean
+            // wifi-success deinit path. Do NOT strand behind this gate forever:
+            // free the BLE radio now (same StopBleAdvertising-before-TLS pattern as
+            // the confirm path below) so the blocking TLS claim fetch/confirm can
+            // run, then fall through instead of returning.
+            ESP_LOGW(TAG, "Bootstrap token present but BLE still active; stopping BLE to proceed with claim fetch/confirm");
+            Blufi::GetInstance().CancelBleSetupTimeout();
+            StopBleAdvertising();
         }
     }
 #endif
@@ -537,8 +669,50 @@ void Application::RefreshPendingTbotClaim() {
         return;
     }
 
-    PendingTbotClaim pending_claim;
-    const bool fetched = FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim);
+    // "Hi ESP needs many tries" fix (H1/H2): the /device/config fetch below is a
+    // blocking ~3s HTTP/TLS round-trip. Running it inline here executes it on the
+    // priority-10 Application task (Run(): vTaskPrioritySet(nullptr, 10)) on
+    // core 0, which is exactly the CPU the wake-word AFE fetch task (prio 0, no
+    // affinity) and the mic FEED task (prio 8, core 0) need to detect "Hi ESP".
+    // Hold that high-priority task for ~3s every 10s and the wakenet never fires /
+    // the FEED ringbuffer overflows, so the user has to repeat the wake word until
+    // an utterance lands in a clear gap. Move ONLY the blocking fetch onto a
+    // dedicated low-priority, non-core-0-pinned worker; all state mutation stays
+    // on the Application task via the Schedule()d ApplyPendingTbotClaimFetchResult
+    // continuation, preserving the single-threaded claim FSM invariant (OQ1).
+    DispatchPendingTbotClaimFetch(api_url, token);
+}
+
+// Off-task continuation: runs back on the Application task (Schedule()d from
+// ClaimFetchTask) so every claim_substate_/pending_tbot_claim_*/BLE/SetDeviceState
+// mutation below stays serialized on the one task that owns them (OQ1). This is
+// the verbatim result-handling tail of the old RefreshPendingTbotClaim(); only
+// the blocking fetch moved off-task.
+void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
+                                                   const std::string& token,
+                                                   const PendingTbotClaim& pending_claim,
+                                                   bool fetched, int device_config_status) {
+    if (!fetched && !token.empty() &&
+        (device_config_status == 401 || device_config_status == 403)) {
+        // The phone/backend claim bootstrap token is single-attempt auth. If the
+        // backend rejects it, retrying the same bearer only loops through BLE
+        // teardown -> HTTP 401 -> "Server unavailable". Treat this as a stale
+        // local token, reopen claimable BLE, and wait for the phone to deliver a
+        // fresh attempt token.
+        ESP_LOGW(TAG, "Device config rejected bootstrap token (HTTP %d); clearing stale claim token",
+                 device_config_status);
+        Settings websocket_settings("websocket", true);
+        websocket_settings.SetString("bootstrap_token", "");
+        pending_tbot_claim_ = PendingTbotClaim{};
+        pending_tbot_claim_api_url_.clear();
+        pending_tbot_claim_token_.clear();
+        claim_fetch_failures_ = 0;
+        claim_substate_ = TbotClaimSubstate::AvailableStandby;
+        RenderClaimSubstate(claim_substate_);
+        EnsureBleAdvertisingForStandby();
+        StartClaimPoll();
+        return;
+    }
     if (!fetched || !pending_claim.active) {
         // Unowned / no pending claim yet -> enter claimable standby ("Ready to
         // connect") and run a bounded poll so a phone tap is caught without a
@@ -642,9 +816,18 @@ void Application::RefreshPendingTbotClaim() {
     // surfaced by our OWN authenticated /device/config poll, which already proves
     // this is the physical robot the app is claiming — so confirm it AUTOMATICALLY
     // instead of waiting for a BOOT-button press (which had too short / racy a
-    // window in practice). ConfirmPendingTbotClaim() runs on this (App) task — the
-    // same task that just performed the blocking config fetch — so its blocking
-    // POST /claim/confirm is safe here. It persists the claimed flag + websocket
+    // window in practice). ConfirmPendingTbotClaim() runs on this (App) task and
+    // makes a blocking ~5s POST /claim/confirm inline. This is deliberately kept
+    // ON-task (unlike the config fetch and heartbeat, which were moved to
+    // low-priority workers): it is a ONE-SHOT call in the boot claim-confirm
+    // window, not a periodic timer tick, and at this point the device is still
+    // UNCLAIMED so the wake-word AFE mic is disabled (see the IsDeviceClaimed()-
+    // gated Idle gate) — there is no wake-word pipeline to starve until this very
+    // call succeeds and turns the mic on. Callers also rely on its SYNCHRONOUS
+    // post-condition (they inspect claim_substate_ == Confirmed immediately after,
+    // e.g. just below at the stale-token-clear block and in the cached-token path
+    // of RefreshPendingTbotClaim) to clear a stale bootstrap token + reopen BLE;
+    // making it async would break that. It persists the claimed flag + websocket
     // credentials, brings audio up, and Alerts CONNECTED on success (or a
     // localized failure copy on error). The BOOT-button path stays wired as a
     // manual fallback if a future build wants to re-enable explicit consent.
@@ -729,44 +912,19 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     pending_tbot_claim_token_.clear();
     claim_substate_ = TbotClaimSubstate::Confirmed;
 
-    // TBOT BLE+audio contention fix — bring audio up NOW that we are claimed.
-    // While UNCLAIMED we deliberately skipped the realtime audio WS preconnect
-    // (InitializeProtocol) and kept the AFE/mic input OFF in Idle
-    // (HandleStateChangedEvent). A successful confirm has just persisted the
-    // claimed flag (Settings("tbot_claim").confirmed = 1, so IsDeviceClaimed()
-    // is now true) AND the freshly-claimed websocket URL + backend device
-    // secret (PersistTbotClaimConfirmationResponse). BLE advertising was torn down
-    // above, so the BLE+audio contention that overflowed the AFE FEED ringbuffer
-    // is gone and it is safe to start audio. We do this explicitly here so a
-    // just-claimed robot gets working audio WITHOUT requiring a reboot.
+    // TBOT claim complete -> return to explicit wake standby. Do not warm the
+    // realtime WebSocket here: opening the channel can route through the normal
+    // connect path and leave the device in Listening, where this board disables
+    // wake-word detection. The first "Hi ESP" opens the channel on the existing
+    // wake worker path instead.
     if (IsDeviceClaimed()) {
-        // 1) Re-arm the AFE/mic input by enabling wake-word detection (cheap,
-        //    non-blocking) so "Hi ESP" works immediately. This mirrors the
-        //    claimed Idle path; the device is already in Idle here.
+        SetDeviceState(kDeviceStateIdle);
         audio_service_.EnableWakeWordDetection(true);
-
-        // 2) Warm the realtime audio WS after claim persistence so the first
-        //    wake word does not pay the cold TLS/WebSocket handshake. For the
-        //    WebSocket protocol Protocol::Start() IS the audio preconnect, but it
-        //    BLOCKS on the TLS + server-hello handshake (up to ~20s). We are on
-        //    the priority-10 main Application task here, so we must NOT call it
-        //    inline (it would freeze the event loop and trip the 10s task
-        //    watchdog). Run it on a short-lived detached worker, exactly like the
-        //    boot preconnect runs inside ActivationTask. Guard on "channel not
-        //    already open" so we never disturb an already-live channel (e.g. a
-        //    claimed MQTT control channel started at boot). If the preconnect
-        //    fails it is non-fatal: the first wake word reopens it on demand
-        //    (ContinueWakeWordInvoke retries OpenAudioChannel).
-        if (protocol_ && !protocol_->IsAudioChannelOpened()) {
-            ESP_LOGI(TAG, "Claim confirmed: warming realtime audio WS (off-task)");
-            xTaskCreate([](void* arg) {
-                Application* app = static_cast<Application*>(arg);
-                if (app->protocol_ && !app->protocol_->IsAudioChannelOpened()) {
-                    app->protocol_->Start();
-                }
-                vTaskDelete(nullptr);
-            }, "claim_ws_warm", 4096, this, tskIDLE_PRIORITY + 3, nullptr);
-        }
+        // On first claim, the realtime session may already have connected while
+        // unclaimed, before backend credentials existed. Start and fire one
+        // heartbeat now so the claimed online device reports immediately.
+        StartHeartbeat();
+        DispatchDeviceHeartbeat();
     }
 
     Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTED, "link", Lang::Sounds::OGG_SUCCESS);
@@ -775,8 +933,49 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
 
 void Application::SchedulePendingTbotClaimRefresh() {
     Schedule([this]() {
-        RefreshPendingTbotClaim();
+        // BluFi-provisioned reconnect: drive the FSM out of kDeviceStateWifiConfiguring
+        // (Activating -> ActivationTask -> Idle) FIRST, otherwise RefreshPendingTbotClaim
+        // would be swallowed by its own WifiConfiguring early-return and the pending
+        // claim would never auto-confirm without an extra manual power-cycle.
+        PromoteFromWifiConfigAfterProvisioning();
+        if (GetDeviceState() != kDeviceStateWifiConfiguring) {
+            // Already out of setup (promoted-and-no-async-activation, or never in
+            // setup) -> run the claim refresh now.
+            RefreshPendingTbotClaim();
+        }
+        // else: still in setup (stale success report / not actually connected) ->
+        // either we left it in WifiConfiguring on purpose, or activation is running
+        // and HandleActivationDoneEvent() will call RefreshPendingTbotClaim() from Idle.
     });
+}
+
+void Application::PromoteFromWifiConfigAfterProvisioning() {
+    // BluFi reported STA-connected success. Unlike a stale STA event, this is a
+    // real provisioning completion, so leave WiFi-config mode and run the normal
+    // activation->Idle path. RefreshPendingTbotClaim (which auto-confirms the
+    // pending claim) only runs once we are OUT of kDeviceStateWifiConfiguring.
+    if (GetDeviceState() != kDeviceStateWifiConfiguring) {
+        return;  // Already promoted / not in setup -> let the normal path run.
+    }
+    if (!WifiManager::GetInstance().IsConnected()) {
+        return;  // Success report was stale; stay in setup.
+    }
+    if (!SetDeviceState(kDeviceStateActivating)) {
+        return;  // FSM rejected the transition; nothing more to do here.
+    }
+    if (activation_task_handle_ != nullptr) {
+        ESP_LOGW(TAG, "Activation task already running");
+        return;  // Activation already running -> it will reach Idle on its own.
+    }
+    // Reuse the same activation worker as a normal boot (OTA check + protocol/WS),
+    // which ends by setting MAIN_EVENT_ACTIVATION_DONE -> HandleActivationDoneEvent
+    // -> kDeviceStateIdle -> RefreshPendingTbotClaim() (the proven auto-confirm path).
+    xTaskCreate([](void* arg) {
+        Application* app = static_cast<Application*>(arg);
+        app->ActivationTask();
+        app->activation_task_handle_ = nullptr;
+        vTaskDelete(NULL);
+    }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
 }
 
 void Application::RenderClaimSubstate(TbotClaimSubstate substate) {
@@ -803,6 +1002,92 @@ void Application::RenderClaimSubstate(TbotClaimSubstate substate) {
 }
 
 // ---------------------------------------------------------------------------
+// Off-task claim-config fetch ("Hi ESP needs many tries" fix)
+// ---------------------------------------------------------------------------
+
+namespace {
+// Heap-owned hand-off for the off-task claim fetch worker (mirrors ConnectContext).
+struct ClaimFetchContext {
+    Application* app;
+    std::string api_url;
+    std::string token;
+};
+}  // namespace
+
+void Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
+                                                const std::string& token) {
+    // Runs on the Application task. Belt-and-suspenders gating (fix 2): never
+    // kick off a blocking TLS handshake while live realtime audio is in flight —
+    // a wake/connect/listen/speak must always win the radio + CPU. On skip we do
+    // nothing and let the next periodic tick retry; we do NOT StopClaimPoll or
+    // reset the window, so an unclaimed device keeps discovering a phone claim and
+    // the 5-minute confirm cap (PollPendingTbotClaimTick) stays intact.
+    const DeviceState state = GetDeviceState();
+    if (state == kDeviceStateConnecting ||
+        state == kDeviceStateListening ||
+        state == kDeviceStateSpeaking ||
+        connect_in_flight_.load()) {
+        ESP_LOGD(TAG, "Skipping claim fetch this tick (runtime audio active)");
+        return;
+    }
+
+    // Single-flight: a slow backend must never let the 10s timer stack workers.
+    bool expected = false;
+    if (!claim_poll_inflight_.compare_exchange_strong(expected, true)) {
+        ESP_LOGD(TAG, "Claim fetch already in flight; skipping this tick");
+        return;
+    }
+
+    auto* ctx = new ClaimFetchContext{this, api_url, token};
+    // Low priority (tskIDLE_PRIORITY+1) and NOT pinned to core 0 so the worker
+    // simply WAITS on the network at low priority while the wake-word AFE
+    // fetch/feed pipeline keeps the CPU. The old design queued this blocking call
+    // onto the priority-10 Application task, which is the starvation root cause.
+    if (xTaskCreate(&Application::ClaimFetchTask, "claim_fetch", 6144, ctx,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "claim_fetch task create failed; retrying next tick");
+        delete ctx;
+        claim_poll_inflight_.store(false);
+    }
+}
+
+void Application::ClaimFetchTask(void* arg) {
+    auto* ctx = static_cast<ClaimFetchContext*>(arg);
+    Application* self = ctx->app;
+    std::string api_url = ctx->api_url;
+    std::string token = ctx->token;
+    delete ctx;
+
+    // The ONLY work on this worker: the blocking ~3s HTTP/TLS fetch. No shared
+    // state is touched here.
+    PendingTbotClaim pending_claim;
+    int device_config_status = 0;
+    const bool fetched = FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim,
+                                                               &device_config_status);
+
+    // Marshal result-application back onto the Application task (OQ1): all
+    // claim_substate_/pending_tbot_claim_*/BLE/SetDeviceState mutation stays on
+    // the one task that owns them. Clear the single-flight guard there so the
+    // next tick can dispatch again.
+    self->Schedule([self, api_url, token, pending_claim, fetched, device_config_status]() {
+        self->claim_poll_inflight_.store(false);
+        // The periodic poll may have been stopped (claimed+online / WiFiConfiguring)
+        // while this fetch was outstanding; honor that and drop stale no-claim
+        // results. But a Wi-Fi provisioning completion dispatches a one-shot
+        // fetch before the poll timer is active. If that fetch already found an
+        // authenticated pending claim, it must still be applied or mobile stays
+        // stuck at WAITING_PHYSICAL_CONFIRM forever.
+        if (!self->claim_poll_active_ && !(fetched && pending_claim.active && !token.empty())) {
+            return;
+        }
+        self->ApplyPendingTbotClaimFetchResult(api_url, token, pending_claim,
+                                               fetched, device_config_status);
+    });
+
+    vTaskDelete(nullptr);
+}
+
+// ---------------------------------------------------------------------------
 // Bounded claim poll (C4)
 // ---------------------------------------------------------------------------
 
@@ -810,8 +1095,25 @@ void Application::StartClaimPoll() {
     if (online_intent_.load() && IsDeviceClaimed()) {
         return;  // Claimed + online; never re-arm the blocking claim backend poll.
     }
+    // Fix 3: once the realtime WS is up (online_intent_) the device is fully
+    // functional, so the claim poll is pure background — back it off to 60s so it
+    // can never materially starve audio. Offline / mid-confirm keeps the 10s
+    // cadence so a phone claim is discovered promptly. We never fully kill the
+    // poll for an unclaimed device (must keep discovering it got claimed).
+    const uint64_t desired_interval_us =
+        online_intent_.load() ? kClaimPollIntervalIdleUs : kClaimPollIntervalUs;
     if (claim_poll_active_) {
-        return;  // Already polling this window.
+        if (desired_interval_us == claim_poll_interval_us_ || claim_poll_timer_ == nullptr) {
+            return;  // Already polling this window at the right cadence.
+        }
+        // Cadence changed (e.g. WS just came up) -> re-arm at the new interval
+        // without resetting the 5-minute confirm-window start.
+        esp_timer_stop(claim_poll_timer_);
+        claim_poll_interval_us_ = desired_interval_us;
+        esp_timer_start_periodic(claim_poll_timer_, claim_poll_interval_us_);
+        ESP_LOGI(TAG, "Claim poll re-armed (every %llus)",
+                 claim_poll_interval_us_ / 1000000ULL);
+        return;
     }
     if (claim_poll_timer_ == nullptr) {
         esp_timer_create_args_t args = {
@@ -833,9 +1135,10 @@ void Application::StartClaimPoll() {
     }
     claim_poll_started_ms_ = esp_timer_get_time() / 1000;
     claim_poll_active_ = true;
-    esp_timer_start_periodic(claim_poll_timer_, kClaimPollIntervalUs);
+    claim_poll_interval_us_ = desired_interval_us;
+    esp_timer_start_periodic(claim_poll_timer_, claim_poll_interval_us_);
     ESP_LOGI(TAG, "Claim poll started (every %llus, %llds cap)",
-             kClaimPollIntervalUs / 1000000ULL, kClaimPollWindowMs / 1000);
+             claim_poll_interval_us_ / 1000000ULL, kClaimPollWindowMs / 1000);
 }
 
 void Application::StopClaimPoll() {
@@ -960,14 +1263,28 @@ void Application::HandleClaimConfirmTimeout() {
 // ---------------------------------------------------------------------------
 
 bool Application::IsDeviceClaimed() const {
-    // Authoritative claimed-signal: a DEDICATED flag written ONLY by a successful
-    // physical-claim confirm (PersistTbotClaimConfirmationResponse). We must NOT
-    // key off websocket "token": the OTA CheckVersion response also writes that
-    // key (a realtime-WS auth token) on every boot (observed: "Received websocket
-    // token: empty=0"), so an unclaimed-but-online robot would falsely look
-    // claimed and silently stop advertising/polling for pairing.
+    // Primary claimed-signal: a DEDICATED flag written ONLY by a successful
+    // physical-claim confirm (PersistTbotClaimConfirmationResponse). Recovery
+    // signal: backend device_id + device_secret are also written only by that
+    // successful confirm, so after a reboot/marker loss they are enough to keep
+    // the robot on the claimed online path. We must NOT key off websocket
+    // "token": OTA CheckVersion can write that realtime-WS token on every boot.
     Settings claim_state("tbot_claim", false);
-    return claim_state.GetInt("confirmed", 0) != 0;
+    if (claim_state.GetInt("confirmed", 0) != 0) {
+        return true;
+    }
+
+    Settings websocket_settings("websocket", false);
+    const std::string websocket_token = websocket_settings.GetString("token");
+    const bool factory_test_claimed = claim_state.GetInt("factory_test", 0) != 0;
+    if (factory_test_claimed && !websocket_token.empty()) {
+        return true;
+    }
+
+    Settings backend_settings("backend", false);
+    const std::string device_id = backend_settings.GetString("device_id");
+    const std::string device_secret = backend_settings.GetString("device_secret");
+    return !device_id.empty() && !device_secret.empty();
 }
 
 void Application::EnsureBleAdvertisingForStandby() {
@@ -997,6 +1314,15 @@ void Application::EnsureBleAdvertisingForStandby() {
     // (kMaxBleReadvertiseAttempts) is untouched and still bounds a flapping peer.
     blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
 #endif
+}
+
+void Application::EnsureBleAdvertisingForUnclaimedSavedWifi() {
+    if (IsDeviceClaimed()) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Stored WiFi exists but device is unclaimed; keeping BLE advertising open for setup");
+    EnsureBleAdvertisingForStandby();
 }
 
 void Application::StopBleAdvertising() {
@@ -1055,11 +1381,12 @@ static int ExtractWifiRssi(cJSON* status_root) {
     return ClampInt(rssi->valueint, -127, 0);
 }
 
-static std::string BuildTbotHeartbeatBody(const std::string& status_json) {
+static std::string BuildTbotHeartbeatBody(const std::string& status_json,
+                                          const std::string& device_id) {
     cJSON* status_root = cJSON_Parse(status_json.c_str());
     cJSON* root = cJSON_CreateObject();
 
-    cJSON_AddStringToObject(root, "device_id", Board::GetInstance().GetUuid().c_str());
+    cJSON_AddStringToObject(root, "device_id", device_id.c_str());
     const std::string firmware_version = FirmwareVersionForHeartbeat();
     cJSON_AddStringToObject(root, "firmware_version", firmware_version.c_str());
 
@@ -1108,7 +1435,11 @@ void Application::StartHeartbeat() {
         esp_timer_create_args_t args = {
             .callback = [](void* arg) {
                 Application* app = static_cast<Application*>(arg);
-                app->Schedule([app]() { app->SendDeviceHeartbeat(); });
+                // Post to the Application task, which gates + spawns the off-task
+                // HTTP worker. The blocking POST must never run on the prio-10
+                // main task (it starves the wake-word AFE pipeline -> "Hi ESP"
+                // needs several tries), so do NOT call SendDeviceHeartbeat() here.
+                app->Schedule([app]() { app->DispatchDeviceHeartbeat(); });
             },
             .arg = this,
             .dispatch_method = ESP_TIMER_TASK,
@@ -1133,17 +1464,214 @@ void Application::StopHeartbeat() {
     heartbeat_active_ = false;
 }
 
-bool Application::SendDeviceHeartbeat() {
+void Application::HandleHeartbeatAuthFailure(int status_code) {
+    ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d); clearing stale claim credentials", status_code);
+    StopHeartbeat();
+    CloseAudioChannelByIntent();
+
+    {
+        Settings backend_settings("backend", true);
+        backend_settings.SetString("device_secret", "");
+    }
+    {
+        Settings claim_state("tbot_claim", true);
+        claim_state.SetInt("confirmed", 0);
+    }
+    {
+        Settings websocket_settings("websocket", true);
+        websocket_settings.SetString("bootstrap_token", "");
+    }
+
+    pending_tbot_claim_ = PendingTbotClaim{};
+    pending_tbot_claim_api_url_.clear();
+    pending_tbot_claim_token_.clear();
+    claim_substate_ = TbotClaimSubstate::AvailableStandby;
+    backend_offline_.store(false);
+    EnsureBleAdvertisingForStandby();
+    StartClaimPoll();
+    RenderClaimSubstate(claim_substate_);
+}
+
+void Application::EnterRepairPairingMode() {
+    // Callable from the BOOT button task; marshal ALL claim-FSM + NVS mutation onto
+    // the Application task (OQ1: the claim state machine is single-threaded).
+    Schedule([this]() {
+        ESP_LOGW(TAG, "BOOT re-pair: forgetting current claim so a new parent phone can connect");
+        StopHeartbeat();
+        CloseAudioChannelByIntent();
+
+        // Release backend ownership NOW (synchronous) if we have credentials and are
+        // online. This is a deliberate, user-initiated reset, so a one-time blocking
+        // ~5s POST on the app task is acceptable -- and it is REQUIRED for the feature
+        // to work: a deferred/async release races the parent re-pairing on the new
+        // phone and loses (the phone's claim hits the backend first and gets
+        // DEVICE_ALREADY_OWNED -> "robot already paired"). Freeing the `devices` row
+        // here, before we re-advertise, guarantees the next claim succeeds.
+        // If we're offline the POST fails fast (5s cap) and we fall back to
+        // release_pending so RefreshPendingTbotClaim retries once we're back online
+        // (honors "the robot may have no Wi-Fi at reset time").
+        bool had_cloud_secret = false;
+        {
+            Settings backend_settings("backend", false);
+            had_cloud_secret = !backend_settings.GetString("device_secret").empty() &&
+                               !backend_settings.GetString("device_id").empty() &&
+                               !backend_settings.GetString("api_url").empty();
+        }
+        bool released = false;
+        if (had_cloud_secret) {
+            released = SystemReset::ReleaseCloudOwnership();
+            ESP_LOGW(TAG, "BOOT re-pair cloud ownership release: %s",
+                     released ? "OK (backend freed for re-claim)"
+                              : "FAILED (offline/auth?) -> deferred retry when online");
+        } else {
+            ESP_LOGW(TAG, "BOOT re-pair: no cloud credentials to release (treating as already free)");
+        }
+
+        // Local unclaim: drop the claimed flag + the live WS/claim tokens so the
+        // robot stops acting as an owned device and re-advertises for pairing.
+        {
+            Settings backend_settings("backend", true);
+            if (released) {
+                // Backend row is freed; the now-orphaned secret would only 401 a
+                // retry, so drop it and stop deferring.
+                backend_settings.SetString("device_secret", "");
+                backend_settings.SetInt("release_pending", 0);
+            } else if (had_cloud_secret) {
+                // KEEP the credentials so the deferred POST can authenticate later.
+                backend_settings.SetInt("release_pending", 1);
+            }
+        }
+        {
+            Settings claim_state("tbot_claim", true);
+            claim_state.SetInt("confirmed", 0);
+        }
+        {
+            Settings websocket_settings("websocket", true);
+            websocket_settings.SetString("bootstrap_token", "");
+            websocket_settings.SetString("url", "");
+        }
+
+        pending_tbot_claim_ = PendingTbotClaim{};
+        pending_tbot_claim_api_url_.clear();
+        pending_tbot_claim_token_.clear();
+        claim_substate_ = TbotClaimSubstate::AvailableStandby;
+        backend_offline_.store(false);
+        RenderClaimSubstate(claim_substate_);
+
+        // The parent wants to re-pair AND choose a (possibly different) Wi-Fi network.
+        // Forget the saved Wi-Fi and reboot: on the next boot the robot has no SSID, so
+        // TryWifiConnect() falls into StartWifiConfigMode() and re-opens BLE Wi-Fi
+        // provisioning, so the phone is prompted to pick a network. If we instead stayed
+        // on the old Wi-Fi and only re-advertised claimable standby, the app sees the
+        // robot already-online and SKIPS the Wi-Fi step -> the parent can never change
+        // networks (the reported "can't set a different Wi-Fi"). The cloud row was freed
+        // synchronously above (while still online); the offline case keeps
+        // release_pending so the deferred release fires once the NEW network connects.
+        SsidManager::GetInstance().Clear();
+        ESP_LOGW(TAG, "BOOT re-pair: Wi-Fi forgotten; rebooting into Wi-Fi setup for a new network");
+        vTaskDelay(pdMS_TO_TICKS(1500));
+        esp_restart();
+    });
+}
+
+void Application::MaybeDispatchDeferredCloudRelease() {
+    Settings backend_settings("backend", false);
+    if (backend_settings.GetInt("release_pending", 0) == 0) {
+        return;  // No pending BOOT re-pair release.
+    }
+    const std::string api_url = backend_settings.GetString("api_url");
+    const std::string device_id = backend_settings.GetString("device_id");
+    const std::string device_secret = backend_settings.GetString("device_secret");
+    if (api_url.empty() || device_id.empty() || device_secret.empty()) {
+        // No (remaining) cloud credentials to release -> nothing the backend can
+        // act on. Clear the marker so we stop re-checking on every refresh.
+        Settings writable("backend", true);
+        writable.SetInt("release_pending", 0);
+        return;
+    }
+
+    // Same belt-and-suspenders gating as the claim fetch: never start a blocking
+    // TLS POST while live audio is in flight, and single-flight so a stuck network
+    // can't stack workers across refreshes.
+    const DeviceState state = GetDeviceState();
+    if (state == kDeviceStateConnecting ||
+        state == kDeviceStateListening ||
+        state == kDeviceStateSpeaking ||
+        connect_in_flight_.load()) {
+        return;
+    }
+    bool expected = false;
+    if (!cloud_release_inflight_.compare_exchange_strong(expected, true)) {
+        return;  // Release already in flight.
+    }
+
+    // Low priority + not pinned to core 0 (same as ClaimFetchTask) so the blocking
+    // POST waits on the network without starving the core-0 wake-word AFE pipeline.
+    if (xTaskCreate(&Application::CloudReleaseTask, "cloud_release", 6144, this,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "cloud_release task create failed; retrying next refresh");
+        cloud_release_inflight_.store(false);
+    }
+}
+
+void Application::CloudReleaseTask(void* arg) {
+    Application* self = static_cast<Application*>(arg);
+
+    // ONLY work on this worker: the blocking ~5s factory-reset POST. It reads NVS
+    // (backend.*) internally and touches no shared Application state.
+    const bool released = SystemReset::ReleaseCloudOwnership();
+
+    // Marshal the result back onto the Application task (OQ1) and clear the
+    // single-flight guard there.
+    self->Schedule([self, released]() {
+        self->cloud_release_inflight_.store(false);
+        if (!released) {
+            ESP_LOGW(TAG, "Deferred cloud ownership release failed; will retry on next refresh");
+            return;
+        }
+        Settings backend_settings("backend", true);
+        backend_settings.SetInt("release_pending", 0);
+        backend_settings.SetString("device_secret", "");
+        ESP_LOGI(TAG, "Deferred cloud ownership released; robot is free for a new parent to claim");
+    });
+
+    vTaskDelete(nullptr);
+}
+
+namespace {
+struct HeartbeatContext {
+    Application* app;
+    std::string url;
+    std::string device_secret;
+    std::string body;
+};
+}  // namespace
+
+void Application::DispatchDeviceHeartbeat() {
+    // Runs on the Application task. Do ALL the gating + URL/body build here (it
+    // reads the FSM DeviceState and NVS settings, which stay serialized on the one
+    // task that owns them per OQ1), then hand ONLY the blocking ~5s HTTP/TLS POST
+    // to an off-task worker. The old design ran the POST inline on this priority-10
+    // task, freezing the core-0 wake-word AFE feed/fetch pipeline for up to 5s
+    // every 20s -> "Hi ESP" had to be repeated until an utterance landed in a gap.
+
     // H2: gate on a LIVE online DeviceState (Idle/Listening/Speaking), not merely
     // on token presence. A claimed device sitting in WifiConfiguring/Activating/
     // Connecting/Upgrading/Error has no healthy session to report and must not
-    // fire heartbeats (which would also block the main task). The timer can still
-    // be stopped late, so this is the authoritative runtime gate.
+    // fire heartbeats. The timer can still be stopped late, so this is the
+    // authoritative runtime gate.
     const DeviceState device_state = GetDeviceState();
     if (device_state != kDeviceStateIdle &&
         device_state != kDeviceStateListening &&
         device_state != kDeviceStateSpeaking) {
-        return false;
+        return;
+    }
+
+    // Single-flight: a slow backend must never let the 20s timer stack workers.
+    bool expected = false;
+    if (!heartbeat_inflight_.compare_exchange_strong(expected, true)) {
+        ESP_LOGD(TAG, "Heartbeat already in flight; skipping this tick");
+        return;
     }
 
     // Gate: only claimed/online. Backend API auth uses the backend device
@@ -1152,11 +1680,19 @@ bool Application::SendDeviceHeartbeat() {
     Settings backend_settings("backend", false);
     const std::string api_url = backend_settings.GetString("api_url");
     if (api_url.empty()) {
-        return false;
+        heartbeat_inflight_.store(false);
+        return;
     }
     const std::string device_secret = backend_settings.GetString("device_secret");
     if (device_secret.empty()) {
-        return false;  // Not claimed yet -> do not heartbeat.
+        heartbeat_inflight_.store(false);
+        return;  // Not claimed yet -> do not heartbeat.
+    }
+    const std::string backend_device_id = backend_settings.GetString("device_id");
+    if (backend_device_id.empty()) {
+        ESP_LOGW(TAG, "Heartbeat skipped: missing backend device id");
+        heartbeat_inflight_.store(false);
+        return;
     }
 
     // Build POST {api_url}/device/heartbeat. The body matches the backend
@@ -1169,20 +1705,58 @@ bool Application::SendDeviceHeartbeat() {
     if (base.find("/v1") == std::string::npos) {
         base += "/v1";
     }
-    const std::string url = base + "/device/heartbeat";
-
     const std::string status_json = Board::GetInstance().GetDeviceStatusJson();
-    std::string body = BuildTbotHeartbeatBody(status_json);
 
+    auto* ctx = new HeartbeatContext{this, base + "/device/heartbeat", device_secret,
+                                     BuildTbotHeartbeatBody(status_json, backend_device_id)};
+    // Low priority (tskIDLE_PRIORITY+1) and NOT pinned to core 0 so the worker
+    // simply WAITS on the network at low priority while the wake-word AFE
+    // fetch/feed pipeline keeps the CPU (same pattern as ClaimFetchTask).
+    if (xTaskCreate(&Application::HeartbeatTask, "heartbeat_http", 8192, ctx,
+                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "heartbeat task create failed; retrying next tick");
+        delete ctx;
+        heartbeat_inflight_.store(false);
+    }
+}
+
+void Application::HeartbeatTask(void* arg) {
+    auto* ctx = static_cast<HeartbeatContext*>(arg);
+    Application* self = ctx->app;
+    const std::string url = ctx->url;
+    const std::string device_secret = ctx->device_secret;
+    std::string body = std::move(ctx->body);
+    delete ctx;
+
+    // The ONLY work on this worker: the blocking ~5s HTTP/TLS POST.
+    int status_code = self->SendDeviceHeartbeat(url, device_secret, std::move(body));
+
+    // Clear the single-flight guard and marshal any auth-failure handling back
+    // onto the Application task (OQ1): HandleHeartbeatAuthFailure mutates claim /
+    // BLE / NVS / audio-channel state, which must stay on the owning task.
+    self->Schedule([self, status_code]() {
+        self->heartbeat_inflight_.store(false);
+        if (status_code == 401 || status_code == 403) {
+            self->HandleHeartbeatAuthFailure(status_code);
+        }
+    });
+
+    vTaskDelete(nullptr);
+}
+
+int Application::SendDeviceHeartbeat(const std::string& url, const std::string& device_secret,
+                                     std::string body) {
+    // Runs on the off-task HeartbeatTask worker (see DispatchDeviceHeartbeat).
+    // Returns the HTTP status code (or 0 on transport failure); the caller
+    // marshals auth-failure handling back onto the Application task.
     auto* network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(2);
     if (!http) {
         ESP_LOGE(TAG, "Failed to create HTTP client for heartbeat");
-        return false;
+        return 0;
     }
-    // B1: a heartbeat must never stall audio. SendDeviceHeartbeat() runs on the
-    // priority-10 main Application task, so cap the blocking Open() at 5s instead
-    // of the default 30s so a slow/unreachable backend can never freeze playback.
+    // B1: still cap the blocking Open() at 5s (was the prio-10-task safety bound;
+    // keep it bounded on the worker too so a hung TLS handshake can't leak tasks).
     http->SetTimeout(5000);
     http->SetHeader("X-Device-Token", device_secret);
     http->SetHeader("Content-Type", "application/json");
@@ -1193,17 +1767,17 @@ bool Application::SendDeviceHeartbeat() {
     if (!http->Open("POST", url)) {
         ESP_LOGW(TAG, "Heartbeat HTTP open failed: 0x%x", http->GetLastError());
         http->Close();
-        return false;
+        return 0;
     }
     const int status_code = http->GetStatusCode();
     http->Close();
 
     if (status_code < 200 || status_code >= 300) {
         ESP_LOGW(TAG, "Heartbeat failed (HTTP %d)", status_code);
-        return false;
+        return status_code;
     }
     ESP_LOGI(TAG, "Heartbeat accepted (HTTP %d)", status_code);
-    return true;
+    return status_code;
 }
 
 TbotBleSubstate Application::GetBleSubstate() const {
@@ -1240,6 +1814,11 @@ void Application::ActivationTask() {
 
     // Check for new firmware version
     CheckNewVersion();
+
+    // Claimed devices can override the OTA-provided websocket.url from the
+    // backend's authenticated runtime config. If this fails, keep the existing
+    // OTA/NVS value and compile-time placeholder fallback chain.
+    RefreshWebsocketUrlFromConfigFetch();
 
     // Initialize the protocol
     InitializeProtocol();
@@ -1302,6 +1881,21 @@ void Application::CheckAssetsVersion() {
 
     // Apply assets
     assets.Apply();
+
+    // Cold-boot first-wake latency fix: prewarm the AFE wake-word pipeline here,
+    // on the prio-2 activation task, so the expensive one-time AFE create + the
+    // audio_detection fetch-task spawn overlap the OTA/protocol network waits that
+    // still run before Idle. Without this the AFE is built lazily on the FIRST
+    // EnableWakeWordDetection(true) at the prio-10 Idle transition, and the very
+    // first "Hi ESP" spoken right at Idle races AFE init and is dropped (1-2
+    // tries). Strictly gated on IsDeviceClaimed() so an UNCLAIMED robot never
+    // builds/runs the mic (BLE+AFE-FEED contention gate). Prewarm does NOT Start()
+    // the mic — the locked Idle gate still owns enabling it — so the FEED ring
+    // stays empty until then and OQ1 / the contention fix are untouched.
+    if (IsDeviceClaimed()) {
+        audio_service_.PrewarmWakeWord();
+    }
+
     display->SetChatMessage("system", "");
     display->SetEmotion("microchip_ai");
 }
@@ -1417,12 +2011,29 @@ void Application::InitializeProtocol() {
         protocol_ = std::make_unique<MqttProtocol>();
     }
 
+    if (is_websocket_protocol && lesson_message_queue_ == nullptr &&
+        lesson_message_task_handle_ == nullptr) {
+        lesson_message_queue_ = xQueueCreate(kLessonMessageQueueDepth, sizeof(char*));
+        if (lesson_message_queue_ == nullptr) {
+            ESP_LOGE(TAG, "lesson_worker queue create failed");
+        } else if (xTaskCreateWithCaps(&Application::LessonMessageTask, "lesson_worker",
+                                       kLessonMessageWorkerStackBytes, this,
+                                       tskIDLE_PRIORITY + 2, &lesson_message_task_handle_,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+            ESP_LOGE(TAG, "lesson_worker task create failed");
+            vQueueDelete(lesson_message_queue_);
+            lesson_message_queue_ = nullptr;
+            lesson_message_task_handle_ = nullptr;
+        }
+    }
+
     protocol_->OnConnected([this]() {
         backend_offline_.store(false);  // healthy session -> ONLINE, not retry
         DismissAlert();
         // Device session is up -> begin periodic heartbeat (C5). The sender is
         // self-gated: it only POSTs once claim backend credentials are in NVS.
         StartHeartbeat();
+        DispatchDeviceHeartbeat();
     });
 
     protocol_->OnNetworkError([this](const std::string& message) {
@@ -1446,13 +2057,19 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
-        // Channel is up (including the boot-time preconnect, which bypasses
-        // ContinueOpenAudioChannel) -> mark intent so an unexpected drop while
-        // idle auto-reconnects instead of stranding the device offline.
-        online_intent_.store(true);
+        // User-driven listen/wake sessions own reconnect intent. Passive lesson
+        // preconnect only makes the device reachable for server lesson pull/nudge;
+        // it must not later reconnect into Listening without a wake/button action.
+        if (passive_ws_intent_.load()) {
+            ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
+            StopHeartbeat();
+        } else {
+            online_intent_.store(true);
+            StartHeartbeat();
+            DispatchDeviceHeartbeat();
+        }
         backend_offline_.store(false);
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        StartHeartbeat();
         // Once the realtime WS is up, STOP the blocking claim-config HTTP/TLS poll.
         // It runs on the main task and was starving the Opus codec task (growing
         // encode_drop -> dropped mic uplink -> "I speak but no response"). The
@@ -1483,6 +2100,15 @@ void Application::InitializeProtocol() {
             // WSS-7: drop stale mic backlog so a future session does not replay
             // seconds-old uplink audio after the channel reopens.
             while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+            // Claimed idle robots keep a passive lesson socket so admin/backend
+            // nudges can reach the LCD without putting the device into Listening.
+            // Idle WebSocket timeout is an unexpected drop for that passive path;
+            // reopen the same passive channel instead of using voice reconnect.
+            if (passive_ws_intent_.load()) {
+                ESP_LOGW(TAG, "passive_lesson_ws_dropped_unexpected -> passive reconnect");
+                StartPassiveLessonWebsocket();
+                return;
+            }
             // Sustained operation: an UNEXPECTED drop (server/tunnel closed the WS,
             // NOT a user/system close) leaves online_intent_ true -> auto-reconnect
             // with backoff so a 20-60 min conversation is not permanently cut off.
@@ -1507,6 +2133,14 @@ void Application::InitializeProtocol() {
         }
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
+            // Guard the state deref: a tts frame with no "state" or a non-string
+            // state null-derefs state->valuestring below (deep-audit #4 HIGH — a
+            // malformed/MITM frame crashes the audio task). cJSON_IsString covers
+            // both the missing-key (null node) and wrong-type cases.
+            if (!cJSON_IsString(state)) {
+                ESP_LOGW(TAG, "tts frame missing or non-string state; dropping");
+                return;
+            }
             if (strcmp(state->valuestring, "start") == 0) {
                 audio_service_.ResetDecoder();
                 // Bump the response generation and publish it to the audio
@@ -1554,7 +2188,16 @@ void Application::InitializeProtocol() {
                     last_speaking_activity_ms_.store(0);
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
+                            if (lesson_interactive_listen_pending_.exchange(false)) {
+                                SetDeviceState(kDeviceStateListening);
+                                if (protocol_) {
+                                    protocol_->SendStartListening(kListeningModeManualStop);
+                                }
+                                audio_service_.EnableVoiceProcessing(true);
+                                ESP_LOGI(TAG, "lesson prompt complete -> listening");
+                            } else {
+                                SetDeviceState(kDeviceStateIdle);
+                            }
                         } else {
                             SetDeviceState(kDeviceStateListening);
                             ESP_LOGI(TAG, "mic_loop_resumed ts=%lld",
@@ -1621,12 +2264,21 @@ void Application::InitializeProtocol() {
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
         } else if (strcmp(type->valuestring, "custom") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
-            ESP_LOGI(TAG, "Received custom message: %s", cJSON_PrintUnformatted(root));
+            char* root_str = cJSON_PrintUnformatted(root);
+            ESP_LOGI(TAG, "Received custom message: %s", root_str ? root_str : "(null)");
+            if (root_str != nullptr) {
+                cJSON_free(root_str);
+            }
             if (cJSON_IsObject(payload)) {
                 if (HandleRobotActionMessage(payload)) {
                     return;
                 }
-                Schedule([this, display, payload_str = std::string(cJSON_PrintUnformatted(payload))]() {
+                char* payload_str_raw = cJSON_PrintUnformatted(payload);
+                std::string payload_str = (payload_str_raw != nullptr) ? std::string(payload_str_raw) : std::string();
+                if (payload_str_raw != nullptr) {
+                    cJSON_free(payload_str_raw);
+                }
+                Schedule([this, display, payload_str = std::move(payload_str)]() {
                     display->SetChatMessage("system", payload_str.c_str());
                 });
             } else {
@@ -1636,28 +2288,26 @@ void Application::InitializeProtocol() {
         } else if (strncmp(type->valuestring, "lesson_", 7) == 0) {
             // US-006 Slice-01 (S10): additive lesson_* dispatch. Placed immediately
             // ABOVE the unknown-type no-op so un-upgraded firmware keeps dropping
-            // lesson_* silently (backward-compat). Do NOT move the no-op below it.
-            HandleLessonMessage(root);
+            // lesson_* silently (backward-compat). Queue it so HTTP/TLS image fetch
+            // and decode never run on the WebSocket receive callback / lwIP stack.
+            EnqueueLessonMessage(root);
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
     });
     
-    // TBOT BLE+audio contention fix: while the device is UNCLAIMED it has no
-    // lessons and needs no audio. On real hardware, running the realtime audio
-    // WS preconnect (Wi-Fi audio traffic) at the same time as BLE advertising
-    // (claimable standby) + the AFE mic pipeline overloads the chip: the AFE
-    // FEED ringbuffer starves and floods the log with "Ringbuffer of AFE(FEED)
-    // is full", then the robot errors. So for the realtime WebSocket protocol we
-    // SKIP the boot-time audio preconnect until the device is claimed. This
-    // removes the Wi-Fi audio traffic that fights BLE during pairing. The
-    // protocol object itself is fully constructed (callbacks wired), so
-    // IsAudioChannelOpened()/SendAudio()/etc. stay valid; we just do not open the
-    // channel yet. A fresh claim confirm brings audio up explicitly (see
-    // ConfirmPendingTbotClaim). MQTT (control channel) is never gated here.
-    if (is_websocket_protocol && !IsDeviceClaimed()) {
-        ESP_LOGI(TAG, "Unclaimed: skipping realtime audio WS preconnect (BLE+audio "
-                      "contention); audio starts on claim confirm");
+    // WebSocket Start() opens the realtime audio channel. Unclaimed devices keep
+    // it closed until wake/button so BLE claim and local wake-word setup own the
+    // radio. Claimed devices open a PASSIVE channel so ESP-server connect-time
+    // lesson pull and backend lesson nudges have a route without entering
+    // Listening. MQTT Start() is a control-channel connect, so it still runs here.
+    if (is_websocket_protocol) {
+        if (IsDeviceClaimed()) {
+            ESP_LOGI(TAG, "Claimed device: opening passive WebSocket for lesson/nudge");
+            StartPassiveLessonWebsocket();
+        } else {
+            ESP_LOGI(TAG, "WebSocket audio starts on wake word or explicit listen");
+        }
     } else {
         protocol_->Start();
     }
@@ -1667,6 +2317,39 @@ bool Application::HandleRobotActionMessage(const cJSON* root) {
     auto action = cJSON_GetObjectItem(root, "action");
     if (!cJSON_IsString(action)) {
         return false;
+    }
+
+    if (strcmp(action->valuestring, "head_set_angle") == 0) {
+        auto angle = cJSON_GetObjectItem(root, "angle");
+        int target_angle = cJSON_IsNumber(angle) ? angle->valueint : 90;
+        Schedule([this, target_angle]() {
+            SendHeadSetAngle(target_angle);
+        });
+        return true;
+    }
+
+    auto schedule_percent_action = [this, root](bool (Application::*method)(int), int default_percent) {
+        auto percent = cJSON_GetObjectItem(root, "percent");
+        int target_percent = cJSON_IsNumber(percent) ? percent->valueint : default_percent;
+        Schedule([this, method, target_percent]() {
+            (this->*method)(target_percent);
+        });
+    };
+    if (strcmp(action->valuestring, "left_arm_set_percent") == 0) {
+        schedule_percent_action(&Application::SendLeftArmSetPercent, 100);
+        return true;
+    }
+    if (strcmp(action->valuestring, "right_arm_set_percent") == 0) {
+        schedule_percent_action(&Application::SendRightArmSetPercent, 100);
+        return true;
+    }
+    if (strcmp(action->valuestring, "both_arms_set_percent") == 0) {
+        schedule_percent_action(&Application::SendBothArmsSetPercent, 100);
+        return true;
+    }
+    if (strcmp(action->valuestring, "head_set_percent") == 0) {
+        schedule_percent_action(&Application::SendHeadSetPercent, 50);
+        return true;
     }
 
     using RobotActionHandler = bool (Application::*)();
@@ -1680,6 +2363,9 @@ bool Application::HandleRobotActionMessage(const cJSON* root) {
         {"right_arm_lower", &Application::SendRightArmLower},
         {"both_arms_raise", &Application::SendBothArmsRaise},
         {"both_arms_lower", &Application::SendBothArmsLower},
+        {"head_turn_left", &Application::SendHeadTurnLeft},
+        {"head_turn_right", &Application::SendHeadTurnRight},
+        {"head_center", &Application::SendHeadCenter},
     };
 
     for (const auto& handler : handlers) {
@@ -1724,6 +2410,38 @@ bool Application::SendBothArmsRaise() {
 
 bool Application::SendBothArmsLower() {
     return robot_uart_.SendBothArmsLower();
+}
+
+bool Application::SendLeftArmSetPercent(int percent) {
+    return robot_uart_.SendLeftArmSetPercent(percent);
+}
+
+bool Application::SendRightArmSetPercent(int percent) {
+    return robot_uart_.SendRightArmSetPercent(percent);
+}
+
+bool Application::SendBothArmsSetPercent(int percent) {
+    return robot_uart_.SendBothArmsSetPercent(percent);
+}
+
+bool Application::SendHeadTurnLeft() {
+    return robot_uart_.SendHeadTurnLeft();
+}
+
+bool Application::SendHeadTurnRight() {
+    return robot_uart_.SendHeadTurnRight();
+}
+
+bool Application::SendHeadCenter() {
+    return robot_uart_.SendHeadCenter();
+}
+
+bool Application::SendHeadSetAngle(int angle) {
+    return robot_uart_.SendHeadSetAngle(angle);
+}
+
+bool Application::SendHeadSetPercent(int percent) {
+    return robot_uart_.SendHeadSetPercent(percent);
 }
 
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
@@ -1784,7 +2502,17 @@ void Application::StartListening() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
+void Application::PrepareLessonInteractiveListening() {
+    lesson_interactive_listen_pending_.store(true);
+    StartListening();
+}
+
+void Application::CancelLessonInteractiveListening() {
+    lesson_interactive_listen_pending_.store(false);
+}
+
 void Application::StopListening() {
+    CancelLessonInteractiveListening();
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
@@ -1872,8 +2600,35 @@ struct ConnectContext {
     Application* app;
     ListeningMode mode;
     uint32_t generation;
+    std::string wake_word;
+    bool wake_word_invoke = false;
+    bool passive_preconnect = false;
 };
 }  // namespace
+
+void Application::StartPassiveLessonWebsocket() {
+    if (protocol_ == nullptr) {
+        ESP_LOGE(TAG, "Protocol not initialized");
+        return;
+    }
+    if (protocol_->IsAudioChannelOpened() || connect_in_flight_.load()) {
+        return;
+    }
+    passive_ws_intent_.store(true);
+    online_intent_.store(false);
+    uint32_t gen = ++connect_generation_;
+    connect_in_flight_.store(true);
+    ArmConnectWatchdog();
+    auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
+    if (xTaskCreate(&Application::OpenChannelTask, "lesson_ws", 4096, ctx,
+                    tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+        delete ctx;
+        connect_in_flight_.store(false);
+        passive_ws_intent_.store(false);
+        CancelConnectWatchdog();
+        ESP_LOGE(TAG, "lesson_ws task create failed");
+    }
+}
 
 void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     // Check state again in case it was changed during scheduling
@@ -1902,7 +2657,8 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     uint32_t gen = ++connect_generation_;
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
-    auto* ctx = new ConnectContext{this, mode, gen};
+    passive_ws_intent_.store(false);
+    auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
     if (xTaskCreate(&Application::OpenChannelTask, "ws_open", 4096, ctx,
                     tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
         delete ctx;
@@ -1918,13 +2674,35 @@ void Application::OpenChannelTask(void* arg) {
     Application* self = ctx->app;
     ListeningMode mode = ctx->mode;
     uint32_t gen = ctx->generation;
+    std::string wake_word = ctx->wake_word;
+    bool wake_word_invoke = ctx->wake_word_invoke;
+    bool passive_preconnect = ctx->passive_preconnect;
     delete ctx;
 
     // The ONLY blocking call, now off the app task.
-    bool ok = self->protocol_ && self->protocol_->OpenAudioChannel();
+    bool ok = false;
+    int max_attempts = wake_word_invoke ? kWakeWordAudioChannelOpenMaxAttempts : 1;
+    for (int attempt = 1;
+         self->protocol_ && !self->protocol_->IsAudioChannelOpened() && attempt <= max_attempts;
+         ++attempt) {
+        ok = self->protocol_->OpenAudioChannel();
+        if (ok) {
+            break;
+        }
+        if (wake_word_invoke) {
+            ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d",
+                     attempt, kWakeWordAudioChannelOpenMaxAttempts);
+        }
+        if (wake_word_invoke && attempt < max_attempts) {
+            vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
+        }
+    }
+    if (self->protocol_ && self->protocol_->IsAudioChannelOpened()) {
+        ok = true;
+    }
     self->connect_in_flight_.store(false);  // worker is done using protocol_
 
-    self->Schedule([self, ok, mode, gen]() {
+    self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
         self->CancelConnectWatchdog();
         // A ResetProtocol arrived while we were mid-connect and deferred the
         // actual reset to us (now safe: the worker no longer touches protocol_).
@@ -1935,18 +2713,38 @@ void Application::OpenChannelTask(void* arg) {
         if (gen != self->connect_generation_.load()) {
             return;  // superseded by a newer connect or the watchdog
         }
-        if (self->GetDeviceState() != kDeviceStateConnecting) {
+        if (!passive_preconnect && self->GetDeviceState() != kDeviceStateConnecting) {
             return;
         }
         if (ok) {
             self->backend_offline_.store(false);
             self->reconnect_attempt_ = 0;
-            self->SetListeningMode(mode);
+            if (passive_preconnect) {
+                ESP_LOGI(TAG, "passive_lesson_websocket_opened");
+            } else if (wake_word_invoke) {
+                self->FinishWakeWordInvoke(wake_word);
+            } else {
+                self->SetListeningMode(mode);
+            }
         } else {
-            ESP_LOGW(TAG, "open_audio_channel_failed -> idle + backoff");
+            if (passive_preconnect) {
+                ESP_LOGW(TAG, "passive_lesson_websocket_failed");
+                self->passive_ws_intent_.store(false);
+            } else if (wake_word_invoke) {
+                ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");
+            } else {
+                ESP_LOGW(TAG, "open_audio_channel_failed -> idle + backoff");
+            }
             self->backend_offline_.store(true);
-            self->SetDeviceState(kDeviceStateIdle);
-            self->ScheduleReconnect(mode);   // WSS-4: bounded retry
+            if (wake_word_invoke) {
+                self->audio_service_.EnableWakeWordDetection(true);
+            }
+            if (self->GetDeviceState() == kDeviceStateConnecting) {
+                self->SetDeviceState(kDeviceStateIdle);
+            }
+            if (!wake_word_invoke && !passive_preconnect) {
+                self->ScheduleReconnect(mode);   // WSS-4: bounded retry
+            }
         }
     });
     vTaskDelete(nullptr);
@@ -1968,7 +2766,10 @@ void Application::ArmConnectWatchdog() {
         }
     }
     esp_timer_stop(connect_watchdog_timer_);
-    esp_timer_start_once(connect_watchdog_timer_, 12000000);  // 12s > sum of dep waits
+    // OpenAudioChannel can spend up to 10s waiting for server hello after the
+    // socket connect. Wake-word invokes may retry; the watchdog must outlive that
+    // budget or the first valid "Hi ESP" is reset to Idle before success returns.
+    esp_timer_start_once(connect_watchdog_timer_, kConnectWatchdogTimeoutUs);
 }
 
 void Application::CancelConnectWatchdog() {
@@ -2078,8 +2879,18 @@ void Application::HandleStartListeningEvent() {
         }
         SetListeningMode(kListeningModeManualStop);
     } else if (state == kDeviceStateSpeaking) {
+        if (lesson_interactive_listen_pending_.load()) {
+            ESP_LOGI(TAG, "lesson prompt still speaking; defer listening");
+            listening_mode_ = kListeningModeManualStop;
+            return;
+        }
         AbortSpeaking(kAbortReasonNone);
         SetListeningMode(kListeningModeManualStop);
+    } else if (state == kDeviceStateListening) {
+        ESP_LOGI(TAG, "lesson/manual listening rearm");
+        listening_mode_ = kListeningModeManualStop;
+        protocol_->SendStartListening(kListeningModeManualStop);
+        audio_service_.EnableVoiceProcessing(true);
     }
 }
 
@@ -2121,7 +2932,8 @@ void Application::HandleWakeWordDetectedEvent() {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update),
-            // then continue with OpenAudioChannel which may block for ~1 second
+            // then continue on a worker because OpenAudioChannel can block on
+            // TCP/TLS/server hello long enough to starve the app/audio loop.
             Schedule([this, wake_word]() {
                 ContinueWakeWordInvoke(wake_word);
             });
@@ -2158,20 +2970,39 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         return;
     }
 
-    for (int attempt = 1;
-         !protocol_->IsAudioChannelOpened() && attempt <= kWakeWordAudioChannelOpenMaxAttempts;
-         ++attempt) {
-        if (protocol_->OpenAudioChannel()) {
-            break;
+    if (!protocol_->IsAudioChannelOpened()) {
+        if (connect_in_flight_.load()) {
+            ESP_LOGW(TAG, "wake_audio_channel_open_deferred: connect already in flight");
+            return;
         }
-        ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d",
-                 attempt, kWakeWordAudioChannelOpenMaxAttempts);
-        if (attempt < kWakeWordAudioChannelOpenMaxAttempts) {
-            vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
+        reconnect_mode_ = GetDefaultListeningMode();
+        uint32_t gen = ++connect_generation_;
+        connect_in_flight_.store(true);
+        ArmConnectWatchdog();
+        passive_ws_intent_.store(false);
+        auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
+        if (xTaskCreate(&Application::OpenChannelTask, "wake_ws_open", 4096, ctx,
+                        tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+            delete ctx;
+            connect_in_flight_.store(false);
+            CancelConnectWatchdog();
+            ESP_LOGE(TAG, "wake_ws_open task create failed -> idle");
+            audio_service_.EnableWakeWordDetection(true);
+            SetDeviceState(kDeviceStateIdle);
         }
+        return;
     }
 
-    if (!protocol_->IsAudioChannelOpened()) {
+    FinishWakeWordInvoke(wake_word);
+}
+
+void Application::FinishWakeWordInvoke(const std::string& wake_word) {
+    auto state = GetDeviceState();
+    if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
+        return;
+    }
+
+    if (!protocol_ || !protocol_->IsAudioChannelOpened()) {
         audio_service_.EnableWakeWordDetection(true);
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -2185,12 +3016,12 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     }
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
-    SetListeningMode(GetDefaultListeningMode());
+    SetListeningMode(kListeningModeAutoStop);
 #else
     // Set flag to play popup sound after state changes to listening
     // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
     play_popup_on_listening_ = true;
-    SetListeningMode(GetDefaultListeningMode());
+    SetListeningMode(kListeningModeAutoStop);
 #endif
 }
 
@@ -2446,6 +3277,8 @@ void Application::AbortSpeaking(AbortReason reason) {
 }
 
 void Application::SetListeningMode(ListeningMode mode) {
+    passive_ws_intent_.store(false);
+    online_intent_.store(true);
     listening_mode_ = mode;
     SetDeviceState(kDeviceStateListening);
 }
@@ -2612,6 +3445,7 @@ void Application::PlaySound(const std::string_view& sound) {
 void Application::CloseAudioChannelByIntent() {
     // User/system-initiated close: we no longer want an open channel, so
     // OnAudioChannelClosed must NOT auto-reconnect. Cancel any pending retry.
+    passive_ws_intent_.store(false);
     online_intent_.store(false);
     reconnect_attempt_ = 0;
     if (reconnect_timer_ != nullptr) {

@@ -138,6 +138,8 @@ private:
 
     static uint16_t _crc_checksum(uint8_t iv8, uint8_t *data, int len);
 
+    bool _require_secure_session_for_credentials();
+
     void _handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t *param);
 
     static int _get_softap_conn_num();
@@ -147,6 +149,8 @@ private:
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason);
+    void StartStationConnectFromCredentials(const char* reason);
+    void ScheduleStationConnectFallback();
     void _send_wifi_list();
     void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
@@ -185,10 +189,16 @@ private:
         int dh_param_len;
         uint8_t iv[16];
         mbedtls_dhm_context *dhm;
-        esp_aes_context *aes;
+        // Use the mbedTLS AES context type (matches the mbedtls_aes_* API used in
+        // blufi.cpp). With CONFIG_MBEDTLS_HARDWARE_AES on, this is aliased to
+        // esp_aes_context; with HW AES off (to free internal/DMA RAM for the WSS
+        // TLS path) it is the software context. Correct under both. CFB128 output
+        // is identical, so BluFi provisioning is unaffected.
+        mbedtls_aes_context *aes;
     };
 
     BlufiSecurity *m_sec;
+    bool m_blufi_security_negotiated;
 
     // Bootstrap token received via BluFi custom-data TLV tag=0x01 (RAM only, never written to NVS)
     std::string bootstrap_token_;
@@ -207,6 +217,7 @@ private:
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;
     bool m_sta_is_connecting;
+    bool m_wifi_connect_task_started = false;
     esp_blufi_extra_info_t m_sta_conn_info{};
 
     // BLE hard-timeout safety gate (#1)

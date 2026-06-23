@@ -15,6 +15,14 @@ public:
     bool SendRightArmLower();
     bool SendBothArmsRaise();
     bool SendBothArmsLower();
+    bool SendLeftArmSetPercent(int percent);
+    bool SendRightArmSetPercent(int percent);
+    bool SendBothArmsSetPercent(int percent);
+    bool SendHeadTurnLeft();
+    bool SendHeadTurnRight();
+    bool SendHeadCenter();
+    bool SendHeadSetAngle(int angle);
+    bool SendHeadSetPercent(int percent);
     bool SendServoSweep(const std::string& part, const std::string& action, int from, int to, int step, int delay_ms);
 
 private:

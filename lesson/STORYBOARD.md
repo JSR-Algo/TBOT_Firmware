@@ -13,29 +13,29 @@
 
 | Step | Lesson action | Prompt summary | Robot pose | Object |
 |---|---|---|---|---|
-| s1 | Greeting | TeeBot says hello and invites the child to explore. | teach, flyIn | barn |
-| s2 | Review | Child waves and says "Hello, TeeBot!" | teach | barn |
+| s1 | Greeting | TeeBot says hello and starts exploring together. | teach, flyIn | barn |
+| s2 | Review | TeeBot gives a friendly hello wave. | teach | barn |
 | s3 | Focus | Teach barn, farm, hay. | teach | barn |
-| s4 | Model | Model "barn" with strong /b/ and final /n/. | teach | barn |
-| s5 | Listen | Child listens for final sound in b-a-r-n. | listening | barn |
-| s6 | Repeat | Child says "barn"; final /n/ reminder. | listening | barn |
-| s7 | Fill blank | "At the ___, I see animals." | thinking | barn |
-| s8 | Feedback | Reinforce final consonants and effort. | teach | barn |
+| s4 | Model | TeeBot models "barn" and tells the child they can try next. | teach | barn |
+| s5 | Listen | Child tries saying "barn" while TeeBot listens. | listening | barn |
+| s6 | Repeat | Child says "barn" together with TeeBot. | listening | barn |
+| s7 | Fill blank | "This is a ___. You can say barn." TeeBot waits for the child's voice. | thinking | barn |
+| s8 | Feedback | Acknowledge the child's response without judging the sound. | teach | barn |
 | s9 | Celebrate | Celebrate Barn Star and garden growth. | celebrate | barn |
 
 ## Exact Teaching Target
 
-Learning objective: place words plus Vietnamese L1-aware final consonant
-practice.
+Learning objective: low-pressure listening and speaking practice with place
+words.
 
 Primary object: `barn`
 
 Correct answer in step s7: `barn`
 
-L1 transfer target: `final_consonants`
+Practice mode: `guided_speaking`
 
-Safe fallback if speech scoring is not available: let the child listen again,
-say the word with TeeBot, and continue with the local fill-blank choice.
+Safe fallback if speech recognition is not available: let the child listen
+again, say the word with TeeBot, and continue with the local fill-blank choice.
 
 ## Robot Display Notes
 
@@ -46,4 +46,3 @@ For a small TFT robot display, use the same order:
 3. Draw TeeBot bottom-left, with the pose for the current step.
 4. Show only short captions on robot hardware; keep the full text in the mobile
    app or a parent controller if the display is too small.
-

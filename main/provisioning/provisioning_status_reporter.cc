@@ -44,6 +44,15 @@ bool ProvisioningStatusReporter::Report(Status status,
     }
 
     char* raw = cJSON_PrintUnformatted(root);
+    // cJSON_PrintUnformatted returns nullptr on allocation failure. Guard
+    // before constructing std::string (strlen(nullptr) would crash), mirroring
+    // BuildTbotClaimConfirmBody in claim_confirmation_reporter.cc. An empty body
+    // would be a malformed request, so bail out cleanly instead.
+    if (raw == nullptr) {
+        ESP_LOGE(TAG, "Failed to serialize provisioning report body");
+        cJSON_Delete(root);
+        return false;
+    }
     std::string body(raw);
     cJSON_free(raw);
     cJSON_Delete(root);

@@ -103,11 +103,19 @@ void AudioService::Initialize(AudioCodec* codec) {
 #endif
 
     audio_processor_->OnOutput([this](std::vector<int16_t>&& data) {
+        static uint32_t output_count = 0;
+        output_count++;
+        if (output_count == 1 || output_count % 25 == 0) {
+            ESP_LOGI(TAG, "voice_processor_output count=%lu samples=%u",
+                     static_cast<unsigned long>(output_count),
+                     static_cast<unsigned>(data.size()));
+        }
         PushTaskToEncodeQueue(kAudioTaskTypeEncodeToSendQueue, std::move(data));
     });
 
     audio_processor_->OnVadStateChange([this](bool speaking) {
         voice_detected_ = speaking;
+        ESP_LOGI(TAG, "voice_vad_state speaking=%d", speaking ? 1 : 0);
         if (callbacks_.on_vad_change) {
             callbacks_.on_vad_change(speaking);
         }
@@ -453,6 +461,14 @@ void AudioService::OpusCodecTask() {
                     packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
 
                     if (task->type == kAudioTaskTypeEncodeToSendQueue) {
+                        static uint32_t uplink_packet_count = 0;
+                        uplink_packet_count++;
+                        if (uplink_packet_count == 1 || uplink_packet_count % 25 == 0) {
+                            ESP_LOGI(TAG, "audio_uplink_packet_queued count=%lu payload_bytes=%u timestamp=%lu",
+                                     static_cast<unsigned long>(uplink_packet_count),
+                                     static_cast<unsigned>(packet->payload.size()),
+                                     static_cast<unsigned long>(packet->timestamp));
+                        }
                         {
                             std::lock_guard<std::mutex> lock2(audio_queue_mutex_);
                             audio_send_queue_.push_back(std::move(packet));
@@ -480,6 +496,17 @@ void AudioService::OpusCodecTask() {
 }
 
 void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
+    // Defense in depth: the (sample_rate, frame_duration) pair originates from
+    // the server hello and is validated at both protocol boundaries, but a
+    // non-positive value reaching here would make decoder_frame_size_ <= 0 and
+    // the subsequent task->pcm.resize(decoder_frame_size_) OOM (huge size_t cast)
+    // or crash. Reject non-positive inputs so decoder_frame_size_ stays > 0 and
+    // the decode loop skips work it cannot do (opus_decoder_ left null).
+    if (sample_rate <= 0 || frame_duration <= 0) {
+        ESP_LOGE(TAG, "Refusing invalid decode params: sample_rate=%d frame_duration=%d",
+                 sample_rate, frame_duration);
+        return;
+    }
     if (decoder_sample_rate_ == sample_rate && decoder_duration_ms_ == frame_duration) {
         return;
     }
@@ -498,6 +525,19 @@ void AudioService::SetDecodeSampleRate(int sample_rate, int frame_duration) {
     decoder_sample_rate_ = sample_rate;
     decoder_duration_ms_ = frame_duration;
     decoder_frame_size_ = decoder_sample_rate_ / 1000 * frame_duration;
+    // Guard against integer truncation making the frame size non-positive (e.g.
+    // sample_rate < 1000). A zero/negative size passed to vector::resize in the
+    // decode loop would crash; close the decoder and bail so the loop skips it.
+    if (decoder_frame_size_ <= 0) {
+        ESP_LOGE(TAG, "Computed non-positive decoder_frame_size_ (%d) for rate=%d dur=%d; disabling decoder",
+                 decoder_frame_size_, decoder_sample_rate_, frame_duration);
+        std::unique_lock<std::mutex> close_lock(decoder_mutex_);
+        if (opus_decoder_ != nullptr) {
+            esp_opus_dec_close(opus_decoder_);
+            opus_decoder_ = nullptr;
+        }
+        return;
+    }
 
     auto codec = Board::GetInstance().GetAudioCodec();
     if (decoder_sample_rate_ != codec->output_sample_rate()) {
@@ -642,6 +682,32 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     } else {
         wake_word_->Stop();
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+    }
+}
+
+void AudioService::PrewarmWakeWord() {
+    // Runs the one-time lazy-init body from EnableWakeWordDetection(true) MINUS
+    // Start(): build the AFE (esp_afe create_from_config) and spawn the
+    // audio_detection fetch task ahead of Idle, on the prio-2 activation task,
+    // so the first wake-word check at Idle is just a cheap Start() instead of a
+    // synchronous AFE create on the prio-10 transition that drops the first
+    // "Hi ESP". Deliberately does NOT call wake_word_->Start() and does NOT set
+    // AS_EVENT_WAKE_WORD_RUNNING: the FEED ring must stay empty until the locked
+    // IsDeviceClaimed()-gated Idle gate enables the mic, preserving the BLE/AFE
+    // contention fix. Callers gate this on IsDeviceClaimed().
+    if (!wake_word_) {
+        CreateWakeWordIfAvailable();
+    }
+    if (!wake_word_) {
+        return;
+    }
+    if (!wake_word_initialized_) {
+        if (!wake_word_->Initialize(codec_, models_list_)) {
+            ESP_LOGE(TAG, "Failed to prewarm wake word");
+            return;
+        }
+        wake_word_initialized_ = true;
+        ESP_LOGI(TAG, "Wake word prewarmed (AFE built; not started)");
     }
 }
 
@@ -804,8 +870,6 @@ void AudioService::CheckAndUpdateAudioPowerState() {
 
 void AudioService::SetModelsList(srmodel_list_t* models_list) {
     models_list_ = models_list;
-
-    CreateWakeWordIfAvailable();
 }
 
 void AudioService::CreateWakeWordIfAvailable() {

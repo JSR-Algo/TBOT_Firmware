@@ -67,19 +67,20 @@ def test_blufi_wifi_list_requests_refresh_stale_cached_scan_results():
     assert get_list.index("!m_ap_records.empty() && IsWifiScanCacheFresh()") < get_list.index("_send_wifi_list();")
     assert "m_ap_records.clear();" in get_list
 
-def test_blufi_init_resets_wifi_scan_cache_capture_after_previous_connect_attempt():
+def test_blufi_init_resets_wifi_scan_cache_capture_without_starting_eager_scan():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "esp_err_t Blufi::init")
 
     assert "m_scan_should_save_ssid = true;" in body
-    assert body.index("m_scan_should_save_ssid = true;") < body.index("start_wifi_scan();")
+    assert body.index("m_scan_should_save_ssid = true;") < body.index("_controller_init()")
+    assert "start_wifi_scan();" not in body
 
 def test_blufi_init_resets_ble_timeout_latch_for_fresh_setup_window():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "esp_err_t Blufi::init")
 
     assert "ble_timed_out_ = false;" in body
-    assert body.index("ble_timed_out_ = false;") < body.index("start_wifi_scan();")
+    assert body.index("ble_timed_out_ = false;") < body.index("_controller_init()")
 
 def test_blufi_wifi_list_marks_inflight_scan_results_as_app_visible():
     source = read("main/boards/common/blufi.cpp")

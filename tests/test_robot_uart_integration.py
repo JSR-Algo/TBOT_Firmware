@@ -21,6 +21,14 @@ def test_main_firmware_declares_robot_uart_bridge():
         "SendRightArmLower",
         "SendBothArmsRaise",
         "SendBothArmsLower",
+        "SendLeftArmSetPercent",
+        "SendRightArmSetPercent",
+        "SendBothArmsSetPercent",
+        "SendHeadTurnLeft",
+        "SendHeadTurnRight",
+        "SendHeadCenter",
+        "SendHeadSetAngle",
+        "SendHeadSetPercent",
     ]:
         assert method in header
         assert method in source
@@ -35,8 +43,16 @@ def test_main_firmware_declares_robot_uart_bridge():
     assert '\\"part\\":\\"' in source
     assert 'left_arm' in source
     assert 'right_arm' in source
+    assert 'head' in source
     assert '\\"action\\":\\"' in source
     assert 'action == "raise"' in source
+    assert 'turn_left' in source
+    assert 'turn_right' in source
+    assert 'center' in source
+    assert 'set_angle' in source
+    assert 'set_percent' in source
+    assert 'clamp_servo_angle' in source
+    assert 'clamp_percent' in source
     assert 'lower' in source
 
 
@@ -57,11 +73,39 @@ def test_application_triggers_left_arm_from_websocket_and_mcp():
         "right_arm_lower",
         "both_arms_raise",
         "both_arms_lower",
+        "left_arm_set_percent",
+        "right_arm_set_percent",
+        "both_arms_set_percent",
+        "head_turn_left",
+        "head_turn_right",
+        "head_center",
+        "head_set_angle",
+        "head_set_percent",
     ]:
         assert f'"{action}"' in app_cc
         assert f"self.robot.{action}" in mcp_cc
     assert "SendBothArmsRaise" in app_cc
     assert "SendLeftArmRaise" in app_cc
+    assert "SendLeftArmSetPercent" in app_cc
+    assert "SendRightArmSetPercent" in app_cc
+    assert "SendBothArmsSetPercent" in app_cc
+    assert "SendHeadTurnLeft" in app_cc
+    assert "SendHeadSetAngle" in app_cc
+    assert "SendHeadSetPercent" in app_cc
+    assert "quay đầu trái" in mcp_cc
+    assert "quay đầu phải" in mcp_cc
+    assert "đưa đầu về giữa" in mcp_cc
+    assert "self.robot.head_set_angle" in mcp_cc
+    assert 'Property("angle", kPropertyTypeInteger, 90, 0, 180)' in mcp_cc
+    assert "chỉnh góc quay đầu" in mcp_cc
+    assert "self.robot.head_set_percent" in mcp_cc
+    assert 'Property("percent", kPropertyTypeInteger, 50, 0, 100)' in mcp_cc
+    assert "quay đầu 50%" in mcp_cc
+    assert "self.robot.left_arm_set_percent" in mcp_cc
+    assert "self.robot.right_arm_set_percent" in mcp_cc
+    assert "self.robot.both_arms_set_percent" in mcp_cc
+    assert 'Property("percent", kPropertyTypeInteger, 100, 0, 100)' in mcp_cc
+    assert "nâng tay trái 50%" in mcp_cc
     assert "dơ tay trái" in mcp_cc
     assert "dơ tay phải" in mcp_cc
     assert "dơ cả hai tay" in mcp_cc
@@ -82,6 +126,14 @@ def test_llm_emotion_messages_do_not_trigger_arm_gestures():
     assert "SendLeftArmLower" not in body
     assert "SendRightArmLower" not in body
     assert "SendBothArmsLower" not in body
+    assert "SendLeftArmSetPercent" not in body
+    assert "SendRightArmSetPercent" not in body
+    assert "SendBothArmsSetPercent" not in body
+    assert "SendHeadTurnLeft" not in body
+    assert "SendHeadTurnRight" not in body
+    assert "SendHeadCenter" not in body
+    assert "SendHeadSetAngle" not in body
+    assert "SendHeadSetPercent" not in body
 
 
 def test_right_arm_uses_mirrored_servo_sweep_direction():
@@ -117,16 +169,63 @@ def test_lcdwiki_board_retries_swapped_uart_pins_for_servant_ack():
 def test_servant_firmware_has_uart_servo_controller():
     main_c = read("../TBOT-Servant-Firmware/main/main.c")
 
-    assert "LEFT_ARM_SERVO_GPIO GPIO_NUM_11" in main_c
+    assert "LEFT_ARM_SERVO_GPIO GPIO_NUM_12" in main_c
     assert "RIGHT_ARM_SERVO_GPIO GPIO_NUM_13" in main_c
+    assert "HEAD_SERVO_GPIO GPIO_NUM_11" in main_c
     assert "LEFT_ARM_SERVO_LEDC_CHANNEL LEDC_CHANNEL_0" in main_c
     assert "RIGHT_ARM_SERVO_LEDC_CHANNEL LEDC_CHANNEL_1" in main_c
-    assert "UART_PORT UART_NUM_1" in main_c
+    assert "HEAD_SERVO_LEDC_CHANNEL LEDC_CHANNEL_2" in main_c
+    assert "UART_PORT UART_NUM_0" in main_c
+    assert "ESP_ERR_INVALID_STATE" in main_c
     assert "LEDC_TIMER_50HZ" in main_c
     assert "servo_sweep" in main_c
     assert "find_servo" in main_c
     assert "cJSON_GetObjectItem" in main_c
     assert '"left_arm"' in main_c
     assert '"right_arm"' in main_c
+    assert '"head"' in main_c
     assert '"raise"' in main_c
     assert '"lower"' in main_c
+    assert '"turn_left"' in main_c
+    assert '"turn_right"' in main_c
+    assert '"center"' in main_c
+    assert '"set_angle"' in main_c
+    assert '"set_percent"' in main_c
+
+def test_head_set_angle_uses_adjustable_servo_angle_payload():
+    source = read("main/robot_uart.cc")
+    header = read("main/robot_uart.h")
+    app_cc = read("main/application.cc")
+
+    assert "bool SendHeadSetAngle(int angle)" in header
+    assert "bool SendHeadSetPercent(int percent)" in header
+    assert "bool RobotUart::SendHeadSetAngle(int angle)" in source
+    assert 'return SendServoSweep("head", "set_angle", 90, target_angle, 2, 20);' in source
+    assert "clamp_servo_angle(angle)" in source
+    assert 'strcmp(action->valuestring, "head_set_angle") == 0' in app_cc
+    assert 'cJSON_GetObjectItem(root, "angle")' in app_cc
+
+def test_percent_commands_map_to_servo_payloads():
+    source = read("main/robot_uart.cc")
+    header = read("main/robot_uart.h")
+    app_cc = read("main/application.cc")
+
+    for method in [
+        "bool SendLeftArmSetPercent(int percent)",
+        "bool SendRightArmSetPercent(int percent)",
+        "bool SendBothArmsSetPercent(int percent)",
+        "bool SendHeadSetPercent(int percent)",
+    ]:
+        assert method in header
+
+    assert "percent_to_left_arm_angle" in source
+    assert "percent_to_right_arm_angle" in source
+    assert "percent_to_head_angle" in source
+    assert 'SendServoSweep("left_arm", "set_percent", 0, target_angle, 2, 20)' in source
+    assert 'SendServoSweep("right_arm", "set_percent", 60, target_angle, 2, 20)' in source
+    assert 'SendServoSweep("head", "set_percent", 90, target_angle, 2, 20)' in source
+    assert 'strcmp(action->valuestring, "left_arm_set_percent") == 0' in app_cc
+    assert 'strcmp(action->valuestring, "right_arm_set_percent") == 0' in app_cc
+    assert 'strcmp(action->valuestring, "both_arms_set_percent") == 0' in app_cc
+    assert 'strcmp(action->valuestring, "head_set_percent") == 0' in app_cc
+    assert 'cJSON_GetObjectItem(root, "percent")' in app_cc

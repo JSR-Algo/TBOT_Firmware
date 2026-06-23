@@ -84,8 +84,8 @@ static std::string BuildFactoryResetUrl(const std::string& api_url, const std::s
 bool SystemReset::ReleaseCloudOwnership() {
     Settings backend_settings("backend", false);
     const std::string api_url = backend_settings.GetString("api_url");
+    const std::string device_id = backend_settings.GetString("device_id");
     const std::string device_secret = backend_settings.GetString("device_secret");
-    const std::string device_id = Board::GetInstance().GetUuid();
 
     if (api_url.empty() || device_secret.empty() || device_id.empty()) {
         ESP_LOGI(TAG, "No cloud ownership credentials present; local factory reset can continue");
@@ -123,6 +123,15 @@ bool SystemReset::ReleaseCloudOwnership() {
 
     const int status_code = http->GetStatusCode();
     http->Close();
+    if (status_code == 401) {
+        ESP_LOGW(TAG, "Cloud factory reset rejected stale device credentials (HTTP 401); clearing local release marker");
+        Settings writable_backend_settings("backend", true);
+        writable_backend_settings.SetString("device_secret", "");
+        writable_backend_settings.SetInt("release_pending", 0);
+        Settings claim_state("tbot_claim", true);
+        claim_state.SetInt("confirmed", 0);
+        return true;
+    }
     if (status_code < 200 || status_code >= 300) {
         ESP_LOGW(TAG, "Cloud factory reset failed (HTTP %d)", status_code);
         return false;

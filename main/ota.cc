@@ -10,6 +10,7 @@
 #include <esp_partition.h>
 #include <esp_ota_ops.h>
 #include <esp_app_format.h>
+#include <esp_system.h>
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
@@ -166,6 +167,8 @@ esp_err_t Ota::CheckVersion() {
 
     has_websocket_config_ = false;
     cJSON *websocket = cJSON_GetObjectItem(root, "websocket");
+    bool factory_test_claimed_seen = false;
+    int factory_test_claimed_value = 0;
     if (cJSON_IsObject(websocket)) {
         Settings settings("websocket", true);
         cJSON *item = NULL;
@@ -179,13 +182,23 @@ esp_err_t Ota::CheckVersion() {
                     settings.SetString(item->string, item->valuestring);
                 }
             } else if (cJSON_IsNumber(item)) {
-                if (settings.GetInt(item->string) != item->valueint) {
-                    settings.SetInt(item->string, item->valueint);
+                if (std::strcmp(item->string, "factory_test_claimed") == 0) {
+                    factory_test_claimed_seen = true;
+                    factory_test_claimed_value = item->valueint != 0 ? 1 : 0;
+                } else {
+                    ESP_LOGW(TAG, "Ignoring unsupported websocket numeric field: %s", item->string);
                 }
             }
         }
+        {
+            Settings claim_state("tbot_claim", true);
+            claim_state.SetInt("factory_test",
+                               factory_test_claimed_seen ? factory_test_claimed_value : 0);
+        }
         has_websocket_config_ = true;
     } else {
+        Settings claim_state("tbot_claim", true);
+        claim_state.SetInt("factory_test", 0);
         ESP_LOGI(TAG, "No websocket section found!");
     }
 
@@ -194,6 +207,44 @@ esp_err_t Ota::CheckVersion() {
         Settings settings("backend", true);
         if (settings.GetString("api_url") != api_url->valuestring) {
             settings.SetString("api_url", api_url->valuestring);
+        }
+    }
+
+    cJSON *claim_reset = cJSON_GetObjectItem(root, "claim_reset");
+    if (cJSON_IsObject(claim_reset)) {
+        cJSON *local_claim = cJSON_GetObjectItem(claim_reset, "local_claim");
+        cJSON *nonce = cJSON_GetObjectItem(claim_reset, "nonce");
+        const bool should_reset_local_claim =
+            (cJSON_IsNumber(local_claim) && local_claim->valueint != 0) || cJSON_IsTrue(local_claim);
+        if (should_reset_local_claim && cJSON_IsString(nonce) && nonce->valuestring[0] != '\0') {
+            const std::string reset_nonce = nonce->valuestring;
+            Settings reset_state("tbot_reset", true);
+            if (reset_state.GetString("claim_nonce") != reset_nonce) {
+                ESP_LOGW(TAG, "OTA claim reset requested; clearing local ownership state and rebooting");
+                {
+                    Settings claim_state("tbot_claim", true);
+                    claim_state.SetInt("confirmed", 0);
+                    claim_state.SetInt("factory_test", 0);
+                }
+                {
+                    Settings backend_settings("backend", true);
+                    backend_settings.SetString("device_id", "");
+                    backend_settings.SetString("device_secret", "");
+                    backend_settings.SetInt("release_pending", 0);
+                }
+                {
+                    Settings websocket_settings("websocket", true);
+                    websocket_settings.SetString("bootstrap_token", "");
+                    websocket_settings.SetString("token", "");
+                    websocket_settings.SetString("url", "");
+                    websocket_settings.SetString("claim_device_id", "");
+                }
+                reset_state.SetString("claim_nonce", reset_nonce);
+                cJSON_Delete(root);
+                vTaskDelay(pdMS_TO_TICKS(500));
+                esp_restart();
+                return ESP_OK;
+            }
         }
     }
 
