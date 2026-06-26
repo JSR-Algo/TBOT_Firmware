@@ -577,6 +577,11 @@ void test_start_stop_error_lifecycle() {
     Handle(PrepareFrame(1));
     Handle(StartFrame(2));
     require(FrameType(1) == "lesson_ack" && FrameSeq(1) == 2, "start acks at seq 2");
+    // lesson_start turns OFF the idle realtime emoji face so only the 3 lesson layers show.
+    // NOTE non-tautology: drop the SetLessonMode(true) in the lesson_start handler and this
+    // fails (the smiley would bleed through / reappear on a caption-only step).
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == true,
+            "start hides the realtime emoji face");
 
     // lesson_stop: acks, cancels listening, clears all three layers + neutral emotion.
     Handle(std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
@@ -587,6 +592,8 @@ void test_start_stop_error_lifecycle() {
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "stop clears background layer");
     require(disp.last_emotion == "neutral", "stop restores neutral face");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "stop restores the realtime emoji face");
 
     // lesson_error (S->F status): NOT acked; clears layers, sad face + failure caption.
     size_t before = Sent().size();

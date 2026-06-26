@@ -35,6 +35,12 @@ public:
     // Robot overlay image layer for lesson steps. It stacks above the teaching
     // object and below system/status bars; pass nullptr to clear stale overlays.
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {}
+    // Lesson display mode: when active, hide the idle realtime emoji face so ONLY the
+    // lesson's three image layers (background/object/overlay) show. Toggled true on
+    // lesson_start and false on lesson_stop/lesson_error so the smiley does not bleed
+    // through the lesson scene (or show on a caption-only/asset-fetch-failed step).
+    // Default no-op (only LcdDisplay owns the emoji LVGL object tree).
+    virtual void SetLessonMode(bool active) {}
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);

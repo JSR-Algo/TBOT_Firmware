@@ -173,7 +173,7 @@ bool IsPassiveStep(const char* completion_class, const char* step_type) {
     return IsPassiveStepType(step_type);
 }
 
-// Layer-3 pose -> a valid EyesEmojiCollection emotion. The sprite-atlas has no
+// Layer-3 pose -> a valid emoji-collection emotion name. The sprite-atlas has no
 // on-device renderer, so the robot overlay collapses to an emoji-face (the defined
 // espTft v1 full render — D-ATLAS-CRITICAL / DIV-FW-ATLAS).
 const char* ExpressionToEmotion(const char* expr) {
@@ -729,6 +729,15 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (strcmp(type, "lesson_start") == 0) {
         g_session.running = true;
+        // Turn OFF the idle realtime emoji face so ONLY the lesson's three image layers
+        // show (inverse of the lesson_stop restore below). Without this the smiley bleeds
+        // through the lesson scene and reappears on any caption-only / asset-fetch-failed
+        // step (the lesson_step renderer still calls SetEmotion as a fallback layer).
+        Display* start_display = Board::GetInstance().GetDisplay();
+        LvglDisplay* start_lvgl = dynamic_cast<LvglDisplay*>(start_display);
+        if (start_lvgl) {
+            Schedule([start_lvgl]() { start_lvgl->SetLessonMode(true); });
+        }
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
         return;
     }
@@ -746,6 +755,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetEmotion("neutral");
             });
         }
@@ -765,6 +775,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetEmotion("sad");
                 display->SetChatMessage("assistant", "Bài học chưa tải được.");
             });

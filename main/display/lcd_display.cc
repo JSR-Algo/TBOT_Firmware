@@ -41,9 +41,6 @@ void LcdDisplay::InitializeLcdThemes() {
     light_theme->set_text_font(text_font);
     light_theme->set_icon_font(icon_font);
     light_theme->set_large_icon_font(large_icon_font);
-#if CONFIG_BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD
-    light_theme->set_emoji_collection(std::make_shared<EyesEmojiCollection>());
-#endif
 
     // dark theme
     auto dark_theme = new LvglTheme("dark");
@@ -59,9 +56,6 @@ void LcdDisplay::InitializeLcdThemes() {
     dark_theme->set_text_font(text_font);
     dark_theme->set_icon_font(icon_font);
     dark_theme->set_large_icon_font(large_icon_font);
-#if CONFIG_BOARD_TYPE_Freenove_ESP32S3_DISPLAY_2_8_LCD
-    dark_theme->set_emoji_collection(std::make_shared<EyesEmojiCollection>());
-#endif
 
     auto& theme_manager = LvglThemeManager::GetInstance();
     theme_manager.RegisterTheme("light", light_theme);
@@ -524,7 +518,12 @@ void LcdDisplay::SetupUI() {
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
 
     emoji_image_ = lv_img_create(screen);
-    lv_obj_align(emoji_image_, LV_ALIGN_TOP_MID, 0, text_font->line_height + lvgl_theme->spacing(8));
+    // Full-screen face: size the image object to the whole panel and let LVGL
+    // scale every neon GIF to COVER it (aspect-preserved, overflow cropped) so the
+    // 320x240 source fills the 480x320 (3.5") LCD with no black margins.
+    lv_obj_set_size(emoji_image_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_align(emoji_image_, LV_ALIGN_CENTER, 0, 0);
+    lv_image_set_inner_align(emoji_image_, LV_IMAGE_ALIGN_COVER);
 
     // Display AI logo while booting
     emoji_label_ = lv_label_create(screen);
@@ -1334,6 +1333,29 @@ void LcdDisplay::ClearChatMessages() {
 }
 #endif
 
+// US-006 lesson display mode: hide/show the idle realtime emoji face. emoji_box_ is the
+// parent of emoji_image_/emoji_label_, so hiding it suppresses the face regardless of any
+// SetEmotion call the lesson_step renderer still makes (those only touch the children) —
+// the lesson's three image layers become the whole scene. Defined once (shared across both
+// CONFIG_USE_WECHAT_MESSAGE_STYLE variants) since it only toggles the shared emoji_box_.
+void LcdDisplay::SetLessonMode(bool active) {
+    DisplayLockGuard lock(this);
+    if (emoji_box_ == nullptr) {
+        return;
+    }
+    if (active) {
+        // Pause any animated face so it does not run invisibly behind the lesson scene.
+        if (gif_controller_) {
+            gif_controller_->Stop();
+        }
+        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        // Re-show the face; the lesson_stop/lesson_error handler issues the SetEmotion that
+        // follows (neutral/sad), which restores the correct image/GIF.
+        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 void LcdDisplay::SetEmotion(const char* emotion) {
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!", emotion);
@@ -1374,6 +1396,8 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
         
         if (gif_controller_->IsLoaded()) {
+            // emoji_image_ uses LV_IMAGE_ALIGN_COVER (set in SetupUI), so LVGL
+            // auto-scales each frame to fill the panel — no manual scaling here.
             // Set up frame update callback
             gif_controller_->SetFrameCallback([this]() {
                 lv_image_set_src(emoji_image_, gif_controller_->image_dsc());

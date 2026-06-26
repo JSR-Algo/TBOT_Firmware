@@ -59,6 +59,7 @@ public:
     virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonObject(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
+    virtual void SetLessonMode(bool active) override;
     virtual void SetupUI() override;
     // Add theme switching function
     virtual void SetTheme(Theme* theme) override;
