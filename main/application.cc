@@ -35,6 +35,9 @@
 
 static constexpr uint32_t kListenPlaybackDrainTimeoutMs = 650;
 static constexpr uint32_t kSpeakingTimeoutMs = 12000;
+static constexpr uint32_t kTtsStopPlaybackDrainTimeoutMs = 15000;
+static constexpr uint32_t kListeningNoSpeechTimeoutMs = 15000;
+static constexpr uint32_t kListeningMaxTurnMs = 60000;
 static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
@@ -200,7 +203,11 @@ void Application::Initialize() {
         // consumed by HandleWakeWordDetectedEvent() to reject wake-word
         // false-positives on noise (no recent VAD-speaking window).
         if (speaking) {
-            last_vad_speech_ms_ = esp_timer_get_time() / 1000;
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            last_vad_speech_ms_ = now_ms;
+            if (GetDeviceState() == kDeviceStateListening) {
+                last_listening_activity_ms_.store(now_ms);
+            }
         }
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
@@ -318,18 +325,35 @@ void Application::Run() {
 
         if (bits & MAIN_EVENT_ERROR) {
             SetDeviceState(kDeviceStateIdle);
-            // Resolve the connect state through the FSM mapper (backend_offline_
-            // is set on the ws/backend error) so this render is mapper-driven,
-            // not hand-coded. OFFLINE_RETRY -> localized "Server unavailable.
-            // Retrying..."; any other resolved state keeps the generic ERROR
-            // banner. Detailed error stays in the chat body + log.
-            const TbotConnectState cs = TbotConnectMapper::ResolveState(
-                GetDeviceState(), claim_substate_, GetBleSubstate(),
-                backend_offline_.load());
-            const char* status = (cs == TbotConnectState::OFFLINE_RETRY)
-                ? Lang::Strings::SERVER_UNAVAILABLE_RETRYING
-                : Lang::Strings::ERROR;
-            Alert(status, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+            // WSS-8: while a connect cycle is still in progress (or a passive
+            // lesson preconnect is running), a failed attempt is a RECOVERABLE
+            // transient — the wake open-loop (3x) and ScheduleReconnect backoff
+            // retry and usually land in Listening within a second or two over the
+            // slow cold TLS/tunnel handshake. Flashing "Server unavailable.
+            // Retrying..." on each attempt shows a scary error that immediately
+            // self-clears. Keep the calm idle/connecting view; the banner is
+            // surfaced once, from the terminal give-up points (and any non-connect
+            // error, where neither flag is set, still alerts immediately).
+            if (connect_attempt_active_.load() || passive_ws_intent_.load()) {
+                ESP_LOGI(TAG, "connect error suppressed (recoverable): attempt_active=%d passive=%d in_flight=%d reconnect_attempt=%d",
+                         connect_attempt_active_.load() ? 1 : 0,
+                         passive_ws_intent_.load() ? 1 : 0,
+                         connect_in_flight_.load() ? 1 : 0,
+                         reconnect_attempt_);
+            } else {
+                // Resolve the connect state through the FSM mapper (backend_offline_
+                // is set on the ws/backend error) so this render is mapper-driven,
+                // not hand-coded. OFFLINE_RETRY -> localized "Server unavailable.
+                // Retrying..."; any other resolved state keeps the generic ERROR
+                // banner. Detailed error stays in the chat body + log.
+                const TbotConnectState cs = TbotConnectMapper::ResolveState(
+                    GetDeviceState(), claim_substate_, GetBleSubstate(),
+                    backend_offline_.load());
+                const char* status = (cs == TbotConnectState::OFFLINE_RETRY)
+                    ? Lang::Strings::SERVER_UNAVAILABLE_RETRYING
+                    : Lang::Strings::ERROR;
+                Alert(status, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+            }
         }
 
         if (bits & MAIN_EVENT_NETWORK_CONNECTED) {
@@ -427,6 +451,7 @@ void Application::Run() {
             clock_ticks_++;
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
+            HandleListeningWatchdogTick();
         
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
@@ -2063,6 +2088,7 @@ void Application::InitializeProtocol() {
         if (passive_ws_intent_.load()) {
             ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
             StopHeartbeat();
+            audio_service_.EnableWakeWordDetection(true);
         } else {
             online_intent_.store(true);
             StartHeartbeat();
@@ -2167,6 +2193,11 @@ void Application::InitializeProtocol() {
                 auto reason = cJSON_GetObjectItem(root, "reason");
                 bool is_interrupt = cJSON_IsString(reason) &&
                                     strcmp(reason->valuestring, "interrupt") == 0;
+                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
+                bool force_continue_listening = cJSON_IsTrue(continue_listening);
+                auto listen_mode = cJSON_GetObjectItem(root, "listen_mode");
+                bool force_realtime_listen = cJSON_IsString(listen_mode) &&
+                                             strcmp(listen_mode->valuestring, "realtime") == 0;
                 if (is_interrupt) {
                     // Barge-in: cut NOW instead of draining. Bump+publish the
                     // generation so any in-flight frame is gen-gated (Patch 3.3),
@@ -2183,9 +2214,30 @@ void Application::InitializeProtocol() {
                 // User reported: "phản hồi không ổn định chưa trả lời hết cầu
                 // chuyển sang đang lắng nghe". Normal stops rely on natural queue
                 // drain; only the interrupt branch above cuts early.
-                Schedule([this]() {
+                Schedule([this, force_continue_listening, force_realtime_listen]() {
                     ++speaking_generation_;
                     last_speaking_activity_ms_.store(0);
+                    if (force_continue_listening) {
+                        bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
+                        if (!playback_drained) {
+                            ESP_LOGW(TAG,
+                                     "tts_stop_playback_drain_timeout timeout_ms=%lu action=continue_listening",
+                                     static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                        }
+                        if (force_realtime_listen) {
+                            listening_mode_ = kListeningModeRealtime;
+                        } else {
+                            listening_mode_ = GetDefaultListeningMode();
+                        }
+                        SetDeviceState(kDeviceStateListening);
+                        if (protocol_) {
+                            protocol_->SendStartListening(kListeningModeRealtime);
+                        }
+                        audio_service_.EnableVoiceProcessing(true);
+                        ESP_LOGI(TAG, "mic_loop_resumed ts=%lld reason=tts_stop_continue_listening",
+                                 esp_timer_get_time() / 1000);
+                        return;
+                    }
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
                             if (lesson_interactive_listen_pending_.exchange(false)) {
@@ -2198,6 +2250,14 @@ void Application::InitializeProtocol() {
                             } else {
                                 SetDeviceState(kDeviceStateIdle);
                             }
+                        } else if (listening_mode_ == kListeningModeAutoStop) {
+                            bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
+                            if (!playback_drained) {
+                                ESP_LOGW(TAG,
+                                         "tts_stop_playback_drain_timeout timeout_ms=%lu action=idle",
+                                         static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                            }
+                            SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
                             ESP_LOGI(TAG, "mic_loop_resumed ts=%lld",
@@ -2511,6 +2571,11 @@ void Application::CancelLessonInteractiveListening() {
     lesson_interactive_listen_pending_.store(false);
 }
 
+void Application::SetLessonRuntimeActive(bool active) {
+    lesson_runtime_active_.store(active);
+    xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+}
+
 void Application::StopListening() {
     CancelLessonInteractiveListening();
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
@@ -2656,6 +2721,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     online_intent_.store(true);  // we want an open channel -> reconnect on unexpected drop
     uint32_t gen = ++connect_generation_;
     connect_in_flight_.store(true);
+    connect_attempt_active_.store(true);  // WSS-8: suppress per-attempt error banner until terminal
     ArmConnectWatchdog();
     passive_ws_intent_.store(false);
     auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
@@ -2663,6 +2729,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
                     tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
         delete ctx;
         connect_in_flight_.store(false);
+        connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
         CancelConnectWatchdog();
         ESP_LOGE(TAG, "ws_open task create failed -> idle");
         SetDeviceState(kDeviceStateIdle);
@@ -2713,12 +2780,20 @@ void Application::OpenChannelTask(void* arg) {
         if (gen != self->connect_generation_.load()) {
             return;  // superseded by a newer connect or the watchdog
         }
-        if (!passive_preconnect && self->GetDeviceState() != kDeviceStateConnecting) {
-            return;
+        if (!passive_preconnect) {
+            const DeviceState state = self->GetDeviceState();
+            if (wake_word_invoke) {
+                if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
+                    return;
+                }
+            } else if (state != kDeviceStateConnecting) {
+                return;
+            }
         }
         if (ok) {
             self->backend_offline_.store(false);
             self->reconnect_attempt_ = 0;
+            self->connect_attempt_active_.store(false);  // WSS-8: connect cycle resolved (success)
             if (passive_preconnect) {
                 ESP_LOGI(TAG, "passive_lesson_websocket_opened");
             } else if (wake_word_invoke) {
@@ -2744,6 +2819,12 @@ void Application::OpenChannelTask(void* arg) {
             }
             if (!wake_word_invoke && !passive_preconnect) {
                 self->ScheduleReconnect(mode);   // WSS-4: bounded retry
+            } else if (wake_word_invoke) {
+                // WSS-8: the wake open-loop exhausted all attempts -> terminal.
+                // Per-attempt errors were suppressed (connect_attempt_active_),
+                // so surface the offline banner exactly once now.
+                self->connect_attempt_active_.store(false);
+                xEventGroupSetBits(self->event_group_, MAIN_EVENT_ERROR);
             }
         }
     });
@@ -2799,6 +2880,10 @@ void Application::ScheduleReconnect(ListeningMode mode) {
     if (reconnect_attempt_ >= kMaxReconnectAttempts) {
         ESP_LOGW(TAG, "reconnect_giveup after %d attempts (stay idle)", reconnect_attempt_);
         reconnect_attempt_ = 0;
+        // WSS-8: bounded reconnect exhausted -> terminal failure. Per-attempt
+        // errors were suppressed while retrying; surface the offline banner once.
+        connect_attempt_active_.store(false);
+        xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
         return;
     }
     reconnect_mode_ = mode;
@@ -2889,6 +2974,11 @@ void Application::HandleStartListeningEvent() {
     } else if (state == kDeviceStateListening) {
         ESP_LOGI(TAG, "lesson/manual listening rearm");
         listening_mode_ = kListeningModeManualStop;
+        {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            listening_started_ms_.store(now_ms);
+            last_listening_activity_ms_.store(now_ms);
+        }
         protocol_->SendStartListening(kListeningModeManualStop);
         audio_service_.EnableVoiceProcessing(true);
     }
@@ -2905,6 +2995,8 @@ void Application::HandleStopListeningEvent() {
         if (protocol_) {
             protocol_->SendStopListening();
         }
+        listening_started_ms_.store(0);
+        last_listening_activity_ms_.store(0);
         SetDeviceState(kDeviceStateIdle);
     }
 }
@@ -2978,6 +3070,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         reconnect_mode_ = GetDefaultListeningMode();
         uint32_t gen = ++connect_generation_;
         connect_in_flight_.store(true);
+        connect_attempt_active_.store(true);  // WSS-8: suppress per-attempt error banner until terminal
         ArmConnectWatchdog();
         passive_ws_intent_.store(false);
         auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
@@ -2985,6 +3078,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
                         tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
             delete ctx;
             connect_in_flight_.store(false);
+            connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
             CancelConnectWatchdog();
             ESP_LOGE(TAG, "wake_ws_open task create failed -> idle");
             audio_service_.EnableWakeWordDetection(true);
@@ -3052,6 +3146,60 @@ static const char* ConnectStateScreenCopy(const TbotConnectStateSpec* spec) {
     }
 }
 
+void Application::HandleListeningWatchdogTick() {
+    if (GetDeviceState() != kDeviceStateListening) {
+        return;
+    }
+
+    // Realtime mode intentionally keeps a long-lived audio stream open. The
+    // watchdog is for finite AutoStop/manual turns that should not sit in
+    // Listening forever after missed VAD/STT/server-stop events.
+    if (listening_mode_ == kListeningModeRealtime) {
+        return;
+    }
+
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    int64_t started_ms = listening_started_ms_.load();
+    int64_t last_activity_ms = last_listening_activity_ms_.load();
+    if (started_ms <= 0 || last_activity_ms <= 0) {
+        listening_started_ms_.store(now_ms);
+        last_listening_activity_ms_.store(now_ms);
+        return;
+    }
+
+    const int64_t idle_ms = now_ms - last_activity_ms;
+    const int64_t turn_ms = now_ms - started_ms;
+    const uint32_t idle_limit_ms = listening_mode_ == kListeningModeAutoStop
+        ? kListeningNoSpeechTimeoutMs
+        : kListeningMaxTurnMs;
+    if (idle_ms < idle_limit_ms && turn_ms < kListeningMaxTurnMs) {
+        return;
+    }
+
+    uint32_t decode_q = 0, send_q = 0, playback_q = 0;
+    audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
+    auto audio_stats = audio_service_.GetDebugStatistics();
+    ESP_LOGW(TAG,
+             "listening_watchdog_timeout mode=%d idle_ms=%lld turn_ms=%lld decode_q=%lu send_q=%lu playback_q=%lu decode_drop=%lu encode_drop=%lu reconnects=%lu",
+             static_cast<int>(listening_mode_),
+             idle_ms,
+             turn_ms,
+             (unsigned long)decode_q,
+             (unsigned long)send_q,
+             (unsigned long)playback_q,
+             (unsigned long)audio_stats.decode_drop_count,
+             (unsigned long)audio_stats.encode_drop_count,
+             (unsigned long)reconnect_count_.load());
+
+    if (protocol_) {
+        protocol_->SendStopListening();
+    }
+    audio_service_.EnableVoiceProcessing(false);
+    listening_started_ms_.store(0);
+    last_listening_activity_ms_.store(0);
+    SetDeviceState(kDeviceStateIdle);
+}
+
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
@@ -3075,10 +3223,20 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            if (lesson_runtime_active_.load()) {
+                display->SetStatus("Đang học...");
+                listening_started_ms_.store(0);
+                last_listening_activity_ms_.store(0);
+                audio_service_.EnableVoiceProcessing(false);
+                audio_service_.EnableWakeWordDetection(false);
+                break;
+            }
             // ONLINE (or OFFLINE_RETRY / a claim overlay) per the mapper.
             display->SetStatus(connect_copy);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            listening_started_ms_.store(0);
+            last_listening_activity_ms_.store(0);
             audio_service_.EnableVoiceProcessing(false);
             // TBOT BLE+audio contention fix: the AFE/mic input only runs while
             // wake-word (or voice processing) is enabled — that is what feeds the
@@ -3104,6 +3262,11 @@ void Application::HandleStateChangedEvent() {
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
+            {
+                int64_t now_ms = esp_timer_get_time() / 1000;
+                listening_started_ms_.store(now_ms);
+                last_listening_activity_ms_.store(now_ms);
+            }
             display->SetStatus(Lang::Strings::LISTENING);
             display->SetEmotion("neutral");
 
@@ -3141,6 +3304,8 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            listening_started_ms_.store(0);
+            last_listening_activity_ms_.store(0);
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
@@ -3244,6 +3409,8 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
         protocol_->SendAbortSpeaking(kAbortReasonNone);
     }
     if (listening_mode_ == kListeningModeManualStop) {
+        SetDeviceState(kDeviceStateIdle);
+    } else if (listening_mode_ == kListeningModeAutoStop) {
         SetDeviceState(kDeviceStateIdle);
     } else {
         SetDeviceState(kDeviceStateListening);

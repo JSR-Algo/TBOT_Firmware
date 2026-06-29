@@ -3,7 +3,8 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_PRODUCTION_OTA_URL = "https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
+CURRENT_PRODUCTION_OTA_URL = "https://carefully-freelance-improving-numerical.trycloudflare.com/tbot/ota/"
+CURRENT_PRODUCTION_WEBSOCKET_URL = "wss://freebsd-concern-noon-cement.trycloudflare.com/tbot/v1/"
 CURRENT_OTA_BUILD_VERSION = "2.2.34"
 
 
@@ -23,17 +24,12 @@ def kconfig_default(text: str, config_name: str) -> str:
     return default.group("value")
 
 
-def test_firmware_does_not_compile_a_final_websocket_endpoint_fallback():
+def test_firmware_compiles_current_public_websocket_endpoint_fallback():
     kconfig = read("main/Kconfig.projbuild")
 
     websocket_default = kconfig_default(kconfig, "WEBSOCKET_URL")
 
-    assert websocket_default in {
-        "",
-        "ws://your-ip-or-domain:port/tbot/v1/",
-        "wss://your-ip-or-domain:port/tbot/v1/",
-    }
-    assert "trycloudflare.com" not in websocket_default
+    assert websocket_default == CURRENT_PRODUCTION_WEBSOCKET_URL
     assert "tbot-backend-8wmh.onrender.com" not in websocket_default
 
 def test_project_version_advances_past_current_production_lcdwiki_ota():
@@ -42,7 +38,7 @@ def test_project_version_advances_past_current_production_lcdwiki_ota():
     assert f'set(PROJECT_VER "{CURRENT_OTA_BUILD_VERSION}")' in cmake
 
 
-def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
+def test_local_firmware_build_configs_compile_current_public_websocket_seed():
     local_configs = sorted(
         path for path in ROOT.glob("sdkconfig*")
         if path.is_file() and not path.name.endswith((".bak", ".old"))
@@ -54,9 +50,8 @@ def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
         if "CONFIG_WEBSOCKET_URL=" not in contents:
             continue
 
-        assert "trycloudflare.com/tbot/v1/" not in contents, sdkconfig.name
         assert "tbot-backend-8wmh.onrender.com/tbot/v1/" not in contents, sdkconfig.name
-        assert 'CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"' in contents, sdkconfig.name
+        assert f'CONFIG_WEBSOCKET_URL="{CURRENT_PRODUCTION_WEBSOCKET_URL}"' in contents, sdkconfig.name
 
 
 def test_local_firmware_build_configs_compile_only_current_production_ota_seed():

@@ -105,7 +105,7 @@ const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
 
 constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
 constexpr bool kHoldBootProbePattern = false;
-constexpr int kLcdWikiOutputVolume = 70;
+constexpr int kLcdWikiOutputVolume = 100;
 
 void EnableBacklightForBoot() {
     const gpio_config_t backlight_gpio_config = {
@@ -141,7 +141,7 @@ class LcdWikiAudioCodec : public Es8311AudioCodec {
 private:
     std::vector<int16_t> BuildDiagnosticTone(int tone_hz, int duration_ms) {
         const int sample_rate = output_sample_rate();
-        const int amplitude = 8000;
+        const int amplitude = 24000;
         const int tone_samples = sample_rate * duration_ms / 1000;
         const int period = std::max(1, sample_rate / tone_hz);
         std::vector<int16_t> tone(tone_samples);
@@ -149,6 +149,24 @@ private:
             tone[i] = ((i % period) < (period / 2)) ? amplitude : -amplitude;
         }
         return tone;
+    }
+
+    void ConfigurePaGpioForDiagnostic() {
+        if (AUDIO_CODEC_PA_PIN == GPIO_NUM_NC) {
+            return;
+        }
+        gpio_config_t cfg = {};
+        cfg.pin_bit_mask = (1ULL << AUDIO_CODEC_PA_PIN);
+        cfg.mode = GPIO_MODE_OUTPUT;
+        cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+        cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        cfg.intr_type = GPIO_INTR_DISABLE;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&cfg));
+
+        const int active_level = AUDIO_CODEC_PA_INVERTED ? 0 : 1;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(AUDIO_CODEC_PA_PIN, active_level));
+        ESP_LOGI(TAG, "LCDWiki audio diagnostic PA configured pin=%d active_level=%d gpio_level=%d",
+                 AUDIO_CODEC_PA_PIN, active_level, gpio_get_level(AUDIO_CODEC_PA_PIN));
     }
 
     void PlayDiagnosticSegment(const char* name, int pa_level, int tone_hz) {
@@ -169,6 +187,7 @@ private:
 
     void RunDiagnosticTone() {
         EnableOutput(true);
+        ConfigurePaGpioForDiagnostic();
 
         PlayDiagnosticSegment("pa_low", 0, 660);
         PlayDiagnosticSegment("pa_high", 1, 880);
@@ -186,8 +205,10 @@ public:
         bool use_mclk = true, bool pa_inverted = false)
         : Es8311AudioCodec(i2c_master_handle, i2c_port, input_sample_rate, output_sample_rate,
             mclk, bclk, ws, dout, din, pa_pin, es8311_addr, use_mclk, pa_inverted) {
-        input_channels_ = 2;
-        output_channels_ = 2;
+        // ES8311 is a mono codec. Keep the device channel count at 1; forcing
+        // stereo can report successful writes while leaving the speaker silent.
+        input_channels_ = 1;
+        output_channels_ = 1;
     }
 
     void Start() override {

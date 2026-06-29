@@ -103,6 +103,7 @@ public:
     void StartListening();
     void PrepareLessonInteractiveListening();
     void CancelLessonInteractiveListening();
+    void SetLessonRuntimeActive(bool active);
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -161,6 +162,7 @@ private:
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
+    std::atomic<bool> lesson_runtime_active_{false};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
@@ -228,6 +230,14 @@ private:
     std::atomic<uint32_t> connect_generation_{0};
     std::atomic<bool> connect_in_flight_{false};
     std::atomic<bool> reset_pending_{false};
+    // WSS-8: true from the start of a wake/listen/reconnect connect cycle until it
+    // terminally succeeds or gives up. While true, a per-attempt SetError is a
+    // RECOVERABLE transient (the wake loop / ScheduleReconnect backoff retries),
+    // so MAIN_EVENT_ERROR keeps the calm "connecting/idle" view instead of flashing
+    // "Server unavailable. Retrying...". The error banner is surfaced ONCE, from the
+    // terminal give-up points (wake-open exhausted, reconnect give-up). Cleared on
+    // OnAudioChannelOpened (success).
+    std::atomic<bool> connect_attempt_active_{false};
     esp_timer_handle_t connect_watchdog_timer_ = nullptr;   // one-shot (SM-3)
     // T2/WSS-4: bounded auto-reconnect with exponential backoff + jitter.
     esp_timer_handle_t reconnect_timer_ = nullptr;          // one-shot
@@ -257,6 +267,8 @@ private:
     std::atomic<bool> tts_audio_accepting_{false};
     std::atomic<uint32_t> speaking_generation_{0};
     std::atomic<int64_t> last_speaking_activity_ms_{0};
+    std::atomic<int64_t> listening_started_ms_{0};
+    std::atomic<int64_t> last_listening_activity_ms_{0};
     std::atomic<uint32_t> interrupt_count_{0};   // OBS-2: barge-in / abort count
     std::atomic<uint32_t> reconnect_count_{0};   // OBS-2: WS reconnect attempts
 
@@ -278,6 +290,7 @@ private:
     static void SpeakingTimeoutTask(void* arg);
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);
+    void HandleListeningWatchdogTick();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void StartPassiveLessonWebsocket();
     static void OpenChannelTask(void* arg);            // T1: blocking connect, off app task

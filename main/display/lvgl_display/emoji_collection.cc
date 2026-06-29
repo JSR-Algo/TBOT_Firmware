@@ -141,44 +141,6 @@ Twemoji64::Twemoji64() {
     AddEmoji("confused", new LvglSourceImage(&emoji_1f644_64));
 }
 
-extern "C" {
-extern const lv_image_dsc_t eye_openeyes;
-extern const lv_image_dsc_t eye_sleepeyes;
-extern const lv_image_dsc_t eye_halfsleepeyes;
-extern const lv_image_dsc_t eye_lefteyes;
-extern const lv_image_dsc_t eye_righteyes;
-extern const lv_image_dsc_t eye_lookdoweyes;
-extern const lv_image_dsc_t eye_sadeyes;
-extern const unsigned int eye_happy_gif_size;
-extern const uint8_t eye_happy_gif_data[];
-}
-
-EyesEmojiCollection::EyesEmojiCollection() {
-    AddEmoji("neutral", new LvglSourceImage(&eye_openeyes));
-    AddEmoji("open", new LvglSourceImage(&eye_openeyes));
-    AddEmoji("idle", new LvglSourceImage(&eye_openeyes));
-    AddEmoji("microchip_ai", new LvglSourceImage(&eye_openeyes));
-    AddEmoji("happy", new LvglStaticGifImage(eye_happy_gif_data, eye_happy_gif_size));
-    AddEmoji("laughing", new LvglStaticGifImage(eye_happy_gif_data, eye_happy_gif_size));
-    AddEmoji("funny", new LvglSourceImage(&eye_lefteyes));
-    AddEmoji("loving", new LvglSourceImage(&eye_righteyes));
-    AddEmoji("confident", new LvglSourceImage(&eye_righteyes));
-    AddEmoji("cool", new LvglSourceImage(&eye_lefteyes));
-    AddEmoji("delicious", new LvglSourceImage(&eye_lookdoweyes));
-    AddEmoji("kissy", new LvglSourceImage(&eye_righteyes));
-    AddEmoji("silly", new LvglSourceImage(&eye_lefteyes));
-    AddEmoji("sad", new LvglSourceImage(&eye_sadeyes));
-    AddEmoji("crying", new LvglSourceImage(&eye_sadeyes));
-    AddEmoji("angry", new LvglSourceImage(&eye_sadeyes));
-    AddEmoji("sleepy", new LvglSourceImage(&eye_sleepeyes));
-    AddEmoji("relaxed", new LvglSourceImage(&eye_halfsleepeyes));
-    AddEmoji("thinking", new LvglSourceImage(&eye_lookdoweyes));
-    AddEmoji("confused", new LvglSourceImage(&eye_halfsleepeyes));
-    AddEmoji("embarrassed", new LvglSourceImage(&eye_halfsleepeyes));
-    AddEmoji("winking", new LvglSourceImage(&eye_lefteyes));
-    AddEmoji("left", new LvglSourceImage(&eye_lefteyes));
-    AddEmoji("right", new LvglSourceImage(&eye_righteyes));
-    AddEmoji("lookdown", new LvglSourceImage(&eye_lookdoweyes));
-    AddEmoji("surprised", new LvglSourceImage(&eye_openeyes));
-    AddEmoji("shocked", new LvglSourceImage(&eye_openeyes));
-}
+// EyesEmojiCollection (static eye PNGs + happy GIF) was removed. The robot's
+// faces now come from the tbot-neon-faces GIF collection packed into the assets
+// SPIFFS partition; assets.cc overrides the theme's emoji collection at runtime.

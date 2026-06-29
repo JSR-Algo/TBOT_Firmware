@@ -55,7 +55,7 @@ while [[ -z "$PORT" ]]; do
 done
 
 echo "Using port: $PORT"
-python3 -m esptool --chip esp32s3 --port "$PORT" chip_id
+python3 -m esptool --chip esp32s3 --port "$PORT" --after no_reset chip_id
 python3 -m esptool \
   --chip esp32s3 \
   -b "$BAUD" \

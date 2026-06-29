@@ -175,6 +175,16 @@ std::string StartFrame(int seq) {
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
 }
+std::string StopFrame(int seq) {
+    return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
+}
+std::string ErrorFrame(int seq) {
+    return std::string("{\"type\":\"lesson_error\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"code\":\"STEP_TIMEOUT\"}}";
+}
 // Full three-layer lesson_step. Caller controls scene srcs + extra body fields.
 std::string StepFrame(int seq, const std::string& step_id,
                       const std::string& poster_src, const std::string& object_src,
@@ -562,6 +572,48 @@ void test_prepare_new_assignment_version_same_session_resets_stream() {
     require(FrameSeq(1) == 1, "republished version resets F->S stream for ESP runtime cursor");
     require(FrameBodyStr(1, "assetPack", "cacheKey") == "lesson/v2-newchecksum9876543210",
             "republished version prepare acks new assetPack cacheKey, not cached stale pack");
+}
+
+void test_prepare_after_stop_same_session_resets_stream() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+    Handle(StartFrame(2));
+    Handle(StopFrame(3));
+    require(Sent().size() == 3, "first lesson lifecycle emits prepare/start/stop acks");
+    require(FrameType(2) == "lesson_ack", "first lesson stop acks");
+    require(FrameBodyNum(2, "acks") == 3, "first stop ack echoes inbound sequence 3");
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+
+    require(Sent().size() == 4, "new lesson prepare after stop emits a fresh ack");
+    require(FrameType(3) == "lesson_ack", "new lesson prepare is acked, not lesson_error");
+    require(FrameSeq(3) == 1, "new lesson prepare after stop restarts F->S stream at 1");
+    require(FrameBodyNum(3, "acks") == 1, "new lesson prepare acks inbound sequence 1");
+}
+
+void test_prepare_after_terminal_error_same_session_resets_stream() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+    Handle(StartFrame(2));
+    Handle(ErrorFrame(3));
+    require(Sent().size() == 2, "inbound lesson_error is terminal and not acked");
+    require(disp.last_emotion == "sad", "terminal lesson_error shows sad face");
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+
+    require(Sent().size() == 3, "new lesson prepare after terminal error emits fresh ack");
+    require(FrameType(2) == "lesson_ack", "new lesson prepare after error is acked");
+    require(FrameSeq(2) == 1, "new lesson prepare after terminal error restarts F->S stream at 1");
+    require(FrameBodyNum(2, "acks") == 1, "new lesson prepare after error acks inbound sequence 1");
 }
 
 // ==========================================================================
@@ -1605,6 +1657,8 @@ int main() {
     test_unknown_session_and_staleness();
     test_dedup_reack();
     test_prepare_new_assignment_version_same_session_resets_stream();
+    test_prepare_after_stop_same_session_resets_stream();
+    test_prepare_after_terminal_error_same_session_resets_stream();
     test_start_stop_error_lifecycle();
     test_lifecycle_display_variants();
     test_step_rejects();

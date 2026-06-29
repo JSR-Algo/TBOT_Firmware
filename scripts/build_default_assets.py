@@ -715,10 +715,29 @@ def get_emoji_collection_path(default_emoji_collection, xiaozhi_fonts_path, proj
     - PNG emoji collections from xiaozhi-fonts (e.g., emojis_32, twemoji_64)
     - GIF emoji collections from xiaozhi-fonts (e.g., noto-emoji_128, noto-emoji_64)
     - Otto GIF emoji collection (otto-gif)
+    - TBot neon mochi faces (tbot-neon-faces), packed from the project tree into
+      the assets SPIFFS partition (the 21 GIFs are ~3.6 MB and do not fit in the
+      app partition)
     """
     if not default_emoji_collection:
         return None
-    
+
+    # Special handling for TBot neon mochi faces shipped in the project tree.
+    # The GIF filenames (happy.gif, sad.gif, ...) already match the emotion
+    # names passed to SetEmotion(), so process_emoji_collection() maps them 1:1.
+    if default_emoji_collection == 'tbot-neon-faces':
+        if project_root:
+            neon_faces_path = os.path.join(project_root, 'main', 'display',
+                                           'lvgl_display', 'tbot-neon-faces', 'gif')
+            if os.path.exists(neon_faces_path):
+                return neon_faces_path
+            else:
+                print(f"Warning: TBot neon faces directory not found: {neon_faces_path}")
+                return None
+        else:
+            print("Warning: project_root not provided, cannot locate tbot-neon-faces collection")
+            return None
+
     # Special handling for otto-gif collection
     if default_emoji_collection == 'otto-gif':
         if project_root:

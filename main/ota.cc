@@ -25,6 +25,39 @@
 
 #define TAG "Ota"
 
+namespace {
+
+std::vector<std::string> BuildCheckVersionUrls(const std::string& configured_url) {
+    std::vector<std::string> urls;
+    if (configured_url.rfind("https://", 0) == 0 &&
+            configured_url.find(".trycloudflare.com/") != std::string::npos) {
+        std::string http_url = "http://" + configured_url.substr(strlen("https://"));
+        urls.push_back(http_url);
+    }
+    if (configured_url.length() >= 10) {
+        if (std::find(urls.begin(), urls.end(), configured_url) == urls.end()) {
+            urls.push_back(configured_url);
+        }
+    }
+
+    std::string fallback_url = CONFIG_OTA_URL;
+    if (fallback_url.length() >= 10 &&
+            std::find(urls.begin(), urls.end(), fallback_url) == urls.end()) {
+        urls.push_back(fallback_url);
+    }
+    return urls;
+}
+
+void PersistRecoveredOtaUrl(const std::string& url) {
+    Settings settings("wifi", true);
+    if (settings.GetString("ota_url") != url) {
+        settings.SetString("ota_url", url);
+        ESP_LOGW(TAG, "Recovered OTA URL persisted to NVS: %s", url.c_str());
+    }
+}
+
+} // namespace
+
 
 Ota::Ota() {
 #ifdef ESP_EFUSE_BLOCK_USR_DATA
@@ -83,22 +116,37 @@ esp_err_t Ota::CheckVersion() {
     current_version_ = app_desc->version;
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
-    std::string url = GetCheckVersionUrl();
-    if (url.length() < 10) {
+    std::string configured_url = GetCheckVersionUrl();
+    auto urls = BuildCheckVersionUrls(configured_url);
+    if (urls.empty()) {
         ESP_LOGE(TAG, "Check version URL is not properly set");
         return ESP_ERR_INVALID_ARG;
     }
 
-    auto http = SetupHttp();
-
     std::string data = board.GetSystemInfoJson();
     std::string method = data.length() > 0 ? "POST" : "GET";
-    http->SetContent(std::move(data));
 
-    if (!http->Open(method, url)) {
-        int last_error = http->GetLastError();
-        ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x", last_error);
+    std::unique_ptr<Http> http;
+    int last_error = ESP_FAIL;
+    std::string opened_url;
+    for (const auto& url : urls) {
+        http = SetupHttp();
+        std::string body_copy = data;
+        http->SetContent(std::move(body_copy));
+        if (http->Open(method, url)) {
+            opened_url = url;
+            break;
+        }
+        last_error = http->GetLastError();
+        ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x, url=%s", last_error, url.c_str());
+    }
+
+    if (opened_url.empty()) {
         return last_error;
+    }
+
+    if (opened_url != configured_url) {
+        PersistRecoveredOtaUrl(opened_url);
     }
 
     auto status_code = http->GetStatusCode();

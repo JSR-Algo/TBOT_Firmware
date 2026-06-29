@@ -44,8 +44,8 @@ import urllib.request
 # server emits `activation`. The /v1/ota/ example is a different path shape.
 PRESETS = {
     "kconfig":      "https://tbot-backend-8wmh.onrender.com/tbot/ota/",          # firmware compile-time default
-    "render-tunnel":"https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/",  # render.yaml TBOT_OTA_URL
-    "skylabs":      "https://api.skylabs.vn/v1/ota/",                            # bootstrap.controller.ts Swagger example
+    "render-tunnel":"https://athletic-editorials-stereo-anatomy.trycloudflare.com/tbot/ota/",  # current quick-tunnel TBOT_OTA_URL
+    "trycloudflare": "https://athletic-editorials-stereo-anatomy.trycloudflare.com/tbot/ota/",                            # current quick-tunnel OTA
 }
 
 # NVS partition for ESP32-S3 image (partitions: nvs, data, nvs, 0x9000, 0x4000).

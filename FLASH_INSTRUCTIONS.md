@@ -10,9 +10,9 @@ Binary mới ở `build/xiaozhi.bin` (2.5MB).
 
 ## Endpoint đang dùng để nạp code
 
-- Web/admin: `https://admin.skylabs.vn`
-- OTA: `https://ota.skylabs.vn/tbot/ota/`
-- WS: `wss://ws.skylabs.vn/tbot/v1/`
+- Web/admin: `https://eval-renaissance-covering-yukon.trycloudflare.com`
+- OTA: `https://athletic-editorials-stereo-anatomy.trycloudflare.com/tbot/ota/`
+- WS: `wss://fantastic-hall-owners-programming.trycloudflare.com/tbot/v1/`
 
 Firmware lấy WS từ OTA JSON. Khi build/flash, `CONFIG_OTA_URL` đang trỏ tới OTA URL ở trên.
 
@@ -43,7 +43,7 @@ Firmware lấy WS từ OTA JSON. Khi build/flash, `CONFIG_OTA_URL` đang trỏ t
 
 1. Mở manager-web admin UI (port 8002):
    ```
-   https://admin.skylabs.vn
+   https://eval-renaissance-covering-yukon.trycloudflare.com
    ```
 2. Vào tab **OTA / Firmware Management** (tên menu tùy ngôn ngữ)
 3. Upload file `build/xiaozhi.bin`

@@ -48,6 +48,7 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
     passive_opened = opened[opened.index("if (passive_ws_intent_.load())") : opened.index("} else {")]
     assert "StartHeartbeat" not in passive_opened
     assert "DispatchDeviceHeartbeat" not in passive_opened
+    assert "EnableWakeWordDetection(true)" in passive_opened
     assert "online_intent_.store(true)" in opened
     assert "online_intent_.store(true)" in set_listening
     assert "passive_ws_intent_.store(false)" in set_listening

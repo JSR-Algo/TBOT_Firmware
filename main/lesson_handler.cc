@@ -105,6 +105,18 @@ struct LessonSession {
 };
 LessonSession g_session;
 
+void ClearTerminalLessonCursor() {
+    // A completed/failed lesson is terminal. The server may reuse the same assignmentId
+    // / sessionId for the next sample lesson and restart S->F sequence at 1; clear the
+    // inbound cursor so fresh prepare is not treated as an old duplicate.
+    g_session.last_in_sequence = 0;
+    g_session.last_ack_sequence = 0;
+    g_session.last_ack_rendered = false;
+    g_session.last_ack_degraded = false;
+    g_session.last_ack_asset_pack_json.clear();
+    g_session.assignment_version = -1.0;
+}
+
 // Build an outbound F->S frame. Envelope identity (protocolVersion/assignmentId/
 // sessionId/lessonId/lessonVersion/stepId) is echoed verbatim from the inbound
 // frame; the firmware owns only type/sequence/timestamp/body. `body` is consumed.
@@ -729,6 +741,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (strcmp(type, "lesson_start") == 0) {
         g_session.running = true;
+        Application::GetInstance().SetLessonRuntimeActive(true);
         // Turn OFF the idle realtime emoji face so ONLY the lesson's three image layers
         // show (inverse of the lesson_stop restore below). Without this the smiley bleeds
         // through the lesson scene and reappears on any caption-only / asset-fetch-failed
@@ -743,9 +756,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (strcmp(type, "lesson_stop") == 0) {
         Application::GetInstance().CancelLessonInteractiveListening();
+        Application::GetInstance().SetLessonRuntimeActive(false);
         g_session.running = false;
         g_session.prepared = false;
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
+        ClearTerminalLessonCursor();
         // Return the robot display to its idle realtime state (protocol §4.6): clear any
         // persistent lesson background poster (US-006) and restore the neutral face.
         Display* display = Board::GetInstance().GetDisplay();
@@ -763,11 +778,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (strcmp(type, "lesson_error") == 0) {
         Application::GetInstance().CancelLessonInteractiveListening();
+        Application::GetInstance().SetLessonRuntimeActive(false);
         // ESP can send a terminal lesson_error when it rejects an unsafe lesson payload
         // before it reaches the renderer. Do not ack this status frame back; clear stale
         // layers and show a child-safe failure message instead of leaving the last step
         // frozen on screen.
         g_session.running = false;
+        g_session.prepared = false;
+        ClearTerminalLessonCursor();
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {

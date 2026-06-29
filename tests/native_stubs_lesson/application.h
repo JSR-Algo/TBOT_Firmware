@@ -28,6 +28,7 @@ public:
         protocol_ = std::make_unique<Protocol>();
         prepare_listen_calls = 0;
         cancel_listen_calls = 0;
+        lesson_runtime_active = false;
         schedule_calls = 0;
     }
 
@@ -38,6 +39,7 @@ public:
 
     int prepare_listen_calls = 0;
     int cancel_listen_calls = 0;
+    bool lesson_runtime_active = false;
     int schedule_calls = 0;
 
     void Schedule(std::function<void()>&& cb) {
@@ -46,6 +48,7 @@ public:
     }
     void PrepareLessonInteractiveListening() { prepare_listen_calls++; }
     void CancelLessonInteractiveListening() { cancel_listen_calls++; }
+    void SetLessonRuntimeActive(bool active) { lesson_runtime_active = active; }
 
     // Defined in lesson_handler.cc (the unit under test).
     void HandleLessonMessage(const cJSON* root);

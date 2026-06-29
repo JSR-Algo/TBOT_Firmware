@@ -160,6 +160,118 @@ def test_wake_word_listening_uses_autostop_even_when_default_mode_is_realtime():
     assert "SetListeningMode(GetDefaultListeningMode());" not in body
 
 
+def test_autostop_tts_stop_returns_to_idle_instead_of_reopening_mic_loop():
+    app_cc = read("main/application.cc")
+
+    stop = app_cc.index('strcmp(state->valuestring, "stop") == 0')
+    sentence_start = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop)
+    stop_body = app_cc[stop:sentence_start]
+
+    assert "listening_mode_ == kListeningModeAutoStop" in stop_body
+    assert "SetDeviceState(kDeviceStateIdle);" in stop_body
+    autostop_start = stop_body.index("listening_mode_ == kListeningModeAutoStop")
+    autostop_body = stop_body[autostop_start:stop_body.index("} else", autostop_start)]
+    assert "SetDeviceState(kDeviceStateListening)" not in autostop_body
+    assert "mic_loop_resumed" not in autostop_body
+
+
+def test_autostop_tts_stop_drains_playback_before_returning_to_idle():
+    app_cc = read("main/application.cc")
+
+    assert "kTtsStopPlaybackDrainTimeoutMs" in app_cc
+
+    stop = app_cc.index('strcmp(state->valuestring, "stop") == 0')
+    sentence_start = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop)
+    stop_body = app_cc[stop:sentence_start]
+
+    assert "audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs)" in stop_body
+    assert "tts_stop_playback_drain_timeout" in stop_body
+
+    autostop_start = stop_body.index("listening_mode_ == kListeningModeAutoStop")
+    autostop_body = stop_body[autostop_start:stop_body.index("} else", autostop_start)]
+    assert autostop_body.index("audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs)") < autostop_body.index(
+        "SetDeviceState(kDeviceStateIdle);"
+    )
+
+
+def test_google_live_tts_stop_continue_listening_reopens_realtime_mic_loop():
+    app_cc = read("main/application.cc")
+
+    stop = app_cc.index('strcmp(state->valuestring, "stop") == 0')
+    sentence_start = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop)
+    stop_body = app_cc[stop:sentence_start]
+
+    assert 'cJSON_GetObjectItem(root, "continue_listening")' in stop_body
+    assert "cJSON_IsTrue(continue_listening)" in stop_body
+    assert 'cJSON_GetObjectItem(root, "listen_mode")' in stop_body
+    assert 'strcmp(listen_mode->valuestring, "realtime") == 0' in stop_body
+    assert "force_continue_listening" in stop_body
+    continue_start = stop_body.index("force_continue_listening")
+    continue_body = stop_body[continue_start:stop_body.index("if (GetDeviceState() == kDeviceStateSpeaking)", continue_start)]
+    assert "listening_mode_ = kListeningModeRealtime;" in continue_body
+    assert "SetDeviceState(kDeviceStateListening);" in continue_body
+    assert "protocol_->SendStartListening(kListeningModeRealtime);" in continue_body
+    assert "mic_loop_resumed" in continue_body
+
+
+def test_autostop_speaking_timeout_returns_to_idle_instead_of_reopening_mic_loop():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleSpeakingTimeout")
+    end = app_cc.index("void Application::AbortSpeaking", start)
+    body = app_cc[start:end]
+
+    assert "listening_mode_ == kListeningModeAutoStop" in body
+    autostop_start = body.index("listening_mode_ == kListeningModeAutoStop")
+    autostop_body = body[autostop_start:body.index("} else", autostop_start)]
+    assert "SetDeviceState(kDeviceStateIdle);" in autostop_body
+    assert "SetDeviceState(kDeviceStateListening)" not in autostop_body
+    assert "mic_loop_resumed" not in autostop_body
+
+
+def test_listening_watchdog_exits_stale_autostop_turns():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+
+    assert "kListeningNoSpeechTimeoutMs" in app_cc
+    assert "kListeningMaxTurnMs" in app_cc
+    assert "last_listening_activity_ms_" in app_h
+    assert "listening_started_ms_" in app_h
+    assert "void Application::HandleListeningWatchdogTick" in app_cc
+    assert "void HandleListeningWatchdogTick();" in app_h
+
+    clock_start = app_cc.index("if (bits & MAIN_EVENT_CLOCK_TICK)")
+    clock_end = app_cc.index("void Application::HandleNetworkConnectedEvent", clock_start)
+    clock_body = app_cc[clock_start:clock_end]
+    assert "HandleListeningWatchdogTick();" in clock_body
+
+    watchdog_start = app_cc.index("void Application::HandleListeningWatchdogTick")
+    watchdog_end = app_cc.index("void Application::HandleStateChangedEvent", watchdog_start)
+    watchdog_body = app_cc[watchdog_start:watchdog_end]
+    assert "GetDeviceState() != kDeviceStateListening" in watchdog_body
+    assert "listening_mode_ == kListeningModeRealtime" in watchdog_body
+    assert "listening_watchdog_timeout" in watchdog_body
+    assert "protocol_->SendStopListening();" in watchdog_body
+    assert "audio_service_.EnableVoiceProcessing(false);" in watchdog_body
+    assert "SetDeviceState(kDeviceStateIdle);" in watchdog_body
+
+
+def test_listening_activity_is_refreshed_when_listening_starts_and_vad_fires():
+    app_cc = read("main/application.cc")
+
+    vad_start = app_cc.index("callbacks.on_vad_change")
+    vad_end = app_cc.index("xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);", vad_start)
+    vad_body = app_cc[vad_start:vad_end]
+    assert "last_listening_activity_ms_.store" in vad_body
+    assert "GetDeviceState() == kDeviceStateListening" in vad_body
+
+    listening_start = app_cc.index("case kDeviceStateListening:")
+    speaking_start = app_cc.index("case kDeviceStateSpeaking:", listening_start)
+    listening_body = app_cc[listening_start:speaking_start]
+    assert "listening_started_ms_.store" in listening_body
+    assert "last_listening_activity_ms_.store" in listening_body
+
+
 def test_cold_wake_word_open_uses_worker_instead_of_blocking_app_task():
     app_cc = read("main/application.cc")
     app_h = read("main/application.h")
@@ -196,6 +308,28 @@ def test_wake_word_connect_watchdog_allows_slow_websocket_open_retries():
     assert "35ULL * 1000000ULL" in app_cc
     assert "esp_timer_start_once(connect_watchdog_timer_, kConnectWatchdogTimeoutUs)" in app_cc
     assert "esp_timer_start_once(connect_watchdog_timer_, 12000000)" not in app_cc
+
+
+def test_wake_word_open_finishes_after_stale_passive_socket_close_returns_idle():
+    app_cc = read("main/application.cc")
+
+    open_start = app_cc.index("void Application::OpenChannelTask")
+    open_end = app_cc.index("void Application::ArmConnectWatchdog", open_start)
+    open_body = app_cc[open_start:open_end]
+    callback_start = open_body.index("self->Schedule")
+    state_guard = open_body[
+        open_body.index("if (!passive_preconnect", callback_start) :
+        open_body.index("if (ok)", callback_start)
+    ]
+
+    # A timed-out passive WebSocket can emit OnAudioChannelClosed after the wake
+    # path already moved Idle -> Connecting. That stale close returns the FSM to
+    # Idle while the wake worker is still opening a fresh channel. The wake worker
+    # must still finish the original wake turn from Idle, not discard it and make
+    # the user say "Hi ESP" again.
+    assert "wake_word_invoke" in state_guard
+    assert "kDeviceStateIdle" in state_guard
+    assert "FinishWakeWordInvoke(wake_word)" in open_body
 
 
 def test_afe_audio_loops_yield_to_avoid_watchdog_starvation():
