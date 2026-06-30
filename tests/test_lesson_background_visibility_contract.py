@@ -57,6 +57,71 @@ def test_lesson_background_is_persistent_not_preview_timer_based():
     assert "lv_image_set_scale(lesson_background_" in body
 
 
+def test_lesson_background_uses_cover_scale_not_width_only_fit():
+    source = SOURCE.read_text(encoding="utf-8")
+    bodies = []
+    offset = 0
+    while True:
+        try:
+            start = source.index("void LcdDisplay::SetLessonBackground", offset)
+        except ValueError:
+            break
+        bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonBackground"))
+        offset = start + 1
+
+    assert "LessonImageCoverScale" in source
+    assert len(bodies) >= 2
+    for body in bodies:
+        assert "LessonImageCoverScale(" in body
+        assert "256 * width_ / img_dsc->header.w" not in body
+
+def test_lesson_object_and_robot_overlay_use_safe_composition_layout():
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert "kLessonObjectMaxWidthPercent = 46" in source
+    assert "kLessonObjectMaxHeightPercent = 50" in source
+    assert "kLessonObjectYOffsetDivisor = 12" in source
+    assert "kLessonRobotMaxWidthPercent = 32" in source
+    assert "kLessonRobotMaxHeightPercent = 34" in source
+    assert "kLessonRobotBottomInsetDivisor = 6" in source
+
+    object_bodies = []
+    overlay_bodies = []
+    offset = 0
+    while True:
+        try:
+            start = source.index("void LcdDisplay::SetLessonObject", offset)
+        except ValueError:
+            break
+        object_bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonObject"))
+        offset = start + 1
+
+    offset = 0
+    while True:
+        try:
+            start = source.index("void LcdDisplay::SetLessonRobotOverlay", offset)
+        except ValueError:
+            break
+        overlay_bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonRobotOverlay"))
+        offset = start + 1
+
+    assert len(object_bodies) >= 2
+    assert len(overlay_bodies) >= 2
+    for body in object_bodies:
+        assert "LessonImageFitScale(" in body
+        assert "kLessonObjectMaxWidthPercent" in body
+        assert "kLessonObjectMaxHeightPercent" in body
+        assert "LV_ALIGN_CENTER, 0, -height_ / kLessonObjectYOffsetDivisor" in body
+        assert "width_ * 3 / 5" not in body
+        assert "height_ / 12)" not in body
+    for body in overlay_bodies:
+        assert "LessonImageFitScale(" in body
+        assert "kLessonRobotMaxWidthPercent" in body
+        assert "kLessonRobotMaxHeightPercent" in body
+        assert "LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / kLessonRobotBottomInsetDivisor" in body
+        assert "width_ / 3" not in body
+        assert "-height_ / 12" not in body
+
 def test_lesson_stop_clears_persistent_background_on_firmware():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     body = function_body(source, "void Application::HandleLessonMessage")

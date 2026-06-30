@@ -104,6 +104,10 @@ public:
     void PrepareLessonInteractiveListening();
     void CancelLessonInteractiveListening();
     void SetLessonRuntimeActive(bool active);
+    bool IsLessonRuntimeActive() const;
+    void BeginLessonNetworkRenderQuiet();
+    void EndLessonNetworkRenderQuiet();
+    bool IsLessonNetworkRenderQuiet() const;
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -164,6 +168,7 @@ private:
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     std::atomic<bool> lesson_runtime_active_{false};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
+    std::atomic<int> lesson_network_render_quiet_{0};
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
@@ -231,18 +236,20 @@ private:
     std::atomic<bool> connect_in_flight_{false};
     std::atomic<bool> reset_pending_{false};
     // WSS-8: true from the start of a wake/listen/reconnect connect cycle until it
-    // terminally succeeds or gives up. While true, a per-attempt SetError is a
+    // succeeds or the user/system cancels the online intent. While true, a per-attempt SetError is a
     // RECOVERABLE transient (the wake loop / ScheduleReconnect backoff retries),
     // so MAIN_EVENT_ERROR keeps the calm "connecting/idle" view instead of flashing
-    // "Server unavailable. Retrying...". The error banner is surfaced ONCE, from the
-    // terminal give-up points (wake-open exhausted, reconnect give-up). Cleared on
-    // OnAudioChannelOpened (success).
+    // "Server unavailable. Retrying...". Wake-open exhaustion still surfaces a
+    // terminal error; listen-mode reconnect stays in long-horizon auto-reconnect.
+    // Cleared on OnAudioChannelOpened (success).
     std::atomic<bool> connect_attempt_active_{false};
     esp_timer_handle_t connect_watchdog_timer_ = nullptr;   // one-shot (SM-3)
-    // T2/WSS-4: bounded auto-reconnect with exponential backoff + jitter.
+    // T2/WSS-4: long-horizon auto-reconnect with fast backoff, then slow periodic retry.
     esp_timer_handle_t reconnect_timer_ = nullptr;          // one-shot
     int reconnect_attempt_ = 0;
+    int passive_reconnect_attempt_ = 0;
     ListeningMode reconnect_mode_ = kListeningModeAutoStop;
+    std::atomic<bool> reconnect_passive_{false};
     // Sustained operation: true while we WANT an open audio channel. Set on
     // OnAudioChannelOpened; cleared by CloseAudioChannelByIntent() for every
     // user/system-initiated close. An UNEXPECTED drop leaves it true ->
@@ -298,7 +305,8 @@ private:
     void ArmConnectWatchdog();                         // SM-3: bound CONNECTING
     void CancelConnectWatchdog();
     void HandleConnectWatchdog(uint32_t generation);
-    void ScheduleReconnect(ListeningMode mode);        // T2/WSS-4: backoff+jitter
+    void ScheduleReconnect(ListeningMode mode);        // T2/WSS-4: long-horizon backoff+jitter
+    void SchedulePassiveLessonReconnect();             // passive lesson/nudge socket retry
     void HandleReconnectTick();
     void CloseAudioChannelByIntent();                  // intentional close -> clears online_intent_
     void ContinueWakeWordInvoke(const std::string& wake_word);

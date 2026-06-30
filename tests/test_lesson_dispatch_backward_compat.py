@@ -69,6 +69,24 @@ def test_lesson_frames_are_serialized_off_websocket_receive_stack():
     assert "HandleLessonMessage(root);" in worker
 
 
+def test_lesson_worker_queue_full_drop_is_nonblocking_and_frees_payload():
+    app = read("main/application.cc")
+    enqueue = app[
+        app.index("void Application::EnqueueLessonMessage") :
+        app.index("void Application::LessonMessageTask")
+    ]
+
+    assert "char* payload = cJSON_PrintUnformatted(root);" in enqueue
+    assert "xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE" in enqueue
+    assert 'ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d"' in enqueue
+    drop = enqueue[
+        enqueue.index("xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE") :
+        enqueue.index("} else {")
+    ]
+    assert "cJSON_free(payload);" in drop
+    assert "HandleLessonMessage(root);" not in enqueue
+
+
 def test_unknown_type_noop_is_unchanged():
     app = read("main/application.cc")
     assert app.count('ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring)') == 1

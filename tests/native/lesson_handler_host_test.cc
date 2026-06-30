@@ -919,6 +919,62 @@ void test_step_fetches_canonical_layer_urls_in_order() {
             "robotOverlay asset URL fetched third");
 }
 
+void test_step_http_fetch_sets_short_timeout_before_open() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s4",
+                     "https://cdn.example.test/bg/poster.jpg",
+                     "https://cdn.example.test/object/barn.png",
+                     "https://cdn.example.test/robot/teach.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+
+    require(HostHttp().open_calls.size() == 3, "three HTTP lesson fetches still occur");
+    require(HostHttp().timeout_calls.size() == 3, "each HTTP lesson fetch sets a timeout");
+    for (int timeout_ms : HostHttp().timeout_calls) {
+        require(timeout_ms == 1200, "lesson image timeout is short enough for fallback-before-idle");
+    }
+}
+
+void test_step_reuses_cached_layer_bytes_for_repeated_urls() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    const char* poster = "http://cache.test/bg/reused-poster.jpg";
+    const char* object = "http://cache.test/object/reused-barn.png";
+    const char* overlay = "http://cache.test/robot/reused-listen.png";
+
+    Handle(StepFrame(3, "s-cache-1", poster, object, overlay,
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    Handle(StepFrame(4, "s-cache-2", poster, object, overlay,
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+
+    require(HostHttp().open_calls.size() == 3,
+            "repeated layer URLs are decoded from lesson image cache without refetch");
+    require(disp.background_calls.size() >= 2 && disp.object_calls.size() >= 2 &&
+                disp.overlay_calls.size() >= 2,
+            "cached layer bytes still draw every repeated step");
+    require(FrameBodyBool(Sent().size() - 1, "degraded", true) == false,
+            "cache-hit repeated step remains non-degraded");
+}
+
 // interactive step (no completionClass, non-passive stepType) opens a listen window.
 void test_step_interactive_opens_listen() {
     ResetObservable();
@@ -1665,6 +1721,8 @@ int main() {
     test_step_full_render_http();
     test_step_ignores_story_metadata_while_rendering_layers();
     test_step_fetches_canonical_layer_urls_in_order();
+    test_step_http_fetch_sets_short_timeout_before_open();
+    test_step_reuses_cached_layer_bytes_for_repeated_urls();
     test_step_interactive_opens_listen();
     test_step_degraded_and_caption_fallback();
     test_step_http_error_paths();

@@ -65,3 +65,23 @@ def test_passive_lesson_socket_reconnects_without_entering_listening_after_idle_
     assert "StartPassiveLessonWebsocket();" in closed[passive_idx:online_idx]
     assert "ScheduleReconnect" not in closed[passive_idx:online_idx]
     assert "passive_ws_intent_.store(false)" in close_by_intent
+
+def test_passive_lesson_socket_connect_failure_retries_passively():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    passive_failure = open_task[
+        open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")') :
+        open_task.index('} else if (wake_word_invoke)', open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")'))
+    ]
+    reconnect_tick = function_body(source, "void Application::HandleReconnectTick")
+    passive_scheduler = function_body(source, "void Application::SchedulePassiveLessonReconnect")
+
+    assert "void SchedulePassiveLessonReconnect();" in header
+    assert "std::atomic<bool> reconnect_passive_" in header
+    assert "passive_reconnect_attempt_" in header
+    assert "SchedulePassiveLessonReconnect();" in passive_failure
+    assert "ScheduleReconnect" not in passive_failure
+    assert "StartPassiveLessonWebsocket();" in reconnect_tick
+    assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
+    assert "passive_lesson_reconnect_scheduled" in passive_scheduler

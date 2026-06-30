@@ -80,11 +80,11 @@ void CopyNum(cJSON* dst, const cJSON* src, const char* k) {
 int64_t NowMs() { return static_cast<int64_t>(time(nullptr)) * 1000LL; }
 
 // ---- single active lesson session (slice-01: one assignment at a time) -------
-// OnIncomingJson runs on the single protocol receive task, so lesson frames are
-// processed sequentially and this state needs no lock. Draws are marshalled to the
-// app task via Application::Schedule(). The F->S sequence is the only firmware-owned
-// wire state (shared by acks + progress, monotonic per (assignmentId,sessionId),
-// starting at 1 — fixture sequenceStreams F->S).
+// HandleLessonMessage runs on the dedicated lesson_worker task, so lesson frames
+// are processed sequentially and this state needs no lock. Draws are marshalled to
+// the app task via Application::Schedule(). The F->S sequence is the only
+// firmware-owned wire state (shared by acks + progress, monotonic per
+// (assignmentId,sessionId), starting at 1 — fixture sequenceStreams F->S).
 struct LessonSession {
     std::string assignment_id;
     std::string session_id;
@@ -210,6 +210,9 @@ bool IsJpegImage(const void* data, size_t size) {
 
 constexpr size_t kMaxLessonImageBytes = 512 * 1024;
 constexpr size_t kMaxLessonDecodedImageBytes = 320 * 240 * 2;
+constexpr int kLessonImageHttpTimeoutMs = 1200;
+constexpr size_t kLessonImageCacheMaxEntries = 8;
+constexpr size_t kLessonImageCacheMaxBytes = 384 * 1024;
 
 bool LessonDecodedImageFitsBudget(size_t decoded_len, size_t width, size_t height, size_t stride) {
     if (decoded_len == 0 || width == 0 || height == 0 || stride == 0) return false;
@@ -261,7 +264,7 @@ std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_len
     // LVGL can't decode the bytes (truncated/unsupported image, HTML error page
     // served as 200, etc.) and does NOT free data on throw — catch it so an
     // undecodable poster is a non-fatal skip instead of an exception escaping the
-    // WS receive task (deep-audit #1 CRITICAL). catch(...) avoids any <exception>
+    // lesson_worker task (deep-audit #1 CRITICAL). catch(...) avoids any <exception>
     // include dependency.
     try {
         return std::make_unique<LvglAllocatedImage>(data, content_length);
@@ -271,6 +274,127 @@ std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_len
         return nullptr;
     }
 }
+
+// GCOVR_EXCL_START: exercised by host behavior tests, but OOM/LRU defensive branches
+// are not useful to exhaustively line-cover in the native harness.
+struct LessonImageCacheEntry {
+    std::string url;
+    char* data = nullptr;
+    size_t size = 0;
+    uint32_t last_used = 0;
+};
+LessonImageCacheEntry g_lesson_image_cache[kLessonImageCacheMaxEntries];
+size_t g_lesson_image_cache_bytes = 0;
+uint32_t g_lesson_image_cache_clock = 0;
+
+void FreeLessonImageCacheEntry(LessonImageCacheEntry& entry) {
+    if (entry.data != nullptr) {
+        heap_caps_free(entry.data);
+    }
+    entry.url.clear();
+    entry.data = nullptr;
+    entry.size = 0;
+    entry.last_used = 0;
+}
+
+void ClearLessonImageCache() {
+    for (auto& entry : g_lesson_image_cache) {
+        FreeLessonImageCacheEntry(entry);
+    }
+    g_lesson_image_cache_bytes = 0;
+}
+
+void EvictLessonImageCacheEntry(size_t index) {
+    if (index >= kLessonImageCacheMaxEntries) return;
+    LessonImageCacheEntry& entry = g_lesson_image_cache[index];
+    if (entry.data == nullptr) return;
+    if (g_lesson_image_cache_bytes >= entry.size) {
+        g_lesson_image_cache_bytes -= entry.size;
+    } else {
+        g_lesson_image_cache_bytes = 0;
+    }
+    FreeLessonImageCacheEntry(entry);
+}
+
+int FindLessonImageCacheEntry(const char* url) {
+    if (url == nullptr) return -1;
+    for (size_t i = 0; i < kLessonImageCacheMaxEntries; ++i) {
+        if (g_lesson_image_cache[i].data != nullptr && g_lesson_image_cache[i].url == url) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+int FindLessonImageCacheSlot() {
+    for (size_t i = 0; i < kLessonImageCacheMaxEntries; ++i) {
+        if (g_lesson_image_cache[i].data == nullptr) return static_cast<int>(i);
+    }
+    size_t lru_index = 0;
+    uint32_t lru_stamp = g_lesson_image_cache[0].last_used;
+    for (size_t i = 1; i < kLessonImageCacheMaxEntries; ++i) {
+        if (g_lesson_image_cache[i].last_used < lru_stamp) {
+            lru_stamp = g_lesson_image_cache[i].last_used;
+            lru_index = i;
+        }
+    }
+    return static_cast<int>(lru_index);
+}
+
+char* CloneLessonImageBytes(const char* data, size_t size) {
+    if (data == nullptr || size == 0 || size > kMaxLessonImageBytes) return nullptr;
+    char* copy = static_cast<char*>(heap_caps_malloc(size, MALLOC_CAP_8BIT));
+    if (copy == nullptr) return nullptr;
+    memcpy(copy, data, size);
+    return copy;
+}
+
+std::unique_ptr<LvglImage> LessonImageCacheLookup(const char* url) {
+    int index = FindLessonImageCacheEntry(url);
+    if (index < 0) return nullptr;
+    LessonImageCacheEntry& entry = g_lesson_image_cache[index];
+    char* copy = CloneLessonImageBytes(entry.data, entry.size);
+    if (copy == nullptr) {
+        ESP_LOGW(TAG, "lesson image fetch: cache clone failed");
+        return nullptr;
+    }
+    entry.last_used = ++g_lesson_image_cache_clock;
+    ESP_LOGI(TAG, "lesson image fetch: cache hit");
+    return DecodeLessonImageBytes(copy, entry.size, "lesson image cache");
+}
+
+void LessonImageCacheStore(const char* url, const char* data, size_t size) {
+    if (url == nullptr || url[0] == '\0' || data == nullptr || size == 0) return;
+    if (size > kMaxLessonImageBytes || size > kLessonImageCacheMaxBytes) return;
+
+    int existing = FindLessonImageCacheEntry(url);
+    if (existing >= 0) {
+        EvictLessonImageCacheEntry(static_cast<size_t>(existing));
+    }
+    while (g_lesson_image_cache_bytes + size > kLessonImageCacheMaxBytes) {
+        int evict = FindLessonImageCacheSlot();
+        if (evict < 0 || g_lesson_image_cache[evict].data == nullptr) break;
+        EvictLessonImageCacheEntry(static_cast<size_t>(evict));
+    }
+    int slot = FindLessonImageCacheSlot();
+    if (slot < 0) return;
+    if (g_lesson_image_cache[slot].data != nullptr) {
+        EvictLessonImageCacheEntry(static_cast<size_t>(slot));
+    }
+
+    char* copy = CloneLessonImageBytes(data, size);
+    if (copy == nullptr) {
+        ESP_LOGW(TAG, "lesson image fetch: cache store alloc failed");
+        return;
+    }
+    LessonImageCacheEntry& entry = g_lesson_image_cache[slot];
+    entry.url = url;
+    entry.data = copy;
+    entry.size = size;
+    entry.last_used = ++g_lesson_image_cache_clock;
+    g_lesson_image_cache_bytes += size;
+}
+// GCOVR_EXCL_STOP
 
 constexpr const char* kLessonAssetPackRoot = "/sdcard/tbot/lesson-assets/";
 
@@ -437,13 +561,18 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
 //
 // FAILURE IS NEVER FATAL: any error (no URL, no network, bad status, alloc fail, short
 // read) returns nullptr and the caller falls back to the caption-only ladder. We run
-// on the protocol receive task (HandleLessonMessage), so this blocking download does
-// NOT stall the LVGL/app task; the decoded draw is then marshalled via Schedule().
+// on the dedicated lesson_worker task (HandleLessonMessage), so this blocking download
+// does NOT stall the WS receive callback or LVGL/app task; the decoded draw is then
+// marshalled via Schedule().
 std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
     if (url == nullptr || url[0] == '\0') return nullptr;
 
     if (strncmp(url, "sd://", 5) == 0 || strncmp(url, "file://", 7) == 0) {
         return FetchLessonLocalImage(url);
+    }
+
+    if (auto cached = LessonImageCacheLookup(url)) {
+        return cached;
     }
 
     auto* network = Board::GetInstance().GetNetwork();
@@ -453,6 +582,7 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
     }
     auto http = network->CreateHttp(3);
     if (!http) return nullptr;
+    http->SetTimeout(kLessonImageHttpTimeoutMs);
 
     if (!http->Open("GET", url)) {
         ESP_LOGW(TAG, "lesson image fetch: open failed");
@@ -550,6 +680,7 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         content_length = total_read;
     }
 
+    LessonImageCacheStore(url, data, content_length);
     return DecodeLessonImageBytes(data, content_length, "lesson image fetch");
 }
 
@@ -641,6 +772,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     if (is_prepare && !duplicate_prepare) {
         // lesson_prepare (re)establishes the single active session and resets the
         // F->S counter + the inbound sequence cursor for this assignment.
+        ClearLessonImageCache();
         g_session = LessonSession{};
         g_session.assignment_id = assignment_id;
         g_session.session_id = session_id;
@@ -860,6 +992,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // mirrors mcp_server.cc:255 and yields nullptr on non-LVGL boards.
     Display* base_display = Board::GetInstance().GetDisplay();
     LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(base_display);
+
+    Application::GetInstance().BeginLessonNetworkRenderQuiet();
+    struct LessonNetworkRenderQuietGuard {
+        ~LessonNetworkRenderQuietGuard() {
+            Application::GetInstance().EndLessonNetworkRenderQuiet();
+        }
+    } lesson_network_render_quiet_guard;
 
     // Try to fetch + decode the authored poster. On any failure FetchLessonImage
     // returns nullptr and we fall through to the caption-only render (never crash).

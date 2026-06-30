@@ -29,6 +29,7 @@ struct HostHttpScript {
     int early_close_after = -1;   // if >=0, the Nth Read() returns 0 (server closed early)
     size_t max_chunk = 0;         // 0 = serve all remaining in one Read; else cap each Read
     std::vector<HostHttpOpenCall> open_calls;
+    std::vector<int> timeout_calls;
 };
 
 inline HostHttpScript& HostHttp() {
@@ -39,6 +40,9 @@ inline void ResetHostHttp() { HostHttp() = HostHttpScript{}; }
 
 class FakeHttp {
 public:
+    void SetTimeout(int timeout_ms) {
+        HostHttp().timeout_calls.push_back(timeout_ms);
+    }
     bool Open(const char* method, const char* url) {
         HostHttp().open_calls.push_back({method ? method : "", url ? url : ""});
         opened_ = HostHttp().open_ok;

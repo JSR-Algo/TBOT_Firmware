@@ -18,6 +18,33 @@
 
 #define TAG "LcdDisplay"
 
+namespace {
+constexpr int kLessonObjectMaxWidthPercent = 46;
+constexpr int kLessonObjectMaxHeightPercent = 50;
+constexpr int kLessonObjectYOffsetDivisor = 12;
+constexpr int kLessonRobotMaxWidthPercent = 32;
+constexpr int kLessonRobotMaxHeightPercent = 34;
+constexpr int kLessonRobotBottomInsetDivisor = 6;
+
+int LessonImageFitScale(int image_width, int image_height, int max_width, int max_height) {
+    if (image_width <= 0 || image_height <= 0 || max_width <= 0 || max_height <= 0) {
+        return 256;
+    }
+    const int scale_w = 256 * max_width / image_width;
+    const int scale_h = 256 * max_height / image_height;
+    return std::max(1, std::min(scale_w, scale_h));
+}
+
+int LessonImageCoverScale(int image_width, int image_height, int target_width, int target_height) {
+    if (image_width <= 0 || image_height <= 0 || target_width <= 0 || target_height <= 0) {
+        return 256;
+    }
+    const int scale_w = 256 * target_width / image_width;
+    const int scale_h = 256 * target_height / image_height;
+    return std::max(1, std::max(scale_w, scale_h));
+}
+}  // namespace
+
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
 LV_FONT_DECLARE(BUILTIN_ICON_FONT);
 LV_FONT_DECLARE(font_awesome_30_4);
@@ -847,7 +874,8 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
     auto img_dsc = lesson_background_cached_->image_dsc();
     lv_image_set_src(lesson_background_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        lv_image_set_scale(lesson_background_, 256 * width_ / img_dsc->header.w);
+        lv_image_set_scale(lesson_background_, LessonImageCoverScale(
+            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h), width_, height_));
     }
     lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
     if (container_ != nullptr) {
@@ -878,11 +906,12 @@ void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
     auto img_dsc = lesson_object_cached_->image_dsc();
     lv_image_set_src(lesson_object_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        int scale_w = 256 * width_ * 3 / 5 / img_dsc->header.w;
-        int scale_h = 256 * height_ * 3 / 5 / img_dsc->header.h;
-        lv_image_set_scale(lesson_object_, std::max(1, std::min(scale_w, scale_h)));
+        lv_image_set_scale(lesson_object_, LessonImageFitScale(
+            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
+            width_ * kLessonObjectMaxWidthPercent / 100,
+            height_ * kLessonObjectMaxHeightPercent / 100));
     }
-    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, height_ / 12);
+    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, -height_ / kLessonObjectYOffsetDivisor);
     lv_obj_remove_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(lesson_object_);
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
@@ -906,11 +935,12 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     auto img_dsc = lesson_robot_overlay_cached_->image_dsc();
     lv_image_set_src(lesson_robot_overlay_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        int scale_w = 256 * width_ / 3 / img_dsc->header.w;
-        int scale_h = 256 * height_ / 3 / img_dsc->header.h;
-        lv_image_set_scale(lesson_robot_overlay_, std::max(1, std::min(scale_w, scale_h)));
+        lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
+            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
+            width_ * kLessonRobotMaxWidthPercent / 100,
+            height_ * kLessonRobotMaxHeightPercent / 100));
     }
-    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / 12);
+    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / kLessonRobotBottomInsetDivisor);
     lv_obj_remove_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(lesson_robot_overlay_);
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
@@ -1219,7 +1249,8 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
     // not 0.5x like the centered preview. 256 == LV_SCALE_NONE (1:1); width_/w gives
     // the fill factor. Guard against a zero-dimension descriptor.
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        lv_image_set_scale(lesson_background_, 256 * width_ / img_dsc->header.w);
+        lv_image_set_scale(lesson_background_, LessonImageCoverScale(
+            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h), width_, height_));
     }
     lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
     if (container_ != nullptr) {
@@ -1251,11 +1282,12 @@ void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
     auto img_dsc = lesson_object_cached_->image_dsc();
     lv_image_set_src(lesson_object_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        int scale_w = 256 * width_ * 3 / 5 / img_dsc->header.w;
-        int scale_h = 256 * height_ * 3 / 5 / img_dsc->header.h;
-        lv_image_set_scale(lesson_object_, std::max(1, std::min(scale_w, scale_h)));
+        lv_image_set_scale(lesson_object_, LessonImageFitScale(
+            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
+            width_ * kLessonObjectMaxWidthPercent / 100,
+            height_ * kLessonObjectMaxHeightPercent / 100));
     }
-    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, height_ / 12);
+    lv_obj_align(lesson_object_, LV_ALIGN_CENTER, 0, -height_ / kLessonObjectYOffsetDivisor);
     lv_obj_remove_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(lesson_object_);
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
@@ -1280,11 +1312,12 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     auto img_dsc = lesson_robot_overlay_cached_->image_dsc();
     lv_image_set_src(lesson_robot_overlay_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
-        int scale_w = 256 * width_ / 3 / img_dsc->header.w;
-        int scale_h = 256 * height_ / 3 / img_dsc->header.h;
-        lv_image_set_scale(lesson_robot_overlay_, std::max(1, std::min(scale_w, scale_h)));
+        lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
+            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
+            width_ * kLessonRobotMaxWidthPercent / 100,
+            height_ * kLessonRobotMaxHeightPercent / 100));
     }
-    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / 12);
+    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / kLessonRobotBottomInsetDivisor);
     lv_obj_remove_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(lesson_robot_overlay_);
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);

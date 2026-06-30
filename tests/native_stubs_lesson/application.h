@@ -29,6 +29,7 @@ public:
         prepare_listen_calls = 0;
         cancel_listen_calls = 0;
         lesson_runtime_active = false;
+        lesson_network_render_quiet = 0;
         schedule_calls = 0;
     }
 
@@ -40,6 +41,7 @@ public:
     int prepare_listen_calls = 0;
     int cancel_listen_calls = 0;
     bool lesson_runtime_active = false;
+    int lesson_network_render_quiet = 0;
     int schedule_calls = 0;
 
     void Schedule(std::function<void()>&& cb) {
@@ -49,6 +51,11 @@ public:
     void PrepareLessonInteractiveListening() { prepare_listen_calls++; }
     void CancelLessonInteractiveListening() { cancel_listen_calls++; }
     void SetLessonRuntimeActive(bool active) { lesson_runtime_active = active; }
+    void BeginLessonNetworkRenderQuiet() { lesson_network_render_quiet++; }
+    void EndLessonNetworkRenderQuiet() {
+        if (lesson_network_render_quiet > 0) lesson_network_render_quiet--;
+    }
+    bool IsLessonNetworkRenderQuiet() const { return lesson_network_render_quiet > 0; }
 
     // Defined in lesson_handler.cc (the unit under test).
     void HandleLessonMessage(const cJSON* root);

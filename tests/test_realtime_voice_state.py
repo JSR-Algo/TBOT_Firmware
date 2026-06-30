@@ -132,6 +132,22 @@ def test_websocket_protocol_preconnects_before_first_wake_word():
     assert "return true;" in start_body
 
 
+def test_screen_snapshot_is_rejected_while_lesson_runtime_active():
+    mcp_cc = read("main/mcp_server.cc")
+    app_h = read("main/application.h")
+    app_cc = read("main/application.cc")
+
+    assert "bool IsLessonRuntimeActive() const;" in app_h
+    assert "bool Application::IsLessonRuntimeActive() const" in app_cc
+    snapshot_start = mcp_cc.index('AddUserOnlyTool("self.screen.snapshot"')
+    preview_start = mcp_cc.index('AddUserOnlyTool("self.screen.preview_image"', snapshot_start)
+    snapshot_body = mcp_cc[snapshot_start:preview_start]
+
+    assert "Application::GetInstance().IsLessonRuntimeActive()" in snapshot_body
+    assert "screen snapshot disabled during lesson" in snapshot_body
+    assert snapshot_body.index("IsLessonRuntimeActive()") < snapshot_body.index("SnapshotToJpeg")
+
+
 def test_preconnected_wake_word_can_continue_from_idle_state():
     app_cc = read("main/application.cc")
 
@@ -310,6 +326,51 @@ def test_wake_word_connect_watchdog_allows_slow_websocket_open_retries():
     assert "esp_timer_start_once(connect_watchdog_timer_, 12000000)" not in app_cc
 
 
+def test_reconnect_backoff_rolls_into_slow_periodic_retry_without_terminal_giveup():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+
+    schedule_start = app_cc.index("void Application::ScheduleReconnect")
+    schedule_end = app_cc.index("void Application::SchedulePassiveLessonReconnect", schedule_start)
+    schedule_body = app_cc[schedule_start:schedule_end]
+
+    assert "kFastReconnectAttempts" in schedule_body
+    assert "kSlowReconnectRetryMs" in schedule_body
+    assert "reconnect_slow_retry_scheduled" in schedule_body
+    assert "reconnect_giveup" not in schedule_body
+    assert "xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR)" not in schedule_body
+    assert "connect_attempt_active_.store(false)" not in schedule_body
+
+    tick_start = app_cc.index("void Application::HandleReconnectTick")
+    tick_end = app_cc.index("void Application::HandleStartListeningEvent", tick_start)
+    tick_body = app_cc[tick_start:tick_end]
+    assert tick_body.index("SetDeviceState(kDeviceStateConnecting);") < tick_body.index(
+        "ContinueOpenAudioChannel(reconnect_mode_);"
+    )
+
+    assert "long-horizon auto-reconnect" in app_h
+
+
+def test_reconnect_suppression_flag_clears_when_retry_chain_is_abandoned():
+    app_cc = read("main/application.cc")
+
+    tick_start = app_cc.index("void Application::HandleReconnectTick")
+    tick_end = app_cc.index("void Application::HandleStartListeningEvent", tick_start)
+    tick_body = app_cc[tick_start:tick_end]
+
+    no_protocol = tick_body[tick_body.index("if (protocol_ == nullptr)") : tick_body.index("if (reconnect_passive_")]
+    assert "connect_attempt_active_.store(false);" in no_protocol
+
+    user_moved_on = tick_body[tick_body.index("if (GetDeviceState() != kDeviceStateIdle)") :]
+    user_moved_on = user_moved_on[: user_moved_on.index("if (protocol_->IsAudioChannelOpened())")]
+    assert "connect_attempt_active_.store(false);" in user_moved_on
+
+    close_start = app_cc.index("void Application::CloseAudioChannelByIntent")
+    close_end = app_cc.index("void Application::ResetProtocol", close_start)
+    close_body = app_cc[close_start:close_end]
+    assert close_body.index("connect_attempt_active_.store(false);") < close_body.index("protocol_->CloseAudioChannel();")
+
+
 def test_wake_word_open_finishes_after_stale_passive_socket_close_returns_idle():
     app_cc = read("main/application.cc")
 
@@ -384,6 +445,59 @@ def test_audio_uplink_pipeline_has_send_boundary_diagnostics():
     assert "MAIN_EVENT_SEND_AUDIO packet" in app_cc
     assert "Websocket SendAudio" in ws_cc
 
+def test_lesson_image_render_quiets_audio_uplink_without_dropping_packets():
+    app_h = read("main/application.h")
+    app_cc = read("main/application.cc")
+    lesson_cc = read("main/lesson_handler.cc")
+
+    assert "BeginLessonNetworkRenderQuiet" in app_h
+    assert "EndLessonNetworkRenderQuiet" in app_h
+    assert "IsLessonNetworkRenderQuiet" in app_h
+    assert "lesson_network_render_quiet_" in app_h
+
+    send_start = app_cc.index("if (bits & MAIN_EVENT_SEND_AUDIO)")
+    send_end = app_cc.index("if (bits & MAIN_EVENT_WAKE_WORD_DETECTED)", send_start)
+    send_body = app_cc[send_start:send_end]
+    quiet_idx = send_body.index("IsLessonNetworkRenderQuiet()")
+    pop_idx = send_body.index("audio_service_.PopPacketFromSendQueue()")
+    assert quiet_idx < pop_idx
+    assert "MAIN_EVENT_SEND_AUDIO deferred_for_lesson_render" in send_body
+    assert "xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);" in send_body
+    assert "vTaskDelay(pdMS_TO_TICKS(20));" in send_body
+
+    step_start = lesson_cc.index('const cJSON* scene = Obj(body, "scene")')
+    step_end = lesson_cc.index('ESP_LOGI(TAG, "lesson_step rendered', step_start)
+    step_body = lesson_cc[step_start:step_end]
+    begin_idx = step_body.index("BeginLessonNetworkRenderQuiet()")
+    fetch_idx = step_body.index("FetchLessonImage(poster_src)")
+    ack_idx = step_body.index("emit_ack(root, sequence")
+    assert begin_idx < fetch_idx < ack_idx
+    assert "EndLessonNetworkRenderQuiet()" in step_body
+
+def test_firmware_exposes_sample_lesson_asset_sync_to_sd():
+    mcp_server = read("main/mcp_server.cc")
+
+    assert "self.lesson_assets.sync_sample_to_sd" in mcp_server
+    assert "/sdcard/tbot/lesson-assets/sample-barn" in mcp_server
+    assert "barn-round-field-poster.jpg" in mcp_server
+    assert "bright-listening.png" in mcp_server
+    assert "downloadedCount" in mcp_server
+
+def test_sample_lesson_asset_sync_does_not_mkdir_sd_mount_point():
+    mcp_server = read("main/mcp_server.cc")
+
+    ensure_start = mcp_server.index("void EnsureSampleLessonAssetDir()")
+    ensure_end = mcp_server.index("bool DownloadLessonAssetToFile", ensure_start)
+    ensure_body = mcp_server[ensure_start:ensure_end]
+
+    assert 'EnsureDirOrThrow("/sdcard/tbot")' in ensure_body
+    assert 'EnsureDirOrThrow("/sdcard/tbot/lesson-assets")' in ensure_body
+    assert 'DirectoryExists("/sdcard")' not in ensure_body
+    assert 'EnsureDir("/sdcard")' not in ensure_body
+    assert "failed to create SD directory" in mcp_server
+    assert "if (!EnsureSampleLessonAssetDir())" not in mcp_server
+    assert "EnsureSampleLessonAssetDir();" in mcp_server
+
 def test_start_listening_rearms_when_already_listening():
     app_cc = read("main/application.cc")
 
@@ -432,6 +546,20 @@ def test_lesson_prompt_start_listening_event_does_not_abort_speaking_prompt():
     assert "lesson_interactive_listen_pending_.load()" in speaking
     assert "lesson prompt still speaking; defer listening" in speaking
     assert speaking.index("lesson_interactive_listen_pending_.load()") < speaking.index("AbortSpeaking(kAbortReasonNone);")
+
+def test_lesson_interactive_listening_surfaces_visible_turn_cue():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    listening = body[body.index("state == kDeviceStateListening") :]
+
+    assert "lesson_interactive_listen_pending_.exchange(false)" in listening
+    lesson_cue = listening[listening.index("lesson_interactive_listen_pending_.exchange(false)") :]
+    assert 'display->SetStatus("Con nói nhé...");' in lesson_cue
+    assert 'display->SetChatMessage("system", "Con nói nhé.");' in lesson_cue
+    assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" in lesson_cue
 
 def test_lesson_interactive_listening_pending_is_cleared_on_cancel_paths():
     app_cc = read("main/application.cc")
