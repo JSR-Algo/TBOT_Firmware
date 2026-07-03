@@ -941,6 +941,8 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
             "pause clears stale child-turn caption");
     require(disp.last_status == "Tạm dừng bài học", "pause shows child-visible paused status");
     require(disp.last_emotion == "thinking", "pause keeps a calm thinking face");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "pause restores realtime thinking face instead of hiding it");
     require(App().last_sound == "popup", "pause plays audible transition cue");
 
     const size_t before_paused_step = Sent().size();
@@ -963,6 +965,8 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
             "resume clears stale child-turn caption");
     require(disp.last_status == "Đang học...", "resume restores lesson-active status");
     require(disp.last_emotion == "thinking", "resume shows lesson-active thinking face");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "resume restores realtime thinking face until the next lesson step renders");
 }
 
 void test_stop_reason_controls_terminal_cue() {

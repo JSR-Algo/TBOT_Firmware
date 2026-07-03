@@ -1025,8 +1025,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         Display* display = Board::GetInstance().GetDisplay();
+        LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display]() {
+            Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
                 display->SetStatus("Tạm dừng bài học");
@@ -1043,8 +1045,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         Display* display = Board::GetInstance().GetDisplay();
+        LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display]() {
+            Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
                 display->SetStatus("Đang học...");
