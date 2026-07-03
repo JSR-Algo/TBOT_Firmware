@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <inttypes.h>
 #include <esp_log.h>
 
 #define TAG "GIF"
@@ -29,7 +30,7 @@ typedef struct Table {
 #endif
 
 static gd_GIF  * gif_open(gd_GIF * gif);
-static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file);
+static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file, size_t data_size);
 static inline void f_gif_read(gd_GIF * gif, void * buf, size_t len);
 static inline int f_gif_seek(gd_GIF * gif, size_t pos, int k);
 static void f_gif_close(gd_GIF * gif);
@@ -53,19 +54,19 @@ gd_open_gif_file(const char * fname)
     gd_GIF gif_base;
     memset(&gif_base, 0, sizeof(gif_base));
 
-    bool res = f_gif_open(&gif_base, fname, true);
+    bool res = f_gif_open(&gif_base, fname, true, 0);
     if(!res) return NULL;
 
     return gif_open(&gif_base);
 }
 
 gd_GIF *
-gd_open_gif_data(const void * data)
+gd_open_gif_data(const void * data, size_t data_size)
 {
     gd_GIF gif_base;
     memset(&gif_base, 0, sizeof(gif_base));
 
-    bool res = f_gif_open(&gif_base, data, false);
+    bool res = f_gif_open(&gif_base, data, false, data_size);
     if(!res) return NULL;
 
     return gif_open(&gif_base);
@@ -769,10 +770,11 @@ gd_close_gif(gd_GIF * gif)
     lv_free(gif);
 }
 
-static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file)
+static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file, size_t data_size)
 {
     gif->f_rw_p = 0;
     gif->data = NULL;
+    gif->data_size = 0;
     gif->is_file = is_file;
 
     if(is_file) {
@@ -782,6 +784,7 @@ static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file)
     }
     else {
         gif->data = path;
+        gif->data_size = data_size;
         return true;
     }
 }
@@ -792,6 +795,18 @@ static void f_gif_read(gd_GIF * gif, void * buf, size_t len)
         lv_fs_read(&gif->fd, buf, len, NULL);
     }
     else {
+        /* Bounds-check against the in-memory buffer length when known
+         * (data_size != 0). A truncated/hostile GIF must not walk past the
+         * end of the heap buffer. On overrun, zero-fill the destination and
+         * leave f_rw_p past the end so subsequent reads also fail closed. */
+        if(gif->data_size != 0 &&
+           (gif->f_rw_p > gif->data_size || len > gif->data_size - gif->f_rw_p)) {
+            ESP_LOGW(TAG, "GIF read past end of buffer (pos=%" PRIu32 " len=%u size=%u)",
+                     gif->f_rw_p, (unsigned) len, (unsigned) gif->data_size);
+            memset(buf, 0, len);
+            gif->f_rw_p = (uint32_t) gif->data_size + 1;
+            return;
+        }
         memcpy(buf, &gif->data[gif->f_rw_p], len);
         gif->f_rw_p += len;
     }
@@ -808,6 +823,11 @@ static int f_gif_seek(gd_GIF * gif, size_t pos, int k)
     else {
         if(k == LV_FS_SEEK_CUR) gif->f_rw_p += pos;
         else if(k == LV_FS_SEEK_SET) gif->f_rw_p = pos;
+        /* Clamp past-the-end seeks when the buffer length is known so the
+         * next read fails closed rather than reading out of bounds. */
+        if(gif->data_size != 0 && gif->f_rw_p > gif->data_size) {
+            gif->f_rw_p = (uint32_t) gif->data_size + 1;
+        }
         return gif->f_rw_p;
     }
 }

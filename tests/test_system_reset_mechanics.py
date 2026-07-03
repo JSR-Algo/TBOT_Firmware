@@ -193,8 +193,9 @@ def test_check_buttons_nvs_only_branch_does_not_restart(check_buttons: str):
 def test_release_reads_creds_from_backend_namespace(release_ownership: str):
     assert 'Settings backend_settings("backend", false)' in release_ownership
     assert 'backend_settings.GetString("api_url")' in release_ownership
+    assert 'backend_settings.GetString("device_id")' in release_ownership
     assert 'backend_settings.GetString("device_secret")' in release_ownership
-    assert "Board::GetInstance().GetUuid()" in release_ownership
+    assert "Board::GetInstance().GetUuid()" not in release_ownership
 
 
 def test_release_short_circuits_true_when_all_creds_absent(release_ownership: str):
@@ -263,8 +264,29 @@ def test_release_returns_false_and_closes_on_open_failure(release_ownership: str
 
 
 def test_release_treats_below_200_as_failure(release_ownership: str):
-    # The status guard is the credential-safety gate: only a 2xx releases.
+    # The generic status guard still retries transport/server failures. A 401 is
+    # handled just before it as stale credentials.
     assert "if (status_code < 200 || status_code >= 300)" in release_ownership
+
+
+def test_release_treats_401_as_stale_credentials_and_clears_retry_marker(release_ownership: str):
+    guard = "if (status_code == 401)"
+    assert guard in release_ownership
+    branch = release_ownership[
+        release_ownership.index(guard) : release_ownership.index("if (status_code < 200")
+    ]
+    assert 'Settings writable_backend_settings("backend", true)' in branch
+    assert 'writable_backend_settings.SetString("device_secret", "")' in branch
+    assert 'writable_backend_settings.SetInt("release_pending", 0)' in branch
+    assert 'Settings claim_state("tbot_claim", true)' in branch
+    assert 'claim_state.SetInt("confirmed", 0)' in branch
+    assert "return true;" in branch
+
+
+def test_release_checks_401_before_generic_non_2xx_failure(release_ownership: str):
+    assert release_ownership.index("if (status_code == 401)") < release_ownership.index(
+        "if (status_code < 200 || status_code >= 300)"
+    )
 
 
 def test_release_treats_300_and_above_as_failure(release_ownership: str):
@@ -281,13 +303,13 @@ def test_release_reads_status_then_closes_before_evaluating(release_ownership: s
     assert "const int status_code = http->GetStatusCode();" in release_ownership
     idx_status = release_ownership.index("const int status_code = http->GetStatusCode();")
     idx_close = release_ownership.index("http->Close();", idx_status)
-    idx_guard = release_ownership.index("if (status_code < 200")
+    idx_guard = release_ownership.index("if (status_code == 401)")
     assert idx_status < idx_close < idx_guard
 
 
-def test_release_returns_true_only_on_2xx(release_ownership: str):
-    # The final return true must come *after* the status guard, i.e. only a 2xx
-    # that fell through the guard returns success.
+def test_release_returns_true_on_2xx_after_generic_failure_guard(release_ownership: str):
+    # The final return true remains the normal 2xx success path; the earlier 401
+    # return is the explicit stale-credentials exception.
     guard_idx = release_ownership.index("if (status_code < 200 || status_code >= 300)")
     # Find the final return true (success path), which is the last `return true;`.
     last_true = release_ownership.rindex("return true;")
@@ -497,6 +519,7 @@ def test_device_secret_only_referenced_in_safe_sinks(source: str):
         'const std::string device_secret = backend_settings.GetString("device_secret");',
         "if (api_url.empty() || device_secret.empty() || device_id.empty())",
         'http->SetHeader("X-Device-Token", device_secret);',
+        'writable_backend_settings.SetString("device_secret", "");',
     ]
     for line in body.splitlines():
         if "device_secret" in line:

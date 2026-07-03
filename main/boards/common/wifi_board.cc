@@ -104,6 +104,8 @@ void WifiBoard::TryWifiConnect() {
     bool have_ssid = !ssid_manager.GetSsidList().empty();
 
     if (have_ssid) {
+        auto& app = Application::GetInstance();
+        app.EnsureBleAdvertisingForUnclaimedSavedWifi();
         // Start connection attempt with timeout
         ESP_LOGI(TAG, "Starting WiFi connection attempt");
         esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);

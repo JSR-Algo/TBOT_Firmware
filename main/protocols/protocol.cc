@@ -82,7 +82,17 @@ bool Protocol::SendLessonFrame(const std::string& frame) {
     // US-006 Slice-01: the lesson frame is already a complete envelope (built by
     // lesson_handler.cc); send it verbatim. Additive — does not touch the voice/MCP
     // send paths; reuses the existing protected SendText.
-    return SendText(frame);
+    cJSON* root = cJSON_Parse(frame.c_str());
+    const cJSON* type = root ? cJSON_GetObjectItem(root, "type") : nullptr;
+    const cJSON* sequence = root ? cJSON_GetObjectItem(root, "sequence") : nullptr;
+    bool sent = SendText(frame);
+    ESP_LOGI(TAG, "send lesson frame type=%s seq=%d bytes=%u sent=%d",
+             cJSON_IsString(type) ? type->valuestring : "(parse-failed)",
+             cJSON_IsNumber(sequence) ? sequence->valueint : -1,
+             (unsigned)frame.size(),
+             sent ? 1 : 0);
+    if (root) cJSON_Delete(root);
+    return sent;
 }
 
 bool Protocol::IsTimeout() const {

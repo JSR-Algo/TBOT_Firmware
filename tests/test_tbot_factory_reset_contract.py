@@ -46,8 +46,9 @@ def test_factory_reset_posts_device_token_to_backend_release_route():
     body = function_body(source, "bool SystemReset::ReleaseCloudOwnership")
 
     assert 'backend_settings.GetString("api_url")' in body
+    assert 'backend_settings.GetString("device_id")' in body
     assert 'backend_settings.GetString("device_secret")' in body
-    assert 'Board::GetInstance().GetUuid()' in body
+    assert 'Board::GetInstance().GetUuid()' not in body
     assert 'http->SetHeader("X-Device-Token", device_secret)' in body
     assert 'http->SetHeader("X-Device-Id", device_id)' in body
     assert 'http->Open("POST", url)' in body

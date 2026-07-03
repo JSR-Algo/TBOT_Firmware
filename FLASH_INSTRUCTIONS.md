@@ -18,18 +18,24 @@ Firmware lấy WS từ OTA JSON. Khi build/flash, `CONFIG_OTA_URL` đang trỏ t
 
 ## Cách flash 1 — USB (nhanh nhất, ~30s)
 
+> CẢNH BÁO: KHÔNG dùng `idf.py flash` trần trên một checkout mới — nó sẽ ra MÀN HÌNH ĐEN.
+> `sdkconfig` bị gitignore và ESP-IDF KHÔNG tự nạp `sdkconfig.defaults.local`, nên board
+> mặc định Kconfig (`BOARD_TYPE_BREAD_COMPACT_WIFI`, không có driver LCD) sẽ thắng → màn
+> hình đen (WiFi vẫn chạy nên dễ tưởng là OK). Luôn flash bằng script fleet-safe dưới đây.
+
 1. Cắm cáp USB-C từ robot vào laptop
-2. Trên macOS: kiểm tra device serial:
+2. Trên macOS: liệt kê port serial:
    ```bash
-   ls /dev/cu.usb* /dev/cu.wch*
+   ls /dev/cu.usbmodem* /dev/cu.wch*
    ```
-3. Flash:
+3. Build + flash bằng script fleet-safe (thay XXXX bằng port từ bước 2):
    ```bash
    cd /Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware
-   source ~/esp/esp-idf/export.sh
-   idf.py -p /dev/cu.usbserial-XXXX flash
+   ./build-lcdwiki.sh /dev/cu.usbmodemXXXX
    ```
-   (thay XXXX bằng device path từ bước 2; thường là `/dev/cu.usbserial-110` hoặc tương tự)
+   Script sẽ **HARD-ABORT** trừ khi xác nhận được `CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y`
+   trong `sdkconfig` — đây chính là chốt chặn ngăn image bread-board màn-hình-đen. Khi
+   xong nó in app size + dòng `FLASH OK for <port>`.
 
 4. Robot tự reboot, kết nối lại WiFi + server.
 
@@ -41,9 +47,14 @@ Firmware lấy WS từ OTA JSON. Khi build/flash, `CONFIG_OTA_URL` đang trỏ t
    ```
 2. Vào tab **OTA / Firmware Management** (tên menu tùy ngôn ngữ)
 3. Upload file `build/xiaozhi.bin`
-4. Chọn target device: MAC `3c:0f:02:de:c2:e0` (robot)
+4. Chọn target device theo MAC (mỗi robot một MAC riêng) — ví dụ một unit: `3c:0f:02:de:c2:e0`
 5. Click "Push firmware" hoặc "OTA update"
 6. Robot sẽ tự download + flash + reboot
+
+> CAVEAT (PROJECT_VER 2.2.30): MỌI image — bản LCD đúng lẫn bản bread-board màn-hình-đen —
+> đều report cùng version `2.2.30` cho OTA, nên OTA coi là "đã mới nhất" và **KHÔNG** sửa
+> được một unit đã bị flash nhầm board. Vì vậy USB qua `build-lcdwiki.sh` (Cách 1) mới là
+> source of truth khi flash cả fleet; OTA chỉ dùng để cập nhật unit đã chắc chắn đúng board.
 
 ## Sau khi flash
 

@@ -65,9 +65,16 @@ bool WebsocketProtocol::Start() {
 
 bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     if (websocket_ == nullptr || !websocket_->IsConnected()) {
+        ESP_LOGW(TAG, "Websocket SendAudio unavailable websocket=%d connected=%d payload_bytes=%u version=%d",
+                 websocket_ != nullptr ? 1 : 0,
+                 (websocket_ != nullptr && websocket_->IsConnected()) ? 1 : 0,
+                 packet ? static_cast<unsigned>(packet->payload.size()) : 0,
+                 version_);
         return false;
     }
 
+    const size_t payload_size = packet->payload.size();
+    bool sent = false;
     if (version_ == 2) {
         std::string serialized;
         serialized.resize(sizeof(BinaryProtocol2) + packet->payload.size());
@@ -79,7 +86,7 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         bp2->payload_size = htonl(packet->payload.size());
         memcpy(bp2->payload, packet->payload.data(), packet->payload.size());
 
-        return websocket_->Send(serialized.data(), serialized.size(), true);
+        sent = websocket_->Send(serialized.data(), serialized.size(), true);
     } else if (version_ == 3) {
         std::string serialized;
         serialized.resize(sizeof(BinaryProtocol3) + packet->payload.size());
@@ -89,10 +96,18 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
         bp3->payload_size = htons(packet->payload.size());
         memcpy(bp3->payload, packet->payload.data(), packet->payload.size());
 
-        return websocket_->Send(serialized.data(), serialized.size(), true);
+        sent = websocket_->Send(serialized.data(), serialized.size(), true);
     } else {
-        return websocket_->Send(packet->payload.data(), packet->payload.size(), true);
+        sent = websocket_->Send(packet->payload.data(), packet->payload.size(), true);
     }
+    static uint32_t send_audio_count = 0;
+    send_audio_count++;
+    if (!sent || send_audio_count == 1 || send_audio_count % 25 == 0) {
+        ESP_LOGI(TAG, "Websocket SendAudio count=%lu sent=%d payload_bytes=%u version=%d",
+                 static_cast<unsigned long>(send_audio_count), sent ? 1 : 0,
+                 static_cast<unsigned>(payload_size), version_);
+    }
+    return sent;
 }
 
 bool WebsocketProtocol::SendText(const std::string& text) {
@@ -101,7 +116,7 @@ bool WebsocketProtocol::SendText(const std::string& text) {
     }
 
     if (!websocket_->Send(text)) {
-        ESP_LOGE(TAG, "Failed to send text: %s", text.c_str());
+        ESP_LOGE(TAG, "Failed to send text frame bytes=%u", (unsigned)text.size());
         SetError(Lang::Strings::SERVER_ERROR);
         return false;
     }
@@ -159,11 +174,25 @@ bool WebsocketProtocol::OpenAudioChannel() {
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
+                    // Bounds-check the server-supplied frame before any deref: the
+                    // header must fit, and payload_size must not exceed the bytes that
+                    // actually arrived — else the vector copy over-reads the heap
+                    // (deep-audit: payload_size is attacker/server-controlled).
+                    if (len < sizeof(BinaryProtocol2)) {
+                        ESP_LOGE(TAG, "binary v2 frame too short: %u", (unsigned)len);
+                        return;
+                    }
                     BinaryProtocol2* bp2 = (BinaryProtocol2*)data;
                     bp2->version = ntohs(bp2->version);
                     bp2->type = ntohs(bp2->type);
                     bp2->timestamp = ntohl(bp2->timestamp);
                     bp2->payload_size = ntohl(bp2->payload_size);
+                    size_t bp2_avail = len - sizeof(BinaryProtocol2);
+                    if (bp2->payload_size > bp2_avail) {
+                        ESP_LOGE(TAG, "binary v2 payload_size %u > avail %u; dropping",
+                                 (unsigned)bp2->payload_size, (unsigned)bp2_avail);
+                        return;
+                    }
                     auto payload = (uint8_t*)bp2->payload;
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -172,9 +201,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
                     }));
                 } else if (version_ == 3) {
+                    if (len < sizeof(BinaryProtocol3)) {
+                        ESP_LOGE(TAG, "binary v3 frame too short: %u", (unsigned)len);
+                        return;
+                    }
                     BinaryProtocol3* bp3 = (BinaryProtocol3*)data;
                     bp3->type = bp3->type;
                     bp3->payload_size = ntohs(bp3->payload_size);
+                    size_t bp3_avail = len - sizeof(BinaryProtocol3);
+                    if (bp3->payload_size > bp3_avail) {
+                        ESP_LOGE(TAG, "binary v3 payload_size %u > avail %u; dropping",
+                                 (unsigned)bp3->payload_size, (unsigned)bp3_avail);
+                        return;
+                    }
                     auto payload = (uint8_t*)bp3->payload;
                     on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
@@ -199,6 +238,13 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 if (strcmp(type->valuestring, "hello") == 0) {
                     ParseServerHello(root);
                 } else {
+                    if (strncmp(type->valuestring, "lesson_", 7) == 0) {
+                        auto sequence = cJSON_GetObjectItem(root, "sequence");
+                        ESP_LOGI(TAG, "ws text lesson frame type=%s seq=%d bytes=%u",
+                                 type->valuestring,
+                                 cJSON_IsNumber(sequence) ? sequence->valueint : -1,
+                                 (unsigned)len);
+                    }
                     if (on_incoming_json_ != nullptr) {
                         on_incoming_json_(root);
                     }
@@ -281,8 +327,11 @@ std::string WebsocketProtocol::GetHelloMessage() {
 
 void WebsocketProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
-    if (transport == nullptr || strcmp(transport->valuestring, "websocket") != 0) {
-        ESP_LOGE(TAG, "Unsupported transport: %s", transport->valuestring);
+    // cJSON_IsString guards both the missing-key (null node) and wrong-type
+    // (number/null JSON -> valuestring==NULL) cases; strcmp(NULL, ...) faulted before
+    // (deep-audit). Don't log the raw valuestring (it may be NULL).
+    if (!cJSON_IsString(transport) || strcmp(transport->valuestring, "websocket") != 0) {
+        ESP_LOGE(TAG, "Unsupported or invalid transport in server hello");
         return;
     }
 
@@ -294,13 +343,27 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
 
     auto audio_params = cJSON_GetObjectItem(root, "audio_params");
     if (cJSON_IsObject(audio_params)) {
+        // Validate before trusting: an out-of-range sample_rate flows into
+        // AudioService::SetDecodeSampleRate -> decoder_frame_size_ (<=0) ->
+        // vector::resize OOM/crash. Reject anything outside the Opus-legal set
+        // and keep the safe default. (deep-audit: server-controlled decoder cfg)
         auto sample_rate = cJSON_GetObjectItem(audio_params, "sample_rate");
         if (cJSON_IsNumber(sample_rate)) {
-            server_sample_rate_ = sample_rate->valueint;
+            if (IsValidOpusSampleRate(sample_rate->valueint)) {
+                server_sample_rate_ = sample_rate->valueint;
+            } else {
+                ESP_LOGE(TAG, "Invalid sample_rate %d in server hello; keeping %d",
+                         sample_rate->valueint, server_sample_rate_);
+            }
         }
         auto frame_duration = cJSON_GetObjectItem(audio_params, "frame_duration");
         if (cJSON_IsNumber(frame_duration)) {
-            server_frame_duration_ = frame_duration->valueint;
+            if (IsValidOpusFrameDuration(frame_duration->valueint)) {
+                server_frame_duration_ = frame_duration->valueint;
+            } else {
+                ESP_LOGE(TAG, "Invalid frame_duration %d in server hello; keeping %d",
+                         frame_duration->valueint, server_frame_duration_);
+            }
         }
     }
 

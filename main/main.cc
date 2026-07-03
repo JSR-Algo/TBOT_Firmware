@@ -7,10 +7,29 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#if TBOT_NATIVE_COVERAGE
+#else
 #include "application.h"
+#endif
 
 #define TAG "main"
 
+#if TBOT_NATIVE_COVERAGE
+int TbotAfskDemodHostCoverageMain();
+extern "C" void esp_gcov_dump(void);
+
+extern "C" void app_main(void)
+{
+    ESP_LOGI(TAG, "TBOT native coverage: running AFSK harness");
+    int result = TbotAfskDemodHostCoverageMain();
+    ESP_LOGI(TAG, "TBOT native coverage: ready to dump GCOV data");
+    esp_gcov_dump();
+    ESP_LOGI(TAG, "TBOT native coverage: GCOV data dumped, result=%d", result);
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+#else
 extern "C" void app_main(void)
 {
     // Initialize NVS flash for WiFi configuration
@@ -27,3 +46,4 @@ extern "C" void app_main(void)
     app.Initialize();
     app.Run();  // This function runs the main event loop and never returns
 }
+#endif

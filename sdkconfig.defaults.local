@@ -1,10 +1,7 @@
 CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
-# NOTE: OTA_URL is the fresh-flash bootstrap SEED and must be a reachable host. The current
-# value is an EPHEMERAL trycloudflare tunnel — update it as the tunnel rotates, or move to the
-# stable *.skylabs.vn host. WEBSOCKET_URL stays a PLACEHOLDER on purpose (endpoint rule): the
-# device uses the websocket.url returned by OTA/bootstrap, persisted to NVS. See
-# docs/connection-flow-inspection-and-plan.md (C-OTA) + tests/test_tbot_connect_config.py.
+# Stable backend bootstrap seed. The OTA response returns the final websocket.url.
 CONFIG_OTA_URL="https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
+CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
 CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"
 # BLE setup hard-timeout: spec default 5 min (was 120s); range 60-600 (max 10 min).
 CONFIG_BLE_SETUP_TIMEOUT_SEC=300
@@ -25,3 +22,19 @@ CONFIG_USE_DEVICE_AEC=y
 # CONFIG_USE_HOTSPOT_WIFI_PROVISIONING is not set
 CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING=y
 CONFIG_BT_BLUEDROID_ENABLED=y
+CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
+CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
+
+# Lesson runtime keeps a WebSocket open while downloading HTTPS poster/object
+# images. The default 3072-byte LWIP tcp/ip task stack overflows on ESP32-S3.
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=8192
+
+# Memory relief for internal SRAM during conversation. While streaming audio,
+# WiFi/LWIP dynamic buffers + LVGL + audio squeezed internal RAM down to ~211 B,
+# so esp-aes (HW AES uses DMA -> must allocate INTERNAL/DMA RAM) failed:
+#   "esp-aes: Failed to allocate memory" -> ws_disconnect -> reconnect TLS
+#   handshake OOM -> "Máy chủ không khả dụng" + robot can't hear ("con nói lại").
+# Push WiFi/LWIP buffers to PSRAM (same approach already used for BT above) and
+# trim the dynamic TX pool so internal RAM stays free for AES-DMA / TLS.
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=24

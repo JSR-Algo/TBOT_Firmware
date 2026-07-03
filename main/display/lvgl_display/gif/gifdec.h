@@ -27,6 +27,7 @@ typedef struct _gd_GCE {
 typedef struct _gd_GIF {
     lv_fs_file_t fd;
     const char * data;
+    size_t data_size;  /* Length of in-memory buffer (is_file==0); 0 means unbounded/unknown. */
     uint8_t is_file;
     uint32_t f_rw_p;
     int32_t anim_start;
@@ -53,7 +54,7 @@ typedef struct _gd_GIF {
 
 gd_GIF * gd_open_gif_file(const char * fname);
 
-gd_GIF * gd_open_gif_data(const void * data);
+gd_GIF * gd_open_gif_data(const void * data, size_t data_size);
 
 void gd_render_frame(gd_GIF * gif, uint8_t * buffer);
 

@@ -1,0 +1,1622 @@
+// Host-native statement-coverage harness for main/lesson_handler.cc (the additive
+// US-006 lesson_* renderer). Mirrors the afsk_demod_host_test.cc precedent: compiles
+// the REAL .cc against tests/native_stubs_lesson/* fakes, drives every reachable wire
+// path, and asserts the REAL outbound JSON envelopes / draw calls / listen lifecycle.
+//
+// Scope = learning-flow only. These tests EXECUTE C++ lines (unlike the source-text
+// reader tests/test_lesson_*.py which compile/flash nothing). Coverage measured with
+// gcovr (see scripts/run_host_native_lesson_coverage.sh).
+//
+// Non-tautology proof (see NOTE markers below): several asserts pin an EXACT outbound
+// value (sequence number, ready flag, error code, degraded flag, draw count) that a
+// plausible source mutation would flip — named inline so a reviewer can confirm the test
+// would fail under that mutation.
+
+#include "application.h"
+#include "board.h"
+#include "display.h"
+#include "lvgl_display.h"
+#include "lvgl_image.h"
+#include "assets.h"
+#include "jpeg_to_image.h"
+#include "esp_heap_caps.h"
+#include "lesson_handler.h"
+
+#include <cJSON.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <vector>
+#include <unistd.h>  // access() for the /sdcard writability probe
+
+#ifdef fread
+#undef fread
+#endif
+#include <stdio.h>
+extern "C" size_t fread(void* ptr, size_t size, size_t count, FILE* stream);
+
+bool& HostLessonFreadShortReadOnce() {
+    static bool v = false;
+    return v;
+}
+
+extern "C" size_t HostLessonFread(void* ptr, size_t size, size_t count, FILE* stream) {
+    if (HostLessonFreadShortReadOnce()) {
+        HostLessonFreadShortReadOnce() = false;
+        if (count == 0) return 0;
+        return ::fread(ptr, size, count - 1, stream);
+    }
+    return ::fread(ptr, size, count, stream);
+}
+
+namespace {
+
+int g_checks = 0;
+void require(bool cond, const char* msg) {
+    g_checks++;
+    if (!cond) {
+        std::cerr << "lesson host test FAILED: " << msg << "\n";
+        std::exit(1);
+    }
+}
+
+Application& App() { return Application::GetInstance(); }
+const std::vector<std::string>& Sent() { return App().protocol_->sent_frames; }
+
+std::string FrameType(size_t i) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* t = cJSON_GetObjectItem(f, "type");
+    std::string out = (t && cJSON_IsString(t)) ? t->valuestring : "";
+    cJSON_Delete(f);
+    return out;
+}
+double FrameSeq(size_t i) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* s = cJSON_GetObjectItem(f, "sequence");
+    double out = (s && cJSON_IsNumber(s)) ? s->valuedouble : -999;
+    cJSON_Delete(f);
+    return out;
+}
+// stepId at envelope level: "" returned for JSON null too (we distinguish via has-key).
+bool FrameStepIdIsNull(size_t i) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* v = cJSON_GetObjectItem(f, "stepId");
+    bool out = v != nullptr && cJSON_IsNull(v);
+    cJSON_Delete(f);
+    return out;
+}
+std::string FrameStepId(size_t i) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* v = cJSON_GetObjectItem(f, "stepId");
+    std::string out = (v && cJSON_IsString(v)) ? v->valuestring : "";
+    cJSON_Delete(f);
+    return out;
+}
+bool FrameBodyBool(size_t i, const char* key, bool dflt) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* b = cJSON_GetObjectItem(f, "body");
+    cJSON* v = b ? cJSON_GetObjectItem(b, key) : nullptr;
+    bool out = v ? cJSON_IsTrue(v) : dflt;
+    cJSON_Delete(f);
+    return out;
+}
+double FrameBodyNum(size_t i, const char* key) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* b = cJSON_GetObjectItem(f, "body");
+    cJSON* v = b ? cJSON_GetObjectItem(b, key) : nullptr;
+    double out = (v && cJSON_IsNumber(v)) ? v->valuedouble : -999;
+    cJSON_Delete(f);
+    return out;
+}
+std::string FrameBodyStr(size_t i, const char* obj, const char* key) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* b = cJSON_GetObjectItem(f, "body");
+    cJSON* o = (b && obj) ? cJSON_GetObjectItem(b, obj) : b;
+    cJSON* v = o ? cJSON_GetObjectItem(o, key) : nullptr;
+    std::string out = (v && cJSON_IsString(v)) ? v->valuestring : "";
+    cJSON_Delete(f);
+    return out;
+}
+// assetPack.ready inside an ack body.
+bool FrameAssetPackReady(size_t i) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* b = cJSON_GetObjectItem(f, "body");
+    cJSON* ap = b ? cJSON_GetObjectItem(b, "assetPack") : nullptr;
+    cJSON* r = ap ? cJSON_GetObjectItem(ap, "ready") : nullptr;
+    bool out = r ? cJSON_IsTrue(r) : false;
+    cJSON_Delete(f);
+    return out;
+}
+bool FrameHasAssetPack(size_t i) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* b = cJSON_GetObjectItem(f, "body");
+    cJSON* ap = b ? cJSON_GetObjectItem(b, "assetPack") : nullptr;
+    bool out = ap != nullptr;
+    cJSON_Delete(f);
+    return out;
+}
+
+void Handle(const std::string& json) {
+    cJSON* root = cJSON_Parse(json.c_str());
+    require(root != nullptr, "test JSON parsed");
+    App().HandleLessonMessage(root);
+    cJSON_Delete(root);
+}
+
+void ResetObservable() { App().HostReset(); }
+
+// Per-test unique session identity. The renderer's g_session is FILE-STATIC and cannot be
+// reset from the test, so each test bumps these ids; a fresh assignmentId makes the
+// renderer's duplicate_prepare==false (assignment mismatch), firing the real fresh-session
+// reset (g_session = LessonSession{}) so F->S restarts at 1 deterministically per test.
+int g_aid_counter = 0;
+std::string g_aid = "a1";
+std::string g_sid = "s1";
+void FreshSession() {
+    g_aid_counter++;
+    g_aid = "a" + std::to_string(g_aid_counter);
+    g_sid = "s" + std::to_string(g_aid_counter);
+}
+const char* AID() { return g_aid.c_str(); }
+const char* SID() { return g_sid.c_str(); }
+
+// ---- frame builders ------------------------------------------------------
+
+std::string PrepareFrame(int seq, const std::string& extra_body = "") {
+    return std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\"" + extra_body + "}}";
+}
+std::string StartFrame(int seq) {
+    return std::string("{\"type\":\"lesson_start\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
+}
+// Full three-layer lesson_step. Caller controls scene srcs + extra body fields.
+std::string StepFrame(int seq, const std::string& step_id,
+                      const std::string& poster_src, const std::string& object_src,
+                      const std::string& overlay_src, const std::string& extra_body = "",
+                      const std::string& extra_scene = "") {
+    std::string scene =
+        "\"scene\":{"
+        "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"" + poster_src + "\"}},"
+        "\"teachingObject\":{\"asset\":{\"src\":\"" + object_src + "\"}},"
+        "\"robotOverlay\":{\"asset\":{\"src\":\"" + overlay_src + "\"},\"expression\":\"teaching\"}"
+        + extra_scene + "}";
+    return std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\"," + "\"stepId\":\"" + step_id + "\",\"lessonVersion\":3,\"lessonId\":\"L1\"," +
+           "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\"" + extra_body + "," + scene + "}}";
+}
+
+// Open a fresh session: bump the per-test ids, then prepare(1)+start(2). Returns next
+// sequence (3). The id bump guarantees the renderer's fresh-session reset fires so F->S
+// restarts at 1 regardless of what a prior test left in the file-static g_session.
+int OpenSession() {
+    FreshSession();
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    return 3;
+}
+
+// A small valid JPEG-magic body the fake Http/decoder accept.
+std::vector<unsigned char> JpegBody() {
+    return {0xff, 0xd8, 0xff, 0x10, 0x20, 0x30};
+}
+std::vector<unsigned char> PngLikeBody() {  // non-JPEG -> LvglAllocatedImage(data,size) path
+    return {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a};
+}
+
+// ==========================================================================
+// 1. Envelope guards
+// ==========================================================================
+void test_envelope_guards() {
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+
+    Handle("{\"foo\":1}");  // type==null -> return
+    require(Sent().empty(), "missing type emits nothing");
+
+    // missing assignmentId/sessionId/sequence -> dropped
+    Handle("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"x\"}");
+    require(Sent().empty(), "missing identity emits nothing");
+
+    // has assignment+session but no sequence -> dropped (has_seq false)
+    Handle("{\"type\":\"lesson_prepare\",\"assignmentId\":\"a\",\"sessionId\":\"s\"}");
+    require(Sent().empty(), "missing sequence emits nothing");
+}
+
+// ==========================================================================
+// 2. Prepare + assetPack ack ladder
+// ==========================================================================
+void test_prepare_basic() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+
+    Handle(PrepareFrame(1));
+    require(Sent().size() == 1, "prepare emits one ack");
+    require(FrameType(0) == "lesson_ack", "prepare -> lesson_ack");
+    // NOTE non-tautology: fresh prepare MUST reset F->S to emit at seq 1. Mutation:
+    // remove the `g_session = LessonSession{}` reset -> seq would not be 1.
+    require(FrameSeq(0) == 1, "fresh prepare ack rides F->S seq 1");
+    require(FrameBodyNum(0, "acks") == 1, "ack echoes the acked inbound sequence");
+    require(FrameBodyBool(0, "rendered", true) == false, "prepare ack rendered=false");
+    require(FrameBodyBool(0, "degraded", true) == false, "prepare ack degraded=false");
+    // lifecycle prepare echoes stepId as JSON null (no stepId in frame)
+    require(FrameStepIdIsNull(0), "lifecycle ack stepId is null");
+    require(!FrameHasAssetPack(0), "prepare without assetPack carries no assetPack ack");
+}
+
+void test_prepare_assetpack_not_ready_branches() {
+    // assetPack present but empty assets array -> ready=false (assets size 0 branch)
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck1-abcdef1234567890\",\"assets\":[]}"));
+    require(FrameHasAssetPack(0), "assetPack present -> ack carries assetPack");
+    require(FrameAssetPackReady(0) == false, "empty assets array -> not ready");
+    require(FrameBodyStr(0, "assetPack", "cacheKey") == "ck1-abcdef1234567890", "cacheKey echoed");
+
+    // assetPack asset not READY (state mismatch) -> ready=false
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck2-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"DOWNLOADING\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/x.png\",\"size\":10}]}"));
+    require(FrameAssetPackReady(0) == false, "non-READY asset -> not ready");
+
+    // asset READY+checksum but missing declared size -> not ready (has_declared_size false)
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck3-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/x.png\"}]}"));
+    require(FrameAssetPackReady(0) == false, "missing size -> not ready");
+
+    // asset READY+size but local file not on disk -> LessonLocalFileReady false -> not ready
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck4-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/missing.png\",\"size\":10}]}"));
+    require(FrameAssetPackReady(0) == false, "missing local file -> not ready");
+}
+
+void test_prepare_assetpack_ready_with_real_file() {
+    // Stage a real file on a host-only SD root. The wire localPath stays canonical
+    // sd://sdcard/tbot/lesson-assets/..., while TBOT_HOST_LESSON_ASSET_ROOT maps it
+    // to a deterministic temp directory so this test never depends on host /sdcard.
+    const char* dir = "/tmp/tbot-host-sd/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd && mkdir -p /tmp/tbot-host-sd/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd/lesson-assets/ready.png";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "staged asset file opens");
+    const char bytes[10] = {1,2,3,4,5,6,7,8,9,10};
+    fwrite(bytes, 1, 10, fp);
+    fclose(fp);
+    (void)dir;
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck5-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/ready.png\",\"size\":10}]}"));
+    require(FrameAssetPackReady(0) == true, "verified asset + covered critical -> ready");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_prepare_assetpack_ready_without_critical_asset_list() {
+    // Some older ESP prepare frames may omit criticalAssets while still carrying a
+    // fully materialized assetPack. Firmware must verify every asset on disk and
+    // accept the pack instead of treating the absent list as a missing layer.
+    const char* dir = "/tmp/tbot-host-sd-no-critical/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-no-critical && mkdir -p /tmp/tbot-host-sd-no-critical/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-no-critical/lesson-assets/ready.png";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "no-critical asset fixture opens");
+    const char bytes[6] = {1,2,3,4,5,6};
+    fwrite(bytes, 1, 6, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck6-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"backgroundScene.poster\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/ready.png\",\"size\":6}]}"));
+    require(FrameHasAssetPack(0), "no-critical assetPack still carries ack body");
+    require(FrameBodyStr(0, "assetPack", "cacheKey") == "ck6-abcdef1234567890",
+            "no-critical cacheKey echoed");
+    require(FrameAssetPackReady(0) == true,
+            "verified assetPack without criticalAssets list is ready");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_prepare_assetpack_prefix_only_cache_key_not_ready() {
+    const char* dir = "/tmp/tbot-host-sd-prefix/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-prefix && mkdir -p /tmp/tbot-host-sd-prefix/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-prefix/lesson-assets/prefix-only.png";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "prefix-only fixture opens under host SD root");
+    const char bytes[10] = {1,2,3,4,5,6,7,8,9,10};
+    fwrite(bytes, 1, 10, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef12\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/prefix-only.png\",\"size\":10}]}"));
+    require(FrameAssetPackReady(0) == false,
+            "prefix-only assetPack cacheKey is not ready for full manifest checksum");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_prepare_assetpack_stale_checksum_cache_key_not_ready() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"newchecksum9876543210\"},"
+                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-oldchecksum1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/missing.png\",\"size\":10}]}"));
+    require(FrameHasAssetPack(0), "stale checksum cacheKey still returns assetPack ack");
+    require(FrameBodyStr(0, "assetPack", "cacheKey") == "w01-d01/v3-oldchecksum1234567890",
+            "stale cacheKey echoed for ESP correlation");
+    require(FrameAssetPackReady(0) == false,
+            "stale assetPack cacheKey is not ready for current manifest checksum");
+}
+
+void test_prepare_assetpack_missing_declared_critical_key_not_ready() {
+    const char* dir = "/tmp/tbot-host-sd-missing-critical/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-missing-critical && mkdir -p /tmp/tbot-host-sd-missing-critical/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-missing-critical/lesson-assets/background.png";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "missing-critical fixture opens");
+    const char bytes[8] = {1,2,3,4,5,6,7,8};
+    fwrite(bytes, 1, 8, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"backgroundScene.poster\"},{\"key\":\"teachingObject.barn\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-missing-critical-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"backgroundScene.poster\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/background.png\",\"size\":8}]}"));
+    require(FrameHasAssetPack(0), "missing critical key still returns correlated assetPack ack");
+    require(FrameAssetPackReady(0) == false,
+            "declared critical asset missing from READY pack -> not ready");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_prepare_assetpack_requires_manifest_checksum_before_ack() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/missing.png\",\"size\":10}]}"));
+    require(Sent().size() == 1, "missing manifest checksum emits one frame");
+    require(FrameType(0) == "lesson_error", "missing manifest checksum rejects prepare before ack");
+    require(FrameBodyStr(0, nullptr, "code") == "ASSET_PACK_NOT_READY",
+            "missing manifest checksum error code");
+    require(!FrameHasAssetPack(0), "missing manifest checksum does not emit assetPack ack");
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"\"},"
+                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/missing.png\",\"size\":10}]}"));
+    require(FrameType(0) == "lesson_error", "blank manifest checksum rejects prepare before ack");
+    require(FrameBodyStr(0, nullptr, "code") == "ASSET_PACK_NOT_READY",
+            "blank manifest checksum error code");
+    require(!FrameHasAssetPack(0), "blank manifest checksum does not emit assetPack ack");
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"   \"},"
+                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/missing.png\",\"size\":10}]}}"));
+    require(FrameType(0) == "lesson_error", "whitespace manifest checksum rejects prepare before ack");
+    require(FrameBodyStr(0, nullptr, "code") == "ASSET_PACK_NOT_READY",
+            "whitespace manifest checksum error code");
+    require(!FrameHasAssetPack(0), "whitespace manifest checksum does not emit assetPack ack");
+}
+
+// ==========================================================================
+// 3. Version / profile gate
+// ==========================================================================
+void test_version_profile_gate() {
+    // bad protocolVersion on a fresh prepare -> lesson_error at seq 1 ("contract")
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"WRONG\",")
+           + "\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\",\"sequence\":1,"
+             "\"body\":{\"profile\":\"" + kLessonProfileEspTft + "\"}}");
+    require(Sent().size() == 1, "bad version -> one error frame");
+    require(FrameType(0) == "lesson_error", "bad version -> lesson_error");
+    require(FrameSeq(0) == 1, "fresh rejected prepare error at seq 1");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED", "version error code");
+    require(FrameBodyStr(0, "context", "reason") == "contract", "version error reason=contract");
+
+    // good version, bad profile -> lesson_error reason="profile"
+    ResetObservable();
+    FreshSession();
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":1,\"body\":{\"profile\":\"oledTiny\"}}");
+    require(FrameType(0) == "lesson_error", "bad profile -> lesson_error");
+    require(FrameBodyStr(0, "context", "reason") == "profile", "profile error reason=profile");
+}
+
+// ==========================================================================
+// 4. Unknown-session drop + staleness drop
+// ==========================================================================
+void test_unknown_session_and_staleness() {
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    OpenSession();  // a1/s1 active, seq now 1,2 processed
+    size_t base = Sent().size();
+
+    // a lesson_step for a DIFFERENT session -> dropped (not prepare, session mismatch)
+    Handle(std::string("{\"type\":\"lesson_start\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"aX\",\"sessionId\":\"sX\","
+           "\"sequence\":9,\"body\":{}}");
+    require(Sent().size() == base, "unknown-session frame dropped silently");
+
+    // staleness: a step carrying an OLDER assignmentVersion than the recorded one.
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":5"));   // records av=5
+    size_t b2 = Sent().size();
+    // start carrying older av=2 -> stale drop, no ack
+    Handle(std::string("{\"type\":\"lesson_start\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":2,\"body\":{\"assignmentVersion\":2}}");
+    require(Sent().size() == b2, "stale assignmentVersion dropped");
+}
+
+// ==========================================================================
+// 5. Dedup / idempotent re-ack (replays cached rendered/degraded + assetPack)
+// ==========================================================================
+void test_dedup_reack() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+
+    // prepare with a (not-ready) assetPack so the cached ack carries an assetPack body.
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ckD-abcdef1234567890\",\"assets\":[]}"));
+    require(Sent().size() == 1, "prepare ack");
+    bool first_ready = FrameAssetPackReady(0);
+
+    // duplicate prepare (same assignment/session, sequence <= last) -> re-ack path.
+    // duplicate_prepare==true so NO session reset; sequence<=last triggers replay.
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ckD-abcdef1234567890\",\"assets\":[]}"));
+    require(Sent().size() == 2, "duplicate prepare re-acks");
+    require(FrameType(1) == "lesson_ack", "re-ack is an ack");
+    // NOTE non-tautology: re-ack must REPLAY the cached assetPack body. Mutation: drop the
+    // cached-assetPack replay (re_asset_pack=nullptr) -> the re-ack would carry NO assetPack.
+    require(FrameHasAssetPack(1), "duplicate re-ack replays cached assetPack body");
+    require(FrameAssetPackReady(1) == first_ready, "re-ack replays cached ready flag");
+
+    // a duplicate of an OLDER sequence than the cached one -> conservative false/false,
+    // no assetPack. Advance to seq 3 first via start(2)+a step? Simpler: send seq 0 dup.
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":0,\"body\":{\"profile\":\"" + kLessonProfileEspTft + "\"}}");
+    require(Sent().size() == 3, "older duplicate also re-acks");
+    require(FrameBodyBool(2, "rendered", true) == false, "older dup re-ack rendered=false");
+    require(!FrameHasAssetPack(2), "older dup carries no cached assetPack");
+}
+
+void test_prepare_new_assignment_version_same_session_resets_stream() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1,\"manifestRef\":{\"manifestChecksum\":\"oldchecksum1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"lesson/v1-oldchecksum1234567890\",\"assets\":[]}"));
+    require(Sent().size() == 1, "initial version prepare ack");
+    require(FrameSeq(0) == 1, "initial version starts F->S stream at 1");
+    require(FrameBodyStr(0, "assetPack", "cacheKey") == "lesson/v1-oldchecksum1234567890",
+            "initial version ack carries old assetPack cacheKey");
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":2,\"manifestRef\":{\"manifestChecksum\":\"newchecksum9876543210\"},"
+                          "\"assetPack\":{\"cacheKey\":\"lesson/v2-newchecksum9876543210\",\"assets\":[]}"));
+
+    require(Sent().size() == 2, "republished version prepare emits fresh ack");
+    require(FrameSeq(1) == 1, "republished version resets F->S stream for ESP runtime cursor");
+    require(FrameBodyStr(1, "assetPack", "cacheKey") == "lesson/v2-newchecksum9876543210",
+            "republished version prepare acks new assetPack cacheKey, not cached stale pack");
+}
+
+// ==========================================================================
+// 6. start / stop / error lifecycle (with display clears via inline Schedule)
+// ==========================================================================
+void test_start_stop_error_lifecycle() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    require(FrameType(1) == "lesson_ack" && FrameSeq(1) == 2, "start acks at seq 2");
+
+    // lesson_stop: acks, cancels listening, clears all three layers + neutral emotion.
+    Handle(std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":3,\"body\":{}}");
+    require(FrameType(2) == "lesson_ack", "stop acks");
+    require(App().cancel_listen_calls >= 1, "stop cancels interactive listening");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "stop clears background layer");
+    require(disp.last_emotion == "neutral", "stop restores neutral face");
+
+    // lesson_error (S->F status): NOT acked; clears layers, sad face + failure caption.
+    size_t before = Sent().size();
+    Handle(std::string("{\"type\":\"lesson_error\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":4,\"body\":{}}");
+    require(Sent().size() == before, "lesson_error is NOT acked back");
+    require(disp.last_emotion == "sad", "lesson_error shows sad face");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Bài học chưa tải được.",
+            "lesson_error shows child-safe failure caption");
+
+    // unhandled slice type (e.g. lesson_pause) -> dropped, no ack
+    size_t b2 = Sent().size();
+    Handle(std::string("{\"type\":\"lesson_pause\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":5,\"body\":{}}");
+    require(Sent().size() == b2, "lesson_pause dropped in slice");
+}
+
+// stop/error when display is a plain (non-LVGL) Display* -> lvgl_display branch nullptr,
+// and when display is null entirely.
+void test_lifecycle_display_variants() {
+    // non-LVGL display: dynamic_cast yields null, emotion still set, no layer clears.
+    ResetObservable();
+    FreshSession();
+    Display plain;
+    Board::GetInstance().display_ = &plain;
+    Board::GetInstance().network_ = nullptr;
+    Handle(PrepareFrame(1));
+    Handle(std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":2,\"body\":{}}");
+    require(plain.last_emotion == "neutral", "non-LVGL stop still sets neutral");
+
+    // null display: stop schedules nothing display-side, still acks.
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1));
+    size_t b = Sent().size();
+    Handle(std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":2,\"body\":{}}");
+    require(FrameType(b) == "lesson_ack", "stop with null display still acks");
+}
+
+// ==========================================================================
+// 7. lesson_step: video reject + missing-layer reject
+// ==========================================================================
+void test_step_rejects() {
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+
+    // video forced via bg.mode != poster
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s4\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\",\"scene\":{\"backgroundScene\":{\"mode\":\"video\"},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"u\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"u\"}}}}}");
+    require(FrameType(Sent().size()-1) == "lesson_error", "video mode -> lesson_error");
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
+            "video reject code");
+    require(FrameStepId(Sent().size()-1) == "s4", "step error echoes stepId");
+
+    // video forced via non-null bg.video
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s5\",\"sequence\":4,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"video\":{\"src\":\"v\"}},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"u\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"u\"}}}}}");
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
+            "non-null video -> reject");
+
+    // missing required layer (no poster src) -> LESSON_FRAME_INVALID
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\"," 
+           "\"stepId\":\"s6\",\"sequence\":5,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\"},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"u\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"u\"}}}}}");
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "missing layer -> LESSON_FRAME_INVALID");
+
+    // Blank-but-present source must be rejected like backend/ESP trim guards; otherwise
+    // firmware would ack a non-renderable frame as degraded instead of failing fast.
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\"," 
+           "\"stepId\":\"s7\",\"sequence\":6,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"   \"}}}}}");
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "blank layer source -> LESSON_FRAME_INVALID");
+}
+
+// ==========================================================================
+// 8. lesson_step full render: HTTP fetch + decode all three layers (LvglDisplay)
+// ==========================================================================
+void test_step_full_render_http() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    // Known Content-Length JPEG body for all three fetches; decoder mode 0 = success.
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    int seq = 3;
+    // passive step (greeting) so degraded computes from drew flags and NO listen window.
+    Handle(StepFrame(seq, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"Xin chào\",\"stepType\":\"greeting\"", ""));
+    size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack", "rendered step acks");
+    // NOTE non-tautology: all three layers fetched+drew so degraded MUST be false.
+    // Mutation: force overlay fetch to fail (degraded becomes true) -> this flips.
+    require(FrameBodyBool(idx, "rendered", false) == true, "step ack rendered=true");
+    require(FrameBodyBool(idx, "degraded", true) == false,
+            "all three layers drew -> degraded=false");
+    require(disp.background_calls.size() >= 1 && disp.background_calls[0] == true,
+            "background image drawn back layer");
+    require(!disp.object_calls.empty() && disp.object_calls[0] == true,
+            "teaching object image drawn");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls[0] == true,
+            "robot overlay image drawn");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Xin chào", "authored prompt caption drawn");
+    require(disp.last_emotion == "happy", "teaching expression -> happy emotion");
+    // passive greeting: no interactive listen window opened.
+    require(App().prepare_listen_calls == 0, "passive step opens NO listen window");
+}
+
+void test_step_ignores_story_metadata_while_rendering_layers() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s-story", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"TeeBot kể chuyện về barn.\""
+                     ",\"stepType\":\"greeting\""
+                     ",\"story\":{\"beatId\":\"intro\",\"text\":\"TeeBot and the child visit a barn.\"}"
+                     ",\"storyText\":\"TeeBot and the child visit a barn.\""
+                     ",\"storyBeat\":{\"ask\":\"What animal do you see?\",\"waitForChild\":true}"
+                     ",\"vocab\":{\"word\":\"barn\",\"partOfSpeech\":\"noun\"}",
+                     ""));
+
+    const size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack", "story metadata step still acks");
+    require(FrameStepId(idx) == "s-story", "story metadata step echoes stepId");
+    require(FrameBodyBool(idx, "rendered", false) == true, "story metadata step renders");
+    require(FrameBodyBool(idx, "degraded", true) == false, "story metadata step keeps all layers non-degraded");
+    require(HostHttp().open_calls.size() == 3, "story metadata does not add extra asset fetches");
+    require(HostHttp().open_calls[0].url == "http://x/p.jpg", "story metadata background URL fetches first");
+    require(HostHttp().open_calls[1].url == "http://x/o.jpg", "story metadata teaching URL fetches second");
+    require(HostHttp().open_calls[2].url == "http://x/r.jpg", "story metadata overlay URL fetches third");
+    require(disp.background_calls.size() >= 1 && disp.object_calls.size() >= 1 && disp.overlay_calls.size() >= 1,
+            "story metadata frame draws all three lesson layers");
+    require(!disp.chat_messages.empty() && disp.chat_messages.back().second == "TeeBot kể chuyện về barn.",
+            "story metadata frame keeps authored prompt as caption");
+
+    // Backend manifest marks storyBeat.waitForChild as completionClass=interactive
+    // even when the visual stepType is a normally-passive story/greeting frame.
+    // Firmware must follow completionClass, render the layers, open the child
+    // response window, and still avoid fabricating progress/scoring on render ack.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    size_t before_wait = Sent().size();
+    Handle(StepFrame(3, "s-story-wait", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"What animal do you see?\""
+                     ",\"stepType\":\"greeting\""
+                     ",\"completionClass\":\"interactive\""
+                     ",\"storyBeat\":{\"ask\":\"What animal do you see?\",\"waitForChild\":true}"
+                     ",\"vocab\":{\"word\":\"barn\",\"promptKind\":\"guided-speaking\"}",
+                     ""));
+    require(Sent().size() == before_wait + 1, "story waitForChild render emits only ack");
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "story waitForChild frame acks render");
+    require(FrameStepId(Sent().size() - 1) == "s-story-wait", "story waitForChild echoes stepId");
+    require(FrameBodyBool(Sent().size() - 1, "rendered", false) == true,
+            "story waitForChild renders layers");
+    require(FrameBodyBool(Sent().size() - 1, "degraded", true) == false,
+            "story waitForChild remains non-degraded");
+    require(App().prepare_listen_calls == 1,
+            "storyBeat.waitForChild completionClass=interactive opens child response window");
+    for (const auto& frame : Sent()) {
+        require(frame.find("lesson_progress") == std::string::npos,
+                "story waitForChild render does not fabricate progress");
+        require(frame.find("pronunciation") == std::string::npos,
+                "story waitForChild render ack contains no pronunciation scoring");
+        require(frame.find("score") == std::string::npos,
+                "story waitForChild render ack contains no score field");
+    }
+
+    // Some authored/custom interactive steps carry storyBeat.ask without repeating
+    // waitForChild. The backend/ESP contract still marks these interactive through
+    // completionClass, and firmware must open the listen window from that class.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    Handle(StepFrame(3, "s-story-ask-only", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"Look at the picture.\""
+                     ",\"stepType\":\"model\""
+                     ",\"completionClass\":\"interactive\""
+                     ",\"storyBeat\":{\"ask\":\"Which animal is beside the barn?\"}"
+                     ",\"vocab\":{\"word\":\"barn\",\"promptKind\":\"guided-speaking\"}",
+                     ""));
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "story ask-only frame acks render");
+    require(FrameStepId(Sent().size() - 1) == "s-story-ask-only", "story ask-only echoes stepId");
+    require(FrameBodyBool(Sent().size() - 1, "rendered", false) == true,
+            "story ask-only renders layers");
+    require(FrameBodyBool(Sent().size() - 1, "degraded", true) == false,
+            "story ask-only remains non-degraded");
+    require(App().prepare_listen_calls == 1,
+            "completionClass interactive opens child response window without waitForChild flag");
+    require(!disp.background_calls.empty() && !disp.object_calls.empty() && !disp.overlay_calls.empty(),
+            "story ask-only frame draws all three lesson layers");
+}
+
+void test_step_fetches_canonical_layer_urls_in_order() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s4",
+                     "https://cdn.example.test/bg/poster.jpg",
+                     "https://cdn.example.test/object/barn.png",
+                     "https://cdn.example.test/robot/teach.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+
+    require(HostHttp().open_calls.size() == 3, "three lesson layer URLs fetched");
+    require(HostHttp().open_calls[0].method == "GET", "background fetch uses GET");
+    require(HostHttp().open_calls[0].url == "https://cdn.example.test/bg/poster.jpg",
+            "backgroundScene poster URL fetched first");
+    require(HostHttp().open_calls[1].url == "https://cdn.example.test/object/barn.png",
+            "teachingObject asset URL fetched second");
+    require(HostHttp().open_calls[2].url == "https://cdn.example.test/robot/teach.png",
+            "robotOverlay asset URL fetched third");
+}
+
+// interactive step (no completionClass, non-passive stepType) opens a listen window.
+void test_step_interactive_opens_listen() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s7", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"stepType\":\"ask\"", ""));
+    // NOTE non-tautology: an interactive step MUST open the listen window. Mutation:
+    // classify "ask" as passive -> prepare_listen_calls stays 0.
+    require(App().prepare_listen_calls == 1, "interactive step opens listen window");
+
+    // Canonical s7 fillBlank frame: backend/ESP send helperText + choices for the
+    // guided speaking turn. Firmware must tolerate those fields, draw the prompt,
+    // ACK render, open exactly one listen window, and NOT fabricate lesson_progress
+    // or pronunciation scoring from render success.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    size_t before_s7 = Sent().size();
+    Handle(StepFrame(
+        3, "s7", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+        ",\"prompt\":\"TeeBot says: This is a ___. You can say barn.\""
+        ",\"stepType\":\"fillBlank\""
+        ",\"completionClass\":\"interactive\""
+        ",\"helperText\":\"TeeBot waits for your voice.\""
+        ",\"choices\":[{\"id\":\"c1\",\"label\":\"barn\",\"isCorrect\":true},"
+        "{\"id\":\"c2\",\"label\":\"house\",\"isCorrect\":false}]",
+        ""));
+    require(Sent().size() == before_s7 + 1, "s7 render emits only one ack frame");
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "canonical s7 render -> lesson_ack");
+    require(App().prepare_listen_calls == 1, "canonical s7 opens one child-response window");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "TeeBot says: This is a ___. You can say barn.",
+            "canonical s7 prompt caption drawn without scoring text");
+    for (const auto& frame : Sent()) {
+        require(frame.find("lesson_progress") == std::string::npos,
+                "canonical s7 render does not fabricate progress/scoring");
+        require(frame.find("pronunciation") == std::string::npos,
+                "canonical s7 render ack contains no pronunciation scoring");
+        require(frame.find("score") == std::string::npos,
+                "canonical s7 render ack contains no score field");
+    }
+
+    // explicit completionClass=passive overrides the (interactive) type set.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    Handle(StepFrame(3, "s8", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"stepType\":\"ask\",\"completionClass\":\"passive\"", ""));
+    require(App().prepare_listen_calls == 0, "completionClass=passive forces passive");
+
+    // explicit completionClass=interactive overrides a passive type.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    Handle(StepFrame(3, "s9", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"stepType\":\"greeting\",\"completionClass\":\"interactive\"", ""));
+    require(App().prepare_listen_calls == 1, "completionClass=interactive forces interactive");
+
+    // unknown completionClass falls through to the type set (greeting=passive).
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    Handle(StepFrame(3, "s10", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"stepType\":\"review\",\"completionClass\":\"weird\"", ""));
+    require(App().prepare_listen_calls == 0, "unknown completionClass -> type-set fallback (review passive)");
+}
+
+// ==========================================================================
+// 9. degraded ladder: fetch failures + caption/glyph fallback + no network
+// ==========================================================================
+void test_step_degraded_and_caption_fallback() {
+    // No network at all: FetchLessonImage returns nullptr for every layer; caption-only.
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;   // "no network" branch in FetchLessonImage
+    OpenSession();
+
+    // No prompt; teachingObject has a primitiveFallbackCard so glyph+label fold in.
+    std::string extra_scene =
+        ",\"backgroundScene_unused\":0";  // keep builder simple; add card via object below
+    // Build a step where teachingObject carries primitiveFallbackCard + primaryWord and
+    // backgroundScene has an altCaption -> exercises the caption assembly w/o prompt.
+    std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+        kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+        "\"stepId\":\"s4\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+        "\",\"stepType\":\"focus\",\"scene\":{"
+        "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
+        "\"altCaption\":\"alt text\"},"
+        "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"},"
+        "\"primitiveFallbackCard\":{\"glyph\":\"G\",\"label\":\"Lab\"},\"primaryWord\":\"Word\"},"
+        "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}";
+    Handle(frame);
+    size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack", "caption-only step still acks");
+    // NOTE non-tautology: nothing drew (no network) so degraded MUST be true. Mutation:
+    // hardcode degraded=false -> flips.
+    require(FrameBodyBool(idx, "degraded", false) == true, "no media drew -> degraded=true");
+    // caption: glyph + label + " - " + alt (object did NOT draw, so glyph branch taken)
+    require(!disp.chat_messages.empty(), "caption drawn");
+    require(disp.chat_messages.back().second == std::string("G Lab - alt text"),
+            "glyph+label+alt caption assembled");
+    require(disp.last_emotion == "thinking", "thinking expression -> thinking emotion");
+    // caption-only step clears any stale layers (clear_bg true -> background_calls false)
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "caption-only clears stale background");
+    (void)extra_scene;
+}
+
+// HTTP status != 200, open fail, create-null, and read-error / chunked / size-cap paths.
+void test_step_http_error_paths() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    // status 404 -> fetch nullptr -> degraded
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().status = 404; HostHttp().body = JpegBody();
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "404 -> degraded");
+
+    // Open() fails
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().open_ok = false;
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "open-fail -> degraded");
+
+    // CreateHttp returns null
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().create_null = true;
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "create-null -> degraded");
+
+    // Content-Length exceeds cap -> dropped
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody();
+    HostHttp().content_length_override = 600 * 1024;  // > 512KB cap
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "oversize CL -> dropped");
+
+    // read error mid-body (Content-Length path)
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody();
+    HostHttp().content_length_override = 6;  // matches body size, force multi-read
+    HostHttp().max_chunk = 2;                // 3 reads to fill
+    HostHttp().read_error_after = 1;         // 2nd read errors
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "CL read error -> degraded");
+
+    // short read (server closed early in CL path) -> total_read < content_length
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody();
+    HostHttp().content_length_override = 6;
+    HostHttp().max_chunk = 2;
+    HostHttp().early_close_after = 1;  // 2nd read returns 0 -> short read
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "CL short read -> degraded");
+}
+
+// chunked (no Content-Length) success + growth, plus chunked empty + chunked oversize.
+void test_step_http_chunked_paths() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    // chunked success with growth: body > initial 16KB cap forces a realloc.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().use_content_length = false;          // GetBodyLength()==0 -> chunked path
+    HostHttp().body.assign(20 * 1024, 0x41);        // 20KB
+    HostHttp().body[0] = 0x89; HostHttp().body[1] = 0x50;  // PNG-ish, non-JPEG
+    HostHttp().body[2] = 0x4e;
+    HostHttp().max_chunk = 4096;                    // multiple reads -> exercise grow loop
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", true) == false,
+            "chunked growth fetch draws all layers -> not degraded");
+    require(disp.background_calls.back() == true, "chunked poster drew");
+
+    // chunked empty body -> total_read==0 -> nullptr
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().use_content_length = false;
+    HostHttp().body.clear();   // empty -> first Read returns 0
+    Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "chunked empty -> degraded");
+
+    // chunked oversize -> exceeds cap during growth -> dropped
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().use_content_length = false;
+    HostHttp().body.assign(600 * 1024, 0x41);  // > 512KB, will blow the cap mid-grow
+    HostHttp().max_chunk = 64 * 1024;
+    Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "chunked oversize -> dropped");
+}
+
+// JPEG decode-failure + degenerate-geometry branches; non-JPEG undecodable throw branch.
+void test_decode_failure_branches() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    // JPEG decode returns non-OK
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 1;  // decode fail
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "JPEG decode-fail -> degraded");
+
+    // JPEG decode OK but degenerate geometry (width==0) -> rejected
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 2;  // ESP_OK + zero width
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "degenerate JPEG -> degraded");
+
+    // JPEG decode OK but decoded RGB565 footprint exceeds the firmware budget -> rejected
+    // before LvglAllocatedImage can retain a large buffer.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 3;  // ESP_OK + 400x400 RGB565 decoded buffer
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "oversized decoded JPEG -> degraded");
+    require(disp.background_calls.empty() || disp.background_calls.back() == false,
+            "oversized decoded JPEG is not drawn");
+
+    // non-JPEG undecodable -> LvglAllocatedImage(data,size) ctor throws -> caught -> nullptr
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = PngLikeBody();
+    HostImageDecodeShouldThrow() = true;  // throws on the FIRST construction (poster)
+    Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "undecodable image throw is caught -> degraded, no crash");
+}
+
+// OOM guards: heap_caps_malloc returns null on the pre-sized (CL) alloc and on the
+// chunked initial alloc.
+void test_oom_guards() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    // Content-Length path alloc fails (first heap_caps_malloc).
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostHttp().use_content_length = true;
+    HostHeapFailAfter() = 0; HostHeapCallCount() = 0;  // fail the very first alloc
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    HostHeapFailAfter() = -1;  // disable hook
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "CL alloc OOM -> degraded");
+
+    // chunked path initial alloc fails.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().use_content_length = false; HostHttp().body = JpegBody();
+    HostHeapFailAfter() = 0; HostHeapCallCount() = 0;
+    Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    HostHeapFailAfter() = -1;
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "chunked alloc OOM -> degraded");
+}
+
+// ==========================================================================
+// 10. local sd:// / file:// fetch path (FetchLessonLocalImage + path validation)
+// ==========================================================================
+void test_local_file_fetch() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    const char* dir = "/tmp/tbot-host-sd-local/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-local && mkdir -p /tmp/tbot-host-sd-local/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+
+    // unsafe path (..) rejected -> nullptr -> degraded
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    Handle(StepFrame(3, "s4", "sd://sdcard/tbot/lesson-assets/../evil.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "path traversal poster rejected -> degraded");
+
+    // non-pack-root local path rejected
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    Handle(StepFrame(3, "s4", "file:///etc/passwd", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "non-pack-root local poster rejected -> degraded");
+
+    const char* p = "/tmp/tbot-host-sd-local/lesson-assets/poster.jpg";
+    FILE* fp = fopen(p, "wb");
+    require(fp != nullptr, "local poster fixture opens under host SD root");
+    auto b = JpegBody();
+    fwrite(b.data(), 1, b.size(), fp);
+    fclose(fp);
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostJpegDecodeMode() = 0;
+    // poster local (decodes), object+overlay via HTTP success
+    HostHttp().body = JpegBody();
+    Handle(StepFrame(3, "s4", "sd://sdcard/tbot/lesson-assets/poster.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(disp.background_calls.back() == true, "local sd:// poster decoded+drawn");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_local_file_fetch_error_branches() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    const char* dir = "/tmp/tbot-host-sd-local-errors/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-local-errors && mkdir -p /tmp/tbot-host-sd-local-errors/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+
+    // Missing file under a valid sd:// pack path -> fopen fails, degraded fallback.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "s-local-missing",
+                     "sd://sdcard/tbot/lesson-assets/missing-poster.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "missing local poster -> degraded fallback");
+
+    // FIFO under the pack root opens as a local path but cannot seek, so the
+    // local file reader must close it and degrade instead of blocking/crashing.
+    int fifo_rc = system("mkfifo /tmp/tbot-host-sd-local-errors/lesson-assets/poster.pipe && (printf x > /tmp/tbot-host-sd-local-errors/lesson-assets/poster.pipe &)");
+    require(fifo_rc == 0, "local FIFO fixture is created");
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "s-local-fifo",
+                     "sd://sdcard/tbot/lesson-assets/poster.pipe",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "unseekable local poster -> degraded fallback");
+
+    // Empty file -> invalid local size, degraded fallback, no crash.
+    FILE* empty = fopen("/tmp/tbot-host-sd-local-errors/lesson-assets/empty.jpg", "wb");
+    require(empty != nullptr, "empty local fixture opens");
+    fclose(empty);
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "s-local-empty",
+                     "sd://sdcard/tbot/lesson-assets/empty.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "empty local poster -> degraded fallback");
+
+    // Local malloc failure -> degraded fallback, object/overlay can still fetch.
+    FILE* poster = fopen("/tmp/tbot-host-sd-local-errors/lesson-assets/poster.jpg", "wb");
+    require(poster != nullptr, "alloc-fail local fixture opens");
+    auto jpeg = JpegBody();
+    fwrite(jpeg.data(), 1, jpeg.size(), poster);
+    fclose(poster);
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    HostHeapFailAfter() = 0; HostHeapCallCount() = 0;
+    Handle(StepFrame(3, "s-local-alloc",
+                     "sd://sdcard/tbot/lesson-assets/poster.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    HostHeapFailAfter() = -1;
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "local poster alloc failure -> degraded fallback");
+
+    // Local file short-read after a successful ftell/alloc must free the buffer and
+    // degrade instead of treating partial bytes as a decoded layer.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    HostLessonFreadShortReadOnce() = true;
+    Handle(StepFrame(3, "s-local-short-read",
+                     "sd://sdcard/tbot/lesson-assets/poster.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "local poster short read -> degraded fallback");
+
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_sd_pack_step_draws_all_local_layers_and_waits_for_child() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    const char* dir = "/tmp/tbot-host-sd-pack/lesson-assets/w01-d01/v3-abcdef";
+    system("rm -rf /tmp/tbot-host-sd-pack && mkdir -p /tmp/tbot-host-sd-pack/lesson-assets/w01-d01/v3-abcdef");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", "/tmp/tbot-host-sd-pack/lesson-assets", 1);
+
+    const std::vector<std::string> files = {
+        "/tmp/tbot-host-sd-pack/lesson-assets/w01-d01/v3-abcdef/backgroundScene.poster",
+        "/tmp/tbot-host-sd-pack/lesson-assets/w01-d01/v3-abcdef/teachingObject.barn",
+        "/tmp/tbot-host-sd-pack/lesson-assets/w01-d01/v3-abcdef/robotOverlay.teach",
+    };
+    auto jpeg = JpegBody();
+    for (const auto& path : files) {
+        FILE* fp = fopen(path.c_str(), "wb");
+        require(fp != nullptr, "sd-pack layer fixture opens under host SD root");
+        fwrite(jpeg.data(), 1, jpeg.size(), fp);
+        fclose(fp);
+    }
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s-sd-story",
+                     "sd://sdcard/tbot/lesson-assets/w01-d01/v3-abcdef/backgroundScene.poster",
+                     "sd://sdcard/tbot/lesson-assets/w01-d01/v3-abcdef/teachingObject.barn",
+                     "sd://sdcard/tbot/lesson-assets/w01-d01/v3-abcdef/robotOverlay.teach",
+                     ",\"prompt\":\"What animal do you see?\""
+                     ",\"stepType\":\"greeting\""
+                     ",\"completionClass\":\"interactive\""
+                     ",\"storyBeat\":{\"ask\":\"What animal do you see?\",\"waitForChild\":true}"
+                     ",\"vocab\":{\"word\":\"barn\",\"promptKind\":\"guided-speaking\"}",
+                     ""));
+
+    const size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack", "sd-pack story step acks render");
+    require(FrameStepId(idx) == "s-sd-story", "sd-pack story step echoes stepId");
+    require(FrameBodyBool(idx, "rendered", false) == true, "sd-pack story step renders");
+    require(FrameBodyBool(idx, "degraded", true) == false,
+            "all three sd-pack layers drew -> non-degraded");
+    require(HostHttp().open_calls.empty(), "sd-pack local layers do not use HTTP fetch");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "sd-pack background layer drawn");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == true,
+            "sd-pack teaching object layer drawn");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == true,
+            "sd-pack robot overlay layer drawn");
+    require(App().prepare_listen_calls == 1,
+            "sd-pack guided story opens child response window");
+    for (const auto& frame : Sent()) {
+        require(frame.find("lesson_progress") == std::string::npos,
+                "sd-pack guided story render does not fabricate progress");
+        require(frame.find("pronunciation") == std::string::npos,
+                "sd-pack guided story render ack contains no pronunciation scoring");
+        require(frame.find("score") == std::string::npos,
+                "sd-pack guided story render ack contains no score field");
+    }
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+// AssetAvailable on-device fallback: no network poster, but poster name is in the flashed
+// asset table -> poster_drew via AssetAvailable.
+void test_asset_available_fallback() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;  // no HTTP
+    OpenSession();
+    Assets::GetInstance().Clear();
+    // Flash the poster src name so AssetAvailable(poster_src) returns true.
+    Assets::GetInstance().table["flashed_poster"] = {1, 2, 3, 4};
+    Handle(StepFrame(3, "s4", "flashed_poster", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    // poster_drew=true via AssetAvailable; object/overlay had no network -> not drawn ->
+    // degraded true (object did not draw). Still proves the AssetAvailable rung executed.
+    require(FrameType(Sent().size()-1) == "lesson_ack", "asset-fallback step acks");
+}
+
+// REGRESSION (poster_drew flag-without-draw): a poster whose name is in the flashed asset
+// table but whose authored URL FAILS to fetch must be treated as NOT drawn. The old
+// `if (!poster_drew && AssetAvailable(poster_src)) poster_drew = true;` rung flipped
+// poster_drew=true WITHOUT ever scheduling a SetLessonBackground draw (AssetAvailable only
+// probes GetAssetData presence and discards the bytes). That produced two dishonest
+// outcomes: (1) degraded was acked false for a blank/invisible poster, and (2) clear_bg
+// (= !poster_drew) went false, so the stale previous-step poster was NOT cleared.
+//
+// Here all three scene.*.src are present, the poster URL is also a flashed asset key, but
+// every HTTP fetch returns status 404 -> FetchLessonImage(poster) == nullptr. Honest
+// behavior AFTER the fix: poster is NOT drawn -> degraded=true AND the background layer is
+// explicitly cleared (SetLessonBackground(nullptr) -> background_calls.back()==false).
+// The background-clear assertion is the one that FAILS before the fix (the rung sets
+// poster_drew=true, so clear_bg is false and SetLessonBackground(nullptr) is never called,
+// leaving background_calls EMPTY).
+void test_flashed_poster_without_draw_is_not_drawn() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;   // network present so the HTTP path is taken
+    OpenSession();
+
+    // Flash the poster key so the (buggy) AssetAvailable rung would see it as "present".
+    Assets::GetInstance().Clear();
+    Assets::GetInstance().table["flashed_poster"] = {0xde, 0xad, 0xbe, 0xef};
+
+    // All fetches fail: status != 200 -> FetchLessonImage returns nullptr for every layer.
+    ResetHostHttp();
+    HostHttp().status = 404;
+    HostHttp().body = JpegBody();
+
+    Handle(StepFrame(3, "s-flashed", "flashed_poster", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+
+    const size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack", "flashed-poster-no-draw step still acks");
+    // HONEST behavior after the fix: a flashed-but-not-drawn poster is degraded.
+    require(FrameBodyBool(idx, "degraded", false) == true,
+            "flashed-only poster with no draw path -> degraded=true");
+    // DISTINGUISHING assertion (fails before the fix): because the poster was NOT drawn,
+    // clear_bg is true and the renderer clears the (possibly stale) background layer.
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "no-draw poster clears stale background instead of acking it as drawn");
+}
+
+// Remaining reachable branches: chunked realloc-fail + chunked read-error guards, the
+// JPEG decoded-image rejected throw, LessonLocalPath sd:// tail variants + non-local
+// assetPack localPath, the object-drew caption branch, and the unknown-expression
+// neutral-emotion default.
+void test_remaining_reachable_branches() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    // --- chunked realloc-fail guard (479-481): initial 16KB malloc OK, then the grow
+    // realloc returns null. Body must exceed 16KB so a realloc is attempted.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().use_content_length = false;
+    HostHttp().body.assign(20 * 1024, 0x41);
+    HostHttp().max_chunk = 4096;
+    HostHeapFailAfter() = 1; HostHeapCallCount() = 0;  // malloc#0 OK, realloc#1 null
+    Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    HostHeapFailAfter() = -1;
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "chunked realloc-fail -> degraded");
+
+    // --- chunked read-error guard (489-491): chunked path, a Read() returns -1.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().use_content_length = false;
+    HostHttp().body.assign(8 * 1024, 0x41);  // fits initial 16KB cap (no realloc)
+    HostHttp().max_chunk = 1024;
+    HostHttp().read_error_after = 1;         // 2nd read errors
+    Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true, "chunked read-error -> degraded");
+
+    // --- JPEG decoded-image-rejected throw (226-231): decode succeeds (mode 0) but the
+    // 6-arg LvglAllocatedImage ctor throws -> caught -> nullptr.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    HostImageDecodeShouldThrow() = true;  // throws on the first (poster) JPEG construction
+    Handle(StepFrame(3, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyBool(Sent().size()-1, "degraded", false) == true,
+            "decoded-JPEG rejected throw is caught -> degraded");
+
+    // --- LessonLocalPath sd:// variants via assetPack localPath (LessonLocalFileReady ->
+    // LessonLocalPath). These resolve the path (lines 268-273) even though the file is
+    // absent on the host. Three localPaths: "/"-prefixed tail (269), bare tail (270), and
+    // a non-local http localPath (273 -> "").
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ckP-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd:///sdcard/tbot/lesson-assets/a.png\",\"size\":4}]}"));
+    require(FrameAssetPackReady(0) == false, "sd:// slash-tail path resolves, file absent -> not ready");
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ckP2-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://tbot/x.png\",\"size\":4}]}"));
+    require(FrameAssetPackReady(0) == false, "sd:// bare-tail path resolves, file absent -> not ready");
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ckP3-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"http://x/y.png\",\"size\":4}]}"));
+    require(FrameAssetPackReady(0) == false, "non-local localPath -> empty path -> not ready");
+
+    // --- object-drew caption branch (848-850): no prompt, teachingObject fetches+draws,
+    // label resolves from primaryWord -> caption = label.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    {
+        std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+            SID() + "\",\"stepId\":\"s4\",\"sequence\":3,\"body\":{\"profile\":\"" +
+            kLessonProfileEspTft + "\",\"stepType\":\"greeting\",\"scene\":{"
+            "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+            "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"},\"primaryWord\":\"Mèo\"},"
+            "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"celebrating\"}}}}";
+        Handle(frame);
+        // object drew + no prompt + label(primaryWord) -> caption == label
+        require(!disp.chat_messages.empty() && disp.chat_messages.back().second == "Mèo",
+                "object-drew + primaryWord -> caption is the label");
+        // NOTE non-tautology: "celebrating" expression MUST map to "laughing". Mutation:
+        // drop the celebrating case -> emotion would be "neutral".
+        require(disp.last_emotion == "laughing", "celebrating expression -> laughing emotion");
+    }
+
+    // --- unknown expression -> ExpressionToEmotion default "neutral" (line 175).
+    ResetObservable();
+    Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    {
+        std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+            SID() + "\",\"stepId\":\"s4\",\"sequence\":3,\"body\":{\"profile\":\"" +
+            kLessonProfileEspTft + "\",\"prompt\":\"Q\",\"stepType\":\"greeting\",\"scene\":{"
+            "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+            "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+            "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"mysterious\"}}}}";
+        Handle(frame);
+        require(disp.last_emotion == "neutral", "unknown expression -> neutral emotion");
+    }
+}
+
+// protocol_ null leak-guard branch: emit builds the frame but skips the send.
+void test_protocol_null_send_skip() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    App().protocol_.reset();  // null protocol_ -> emit's `if (protocol_)` false branch
+    // Should not crash; nothing recorded (protocol_ is null so Sent() would deref) -> we
+    // simply assert no crash by completing the call.
+    cJSON* root = cJSON_Parse(PrepareFrame(1).c_str());
+    App().HandleLessonMessage(root);
+    cJSON_Delete(root);
+    require(true, "null protocol_ build-without-send did not crash");
+    App().HostReset();  // restore protocol_ for any later test
+}
+
+}  // namespace
+
+int main() {
+    test_envelope_guards();
+    test_prepare_basic();
+    test_prepare_assetpack_not_ready_branches();
+    test_prepare_assetpack_ready_with_real_file();
+    test_prepare_assetpack_ready_without_critical_asset_list();
+    test_prepare_assetpack_prefix_only_cache_key_not_ready();
+    test_prepare_assetpack_stale_checksum_cache_key_not_ready();
+    test_prepare_assetpack_missing_declared_critical_key_not_ready();
+    test_prepare_assetpack_requires_manifest_checksum_before_ack();
+    test_version_profile_gate();
+    test_unknown_session_and_staleness();
+    test_dedup_reack();
+    test_prepare_new_assignment_version_same_session_resets_stream();
+    test_start_stop_error_lifecycle();
+    test_lifecycle_display_variants();
+    test_step_rejects();
+    test_step_full_render_http();
+    test_step_ignores_story_metadata_while_rendering_layers();
+    test_step_fetches_canonical_layer_urls_in_order();
+    test_step_interactive_opens_listen();
+    test_step_degraded_and_caption_fallback();
+    test_step_http_error_paths();
+    test_step_http_chunked_paths();
+    test_decode_failure_branches();
+    test_oom_guards();
+    test_local_file_fetch();
+    test_local_file_fetch_error_branches();
+    test_sd_pack_step_draws_all_local_layers_and_waits_for_child();
+    test_asset_available_fallback();
+    test_flashed_poster_without_draw_is_not_drawn();
+    test_remaining_reachable_branches();
+    test_protocol_null_send_skip();
+    std::cout << "lesson host test OK (" << g_checks << " checks)\n";
+    return 0;
+}
