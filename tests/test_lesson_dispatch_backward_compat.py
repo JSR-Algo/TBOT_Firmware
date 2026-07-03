@@ -203,14 +203,14 @@ def test_interactive_step_opens_listening_instead_of_completing_from_render():
     h = read("main/lesson_handler.cc")
     render_tail = h[h.index("emit_ack(root, sequence") : h.index('ESP_LOGI(TAG, "lesson_step rendered')]
 
-    assert "if (!passive)" in render_tail
+    assert "if (!passive && rendered)" in render_tail
     listen_schedule = re.search(
         r"Schedule\(\[\]\(\)\s*\{\s*Application::GetInstance\(\)\.PrepareLessonInteractiveListening\(\);\s*\}\);",
         render_tail,
         re.S,
     )
     assert listen_schedule is not None
-    assert render_tail.index("if (!passive)") < render_tail.index("Schedule([]()") < render_tail.index("PrepareLessonInteractiveListening")
+    assert render_tail.index("if (!passive && rendered)") < render_tail.index("Schedule([]()") < render_tail.index("PrepareLessonInteractiveListening")
 
 
 # ── FW-02: a session-opening prepare resets the F->S counter BEFORE the gate ───────
