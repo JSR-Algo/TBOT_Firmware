@@ -2761,6 +2761,7 @@ void Application::PrepareLessonInteractiveListening(uint32_t generation) {
     lesson_interactive_listen_pending_.store(true);
     auto display = Board::GetInstance().GetDisplay();
     if (display) {
+        display->ClearChatMessages();
         display->SetStatus("Sắp đến lượt con...");
         display->SetEmotion("thinking");
     }
@@ -3353,6 +3354,7 @@ void Application::HandleStartListeningEvent() {
             ESP_LOGI(TAG, "lesson prompt still speaking; defer listening");
             listening_mode_ = kListeningModeManualStop;
             auto display = Board::GetInstance().GetDisplay();
+            display->ClearChatMessages();
             display->SetStatus("Sắp đến lượt con...");
             display->SetEmotion("thinking");
             return;
