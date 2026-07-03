@@ -2320,7 +2320,9 @@ void Application::InitializeProtocol() {
                 Schedule([this, force_continue_listening, force_realtime_listen]() {
                     ++speaking_generation_;
                     last_speaking_activity_ms_.store(0);
-                    const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load();
+                    const bool lesson_interactive_turn =
+                        lesson_interactive_listen_pending_.load() ||
+                        lesson_interactive_listening_active_.load();
                     if (lesson_runtime_active_.load() && !lesson_interactive_turn) {
                         ESP_LOGI(TAG, "lesson tts stop continue ignored state=%d",
                                  static_cast<int>(GetDeviceState()));
@@ -2351,7 +2353,7 @@ void Application::InitializeProtocol() {
                     }
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
-                            if (lesson_interactive_listen_pending_.load()) {
+                            if (lesson_interactive_turn) {
                                 SetDeviceState(kDeviceStateListening);
                                 ESP_LOGI(TAG, "lesson prompt complete -> listening");
                             } else {

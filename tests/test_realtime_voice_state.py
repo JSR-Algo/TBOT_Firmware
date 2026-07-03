@@ -932,7 +932,12 @@ def test_lesson_prompt_tts_stop_continue_listening_does_not_take_over_realtime()
     stop_body = app_cc[stop:sentence_start]
     schedule_body = stop_body[stop_body.index("Schedule([this") :]
 
-    assert "const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load();" in schedule_body
+    assert "const bool lesson_interactive_turn =" in schedule_body
+    turn_decl_start = schedule_body.index("const bool lesson_interactive_turn =")
+    turn_decl = schedule_body[turn_decl_start : schedule_body.index(";", turn_decl_start)]
+    assert "lesson_interactive_listen_pending_.load()" in turn_decl
+    assert "lesson_interactive_listening_active_.load()" in turn_decl
+    assert "||" in turn_decl
     assert "if (force_continue_listening && !lesson_interactive_turn)" in schedule_body
     assert schedule_body.index("const bool lesson_interactive_turn") < schedule_body.index(
         "if (force_continue_listening"
@@ -954,7 +959,12 @@ def test_lesson_runtime_tts_stop_continue_listening_ignores_non_answer_turn():
     stop_body = app_cc[stop:sentence_start]
     schedule_body = stop_body[stop_body.index("Schedule([this") :]
 
-    assert "const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load();" in schedule_body
+    assert "const bool lesson_interactive_turn =" in schedule_body
+    turn_decl_start = schedule_body.index("const bool lesson_interactive_turn =")
+    turn_decl = schedule_body[turn_decl_start : schedule_body.index(";", turn_decl_start)]
+    assert "lesson_interactive_listen_pending_.load()" in turn_decl
+    assert "lesson_interactive_listening_active_.load()" in turn_decl
+    assert "||" in turn_decl
     assert "if (lesson_runtime_active_.load() && !lesson_interactive_turn)" in schedule_body
     assert schedule_body.index("if (lesson_runtime_active_.load() && !lesson_interactive_turn)") < schedule_body.index(
         "if (force_continue_listening && !lesson_interactive_turn)"
@@ -968,6 +978,32 @@ def test_lesson_runtime_tts_stop_continue_listening_ignores_non_answer_turn():
     assert "SetDeviceState(kDeviceStateIdle);" in lesson_guard
     assert "protocol_->SendStartListening" not in lesson_guard
     assert "audio_service_.EnableVoiceProcessing(true);" not in lesson_guard
+
+def test_lesson_tts_stop_treats_active_child_listening_as_answer_turn():
+    app_cc = read("main/application.cc")
+
+    stop = app_cc.index('strcmp(state->valuestring, "stop") == 0')
+    sentence_start = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop)
+    stop_body = app_cc[stop:sentence_start]
+    schedule_body = stop_body[stop_body.index("Schedule([this") :]
+
+    turn_decl_start = schedule_body.index("const bool lesson_interactive_turn =")
+    turn_decl = schedule_body[turn_decl_start : schedule_body.index(";", turn_decl_start)]
+    assert "lesson_interactive_listen_pending_.load()" in turn_decl
+    assert "lesson_interactive_listening_active_.load()" in turn_decl
+    assert turn_decl.index("lesson_interactive_listen_pending_.load()") < turn_decl.index(
+        "lesson_interactive_listening_active_.load()"
+    )
+
+    manual_start = schedule_body.index("if (listening_mode_ == kListeningModeManualStop)")
+    manual_body = schedule_body[
+        manual_start :
+        schedule_body.index("} else if (listening_mode_ == kListeningModeAutoStop)", manual_start)
+    ]
+    assert "if (lesson_interactive_turn)" in manual_body
+    assert "lesson_interactive_listen_pending_.load()" not in manual_body
+    assert "SetDeviceState(kDeviceStateListening);" in manual_body
+    assert "lesson prompt complete -> listening" in manual_body
 
 def test_autostop_speaking_timeout_returns_to_idle_instead_of_reopening_mic_loop():
     app_cc = read("main/application.cc")
@@ -1774,7 +1810,7 @@ def test_lesson_prompt_tts_stop_rearms_interactive_listening_instead_of_idling()
     stop_body = app_cc[stop_start:stop_end]
     manual_body = stop_body[stop_body.index("listening_mode_ == kListeningModeManualStop") :]
 
-    assert "lesson_interactive_listen_pending_.load()" in manual_body
+    assert "if (lesson_interactive_turn)" in manual_body
     assert "lesson_interactive_listen_pending_.exchange(false)" not in manual_body
     assert "SetDeviceState(kDeviceStateListening);" in manual_body
     assert "protocol_->SendStartListening(kListeningModeManualStop);" not in manual_body
