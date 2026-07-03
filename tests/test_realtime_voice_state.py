@@ -1542,6 +1542,44 @@ def test_lesson_runtime_main_error_clears_stale_answer_turn_flags():
         "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
     )
 
+def test_lesson_runtime_failure_boundaries_invalidate_stale_answer_turn_generation():
+    app_cc = read("main/application.cc")
+
+    error_start = app_cc.index("if (bits & MAIN_EVENT_ERROR)")
+    error_end = app_cc.index("if (bits & MAIN_EVENT_NETWORK_CONNECTED)", error_start)
+    error_body = app_cc[error_start:error_end]
+    error_lesson_branch = error_body[
+        error_body.index("if (lesson_runtime_active_.load())") :
+        error_body.index("} else if (connect_attempt_active_.load()")
+    ]
+
+    disconnect_start = app_cc.index("void Application::HandleNetworkDisconnectedEvent()")
+    disconnect_end = app_cc.index("void Application::HandleActivationDoneEvent()", disconnect_start)
+    disconnect_body = app_cc[disconnect_start:disconnect_end]
+    active_branch = disconnect_body[disconnect_body.index("if (state == kDeviceStateConnecting") :]
+    disconnect_lesson_branch = active_branch[
+        active_branch.index("if (lesson_runtime_active_.load())") :
+        active_branch.index("} else {", active_branch.index("if (lesson_runtime_active_.load())"))
+    ]
+
+    closed_start = app_cc.index("protocol_->OnAudioChannelClosed")
+    incoming_json = app_cc.index("protocol_->OnIncomingJson", closed_start)
+    closed_body = app_cc[closed_start:incoming_json]
+    online_branch = closed_body[closed_body.index("if (online_intent_.load())") :]
+    closed_lesson_branch = online_branch[
+        online_branch.index("lesson_runtime_active_.load()") :
+        online_branch.index("ESP_LOGW(TAG, \"ws_dropped_unexpected -> auto-reconnect")
+    ]
+
+    for branch in (error_lesson_branch, disconnect_lesson_branch, closed_lesson_branch):
+        assert "lesson_interactive_listen_generation_.fetch_add(1);" in branch
+        assert branch.index("lesson_interactive_listen_generation_.fetch_add(1);") < branch.index(
+            "lesson_interactive_listen_pending_.store(false);"
+        )
+        assert branch.index("lesson_interactive_listen_generation_.fetch_add(1);") < branch.index(
+            "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+        )
+
 def test_reconnect_slow_retry_log_is_distinguishable_and_attempt_capped():
     app_cc = read("main/application.cc")
 

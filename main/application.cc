@@ -349,6 +349,7 @@ void Application::Run() {
             // reconnect keeps slow-period retrying for recovered endpoints.
             if (lesson_runtime_active_.load()) {
                 ESP_LOGI(TAG, "lesson error suppressed: %s", last_error_message_.c_str());
+                lesson_interactive_listen_generation_.fetch_add(1);
                 lesson_interactive_listen_pending_.store(false);
                 lesson_interactive_listening_active_.store(false);
                 auto display = Board::GetInstance().GetDisplay();
@@ -562,6 +563,7 @@ void Application::HandleNetworkDisconnectedEvent() {
         audio_service_.ResetDecoder();
         CloseAudioChannelByIntent();
         if (lesson_runtime_active_.load()) {
+            lesson_interactive_listen_generation_.fetch_add(1);
             lesson_interactive_listen_pending_.store(false);
             lesson_interactive_listening_active_.store(false);
             display->SetStatus(Lang::Strings::PLEASE_WAIT);
@@ -2226,6 +2228,7 @@ void Application::InitializeProtocol() {
                 if (lesson_runtime_active_.load()) {
                     ESP_LOGW(TAG, "lesson ws dropped unexpected -> suppress generic reconnect");
                     online_intent_.store(false);
+                    lesson_interactive_listen_generation_.fetch_add(1);
                     lesson_interactive_listen_pending_.store(false);
                     lesson_interactive_listening_active_.store(false);
                     backend_offline_.store(true);
