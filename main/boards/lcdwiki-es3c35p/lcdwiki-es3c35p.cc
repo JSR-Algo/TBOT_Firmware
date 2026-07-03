@@ -449,9 +449,7 @@ private:
         if (DISPLAY_INVERT_COLOR) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_invert_color(panel, true));
         }
-        if (DISPLAY_SWAP_XY) {
-            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_swap_xy(panel, true));
-        }
+        // ST77922 returns ESP_ERR_NOT_SUPPORTED for hardware swap_xy; landscape is handled by LVGL sw_rotate.
         if (DISPLAY_MIRROR_X || DISPLAY_MIRROR_Y) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_panel_mirror(panel, DISPLAY_MIRROR_X, DISPLAY_MIRROR_Y));
         }

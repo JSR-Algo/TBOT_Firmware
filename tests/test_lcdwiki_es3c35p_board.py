@@ -217,6 +217,13 @@ def test_lcdwiki_es3c35p_uses_st77922_qspi_pins_and_touch_i2c():
     assert "St77922RounderCallback" in board
 
 
+def test_lcdwiki_es3c35p_does_not_call_unsupported_st77922_hardware_swap_xy():
+    board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
+
+    assert "landscape/sw-rotate" in board
+    assert "esp_lcd_panel_swap_xy(panel" not in board
+
+
 def test_lcdwiki_es3c35p_matches_lcdwiki_panel_power_sequence():
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
 
