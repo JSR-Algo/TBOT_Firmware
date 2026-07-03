@@ -1652,6 +1652,13 @@ void test_step_blank_visible_content_does_not_open_listen() {
             "blank visible content after asset failure is degraded");
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
             "blank visible content leaves caption empty");
+    require(disp.last_status == "Lỗi",
+            "blank visible content shows a failure status instead of active lesson status");
+    require(disp.last_emotion == "sad",
+            "blank visible content shows a sad face instead of pretending the step is active");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Bài học chưa tải được.",
+            "blank visible content shows child-safe failure copy");
     require(App().prepare_listen_calls == 0,
             "blank visible content does not open mic for an unseen prompt");
 }

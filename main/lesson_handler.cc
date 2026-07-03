@@ -1275,17 +1275,26 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // over a stale picture.
     Display* display = base_display;
     const bool rendered = display != nullptr;
+    const bool has_visible_content = rendered &&
+        (!caption.empty() || poster_drew || object_drew || overlay_drew);
     if (display) {
         const bool clear_bg = !poster_drew;
         const bool clear_object = !object_drew;
         const bool clear_overlay = !overlay_drew;
         Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
-                  emo = std::string(emotion), cap = caption]() {
+                  has_visible_content, emo = std::string(emotion), cap = caption]() {
             if (lvgl_display) lvgl_display->SetLessonMode(true);
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
             if (clear_overlay && lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
             display->ClearChatMessages();
+            if (!has_visible_content) {
+                display->SetStatus(Lang::Strings::ERROR);
+                display->SetEmotion("sad");
+                display->SetLessonCaption("");
+                display->SetChatMessage("assistant", "Bài học chưa tải được.");
+                return;
+            }
             display->SetStatus("Đang học...");
             display->SetEmotion(emo.c_str());
             display->SetLessonCaption(cap.c_str());
@@ -1310,8 +1319,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const char* step_type       = Str(body, "stepType");
     const char* completion_class = Str(body, "completionClass");
     const bool passive = IsPassiveStep(completion_class, step_type);
-    const bool has_visible_content = rendered &&
-        (!caption.empty() || poster_drew || object_drew || overlay_drew);
     const bool should_listen = !passive && has_visible_content;
     const char* sid = Str(root, "stepId");
     if (!should_listen) {
