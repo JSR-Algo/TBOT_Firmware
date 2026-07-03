@@ -349,6 +349,8 @@ void Application::Run() {
             // reconnect keeps slow-period retrying for recovered endpoints.
             if (lesson_runtime_active_.load()) {
                 ESP_LOGI(TAG, "lesson error suppressed: %s", last_error_message_.c_str());
+                lesson_interactive_listen_pending_.store(false);
+                lesson_interactive_listening_active_.store(false);
                 auto display = Board::GetInstance().GetDisplay();
                 display->SetStatus(Lang::Strings::PLEASE_WAIT);
                 display->SetEmotion("thinking");

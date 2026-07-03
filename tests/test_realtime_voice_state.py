@@ -1480,6 +1480,26 @@ def test_lesson_runtime_main_error_keeps_child_wait_cue():
     assert "Alert(" not in lesson_branch
     assert "OGG_EXCLAMATION" not in lesson_branch
 
+def test_lesson_runtime_main_error_clears_stale_answer_turn_flags():
+    app_cc = read("main/application.cc")
+
+    error_start = app_cc.index("if (bits & MAIN_EVENT_ERROR)")
+    error_end = app_cc.index("if (bits & MAIN_EVENT_NETWORK_CONNECTED)", error_start)
+    error_body = app_cc[error_start:error_end]
+    lesson_branch = error_body[
+        error_body.index("if (lesson_runtime_active_.load())") :
+        error_body.index("} else if (connect_attempt_active_.load()")
+    ]
+
+    assert "lesson_interactive_listen_pending_.store(false);" in lesson_branch
+    assert "lesson_interactive_listening_active_.store(false);" in lesson_branch
+    assert lesson_branch.index("lesson_interactive_listen_pending_.store(false);") < lesson_branch.index(
+        "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+    )
+    assert lesson_branch.index("lesson_interactive_listening_active_.store(false);") < lesson_branch.index(
+        "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+    )
+
 def test_reconnect_slow_retry_log_is_distinguishable_and_attempt_capped():
     app_cc = read("main/application.cc")
 
