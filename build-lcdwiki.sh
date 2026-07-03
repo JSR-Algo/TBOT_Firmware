@@ -85,10 +85,12 @@ for f in "${_defaults_arr[@]}"; do
 done
 
 # --- 3. remove stale sdkconfig + pin target so the board line is re-derived ---
-#     A stale sdkconfig (e.g. left over from a freenove/bread build) would
-#     otherwise be reused and silently keep the wrong board. set-target also
-#     regenerates sdkconfig from the SDKCONFIG_DEFAULTS chain above.
+#     A stale sdkconfig or build dir (e.g. left over from a freenove/bread build
+#     or a failed toolchain switch) would otherwise be reused and silently keep
+#     the wrong board or stale compiler paths. set-target regenerates sdkconfig
+#     from the SDKCONFIG_DEFAULTS chain above.
 rm -f sdkconfig
+rm -rf "$PROJECT_DIR/build"
 idf.py set-target esp32s3
 
 # --- 4. HARD GATE: abort unless the LCDWiki board line actually landed ---

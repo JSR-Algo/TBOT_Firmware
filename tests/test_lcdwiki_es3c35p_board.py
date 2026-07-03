@@ -58,6 +58,7 @@ def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_g
     assert 'set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.local")' in root_cmake
     assert 'export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.local"' in script
     assert "rm -f sdkconfig" in script
+    assert 'rm -rf "$PROJECT_DIR/build"' in script
     assert "idf.py set-target esp32s3" in script
     assert "grep -q '^CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y$' sdkconfig" in script
     assert "BLACK-SCREEN" in script
@@ -66,6 +67,22 @@ def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_g
     assert "SDKCONFIG_DEFAULTS" in flash_instructions
     assert "idf.py build" in flash_instructions
     assert "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y" in flash_instructions
+
+def test_lcdwiki_es3c35p_fleet_build_script_removes_stale_build_dir_before_set_target():
+    script = read("build-lcdwiki.sh")
+
+    sdkconfig_clean = script.index("rm -f sdkconfig")
+    build_clean = script.index('rm -rf "$PROJECT_DIR/build"')
+    set_target = script.index("idf.py set-target esp32s3")
+
+    assert sdkconfig_clean < build_clean < set_target
+
+def test_lcdwiki_es3c35p_fleet_build_script_retries_fresh_build_once():
+    script = read("build-lcdwiki.sh")
+
+    assert "if ! idf.py build; then" in script
+    assert "WARN: idf.py build failed; retrying once" in script
+    assert "idf.py build" in script[script.index("WARN: idf.py build failed; retrying once") :]
 
 def test_lcdwiki_es3c35p_ci_release_build_disables_hardware_aes_and_gates_config():
     config_json = read("main/boards/lcdwiki-es3c35p/config.json")
