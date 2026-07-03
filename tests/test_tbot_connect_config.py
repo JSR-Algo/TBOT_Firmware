@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CURRENT_PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
 CURRENT_PRODUCTION_WEBSOCKET_URL = ""
-CURRENT_OTA_BUILD_VERSION = "2.2.53"
+CURRENT_OTA_BUILD_VERSION = "2.2.54"
 
 
 def read(path: str) -> str:

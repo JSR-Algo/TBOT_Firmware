@@ -1667,6 +1667,8 @@ void test_step_blank_visible_content_does_not_open_listen() {
             "blank visible content shows a failure status instead of active lesson status");
     require(disp.last_emotion == "sad",
             "blank visible content shows a sad face instead of pretending the step is active");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "blank visible content restores realtime sad face instead of hiding it");
     require(!disp.chat_messages.empty() &&
             disp.chat_messages.back().second == "Bài học chưa tải được.",
             "blank visible content shows child-safe failure copy");

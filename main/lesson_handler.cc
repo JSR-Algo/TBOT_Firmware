@@ -1284,7 +1284,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool clear_overlay = !overlay_drew;
         Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
                   has_visible_content, emo = std::string(emotion), cap = caption]() {
-            if (lvgl_display) lvgl_display->SetLessonMode(true);
+            if (lvgl_display) lvgl_display->SetLessonMode(has_visible_content);
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
             if (clear_overlay && lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
