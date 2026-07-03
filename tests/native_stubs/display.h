@@ -11,4 +11,7 @@ public:
         last_role = role ? role : "";
         last_message = message ? message : "";
     }
+    void SetLessonCaption(const char *message) {
+        SetChatMessage("assistant", message);
+    }
 };

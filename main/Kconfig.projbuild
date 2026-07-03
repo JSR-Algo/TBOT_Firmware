@@ -2,12 +2,12 @@ menu "Tbot Assistant"
 
 config OTA_URL
     string "Default OTA URL"
-    default "https://carefully-freelance-improving-numerical.trycloudflare.com/tbot/ota/"
+    default "https://tbot-backend-8wmh.onrender.com/tbot/ota/"
     help
         The application will access this URL to check for new firmwares and server address.
         This is the fresh-flash BOOTSTRAP SEED: with empty NVS the device must reach this
-        host to obtain websocket.url. It MUST be a STABLE host (not an ephemeral/rotating
-        trycloudflare tunnel) so a device whose NVS was cleared is never stranded. The default
+        host to obtain websocket.url. It MUST be a STABLE host, not an ephemeral
+        quick tunnel, so a device whose NVS was cleared is never stranded. The default
         is the stable Render backend already used for provisioning; switch to the current
         managed bootstrap origin when it changes. An ota_url seeded into NVS (wifi
         namespace, key "ota_url") still takes precedence at runtime — see Ota::GetCheckVersionUrl.
@@ -15,11 +15,11 @@ config OTA_URL
 
 config WEBSOCKET_URL
     string "Default WebSocket URL"
-    default "wss://freebsd-concern-noon-cement.trycloudflare.com/tbot/v1/"
+    default ""
     help
         Fresh-flash WebSocket fallback used only when NVS is empty and OTA/bootstrap has not
-        persisted websocket.url yet. OTA/bootstrap still takes precedence at runtime; keep this
-        aligned with the current public WebSocket origin for bench flashing.
+        persisted websocket.url yet. Production builds should get the real public WebSocket
+        from OTA/bootstrap or inject this at build time; do not commit ephemeral tunnel hosts.
 
 choice
     prompt "Flash Assets"
@@ -134,7 +134,7 @@ endchoice
 
 choice BOARD_TYPE
     prompt "Board Type"
-    default BOARD_TYPE_BREAD_COMPACT_WIFI
+    default BOARD_TYPE_LCDWIKI_ES3C35P
     help
         Board type. 开发板类型
     config BOARD_TYPE_BREAD_COMPACT_WIFI

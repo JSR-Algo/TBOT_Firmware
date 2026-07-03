@@ -4,6 +4,13 @@ cmake_minimum_required(VERSION 3.16)
 
 option(TBOT_NATIVE_COVERAGE "Instrument firmware sources for ESP-IDF gcov coverage" OFF)
 
+# ESP-IDF does not auto-load sdkconfig.defaults.local. Keep the production
+# LCDWiki overlay in the default/CI build path so plain idf.py builds select the
+# real board and software AES unless a caller explicitly supplies a build matrix.
+if(NOT DEFINED SDKCONFIG_DEFAULTS)
+    set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.local")
+endif()
+
 # Add this line to disable the specific warning
 add_compile_options(-Wno-missing-field-initializers)
 
@@ -15,7 +22,7 @@ else()
     idf_build_set_property(MINIMAL_BUILD ON)
 endif()
 
-set(PROJECT_VER "2.2.34")
+set(PROJECT_VER "2.2.37")
 project(xiaozhi)
 
 if(TBOT_NATIVE_COVERAGE)

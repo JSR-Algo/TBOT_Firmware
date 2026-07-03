@@ -176,6 +176,25 @@ def test_wifi_config_mode_can_be_rearmed_while_already_configuring():
     allowed_branch = enter_body[wifi_config_idx:enter_body.index("device state is not allowed for WiFi config")]
     assert "StartWifiConfigMode();" in allowed_branch
 
+def test_wifi_config_entry_ignores_active_lesson_before_setup_side_effects():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    enter_body = function_body(wifi_board, "void WifiBoard::EnterWifiConfigMode")
+
+    assert "app.IsLessonRuntimeActive()" in enter_body
+    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("ShowNotification")
+    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("ResetProtocol")
+    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("StopStation")
+    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("StartWifiConfigMode")
+    guard = enter_body[
+        enter_body.index("app.IsLessonRuntimeActive()") :
+        enter_body.index("GetDisplay()->ShowNotification")
+    ]
+    assert "return;" in guard
+    assert "ShowNotification" not in guard
+    assert "ResetProtocol" not in guard
+    assert "StopStation" not in guard
+    assert "StartWifiConfigMode" not in guard
+
 def test_runtime_state_machine_can_interrupt_backend_connect_for_wifi_config():
     state_machine = read("main/device_state_machine.cc")
     connecting_start = state_machine.index("case kDeviceStateConnecting:")

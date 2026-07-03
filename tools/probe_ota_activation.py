@@ -39,13 +39,12 @@ import sys
 import urllib.error
 import urllib.request
 
-# Candidate OTA endpoints seen across the repos (finding §"Residual uncertainty").
-# All /tbot/ota/ variants are the Java esp32-server Spring context-path; only that
-# server emits `activation`. The /v1/ota/ example is a different path shape.
+# Candidate OTA endpoints used by production/stable probes. The backend seed
+# verifies the firmware compatibility response; the stable ESP host is the
+# device-facing OTA server path that can emit activation when manager-api owns it.
 PRESETS = {
-    "kconfig":      "https://tbot-backend-8wmh.onrender.com/tbot/ota/",          # firmware compile-time default
-    "render-tunnel":"https://athletic-editorials-stereo-anatomy.trycloudflare.com/tbot/ota/",  # current quick-tunnel TBOT_OTA_URL
-    "trycloudflare": "https://athletic-editorials-stereo-anatomy.trycloudflare.com/tbot/ota/",                            # current quick-tunnel OTA
+    "kconfig": "https://tbot-backend-8wmh.onrender.com/tbot/ota/",
+    "stable-esp": "https://esp.tjbot.vn/tbot/ota/",
 }
 
 # NVS partition for ESP32-S3 image (partitions: nvs, data, nvs, 0x9000, 0x4000).

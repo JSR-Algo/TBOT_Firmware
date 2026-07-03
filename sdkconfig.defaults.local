@@ -1,8 +1,8 @@
 CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
 # Stable backend bootstrap seed. The OTA response returns the final websocket.url.
-CONFIG_OTA_URL="http://asus-magic-columnists-challenged.trycloudflare.com/tbot/ota/"
+CONFIG_OTA_URL="https://tbot-backend-8wmh.onrender.com/tbot/ota/"
 CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
-CONFIG_WEBSOCKET_URL="wss://foto-flights-badge-turned.trycloudflare.com/tbot/v1/"
+CONFIG_WEBSOCKET_URL=""
 # BLE setup hard-timeout: spec default 5 min (was 120s); range 60-600 (max 10 min).
 CONFIG_BLE_SETUP_TIMEOUT_SEC=300
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -41,3 +41,9 @@ CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=8192
 # — it forced static TX + 32 internal cache-TX buffers, regressed boot TLS
 # (HTTP timeouts) and AFE feed draining, and barely moved internal free RAM.
 # CONFIG_MBEDTLS_HARDWARE_AES is not set
+
+# Lesson images on SD use descriptive asset paths such as lesson-assets and
+# barn-round-field-poster.jpg. Keep FATFS long filename support enabled so the
+# robot can sync and read those files directly from the microSD card.
+# CONFIG_FATFS_LFN_NONE is not set
+CONFIG_FATFS_LFN_HEAP=y

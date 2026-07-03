@@ -147,6 +147,10 @@ public:
     void ResetProtocol();
     void SchedulePendingTbotClaimRefresh();
     void EnsureBleAdvertisingForUnclaimedSavedWifi();
+    // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
+    // Claimed robots suppress claim polling and keep normal online BLE off;
+    // explicit BOOT Wi-Fi-config mode reopens BluFi for owner reconnect/setup.
+    bool IsDeviceClaimed() const;
 
     // BOOT long-press "re-pair": forget the current claim/ownership and re-enter
     // BLE pairing standby so a (possibly different) parent phone can connect and
@@ -168,6 +172,8 @@ private:
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     std::atomic<bool> lesson_runtime_active_{false};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
+    std::atomic<bool> lesson_interactive_listening_active_{false};
+    std::atomic<bool> lesson_idle_repaint_suppressed_{false};
     std::atomic<int> lesson_network_render_quiet_{0};
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
@@ -222,6 +228,7 @@ private:
     // carrying backend DTO fields plus ble_state/ap_state/temp from board status.
     esp_timer_handle_t heartbeat_timer_ = nullptr;        // periodic, ~20s
     bool heartbeat_active_ = false;
+    std::atomic<int> deferred_heartbeat_auth_failure_status_{0};
     // "Hi ESP needs many tries" fix: single-flight guard for the off-task
     // heartbeat worker, same pattern as claim_poll_inflight_. The 20s timer must
     // never stack overlapping HeartbeatTask workers when the backend is slow.
@@ -377,10 +384,6 @@ private:
     // No-ops in non-BluFi builds.
     void EnsureBleAdvertisingForStandby();
     void StopBleAdvertising();
-    // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
-    // Claimed robots suppress claim polling and keep normal online BLE off;
-    // explicit BOOT Wi-Fi-config mode reopens BluFi for owner reconnect/setup.
-    bool IsDeviceClaimed() const;
 
     // --- Heartbeat (C5) ---
     void StartHeartbeat();

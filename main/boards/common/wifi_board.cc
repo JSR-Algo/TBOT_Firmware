@@ -137,20 +137,38 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                 ESP_LOGI(TAG,
                          "NetworkEvent::Connected token_empty=%d code_empty=%d — report owned by BluFi success branch",
                          (int)token.empty(), (int)code.empty());
-                // Cancel the BLE hard-timeout before releasing BLE resources so
-                // the timer cannot post a redundant teardown after deinit().
-                blufi.CancelBleSetupTimeout();
-                // Release BLE resources
-                blufi.deinit();
+                const bool should_release_ble =
+                    Application::GetInstance().IsDeviceClaimed() ||
+                    !token.empty() ||
+                    !code.empty();
+                if (should_release_ble) {
+                    // Cancel the BLE hard-timeout before releasing BLE resources so
+                    // the timer cannot post a redundant teardown after deinit().
+                    blufi.CancelBleSetupTimeout();
+                    // Release BLE resources
+                    blufi.deinit();
+                } else {
+                    ESP_LOGI(TAG,
+                             "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
+                }
             }
 #elif defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
             {
                 auto& blufi = Blufi::GetInstance();
-                // Cancel BLE hard-timeout before deinit to prevent a stale
-                // timer callback from posting a redundant teardown.
-                blufi.CancelBleSetupTimeout();
-                // make sure blufi resources has been released
-                blufi.deinit();
+                const bool should_release_ble =
+                    Application::GetInstance().IsDeviceClaimed() ||
+                    !blufi.GetBootstrapToken().empty() ||
+                    !blufi.GetProvisioningCode().empty();
+                if (should_release_ble) {
+                    // Cancel BLE hard-timeout before deinit to prevent a stale
+                    // timer callback from posting a redundant teardown.
+                    blufi.CancelBleSetupTimeout();
+                    // make sure blufi resources has been released
+                    blufi.deinit();
+                } else {
+                    ESP_LOGI(TAG,
+                             "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
+                }
             }
 #endif
             in_config_mode_ = false;
@@ -195,6 +213,10 @@ void WifiBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
 void WifiBoard::OnWifiConnectTimeout(void* arg) {
     auto* board = static_cast<WifiBoard*>(arg);
     ESP_LOGW(TAG, "WiFi connection timeout, entering config mode");
+    if (Application::GetInstance().IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "WiFi connection timeout ignored during lesson");
+        return;
+    }
 
     WifiManager::GetInstance().StopStation();
     board->StartWifiConfigMode();
@@ -215,6 +237,11 @@ void WifiBoard::OnApSetupTimeout(void* arg) {
 
     Application::GetInstance().Schedule([board]() {
         ESP_LOGW(TAG, "AP setup TIMEOUT teardown executing on Application task");
+        if (Application::GetInstance().IsLessonRuntimeActive()) {
+            ESP_LOGI(TAG, "AP setup TIMEOUT teardown deferred during lesson");
+            board->StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC);
+            return;
+        }
         WifiManager::GetInstance().StopConfigAp();
         board->in_config_mode_ = false;
     });
@@ -272,6 +299,10 @@ const char* WifiBoard::GetApStateString() const {
 }
 
 void WifiBoard::StartWifiConfigMode() {
+    if (Application::GetInstance().IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "StartWifiConfigMode ignored during lesson");
+        return;
+    }
     in_config_mode_ = true;
     // Transition to wifi configuring state
     Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
@@ -338,9 +369,13 @@ void WifiBoard::StartWifiConfigMode() {
 
 void WifiBoard::EnterWifiConfigMode() {
     ESP_LOGI(TAG, "EnterWifiConfigMode called");
+    auto& app = Application::GetInstance();
+    if (app.IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "EnterWifiConfigMode ignored during lesson");
+        return;
+    }
     GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
 
-    auto& app = Application::GetInstance();
     auto state = app.GetDeviceState();
 
     if (state == kDeviceStateWifiConfiguring) {
@@ -361,6 +396,11 @@ void WifiBoard::EnterWifiConfigMode() {
 
             // Wait for 1 second to allow speaking to finish gracefully
             vTaskDelay(pdMS_TO_TICKS(1000));
+            if (Application::GetInstance().IsLessonRuntimeActive()) {
+                ESP_LOGI(TAG, "Delayed EnterWifiConfigMode ignored during lesson");
+                vTaskDelete(NULL);
+                return;
+            }
 
             // Stop any ongoing connection attempt
             esp_timer_stop(board->connect_timer_);

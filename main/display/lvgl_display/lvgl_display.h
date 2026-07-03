@@ -41,6 +41,7 @@ public:
     // through the lesson scene (or show on a caption-only/asset-fetch-failed step).
     // Default no-op (only LcdDisplay owns the emoji LVGL object tree).
     virtual void SetLessonMode(bool active) {}
+    virtual void SetLessonCaption(const char* content) { Display::SetLessonCaption(content); }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);

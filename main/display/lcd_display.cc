@@ -25,6 +25,10 @@ constexpr int kLessonObjectYOffsetDivisor = 12;
 constexpr int kLessonRobotMaxWidthPercent = 32;
 constexpr int kLessonRobotMaxHeightPercent = 34;
 constexpr int kLessonRobotBottomInsetDivisor = 6;
+constexpr int kLessonCaptionWidthPercent = 92;
+constexpr int kLessonCaptionLabelWidthPercent = 86;
+constexpr int kLessonCaptionMaxHeightPercent = 24;
+constexpr int kLessonCaptionBottomInsetDivisor = 60;
 
 int LessonImageFitScale(int image_width, int image_height, int max_width, int max_height) {
     if (image_width <= 0 || image_height <= 0 || max_width <= 0 || max_height <= 0) {
@@ -336,6 +340,9 @@ LcdDisplay::~LcdDisplay() {
     if (lesson_robot_overlay_ != nullptr) {
         lv_obj_del(lesson_robot_overlay_);
     }
+    if (lesson_caption_bar_ != nullptr) {
+        lv_obj_del(lesson_caption_bar_);
+    }
     if (chat_message_label_ != nullptr) {
         lv_obj_del(chat_message_label_);
     }
@@ -439,6 +446,26 @@ void LcdDisplay::SetupUI() {
     lesson_robot_overlay_ = lv_image_create(screen);
     lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
+
+    /* Lesson-only caption overlay: fixed bottom strip, separate from scrolling chat. */
+    lesson_caption_bar_ = lv_obj_create(screen);
+    lv_obj_set_width(lesson_caption_bar_, width_ * kLessonCaptionWidthPercent / 100);
+    lv_obj_set_height(lesson_caption_bar_, height_ * kLessonCaptionMaxHeightPercent / 100);
+    lv_obj_set_style_radius(lesson_caption_bar_, 8, 0);
+    lv_obj_set_style_bg_color(lesson_caption_bar_, lvgl_theme->assistant_bubble_color(), 0);
+    lv_obj_set_style_bg_opa(lesson_caption_bar_, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(lesson_caption_bar_, 0, 0);
+    lv_obj_set_style_pad_all(lesson_caption_bar_, lvgl_theme->spacing(3), 0);
+    lv_obj_set_scrollbar_mode(lesson_caption_bar_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_align(lesson_caption_bar_, LV_ALIGN_BOTTOM_MID, 0, -height_ / kLessonCaptionBottomInsetDivisor);
+    lesson_caption_label_ = lv_label_create(lesson_caption_bar_);
+    lv_obj_set_width(lesson_caption_label_, width_ * kLessonCaptionLabelWidthPercent / 100);
+    lv_label_set_long_mode(lesson_caption_label_, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(lesson_caption_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(lesson_caption_label_, lvgl_theme->text_color(), 0);
+    lv_label_set_text(lesson_caption_label_, "");
+    lv_obj_center(lesson_caption_label_);
+    lv_obj_add_flag(lesson_caption_bar_, LV_OBJ_FLAG_HIDDEN);
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(container_);
@@ -1366,14 +1393,46 @@ void LcdDisplay::ClearChatMessages() {
 }
 #endif
 
-// US-006 lesson display mode: hide/show the idle realtime emoji face. emoji_box_ is the
-// parent of emoji_image_/emoji_label_, so hiding it suppresses the face regardless of any
-// SetEmotion call the lesson_step renderer still makes (those only touch the children) —
-// the lesson's three image layers become the whole scene. Defined once (shared across both
-// CONFIG_USE_WECHAT_MESSAGE_STYLE variants) since it only toggles the shared emoji_box_.
+void LcdDisplay::SetLessonCaption(const char* content) {
+    DisplayLockGuard lock(this);
+    const bool empty = content == nullptr || content[0] == '\0';
+    if (lesson_caption_bar_ != nullptr && lesson_caption_label_ != nullptr) {
+        lv_label_set_text(lesson_caption_label_, empty ? "" : content);
+        if (empty || hide_subtitle_) {
+            lv_obj_add_flag(lesson_caption_bar_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
+        lv_obj_remove_flag(lesson_caption_bar_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_align(lesson_caption_bar_, LV_ALIGN_BOTTOM_MID, 0, -height_ / kLessonCaptionBottomInsetDivisor);
+        lv_obj_move_foreground(lesson_caption_bar_);
+        return;
+    }
+
+    if (chat_message_label_ == nullptr) {
+        if (setup_ui_called_) {
+            ESP_LOGW(TAG, "SetLessonCaption('%s') failed: caption label is nullptr", content ? content : "");
+        }
+        return;
+    }
+    lv_label_set_text(chat_message_label_, empty ? "" : content);
+    if (bottom_bar_ != nullptr) {
+        if (empty || hide_subtitle_) {
+            lv_obj_add_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_remove_flag(bottom_bar_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_align(bottom_bar_, LV_ALIGN_BOTTOM_MID, 0, 0);
+            lv_obj_move_foreground(bottom_bar_);
+        }
+    }
+}
+
+// US-006 lesson display mode: hide/show the idle realtime emoji face. Some layouts wrap
+// the face in emoji_box_, while the WeChat-style LCD layout owns direct screen-level
+// emoji_image_/emoji_label_ objects. Hide whichever surface exists so the lesson's image
+// layers become the whole scene.
 void LcdDisplay::SetLessonMode(bool active) {
     DisplayLockGuard lock(this);
-    if (emoji_box_ == nullptr) {
+    if (emoji_box_ == nullptr && emoji_image_ == nullptr && emoji_label_ == nullptr) {
         return;
     }
     if (active) {
@@ -1381,11 +1440,18 @@ void LcdDisplay::SetLessonMode(bool active) {
         if (gif_controller_) {
             gif_controller_->Stop();
         }
-        lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+        if (emoji_box_ != nullptr) lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+        if (emoji_image_ != nullptr) lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+        if (emoji_label_ != nullptr) lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
     } else {
         // Re-show the face; the lesson_stop/lesson_error handler issues the SetEmotion that
-        // follows (neutral/sad), which restores the correct image/GIF.
-        lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+        // follows (happy/sad), which restores the correct image/GIF.
+        if (emoji_box_ != nullptr) {
+            lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            if (emoji_image_ != nullptr) lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            if (emoji_label_ != nullptr) lv_obj_remove_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -1446,11 +1512,31 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         } else {
             ESP_LOGE(TAG, "Failed to load GIF for emotion: %s", emotion);
             gif_controller_.reset();
+            auto fallback = emoji_collection != nullptr ? emoji_collection->GetEmojiImage("neutral") : nullptr;
+            if (fallback != nullptr) {
+                lv_image_set_src(emoji_image_, fallback->image_dsc());
+                lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            }
         }
     } else {
         lv_image_set_src(emoji_image_, image->image_dsc());
         lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    if (strcmp(emotion, "thinking") == 0) {
+        if (emoji_box_ != nullptr) {
+            lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(emoji_box_);
+        } else {
+            if (emoji_image_ != nullptr) lv_obj_move_foreground(emoji_image_);
+            if (emoji_label_ != nullptr) lv_obj_move_foreground(emoji_label_);
+        }
+        if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
+        if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
+        if (lesson_caption_bar_ != nullptr) lv_obj_move_foreground(lesson_caption_bar_);
+        if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
     }
 
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE

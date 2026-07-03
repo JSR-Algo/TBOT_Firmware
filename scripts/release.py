@@ -290,6 +290,43 @@ def _apply_auto_selects(sdkconfig_append: list[str]) -> list[str]:
 
     return items
 
+def _sdkconfig_key(line: str) -> Optional[str]:
+    """Return CONFIG_* key from either 'CONFIG_X=y' or '# CONFIG_X is not set'."""
+    stripped = line.strip()
+    match = re.match(r"^(CONFIG_[A-Z0-9_]+)=", stripped)
+    if match:
+        return match.group(1)
+    match = re.match(r"^# (CONFIG_[A-Z0-9_]+) is not set$", stripped)
+    if match:
+        return match.group(1)
+    return None
+
+def _rewrite_sdkconfig_with_appends(sdkconfig_path: Path, sdkconfig_append: list[str]) -> None:
+    """Append board config entries while replacing stale generated values.
+
+    release.py runs after `idf.py set-target`, so sdkconfig already contains
+    Kconfig defaults. Appending a later "# CONFIG_X is not set" must remove any
+    earlier "CONFIG_X=y", otherwise CI gates and some Kconfig readers see a
+    contradictory config.
+    """
+    replacement_keys = {
+        key for key in (_sdkconfig_key(entry) for entry in sdkconfig_append) if key
+    }
+    replaces_board_choice = any(key.startswith("CONFIG_BOARD_TYPE_") for key in replacement_keys)
+
+    lines = sdkconfig_path.read_text(encoding="utf-8").splitlines()
+    kept: list[str] = []
+    for line in lines:
+        key = _sdkconfig_key(line)
+        if key in replacement_keys:
+            continue
+        if replaces_board_choice and key and key.startswith("CONFIG_BOARD_TYPE_"):
+            continue
+        kept.append(line)
+
+    kept.extend(["", "# Append by release.py", *sdkconfig_append])
+    sdkconfig_path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+
 ################################################################################
 # Check board_type in CMakeLists
 ################################################################################
@@ -375,12 +412,14 @@ def release(board_type: str, config_filename: str = "config.json", *, filter_nam
             print("set-target failed", file=sys.stderr)
             sys.exit(1)
 
-        # Append sdkconfig
-        with Path("sdkconfig").open("a", encoding='utf-8') as f:
-            f.write("\n")
-            f.write("# Append by release.py\n")
-            for append in sdkconfig_append:
-                f.write(f"{append}\n")
+        # Append sdkconfig, replacing generated defaults for the same keys.
+        _rewrite_sdkconfig_with_appends(Path("sdkconfig"), sdkconfig_append)
+
+        if final_name == "lcdwiki-es3c35p":
+            if os.system(f"{sys.executable} scripts/assert_lcdwiki_prod_config.py") != 0:
+                print("lcdwiki production config gate failed", file=sys.stderr)
+                sys.exit(1)
+
         # Build with macro BOARD_NAME defined to name
         if os.system(f"idf.py -DBOARD_NAME={name} -DBOARD_TYPE={board_type} build") != 0:
             print("build failed")

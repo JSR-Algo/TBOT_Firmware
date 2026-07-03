@@ -58,6 +58,16 @@ def test_ota_download_rejects_short_reads_before_esp_ota_end():
     assert "Firmware download size mismatch" in upgrade_body
     assert upgrade_body.index("total_read != content_length") < upgrade_body.index("esp_ota_end(update_handle)")
 
+def test_ota_check_version_does_not_retry_stale_ephemeral_nvs_url():
+    source = read("main/ota.cc")
+    url_builder_body = function_body(source, "std::vector<std::string> BuildCheckVersionUrls")
+
+    assert "IsEphemeralEndpoint(configured_url)" in url_builder_body
+    assert '"http://"' not in url_builder_body
+    assert "configured_url.substr" not in url_builder_body
+    assert "urls.push_back(configured_url)" in url_builder_body
+    assert "CONFIG_OTA_URL" in url_builder_body
+
 def test_ota_claim_reset_clears_local_ownership_once_per_nonce():
     source = read("main/ota.cc")
     check_body = function_body(source, "esp_err_t Ota::CheckVersion")

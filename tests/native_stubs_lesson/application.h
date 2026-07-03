@@ -14,6 +14,12 @@
 
 #include <functional>
 #include <memory>
+#include <string_view>
+
+enum DeviceState {
+    kDeviceStateIdle,
+    kDeviceStateSpeaking
+};
 
 class Application {
 public:
@@ -28,9 +34,14 @@ public:
         protocol_ = std::make_unique<Protocol>();
         prepare_listen_calls = 0;
         cancel_listen_calls = 0;
+        abort_speaking_calls = 0;
+        last_abort_reason = kAbortReasonNone;
+        device_state = kDeviceStateIdle;
         lesson_runtime_active = false;
         lesson_network_render_quiet = 0;
         schedule_calls = 0;
+        play_sound_calls = 0;
+        last_sound = "";
     }
 
     // ---- members the renderer touches ----
@@ -40,9 +51,14 @@ public:
 
     int prepare_listen_calls = 0;
     int cancel_listen_calls = 0;
+    int abort_speaking_calls = 0;
+    AbortReason last_abort_reason = kAbortReasonNone;
+    DeviceState device_state = kDeviceStateIdle;
     bool lesson_runtime_active = false;
     int lesson_network_render_quiet = 0;
     int schedule_calls = 0;
+    int play_sound_calls = 0;
+    std::string last_sound;
 
     void Schedule(std::function<void()>&& cb) {
         schedule_calls++;
@@ -50,7 +66,17 @@ public:
     }
     void PrepareLessonInteractiveListening() { prepare_listen_calls++; }
     void CancelLessonInteractiveListening() { cancel_listen_calls++; }
+    DeviceState GetDeviceState() const { return device_state; }
+    void AbortSpeaking(AbortReason reason) {
+        abort_speaking_calls++;
+        last_abort_reason = reason;
+        device_state = kDeviceStateIdle;
+    }
     void SetLessonRuntimeActive(bool active) { lesson_runtime_active = active; }
+    void PlaySound(const std::string_view& sound) {
+        play_sound_calls++;
+        last_sound = std::string(sound);
+    }
     void BeginLessonNetworkRenderQuiet() { lesson_network_render_quiet++; }
     void EndLessonNetworkRenderQuiet() {
         if (lesson_network_render_quiet > 0) lesson_network_render_quiet--;

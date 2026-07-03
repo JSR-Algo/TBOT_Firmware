@@ -33,6 +33,8 @@ protected:
     std::unique_ptr<LvglImage> lesson_object_cached_ = nullptr;
     lv_obj_t* lesson_robot_overlay_ = nullptr;  // US-006: robot overlay image layer
     std::unique_ptr<LvglImage> lesson_robot_overlay_cached_ = nullptr;
+    lv_obj_t* lesson_caption_bar_ = nullptr;  // Lesson-only bottom caption overlay
+    lv_obj_t* lesson_caption_label_ = nullptr;
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
     std::unique_ptr<LvglGif> gif_controller_ = nullptr;
@@ -54,6 +56,7 @@ public:
     ~LcdDisplay();
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetChatMessage(const char* role, const char* content) override;
+    virtual void SetLessonCaption(const char* content) override;
     virtual void ClearChatMessages() override;
     virtual void SetPreviewImage(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) override;

@@ -3,12 +3,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EMOJI_COLLECTION_CC = ROOT / "main/display/lvgl_display/emoji_collection.cc"
+NEON_FACES = ROOT / "main/display/lvgl_display/tbot-neon-faces/gif"
 
 
 def test_eyes_collection_maps_speaking_emotions_to_multiple_faces():
-    source = EMOJI_COLLECTION_CC.read_text().split(
-        "EyesEmojiCollection::EyesEmojiCollection()", 1
-    )[1]
+    source = EMOJI_COLLECTION_CC.read_text()
+    assert "EyesEmojiCollection (static eye PNGs + happy GIF) was removed" in source
+    assert "tbot-neon-faces GIF collection" in source
+
     speaking_emotions = [
         "happy",
         "laughing",
@@ -22,22 +24,10 @@ def test_eyes_collection_maps_speaking_emotions_to_multiple_faces():
         "surprised",
     ]
 
-    used_faces = set()
+    gif_faces = set()
     for emotion in speaking_emotions:
-        marker = f'AddEmoji("{emotion}",'
-        start = source.find(marker)
-        assert start != -1, f"missing mapping for {emotion}"
-        line = source[start : source.find("\n", start)]
-        for face in (
-            "eye_openeyes",
-            "eye_halfsleepeyes",
-            "eye_lefteyes",
-            "eye_righteyes",
-            "eye_lookdoweyes",
-            "eye_sadeyes",
-            "eye_happy_gif_data",
-        ):
-            if face in line:
-                used_faces.add(face)
+        face = NEON_FACES / f"{emotion}.gif"
+        assert face.exists(), f"missing neon GIF face for {emotion}"
+        gif_faces.add(face.name)
 
-    assert len(used_faces) >= 4
+    assert len(gif_faces) == len(speaking_emotions)

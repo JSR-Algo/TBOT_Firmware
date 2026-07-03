@@ -158,19 +158,18 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     afe_config->vad_delay_ms = 128;       // smaller pre-speech buffer
     // Keep wake-word inference light enough for feed/fetch to stay balanced on S3.
     afe_config->ns_init = false;
-    
+
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
 
-    // Wake-word fetch task. Do NOT pin to core 1 / raise above the AFE's own
-    // process priority — that starves the AFE pipeline (FEED ringbuffer full).
-    // Wake-word starvation is addressed at the source: stopping the blocking
-    // claim-config HTTP poll that was hogging the main task (see application.cc).
+    // Wake-word fetch task. Keep it above Idle so AFE fetch drains during
+    // TTS/display load, but below audio_input and audio_communication so the
+    // feed/uplink paths stay dominant.
     xTaskCreate([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->AudioDetectionTask();
         vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, tskIDLE_PRIORITY, &audio_detection_task_handle_);
+    }, "audio_detection", 4096, this, tskIDLE_PRIORITY + 1, &audio_detection_task_handle_);
 
     return true;
 }
@@ -308,19 +307,19 @@ void AfeWakeWord::EncodeWakeWordData() {
                 this_->wake_word_cv_.notify_all();
                 return;
             }
-            
+
             // Get frame size
             int frame_size = 0;
             int outbuf_size = 0;
             esp_opus_enc_get_frame_size(encoder_handle, &frame_size, &outbuf_size);
             frame_size = frame_size / sizeof(int16_t);
-            
+
             // Encode all PCM data
             int packets = 0;
             std::vector<int16_t> in_buffer;
             esp_audio_enc_in_frame_t in = {};
             esp_audio_enc_out_frame_t out = {};
-            
+
             for (auto& pcm: this_->wake_word_pcm_) {
                 if (in_buffer.empty()) {
                     in_buffer = std::move(pcm);
@@ -328,7 +327,7 @@ void AfeWakeWord::EncodeWakeWordData() {
                     in_buffer.reserve(in_buffer.size() + pcm.size());
                     in_buffer.insert(in_buffer.end(), pcm.begin(), pcm.end());
                 }
-                
+
                 while (in_buffer.size() >= frame_size) {
                     std::vector<uint8_t> opus_buf(outbuf_size);
                     in.buffer = (uint8_t *)(in_buffer.data());
@@ -336,7 +335,7 @@ void AfeWakeWord::EncodeWakeWordData() {
                     out.buffer = opus_buf.data();
                     out.len = outbuf_size;
                     out.encoded_bytes = 0;
-                    
+
                     ret = esp_opus_enc_process(encoder_handle, &in, &out);
                     if (ret == ESP_AUDIO_ERR_OK) {
                         std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
@@ -346,7 +345,7 @@ void AfeWakeWord::EncodeWakeWordData() {
                     } else {
                         ESP_LOGE(TAG, "Failed to encode audio, error code: %d", ret);
                     }
-                    
+
                     in_buffer.erase(in_buffer.begin(), in_buffer.begin() + frame_size);
                 }
             }

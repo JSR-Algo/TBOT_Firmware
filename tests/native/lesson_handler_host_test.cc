@@ -138,6 +138,30 @@ bool FrameHasAssetPack(size_t i) {
     return out;
 }
 
+bool IsValidUtf8(const std::string& text) {
+    int remaining = 0;
+    for (unsigned char ch : text) {
+        if (remaining == 0) {
+            if ((ch & 0x80) == 0) {
+                continue;
+            }
+            if ((ch & 0xe0) == 0xc0) {
+                remaining = 1;
+            } else if ((ch & 0xf0) == 0xe0) {
+                remaining = 2;
+            } else if ((ch & 0xf8) == 0xf0) {
+                remaining = 3;
+            } else {
+                return false;
+            }
+        } else {
+            if ((ch & 0xc0) != 0x80) return false;
+            --remaining;
+        }
+    }
+    return remaining == 0;
+}
+
 void Handle(const std::string& json) {
     cJSON* root = cJSON_Parse(json.c_str());
     require(root != nullptr, "test JSON parsed");
@@ -175,8 +199,18 @@ std::string StartFrame(int seq) {
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
 }
-std::string StopFrame(int seq) {
+std::string StopFrame(int seq, const std::string& body = "") {
     return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{" + body + "}}";
+}
+std::string PauseFrame(int seq) {
+    return std::string("{\"type\":\"lesson_pause\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
+}
+std::string ResumeFrame(int seq) {
+    return std::string("{\"type\":\"lesson_resume\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
 }
@@ -462,6 +496,49 @@ void test_prepare_assetpack_requires_manifest_checksum_before_ack() {
     require(!FrameHasAssetPack(0), "whitespace manifest checksum does not emit assetPack ack");
 }
 
+void test_prepare_reject_clears_stale_lesson_scene() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "old-step", "http://x/old-p.jpg", "http://x/old-o.jpg",
+                     "http://x/old-r.jpg", ",\"prompt\":\"Old prompt\"", ""));
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "old valid step rendered background before rejected prepare");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "old valid step rendered prompt before rejected prepare");
+
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/missing.png\",\"size\":10}]}"));
+
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "ASSET_PACK_NOT_READY",
+            "rejected prepare emits ASSET_PACK_NOT_READY");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "rejected prepare clears stale background layer");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "rejected prepare clears stale object layer");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "rejected prepare clears stale overlay layer");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "rejected prepare restores idle face instead of stale lesson mode");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "rejected prepare clears stale lesson prompt");
+    require(disp.last_emotion == "sad", "rejected prepare shows sad face");
+    require(App().cancel_listen_calls >= 1, "rejected prepare cancels interactive listening");
+    require(App().lesson_runtime_active == false, "rejected prepare clears active lesson runtime flag");
+}
+
 // ==========================================================================
 // 3. Version / profile gate
 // ==========================================================================
@@ -487,6 +564,50 @@ void test_version_profile_gate() {
            "\"sequence\":1,\"body\":{\"profile\":\"oledTiny\"}}");
     require(FrameType(0) == "lesson_error", "bad profile -> lesson_error");
     require(FrameBodyStr(0, "context", "reason") == "profile", "profile error reason=profile");
+}
+
+void test_fresh_prepare_contract_reject_clears_stale_lesson_scene() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "old-step", "http://x/old-p.jpg", "http://x/old-o.jpg",
+                     "http://x/old-r.jpg", ",\"prompt\":\"Old prompt\"", ""));
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "old valid step rendered background before rejected fresh prepare");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "old valid step rendered prompt before rejected fresh prepare");
+
+    FreshSession();
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":1,\"body\":{\"profile\":\"oledTiny\"}}");
+
+    require(FrameType(Sent().size()-1) == "lesson_error", "bad fresh prepare profile -> lesson_error");
+    require(FrameSeq(Sent().size()-1) == 1, "bad fresh prepare profile keeps fresh F->S sequence");
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
+            "bad fresh prepare profile emits contract error");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "bad fresh prepare clears stale background layer");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "bad fresh prepare clears stale object layer");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "bad fresh prepare clears stale overlay layer");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "bad fresh prepare restores idle face instead of stale lesson mode");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "bad fresh prepare clears stale lesson prompt");
+    require(disp.last_emotion == "sad", "bad fresh prepare shows sad face");
+    require(App().cancel_listen_calls >= 1, "bad fresh prepare cancels interactive listening");
+    require(App().lesson_runtime_active == false, "bad fresh prepare clears active lesson runtime flag");
 }
 
 // ==========================================================================
@@ -627,15 +748,25 @@ void test_start_stop_error_lifecycle() {
     Board::GetInstance().network_ = nullptr;
 
     Handle(PrepareFrame(1));
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
+    App().device_state = kDeviceStateSpeaking;
     Handle(StartFrame(2));
     require(FrameType(1) == "lesson_ack" && FrameSeq(1) == 2, "start acks at seq 2");
+    require(App().abort_speaking_calls == 1, "start aborts stale speech before lesson loading");
+    require(App().last_abort_reason == kAbortReasonNone, "start abort is a normal lesson transition");
+    require(App().cancel_listen_calls >= 1, "start cancels stale child listening before lesson loading");
     // lesson_start turns OFF the idle realtime emoji face so only the 3 lesson layers show.
     // NOTE non-tautology: drop the SetLessonMode(true) in the lesson_start handler and this
     // fails (the smiley would bleed through / reappear on a caption-only step).
     require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == true,
             "start hides the realtime emoji face");
+    require(disp.chat_messages.empty(), "start clears stale bottom-bar chat copy");
+    require(disp.last_status == "Vui lòng đợi...", "start replaces stale status with wait cue");
+    require(disp.last_emotion == "thinking", "start shows a child-visible loading face");
+    require(App().last_sound == "popup", "start plays audible loading cue");
 
-    // lesson_stop: acks, cancels listening, clears all three layers + neutral emotion.
+    // lesson_stop: acks, cancels listening, clears all three layers + child-visible completion cue.
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
     Handle(std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":3,\"body\":{}}");
@@ -643,27 +774,173 @@ void test_start_stop_error_lifecycle() {
     require(App().cancel_listen_calls >= 1, "stop cancels interactive listening");
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "stop clears background layer");
-    require(disp.last_emotion == "neutral", "stop restores neutral face");
+    require(disp.last_status == "Hoàn thành bài học", "completed stop shows completion status");
+    require(disp.last_emotion == "happy", "stop shows happy completion face");
+    require(disp.chat_messages.empty(), "completed stop clears stale child-turn chat copy");
+    require(App().last_sound == "success", "stop plays audible completion cue");
     require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
             "stop restores the realtime emoji face");
 
-    // lesson_error (S->F status): NOT acked; clears layers, sad face + failure caption.
+    const size_t after_stop_frames = Sent().size();
+    const int after_stop_sounds = App().play_sound_calls;
+    Handle(std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"sequence\":3,\"body\":{}}");
+    require(Sent().size() == after_stop_frames,
+            "duplicate terminal stop does not replay ack");
+    require(App().play_sound_calls == after_stop_sounds,
+            "duplicate terminal stop does not replay completion sound");
+
+    // A late terminal error after completed stop must not overwrite completion.
     size_t before = Sent().size();
     Handle(std::string("{\"type\":\"lesson_error\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":4,\"body\":{}}");
-    require(Sent().size() == before, "lesson_error is NOT acked back");
-    require(disp.last_emotion == "sad", "lesson_error shows sad face");
-    require(!disp.chat_messages.empty() &&
-            disp.chat_messages.back().second == "Bài học chưa tải được.",
-            "lesson_error shows child-safe failure caption");
+    require(Sent().size() == before, "late terminal lesson_error after stop is not acked");
+    require(disp.last_status == "Hoàn thành bài học",
+            "late terminal lesson_error after stop does not overwrite completion status");
+    require(disp.last_emotion == "happy",
+            "late terminal lesson_error after stop does not overwrite completion face");
+    require(App().play_sound_calls == after_stop_sounds,
+            "late terminal lesson_error after stop does not replay audio cue");
 
-    // unhandled slice type (e.g. lesson_pause) -> dropped, no ack
-    size_t b2 = Sent().size();
-    Handle(std::string("{\"type\":\"lesson_pause\",\"protocolVersion\":\"") +
+}
+
+void test_start_clears_stale_lesson_scene_before_first_step() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "old-step", "http://x/old-p.jpg", "http://x/old-o.jpg",
+                     "http://x/old-r.jpg", ",\"prompt\":\"Old prompt\"", ""));
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "old lesson rendered background");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "old lesson rendered prompt caption");
+
+    OpenSession();
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "new lesson start clears stale background before first step");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "new lesson start clears stale object before first step");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "new lesson start clears stale overlay before first step");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "new lesson start clears stale prompt caption before first step");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == true,
+            "new lesson start keeps lesson mode active after clearing stale scene");
+}
+
+void test_pause_resume_drop_outside_running_and_unhandled_status_frames() {
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    FreshSession();
+
+    Handle(PrepareFrame(1));
+    size_t before_pause = Sent().size();
+    Handle(PauseFrame(2));
+    require(Sent().size() == before_pause, "pause before start is dropped without ack");
+
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    size_t before_status = Sent().size();
+    Handle(std::string("{\"type\":\"lesson_preload_status\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
-           "\"sequence\":5,\"body\":{}}");
-    require(Sent().size() == b2, "lesson_pause dropped in slice");
+           "\"sequence\":3,\"body\":{\"state\":\"READY\"}}");
+    require(Sent().size() == before_status, "firmware-origin status frames are dropped on S->F path");
+}
+
+void test_pause_resume_is_acknowledged_and_child_visible() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    App().device_state = kDeviceStateSpeaking;
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
+    disp.lesson_captions.emplace_back("Old child question");
+    Handle(PauseFrame(3));
+    require(FrameType(2) == "lesson_ack", "pause is acked");
+    require(FrameBodyNum(2, "acks") == 3, "pause ack echoes inbound sequence");
+    require(App().cancel_listen_calls >= 1, "pause cancels any child listening window");
+    require(App().abort_speaking_calls == 1, "pause aborts any speaking prompt");
+    require(App().last_abort_reason == kAbortReasonNone, "pause abort is a normal lesson pause");
+    require(App().lesson_runtime_active == true, "pause keeps lesson runtime active");
+    require(disp.chat_messages.empty(), "pause clears stale child-turn chat copy");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "pause clears stale child-turn caption");
+    require(disp.last_status == "Tạm dừng bài học", "pause shows child-visible paused status");
+    require(disp.last_emotion == "thinking", "pause keeps a calm thinking face");
+    require(App().last_sound == "popup", "pause plays audible transition cue");
+
+    const size_t before_paused_step = Sent().size();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(4, "paused-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"prompt\":\"Should not draw\"", ""));
+    require(Sent().size() == before_paused_step, "paused lesson does not ack or render new steps");
+    require(disp.last_status == "Tạm dừng bài học", "paused step drop leaves paused status visible");
+
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
+    disp.lesson_captions.emplace_back("Old child question");
+    Handle(ResumeFrame(5));
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "resume is acked");
+    require(FrameBodyNum(Sent().size() - 1, "acks") == 5, "resume ack echoes inbound sequence");
+    require(disp.chat_messages.empty(), "resume clears stale child-turn chat copy");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "resume clears stale child-turn caption");
+    require(disp.last_status == "Đang học...", "resume restores lesson-active status");
+    require(disp.last_emotion == "thinking", "resume shows lesson-active thinking face");
+}
+
+void test_stop_reason_controls_terminal_cue() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+
+    Handle(StopFrame(3, "\"reason\":\"FAILED\""));
+    require(FrameType(2) == "lesson_ack", "failed stop is acked");
+    require(disp.last_status == "Lỗi", "failed stop shows error status");
+    require(disp.last_emotion == "sad", "failed stop shows sad face");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Bài học bị gián đoạn.",
+            "failed stop shows child-safe interruption copy");
+    require(App().last_sound == "exclamation", "failed stop plays failure cue");
+
+    ResetObservable();
+    disp.chat_messages.clear();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    App().device_state = kDeviceStateSpeaking;
+    Handle(StopFrame(3, "\"reason\":\"CANCELLED\""));
+    require(FrameType(2) == "lesson_ack", "cancelled stop is acked");
+    require(App().abort_speaking_calls == 1, "cancelled stop aborts any speaking prompt");
+    require(App().last_abort_reason == kAbortReasonNone, "cancelled stop abort is normal");
+    require(disp.last_status == "Bài học đã dừng", "cancelled stop shows stopped status");
+    require(disp.last_emotion == "neutral", "cancelled stop restores neutral face");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Bài học đã dừng.",
+            "cancelled stop shows child-safe stopped copy");
+    require(App().last_sound == "popup", "cancelled stop plays neutral transition cue");
 }
 
 // stop/error when display is a plain (non-LVGL) Display* -> lvgl_display branch nullptr,
@@ -679,7 +956,8 @@ void test_lifecycle_display_variants() {
     Handle(std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":2,\"body\":{}}");
-    require(plain.last_emotion == "neutral", "non-LVGL stop still sets neutral");
+    require(plain.last_emotion == "happy", "non-LVGL stop still shows completion face");
+    require(App().last_sound == "success", "non-LVGL stop still plays completion cue");
 
     // null display: stop schedules nothing display-side, still acks.
     ResetObservable();
@@ -715,9 +993,13 @@ void test_step_rejects() {
     require(FrameStepId(Sent().size()-1) == "s4", "step error echoes stepId");
 
     // video forced via non-null bg.video
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
     Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
-           "\"stepId\":\"s5\",\"sequence\":4,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\"stepId\":\"s5\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
            "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"video\":{\"src\":\"v\"}},"
            "\"teachingObject\":{\"asset\":{\"src\":\"u\"}},"
            "\"robotOverlay\":{\"asset\":{\"src\":\"u\"}}}}}");
@@ -725,9 +1007,13 @@ void test_step_rejects() {
             "non-null video -> reject");
 
     // missing required layer (no poster src) -> LESSON_FRAME_INVALID
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
     Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\"," 
-           "\"stepId\":\"s6\",\"sequence\":5,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\"stepId\":\"s6\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
            "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\"},"
            "\"teachingObject\":{\"asset\":{\"src\":\"u\"}},"
            "\"robotOverlay\":{\"asset\":{\"src\":\"u\"}}}}}");
@@ -736,14 +1022,122 @@ void test_step_rejects() {
 
     // Blank-but-present source must be rejected like backend/ESP trim guards; otherwise
     // firmware would ack a non-renderable frame as degraded instead of failing fast.
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
     Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\"," 
-           "\"stepId\":\"s7\",\"sequence\":6,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\"stepId\":\"s7\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
            "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
            "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
            "\"robotOverlay\":{\"asset\":{\"src\":\"   \"}}}}}");
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_FRAME_INVALID",
             "blank layer source -> LESSON_FRAME_INVALID");
+}
+
+void test_invalid_step_clears_stale_lesson_scene() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "old-step", "http://x/old-p.jpg", "http://x/old-o.jpg",
+                     "http://x/old-r.jpg", ",\"prompt\":\"Old prompt\"", ""));
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "old valid step rendered background before invalid step");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "old valid step rendered child prompt before invalid step");
+
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"bad-step\",\"sequence\":4,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\"},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"}}}}}");
+
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "invalid step emits LESSON_FRAME_INVALID");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "invalid step clears stale background layer");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "invalid step clears stale object layer");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "invalid step clears stale overlay layer");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "invalid step restores idle face instead of stale lesson mode");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "invalid step clears stale lesson prompt");
+    require(disp.last_emotion == "sad", "invalid step shows sad face");
+    require(App().cancel_listen_calls >= 1, "invalid step cancels interactive listening");
+    require(App().lesson_runtime_active == false, "invalid step clears active lesson runtime flag");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Bài học chưa tải được.",
+            "invalid step shows child-safe failure caption");
+
+    const size_t sent_after_reject = Sent().size();
+    Handle(StartFrame(5));
+    require(Sent().size() == sent_after_reject,
+            "late start after fatal invalid step is dropped");
+
+    Handle(StepFrame(6, "late-after-invalid", "http://x/new-p.jpg", "http://x/new-o.jpg",
+                     "http://x/new-r.jpg", ",\"prompt\":\"Late prompt\"", ""));
+    require(Sent().size() == sent_after_reject,
+            "late step after fatal invalid step is dropped");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "late step after fatal invalid step does not repaint stale failure screen");
+    require(disp.last_emotion == "sad",
+            "late step after fatal invalid step leaves sad failure face visible");
+}
+
+void test_contract_reject_clears_stale_lesson_scene() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "old-step", "http://x/old-p.jpg", "http://x/old-o.jpg",
+                     "http://x/old-r.jpg", ",\"prompt\":\"Old prompt\"", ""));
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "old valid step rendered background before contract reject");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "old valid step rendered prompt before contract reject");
+
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"bad-profile\",\"sequence\":4,\"body\":{\"profile\":\"oledTiny\"}}");
+
+    require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
+            "bad active lesson profile emits contract error");
+    require(FrameBodyStr(Sent().size()-1, "context", "reason") == "profile",
+            "bad active lesson profile reports profile reason");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "contract reject clears stale background layer");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "contract reject clears stale object layer");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "contract reject clears stale overlay layer");
+    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+            "contract reject restores idle face instead of stale lesson mode");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "contract reject clears stale lesson prompt");
+    require(disp.last_emotion == "sad", "contract reject shows sad face");
+    require(App().cancel_listen_calls >= 1, "contract reject cancels interactive listening");
+    require(App().lesson_runtime_active == false, "contract reject clears active lesson runtime flag");
 }
 
 // ==========================================================================
@@ -757,6 +1151,7 @@ void test_step_full_render_http() {
     Board::GetInstance().network_ = &net;
     Assets::GetInstance().Clear();
     OpenSession();
+    const size_t lesson_mode_calls_before_step = disp.lesson_mode_calls.size();
 
     // Known Content-Length JPEG body for all three fetches; decoder mode 0 = success.
     ResetHostHttp();
@@ -765,6 +1160,7 @@ void test_step_full_render_http() {
     HostJpegDecodeMode() = 0;
 
     int seq = 3;
+    disp.chat_messages.emplace_back("assistant", "Old transcript");
     // passive step (greeting) so degraded computes from drew flags and NO listen window.
     Handle(StepFrame(seq, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
                      ",\"prompt\":\"Xin chào\",\"stepType\":\"greeting\"", ""));
@@ -775,14 +1171,18 @@ void test_step_full_render_http() {
     require(FrameBodyBool(idx, "rendered", false) == true, "step ack rendered=true");
     require(FrameBodyBool(idx, "degraded", true) == false,
             "all three layers drew -> degraded=false");
-    require(disp.background_calls.size() >= 1 && disp.background_calls[0] == true,
+    require(disp.lesson_mode_calls.size() > lesson_mode_calls_before_step &&
+            disp.lesson_mode_calls.back() == true,
+            "step hides the start loading face before drawing scene layers");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
             "background image drawn back layer");
-    require(!disp.object_calls.empty() && disp.object_calls[0] == true,
+    require(!disp.object_calls.empty() && disp.object_calls.back() == true,
             "teaching object image drawn");
-    require(!disp.overlay_calls.empty() && disp.overlay_calls[0] == true,
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == true,
             "robot overlay image drawn");
-    require(!disp.chat_messages.empty() &&
-            disp.chat_messages.back().second == "Xin chào", "authored prompt caption drawn");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Xin chào", "authored prompt caption drawn");
+    require(disp.chat_messages.empty(), "new lesson step clears stale chat and does not enter normal chat history");
     require(disp.last_emotion == "happy", "teaching expression -> happy emotion");
     // passive greeting: no interactive listen window opened.
     require(App().prepare_listen_calls == 0, "passive step opens NO listen window");
@@ -822,7 +1222,7 @@ void test_step_ignores_story_metadata_while_rendering_layers() {
     require(HostHttp().open_calls[2].url == "http://x/r.jpg", "story metadata overlay URL fetches third");
     require(disp.background_calls.size() >= 1 && disp.object_calls.size() >= 1 && disp.overlay_calls.size() >= 1,
             "story metadata frame draws all three lesson layers");
-    require(!disp.chat_messages.empty() && disp.chat_messages.back().second == "TeeBot kể chuyện về barn.",
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "TeeBot kể chuyện về barn.",
             "story metadata frame keeps authored prompt as caption");
 
     // Backend manifest marks storyBeat.waitForChild as completionClass=interactive
@@ -889,6 +1289,28 @@ void test_step_ignores_story_metadata_while_rendering_layers() {
             "completionClass interactive opens child response window without waitForChild flag");
     require(!disp.background_calls.empty() && !disp.object_calls.empty() && !disp.overlay_calls.empty(),
             "story ask-only frame draws all three lesson layers");
+
+    // If the backend sends only the canonical storyBeat.ask question (no duplicate
+    // prompt string), the child should still see the actual question while the mic
+    // opens instead of falling back to a generic asset caption.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    Handle(StepFrame(3, "s-story-ask-caption", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"stepType\":\"model\""
+                     ",\"completionClass\":\"interactive\""
+                     ",\"storyBeat\":{\"ask\":\"Which animal is beside the barn?\"}"
+                     ",\"vocab\":{\"word\":\"barn\",\"promptKind\":\"guided-speaking\"}",
+                     ""));
+    require(App().prepare_listen_calls == 1,
+            "storyBeat.ask without prompt opens child response window");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Which animal is beside the barn?",
+            "storyBeat.ask without prompt becomes the visible child question");
 }
 
 void test_step_fetches_canonical_layer_urls_in_order() {
@@ -1017,8 +1439,8 @@ void test_step_interactive_opens_listen() {
     require(Sent().size() == before_s7 + 1, "s7 render emits only one ack frame");
     require(FrameType(Sent().size() - 1) == "lesson_ack", "canonical s7 render -> lesson_ack");
     require(App().prepare_listen_calls == 1, "canonical s7 opens one child-response window");
-    require(!disp.chat_messages.empty() &&
-            disp.chat_messages.back().second == "TeeBot says: This is a ___. You can say barn.",
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "TeeBot says: This is a ___. You can say barn.",
             "canonical s7 prompt caption drawn without scoring text");
     for (const auto& frame : Sent()) {
         require(frame.find("lesson_progress") == std::string::npos,
@@ -1095,14 +1517,103 @@ void test_step_degraded_and_caption_fallback() {
     // hardcode degraded=false -> flips.
     require(FrameBodyBool(idx, "degraded", false) == true, "no media drew -> degraded=true");
     // caption: glyph + label + " - " + alt (object did NOT draw, so glyph branch taken)
-    require(!disp.chat_messages.empty(), "caption drawn");
-    require(disp.chat_messages.back().second == std::string("G Lab - alt text"),
+    require(!disp.lesson_captions.empty(), "caption drawn");
+    require(disp.lesson_captions.back() == std::string("G Lab - alt text"),
             "glyph+label+alt caption assembled");
     require(disp.last_emotion == "thinking", "thinking expression -> thinking emotion");
     // caption-only step clears any stale layers (clear_bg true -> background_calls false)
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "caption-only clears stale background");
     (void)extra_scene;
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    std::string whitespace_prompt_frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+        kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+        "\"stepId\":\"s4b\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+        "\",\"prompt\":\"   \",\"stepType\":\"focus\",\"scene\":{"
+        "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
+        "\"altCaption\":\"alt text\"},"
+        "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"},"
+        "\"primitiveFallbackCard\":{\"glyph\":\"G\",\"label\":\"Lab\"},\"primaryWord\":\"Word\"},"
+        "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}";
+    Handle(whitespace_prompt_frame);
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "G Lab - alt text",
+            "whitespace prompt falls back to readable glyph+label+alt caption");
+}
+
+void test_caption_truncation_preserves_utf8_boundary() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+
+    std::string long_prompt(95, 'A');
+    long_prompt += "éX";
+    Handle(StepFrame(3, "s-utf8-caption", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"" + long_prompt + "\",\"stepType\":\"greeting\"",
+                     ""));
+
+    require(!disp.lesson_captions.empty(), "long UTF-8 prompt caption drawn");
+    require(disp.lesson_captions.back().size() <= 96, "caption remains capped");
+    require(IsValidUtf8(disp.lesson_captions.back()),
+            "caption truncation never cuts a UTF-8 codepoint");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    std::string three_byte_prompt = "€" + std::string(96, 'B');
+    Handle(StepFrame(3, "s-utf8-3byte", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"" + three_byte_prompt + "\",\"stepType\":\"greeting\"",
+                     ""));
+    require(IsValidUtf8(disp.lesson_captions.back()), "3-byte UTF-8 caption remains valid");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    std::string four_byte_prompt = "😀" + std::string(96, 'C');
+    Handle(StepFrame(3, "s-utf8-4byte", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"" + four_byte_prompt + "\",\"stepType\":\"greeting\"",
+                     ""));
+    require(IsValidUtf8(disp.lesson_captions.back()), "4-byte UTF-8 caption remains valid");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    std::string invalid_continuation_prompt = std::string("\xc3X", 2) + std::string(96, 'D');
+    Handle(StepFrame(3, "s-utf8-invalid-cont", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"" + invalid_continuation_prompt + "\",\"stepType\":\"greeting\"",
+                     ""));
+    require(IsValidUtf8(disp.lesson_captions.back()),
+            "invalid continuation is not preserved in caption");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    std::string invalid_lead_prompt = std::string("\xff", 1) + std::string(96, 'E');
+    Handle(StepFrame(3, "s-utf8-invalid-lead", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"" + invalid_lead_prompt + "\",\"stepType\":\"greeting\"",
+                     ""));
+    require(IsValidUtf8(disp.lesson_captions.back()),
+            "invalid UTF-8 lead byte is not preserved in caption");
 }
 
 // HTTP status != 200, open fail, create-null, and read-error / chunked / size-cap paths.
@@ -1657,7 +2168,7 @@ void test_remaining_reachable_branches() {
             "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"celebrating\"}}}}";
         Handle(frame);
         // object drew + no prompt + label(primaryWord) -> caption == label
-        require(!disp.chat_messages.empty() && disp.chat_messages.back().second == "Mèo",
+        require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Mèo",
                 "object-drew + primaryWord -> caption is the label");
         // NOTE non-tautology: "celebrating" expression MUST map to "laughing". Mutation:
         // drop the celebrating case -> emotion would be "neutral".
@@ -1709,15 +2220,23 @@ int main() {
     test_prepare_assetpack_stale_checksum_cache_key_not_ready();
     test_prepare_assetpack_missing_declared_critical_key_not_ready();
     test_prepare_assetpack_requires_manifest_checksum_before_ack();
+    test_prepare_reject_clears_stale_lesson_scene();
     test_version_profile_gate();
+    test_fresh_prepare_contract_reject_clears_stale_lesson_scene();
     test_unknown_session_and_staleness();
     test_dedup_reack();
     test_prepare_new_assignment_version_same_session_resets_stream();
     test_prepare_after_stop_same_session_resets_stream();
     test_prepare_after_terminal_error_same_session_resets_stream();
     test_start_stop_error_lifecycle();
+    test_start_clears_stale_lesson_scene_before_first_step();
+    test_pause_resume_drop_outside_running_and_unhandled_status_frames();
+    test_pause_resume_is_acknowledged_and_child_visible();
+    test_stop_reason_controls_terminal_cue();
     test_lifecycle_display_variants();
     test_step_rejects();
+    test_invalid_step_clears_stale_lesson_scene();
+    test_contract_reject_clears_stale_lesson_scene();
     test_step_full_render_http();
     test_step_ignores_story_metadata_while_rendering_layers();
     test_step_fetches_canonical_layer_urls_in_order();
@@ -1725,6 +2244,7 @@ int main() {
     test_step_reuses_cached_layer_bytes_for_repeated_urls();
     test_step_interactive_opens_listen();
     test_step_degraded_and_caption_fallback();
+    test_caption_truncation_preserves_utf8_boundary();
     test_step_http_error_paths();
     test_step_http_chunked_paths();
     test_decode_failure_branches();

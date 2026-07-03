@@ -228,14 +228,20 @@ void Application::Initialize() {
 
     // Set network event callback for UI updates and network state handling
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+        const bool lesson_active = lesson_runtime_active_.load();
         auto display = Board::GetInstance().GetDisplay();
         
         switch (event) {
             case NetworkEvent::Scanning:
-                display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
+                if (!lesson_active) {
+                    display->ShowNotification(Lang::Strings::SCANNING_WIFI, 30000);
+                }
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_DISCONNECTED);
                 break;
             case NetworkEvent::Connecting: {
+                if (lesson_active) {
+                    break;
+                }
                 if (data.empty()) {
                     // Cellular network - registering without carrier info yet
                     display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
@@ -249,9 +255,11 @@ void Application::Initialize() {
                 break;
             }
             case NetworkEvent::Connected: {
-                std::string msg = Lang::Strings::CONNECTED_TO;
-                msg += data;
-                display->ShowNotification(msg.c_str(), 30000);
+                if (!lesson_active) {
+                    std::string msg = Lang::Strings::CONNECTED_TO;
+                    msg += data;
+                    display->ShowNotification(msg.c_str(), 30000);
+                }
                 xEventGroupSetBits(event_group_, MAIN_EVENT_NETWORK_CONNECTED);
                 break;
             }
@@ -266,7 +274,9 @@ void Application::Initialize() {
                 break;
             // Cellular modem specific events
             case NetworkEvent::ModemDetecting:
-                display->SetStatus(Lang::Strings::DETECTING_MODULE);
+                if (!lesson_active) {
+                    display->SetStatus(Lang::Strings::DETECTING_MODULE);
+                }
                 break;
             case NetworkEvent::ModemErrorNoSim:
                 Alert(Lang::Strings::ERROR, Lang::Strings::PIN_ERROR, "triangle_exclamation", Lang::Sounds::OGG_ERR_PIN);
@@ -278,7 +288,9 @@ void Application::Initialize() {
                 Alert(Lang::Strings::ERROR, Lang::Strings::MODEM_INIT_ERROR, "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
                 break;
             case NetworkEvent::ModemErrorTimeout:
-                display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
+                if (!lesson_active) {
+                    display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
+                }
                 break;
         }
     });
@@ -335,7 +347,12 @@ void Application::Run() {
             // surfaced once for wake-open exhaustion (and any non-connect error,
             // where neither flag is set, still alerts immediately). Listen-mode
             // reconnect keeps slow-period retrying for recovered endpoints.
-            if (connect_attempt_active_.load() || passive_ws_intent_.load()) {
+            if (lesson_runtime_active_.load()) {
+                ESP_LOGI(TAG, "lesson error suppressed: %s", last_error_message_.c_str());
+                auto display = Board::GetInstance().GetDisplay();
+                display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                display->SetEmotion("thinking");
+            } else if (connect_attempt_active_.load() || passive_ws_intent_.load()) {
                 ESP_LOGI(TAG, "connect error suppressed (recoverable): attempt_active=%d passive=%d in_flight=%d reconnect_attempt=%d",
                          connect_attempt_active_.load() ? 1 : 0,
                          passive_ws_intent_.load() ? 1 : 0,
@@ -536,13 +553,23 @@ void Application::HandleNetworkDisconnectedEvent() {
 
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
+    auto display = Board::GetInstance().GetDisplay();
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
+        backend_offline_.store(true);
+        audio_service_.ResetDecoder();
         CloseAudioChannelByIntent();
+        if (lesson_runtime_active_.load()) {
+            display->SetStatus(Lang::Strings::PLEASE_WAIT);
+            display->SetEmotion("thinking");
+        } else {
+            display->SetStatus(Lang::Strings::SERVER_UNAVAILABLE_RETRYING);
+            display->SetEmotion("thinking");
+            audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+        }
     }
 
     // Update the status bar immediately to show the network state
-    auto display = Board::GetInstance().GetDisplay();
     display->UpdateStatusBar(true);
 }
 
@@ -556,6 +583,10 @@ void Application::HandleActivationDoneEvent() {
         state == kDeviceStateListening ||
         state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Activation done ignored because runtime audio is active");
+        return;
+    }
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "Activation done ignored because lesson runtime is active");
         return;
     }
 
@@ -1502,6 +1533,12 @@ void Application::StopHeartbeat() {
 }
 
 void Application::HandleHeartbeatAuthFailure(int status_code) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d) during lesson; deferring claim recovery", status_code);
+        StopHeartbeat();
+        deferred_heartbeat_auth_failure_status_.store(status_code);
+        return;
+    }
     ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d); clearing stale claim credentials", status_code);
     StopHeartbeat();
     CloseAudioChannelByIntent();
@@ -1533,6 +1570,10 @@ void Application::EnterRepairPairingMode() {
     // Callable from the BOOT button task; marshal ALL claim-FSM + NVS mutation onto
     // the Application task (OQ1: the claim state machine is single-threaded).
     Schedule([this]() {
+        if (lesson_runtime_active_.load()) {
+            ESP_LOGW(TAG, "lesson re-pair ignored during lesson");
+            return;
+        }
         ESP_LOGW(TAG, "BOOT re-pair: forgetting current claim so a new parent phone can connect");
         StopHeartbeat();
         CloseAudioChannelByIntent();
@@ -2067,6 +2108,14 @@ void Application::InitializeProtocol() {
     protocol_->OnConnected([this]() {
         backend_offline_.store(false);  // healthy session -> ONLINE, not retry
         DismissAlert();
+        const bool lesson_answer_turn =
+            lesson_interactive_listen_pending_.load() ||
+            lesson_interactive_listening_active_.load();
+        if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+            ESP_LOGI(TAG, "lesson protocol connected without heartbeat");
+            StopHeartbeat();
+            return;
+        }
         // Device session is up -> begin periodic heartbeat (C5). The sender is
         // self-gated: it only POSTs once claim backend credentials are in NVS.
         StartHeartbeat();
@@ -2100,8 +2149,19 @@ void Application::InitializeProtocol() {
         if (passive_ws_intent_.load()) {
             ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
             StopHeartbeat();
-            audio_service_.EnableWakeWordDetection(true);
+            if (!lesson_runtime_active_.load()) {
+                audio_service_.EnableWakeWordDetection(true);
+            }
         } else {
+            const bool lesson_answer_turn =
+                lesson_interactive_listen_pending_.load() ||
+                lesson_interactive_listening_active_.load();
+            if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+                ESP_LOGI(TAG, "lesson audio channel opened ignored");
+                online_intent_.store(false);
+                StopHeartbeat();
+                return;
+            }
             online_intent_.store(true);
             StartHeartbeat();
             DispatchDeviceHeartbeat();
@@ -2125,13 +2185,21 @@ void Application::InitializeProtocol() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
-            display->SetChatMessage("system", "");
+            if (!lesson_runtime_active_.load()) {
+                display->SetChatMessage("system", "");
+            }
             if (GetDeviceState() == kDeviceStateWifiConfiguring ||
                 GetDeviceState() == kDeviceStateAudioTesting) {
                 // The close was caused by explicit setup entry. Keep the setup
                 // state/screen; do not fall back to ONLINE/Idle or schedule a
                 // websocket reconnect while Wi-Fi provisioning owns the radio.
                 while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+                return;
+            }
+            if (lesson_runtime_active_.load() && passive_ws_intent_.load()) {
+                ESP_LOGW(TAG, "lesson passive ws dropped -> passive reconnect");
+                while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+                StartPassiveLessonWebsocket();
                 return;
             }
             SetDeviceState(kDeviceStateIdle);
@@ -2151,7 +2219,21 @@ void Application::InitializeProtocol() {
             // NOT a user/system close) leaves online_intent_ true -> auto-reconnect
             // with backoff so a 20-60 min conversation is not permanently cut off.
             if (online_intent_.load()) {
+                if (lesson_runtime_active_.load()) {
+                    ESP_LOGW(TAG, "lesson ws dropped unexpected -> suppress generic reconnect");
+                    online_intent_.store(false);
+                    backend_offline_.store(true);
+                    audio_service_.ResetDecoder();
+                    display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                    display->SetEmotion("thinking");
+                    return;
+                }
                 ESP_LOGW(TAG, "ws_dropped_unexpected -> auto-reconnect (online_intent)");
+                backend_offline_.store(true);
+                audio_service_.ResetDecoder();
+                display->SetStatus(Lang::Strings::SERVER_UNAVAILABLE_RETRYING);
+                display->SetEmotion("thinking");
+                audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
                 ScheduleReconnect(GetDefaultListeningMode());
             }
         });
@@ -2229,7 +2311,15 @@ void Application::InitializeProtocol() {
                 Schedule([this, force_continue_listening, force_realtime_listen]() {
                     ++speaking_generation_;
                     last_speaking_activity_ms_.store(0);
-                    if (force_continue_listening) {
+                    const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load();
+                    if (lesson_runtime_active_.load() && !lesson_interactive_turn) {
+                        ESP_LOGI(TAG, "lesson tts stop continue ignored state=%d",
+                                 static_cast<int>(GetDeviceState()));
+                        lesson_idle_repaint_suppressed_.store(true);
+                        SetDeviceState(kDeviceStateIdle);
+                        return;
+                    }
+                    if (force_continue_listening && !lesson_interactive_turn) {
                         bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
                         if (!playback_drained) {
                             ESP_LOGW(TAG,
@@ -2252,16 +2342,12 @@ void Application::InitializeProtocol() {
                     }
                     if (GetDeviceState() == kDeviceStateSpeaking) {
                         if (listening_mode_ == kListeningModeManualStop) {
-                            if (lesson_interactive_listen_pending_.exchange(false)) {
+                            if (lesson_interactive_listen_pending_.load()) {
                                 SetDeviceState(kDeviceStateListening);
-                                auto display = Board::GetInstance().GetDisplay();
-                                display->SetStatus("Con nói nhé...");
-                                display->SetChatMessage("system", "Con nói nhé.");
                                 if (protocol_) {
                                     protocol_->SendStartListening(kListeningModeManualStop);
                                 }
                                 audio_service_.EnableVoiceProcessing(true);
-                                audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
                                 ESP_LOGI(TAG, "lesson prompt complete -> listening");
                             } else {
                                 SetDeviceState(kDeviceStateIdle);
@@ -2285,26 +2371,32 @@ void Application::InitializeProtocol() {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGD(TAG, "<< %s", text->valuestring);  // PRIV-1: transcript content debug-only (COPPA)
-                    Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
-                    });
+                    if (!lesson_runtime_active_.load()) {
+                        Schedule([display, message = std::string(text->valuestring)]() {
+                            display->SetChatMessage("assistant", message.c_str());
+                        });
+                    }
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGD(TAG, ">> %s", text->valuestring);  // PRIV-1: transcript content debug-only (COPPA)
-                Schedule([display, message = std::string(text->valuestring)]() {
-                    display->SetChatMessage("user", message.c_str());
-                });
+                if (!lesson_runtime_active_.load()) {
+                    Schedule([display, message = std::string(text->valuestring)]() {
+                        display->SetChatMessage("user", message.c_str());
+                    });
+                }
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
-                    HandleEmotionGesture(emotion_str.c_str());
-                });
+                if (!lesson_runtime_active_.load()) {
+                    Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
+                        display->SetEmotion(emotion_str.c_str());
+                        HandleEmotionGesture(emotion_str.c_str());
+                    });
+                }
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
@@ -2316,6 +2408,10 @@ void Application::InitializeProtocol() {
             if (cJSON_IsString(command)) {
                 ESP_LOGI(TAG, "System command: %s", command->valuestring);
                 if (strcmp(command->valuestring, "reboot") == 0) {
+                    if (lesson_runtime_active_.load()) {
+                        ESP_LOGI(TAG, "System reboot ignored during lesson");
+                        return;
+                    }
                     // Do a reboot if user requests a OTA update
                     Schedule([this]() {
                         Reboot();
@@ -2329,7 +2425,9 @@ void Application::InitializeProtocol() {
             auto message = cJSON_GetObjectItem(root, "message");
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
-                Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::OGG_VIBRATION);
+                if (!lesson_runtime_active_.load()) {
+                    Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::OGG_VIBRATION);
+                }
             } else {
                 ESP_LOGW(TAG, "Alert command requires status, message and emotion");
             }
@@ -2354,9 +2452,11 @@ void Application::InitializeProtocol() {
                 if (payload_str_raw != nullptr) {
                     cJSON_free(payload_str_raw);
                 }
-                Schedule([this, display, payload_str = std::move(payload_str)]() {
-                    display->SetChatMessage("system", payload_str.c_str());
-                });
+                if (!lesson_runtime_active_.load()) {
+                    Schedule([this, display, payload_str = std::move(payload_str)]() {
+                        display->SetChatMessage("system", payload_str.c_str());
+                    });
+                }
             } else {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
             }
@@ -2390,6 +2490,11 @@ void Application::InitializeProtocol() {
 }
 
 bool Application::HandleRobotActionMessage(const cJSON* root) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot action ignored");
+        return false;
+    }
+
     auto action = cJSON_GetObjectItem(root, "action");
     if (!cJSON_IsString(action)) {
         return false;
@@ -2465,58 +2570,114 @@ void Application::HandleEmotionGesture(const char* emotion) {
 }
 
 bool Application::SendLeftArmRaise() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendLeftArmRaise();
 }
 
 bool Application::SendRightArmRaise() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendRightArmRaise();
 }
 
 bool Application::SendLeftArmLower() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendLeftArmLower();
 }
 
 bool Application::SendRightArmLower() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendRightArmLower();
 }
 
 bool Application::SendBothArmsRaise() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendBothArmsRaise();
 }
 
 bool Application::SendBothArmsLower() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendBothArmsLower();
 }
 
 bool Application::SendLeftArmSetPercent(int percent) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendLeftArmSetPercent(percent);
 }
 
 bool Application::SendRightArmSetPercent(int percent) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendRightArmSetPercent(percent);
 }
 
 bool Application::SendBothArmsSetPercent(int percent) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendBothArmsSetPercent(percent);
 }
 
 bool Application::SendHeadTurnLeft() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendHeadTurnLeft();
 }
 
 bool Application::SendHeadTurnRight() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendHeadTurnRight();
 }
 
 bool Application::SendHeadCenter() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendHeadCenter();
 }
 
 bool Application::SendHeadSetAngle(int angle) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendHeadSetAngle(angle);
 }
 
 bool Application::SendHeadSetPercent(int percent) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson robot uart action ignored");
+        return false;
+    }
     return robot_uart_.SendHeadSetPercent(percent);
 }
 
@@ -2552,6 +2713,10 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
 
 void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
     ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson alert suppressed: %s", status);
+        return;
+    }
     auto display = Board::GetInstance().GetDisplay();
     display->SetStatus(status);
     display->SetEmotion(emotion);
@@ -2562,7 +2727,7 @@ void Application::Alert(const char* status, const char* message, const char* emo
 }
 
 void Application::DismissAlert() {
-    if (GetDeviceState() == kDeviceStateIdle) {
+    if (GetDeviceState() == kDeviceStateIdle && !lesson_runtime_active_.load()) {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
         display->SetEmotion("neutral");
@@ -2584,11 +2749,48 @@ void Application::PrepareLessonInteractiveListening() {
 }
 
 void Application::CancelLessonInteractiveListening() {
-    lesson_interactive_listen_pending_.store(false);
+    const bool had_pending = lesson_interactive_listen_pending_.exchange(false);
+    const bool had_active = lesson_interactive_listening_active_.exchange(false);
+    const bool had_lesson_listen = had_pending || had_active;
+    const bool lesson_runtime_cancel = lesson_runtime_active_.load();
+    if (!lesson_runtime_cancel && !had_lesson_listen) {
+        return;
+    }
+    const DeviceState state = GetDeviceState();
+    if (state == kDeviceStateConnecting) {
+        lesson_idle_repaint_suppressed_.store(true);
+        ++connect_generation_;
+        connect_attempt_active_.store(false);
+        passive_ws_intent_.store(false);
+        online_intent_.store(false);
+        CancelConnectWatchdog();
+        SetDeviceState(kDeviceStateIdle);
+        return;
+    }
+    if (state != kDeviceStateListening) {
+        return;
+    }
+    lesson_idle_repaint_suppressed_.store(true);
+    if (protocol_) {
+        protocol_->SendStopListening();
+    }
+    listening_started_ms_.store(0);
+    last_listening_activity_ms_.store(0);
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+    SetDeviceState(kDeviceStateIdle);
 }
 
 void Application::SetLessonRuntimeActive(bool active) {
     lesson_runtime_active_.store(active);
+    if (!active) {
+        const int status_code = deferred_heartbeat_auth_failure_status_.exchange(0);
+        if (status_code != 0) {
+            Schedule([this, status_code]() {
+                HandleHeartbeatAuthFailure(status_code);
+            });
+        }
+    }
     xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
 }
 
@@ -2616,13 +2818,27 @@ bool Application::IsLessonNetworkRenderQuiet() const {
 }
 
 void Application::StopListening() {
-    CancelLessonInteractiveListening();
+    const bool lesson_answer_turn =
+        lesson_interactive_listen_pending_.load() ||
+        lesson_interactive_listening_active_.load();
+    if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+        ESP_LOGI(TAG, "lesson stop listening ignored state=%d", static_cast<int>(GetDeviceState()));
+        return;
+    }
+    if (!(GetDeviceState() == kDeviceStateSpeaking && lesson_interactive_listen_pending_.load())) {
+        CancelLessonInteractiveListening();
+    }
     xEventGroupSetBits(event_group_, MAIN_EVENT_STOP_LISTENING);
 }
 
 void Application::HandleToggleChatEvent() {
     auto state = GetDeviceState();
-    
+
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson toggle ignored state=%d", static_cast<int>(state));
+        return;
+    }
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -2744,6 +2960,15 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         SetDeviceState(kDeviceStateIdle);   // SM-3: don't wedge CONNECTING
         return;
     }
+    const bool lesson_answer_turn =
+        lesson_interactive_listen_pending_.load() ||
+        lesson_interactive_listening_active_.load();
+    if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+        ESP_LOGI(TAG, "lesson open channel ignored state=%d", static_cast<int>(GetDeviceState()));
+        online_intent_.store(false);
+        connect_attempt_active_.store(false);
+        return;
+    }
     if (protocol_->IsAudioChannelOpened()) {
         SetListeningMode(mode);
         return;
@@ -2840,6 +3065,15 @@ void Application::OpenChannelTask(void* arg) {
             } else if (wake_word_invoke) {
                 self->FinishWakeWordInvoke(wake_word);
             } else {
+                const bool lesson_answer_turn =
+                    self->lesson_interactive_listen_pending_.load() ||
+                    self->lesson_interactive_listening_active_.load();
+                if (self->lesson_runtime_active_.load() && !lesson_answer_turn) {
+                    ESP_LOGI(TAG, "lesson open worker ignored state=%d",
+                             static_cast<int>(self->GetDeviceState()));
+                    self->online_intent_.store(false);
+                    return;
+                }
                 self->SetListeningMode(mode);
             }
         } else {
@@ -2909,6 +3143,23 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
     // schedule a backoff retry. connect_in_flight_ may still be true (worker
     // blocked); HandleReconnectTick re-defers until it clears.
     ++connect_generation_;
+    if (passive_ws_intent_.load()) {
+        ESP_LOGW(TAG, "passive_lesson_connect_watchdog_timeout -> passive backoff");
+        backend_offline_.store(true);
+        SchedulePassiveLessonReconnect();
+        return;
+    }
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGW(TAG, "lesson connect watchdog timeout -> suppress generic reconnect");
+        backend_offline_.store(true);
+        online_intent_.store(false);
+        connect_attempt_active_.store(false);
+        lesson_idle_repaint_suppressed_.store(true);
+        if (GetDeviceState() == kDeviceStateConnecting) {
+            SetDeviceState(kDeviceStateIdle);
+        }
+        return;
+    }
     if (GetDeviceState() == kDeviceStateConnecting) {
         ESP_LOGW(TAG, "connect_watchdog_timeout -> idle + backoff");
         backend_offline_.store(true);
@@ -2953,7 +3204,7 @@ void Application::ScheduleReconnect(ListeningMode mode) {
         // reconnects without another wake word or button press.
         uint32_t jitter_ms = esp_random() % (kSlowReconnectRetryMs / 4 + 1);
         delay_ms = kSlowReconnectRetryMs + jitter_ms;
-        ESP_LOGW(TAG, "reconnect_slow_retry_scheduled attempt=%d delay_ms=%lu",
+        ESP_LOGW(TAG, "reconnect_slow_retry_scheduled attempt=%d phase=slow delay_ms=%lu",
                  reconnect_attempt_ + 1, (unsigned long)delay_ms);
         reconnect_attempt_ = kFastReconnectAttempts;
     }
@@ -3005,12 +3256,23 @@ void Application::HandleReconnectTick() {
             SchedulePassiveLessonReconnect();
             return;
         }
-        if (GetDeviceState() != kDeviceStateIdle) {
+        auto state = GetDeviceState();
+        if (state == kDeviceStateWifiConfiguring || state == kDeviceStateAudioTesting) {
             passive_reconnect_attempt_ = 0;
+            return;
+        }
+        if (state != kDeviceStateIdle) {
+            SchedulePassiveLessonReconnect();
             return;
         }
         ESP_LOGI(TAG, "passive_lesson_reconnect_tick attempt=%d", passive_reconnect_attempt_);
         StartPassiveLessonWebsocket();
+        return;
+    }
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson reconnect ignored");
+        reconnect_attempt_ = 0;
+        connect_attempt_active_.store(false);
         return;
     }
     if (GetDeviceState() != kDeviceStateIdle) {
@@ -3034,7 +3296,14 @@ void Application::HandleReconnectTick() {
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
-    
+    const bool lesson_answer_turn =
+        lesson_interactive_listen_pending_.load() ||
+        lesson_interactive_listening_active_.load();
+    if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+        ESP_LOGI(TAG, "lesson start listening ignored state=%d", static_cast<int>(state));
+        return;
+    }
+
     if (state == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
         return;
@@ -3048,7 +3317,7 @@ void Application::HandleStartListeningEvent() {
         ESP_LOGE(TAG, "Protocol not initialized");
         return;
     }
-    
+
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
@@ -3071,8 +3340,10 @@ void Application::HandleStartListeningEvent() {
         ESP_LOGI(TAG, "lesson/manual listening rearm");
         listening_mode_ = kListeningModeManualStop;
         if (lesson_interactive_listen_pending_.exchange(false)) {
+            lesson_interactive_listening_active_.store(true);
             auto display = Board::GetInstance().GetDisplay();
             display->SetStatus("Con nói nhé...");
+            display->SetEmotion("thinking");
             display->SetChatMessage("system", "Con nói nhé.");
             audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
         }
@@ -3088,15 +3359,25 @@ void Application::HandleStartListeningEvent() {
 
 void Application::HandleStopListeningEvent() {
     auto state = GetDeviceState();
-    
+    const bool lesson_answer_turn =
+        lesson_interactive_listen_pending_.load() ||
+        lesson_interactive_listening_active_.load();
+    if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+        ESP_LOGI(TAG, "lesson stop listening ignored state=%d", static_cast<int>(state));
+        return;
+    }
+
     if (state == kDeviceStateAudioTesting) {
         audio_service_.EnableAudioTesting(false);
         SetDeviceState(kDeviceStateWifiConfiguring);
         return;
-    } else if (state == kDeviceStateListening) {
+    }
+
+    if (state == kDeviceStateListening) {
         if (protocol_) {
             protocol_->SendStopListening();
         }
+        lesson_interactive_listening_active_.store(false);
         listening_started_ms_.store(0);
         last_listening_activity_ms_.store(0);
         SetDeviceState(kDeviceStateIdle);
@@ -3111,6 +3392,11 @@ void Application::HandleWakeWordDetectedEvent() {
     auto state = GetDeviceState();
     auto wake_word = audio_service_.GetLastWakeWord();
     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson wake ignored state=%d", static_cast<int>(state));
+        return;
+    }
 
     if (state == kDeviceStateIdle) {
         // NOTE: VAD-gate approach was attempted but failed — VAD runs inside
@@ -3136,6 +3422,11 @@ void Application::HandleWakeWordDetectedEvent() {
         // Channel already opened, continue directly
         ContinueWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking || state == kDeviceStateListening) {
+        if (lesson_interactive_listen_pending_.load() ||
+            lesson_interactive_listening_active_.load()) {
+            ESP_LOGI(TAG, "lesson wake ignored state=%d", static_cast<int>(state));
+            return;
+        }
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
         while (audio_service_.PopPacketFromSendQueue());
@@ -3161,6 +3452,10 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
     // Check state again in case it was changed during scheduling
     auto state = GetDeviceState();
     if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
+        return;
+    }
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson wake continue ignored state=%d", static_cast<int>(state));
         return;
     }
 
@@ -3195,6 +3490,13 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 void Application::FinishWakeWordInvoke(const std::string& wake_word) {
     auto state = GetDeviceState();
     if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
+        return;
+    }
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson wake finish ignored state=%d", static_cast<int>(state));
+        if (state == kDeviceStateConnecting) {
+            SetDeviceState(kDeviceStateIdle);
+        }
         return;
     }
 
@@ -3299,7 +3601,17 @@ void Application::HandleListeningWatchdogTick() {
     audio_service_.EnableVoiceProcessing(false);
     listening_started_ms_.store(0);
     last_listening_activity_ms_.store(0);
+    lesson_interactive_listening_active_.store(false);
     SetDeviceState(kDeviceStateIdle);
+    auto display = Board::GetInstance().GetDisplay();
+    if (lesson_runtime_active_.load()) {
+        display->SetStatus(Lang::Strings::PLEASE_WAIT);
+        display->SetEmotion("thinking");
+    } else {
+        display->SetStatus(Lang::Strings::SERVER_TIMEOUT);
+        display->SetEmotion("thinking");
+        audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+    }
 }
 
 void Application::HandleStateChangedEvent() {
@@ -3324,9 +3636,23 @@ void Application::HandleStateChangedEvent() {
 
     switch (new_state) {
         case kDeviceStateUnknown:
-        case kDeviceStateIdle:
+        case kDeviceStateIdle: {
+            const bool suppress_lesson_idle_repaint =
+                lesson_idle_repaint_suppressed_.exchange(false);
             if (lesson_runtime_active_.load()) {
-                display->SetStatus("Đang học...");
+                if (!suppress_lesson_idle_repaint) {
+                    display->SetLessonCaption("");
+                    display->ClearChatMessages();
+                    display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                    display->SetEmotion("thinking");
+                }
+                listening_started_ms_.store(0);
+                last_listening_activity_ms_.store(0);
+                audio_service_.EnableVoiceProcessing(false);
+                audio_service_.EnableWakeWordDetection(false);
+                break;
+            }
+            if (suppress_lesson_idle_repaint) {
                 listening_started_ms_.store(0);
                 last_listening_activity_ms_.store(0);
                 audio_service_.EnableVoiceProcessing(false);
@@ -3336,7 +3662,7 @@ void Application::HandleStateChangedEvent() {
             // ONLINE (or OFFLINE_RETRY / a claim overlay) per the mapper.
             display->SetStatus(connect_copy);
             display->ClearChatMessages();  // Clear messages first
-            display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            display->SetEmotion(backend_offline_.load() ? "thinking" : "neutral"); // Then set emotion (wechat mode checks child count)
             listening_started_ms_.store(0);
             last_listening_activity_ms_.store(0);
             audio_service_.EnableVoiceProcessing(false);
@@ -3351,26 +3677,40 @@ void Application::HandleStateChangedEvent() {
             // lessons (wake word -> talk) work normally. A fresh claim confirm
             // enables wake-word explicitly (see ConfirmPendingTbotClaim) so audio
             // comes up without a reboot.
-            if (IsDeviceClaimed()) {
+            if (IsDeviceClaimed() && !connect_in_flight_.load()) {
                 audio_service_.EnableWakeWordDetection(true);
             } else {
                 audio_service_.EnableWakeWordDetection(false);
             }
             break;
+        }
         case kDeviceStateConnecting:
+            if (lesson_runtime_active_.load()) {
+                display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                display->SetEmotion("thinking");
+                break;
+            }
             // BACKEND_CONNECTING per the mapper ("Connecting...").
             display->SetStatus(connect_copy);
-            display->SetEmotion("neutral");
+            display->SetEmotion(backend_offline_.load() ? "thinking" : "neutral");
             display->SetChatMessage("system", "");
             break;
-        case kDeviceStateListening:
+        case kDeviceStateListening: {
             {
                 int64_t now_ms = esp_timer_get_time() / 1000;
                 listening_started_ms_.store(now_ms);
                 last_listening_activity_ms_.store(now_ms);
             }
-            display->SetStatus(Lang::Strings::LISTENING);
-            display->SetEmotion("neutral");
+            const bool lesson_interactive_listen = lesson_interactive_listen_pending_.exchange(false);
+            if (lesson_interactive_listen) {
+                lesson_interactive_listening_active_.store(true);
+                display->SetStatus("Con nói nhé...");
+                display->SetEmotion("thinking");
+                display->SetChatMessage("system", "Con nói nhé.");
+            } else {
+                display->SetStatus(Lang::Strings::LISTENING);
+                display->SetEmotion("thinking");
+            }
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -3399,13 +3739,20 @@ void Application::HandleStateChangedEvent() {
 #endif
             
             // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
-            if (play_popup_on_listening_) {
+            if (lesson_interactive_listen) {
+                play_popup_on_listening_ = false;
+                audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+            } else if (play_popup_on_listening_) {
                 play_popup_on_listening_ = false;
                 audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
             }
             break;
+        }
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            if (!lesson_runtime_active_.load()) {
+                display->SetEmotion("happy");
+            }
             listening_started_ms_.store(0);
             last_listening_activity_ms_.store(0);
 
@@ -3510,10 +3857,24 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
     if (protocol_) {
         protocol_->SendAbortSpeaking(kAbortReasonNone);
     }
+    CancelLessonInteractiveListening();
+    auto show_timeout_cue = [this]() {
+        auto display = Board::GetInstance().GetDisplay();
+        if (lesson_runtime_active_.load()) {
+            display->SetStatus(Lang::Strings::PLEASE_WAIT);
+            display->SetEmotion("thinking");
+        } else {
+            display->SetStatus(Lang::Strings::SERVER_TIMEOUT);
+            display->SetEmotion("thinking");
+            audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+        }
+    };
     if (listening_mode_ == kListeningModeManualStop) {
         SetDeviceState(kDeviceStateIdle);
+        show_timeout_cue();
     } else if (listening_mode_ == kListeningModeAutoStop) {
         SetDeviceState(kDeviceStateIdle);
+        show_timeout_cue();
     } else {
         SetDeviceState(kDeviceStateListening);
         ESP_LOGI(TAG, "mic_loop_resumed ts=%lld reason=speaking_timeout",
@@ -3557,6 +3918,10 @@ ListeningMode Application::GetDefaultListeningMode() const {
 }
 
 void Application::Reboot() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson reboot ignored");
+        return;
+    }
     ESP_LOGI(TAG, "Rebooting...");
     // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
@@ -3570,6 +3935,10 @@ void Application::Reboot() {
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson firmware upgrade ignored");
+        return false;
+    }
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
 
@@ -3627,6 +3996,10 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     }
 
     auto state = GetDeviceState();
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson direct wake ignored state=%d", static_cast<int>(state));
+        return;
+    }
     
     if (state == kDeviceStateIdle) {
         audio_service_.EncodeWakeWord();
@@ -3655,6 +4028,11 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
 }
 
 bool Application::CanEnterSleepMode() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson sleep mode blocked");
+        return false;
+    }
+
     if (GetDeviceState() != kDeviceStateIdle) {
         return false;
     }
@@ -3681,8 +4059,16 @@ void Application::SendMcpMessage(const std::string& payload) {
 }
 
 void Application::SetAecMode(AecMode mode) {
-    aec_mode_ = mode;
-    Schedule([this]() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "lesson aec mode ignored");
+        return;
+    }
+    Schedule([this, mode]() {
+        if (lesson_runtime_active_.load()) {
+            ESP_LOGI(TAG, "scheduled lesson aec mode ignored");
+            return;
+        }
+        aec_mode_ = mode;
         auto& board = Board::GetInstance();
         auto display = board.GetDisplay();
         switch (aec_mode_) {
@@ -3736,6 +4122,10 @@ void Application::DoResetProtocol() {
 }
 
 void Application::ResetProtocol() {
+    if (lesson_runtime_active_.load()) {
+        ESP_LOGI(TAG, "ResetProtocol ignored during lesson");
+        return;
+    }
     Schedule([this]() {
         ++connect_generation_;  // invalidate any in-flight connect's result
         if (connect_in_flight_.load()) {
