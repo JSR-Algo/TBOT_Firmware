@@ -89,6 +89,7 @@
 #define ROBOT_UART_ALT_NUM    UART_NUM_1
 #define ROBOT_UART_ALT_TX_PIN GPIO_NUM_43
 #define ROBOT_UART_ALT_RX_PIN GPIO_NUM_44
+#define ROBOT_UART_ACK_READER_ENABLED 0
 
 // ---- MicroSD / TF card (SDIO 4-bit, LCDWiki ES3C35P spec) ----
 #define SDCARD_MOUNT_POINT    "/sdcard"

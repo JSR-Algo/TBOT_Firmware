@@ -218,6 +218,16 @@ def test_lcdwiki_board_retries_swapped_uart_pins_for_servant_ack():
     assert "ROBOT_UART_ALT_RX_PIN GPIO_NUM_44" in config
 
 
+def test_lcdwiki_disables_robot_uart_ack_reader_to_avoid_console_echo():
+    config = read("main/boards/lcdwiki-es3c35p/config.h")
+    source = read("main/robot_uart.cc")
+
+    assert "#define ROBOT_UART_ACK_READER_ENABLED 0" in config
+    assert "#ifndef ROBOT_UART_ACK_READER_ENABLED" in source
+    assert "#define ROBOT_UART_ACK_READER_ENABLED 1" in source
+    assert "if (!ROBOT_UART_ACK_READER_ENABLED)" in source
+
+
 def test_servant_firmware_has_uart_servo_controller():
     main_c = read("../TBOT-Servant-Firmware/main/main.c")
 

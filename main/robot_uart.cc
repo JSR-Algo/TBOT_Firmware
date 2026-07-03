@@ -22,6 +22,10 @@
 #define ROBOT_UART_BAUD_RATE 115200
 #endif
 
+#ifndef ROBOT_UART_ACK_READER_ENABLED
+#define ROBOT_UART_ACK_READER_ENABLED 1
+#endif
+
 #ifndef ROBOT_UART_ALT_NUM
 #ifdef UART_NUM_2
 #define ROBOT_UART_ALT_NUM UART_NUM_2
@@ -302,6 +306,10 @@ bool RobotUart::SelectUartProfile(const char* profile_name, uart_port_t port, gp
 }
 
 void RobotUart::StartAckReader() {
+    if (!ROBOT_UART_ACK_READER_ENABLED) {
+        ESP_LOGI(TAG, "Robot UART ACK reader disabled");
+        return;
+    }
     if (ack_reader_started_ || !primary_ready_) {
         return;
     }
