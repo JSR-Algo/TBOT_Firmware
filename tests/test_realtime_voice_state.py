@@ -1413,6 +1413,27 @@ def test_lesson_runtime_network_disconnect_keeps_child_wait_cue():
     assert 'display->SetEmotion("thinking");' in lesson_branch
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);" not in lesson_branch
 
+def test_lesson_runtime_network_disconnect_clears_stale_answer_turn_flags():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleNetworkDisconnectedEvent()")
+    end = app_cc.index("void Application::HandleActivationDoneEvent()", start)
+    body = app_cc[start:end]
+    active_branch = body[body.index("if (state == kDeviceStateConnecting") :]
+    lesson_branch = active_branch[
+        active_branch.index("if (lesson_runtime_active_.load())") :
+        active_branch.index("} else {", active_branch.index("if (lesson_runtime_active_.load())"))
+    ]
+
+    assert "lesson_interactive_listen_pending_.store(false);" in lesson_branch
+    assert "lesson_interactive_listening_active_.store(false);" in lesson_branch
+    assert lesson_branch.index("lesson_interactive_listen_pending_.store(false);") < lesson_branch.index(
+        "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+    )
+    assert lesson_branch.index("lesson_interactive_listening_active_.store(false);") < lesson_branch.index(
+        "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+    )
+
 def test_lesson_runtime_network_event_callback_suppresses_generic_ui_but_keeps_events():
     app_cc = read("main/application.cc")
 

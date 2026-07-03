@@ -562,6 +562,8 @@ void Application::HandleNetworkDisconnectedEvent() {
         audio_service_.ResetDecoder();
         CloseAudioChannelByIntent();
         if (lesson_runtime_active_.load()) {
+            lesson_interactive_listen_pending_.store(false);
+            lesson_interactive_listening_active_.store(false);
             display->SetStatus(Lang::Strings::PLEASE_WAIT);
             display->SetEmotion("thinking");
         } else {
