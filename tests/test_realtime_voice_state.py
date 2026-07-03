@@ -764,6 +764,23 @@ def test_listening_state_uses_distinct_child_turn_face():
     assert 'display->SetEmotion("neutral");' not in listening_body
 
 
+def test_lesson_active_child_listening_repaint_preserves_child_turn_cue():
+    app_cc = read("main/application.cc")
+
+    listening_start = app_cc.index("case kDeviceStateListening:")
+    speaking_start = app_cc.index("case kDeviceStateSpeaking:", listening_start)
+    listening_body = app_cc[listening_start:speaking_start]
+
+    assert "const bool lesson_interactive_active = lesson_interactive_listening_active_.load();" in listening_body
+    assert "if (lesson_interactive_listen || lesson_interactive_active)" in listening_body
+    child_cue = listening_body[
+        listening_body.index("if (lesson_interactive_listen || lesson_interactive_active)") :
+        listening_body.index("} else {", listening_body.index("if (lesson_interactive_listen || lesson_interactive_active)"))
+    ]
+    assert 'display->SetStatus("Con nói nhé...");' in child_cue
+    assert 'display->SetChatMessage("system", "Con nói nhé.");' in child_cue
+
+
 def test_speaking_state_uses_default_child_friendly_face():
     app_cc = read("main/application.cc")
 

@@ -3737,7 +3737,8 @@ void Application::HandleStateChangedEvent() {
                 last_listening_activity_ms_.store(now_ms);
             }
             const bool lesson_interactive_listen = lesson_interactive_listen_pending_.exchange(false);
-            if (lesson_interactive_listen) {
+            const bool lesson_interactive_active = lesson_interactive_listening_active_.load();
+            if (lesson_interactive_listen || lesson_interactive_active) {
                 lesson_interactive_listening_active_.store(true);
                 display->ClearChatMessages();
                 display->SetStatus("Con nói nhé...");
