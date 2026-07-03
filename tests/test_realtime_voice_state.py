@@ -1685,6 +1685,23 @@ def test_lesson_prompt_start_listening_defer_shows_waiting_turn_cue():
     assert "protocol_->SendStartListening" not in speaking
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" not in speaking
 
+def test_lesson_start_listening_child_cues_guard_missing_display():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    speaking = body[body.index("state == kDeviceStateSpeaking") : body.index("state == kDeviceStateListening")]
+    listening = body[body.index("state == kDeviceStateListening") :]
+
+    speaking_display = speaking[speaking.index("auto display = Board::GetInstance().GetDisplay();") :]
+    assert "if (display)" in speaking_display[: speaking_display.index("return;")]
+    assert speaking_display.index("if (display)") < speaking_display.index("display->ClearChatMessages();")
+
+    listening_display = listening[listening.index("auto display = Board::GetInstance().GetDisplay();") :]
+    assert "if (display)" in listening_display[: listening_display.index("audio_service_.PlaySound")]
+    assert listening_display.index("if (display)") < listening_display.index("display->ClearChatMessages();")
+
 def test_lesson_runtime_start_listening_ignores_non_answer_press():
     app_cc = read("main/application.cc")
 

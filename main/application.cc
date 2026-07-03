@@ -3354,9 +3354,11 @@ void Application::HandleStartListeningEvent() {
             ESP_LOGI(TAG, "lesson prompt still speaking; defer listening");
             listening_mode_ = kListeningModeManualStop;
             auto display = Board::GetInstance().GetDisplay();
-            display->ClearChatMessages();
-            display->SetStatus("Sắp đến lượt con...");
-            display->SetEmotion("thinking");
+            if (display) {
+                display->ClearChatMessages();
+                display->SetStatus("Sắp đến lượt con...");
+                display->SetEmotion("thinking");
+            }
             return;
         }
         AbortSpeaking(kAbortReasonNone);
@@ -3367,10 +3369,12 @@ void Application::HandleStartListeningEvent() {
         if (lesson_interactive_listen_pending_.exchange(false)) {
             lesson_interactive_listening_active_.store(true);
             auto display = Board::GetInstance().GetDisplay();
-            display->ClearChatMessages();
-            display->SetStatus("Con nói nhé...");
-            display->SetEmotion("thinking");
-            display->SetChatMessage("system", "Con nói nhé.");
+            if (display) {
+                display->ClearChatMessages();
+                display->SetStatus("Con nói nhé...");
+                display->SetEmotion("thinking");
+                display->SetChatMessage("system", "Con nói nhé.");
+            }
             audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
         }
         {
