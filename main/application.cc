@@ -2222,6 +2222,8 @@ void Application::InitializeProtocol() {
                 if (lesson_runtime_active_.load()) {
                     ESP_LOGW(TAG, "lesson ws dropped unexpected -> suppress generic reconnect");
                     online_intent_.store(false);
+                    lesson_interactive_listen_pending_.store(false);
+                    lesson_interactive_listening_active_.store(false);
                     backend_offline_.store(true);
                     audio_service_.ResetDecoder();
                     display->SetStatus(Lang::Strings::PLEASE_WAIT);

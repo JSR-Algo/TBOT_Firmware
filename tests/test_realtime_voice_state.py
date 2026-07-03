@@ -1290,6 +1290,29 @@ def test_lesson_runtime_suppresses_generic_reconnect_after_close():
         "SetDeviceState(kDeviceStateConnecting);"
     )
 
+
+def test_lesson_runtime_audio_channel_close_clears_stale_answer_turn_flags():
+    app_cc = read("main/application.cc")
+
+    closed_start = app_cc.index("protocol_->OnAudioChannelClosed")
+    incoming_json = app_cc.index("protocol_->OnIncomingJson", closed_start)
+    closed_body = app_cc[closed_start:incoming_json]
+    online_branch = closed_body[closed_body.index("if (online_intent_.load())") :]
+    lesson_branch = online_branch[
+        online_branch.index("lesson_runtime_active_.load()") :
+        online_branch.index("ESP_LOGW(TAG, \"ws_dropped_unexpected -> auto-reconnect")
+    ]
+
+    assert "lesson_interactive_listen_pending_.store(false);" in lesson_branch
+    assert "lesson_interactive_listening_active_.store(false);" in lesson_branch
+    assert lesson_branch.index("lesson_interactive_listen_pending_.store(false);") < lesson_branch.index(
+        "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+    )
+    assert lesson_branch.index("lesson_interactive_listening_active_.store(false);") < lesson_branch.index(
+        "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+    )
+
+
 def test_backend_offline_connecting_state_keeps_reconnect_face():
     app_cc = read("main/application.cc")
 
