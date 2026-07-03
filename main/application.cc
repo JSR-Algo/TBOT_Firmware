@@ -2740,6 +2740,10 @@ void Application::StartListening() {
 }
 
 void Application::PrepareLessonInteractiveListening() {
+    if (!lesson_runtime_active_.load()) {
+        lesson_interactive_listen_pending_.store(false);
+        return;
+    }
     lesson_interactive_listen_pending_.store(true);
     StartListening();
 }
