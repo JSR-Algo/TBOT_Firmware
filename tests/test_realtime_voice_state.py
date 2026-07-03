@@ -1109,6 +1109,21 @@ def test_listening_watchdog_clears_active_lesson_answer_turn():
         "SetDeviceState(kDeviceStateIdle);"
     )
 
+def test_listening_watchdog_clears_pending_lesson_answer_turn_before_idle():
+    app_cc = read("main/application.cc")
+
+    watchdog_start = app_cc.index("void Application::HandleListeningWatchdogTick")
+    watchdog_end = app_cc.index("void Application::HandleStateChangedEvent", watchdog_start)
+    watchdog_body = app_cc[watchdog_start:watchdog_end]
+
+    assert "lesson_interactive_listen_pending_.store(false);" in watchdog_body
+    assert watchdog_body.index("lesson_interactive_listen_pending_.store(false);") < watchdog_body.index(
+        "lesson_interactive_listening_active_.store(false);"
+    )
+    assert watchdog_body.index("lesson_interactive_listen_pending_.store(false);") < watchdog_body.index(
+        "SetDeviceState(kDeviceStateIdle);"
+    )
+
 def test_listening_activity_is_refreshed_when_listening_starts_and_vad_fires():
     app_cc = read("main/application.cc")
 

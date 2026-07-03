@@ -3636,6 +3636,7 @@ void Application::HandleListeningWatchdogTick() {
     audio_service_.EnableVoiceProcessing(false);
     listening_started_ms_.store(0);
     last_listening_activity_ms_.store(0);
+    lesson_interactive_listen_pending_.store(false);
     lesson_interactive_listening_active_.store(false);
     SetDeviceState(kDeviceStateIdle);
     auto display = Board::GetInstance().GetDisplay();
