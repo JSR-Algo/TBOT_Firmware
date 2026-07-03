@@ -3367,6 +3367,7 @@ void Application::HandleStartListeningEvent() {
         if (lesson_interactive_listen_pending_.exchange(false)) {
             lesson_interactive_listening_active_.store(true);
             auto display = Board::GetInstance().GetDisplay();
+            display->ClearChatMessages();
             display->SetStatus("Con nói nhé...");
             display->SetEmotion("thinking");
             display->SetChatMessage("system", "Con nói nhé.");
@@ -3734,6 +3735,7 @@ void Application::HandleStateChangedEvent() {
             const bool lesson_interactive_listen = lesson_interactive_listen_pending_.exchange(false);
             if (lesson_interactive_listen) {
                 lesson_interactive_listening_active_.store(true);
+                display->ClearChatMessages();
                 display->SetStatus("Con nói nhé...");
                 display->SetEmotion("thinking");
                 display->SetChatMessage("system", "Con nói nhé.");

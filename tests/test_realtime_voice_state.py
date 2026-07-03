@@ -1935,10 +1935,14 @@ def test_lesson_interactive_listening_surfaces_visible_turn_cue():
 
     assert "lesson_interactive_listen_pending_.exchange(false)" in listening
     lesson_cue = listening[listening.index("lesson_interactive_listen_pending_.exchange(false)") :]
+    assert "display->ClearChatMessages();" in lesson_cue
     assert 'display->SetStatus("Con nói nhé...");' in lesson_cue
     assert 'display->SetEmotion("thinking");' in lesson_cue
     assert 'display->SetChatMessage("system", "Con nói nhé.");' in lesson_cue
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" in lesson_cue
+    assert lesson_cue.index("display->ClearChatMessages();") < lesson_cue.index(
+        'display->SetChatMessage("system", "Con nói nhé.");'
+    )
 
 
 def test_lesson_interactive_listening_cue_survives_cold_channel_open():
@@ -1955,9 +1959,13 @@ def test_lesson_interactive_listening_cue_survives_cold_channel_open():
 
     assert "lesson_interactive_listen_pending_.exchange(false)" in listening_body
     lesson_cue = listening_body[listening_body.index("lesson_interactive_listen_pending_.exchange(false)") :]
+    assert "display->ClearChatMessages();" in lesson_cue
     assert 'display->SetStatus("Con nói nhé...");' in lesson_cue
     assert 'display->SetChatMessage("system", "Con nói nhé.");' in lesson_cue
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" in lesson_cue
+    assert lesson_cue.index("display->ClearChatMessages();") < lesson_cue.index(
+        'display->SetChatMessage("system", "Con nói nhé.");'
+    )
     assert lesson_cue.index('display->SetStatus("Con nói nhé...");') < lesson_cue.index(
         "protocol_->SendStartListening(listening_mode_);"
     )
