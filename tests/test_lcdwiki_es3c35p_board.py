@@ -60,6 +60,7 @@ def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_g
     assert "rm -f sdkconfig" in script
     assert 'rm -rf "$PROJECT_DIR/build"' in script
     assert "idf.py set-target esp32s3" in script
+    assert "idf.py -DIDF_TARGET=esp32s3 reconfigure" not in script
     assert "grep -q '^CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y$' sdkconfig" in script
     assert "BLACK-SCREEN" in script
     assert "idf.py -p \"$PORT\" flash" in script
@@ -67,22 +68,26 @@ def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_g
     assert "SDKCONFIG_DEFAULTS" in flash_instructions
     assert "idf.py build" in flash_instructions
     assert "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y" in flash_instructions
+    assert 'IDF_EXPORT="${IDF_EXPORT:-$HOME/esp/esp-idf/export.sh}"' in script
+    assert 'esp-idf-v5.5.2/export.sh' not in script
 
 def test_lcdwiki_es3c35p_fleet_build_script_removes_stale_build_dir_before_set_target():
     script = read("build-lcdwiki.sh")
 
+    lock = script.index('mkdir "$BUILD_LOCK_DIR"')
     sdkconfig_clean = script.index("rm -f sdkconfig")
     build_clean = script.index('rm -rf "$PROJECT_DIR/build"')
     set_target = script.index("idf.py set-target esp32s3")
 
-    assert sdkconfig_clean < build_clean < set_target
+    assert lock < sdkconfig_clean < build_clean < set_target
 
-def test_lcdwiki_es3c35p_fleet_build_script_retries_fresh_build_once():
+def test_lcdwiki_es3c35p_fleet_build_script_does_not_retry_or_bypass_idf_build():
     script = read("build-lcdwiki.sh")
 
-    assert "if ! idf.py build; then" in script
-    assert "WARN: idf.py build failed; retrying once" in script
-    assert "idf.py build" in script[script.index("WARN: idf.py build failed; retrying once") :]
+    assert "if ! idf.py build; then" not in script
+    assert "retrying once" not in script
+    assert 'ninja -C "$PROJECT_DIR/build" -j1 all' not in script
+    assert "idf.py build" in script
 
 def test_lcdwiki_es3c35p_ci_release_build_disables_hardware_aes_and_gates_config():
     config_json = read("main/boards/lcdwiki-es3c35p/config.json")
@@ -176,6 +181,13 @@ def test_lcdwiki_es3c35p_generated_language_matches_vietnamese_sdkconfig():
     assert '"WIFI_CONFIG_MODE": "Chế độ cấu hình Wi-Fi"' in vi
     assert "配网模式" not in vi
 
+
+def test_lcdwiki_es3c35p_generation_uses_idf_python_interpreter():
+    cmake = read("main/CMakeLists.txt")
+
+    assert "COMMAND python " not in cmake
+    assert "COMMAND ${PYTHON} ${PROJECT_DIR}/scripts/gen_lang.py" in cmake
+    assert "COMMAND ${PYTHON} ${PROJECT_DIR}/scripts/build_default_assets.py" in cmake
 
 def test_lcdwiki_es3c35p_uses_st77922_qspi_pins_and_touch_i2c():
     manifest = read("main/idf_component.yml")

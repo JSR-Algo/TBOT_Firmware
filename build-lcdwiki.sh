@@ -84,6 +84,13 @@ for f in "${_defaults_arr[@]}"; do
     fi
 done
 
+BUILD_LOCK_DIR="$PROJECT_DIR/.build-lcdwiki.lock"
+if ! mkdir "$BUILD_LOCK_DIR"; then
+    echo "ERROR: another build-lcdwiki.sh run is active; refusing to remove build/." >&2
+    exit 1
+fi
+trap 'rmdir "$BUILD_LOCK_DIR"' EXIT
+
 # --- 3. remove stale sdkconfig + pin target so the board line is re-derived ---
 #     A stale sdkconfig or build dir (e.g. left over from a freenove/bread build
 #     or a failed toolchain switch) would otherwise be reused and silently keep
@@ -107,10 +114,7 @@ fi
 echo "OK: LCDWiki ES3C35P board confirmed in sdkconfig."
 
 # --- 5. build ---
-if ! idf.py build; then
-    echo "WARN: idf.py build failed; retrying once (fresh build dependency-dir race)." >&2
-    idf.py build
-fi
+idf.py build
 
 # --- 5b. report app binary size (source of truth: the flashed .bin) ---
 APP_BIN="$PROJECT_DIR/build/xiaozhi.bin"   # project(xiaozhi) in CMakeLists.txt
