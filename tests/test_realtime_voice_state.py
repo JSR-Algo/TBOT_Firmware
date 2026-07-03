@@ -989,16 +989,33 @@ def test_lesson_runtime_speaking_timeout_keeps_child_wait_cue():
     assert 'display->SetEmotion("thinking");' in lesson_branch
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);" not in lesson_branch
 
-def test_lesson_prompt_speaking_timeout_clears_pending_child_turn():
+def test_lesson_prompt_speaking_timeout_preserves_pending_child_turn():
     app_cc = read("main/application.cc")
 
     start = app_cc.index("void Application::HandleSpeakingTimeout")
     end = app_cc.index("void Application::AbortSpeaking", start)
     body = app_cc[start:end]
 
+    assert "lesson_answer_turn" in body
+    assert "lesson_runtime_active_.load() && lesson_interactive_listen_pending_.load()" in body
+    assert body.index("lesson_answer_turn") < body.index("CancelLessonInteractiveListening();")
+    cancel_guard = body[
+        body.index("lesson_answer_turn") :
+        body.index("CancelLessonInteractiveListening();")
+    ]
+    assert "if (!lesson_answer_turn)" in cancel_guard
+
     assert "CancelLessonInteractiveListening();" in body
-    assert body.index("CancelLessonInteractiveListening();") < body.index(
+    manual_start = body.index("if (listening_mode_ == kListeningModeManualStop)")
+    manual_body = body[manual_start:body.index("} else if", manual_start)]
+    assert "if (lesson_answer_turn)" in manual_body
+    answer_turn = manual_body[manual_body.index("if (lesson_answer_turn)") :]
+    assert "SetDeviceState(kDeviceStateListening);" in answer_turn
+    assert answer_turn.index("SetDeviceState(kDeviceStateListening);") < answer_turn.index(
         "SetDeviceState(kDeviceStateIdle);"
+    )
+    assert answer_turn.index("SetDeviceState(kDeviceStateListening);") < answer_turn.index(
+        "show_timeout_cue();"
     )
 
 

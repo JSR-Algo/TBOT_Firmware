@@ -3860,7 +3860,11 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
     if (protocol_) {
         protocol_->SendAbortSpeaking(kAbortReasonNone);
     }
-    CancelLessonInteractiveListening();
+    const bool lesson_answer_turn =
+        lesson_runtime_active_.load() && lesson_interactive_listen_pending_.load();
+    if (!lesson_answer_turn) {
+        CancelLessonInteractiveListening();
+    }
     auto show_timeout_cue = [this]() {
         auto display = Board::GetInstance().GetDisplay();
         if (lesson_runtime_active_.load()) {
@@ -3873,6 +3877,11 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
         }
     };
     if (listening_mode_ == kListeningModeManualStop) {
+        if (lesson_answer_turn) {
+            SetDeviceState(kDeviceStateListening);
+            ESP_LOGI(TAG, "lesson prompt timeout -> listening");
+            return;
+        }
         SetDeviceState(kDeviceStateIdle);
         show_timeout_cue();
     } else if (listening_mode_ == kListeningModeAutoStop) {
