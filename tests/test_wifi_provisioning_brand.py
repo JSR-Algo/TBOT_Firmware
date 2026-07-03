@@ -118,6 +118,17 @@ def test_blufi_config_mode_reopens_robot_scan_after_ble_timeout():
     timer_idx = body.index("blufi.StartBleSetupTimeout")
     assert timeout_idx < init_idx < timer_idx
 
+
+def test_blufi_only_build_does_not_reference_softap_timeout_without_hotspot_guard():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    start = wifi_board.index("void WifiBoard::OnApSetupTimeout")
+    end = wifi_board.index("void WifiBoard::StartApSetupTimeout", start)
+    body = wifi_board[start:end]
+
+    timeout_idx = body.index("CONFIG_AP_SETUP_TIMEOUT_SEC")
+    guard_idx = body.index("#ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING")
+    assert guard_idx < timeout_idx
+
 def test_wifi_config_releases_wake_word_resources_before_ble_init():
     wifi_board = read("main/boards/common/wifi_board.cc")
     audio_h = read("main/audio/audio_service.h")

@@ -239,7 +239,9 @@ void WifiBoard::OnApSetupTimeout(void* arg) {
         ESP_LOGW(TAG, "AP setup TIMEOUT teardown executing on Application task");
         if (Application::GetInstance().IsLessonRuntimeActive()) {
             ESP_LOGI(TAG, "AP setup TIMEOUT teardown deferred during lesson");
+#ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
             board->StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC);
+#endif
             return;
         }
         WifiManager::GetInstance().StopConfigAp();
