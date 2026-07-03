@@ -1233,6 +1233,7 @@ void test_step_full_render_http() {
             "robot overlay image drawn");
     require(!disp.lesson_captions.empty() &&
             disp.lesson_captions.back() == "Xin chào", "authored prompt caption drawn");
+    require(disp.last_status == "Đang học...", "rendered step replaces loading status with active lesson status");
     require(disp.chat_messages.empty(), "new lesson step clears stale chat and does not enter normal chat history");
     require(disp.last_emotion == "happy", "teaching expression -> happy emotion");
     // passive greeting: no interactive listen window opened.

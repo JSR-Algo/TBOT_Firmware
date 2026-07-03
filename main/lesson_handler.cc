@@ -1286,6 +1286,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
             if (clear_overlay && lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
             display->ClearChatMessages();
+            display->SetStatus("Đang học...");
             display->SetEmotion(emo.c_str());
             display->SetLessonCaption(cap.c_str());
         });
