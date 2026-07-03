@@ -1925,6 +1925,22 @@ def test_lesson_stop_listening_clears_pending_child_turn_before_idle():
         "SetDeviceState(kDeviceStateIdle);"
     )
 
+def test_lesson_stop_listening_invalidates_pending_child_turn_generation():
+    app_cc = read("main/application.cc")
+
+    handle_start = app_cc.index("void Application::HandleStopListeningEvent")
+    handle_end = app_cc.index("void Application::HandleWakeWordDetectedEvent", handle_start)
+    handle_body = app_cc[handle_start:handle_end]
+    listening = handle_body[handle_body.index("if (state == kDeviceStateListening)") :]
+
+    assert "lesson_interactive_listen_generation_.fetch_add(1);" in listening
+    assert listening.index("lesson_interactive_listen_generation_.fetch_add(1);") < listening.index(
+        "lesson_interactive_listen_pending_.store(false);"
+    )
+    assert listening.index("lesson_interactive_listen_generation_.fetch_add(1);") < listening.index(
+        "SetDeviceState(kDeviceStateIdle);"
+    )
+
 
 def test_stop_listening_release_preserves_pending_lesson_prompt_while_speaking():
     app_cc = read("main/application.cc")

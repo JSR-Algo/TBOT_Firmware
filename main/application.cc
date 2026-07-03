@@ -3418,6 +3418,7 @@ void Application::HandleStopListeningEvent() {
     }
 
     if (state == kDeviceStateListening) {
+        lesson_interactive_listen_generation_.fetch_add(1);
         if (protocol_) {
             protocol_->SendStopListening();
         }
