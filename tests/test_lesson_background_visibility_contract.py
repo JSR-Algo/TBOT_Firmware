@@ -412,7 +412,7 @@ def test_lesson_step_ack_rendered_requires_display_surface():
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
     display_idx = step_branch.index("Display* display = base_display;")
-    rendered_idx = step_branch.index("const bool rendered = display != nullptr;")
+    rendered_idx = step_branch.index("const bool rendered = display != nullptr && dynamic_cast<NoDisplay*>(display) == nullptr;")
     ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
 
     assert display_idx < rendered_idx < ack_idx

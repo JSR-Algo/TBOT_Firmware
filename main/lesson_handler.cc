@@ -1285,7 +1285,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // media layer, clear any previous lesson layer so a caption-only step is not shown
     // over a stale picture.
     Display* display = base_display;
-    const bool rendered = display != nullptr;
+    const bool rendered = display != nullptr && dynamic_cast<NoDisplay*>(display) == nullptr;
     const bool has_visible_content = rendered &&
         (!caption.empty() || poster_drew || object_drew || overlay_drew);
     if (display) {

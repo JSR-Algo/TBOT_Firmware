@@ -34,3 +34,5 @@ public:
         lesson_captions.emplace_back(message ? message : "");
     }
 };
+
+class NoDisplay : public Display {};

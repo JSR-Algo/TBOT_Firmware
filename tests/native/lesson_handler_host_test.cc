@@ -1663,6 +1663,29 @@ void test_step_no_display_does_not_open_listen() {
             "no-display interactive step does not open mic for unseen prompt");
 }
 
+void test_step_no_display_object_does_not_open_listen() {
+    ResetObservable();
+    NoDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    Handle(StepFrame(3, "s-no-display-object-listen",
+                     "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"What animal is beside the barn?\""
+                     ",\"stepType\":\"model\""
+                     ",\"completionClass\":\"interactive\"",
+                     ""));
+
+    const size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack", "NoDisplay object step still acks");
+    require(FrameBodyBool(idx, "rendered", true) == false,
+            "NoDisplay object reports rendered=false");
+    require(App().prepare_listen_calls == 0,
+            "NoDisplay object does not open mic for unseen prompt");
+}
+
 void test_visual_only_interactive_step_does_not_open_listen_without_caption() {
     ResetObservable();
     LvglDisplay disp;
@@ -2556,6 +2579,7 @@ int main() {
     test_passive_step_cancels_prior_interactive_listen();
     test_passive_step_invalidates_queued_interactive_listen_prepare();
     test_step_no_display_does_not_open_listen();
+    test_step_no_display_object_does_not_open_listen();
     test_visual_only_interactive_step_does_not_open_listen_without_caption();
     test_step_blank_visible_content_does_not_open_listen();
     test_step_degraded_and_caption_fallback();
