@@ -394,7 +394,7 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     object_idx = step_branch.index("bool object_drew = false")
     overlay_idx = step_branch.index("bool overlay_drew = false")
     degraded_idx = step_branch.index("const bool degraded =")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
 
     assert poster_idx < object_idx < overlay_idx < degraded_idx < ack_idx
     degraded_expr = step_branch[degraded_idx : step_branch.index(";", degraded_idx)]
@@ -410,10 +410,32 @@ def test_lesson_step_ack_rendered_requires_display_surface():
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
     display_idx = step_branch.index("Display* display = base_display;")
     rendered_idx = step_branch.index("const bool rendered = display != nullptr;")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, render_elapsed_ms)")
 
     assert display_idx < rendered_idx < ack_idx
     assert "emit_ack(root, sequence, /*rendered*/ true, degraded)" not in step_branch
+
+def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+
+    step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') :]
+    start_idx = step_branch.index("const int64_t render_start_us = esp_timer_get_time();")
+    poster_idx = step_branch.index("FetchLessonImage(poster_src)")
+    object_idx = step_branch.index("FetchLessonImage(object_src)")
+    overlay_idx = step_branch.index("FetchLessonImage(overlay_src)")
+    schedule_idx = step_branch.index("Schedule([display, lvgl_display")
+    elapsed_idx = step_branch.index("const int64_t render_elapsed_ms =")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, render_elapsed_ms)")
+    log_idx = step_branch.index("renderElapsedMs=%lld")
+
+    assert start_idx < poster_idx < object_idx < overlay_idx < schedule_idx < elapsed_idx < ack_idx < log_idx
+    raw_elapsed_idx = step_branch.index("const int64_t render_elapsed_us = esp_timer_get_time() - render_start_us;")
+    assert schedule_idx < raw_elapsed_idx < elapsed_idx
+    assert "render_elapsed_us < 0 ? 0 : render_elapsed_us / 1000" in step_branch
+    assert "kLessonRenderElapsedMaxMs" in step_branch[elapsed_idx : step_branch.index(";", elapsed_idx)]
+    assert 'cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));' in body
+    assert "renderElapsedMs" not in step_branch[:start_idx]
 
 def test_lesson_stop_and_caption_only_steps_clear_foreground_object():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")

@@ -34,6 +34,7 @@
 #include <cJSON.h>
 #include <esp_err.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <esp_heap_caps.h>
 
 #define TAG "Lesson"
@@ -247,6 +248,7 @@ constexpr size_t kMaxLessonDecodedImageBytes = 320 * 240 * 2;
 constexpr int kLessonImageHttpTimeoutMs = 1200;
 constexpr size_t kLessonImageCacheMaxEntries = 8;
 constexpr size_t kLessonImageCacheMaxBytes = 384 * 1024;
+constexpr int64_t kLessonRenderElapsedMaxMs = 60000;
 
 bool LessonDecodedImageFitsBudget(size_t decoded_len, size_t width, size_t height, size_t stride) {
     if (decoded_len == 0 || width == 0 || height == 0 || stride == 0) return false;
@@ -756,11 +758,15 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // the ack's own envelope.sequence is the firmware F->S counter; there is NO
     // ackFor field. stepId is echoed (null on lifecycle, "s4" on a step).
     auto emit_ack = [&emit](const cJSON* in, int64_t acked, bool rendered, bool degraded,
-                            cJSON* asset_pack_ack = nullptr, bool cache = true) {
+                            cJSON* asset_pack_ack = nullptr, bool cache = true,
+                            int64_t render_elapsed_ms = -1) {
         cJSON* b = cJSON_CreateObject();
         cJSON_AddNumberToObject(b, "acks", static_cast<double>(acked));
         cJSON_AddBoolToObject(b, "rendered", rendered);
         cJSON_AddBoolToObject(b, "degraded", degraded);
+        if (render_elapsed_ms >= 0) {
+            cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));
+        }
         // FW-LESSON-02: remember this ack's body so a later duplicate of `acked` replays
         // the EXACT same (rendered, degraded). A re-ack (cache=false) never overwrites
         // the cached original.
@@ -1146,6 +1152,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     Display* base_display = Board::GetInstance().GetDisplay();
     LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(base_display);
 
+    const int64_t render_start_us = esp_timer_get_time();
     Application::GetInstance().BeginLessonNetworkRenderQuiet();
     struct LessonNetworkRenderQuietGuard {
         ~LessonNetworkRenderQuietGuard() {
@@ -1263,11 +1270,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
             display->SetLessonCaption(cap.c_str());
         });
     }
+    const int64_t render_elapsed_us = esp_timer_get_time() - render_start_us;
+    const int64_t render_elapsed_raw_ms = render_elapsed_us < 0 ? 0 : render_elapsed_us / 1000;
+    const int64_t render_elapsed_ms = render_elapsed_raw_ms > kLessonRenderElapsedMaxMs
+                                          ? kLessonRenderElapsedMaxMs
+                                          : render_elapsed_raw_ms;
 
     // Canonical step-ack first (body.acks echoes the step's sequence). For a PASSIVE
     // narration step this ack IS the completion signal (the ESP auto-advances on it),
     // so it is the ONLY F->S frame for such a step.
-    emit_ack(root, sequence, rendered, degraded);
+    emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms);
 
     // FW-01 / FW-LESSON-01: render ack is not child-response evidence. Passive
     // narration steps auto-advance on this ack; interactive steps wait for the
@@ -1285,6 +1297,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
             Application::GetInstance().PrepareLessonInteractiveListening();
         });
     }
-    ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d",
-             sid != nullptr ? sid : "?", passive, degraded);
+    ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d renderElapsedMs=%lld",
+             sid != nullptr ? sid : "?", passive, degraded, (long long)render_elapsed_ms);
 }
