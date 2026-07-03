@@ -1939,6 +1939,25 @@ def test_lesson_interactive_listening_pending_is_cleared_on_cancel_paths():
     assert "Application::GetInstance().CancelLessonInteractiveListening();" in failure_helper
     assert "end_lesson_after_failure();" in lesson_error
 
+def test_stale_scheduled_lesson_listen_prepare_does_not_open_mic_after_lesson_end():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::PrepareLessonInteractiveListening()")
+    end = app_cc.index("void Application::CancelLessonInteractiveListening()", start)
+    body = app_cc[start:end]
+
+    assert "if (!lesson_runtime_active_.load())" in body
+    assert body.index("if (!lesson_runtime_active_.load())") < body.index(
+        "lesson_interactive_listen_pending_.store(true);"
+    )
+    assert body.index("if (!lesson_runtime_active_.load())") < body.index("StartListening();")
+    inactive_guard = body[
+        body.index("if (!lesson_runtime_active_.load())"):
+        body.index("lesson_interactive_listen_pending_.store(true);")
+    ]
+    assert "return;" in inactive_guard
+    assert "StartListening" not in inactive_guard
+
 def test_lesson_interactive_cancel_stops_active_child_mic_without_idle_repaint():
     app_cc = read("main/application.cc")
     app_h = read("main/application.h")
