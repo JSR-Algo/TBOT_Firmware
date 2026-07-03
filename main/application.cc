@@ -3366,6 +3366,10 @@ void Application::HandleStartListeningEvent() {
     } else if (state == kDeviceStateListening) {
         ESP_LOGI(TAG, "lesson/manual listening rearm");
         listening_mode_ = kListeningModeManualStop;
+        if (lesson_interactive_listening_active_.load() && !lesson_interactive_listen_pending_.load()) {
+            ESP_LOGI(TAG, "lesson listening already active; duplicate start ignored");
+            return;
+        }
         if (lesson_interactive_listen_pending_.exchange(false)) {
             lesson_interactive_listening_active_.store(true);
             auto display = Board::GetInstance().GetDisplay();

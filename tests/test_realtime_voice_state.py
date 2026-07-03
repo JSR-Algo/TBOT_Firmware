@@ -1719,6 +1719,26 @@ def test_lesson_start_listening_child_cues_guard_missing_display():
     assert "if (display)" in listening_display[: listening_display.index("audio_service_.PlaySound")]
     assert listening_display.index("if (display)") < listening_display.index("display->ClearChatMessages();")
 
+
+def test_lesson_active_child_start_listening_duplicate_ignored_before_resend():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    listening = body[body.index("state == kDeviceStateListening") :]
+
+    guard = "if (lesson_interactive_listening_active_.load() && !lesson_interactive_listen_pending_.load())"
+    assert guard in listening
+    guard_body = listening[
+        listening.index(guard) :
+        listening.index("if (lesson_interactive_listen_pending_.exchange(false))")
+    ]
+    assert "return;" in guard_body
+    assert "protocol_->SendStartListening" not in guard_body
+    assert guard_body.index("return;") < listening.index("protocol_->SendStartListening")
+
+
 def test_lesson_runtime_start_listening_ignores_non_answer_press():
     app_cc = read("main/application.cc")
 
