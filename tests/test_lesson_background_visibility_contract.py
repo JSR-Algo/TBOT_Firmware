@@ -138,8 +138,11 @@ def test_lesson_stop_clears_layers_and_uses_terminal_reason_cue():
     assert "Lang::Sounds::OGG_SUCCESS" in stop_branch
     assert "Lang::Sounds::OGG_POPUP" in stop_branch
     assert "Lang::Sounds::OGG_EXCLAMATION" in stop_branch
+    assert "display->ClearChatMessages()" in stop_branch
     assert 'display->SetChatMessage("assistant", stop_message)' in stop_branch
-    assert "else display->ClearChatMessages()" in stop_branch
+    assert stop_branch.index("display->ClearChatMessages()") < stop_branch.index(
+        'display->SetChatMessage("assistant", stop_message)'
+    )
 
 
 def test_lesson_lifecycle_cues_clear_stale_chat_copy():

@@ -967,10 +967,13 @@ void test_stop_reason_controls_terminal_cue() {
     Board::GetInstance().network_ = nullptr;
     OpenSession();
 
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
     Handle(StopFrame(3, "\"reason\":\"FAILED\""));
     require(FrameType(2) == "lesson_ack", "failed stop is acked");
     require(disp.last_status == "Lỗi", "failed stop shows error status");
     require(disp.last_emotion == "sad", "failed stop shows sad face");
+    require(disp.chat_messages.size() == 1,
+            "failed stop clears stale child-turn chat before terminal copy");
     require(!disp.chat_messages.empty() &&
             disp.chat_messages.back().second == "Bài học bị gián đoạn.",
             "failed stop shows child-safe interruption copy");
@@ -982,12 +985,15 @@ void test_stop_reason_controls_terminal_cue() {
     Board::GetInstance().network_ = nullptr;
     OpenSession();
     App().device_state = kDeviceStateSpeaking;
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
     Handle(StopFrame(3, "\"reason\":\"CANCELLED\""));
     require(FrameType(2) == "lesson_ack", "cancelled stop is acked");
     require(App().abort_speaking_calls == 1, "cancelled stop aborts any speaking prompt");
     require(App().last_abort_reason == kAbortReasonNone, "cancelled stop abort is normal");
     require(disp.last_status == "Bài học đã dừng", "cancelled stop shows stopped status");
     require(disp.last_emotion == "neutral", "cancelled stop restores neutral face");
+    require(disp.chat_messages.size() == 1,
+            "cancelled stop clears stale child-turn chat before terminal copy");
     require(!disp.chat_messages.empty() &&
             disp.chat_messages.back().second == "Bài học đã dừng.",
             "cancelled stop shows child-safe stopped copy");

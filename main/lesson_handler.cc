@@ -1091,8 +1091,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 display->SetLessonCaption("");
                 display->SetStatus(stop_status);
                 display->SetEmotion(stop_emotion);
+                display->ClearChatMessages();
                 if (stop_message != nullptr) display->SetChatMessage("assistant", stop_message);
-                else display->ClearChatMessages();
                 Application::GetInstance().PlaySound(stop_sound);
             });
         }
