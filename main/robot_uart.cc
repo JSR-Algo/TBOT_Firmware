@@ -23,7 +23,11 @@
 #endif
 
 #ifndef ROBOT_UART_ALT_NUM
+#ifdef UART_NUM_2
 #define ROBOT_UART_ALT_NUM UART_NUM_2
+#else
+#define ROBOT_UART_ALT_NUM ROBOT_UART_NUM
+#endif
 #endif
 
 #ifndef ROBOT_UART_ALT_TX_PIN

@@ -94,6 +94,20 @@ def test_robot_uart_reads_servant_ack_asynchronously():
     assert "WaitForAck" not in source
 
 
+def test_robot_uart_default_alt_port_falls_back_when_uart2_is_unavailable():
+    source = read("main/robot_uart.cc")
+    default_block = re.search(
+        r"#ifndef ROBOT_UART_ALT_NUM(?P<body>.*?)#ifndef ROBOT_UART_ALT_TX_PIN",
+        source,
+        re.S,
+    ).group("body")
+
+    assert "#ifdef UART_NUM_2" in default_block
+    assert "#define ROBOT_UART_ALT_NUM UART_NUM_2" in default_block
+    assert "#else" in default_block
+    assert "#define ROBOT_UART_ALT_NUM ROBOT_UART_NUM" in default_block
+    assert "#endif" in default_block
+
 def test_application_triggers_left_arm_from_websocket_and_mcp():
     app_cc = read("main/application.cc")
     app_h = read("main/application.h")
