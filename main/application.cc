@@ -3711,7 +3711,12 @@ void Application::HandleStateChangedEvent() {
         }
         case kDeviceStateConnecting:
             if (lesson_runtime_active_.load()) {
-                display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                if (lesson_interactive_listen_pending_.load()) {
+                    display->ClearChatMessages();
+                    display->SetStatus("Sắp đến lượt con...");
+                } else {
+                    display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                }
                 display->SetEmotion("thinking");
                 break;
             }

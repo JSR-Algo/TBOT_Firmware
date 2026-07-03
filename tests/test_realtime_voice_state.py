@@ -2018,6 +2018,31 @@ def test_lesson_interactive_listen_prepare_shows_pending_turn_cue():
         'display->SetStatus("Sắp đến lượt con...");'
     ) < body.index("StartListening();")
 
+def test_lesson_pending_turn_cue_survives_cold_channel_connecting_state():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStateChangedEvent()")
+    end = app_cc.index("void Application::Schedule(std::function", start)
+    body = app_cc[start:end]
+    connecting = body[
+        body.index("case kDeviceStateConnecting:") :
+        body.index("case kDeviceStateListening:")
+    ]
+    lesson_connecting = connecting[
+        connecting.index("if (lesson_runtime_active_.load())") :
+        connecting.index("break;", connecting.index("if (lesson_runtime_active_.load())"))
+    ]
+
+    assert "lesson_interactive_listen_pending_.load()" in lesson_connecting
+    assert "display->ClearChatMessages();" in lesson_connecting
+    assert 'display->SetStatus("Sắp đến lượt con...");' in lesson_connecting
+    assert 'display->SetStatus(Lang::Strings::PLEASE_WAIT);' in lesson_connecting
+    assert lesson_connecting.index("lesson_interactive_listen_pending_.load()") < lesson_connecting.index(
+        "display->ClearChatMessages();"
+    ) < lesson_connecting.index(
+        'display->SetStatus("Sắp đến lượt con...");'
+    ) < lesson_connecting.index('display->SetStatus(Lang::Strings::PLEASE_WAIT);')
+
 def test_lesson_interactive_cancel_stops_active_child_mic_without_idle_repaint():
     app_cc = read("main/application.cc")
     app_h = read("main/application.h")
