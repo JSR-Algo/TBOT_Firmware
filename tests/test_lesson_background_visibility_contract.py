@@ -310,7 +310,7 @@ def test_lesson_step_uses_dedicated_caption_overlay_not_chat_bubble():
     assert "display->SetLessonCaption(cap.c_str())" in step_branch
     assert 'display->SetChatMessage("assistant", cap.c_str())' not in step_branch
 
-def test_lesson_caption_overlay_is_bounded_for_small_tft_prompts():
+def test_lesson_caption_overlay_wraps_for_small_tft_prompts():
     source = SOURCE.read_text(encoding="utf-8")
     setup_body = function_body(source, "void LcdDisplay::SetupUI")
     caption_setup = setup_body[setup_body.index("lesson_caption_bar_ = lv_obj_create") : setup_body.index("lv_obj_add_flag(lesson_caption_bar_", setup_body.index("lesson_caption_bar_ = lv_obj_create"))]
@@ -323,7 +323,8 @@ def test_lesson_caption_overlay_is_bounded_for_small_tft_prompts():
     assert "lv_obj_set_width(lesson_caption_bar_, width_ * kLessonCaptionWidthPercent / 100)" in caption_setup
     assert "lv_obj_set_height(lesson_caption_bar_, height_ * kLessonCaptionMaxHeightPercent / 100)" in caption_setup
     assert "lv_obj_set_width(lesson_caption_label_, width_ * kLessonCaptionLabelWidthPercent / 100)" in caption_setup
-    assert "lv_label_set_long_mode(lesson_caption_label_, LV_LABEL_LONG_DOT)" in caption_setup
+    assert "lv_label_set_long_mode(lesson_caption_label_, LV_LABEL_LONG_WRAP)" in caption_setup
+    assert "LV_LABEL_LONG_DOT" not in caption_setup
     assert "lv_obj_align(lesson_caption_bar_, LV_ALIGN_BOTTOM_MID, 0, -height_ / kLessonCaptionBottomInsetDivisor)" in caption_setup
     assert "lv_obj_align(lesson_caption_bar_, LV_ALIGN_BOTTOM_MID, 0, -height_ / kLessonCaptionBottomInsetDivisor)" in caption_body
     assert "LV_SIZE_CONTENT" not in caption_setup

@@ -460,7 +460,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(lesson_caption_bar_, LV_ALIGN_BOTTOM_MID, 0, -height_ / kLessonCaptionBottomInsetDivisor);
     lesson_caption_label_ = lv_label_create(lesson_caption_bar_);
     lv_obj_set_width(lesson_caption_label_, width_ * kLessonCaptionLabelWidthPercent / 100);
-    lv_label_set_long_mode(lesson_caption_label_, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(lesson_caption_label_, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(lesson_caption_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(lesson_caption_label_, lvgl_theme->text_color(), 0);
     lv_label_set_text(lesson_caption_label_, "");
