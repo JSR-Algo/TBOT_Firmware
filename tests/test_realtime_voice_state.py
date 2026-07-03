@@ -1998,6 +1998,19 @@ def test_stale_scheduled_lesson_listen_prepare_does_not_open_mic_after_lesson_en
     assert "return;" in inactive_guard
     assert "StartListening" not in inactive_guard
 
+def test_lesson_interactive_listen_prepare_shows_pending_turn_cue():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::PrepareLessonInteractiveListening()")
+    end = app_cc.index("void Application::CancelLessonInteractiveListening()", start)
+    body = app_cc[start:end]
+
+    assert 'display->SetStatus("Sắp đến lượt con...");' in body
+    assert 'display->SetEmotion("thinking");' in body
+    assert body.index("lesson_interactive_listen_pending_.store(true);") < body.index(
+        'display->SetStatus("Sắp đến lượt con...");'
+    ) < body.index("StartListening();")
+
 def test_lesson_interactive_cancel_stops_active_child_mic_without_idle_repaint():
     app_cc = read("main/application.cc")
     app_h = read("main/application.h")

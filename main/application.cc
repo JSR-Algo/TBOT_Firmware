@@ -2759,6 +2759,11 @@ void Application::PrepareLessonInteractiveListening(uint32_t generation) {
         return;
     }
     lesson_interactive_listen_pending_.store(true);
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->SetStatus("Sắp đến lượt con...");
+        display->SetEmotion("thinking");
+    }
     StartListening();
 }
 
