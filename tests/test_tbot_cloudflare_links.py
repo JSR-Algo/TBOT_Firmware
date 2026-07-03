@@ -3,8 +3,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-OTA_URL = "https://tbot-backend-8wmh.onrender.com/tbot/ota/"
-PROVISIONING_STATUS_URL = "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
+OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
+PROVISIONING_STATUS_URL = "https://esp.tjbot.vn/tbot/v1/device/provisioning/status"
 
 
 def assert_no_ephemeral_endpoint(contents: str, source: str) -> None:

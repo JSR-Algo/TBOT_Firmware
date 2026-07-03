@@ -4,13 +4,13 @@ Build production cho robot LCDWiki ES3C35P dùng cấu hình mặc định đã 
 
 - `CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y`
 - `# CONFIG_MBEDTLS_HARDWARE_AES is not set`
-- `CONFIG_OTA_URL="https://tbot-backend-8wmh.onrender.com/tbot/ota/"`
+- `CONFIG_OTA_URL="https://esp.tjbot.vn/tbot/ota/"`
 - `CONFIG_WEBSOCKET_URL=""` — WS production lấy từ OTA/bootstrap hoặc build-time injection.
 
 ## Endpoint đang dùng để nạp code
 
-- API/bootstrap seed: `https://tbot-backend-8wmh.onrender.com/v1`
-- OTA seed: `https://tbot-backend-8wmh.onrender.com/tbot/ota/`
+- API/bootstrap seed: `https://esp.tjbot.vn/tbot/v1`
+- OTA seed: `https://esp.tjbot.vn/tbot/ota/`
 - WS: do OTA/bootstrap trả về từ managed robot-server endpoint. Không commit quick-tunnel host.
 
 ## Cách flash 1 — USB (nhanh nhất, ~30s)

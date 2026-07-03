@@ -819,6 +819,25 @@ void Application::HandleLessonMessage(const cJSON* root) {
         ClearTerminalLessonCursor();
         show_lesson_failure_display();
     };
+    auto clear_stale_lesson_for_fresh_prepare = [this]() {
+        Application::GetInstance().CancelLessonInteractiveListening();
+        Application::GetInstance().SetLessonRuntimeActive(false);
+        ClearTerminalLessonCursor();
+        Display* display = Board::GetInstance().GetDisplay();
+        LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+        if (display) {
+            Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonMode(false);
+                display->SetLessonCaption("");
+                display->ClearChatMessages();
+                display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                display->SetEmotion("thinking");
+            });
+        }
+    };
 
     const bool is_prepare = strcmp(type, "lesson_prepare") == 0;
     double prepare_assignment_version = 0.0;
@@ -845,6 +864,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     if (is_prepare && !duplicate_prepare) {
         // lesson_prepare (re)establishes the single active session and resets the
         // F->S counter + the inbound sequence cursor for this assignment.
+        clear_stale_lesson_for_fresh_prepare();
         ClearLessonImageCache();
         g_session = LessonSession{};
         g_session.assignment_id = assignment_id;

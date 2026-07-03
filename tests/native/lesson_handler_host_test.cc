@@ -695,6 +695,57 @@ void test_prepare_new_assignment_version_same_session_resets_stream() {
             "republished version prepare acks new assetPack cacheKey, not cached stale pack");
 }
 
+void test_fresh_prepare_clears_stale_active_lesson_before_start() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+    Handle(StepFrame(3, "old-interactive", "http://x/old-p.jpg", "http://x/old-o.jpg",
+                     "http://x/old-r.jpg",
+                     ",\"prompt\":\"Con nói: barn.\""
+                     ",\"stepType\":\"ask\""
+                     ",\"completionClass\":\"interactive\"",
+                     ""));
+    require(App().prepare_listen_calls == 1,
+            "old interactive step opened a child-response window");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "old active lesson rendered a background");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Con nói: barn.",
+            "old active lesson rendered child-turn prompt");
+
+    const int cancel_after_old_step = App().cancel_listen_calls;
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":2"));
+
+    require(FrameType(Sent().size() - 1) == "lesson_ack",
+            "fresh valid prepare is acked");
+    require(App().cancel_listen_calls > cancel_after_old_step,
+            "fresh valid prepare cancels stale child-response listening");
+    require(App().lesson_runtime_active == false,
+            "fresh valid prepare clears the old active lesson runtime flag before start");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "fresh valid prepare clears stale background before new start");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "fresh valid prepare clears stale object before new start");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "fresh valid prepare clears stale overlay before new start");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "fresh valid prepare clears stale child-turn caption before new start");
+    require(disp.chat_messages.empty(),
+            "fresh valid prepare clears stale child-turn chat copy before new start");
+    require(disp.last_status == "Vui lòng đợi...",
+            "fresh valid prepare shows a neutral wait state before new start");
+    require(disp.last_emotion == "thinking",
+            "fresh valid prepare shows a calm thinking face before new start");
+}
+
 void test_prepare_after_stop_same_session_resets_stream() {
     ResetObservable();
     FreshSession();
@@ -2391,6 +2442,7 @@ int main() {
     test_unknown_session_and_staleness();
     test_dedup_reack();
     test_prepare_new_assignment_version_same_session_resets_stream();
+    test_fresh_prepare_clears_stale_active_lesson_before_start();
     test_prepare_after_stop_same_session_resets_stream();
     test_prepare_after_terminal_error_same_session_resets_stream();
     test_start_stop_error_lifecycle();

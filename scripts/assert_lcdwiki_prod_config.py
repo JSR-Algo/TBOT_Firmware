@@ -4,6 +4,9 @@ import sys
 from pathlib import Path
 
 
+PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
+
+
 def main() -> int:
     sdkconfig_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("sdkconfig")
     if not sdkconfig_path.exists():
@@ -15,6 +18,9 @@ def main() -> int:
 
     if not re.search(r"^CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y$", sdkconfig, re.MULTILINE):
         failures.append("CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y must be selected for the LCDWiki production build")
+
+    if not re.search(rf'^CONFIG_OTA_URL="{re.escape(PRODUCTION_OTA_URL)}"$', sdkconfig, re.MULTILINE):
+        failures.append(f'CONFIG_OTA_URL must be "{PRODUCTION_OTA_URL}" for production robot bootstrap')
 
     if re.search(r"^CONFIG_MBEDTLS_HARDWARE_AES=y$", sdkconfig, re.MULTILINE):
         failures.append("Hardware AES must stay disabled for LCDWiki production builds")
