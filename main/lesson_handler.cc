@@ -1028,6 +1028,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
             Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
@@ -1048,6 +1051,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
             Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();

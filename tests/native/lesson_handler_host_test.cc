@@ -929,6 +929,9 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
     App().device_state = kDeviceStateSpeaking;
     disp.chat_messages.emplace_back("system", "Con nói nhé.");
     disp.lesson_captions.emplace_back("Old child question");
+    disp.background_calls.push_back(true);
+    disp.object_calls.push_back(true);
+    disp.overlay_calls.push_back(true);
     Handle(PauseFrame(3));
     require(FrameType(2) == "lesson_ack", "pause is acked");
     require(FrameBodyNum(2, "acks") == 3, "pause ack echoes inbound sequence");
@@ -936,6 +939,12 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
     require(App().abort_speaking_calls == 1, "pause aborts any speaking prompt");
     require(App().last_abort_reason == kAbortReasonNone, "pause abort is a normal lesson pause");
     require(App().lesson_runtime_active == true, "pause keeps lesson runtime active");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "pause clears stale lesson background behind realtime face");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "pause clears stale lesson object behind realtime face");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "pause clears stale lesson overlay behind realtime face");
     require(disp.chat_messages.empty(), "pause clears stale child-turn chat copy");
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
             "pause clears stale child-turn caption");
@@ -957,9 +966,18 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
 
     disp.chat_messages.emplace_back("system", "Con nói nhé.");
     disp.lesson_captions.emplace_back("Old child question");
+    disp.background_calls.push_back(true);
+    disp.object_calls.push_back(true);
+    disp.overlay_calls.push_back(true);
     Handle(ResumeFrame(5));
     require(FrameType(Sent().size() - 1) == "lesson_ack", "resume is acked");
     require(FrameBodyNum(Sent().size() - 1, "acks") == 5, "resume ack echoes inbound sequence");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
+            "resume clears stale lesson background behind realtime face");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "resume clears stale lesson object behind realtime face");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "resume clears stale lesson overlay behind realtime face");
     require(disp.chat_messages.empty(), "resume clears stale child-turn chat copy");
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
             "resume clears stale child-turn caption");
