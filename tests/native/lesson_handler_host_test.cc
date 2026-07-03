@@ -776,9 +776,14 @@ void test_prepare_after_terminal_error_same_session_resets_stream() {
 
     Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
     Handle(StartFrame(2));
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
     Handle(ErrorFrame(3));
     require(Sent().size() == 2, "inbound lesson_error is terminal and not acked");
     require(disp.last_emotion == "sad", "terminal lesson_error shows sad face");
+    require(disp.chat_messages.size() == 1,
+            "terminal lesson_error clears stale child-turn chat before failure copy");
+    require(disp.chat_messages.back().second == "Bài học chưa tải được.",
+            "terminal lesson_error shows child-safe failure copy");
 
     Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
 
