@@ -2344,10 +2344,6 @@ void Application::InitializeProtocol() {
                         if (listening_mode_ == kListeningModeManualStop) {
                             if (lesson_interactive_listen_pending_.load()) {
                                 SetDeviceState(kDeviceStateListening);
-                                if (protocol_) {
-                                    protocol_->SendStartListening(kListeningModeManualStop);
-                                }
-                                audio_service_.EnableVoiceProcessing(true);
                                 ESP_LOGI(TAG, "lesson prompt complete -> listening");
                             } else {
                                 SetDeviceState(kDeviceStateIdle);

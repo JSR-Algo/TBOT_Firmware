@@ -1605,8 +1605,8 @@ def test_lesson_prompt_tts_stop_rearms_interactive_listening_instead_of_idling()
     assert "lesson_interactive_listen_pending_.load()" in manual_body
     assert "lesson_interactive_listen_pending_.exchange(false)" not in manual_body
     assert "SetDeviceState(kDeviceStateListening);" in manual_body
-    assert "protocol_->SendStartListening(kListeningModeManualStop);" in manual_body
-    assert "audio_service_.EnableVoiceProcessing(true);" in manual_body
+    assert "protocol_->SendStartListening(kListeningModeManualStop);" not in manual_body
+    assert "audio_service_.EnableVoiceProcessing(true);" not in manual_body
     assert "SetDeviceState(kDeviceStateIdle);" in manual_body
     assert manual_body.index("SetDeviceState(kDeviceStateListening);") < manual_body.index("SetDeviceState(kDeviceStateIdle);")
     assert 'display->SetStatus("Con nói nhé...");' not in manual_body
