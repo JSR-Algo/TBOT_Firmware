@@ -410,7 +410,7 @@ def test_lesson_step_ack_rendered_requires_display_surface():
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
     display_idx = step_branch.index("Display* display = base_display;")
     rendered_idx = step_branch.index("const bool rendered = display != nullptr;")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
 
     assert display_idx < rendered_idx < ack_idx
     assert "emit_ack(root, sequence, /*rendered*/ true, degraded)" not in step_branch
@@ -426,7 +426,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     overlay_idx = step_branch.index("FetchLessonImage(overlay_src)")
     schedule_idx = step_branch.index("Schedule([display, lvgl_display")
     elapsed_idx = step_branch.index("const int64_t render_elapsed_ms =")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
     log_idx = step_branch.index("renderElapsedMs=%lld")
 
     assert start_idx < poster_idx < object_idx < overlay_idx < schedule_idx < elapsed_idx < ack_idx < log_idx

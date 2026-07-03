@@ -1485,6 +1485,28 @@ void test_step_interactive_opens_listen() {
     require(App().prepare_listen_calls == 0, "unknown completionClass -> type-set fallback (review passive)");
 }
 
+void test_step_no_display_does_not_open_listen() {
+    ResetObservable();
+    NetworkInterface net;
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    Handle(StepFrame(3, "s-no-display-listen",
+                     "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"What animal is beside the barn?\""
+                     ",\"stepType\":\"model\""
+                     ",\"completionClass\":\"interactive\"",
+                     ""));
+
+    const size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack", "no-display interactive step still acks");
+    require(FrameBodyBool(idx, "rendered", true) == false,
+            "no-display interactive step reports rendered=false");
+    require(App().prepare_listen_calls == 0,
+            "no-display interactive step does not open mic for unseen prompt");
+}
+
 // ==========================================================================
 // 9. degraded ladder: fetch failures + caption/glyph fallback + no network
 // ==========================================================================
@@ -2289,6 +2311,7 @@ int main() {
     test_step_http_fetch_sets_short_timeout_before_open();
     test_step_reuses_cached_layer_bytes_for_repeated_urls();
     test_step_interactive_opens_listen();
+    test_step_no_display_does_not_open_listen();
     test_step_degraded_and_caption_fallback();
     test_step_missing_optional_object_overlay_uses_prompt_fallback();
     test_caption_truncation_preserves_utf8_boundary();
