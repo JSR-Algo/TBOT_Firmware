@@ -1247,6 +1247,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // media layer, clear any previous lesson layer so a caption-only step is not shown
     // over a stale picture.
     Display* display = base_display;
+    const bool rendered = display != nullptr;
     if (display) {
         const bool clear_bg = !poster_drew;
         const bool clear_object = !object_drew;
@@ -1266,7 +1267,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // Canonical step-ack first (body.acks echoes the step's sequence). For a PASSIVE
     // narration step this ack IS the completion signal (the ESP auto-advances on it),
     // so it is the ONLY F->S frame for such a step.
-    emit_ack(root, sequence, /*rendered*/ true, degraded);
+    emit_ack(root, sequence, rendered, degraded);
 
     // FW-01 / FW-LESSON-01: render ack is not child-response evidence. Passive
     // narration steps auto-advance on this ack; interactive steps wait for the

@@ -394,7 +394,7 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     object_idx = step_branch.index("bool object_drew = false")
     overlay_idx = step_branch.index("bool overlay_drew = false")
     degraded_idx = step_branch.index("const bool degraded =")
-    ack_idx = step_branch.index("emit_ack(root, sequence, /*rendered*/ true, degraded)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded)")
 
     assert poster_idx < object_idx < overlay_idx < degraded_idx < ack_idx
     degraded_expr = step_branch[degraded_idx : step_branch.index(";", degraded_idx)]
@@ -402,6 +402,18 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     assert "object_drew" in degraded_expr
     assert "overlay_drew" in degraded_expr
     assert "false" not in step_branch[ack_idx : step_branch.index(";", ack_idx)]
+
+def test_lesson_step_ack_rendered_requires_display_surface():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+
+    step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
+    display_idx = step_branch.index("Display* display = base_display;")
+    rendered_idx = step_branch.index("const bool rendered = display != nullptr;")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded)")
+
+    assert display_idx < rendered_idx < ack_idx
+    assert "emit_ack(root, sequence, /*rendered*/ true, degraded)" not in step_branch
 
 def test_lesson_stop_and_caption_only_steps_clear_foreground_object():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
