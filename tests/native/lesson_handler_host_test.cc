@@ -1482,7 +1482,8 @@ void test_step_reuses_cached_layer_bytes_for_repeated_urls() {
             "cache-hit repeated step remains non-degraded");
 }
 
-// interactive step (no completionClass, non-passive stepType) opens a listen window.
+// interactive step (no completionClass, non-passive stepType) with an authored prompt
+// opens a listen window.
 void test_step_interactive_opens_listen() {
     ResetObservable();
     LvglDisplay disp;
@@ -1496,7 +1497,7 @@ void test_step_interactive_opens_listen() {
     HostJpegDecodeMode() = 0;
 
     Handle(StepFrame(3, "s7", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
-                     ",\"stepType\":\"ask\"", ""));
+                     ",\"prompt\":\"What do you see?\",\"stepType\":\"ask\"", ""));
     // NOTE non-tautology: an interactive step MUST open the listen window. Mutation:
     // classify "ask" as passive -> prepare_listen_calls stays 0.
     require(App().prepare_listen_calls == 1, "interactive step opens listen window");
@@ -1555,7 +1556,8 @@ void test_step_interactive_opens_listen() {
     ResetHostHttp();
     HostHttp().body = JpegBody();
     Handle(StepFrame(3, "s9", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
-                     ",\"stepType\":\"greeting\",\"completionClass\":\"interactive\"", ""));
+                     ",\"prompt\":\"Can you say barn?\",\"stepType\":\"greeting\","
+                     "\"completionClass\":\"interactive\"", ""));
     require(App().prepare_listen_calls == 1, "completionClass=interactive forces interactive");
 
     // unknown completionClass falls through to the type set (greeting=passive).
@@ -1659,6 +1661,36 @@ void test_step_no_display_does_not_open_listen() {
             "no-display interactive step reports rendered=false");
     require(App().prepare_listen_calls == 0,
             "no-display interactive step does not open mic for unseen prompt");
+}
+
+void test_visual_only_interactive_step_does_not_open_listen_without_caption() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+        kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+        "\"stepId\":\"s-visual-only\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+        "\",\"stepType\":\"model\",\"completionClass\":\"interactive\",\"scene\":{"
+        "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+        "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+        "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"listening\"}}}}";
+    Handle(frame);
+
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "visual-only interactive step draws the poster");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "visual-only interactive step has no child instruction caption");
+    require(App().prepare_listen_calls == 0,
+            "visual-only interactive step does not open mic without a child instruction caption");
 }
 
 void test_step_blank_visible_content_does_not_open_listen() {
@@ -2524,6 +2556,7 @@ int main() {
     test_passive_step_cancels_prior_interactive_listen();
     test_passive_step_invalidates_queued_interactive_listen_prepare();
     test_step_no_display_does_not_open_listen();
+    test_visual_only_interactive_step_does_not_open_listen_without_caption();
     test_step_blank_visible_content_does_not_open_listen();
     test_step_degraded_and_caption_fallback();
     test_step_missing_optional_object_overlay_uses_prompt_fallback();

@@ -1339,7 +1339,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const char* step_type       = Str(body, "stepType");
     const char* completion_class = Str(body, "completionClass");
     const bool passive = IsPassiveStep(completion_class, step_type);
-    const bool should_listen = !passive && has_visible_content;
+    const bool should_listen = !passive && has_visible_content && has_prompt;
     const char* sid = Str(root, "stepId");
     if (!should_listen) {
         Application::GetInstance().CancelLessonInteractiveListening();
