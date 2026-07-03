@@ -3332,6 +3332,9 @@ void Application::HandleStartListeningEvent() {
         if (lesson_interactive_listen_pending_.load()) {
             ESP_LOGI(TAG, "lesson prompt still speaking; defer listening");
             listening_mode_ = kListeningModeManualStop;
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetStatus("Sắp đến lượt con...");
+            display->SetEmotion("thinking");
             return;
         }
         AbortSpeaking(kAbortReasonNone);

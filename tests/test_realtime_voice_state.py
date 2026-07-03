@@ -1626,6 +1626,21 @@ def test_lesson_prompt_start_listening_event_does_not_abort_speaking_prompt():
     assert speaking.index("lesson_interactive_listen_pending_.load()") < speaking.index("AbortSpeaking(kAbortReasonNone);")
 
 
+def test_lesson_prompt_start_listening_defer_shows_waiting_turn_cue():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::HandleStartListeningEvent")
+    end = app_cc.index("void Application::HandleStopListeningEvent", start)
+    body = app_cc[start:end]
+    speaking = body[body.index("state == kDeviceStateSpeaking") : body.index("state == kDeviceStateListening")]
+
+    assert "lesson_interactive_listen_pending_.load()" in speaking
+    assert 'display->SetStatus("Sắp đến lượt con...");' in speaking
+    assert 'display->SetEmotion("thinking");' in speaking
+    assert speaking.index('display->SetStatus("Sắp đến lượt con...");') < speaking.index("return;")
+    assert "protocol_->SendStartListening" not in speaking
+    assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" not in speaking
+
 def test_lesson_runtime_start_listening_ignores_non_answer_press():
     app_cc = read("main/application.cc")
 
