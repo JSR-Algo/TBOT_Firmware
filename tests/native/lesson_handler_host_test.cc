@@ -1516,6 +1516,44 @@ void test_passive_step_cancels_prior_interactive_listen() {
             "passive follow-up cancels the prior interactive listen window");
 }
 
+void test_passive_step_invalidates_queued_interactive_listen_prepare() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    App().defer_scheduled_callbacks = true;
+    Handle(StepFrame(3, "s-queued-interactive",
+                     "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"What animal is this?\""
+                     ",\"stepType\":\"ask\""
+                     ",\"completionClass\":\"interactive\"",
+                     ""));
+    require(App().prepare_listen_calls == 0,
+            "interactive listen prepare is still queued before the app task flush");
+
+    Handle(StepFrame(4, "s-passive-after-queued",
+                     "http://x/p2.jpg", "http://x/o2.jpg", "http://x/r2.jpg",
+                     ",\"prompt\":\"Nice. Now watch the next animal.\""
+                     ",\"stepType\":\"feedback\""
+                     ",\"completionClass\":\"passive\"",
+                     ""));
+    require(App().cancel_listen_calls >= 1,
+            "passive follow-up cancels before the queued interactive prepare flushes");
+
+    App().defer_scheduled_callbacks = false;
+    App().FlushScheduledCallbacks();
+
+    require(App().prepare_listen_calls == 0,
+            "passive follow-up invalidates the queued interactive listen prepare");
+}
+
 void test_step_no_display_does_not_open_listen() {
     ResetObservable();
     NetworkInterface net;
@@ -2371,6 +2409,7 @@ int main() {
     test_step_reuses_cached_layer_bytes_for_repeated_urls();
     test_step_interactive_opens_listen();
     test_passive_step_cancels_prior_interactive_listen();
+    test_passive_step_invalidates_queued_interactive_listen_prepare();
     test_step_no_display_does_not_open_listen();
     test_step_blank_visible_content_does_not_open_listen();
     test_step_degraded_and_caption_fallback();

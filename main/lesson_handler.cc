@@ -1297,10 +1297,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
         Application::GetInstance().CancelLessonInteractiveListening();
     }
     if (should_listen) {
+        const uint32_t listen_generation =
+            Application::GetInstance().BeginLessonInteractiveListeningRequest();
         ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",
                  sid != nullptr ? sid : "?");
-        Schedule([]() {
-            Application::GetInstance().PrepareLessonInteractiveListening();
+        Schedule([listen_generation]() {
+            Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
         });
     }
     ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d renderElapsedMs=%lld",

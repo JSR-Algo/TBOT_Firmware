@@ -2741,7 +2741,19 @@ void Application::StartListening() {
     xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
 }
 
+uint32_t Application::BeginLessonInteractiveListeningRequest() {
+    return lesson_interactive_listen_generation_.fetch_add(1) + 1;
+}
+
 void Application::PrepareLessonInteractiveListening() {
+    PrepareLessonInteractiveListening(lesson_interactive_listen_generation_.load());
+}
+
+void Application::PrepareLessonInteractiveListening(uint32_t generation) {
+    if (generation != lesson_interactive_listen_generation_.load()) {
+        ESP_LOGI(TAG, "stale lesson interactive listen prepare ignored");
+        return;
+    }
     if (!lesson_runtime_active_.load()) {
         lesson_interactive_listen_pending_.store(false);
         return;
@@ -2751,6 +2763,7 @@ void Application::PrepareLessonInteractiveListening() {
 }
 
 void Application::CancelLessonInteractiveListening() {
+    lesson_interactive_listen_generation_.fetch_add(1);
     const bool had_pending = lesson_interactive_listen_pending_.exchange(false);
     const bool had_active = lesson_interactive_listening_active_.exchange(false);
     const bool had_lesson_listen = had_pending || had_active;

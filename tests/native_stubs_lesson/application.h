@@ -14,7 +14,9 @@
 
 #include <functional>
 #include <memory>
+#include <cstdint>
 #include <string_view>
+#include <vector>
 
 enum DeviceState {
     kDeviceStateIdle,
@@ -40,6 +42,9 @@ public:
         lesson_runtime_active = false;
         lesson_network_render_quiet = 0;
         schedule_calls = 0;
+        defer_scheduled_callbacks = false;
+        deferred_callbacks.clear();
+        lesson_interactive_listen_generation = 0;
         play_sound_calls = 0;
         last_sound = "";
     }
@@ -57,15 +62,36 @@ public:
     bool lesson_runtime_active = false;
     int lesson_network_render_quiet = 0;
     int schedule_calls = 0;
+    bool defer_scheduled_callbacks = false;
+    std::vector<std::function<void()>> deferred_callbacks;
+    uint32_t lesson_interactive_listen_generation = 0;
     int play_sound_calls = 0;
     std::string last_sound;
 
     void Schedule(std::function<void()>&& cb) {
         schedule_calls++;
+        if (defer_scheduled_callbacks) {
+            deferred_callbacks.push_back(std::move(cb));
+            return;
+        }
         if (cb) cb();  // run inline so the draw-lambda body executes against fakes
     }
+    void FlushScheduledCallbacks() {
+        auto callbacks = std::move(deferred_callbacks);
+        deferred_callbacks.clear();
+        for (auto& cb : callbacks) {
+            if (cb) cb();
+        }
+    }
+    uint32_t BeginLessonInteractiveListeningRequest() { return ++lesson_interactive_listen_generation; }
     void PrepareLessonInteractiveListening() { prepare_listen_calls++; }
-    void CancelLessonInteractiveListening() { cancel_listen_calls++; }
+    void PrepareLessonInteractiveListening(uint32_t generation) {
+        if (generation == lesson_interactive_listen_generation) prepare_listen_calls++;
+    }
+    void CancelLessonInteractiveListening() {
+        lesson_interactive_listen_generation++;
+        cancel_listen_calls++;
+    }
     DeviceState GetDeviceState() const { return device_state; }
     void AbortSpeaking(AbortReason reason) {
         abort_speaking_calls++;

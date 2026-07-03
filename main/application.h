@@ -12,6 +12,7 @@
 #include <deque>
 #include <memory>
 #include <atomic>
+#include <cstdint>
 
 #include "protocol.h"
 #include "ota.h"
@@ -101,7 +102,9 @@ public:
      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
      */
     void StartListening();
+    uint32_t BeginLessonInteractiveListeningRequest();
     void PrepareLessonInteractiveListening();
+    void PrepareLessonInteractiveListening(uint32_t generation);
     void CancelLessonInteractiveListening();
     void SetLessonRuntimeActive(bool active);
     bool IsLessonRuntimeActive() const;
@@ -171,6 +174,7 @@ private:
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     std::atomic<bool> lesson_runtime_active_{false};
+    std::atomic<uint32_t> lesson_interactive_listen_generation_{0};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
     std::atomic<bool> lesson_interactive_listening_active_{false};
     std::atomic<bool> lesson_idle_repaint_suppressed_{false};
