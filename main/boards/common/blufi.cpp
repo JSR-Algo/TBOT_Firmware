@@ -1321,6 +1321,9 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             break;
         }
         case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA: {
+            if (!_require_secure_session_for_credentials()) {
+                break;
+            }
             // Parse TLV stream: [tag(1) | len(1) | value(len)] ...
             // tag=0x01 → bootstrap_token (base64url ASCII, max 64 chars)
             // tag=0x02 → provisioning_code (max 16 chars)

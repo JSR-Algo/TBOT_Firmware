@@ -48,6 +48,7 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
     passive_opened = opened[opened.index("if (passive_ws_intent_.load())") : opened.index("} else {")]
     assert "StartHeartbeat" not in passive_opened
     assert "DispatchDeviceHeartbeat" not in passive_opened
+    assert "EnableWakeWordDetection(true)" in passive_opened
     assert "online_intent_.store(true)" in opened
     assert "online_intent_.store(true)" in set_listening
     assert "passive_ws_intent_.store(false)" in set_listening
@@ -64,3 +65,69 @@ def test_passive_lesson_socket_reconnects_without_entering_listening_after_idle_
     assert "StartPassiveLessonWebsocket();" in closed[passive_idx:online_idx]
     assert "ScheduleReconnect" not in closed[passive_idx:online_idx]
     assert "passive_ws_intent_.store(false)" in close_by_intent
+
+def test_passive_lesson_socket_connect_failure_retries_passively():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    passive_failure = open_task[
+        open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")') :
+        open_task.index('} else if (wake_word_invoke)', open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")'))
+    ]
+    reconnect_tick = function_body(source, "void Application::HandleReconnectTick")
+    passive_scheduler = function_body(source, "void Application::SchedulePassiveLessonReconnect")
+
+    assert "void SchedulePassiveLessonReconnect();" in header
+    assert "std::atomic<bool> reconnect_passive_" in header
+    assert "passive_reconnect_attempt_" in header
+    assert "SchedulePassiveLessonReconnect();" in passive_failure
+    assert "ScheduleReconnect" not in passive_failure
+    assert "StartPassiveLessonWebsocket();" in reconnect_tick
+    assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
+    assert "passive_lesson_reconnect_scheduled" in passive_scheduler
+
+def test_passive_lesson_socket_watchdog_timeout_retries_passively_from_idle():
+    source = read("main/application.cc")
+    watchdog = function_body(source, "void Application::HandleConnectWatchdog")
+
+    passive_branch = watchdog[
+        watchdog.index("if (passive_ws_intent_.load())") :
+        watchdog.index("if (GetDeviceState() == kDeviceStateConnecting)")
+    ]
+
+    assert "passive_lesson_connect_watchdog_timeout -> passive backoff" in passive_branch
+    assert "backend_offline_.store(true);" in passive_branch
+    assert "SchedulePassiveLessonReconnect();" in passive_branch
+    assert "ScheduleReconnect" not in passive_branch
+
+def test_passive_lesson_reconnect_tick_defers_instead_of_abandoning_when_not_idle():
+    source = read("main/application.cc")
+    reconnect_tick = function_body(source, "void Application::HandleReconnectTick")
+    passive_start = reconnect_tick.index("if (reconnect_passive_.exchange(false))")
+    passive_branch = reconnect_tick[
+        passive_start :
+        reconnect_tick.index('ESP_LOGI(TAG, "passive_lesson_reconnect_tick attempt=%d"', passive_start)
+    ]
+    not_idle_branch = passive_branch[
+        passive_branch.index("if (state != kDeviceStateIdle)") :
+    ]
+
+    assert "auto state = GetDeviceState();" in passive_branch
+    assert "state == kDeviceStateWifiConfiguring || state == kDeviceStateAudioTesting" in passive_branch
+    assert "SchedulePassiveLessonReconnect();" in not_idle_branch
+    assert "passive_reconnect_attempt_ = 0" not in not_idle_branch
+    assert "return;" in not_idle_branch
+
+def test_idle_does_not_start_wake_word_while_passive_websocket_tls_is_connecting():
+    source = read("main/application.cc")
+    state_changed = function_body(source, "void Application::HandleStateChangedEvent")
+    idle_case = state_changed[
+        state_changed.index("case kDeviceStateIdle:") :
+        state_changed.index("case kDeviceStateConnecting:")
+    ]
+
+    claimed_idx = idle_case.index("IsDeviceClaimed()")
+    enable_idx = idle_case.index("audio_service_.EnableWakeWordDetection(true)", claimed_idx)
+    guard_idx = idle_case.index("!connect_in_flight_.load()", claimed_idx, enable_idx)
+
+    assert guard_idx < enable_idx

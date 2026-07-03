@@ -3,8 +3,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_PRODUCTION_OTA_URL = "https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
-CURRENT_OTA_BUILD_VERSION = "2.2.34"
+CURRENT_PRODUCTION_OTA_URL = "https://tbot-backend-8wmh.onrender.com/tbot/ota/"
+CURRENT_PRODUCTION_WEBSOCKET_URL = ""
+CURRENT_OTA_BUILD_VERSION = "2.2.37"
 
 
 def read(path: str) -> str:
@@ -23,18 +24,14 @@ def kconfig_default(text: str, config_name: str) -> str:
     return default.group("value")
 
 
-def test_firmware_does_not_compile_a_final_websocket_endpoint_fallback():
+def test_firmware_compiles_no_ephemeral_websocket_endpoint_fallback():
     kconfig = read("main/Kconfig.projbuild")
 
     websocket_default = kconfig_default(kconfig, "WEBSOCKET_URL")
 
-    assert websocket_default in {
-        "",
-        "ws://your-ip-or-domain:port/tbot/v1/",
-        "wss://your-ip-or-domain:port/tbot/v1/",
-    }
+    assert websocket_default == CURRENT_PRODUCTION_WEBSOCKET_URL
     assert "trycloudflare.com" not in websocket_default
-    assert "tbot-backend-8wmh.onrender.com" not in websocket_default
+    assert "ngrok" not in websocket_default.lower()
 
 def test_project_version_advances_past_current_production_lcdwiki_ota():
     cmake = read("CMakeLists.txt")
@@ -42,7 +39,7 @@ def test_project_version_advances_past_current_production_lcdwiki_ota():
     assert f'set(PROJECT_VER "{CURRENT_OTA_BUILD_VERSION}")' in cmake
 
 
-def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
+def test_local_firmware_build_configs_compile_no_ephemeral_websocket_seed():
     local_configs = sorted(
         path for path in ROOT.glob("sdkconfig*")
         if path.is_file() and not path.name.endswith((".bak", ".old"))
@@ -54,9 +51,9 @@ def test_local_firmware_build_configs_do_not_override_websocket_placeholder():
         if "CONFIG_WEBSOCKET_URL=" not in contents:
             continue
 
-        assert "trycloudflare.com/tbot/v1/" not in contents, sdkconfig.name
-        assert "tbot-backend-8wmh.onrender.com/tbot/v1/" not in contents, sdkconfig.name
-        assert 'CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"' in contents, sdkconfig.name
+        assert f'CONFIG_WEBSOCKET_URL="{CURRENT_PRODUCTION_WEBSOCKET_URL}"' in contents, sdkconfig.name
+        assert "trycloudflare.com" not in contents, sdkconfig.name
+        assert "ngrok" not in contents.lower(), sdkconfig.name
 
 
 def test_local_firmware_build_configs_compile_only_current_production_ota_seed():
@@ -74,6 +71,7 @@ def test_local_firmware_build_configs_compile_only_current_production_ota_seed()
 
         ota_url = match.group("value")
         assert ota_url == CURRENT_PRODUCTION_OTA_URL, sdkconfig.name
+        assert "trycloudflare.com" not in ota_url, sdkconfig.name
         assert "ngrok" not in ota_url, sdkconfig.name
         assert "loca.lt" not in ota_url, sdkconfig.name
         assert "serveo.net" not in ota_url, sdkconfig.name
@@ -174,25 +172,32 @@ def test_ble_setup_timeout_matches_contract_in_local_blufi_configs():
         contents = read(sdkconfig_name)
         assert "CONFIG_BLE_SETUP_TIMEOUT_SEC=300" in contents, sdkconfig_name
 
-def test_websocket_protocol_does_not_send_identity_or_auth_headers():
+def test_websocket_protocol_sends_auth_token_as_header_not_query_param():
     websocket_cc = read("main/protocols/websocket_protocol.cc")
 
     assert 'websocket_->SetHeader("protocol-version", std::to_string(version_).c_str());' in websocket_cc
-    assert 'websocket_->SetHeader("authorization", token.c_str());' not in websocket_cc
+    assert 'websocket_->SetHeader("authorization", token.c_str());' in websocket_cc
     assert 'websocket_->SetHeader("device-id", device_id.c_str());' not in websocket_cc
     assert 'websocket_->SetHeader("client-id", client_id.c_str());' not in websocket_cc
     assert 'websocket_->SetHeader("Authorization", token.c_str());' not in websocket_cc
     assert 'websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());' not in websocket_cc
     assert 'websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());' not in websocket_cc
 
-def test_websocket_protocol_adds_server_supported_identity_query_params_without_logging_token():
+def test_websocket_protocol_sends_w3c_traceparent_header_on_connect():
+    websocket_cc = read("main/protocols/websocket_protocol.cc")
+
+    assert '#include <esp_random.h>' in websocket_cc
+    assert "NewTraceParentHeader()" in websocket_cc
+    assert 'websocket_->SetHeader("traceparent", traceparent.c_str());' in websocket_cc
+
+def test_websocket_protocol_adds_identity_query_params_without_auth_query_or_logging_token():
     websocket_cc = read("main/protocols/websocket_protocol.cc")
 
     assert "UrlEncodeQueryValue" in websocket_cc
     assert "AppendWebsocketQueryParam" in websocket_cc
     assert 'AppendWebsocketQueryParam(connect_url, "device-id", device_id);' in websocket_cc
     assert 'AppendWebsocketQueryParam(connect_url, "client-id", client_id);' in websocket_cc
-    assert 'AppendWebsocketQueryParam(connect_url, "authorization", token);' in websocket_cc
+    assert 'AppendWebsocketQueryParam(connect_url, "authorization", token);' not in websocket_cc
     assert "websocket_->Connect(connect_url.c_str())" in websocket_cc
     assert 'ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_)' in websocket_cc
     assert 'ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", connect_url.c_str(), version_)' not in websocket_cc

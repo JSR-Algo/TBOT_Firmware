@@ -189,7 +189,12 @@ private:
         int dh_param_len;
         uint8_t iv[16];
         mbedtls_dhm_context *dhm;
-        esp_aes_context *aes;
+        // Use the mbedTLS AES context type (matches the mbedtls_aes_* API used in
+        // blufi.cpp). With CONFIG_MBEDTLS_HARDWARE_AES on, this is aliased to
+        // esp_aes_context; with HW AES off (to free internal/DMA RAM for the WSS
+        // TLS path) it is the software context. Correct under both. CFB128 output
+        // is identical, so BluFi provisioning is unaffected.
+        mbedtls_aes_context *aes;
     };
 
     BlufiSecurity *m_sec;

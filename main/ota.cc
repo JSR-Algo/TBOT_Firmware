@@ -25,6 +25,40 @@
 
 #define TAG "Ota"
 
+namespace {
+
+bool IsEphemeralEndpoint(const std::string& url) {
+    return url.find(".trycloudflare.com/") != std::string::npos;
+}
+
+std::vector<std::string> BuildCheckVersionUrls(const std::string& configured_url) {
+    std::vector<std::string> urls;
+    if (IsEphemeralEndpoint(configured_url)) {
+        ESP_LOGW(TAG, "Ignoring stale ephemeral OTA URL from NVS; using stable fallback");
+    } else if (configured_url.length() >= 10) {
+        if (std::find(urls.begin(), urls.end(), configured_url) == urls.end()) {
+            urls.push_back(configured_url);
+        }
+    }
+
+    std::string fallback_url = CONFIG_OTA_URL;
+    if (fallback_url.length() >= 10 &&
+            std::find(urls.begin(), urls.end(), fallback_url) == urls.end()) {
+        urls.push_back(fallback_url);
+    }
+    return urls;
+}
+
+void PersistRecoveredOtaUrl(const std::string& url) {
+    Settings settings("wifi", true);
+    if (settings.GetString("ota_url") != url) {
+        settings.SetString("ota_url", url);
+        ESP_LOGW(TAG, "Recovered OTA URL persisted to NVS: %s", url.c_str());
+    }
+}
+
+} // namespace
+
 
 Ota::Ota() {
 #ifdef ESP_EFUSE_BLOCK_USR_DATA
@@ -72,7 +106,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
     return http;
 }
 
-/* 
+/*
  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
  */
 esp_err_t Ota::CheckVersion() {
@@ -83,22 +117,37 @@ esp_err_t Ota::CheckVersion() {
     current_version_ = app_desc->version;
     ESP_LOGI(TAG, "Current version: %s", current_version_.c_str());
 
-    std::string url = GetCheckVersionUrl();
-    if (url.length() < 10) {
+    std::string configured_url = GetCheckVersionUrl();
+    auto urls = BuildCheckVersionUrls(configured_url);
+    if (urls.empty()) {
         ESP_LOGE(TAG, "Check version URL is not properly set");
         return ESP_ERR_INVALID_ARG;
     }
 
-    auto http = SetupHttp();
-
     std::string data = board.GetSystemInfoJson();
     std::string method = data.length() > 0 ? "POST" : "GET";
-    http->SetContent(std::move(data));
 
-    if (!http->Open(method, url)) {
-        int last_error = http->GetLastError();
-        ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x", last_error);
+    std::unique_ptr<Http> http;
+    int last_error = ESP_FAIL;
+    std::string opened_url;
+    for (const auto& url : urls) {
+        http = SetupHttp();
+        std::string body_copy = data;
+        http->SetContent(std::move(body_copy));
+        if (http->Open(method, url)) {
+            opened_url = url;
+            break;
+        }
+        last_error = http->GetLastError();
+        ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x, url=%s", last_error, url.c_str());
+    }
+
+    if (opened_url.empty()) {
         return last_error;
+    }
+
+    if (opened_url != configured_url) {
+        PersistRecoveredOtaUrl(opened_url);
     }
 
     auto status_code = http->GetStatusCode();
@@ -113,7 +162,7 @@ esp_err_t Ota::CheckVersion() {
     // Response: { "firmware": { "version": "1.0.0", "url": "http://" } }
     // Parse the JSON response and check if the version is newer
     // If it is, set has_new_version_ to true and store the new version and URL
-    
+
     cJSON *root = cJSON_Parse(data.c_str());
     if (root == NULL) {
         ESP_LOGE(TAG, "Failed to parse JSON response");
@@ -253,17 +302,17 @@ esp_err_t Ota::CheckVersion() {
     if (cJSON_IsObject(server_time)) {
         cJSON *timestamp = cJSON_GetObjectItem(server_time, "timestamp");
         cJSON *timezone_offset = cJSON_GetObjectItem(server_time, "timezone_offset");
-        
+
         if (cJSON_IsNumber(timestamp)) {
             // 设置系统时间
             struct timeval tv;
             double ts = timestamp->valuedouble;
-            
+
             // 如果有时区偏移，计算本地时间
             if (cJSON_IsNumber(timezone_offset)) {
                 ts += (timezone_offset->valueint * 60 * 1000); // 转换分钟为毫秒
             }
-            
+
             tv.tv_sec = (time_t)(ts / 1000);  // 转换毫秒为秒
             tv.tv_usec = (suseconds_t)((long long)ts % 1000) * 1000;  // 剩余的毫秒转换为微秒
             settimeofday(&tv, NULL);
@@ -484,18 +533,18 @@ std::vector<int> Ota::ParseVersion(const std::string& version) {
     std::vector<int> versionNumbers;
     std::stringstream ss(version);
     std::string segment;
-    
+
     while (std::getline(ss, segment, '.')) {
         versionNumbers.push_back(std::stoi(segment));
     }
-    
+
     return versionNumbers;
 }
 
 bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion) {
     std::vector<int> current = ParseVersion(currentVersion);
     std::vector<int> newer = ParseVersion(newVersion);
-    
+
     for (size_t i = 0; i < std::min(current.size(), newer.size()); ++i) {
         if (newer[i] > current[i]) {
             return true;
@@ -503,7 +552,7 @@ bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::st
             return false;
         }
     }
-    
+
     return newer.size() > current.size();
 }
 
@@ -515,7 +564,7 @@ std::string Ota::GetActivationPayload() {
     std::string hmac_hex;
 #ifdef SOC_HMAC_SUPPORTED
     uint8_t hmac_result[32]; // SHA-256 输出为32字节
-    
+
     // 使用Key0计算HMAC
     esp_err_t ret = esp_hmac_calculate(HMAC_KEY0, (uint8_t*)activation_challenge_.data(), activation_challenge_.size(), hmac_result);
     if (ret != ESP_OK) {
@@ -566,7 +615,7 @@ esp_err_t Ota::Activate() {
         ESP_LOGE(TAG, "Failed to open HTTP connection");
         return ESP_FAIL;
     }
-    
+
     auto status_code = http->GetStatusCode();
     if (status_code == 202) {
         return ESP_ERR_TIMEOUT;

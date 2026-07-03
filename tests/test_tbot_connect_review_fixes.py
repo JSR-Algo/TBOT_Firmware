@@ -118,15 +118,17 @@ def test_heartbeat_is_stopped_on_network_loss_and_setup_entry():
 
 def test_heartbeat_is_stopped_on_backend_error_and_started_only_on_connect():
     source = read("main/application.cc")
-    # OnNetworkError stops it; OnConnected (re)starts it. Scope to the protocol
-    # callback wiring block.
+    # OnNetworkError stops it; OnConnected (re)starts it on the non-lesson path.
     proto_start = source.index("protocol_->OnConnected(")
-    proto_end = source.index("protocol_->OnIncomingAudio(", proto_start)
-    wiring = source[proto_start:proto_end]
+    network_error_start = source.index("protocol_->OnNetworkError(", proto_start)
+    incoming_audio_start = source.index("protocol_->OnIncomingAudio(", network_error_start)
+    connected = source[proto_start:network_error_start]
+    network_error = source[network_error_start:incoming_audio_start]
 
-    assert "StartHeartbeat();" in wiring  # OnConnected
-    assert "StopHeartbeat();" in wiring   # OnNetworkError
-    assert wiring.index("StartHeartbeat();") < wiring.index("StopHeartbeat();")
+    assert "StartHeartbeat();" in connected
+    assert "DispatchDeviceHeartbeat();" in connected
+    assert "StopHeartbeat();" in network_error
+    assert "StartHeartbeat();" not in network_error
 
 
 def test_heartbeat_sender_is_gated_on_a_live_online_device_state():

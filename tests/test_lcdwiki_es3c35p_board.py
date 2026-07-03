@@ -1,4 +1,7 @@
 import re
+import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +30,21 @@ def test_lcdwiki_es3c35p_board_is_selected_and_registered():
     assert "# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set" in sdkconfig
     assert "CONFIG_ESP_CONSOLE_UART_NUM=-1" in sdkconfig
 
+
+def test_lcdwiki_es3c35p_is_kconfig_fallback_board_for_plain_builds():
+    kconfig = read("main/Kconfig.projbuild")
+    board_choice = kconfig[kconfig.index("choice BOARD_TYPE") : kconfig.index("endchoice", kconfig.index("choice BOARD_TYPE"))]
+
+    assert re.search(r"^\s*default BOARD_TYPE_LCDWIKI_ES3C35P$", board_choice, re.MULTILINE)
+    assert not re.search(r"^\s*default BOARD_TYPE_BREAD_COMPACT_WIFI$", board_choice, re.MULTILINE)
+
+
 def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_gates_flash():
+    root_cmake = read("CMakeLists.txt")
     script = read("build-lcdwiki.sh")
     flash_instructions = read("FLASH_INSTRUCTIONS.md")
 
+    assert 'set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.local")' in root_cmake
     assert 'export SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.esp32s3;sdkconfig.defaults.local"' in script
     assert "rm -f sdkconfig" in script
     assert "idf.py set-target esp32s3" in script
@@ -38,8 +52,71 @@ def test_lcdwiki_es3c35p_fleet_build_script_loads_local_board_overlay_and_hard_g
     assert "BLACK-SCREEN" in script
     assert "idf.py -p \"$PORT\" flash" in script
     assert "./build-lcdwiki.sh" in flash_instructions
-    assert "KHÔNG dùng `idf.py flash` trần" in flash_instructions
+    assert "SDKCONFIG_DEFAULTS" in flash_instructions
+    assert "idf.py build" in flash_instructions
     assert "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y" in flash_instructions
+
+def test_lcdwiki_es3c35p_ci_release_build_disables_hardware_aes_and_gates_config():
+    config_json = read("main/boards/lcdwiki-es3c35p/config.json")
+    release_py = read("scripts/release.py")
+    gate_script = read("scripts/assert_lcdwiki_prod_config.py")
+
+    assert "# CONFIG_MBEDTLS_HARDWARE_AES is not set" in config_json
+    assert "assert_lcdwiki_prod_config.py" in release_py
+    assert "lcdwiki-es3c35p" in release_py
+    assert "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y" in gate_script
+    assert "CONFIG_MBEDTLS_HARDWARE_AES=y" in gate_script
+    assert "Hardware AES must stay disabled" in gate_script
+    assert "CONFIG_FATFS_LFN_HEAP=y" in config_json
+    assert "FATFS short-name-only mode must stay disabled" in gate_script
+
+def test_lcdwiki_es3c35p_reference_sdkconfig_passes_prod_gate():
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/assert_lcdwiki_prod_config.py"),
+            str(ROOT / "sdkconfig.es3c35p"),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+def test_release_sdkconfig_append_replaces_existing_values_for_ci_gate(tmp_path):
+    spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")
+    release = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(release)
+
+    sdkconfig = tmp_path / "sdkconfig"
+    sdkconfig.write_text(
+        "\n".join(
+            [
+                "CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI=y",
+                "CONFIG_MBEDTLS_HARDWARE_AES=y",
+                "CONFIG_OTHER_VALUE=y",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    release._rewrite_sdkconfig_with_appends(
+        sdkconfig,
+        [
+            "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y",
+            "# CONFIG_MBEDTLS_HARDWARE_AES is not set",
+        ],
+    )
+
+    text = sdkconfig.read_text(encoding="utf-8")
+    assert "CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI=y" not in text
+    assert "CONFIG_MBEDTLS_HARDWARE_AES=y" not in text
+    assert "CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y" in text
+    assert "# CONFIG_MBEDTLS_HARDWARE_AES is not set" in text
+    assert "CONFIG_OTHER_VALUE=y" in text
 
 def test_lcdwiki_es3c35p_local_defaults_keep_mobile_ble_discovery_enabled():
     local_defaults = read("sdkconfig.defaults.local")
@@ -126,19 +203,45 @@ def test_lcdwiki_es3c35p_uses_lcdwiki_audio_and_uart_pins():
     assert "#define AUDIO_I2S_GPIO_WS   GPIO_NUM_21" in config
     assert "#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_16" in config
     assert "#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_15" in config
-    assert "constexpr int kLcdWikiOutputVolume = 70" in board
+    assert "constexpr int kLcdWikiOutputVolume = 100" in board
     assert "class LcdWikiAudioCodec : public Es8311AudioCodec" in board
-    assert "input_channels_ = 2;" in board
-    assert "output_channels_ = 2;" in board
+    assert "input_channels_ = 1;" in board
+    assert "output_channels_ = 1;" in board
     assert "SetOutputVolume(kLcdWikiOutputVolume);" in board
     assert "static LcdWikiAudioCodec audio_codec" in board
     assert "#define ROBOT_UART_TX_PIN     GPIO_NUM_44" in config
     assert "#define ROBOT_UART_RX_PIN     GPIO_NUM_43" in config
 
+def test_lcdwiki_es3c35p_mounts_micro_sd_for_lesson_assets():
+    config = read("main/boards/lcdwiki-es3c35p/config.h")
+    board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
+
+    assert '#define SDCARD_MOUNT_POINT    "/sdcard"' in config
+    assert has_define(config, "SDCARD_SDMMC_CLK_PIN", "GPIO_NUM_5")
+    assert has_define(config, "SDCARD_SDMMC_CMD_PIN", "GPIO_NUM_4")
+    assert has_define(config, "SDCARD_SDMMC_D0_PIN", "GPIO_NUM_6")
+    assert has_define(config, "SDCARD_SDMMC_D1_PIN", "GPIO_NUM_7")
+    assert has_define(config, "SDCARD_SDMMC_D2_PIN", "GPIO_NUM_2")
+    assert has_define(config, "SDCARD_SDMMC_D3_PIN", "GPIO_NUM_3")
+    assert "esp_vfs_fat_sdmmc_mount(SDCARD_MOUNT_POINT" in board
+    assert "slot_config.width = 4;" in board
+    assert "InitializeSdCard();" in board
+    assert "SD card mounted at %s" in board
+
+def test_lcdwiki_es3c35p_fatfs_supports_long_lesson_asset_names():
+    defaults = read("sdkconfig.defaults.esp32s3") + "\n" + read("sdkconfig.defaults.local")
+    sdkconfig = read("sdkconfig")
+
+    assert "CONFIG_FATFS_LFN_HEAP=y" in defaults
+    assert "CONFIG_FATFS_LFN_HEAP=y" in sdkconfig
+    assert "CONFIG_FATFS_LFN_NONE=y" not in sdkconfig
+
 def test_lcdwiki_es3c35p_runs_boot_audio_diagnostic_tone():
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
 
     assert "RunDiagnosticTone();" in board
+    assert "ConfigurePaGpioForDiagnostic();" in board
+    assert "const int amplitude = 24000;" in board
     assert 'PlayDiagnosticSegment("pa_low", 0, 660);' in board
     assert 'PlayDiagnosticSegment("pa_high", 1, 880);' in board
     assert 'PlayDiagnosticSegment("configured", AUDIO_CODEC_PA_INVERTED ? 0 : 1, 1100);' in board
@@ -192,3 +295,22 @@ def test_lcdwiki_es3c35p_boot_click_rearms_ble_wifi_config_mode():
     assert click_body.index("kDeviceStateWifiConfiguring") < click_body.index("app.ToggleChatState();")
     assert click_body.index("kDeviceStateConnecting") < click_body.index("app.ToggleChatState();")
     assert "EnterWifiConfigMode();" in click_body[:click_body.index("app.ToggleChatState();")]
+
+def test_lcdwiki_es3c35p_boot_click_ignores_active_lesson_before_wifi_config_or_toggle():
+    board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
+
+    init_start = board.index("void InitializeButtons()")
+    init_buttons = board[init_start : board.index("public:", init_start)]
+    click_start = init_buttons.index("boot_button_.OnClick")
+    click_body = init_buttons[click_start : init_buttons.index("boot_button_.OnLongPress", click_start)]
+
+    assert "app.IsLessonRuntimeActive()" in click_body
+    assert click_body.index("app.IsLessonRuntimeActive()") < click_body.index("EnterWifiConfigMode();")
+    assert click_body.index("app.IsLessonRuntimeActive()") < click_body.index("app.ToggleChatState();")
+    guard = click_body[
+        click_body.index("app.IsLessonRuntimeActive()") :
+        click_body.index("auto state = app.GetDeviceState();")
+    ]
+    assert "return;" in guard
+    assert "EnterWifiConfigMode();" not in guard
+    assert "ToggleChatState" not in guard

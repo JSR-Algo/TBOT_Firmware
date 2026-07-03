@@ -7,6 +7,11 @@
 #include <string>
 #include <vector>
 
+enum AbortReason {
+    kAbortReasonNone,
+    kAbortReasonWakeWordDetected
+};
+
 class Protocol {
 public:
     virtual ~Protocol() = default;

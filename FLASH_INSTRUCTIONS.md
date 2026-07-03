@@ -1,27 +1,23 @@
-# TBOT firmware flash — Wake-word barge-in enabled
+# TBOT firmware flash — LCDWiki production build
 
-Đã build firmware mới với:
+Build production cho robot LCDWiki ES3C35P dùng cấu hình mặc định đã được commit:
 
-- `CONFIG_WAKE_WORD_DETECTION_IN_LISTENING=y` — wake-word luôn active
-- `application.cc:kDeviceStateSpeaking` — explicitly enable wake-word in realtime mode
-- Wake words active: **"Hi ESP"** (English) và **"Nĩ hảo Xiǎo Zhì"** (Chinese, "你好Tbot")
-
-Binary mới ở `build/xiaozhi.bin` (2.5MB).
+- `CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y`
+- `# CONFIG_MBEDTLS_HARDWARE_AES is not set`
+- `CONFIG_OTA_URL="https://tbot-backend-8wmh.onrender.com/tbot/ota/"`
+- `CONFIG_WEBSOCKET_URL=""` — WS production lấy từ OTA/bootstrap hoặc build-time injection.
 
 ## Endpoint đang dùng để nạp code
 
-- Web/admin: `https://admin.skylabs.vn`
-- OTA: `https://ota.skylabs.vn/tbot/ota/`
-- WS: `wss://ws.skylabs.vn/tbot/v1/`
-
-Firmware lấy WS từ OTA JSON. Khi build/flash, `CONFIG_OTA_URL` đang trỏ tới OTA URL ở trên.
+- API/bootstrap seed: `https://tbot-backend-8wmh.onrender.com/v1`
+- OTA seed: `https://tbot-backend-8wmh.onrender.com/tbot/ota/`
+- WS: do OTA/bootstrap trả về từ managed robot-server endpoint. Không commit quick-tunnel host.
 
 ## Cách flash 1 — USB (nhanh nhất, ~30s)
 
-> CẢNH BÁO: KHÔNG dùng `idf.py flash` trần trên một checkout mới — nó sẽ ra MÀN HÌNH ĐEN.
-> `sdkconfig` bị gitignore và ESP-IDF KHÔNG tự nạp `sdkconfig.defaults.local`, nên board
-> mặc định Kconfig (`BOARD_TYPE_BREAD_COMPACT_WIFI`, không có driver LCD) sẽ thắng → màn
-> hình đen (WiFi vẫn chạy nên dễ tưởng là OK). Luôn flash bằng script fleet-safe dưới đây.
+> Root `CMakeLists.txt` đã set `SDKCONFIG_DEFAULTS` để plain `idf.py build` nạp
+> `sdkconfig.defaults.local`. Với flash fleet, vẫn dùng script dưới đây vì nó xóa
+> `sdkconfig`, build lại sạch, rồi hard-gate board type trước khi nạp.
 
 1. Cắm cáp USB-C từ robot vào laptop
 2. Trên macOS: liệt kê port serial:
@@ -39,36 +35,30 @@ Firmware lấy WS từ OTA JSON. Khi build/flash, `CONFIG_OTA_URL` đang trỏ t
 
 4. Robot tự reboot, kết nối lại WiFi + server.
 
+## Plain build verification
+
+```bash
+cd /Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware
+rm -f sdkconfig
+idf.py set-target esp32s3
+idf.py build
+python3 scripts/assert_lcdwiki_prod_config.py sdkconfig
+```
+
 ## Cách flash 2 — OTA qua manager-web (không cần cáp)
 
-1. Mở manager-web admin UI (port 8002):
-   ```
-   https://admin.skylabs.vn
-   ```
-2. Vào tab **OTA / Firmware Management** (tên menu tùy ngôn ngữ)
-3. Upload file `build/xiaozhi.bin`
-4. Chọn target device theo MAC (mỗi robot một MAC riêng) — ví dụ một unit: `3c:0f:02:de:c2:e0`
-5. Click "Push firmware" hoặc "OTA update"
-6. Robot sẽ tự download + flash + reboot
-
-> CAVEAT (PROJECT_VER 2.2.30): MỌI image — bản LCD đúng lẫn bản bread-board màn-hình-đen —
-> đều report cùng version `2.2.30` cho OTA, nên OTA coi là "đã mới nhất" và **KHÔNG** sửa
-> được một unit đã bị flash nhầm board. Vì vậy USB qua `build-lcdwiki.sh` (Cách 1) mới là
-> source of truth khi flash cả fleet; OTA chỉ dùng để cập nhật unit đã chắc chắn đúng board.
+OTA chỉ dùng sau khi managed OTA/admin endpoint đã được user provision và unit đã
+chạy đúng board. Upload `build/xiaozhi.bin`, chọn đúng MAC, rồi push firmware.
 
 ## Sau khi flash
 
-Robot có wake-word barge-in. Khi robot đang nói:
-- **Nói "Hi ESP"** → robot dừng nói, vào listening mode, sẵn sàng câu mới
-- **Hoặc nói "Nĩ hảo Xiǎo Zhì"** (你好Tbot, đọc gần "ni hao shao chi") → cùng tác dụng
-- Sau wake word → user nói câu mới → robot trả lời câu mới
+Robot phải hiện mặt trên LCDWiki và chạy một cuộc hội thoại đầy đủ không rớt
+`Máy chủ không khả dụng`.
 
 ## Verify đã chạy đúng firmware mới
 
-Sau reboot, log server sẽ có line:
-```
-core.handle.abortHandle - INFO - Abort message received
-```
-khi user nói wake word (firmware gửi `{"type":"abort","reason":"wake_word_detected"}`).
+Sau reboot, kiểm tra:
 
-Và Live API response sẽ bị cancel ngay (qua `voice_provider.interrupt()` đã sync vào container).
+- LCD có face, không màn hình đen.
+- `python3 scripts/assert_lcdwiki_prod_config.py sdkconfig` in `LCDWiki production build config OK`.
+- Hội thoại kéo dài qua WSS không có AES internal-SRAM OOM / `Máy chủ không khả dụng`.

@@ -229,6 +229,87 @@ def test_wb5_station_connect_timeout_is_60_seconds():
     )
 
 
+def test_wifi_connect_timeout_ignores_active_lesson_before_station_or_setup_side_effects():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    timeout_body = _func_body(
+        wifi_board,
+        "void WifiBoard::OnWifiConnectTimeout(",
+        "// ---",
+    )
+
+    assert "Application::GetInstance().IsLessonRuntimeActive()" in timeout_body
+    guard_idx = timeout_body.index("Application::GetInstance().IsLessonRuntimeActive()")
+    stop_idx = timeout_body.index("WifiManager::GetInstance().StopStation();")
+    setup_idx = timeout_body.index("StartWifiConfigMode();")
+    assert guard_idx < stop_idx < setup_idx
+    guard = timeout_body[guard_idx:stop_idx]
+    assert "return;" in guard
+    assert "StopStation" not in guard
+    assert "StartWifiConfigMode" not in guard
+
+def test_wifi_config_delayed_entry_rechecks_active_lesson_before_setup_side_effects():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    enter_body = _func_body(
+        wifi_board,
+        "void WifiBoard::EnterWifiConfigMode()",
+        "bool WifiBoard::IsInWifiConfigMode()",
+    )
+    delayed_task = enter_body[
+        enter_body.index("xTaskCreate([](void* arg)") :
+        enter_body.index('}, "wifi_cfg_delay"')
+    ]
+
+    assert "Application::GetInstance().IsLessonRuntimeActive()" in delayed_task
+    guard_idx = delayed_task.index("Application::GetInstance().IsLessonRuntimeActive()")
+    stop_idx = delayed_task.index("WifiManager::GetInstance().StopStation();")
+    setup_idx = delayed_task.index("board->StartWifiConfigMode();")
+    assert guard_idx < stop_idx < setup_idx
+    guard = delayed_task[guard_idx:stop_idx]
+    assert "return;" in guard
+    assert "StopStation" not in guard
+    assert "StartWifiConfigMode" not in guard
+
+def test_ap_setup_timeout_rechecks_active_lesson_before_deferred_teardown():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    timeout_body = _func_body(
+        wifi_board,
+        "void WifiBoard::OnApSetupTimeout(",
+        "void WifiBoard::StartApSetupTimeout(",
+    )
+    scheduled = timeout_body[
+        timeout_body.index("Application::GetInstance().Schedule([board]()") :
+        timeout_body.index("});", timeout_body.index("Application::GetInstance().Schedule([board]()"))
+    ]
+
+    assert "Application::GetInstance().IsLessonRuntimeActive()" in scheduled
+    guard_idx = scheduled.index("Application::GetInstance().IsLessonRuntimeActive()")
+    stop_idx = scheduled.index("WifiManager::GetInstance().StopConfigAp();")
+    clear_idx = scheduled.index("board->in_config_mode_ = false;")
+    assert guard_idx < stop_idx < clear_idx
+    guard = scheduled[guard_idx:stop_idx]
+    assert "board->StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC);" in guard
+    assert "return;" in guard
+    assert "StopConfigAp" not in guard
+    assert "in_config_mode_" not in guard
+
+def test_start_wifi_config_mode_ignores_active_lesson_before_setup_side_effects():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _start_wifi_config_body(wifi_board)
+
+    assert "Application::GetInstance().IsLessonRuntimeActive()" in body
+    guard_idx = body.index("Application::GetInstance().IsLessonRuntimeActive()")
+    config_flag_idx = body.index("in_config_mode_ = true;")
+    state_idx = body.index("SetDeviceState(kDeviceStateWifiConfiguring);")
+    assert guard_idx < config_flag_idx < state_idx
+    guard = body[guard_idx:config_flag_idx]
+    assert "return;" in guard
+    assert "in_config_mode_" not in guard
+    assert "SetDeviceState" not in guard
+    assert "StartConfigAp" not in guard
+    assert "ReleaseWakeWordResourcesForWifiConfig" not in guard
+    assert "StartBleSetupTimeout" not in guard
+    assert "ReceiveWifiCredentialsFromAudio" not in guard
+
 # ---------------------------------------------------------------------------
 # WB6: NetworkEvent::Connected must NOT POST the authenticated/provisioning
 #      report itself — that is owned by the BluFi success branch (single owner)
@@ -475,6 +556,46 @@ def test_wb12b_unclaimed_saved_ssid_keeps_ble_advertising_before_station_connect
         "unclaimed saved-SSID startup must reopen BLE before starting station "
         "mode so Android can rediscover and send a fresh claim token"
     )
+
+def test_wb12c_unclaimed_saved_ssid_connect_does_not_teardown_ble_without_claim_secrets():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    fn = _func_body(
+        wifi_board,
+        "void WifiBoard::OnNetworkEvent(",
+        "void WifiBoard::SetNetworkEventCallback(",
+    )
+    case_idx = fn.index("case NetworkEvent::Connected:")
+    case_end = fn.index("case NetworkEvent::Scanning:", case_idx)
+    body = fn[case_idx:case_end]
+
+    token_idx = body.index('const std::string& token = blufi.GetBootstrapToken();')
+    code_idx = body.index('const std::string& code  = blufi.GetProvisioningCode();')
+    release_idx = body.index("const bool should_release_ble")
+    deinit_idx = body.index("blufi.deinit();", release_idx)
+
+    assert token_idx < release_idx
+    assert code_idx < release_idx
+    assert "Application::GetInstance().IsDeviceClaimed()" in body[release_idx:deinit_idx]
+    assert "!token.empty()" in body[release_idx:deinit_idx]
+    assert "!code.empty()" in body[release_idx:deinit_idx]
+    assert "keeping BLE advertising open" in body[release_idx:case_end]
+    assert body.index("if (should_release_ble)", release_idx) < deinit_idx, (
+        "saved-SSID reconnect on an unclaimed robot must not tear down BLE when "
+        "no BluFi claim/provisioning token has arrived; otherwise the mobile app "
+        "cannot rediscover the robot and send the bootstrap token"
+    )
+
+
+def test_wb12d_wifi_board_claim_gate_uses_public_application_api():
+    header = read("main/application.h")
+
+    public_start = header.index("class Application")
+    private_start = header.index("\nprivate:", public_start)
+    public_api = header[public_start:private_start]
+    private_api = header[private_start:]
+
+    assert "bool IsDeviceClaimed() const;" in public_api
+    assert "bool IsDeviceClaimed() const;" not in private_api
 
 # ---------------------------------------------------------------------------
 # WB13: WifiConfigModeExit re-attempts the connection with the new credentials

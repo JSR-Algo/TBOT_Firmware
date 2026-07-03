@@ -860,8 +860,10 @@ def test_sec28_blufi_security_struct_widths_match_cpp_expectations():
     assert "uint8_t *dh_param;" in struct
     assert "int dh_param_len;" in struct
     # The mbedtls sub-contexts are heap pointers (constructed in _security_init).
+    # AES must use the mbedTLS API-compatible context so software-AES builds keep
+    # the same BluFi CFB128 behavior without re-enabling HW AES SRAM pressure.
     assert "mbedtls_dhm_context *dhm;" in struct
-    assert "esp_aes_context *aes;" in struct
+    assert "mbedtls_aes_context *aes;" in struct
 
 # ---------------------------------------------------------------------------
 # SEC29: Wi-Fi credentials must only be accepted after BluFi DH/AES completed.
@@ -879,6 +881,26 @@ def test_sec29_sta_credentials_are_rejected_before_copy_without_secure_session()
         memcpy_idx = case_body.index(f"memcpy({destination}")
         assert guard_idx < memcpy_idx, f"{case_name} must check secure session before memcpy"
         assert "break;" in case_body[guard_idx:memcpy_idx]
+
+# ---------------------------------------------------------------------------
+# SEC31: BluFi CUSTOM_DATA carries bootstrap_token / provisioning_code /
+#        claim_device_id and must be rejected before TLV parsing unless DH/AES
+#        has completed. This closes the token/custom-data plaintext path.
+# ---------------------------------------------------------------------------
+def test_sec31_custom_data_is_rejected_before_tlv_parse_without_secure_session():
+    case_body = _event_case_body("ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")
+
+    guard_idx = case_body.index("_require_secure_session_for_credentials()")
+    data_idx = case_body.index("const uint8_t* data = param->custom_data.data;")
+    prescan_idx = case_body.index("int prescan_offset = 0;")
+    token_persist_idx = case_body.index('websocket_settings.SetString("bootstrap_token", bootstrap_token_);')
+    device_id_persist_idx = case_body.index('websocket_settings.SetString("claim_device_id"')
+
+    assert guard_idx < data_idx
+    assert guard_idx < prescan_idx
+    assert guard_idx < device_id_persist_idx
+    assert guard_idx < token_persist_idx
+    assert "break;" in case_body[guard_idx:data_idx]
 
 # ---------------------------------------------------------------------------
 # SEC30: The secure-session predicate must prove both DH completion and an AES

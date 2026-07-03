@@ -6,8 +6,12 @@
 #include "mcp_server.h"
 #include <esp_log.h>
 #include <esp_app_desc.h>
+#include <esp_heap_caps.h>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
+#include <cerrno>
+#include <sys/stat.h>
 #include <esp_pthread.h>
 
 #include "application.h"
@@ -22,6 +26,127 @@
 
 namespace {
 constexpr size_t kMcpToolsListMaxPayloadBytes = 2500;
+constexpr size_t kLessonAssetSyncMaxBytes = 512 * 1024;
+constexpr const char* kSampleLessonAssetDir = "/sdcard/tbot/lesson-assets/sample-barn";
+constexpr const char* kSampleLessonAssetFiles[] = {
+    "barn-round-field-poster.jpg",
+    "barn.png",
+    "bright-teach.png",
+    "bright-listening.png",
+    "bright-thinking.png",
+    "bright-celebrate.png",
+};
+
+bool EnsureDir(const char* path) {
+    if (path == nullptr || path[0] == '\0') return false;
+    errno = 0;
+    if (mkdir(path, 0755) == 0 || errno == EEXIST) return true;
+    return false;
+}
+
+void EnsureDirOrThrow(const char* path) {
+    if (EnsureDir(path)) return;
+    throw std::runtime_error(std::string("failed to create SD directory: ") +
+                             path + " errno=" + std::to_string(errno));
+}
+
+void EnsureSampleLessonAssetDir() {
+    EnsureDirOrThrow("/sdcard/tbot");
+    EnsureDirOrThrow("/sdcard/tbot/lesson-assets");
+    EnsureDirOrThrow(kSampleLessonAssetDir);
+}
+
+bool DownloadLessonAssetToFile(const std::string& url, const std::string& dest_path, size_t& bytes_out) {
+    bytes_out = 0;
+    auto* network = Board::GetInstance().GetNetwork();
+    if (network == nullptr) {
+        throw std::runtime_error("network unavailable");
+    }
+    auto http = network->CreateHttp(3);
+    if (!http) {
+        throw std::runtime_error("failed to create HTTP client");
+    }
+    http->SetTimeout(10000);
+    if (!http->Open("GET", url)) {
+        throw std::runtime_error("failed to open URL: " + url);
+    }
+    if (http->GetStatusCode() != 200) {
+        int status = http->GetStatusCode();
+        http->Close();
+        throw std::runtime_error("unexpected status " + std::to_string(status) + " for " + url);
+    }
+    size_t content_length = http->GetBodyLength();
+    if (content_length > kLessonAssetSyncMaxBytes) {
+        http->Close();
+        throw std::runtime_error("asset too large: " + url);
+    }
+
+    std::string tmp_path = dest_path + ".tmp";
+    FILE* fp = fopen(tmp_path.c_str(), "wb");
+    if (fp == nullptr) {
+        http->Close();
+        throw std::runtime_error("failed to open SD file: " + tmp_path);
+    }
+
+    char* buffer = static_cast<char*>(heap_caps_malloc(4096, MALLOC_CAP_8BIT));
+    if (buffer == nullptr) {
+        fclose(fp);
+        remove(tmp_path.c_str());
+        http->Close();
+        throw std::runtime_error("failed to allocate download buffer");
+    }
+
+    bool failed = false;
+    std::string error;
+    while (true) {
+        size_t want = 4096;
+        if (content_length > 0) {
+            if (bytes_out >= content_length) break;
+            want = std::min(want, content_length - bytes_out);
+        }
+        int ret = http->Read(buffer, want);
+        if (ret < 0) {
+            failed = true;
+            error = "read error for " + url;
+            break;
+        }
+        if (ret == 0) break;
+        if (bytes_out + static_cast<size_t>(ret) > kLessonAssetSyncMaxBytes) {
+            failed = true;
+            error = "asset too large: " + url;
+            break;
+        }
+        if (fwrite(buffer, 1, static_cast<size_t>(ret), fp) != static_cast<size_t>(ret)) {
+            failed = true;
+            error = "write error for " + tmp_path;
+            break;
+        }
+        bytes_out += static_cast<size_t>(ret);
+    }
+
+    heap_caps_free(buffer);
+    fclose(fp);
+    http->Close();
+
+    if (!failed && content_length > 0 && bytes_out != content_length) {
+        failed = true;
+        error = "short read for " + url;
+    }
+    if (!failed && bytes_out == 0) {
+        failed = true;
+        error = "empty asset: " + url;
+    }
+    if (failed) {
+        remove(tmp_path.c_str());
+        throw std::runtime_error(error);
+    }
+    remove(dest_path.c_str());
+    if (rename(tmp_path.c_str(), dest_path.c_str()) != 0) {
+        remove(tmp_path.c_str());
+        throw std::runtime_error("failed to commit SD file: " + dest_path);
+    }
+    return true;
+}
 }
 
 McpServer::McpServer() {
@@ -281,6 +406,9 @@ void McpServer::AddUserOnlyTools() {
             [display](const PropertyList& properties) -> ReturnValue {
                 auto url = properties["url"].value<std::string>();
                 auto quality = properties["quality"].value<int>();
+                if (Application::GetInstance().IsLessonRuntimeActive()) {
+                    throw std::runtime_error("screen snapshot disabled during lesson");
+                }
 
                 std::string jpeg_data;
                 if (!display->SnapshotToJpeg(jpeg_data, quality)) {
@@ -450,6 +578,48 @@ void McpServer::AddUserOnlyTools() {
 #endif // HAVE_LVGL
 
     // Assets download url (always registered — Settings storage works regardless of partition layout)
+    AddUserOnlyTool("self.lesson_assets.sync_sample_to_sd",
+        "Download the built-in sample lesson images to the SD card for offline lesson rendering.",
+        PropertyList({
+            Property("base_url", kPropertyTypeString, "HTTP base URL containing the sample image files")
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string base_url = properties["base_url"].value<std::string>();
+            while (!base_url.empty() && base_url.back() == '/') {
+                base_url.pop_back();
+            }
+            if (base_url.empty()) {
+                throw std::runtime_error("base_url is required");
+            }
+            EnsureSampleLessonAssetDir();
+
+            cJSON* json = cJSON_CreateObject();
+            cJSON_AddStringToObject(json, "directory", kSampleLessonAssetDir);
+            cJSON* files = cJSON_CreateArray();
+            int downloaded = 0;
+            size_t total_bytes = 0;
+
+            for (const char* file_name : kSampleLessonAssetFiles) {
+                std::string url = base_url + "/" + file_name;
+                std::string dest = std::string(kSampleLessonAssetDir) + "/" + file_name;
+                size_t bytes = 0;
+                DownloadLessonAssetToFile(url, dest, bytes);
+                total_bytes += bytes;
+                downloaded += 1;
+                cJSON* item = cJSON_CreateObject();
+                cJSON_AddStringToObject(item, "file", file_name);
+                cJSON_AddNumberToObject(item, "bytes", static_cast<double>(bytes));
+                cJSON_AddItemToArray(files, item);
+                ESP_LOGI(TAG, "sample lesson asset synced to SD: %s bytes=%u",
+                         dest.c_str(), static_cast<unsigned>(bytes));
+            }
+
+            cJSON_AddNumberToObject(json, "downloadedCount", downloaded);
+            cJSON_AddNumberToObject(json, "totalBytes", static_cast<double>(total_bytes));
+            cJSON_AddItemToObject(json, "files", files);
+            return json;
+        });
+
     AddUserOnlyTool("self.assets.set_download_url", "Set the download url for the assets",
             PropertyList({
                 Property("url", kPropertyTypeString)
@@ -684,6 +854,12 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         return;
     }
 
+    if (Application::GetInstance().IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "MCP tool call rejected during lesson: %s", tool_name.c_str());
+        ReplyError(id, "MCP tools disabled during lesson");
+        return;
+    }
+
     PropertyList arguments = (*tool_iter)->properties();
     try {
         for (auto& argument : arguments) {
@@ -716,7 +892,12 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool_iter, arguments = std::move(arguments)]() {
+    app.Schedule([this, id, tool_iter, tool_name, arguments = std::move(arguments)]() {
+        if (Application::GetInstance().IsLessonRuntimeActive()) {
+            ESP_LOGI(TAG, "scheduled MCP tool call rejected during lesson: %s", tool_name.c_str());
+            ReplyError(id, "MCP tools disabled during lesson");
+            return;
+        }
         try {
             ReplyResult(id, (*tool_iter)->Call(arguments));
         } catch (const std::exception& e) {

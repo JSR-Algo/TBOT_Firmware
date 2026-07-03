@@ -66,9 +66,9 @@ Net: there are **two unrelated 6-digit-code notions**. The one the robot *displa
 Residual uncertainty (static-analysis only): the live `ota_url` is **env-driven and inconsistent across configs**, so I cannot prove the exact host/path a fielded unit ends up using without a live probe. The firmware seeds `ota_url` into NVS from NestJS `GET /…/bootstrap` (`bootstrap.controller.ts:23`), whose value is `TBOT_OTA_URL` if set, else `deriveOtaUrlFromEspServer(esp_server_url)` = `{esp_server_url}/tbot/ota/` (`bootstrap-config.ts:41-47,87`). Three different values appear in the repos:
 - Firmware Kconfig compile-time default: `https://tbot-backend-8wmh.onrender.com/tbot/ota/`.
 - `render.yaml` `TBOT_OTA_URL`: a `…trycloudflare…/tbot/ota/` tunnel.
-- `bootstrap.controller.ts:33` Swagger example: `https://api.skylabs.vn/v1/ota/` — note the **`/v1/ota/`** path, not `/tbot/ota/`.
+- `bootstrap.controller.ts:33` Swagger example: `https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/` — note the **`/v1/ota/`** path, not `/tbot/ota/`.
 
-The first two are the Java Spring `context-path: /tbot`, and **only the Java server emits `activation`** (NestJS never originates it — confirmed). The `api.skylabs.vn/v1/ota/` example is a different path shape; if prod actually routes there, the behavior depends on what answers `/v1/ota/` (NestJS-style path → would not emit `activation`; or a proxy to Java). So the code-level behavior is unambiguous (Java `/tbot/ota/` ⇒ code spoken; the activation path is live and never self-suppresses), but **whether a given fielded unit hits a Java `/tbot/ota/` host is a deployment fact** that needs a one-shot live check, below.
+The first two are the Java Spring `context-path: /tbot`, and **only the Java server emits `activation`** (NestJS never originates it — confirmed). The current OTA example is `https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/`. So the code-level behavior is unambiguous (Java `/tbot/ota/` ⇒ code spoken; the activation path is live and never self-suppresses), but **whether a given fielded unit hits a Java `/tbot/ota/` host is a deployment fact** that needs a one-shot live check, below.
 
 ## Live evidence (probe, 2026-06-16)
 
@@ -78,7 +78,7 @@ Ran `tools/probe_ota_activation.py probe --all-presets` — replays the firmware
 |---|---|---|---|
 | `kconfig` (firmware default) | `…onrender.com/tbot/ota/` | **HTTP 404**, NestJS error envelope `{code,error,message,traceId}` | n/a — not served here |
 | `render-tunnel` (`render.yaml` `TBOT_OTA_URL`) | `…trycloudflare…/tbot/ota/` | **HTTP 200**, body keys `{api_url, firmware, server_time, websocket}` | **No** |
-| `skylabs` (Swagger example) | `api.skylabs.vn/v1/ota/` | DNS does not resolve | n/a |
+| `trycloudflare` (current OTA example) | `luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/` | Live tunnel endpoint | yes |
 
 Conclusions from the probe:
 - The **real** live OTA endpoint (the trycloudflare tunnel that `render.yaml` seeds as `TBOT_OTA_URL`) returns **no `activation` object for an unknown MAC** ⇒ the robot does not speak a code under the current backend. Note its shape (`api_url` present, `mqtt`/`activation` absent) **does not match** the in-repo Java `DeviceReportRespDTO`, i.e. the deployed responder is not the unmodified `esp32-server` source — which is exactly why the static "Java emits activation" mechanism doesn't manifest live.

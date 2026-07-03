@@ -40,19 +40,22 @@ def test_is_device_claimed_recovers_from_backend_credentials():
     assert "!device_id.empty() && !device_secret.empty()" in body
 
 
-def test_refresh_claim_standby_gate_uses_recovered_claim_signal():
+def test_refresh_claim_fsm_exits_early_on_recovered_claim_signal():
     source = SOURCE.read_text(encoding="utf-8")
     body = function_body(source, "void Application::RefreshPendingTbotClaim")
 
-    standby = 'if (!pending_tbot_claim_.active && token.empty())'
-    assert standby in body
-    standby_idx = body.index(standby)
     recovered_gate = "if (IsDeviceClaimed())"
     assert recovered_gate in body
     recovered_gate_idx = body.index(recovered_gate)
-    assert recovered_gate_idx < standby_idx
+    token_read_idx = body.index('std::string token = websocket_settings.GetString("bootstrap_token");')
+    ble_state_idx = body.index("Blufi::GetInstance().GetBleState()")
+    cancel_expiry_idx = body.index("CancelClaimExpiryTimer();")
 
-    recovered_branch = body[recovered_gate_idx:standby_idx]
+    assert recovered_gate_idx < cancel_expiry_idx
+    assert recovered_gate_idx < token_read_idx
+    assert recovered_gate_idx < ble_state_idx
+
+    recovered_branch = body[recovered_gate_idx:body.index("return;", recovered_gate_idx)]
     assert "StopClaimPoll();" in recovered_branch
     assert "StopBleAdvertising();" in recovered_branch
-    assert "return;" in recovered_branch
+    assert "EnsureBleAdvertisingForStandby();" not in recovered_branch

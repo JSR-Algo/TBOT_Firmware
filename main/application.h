@@ -103,6 +103,11 @@ public:
     void StartListening();
     void PrepareLessonInteractiveListening();
     void CancelLessonInteractiveListening();
+    void SetLessonRuntimeActive(bool active);
+    bool IsLessonRuntimeActive() const;
+    void BeginLessonNetworkRenderQuiet();
+    void EndLessonNetworkRenderQuiet();
+    bool IsLessonNetworkRenderQuiet() const;
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -142,6 +147,10 @@ public:
     void ResetProtocol();
     void SchedulePendingTbotClaimRefresh();
     void EnsureBleAdvertisingForUnclaimedSavedWifi();
+    // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
+    // Claimed robots suppress claim polling and keep normal online BLE off;
+    // explicit BOOT Wi-Fi-config mode reopens BluFi for owner reconnect/setup.
+    bool IsDeviceClaimed() const;
 
     // BOOT long-press "re-pair": forget the current claim/ownership and re-enter
     // BLE pairing standby so a (possibly different) parent phone can connect and
@@ -161,7 +170,11 @@ private:
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
+    std::atomic<bool> lesson_runtime_active_{false};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
+    std::atomic<bool> lesson_interactive_listening_active_{false};
+    std::atomic<bool> lesson_idle_repaint_suppressed_{false};
+    std::atomic<int> lesson_network_render_quiet_{0};
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
@@ -215,6 +228,7 @@ private:
     // carrying backend DTO fields plus ble_state/ap_state/temp from board status.
     esp_timer_handle_t heartbeat_timer_ = nullptr;        // periodic, ~20s
     bool heartbeat_active_ = false;
+    std::atomic<int> deferred_heartbeat_auth_failure_status_{0};
     // "Hi ESP needs many tries" fix: single-flight guard for the off-task
     // heartbeat worker, same pattern as claim_poll_inflight_. The 20s timer must
     // never stack overlapping HeartbeatTask workers when the backend is slow.
@@ -228,11 +242,21 @@ private:
     std::atomic<uint32_t> connect_generation_{0};
     std::atomic<bool> connect_in_flight_{false};
     std::atomic<bool> reset_pending_{false};
+    // WSS-8: true from the start of a wake/listen/reconnect connect cycle until it
+    // succeeds or the user/system cancels the online intent. While true, a per-attempt SetError is a
+    // RECOVERABLE transient (the wake loop / ScheduleReconnect backoff retries),
+    // so MAIN_EVENT_ERROR keeps the calm "connecting/idle" view instead of flashing
+    // "Server unavailable. Retrying...". Wake-open exhaustion still surfaces a
+    // terminal error; listen-mode reconnect stays in long-horizon auto-reconnect.
+    // Cleared on OnAudioChannelOpened (success).
+    std::atomic<bool> connect_attempt_active_{false};
     esp_timer_handle_t connect_watchdog_timer_ = nullptr;   // one-shot (SM-3)
-    // T2/WSS-4: bounded auto-reconnect with exponential backoff + jitter.
+    // T2/WSS-4: long-horizon auto-reconnect with fast backoff, then slow periodic retry.
     esp_timer_handle_t reconnect_timer_ = nullptr;          // one-shot
     int reconnect_attempt_ = 0;
+    int passive_reconnect_attempt_ = 0;
     ListeningMode reconnect_mode_ = kListeningModeAutoStop;
+    std::atomic<bool> reconnect_passive_{false};
     // Sustained operation: true while we WANT an open audio channel. Set on
     // OnAudioChannelOpened; cleared by CloseAudioChannelByIntent() for every
     // user/system-initiated close. An UNEXPECTED drop leaves it true ->
@@ -257,6 +281,8 @@ private:
     std::atomic<bool> tts_audio_accepting_{false};
     std::atomic<uint32_t> speaking_generation_{0};
     std::atomic<int64_t> last_speaking_activity_ms_{0};
+    std::atomic<int64_t> listening_started_ms_{0};
+    std::atomic<int64_t> last_listening_activity_ms_{0};
     std::atomic<uint32_t> interrupt_count_{0};   // OBS-2: barge-in / abort count
     std::atomic<uint32_t> reconnect_count_{0};   // OBS-2: WS reconnect attempts
 
@@ -278,6 +304,7 @@ private:
     static void SpeakingTimeoutTask(void* arg);
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);
+    void HandleListeningWatchdogTick();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void StartPassiveLessonWebsocket();
     static void OpenChannelTask(void* arg);            // T1: blocking connect, off app task
@@ -285,7 +312,8 @@ private:
     void ArmConnectWatchdog();                         // SM-3: bound CONNECTING
     void CancelConnectWatchdog();
     void HandleConnectWatchdog(uint32_t generation);
-    void ScheduleReconnect(ListeningMode mode);        // T2/WSS-4: backoff+jitter
+    void ScheduleReconnect(ListeningMode mode);        // T2/WSS-4: long-horizon backoff+jitter
+    void SchedulePassiveLessonReconnect();             // passive lesson/nudge socket retry
     void HandleReconnectTick();
     void CloseAudioChannelByIntent();                  // intentional close -> clears online_intent_
     void ContinueWakeWordInvoke(const std::string& wake_word);
@@ -356,10 +384,6 @@ private:
     // No-ops in non-BluFi builds.
     void EnsureBleAdvertisingForStandby();
     void StopBleAdvertising();
-    // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
-    // Claimed robots suppress claim polling and keep normal online BLE off;
-    // explicit BOOT Wi-Fi-config mode reopens BluFi for owner reconnect/setup.
-    bool IsDeviceClaimed() const;
 
     // --- Heartbeat (C5) ---
     void StartHeartbeat();

@@ -11,6 +11,10 @@
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
 
+#include <cstdio>
+#include <inttypes.h>
+#include <esp_random.h>
+
 #define TAG "WS"
 
 static bool IsUrlUnreserved(char ch) {
@@ -42,6 +46,28 @@ static void AppendWebsocketQueryParam(std::string& url,
     url += name;
     url.push_back('=');
     url += UrlEncodeQueryValue(value);
+}
+
+static std::string NewTraceParentHeader() {
+    uint32_t trace0 = esp_random() | 0x1;
+    uint32_t trace1 = esp_random();
+    uint32_t trace2 = esp_random();
+    uint32_t trace3 = esp_random();
+    uint32_t span0 = esp_random() | 0x1;
+    uint32_t span1 = esp_random();
+    char buffer[56];
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "00-%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "%08" PRIx32 "-%08" PRIx32 "%08" PRIx32 "-01",
+        trace0,
+        trace1,
+        trace2,
+        trace3,
+        span0,
+        span1
+    );
+    return std::string(buffer);
 }
 
 WebsocketProtocol::WebsocketProtocol() {
@@ -160,13 +186,15 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
     }
     websocket_->SetHeader("protocol-version", std::to_string(version_).c_str());
+    std::string traceparent = NewTraceParentHeader();
+    websocket_->SetHeader("traceparent", traceparent.c_str());
+    if (!token.empty()) {
+        websocket_->SetHeader("authorization", token.c_str());
+    }
 
     std::string connect_url = url;
     AppendWebsocketQueryParam(connect_url, "device-id", device_id);
     AppendWebsocketQueryParam(connect_url, "client-id", client_id);
-    if (!token.empty()) {
-        AppendWebsocketQueryParam(connect_url, "authorization", token);
-    }
     ESP_LOGI(TAG, "Websocket auth identity: device-id=%s client-id=%s token_empty=%d",
              device_id.c_str(), client_id.c_str(), token.empty());
 

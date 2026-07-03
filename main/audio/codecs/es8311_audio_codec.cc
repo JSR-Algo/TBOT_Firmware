@@ -208,6 +208,23 @@ void Es8311AudioCodec::EnableOutput(bool enable) {
 int Es8311AudioCodec::Read(int16_t* dest, int samples) {
     if (input_enabled_) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(dev_, (void*)dest, samples * sizeof(int16_t)));
+        // The built-in MEMS mic (LMA2718) is very weak even at max analog PGA
+        // (input_gain_ = 40): captured speech lands around rms 15-41, far below
+        // what the wake-word AFE and the cloud Gemini Live VAD/STT need (it sees
+        // the input as near-silence and fragments turns -> no response). Apply a
+        // digital post-gain so the downstream pipeline gets a usable level.
+        // Speech peaks stay well under int16 max at this factor; hard-clamp guards
+        // the rare loud transient.
+        constexpr int kInputDigitalGain = 4;  // reduced from 8: 8x amplified noise+speaker-echo, dragging turns to max_capture
+        for (int i = 0; i < samples; ++i) {
+            int32_t v = static_cast<int32_t>(dest[i]) * kInputDigitalGain;
+            if (v > 32767) {
+                v = 32767;
+            } else if (v < -32768) {
+                v = -32768;
+            }
+            dest[i] = static_cast<int16_t>(v);
+        }
     }
     return samples;
 }

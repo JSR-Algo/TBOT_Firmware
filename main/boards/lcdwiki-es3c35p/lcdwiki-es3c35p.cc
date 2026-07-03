@@ -25,8 +25,11 @@
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <esp_vfs_fat.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <driver/sdmmc_host.h>
+#include <sdmmc_cmd.h>
 #include <src/misc/cache/lv_cache.h>
 
 #define TAG "LCDWikiES3C35P"
@@ -105,7 +108,7 @@ const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
 
 constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
 constexpr bool kHoldBootProbePattern = false;
-constexpr int kLcdWikiOutputVolume = 70;
+constexpr int kLcdWikiOutputVolume = 100;
 
 void EnableBacklightForBoot() {
     const gpio_config_t backlight_gpio_config = {
@@ -141,7 +144,7 @@ class LcdWikiAudioCodec : public Es8311AudioCodec {
 private:
     std::vector<int16_t> BuildDiagnosticTone(int tone_hz, int duration_ms) {
         const int sample_rate = output_sample_rate();
-        const int amplitude = 8000;
+        const int amplitude = 24000;
         const int tone_samples = sample_rate * duration_ms / 1000;
         const int period = std::max(1, sample_rate / tone_hz);
         std::vector<int16_t> tone(tone_samples);
@@ -149,6 +152,24 @@ private:
             tone[i] = ((i % period) < (period / 2)) ? amplitude : -amplitude;
         }
         return tone;
+    }
+
+    void ConfigurePaGpioForDiagnostic() {
+        if (AUDIO_CODEC_PA_PIN == GPIO_NUM_NC) {
+            return;
+        }
+        gpio_config_t cfg = {};
+        cfg.pin_bit_mask = (1ULL << AUDIO_CODEC_PA_PIN);
+        cfg.mode = GPIO_MODE_OUTPUT;
+        cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+        cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        cfg.intr_type = GPIO_INTR_DISABLE;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&cfg));
+
+        const int active_level = AUDIO_CODEC_PA_INVERTED ? 0 : 1;
+        ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_set_level(AUDIO_CODEC_PA_PIN, active_level));
+        ESP_LOGI(TAG, "LCDWiki audio diagnostic PA configured pin=%d active_level=%d gpio_level=%d",
+                 AUDIO_CODEC_PA_PIN, active_level, gpio_get_level(AUDIO_CODEC_PA_PIN));
     }
 
     void PlayDiagnosticSegment(const char* name, int pa_level, int tone_hz) {
@@ -169,6 +190,7 @@ private:
 
     void RunDiagnosticTone() {
         EnableOutput(true);
+        ConfigurePaGpioForDiagnostic();
 
         PlayDiagnosticSegment("pa_low", 0, 660);
         PlayDiagnosticSegment("pa_high", 1, 880);
@@ -186,8 +208,10 @@ public:
         bool use_mclk = true, bool pa_inverted = false)
         : Es8311AudioCodec(i2c_master_handle, i2c_port, input_sample_rate, output_sample_rate,
             mclk, bclk, ws, dout, din, pa_pin, es8311_addr, use_mclk, pa_inverted) {
-        input_channels_ = 2;
-        output_channels_ = 2;
+        // ES8311 is a mono codec. Keep the device channel count at 1; forcing
+        // stereo can report successful writes while leaving the speaker silent.
+        input_channels_ = 1;
+        output_channels_ = 1;
     }
 
     void Start() override {
@@ -605,6 +629,10 @@ private:
         });
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
+            if (app.IsLessonRuntimeActive()) {
+                ESP_LOGI(TAG, "LCDWiki BOOT click ignored during lesson");
+                return;
+            }
             auto state = app.GetDeviceState();
             if (state == kDeviceStateStarting || state == kDeviceStateWifiConfiguring ||
                 state == kDeviceStateActivating || state == kDeviceStateConnecting) {
@@ -623,10 +651,40 @@ private:
         });
     }
 
+    void InitializeSdCard() {
+        sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+        sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+        slot_config.width = 4;
+        slot_config.clk = SDCARD_SDMMC_CLK_PIN;
+        slot_config.cmd = SDCARD_SDMMC_CMD_PIN;
+        slot_config.d0 = SDCARD_SDMMC_D0_PIN;
+        slot_config.d1 = SDCARD_SDMMC_D1_PIN;
+        slot_config.d2 = SDCARD_SDMMC_D2_PIN;
+        slot_config.d3 = SDCARD_SDMMC_D3_PIN;
+        slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+        esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+            .format_if_mount_failed = false,
+            .max_files = 8,
+            .allocation_unit_size = 16 * 1024,
+        };
+        sdmmc_card_t* card = nullptr;
+        esp_err_t ret = esp_vfs_fat_sdmmc_mount(SDCARD_MOUNT_POINT, &host, &slot_config,
+                                                &mount_config, &card);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to mount SD card at %s: %s",
+                     SDCARD_MOUNT_POINT, esp_err_to_name(ret));
+            return;
+        }
+        ESP_LOGI(TAG, "SD card mounted at %s", SDCARD_MOUNT_POINT);
+        sdmmc_card_print_info(stdout, card);
+    }
+
 public:
     LCDWikiES3C35PBoard() : boot_button_(BOOT_BUTTON_GPIO, false, 5000) {
         InitializeI2c();
         InitializeSpi();
+        InitializeSdCard();
         InitializeLcdDisplay();
         // Workaround "màn đen khi cấp nguồn lạnh" cho dòng panel này: restart 1 lần
         // sau cold boot (chỉ chạy đúng 1 lần vì reset reason đổi thành SW).

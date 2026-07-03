@@ -95,6 +95,10 @@ void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "ShowNotification('%s') called before SetupUI() - message will be lost!", notification);
     }
+    if (Application::GetInstance().IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "lesson notification suppressed: %s", notification);
+        return;
+    }
     DisplayLockGuard lock(this);
     if (notification_label_ == nullptr) {
         if (setup_ui_called_) {
@@ -133,7 +137,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
     }
 
     // Update time
-    if (app.GetDeviceState() == kDeviceStateIdle) {
+    if (app.GetDeviceState() == kDeviceStateIdle && !app.IsLessonRuntimeActive()) {
         if (last_status_update_time_ + std::chrono::seconds(10) < std::chrono::system_clock::now()) {
             // Set status to clock "HH:MM"
             time_t now = time(NULL);
@@ -177,7 +181,11 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         // Check low battery popup only when clock tick event is triggered
         // Because when initializing, the battery level is not ready yet.
         if (low_battery_popup_ != nullptr && !update_all) {
-            if (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging) {
+            if (app.IsLessonRuntimeActive()) {
+                if (!lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) {
+                    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+                }
+            } else if (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging) {
                 if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // Show if low battery popup is hidden
                     lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
                     app.Schedule([&app]() {
@@ -222,6 +230,10 @@ void LvglDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
 }
 
 void LvglDisplay::SetPowerSaveMode(bool on) {
+    if (Application::GetInstance().IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "lesson power save repaint suppressed");
+        return;
+    }
     if (on) {
         SetChatMessage("system", "");
         SetEmotion("sleepy");

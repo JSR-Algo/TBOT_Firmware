@@ -45,6 +45,10 @@ void Display::SetChatMessage(const char* role, const char* content) {
     ESP_LOGW(TAG, "     %s", content);
 }
 
+void Display::SetLessonCaption(const char* content) {
+    SetChatMessage("assistant", content);
+}
+
 void Display::ClearChatMessages() {
     // Default empty implementation, override in subclasses if needed
 }

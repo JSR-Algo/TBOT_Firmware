@@ -1,8 +1,8 @@
 CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
 # Stable backend bootstrap seed. The OTA response returns the final websocket.url.
-CONFIG_OTA_URL="https://luggage-spears-louisville-psychology.trycloudflare.com/tbot/ota/"
+CONFIG_OTA_URL="https://tbot-backend-8wmh.onrender.com/tbot/ota/"
 CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
-CONFIG_WEBSOCKET_URL="ws://your-ip-or-domain:port/tbot/v1/"
+CONFIG_WEBSOCKET_URL=""
 # BLE setup hard-timeout: spec default 5 min (was 120s); range 60-600 (max 10 min).
 CONFIG_BLE_SETUP_TIMEOUT_SEC=300
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
@@ -29,12 +29,21 @@ CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
 # images. The default 3072-byte LWIP tcp/ip task stack overflows on ESP32-S3.
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=8192
 
-# Memory relief for internal SRAM during conversation. While streaming audio,
-# WiFi/LWIP dynamic buffers + LVGL + audio squeezed internal RAM down to ~211 B,
-# so esp-aes (HW AES uses DMA -> must allocate INTERNAL/DMA RAM) failed:
-#   "esp-aes: Failed to allocate memory" -> ws_disconnect -> reconnect TLS
-#   handshake OOM -> "Máy chủ không khả dụng" + robot can't hear ("con nói lại").
-# Push WiFi/LWIP buffers to PSRAM (same approach already used for BT above) and
-# trim the dynamic TX pool so internal RAM stays free for AES-DMA / TLS.
-CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
-CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=24
+# Fix "esp-aes: Failed to allocate memory" -> ws_disconnect -> "Máy chủ không
+# khả dụng" during conversation. While streaming audio, internal SRAM spiked
+# down to ~211 B; the HW AES driver (esp-aes) needs a DMA-capable INTERNAL-RAM
+# buffer per TLS record and failed to allocate, dropping the WSS connection (and
+# the robot could no longer hear -> "con nói lại nhé"). mbedTLS allocations
+# already live in PSRAM (MBEDTLS_EXTERNAL_MEM_ALLOC=y), so switching to software
+# AES removes TLS's last internal/DMA-RAM dependency. SW AES is plenty fast for
+# the low-bitrate audio WSS.
+# NOTE: WiFi/LWIP-in-PSRAM (SPIRAM_TRY_ALLOCATE_WIFI_LWIP) was tried and reverted
+# — it forced static TX + 32 internal cache-TX buffers, regressed boot TLS
+# (HTTP timeouts) and AFE feed draining, and barely moved internal free RAM.
+# CONFIG_MBEDTLS_HARDWARE_AES is not set
+
+# Lesson images on SD use descriptive asset paths such as lesson-assets and
+# barn-round-field-poster.jpg. Keep FATFS long filename support enabled so the
+# robot can sync and read those files directly from the microSD card.
+# CONFIG_FATFS_LFN_NONE is not set
+CONFIG_FATFS_LFN_HEAP=y
