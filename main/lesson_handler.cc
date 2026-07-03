@@ -1124,17 +1124,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const char* poster_src = Str(Obj(bg, "poster"), "src");
     const char* object_src = Str(Obj(to, "asset"), "src");
     const char* overlay_src = Str(Obj(ro, "asset"), "src");
+    const bool has_object_src = !Blank(object_src);
+    const bool has_overlay_src = !Blank(overlay_src);
     const char* prompt = Str(body, "prompt");
     if (Blank(prompt)) prompt = Str(Obj(body, "storyBeat"), "ask");
 
     if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||
-        Blank(poster_src) || Blank(object_src) || Blank(overlay_src)) {
+        Blank(poster_src)) {
         cJSON* eb = MakeErrorBody("LESSON_FRAME_INVALID",
-                                  "lesson_step requires backgroundScene, teachingObject, and robotOverlay image sources",
+                                  "lesson_step requires scene and backgroundScene poster image source",
                                   false, "scene");
         end_lesson_after_failure();
         emit(root, "lesson_error", eb);
-        ESP_LOGW(TAG, "lesson_step rejected: missing required three-layer image source");
+        ESP_LOGW(TAG, "lesson_step rejected: missing required scene or poster image source");
         return;
     }
 
@@ -1180,7 +1182,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // (clear_bg = !poster_drew). A poster with no real draw path must stay not-drawn so
     // the honest degraded ack fires and the previous-step background is cleared.
     bool object_drew = false;
-    if (lvgl_display != nullptr && object_src != nullptr) {
+    if (lvgl_display != nullptr && has_object_src) {
         std::unique_ptr<LvglImage> object_image = FetchLessonImage(object_src);
         if (object_image != nullptr) {
             LvglImage* raw_object = object_image.release();
@@ -1194,7 +1196,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
     }
     bool overlay_drew = false;
-    if (lvgl_display != nullptr && overlay_src != nullptr) {
+    if (lvgl_display != nullptr && has_overlay_src) {
         std::unique_ptr<LvglImage> overlay_image = FetchLessonImage(overlay_src);
         if (overlay_image != nullptr) {
             LvglImage* raw_overlay = overlay_image.release();
@@ -1234,9 +1236,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     TruncateUtf8(caption, 96);  // truncate for the 480px line (STORYBOARD §46-48)
 
-    // §7.5 degraded semantics: false only when required poster/object drew, and any
-    // authored robot overlay image drew. Emoji-face + caption still render as fallback.
-    const bool degraded = !(poster_drew && object_drew && (overlay_src == nullptr || overlay_drew));
+    // §7.5 degraded semantics: false only when all authored visual layers exist and drew.
+    // Missing optional object/overlay sources use caption/emoji fallback and stay degraded.
+    const bool degraded = !(poster_drew && has_object_src && object_drew &&
+                            has_overlay_src && overlay_drew);
 
     // Marshal the draw onto the LVGL task, exactly like the TTS-display pattern
     // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption are

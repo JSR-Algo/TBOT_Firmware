@@ -1020,8 +1020,8 @@ void test_step_rejects() {
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_FRAME_INVALID",
             "missing layer -> LESSON_FRAME_INVALID");
 
-    // Blank-but-present source must be rejected like backend/ESP trim guards; otherwise
-    // firmware would ack a non-renderable frame as degraded instead of failing fast.
+    // Blank-but-present required poster source must be rejected like backend/ESP trim
+    // guards; otherwise firmware would ack a frame with no required background.
     ResetObservable();
     Board::GetInstance().display_ = nullptr;
     Board::GetInstance().network_ = nullptr;
@@ -1029,11 +1029,11 @@ void test_step_rejects() {
     Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\"," 
            "\"stepId\":\"s7\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
-           "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+           "\",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"   \"}},"
            "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
-           "\"robotOverlay\":{\"asset\":{\"src\":\"   \"}}}}}");
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"}}}}}");
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_FRAME_INVALID",
-            "blank layer source -> LESSON_FRAME_INVALID");
+            "blank required poster source -> LESSON_FRAME_INVALID");
 }
 
 void test_invalid_step_clears_stale_lesson_scene() {
@@ -1542,6 +1542,52 @@ void test_step_degraded_and_caption_fallback() {
     Handle(whitespace_prompt_frame);
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "G Lab - alt text",
             "whitespace prompt falls back to readable glyph+label+alt caption");
+}
+
+void test_step_missing_optional_object_overlay_uses_prompt_fallback() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+        kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+        "\"stepId\":\"s-optional-assets\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+        "\",\"prompt\":\"Which animal is beside the barn?\",\"stepType\":\"model\","
+        "\"completionClass\":\"interactive\",\"scene\":{"
+        "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+        "\"teachingObject\":{\"primitiveFallbackCard\":{\"glyph\":\"B\",\"label\":\"barn\"}},"
+        "\"robotOverlay\":{\"expression\":\"listening\"}}}}";
+    Handle(frame);
+
+    const size_t idx = Sent().size() - 1;
+    require(FrameType(idx) == "lesson_ack",
+            "missing optional object/overlay assets still ack through prompt fallback");
+    require(FrameBodyBool(idx, "rendered", false) == true,
+            "prompt fallback frame is still rendered");
+    require(FrameBodyBool(idx, "degraded", false) == true,
+            "missing optional object/overlay assets mark degraded");
+    require(HostHttp().open_calls.size() == 1,
+            "only required poster is fetched when optional assets are absent");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "required poster still draws");
+    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
+            "missing object source clears stale object layer");
+    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
+            "missing overlay source clears stale overlay layer");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Which animal is beside the barn?",
+            "authored prompt remains visible when optional assets are absent");
+    require(disp.last_emotion == "thinking", "listening overlay expression falls back to thinking face");
+    require(App().prepare_listen_calls == 1,
+            "interactive prompt fallback still opens child response window");
 }
 
 void test_caption_truncation_preserves_utf8_boundary() {
@@ -2244,6 +2290,7 @@ int main() {
     test_step_reuses_cached_layer_bytes_for_repeated_urls();
     test_step_interactive_opens_listen();
     test_step_degraded_and_caption_fallback();
+    test_step_missing_optional_object_overlay_uses_prompt_fallback();
     test_caption_truncation_preserves_utf8_boundary();
     test_step_http_error_paths();
     test_step_http_chunked_paths();

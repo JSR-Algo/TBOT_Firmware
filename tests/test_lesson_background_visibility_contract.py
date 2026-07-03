@@ -266,7 +266,7 @@ def test_lesson_step_fetches_and_draws_robot_overlay_image_layer():
     assert "overlay_drew" in step_branch
     assert "SetPreviewImage" not in step_branch
 
-def test_lesson_step_rejects_missing_required_three_layer_image_sources_before_ack():
+def test_lesson_step_rejects_missing_required_scene_or_poster_before_ack():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     body = function_body(source, "void Application::HandleLessonMessage")
 
@@ -276,10 +276,15 @@ def test_lesson_step_rejects_missing_required_three_layer_image_sources_before_a
     emit_error_idx = step_branch.index('emit(root, "lesson_error", eb)', error_idx)
     fetch_idx = step_branch.index("std::unique_ptr<LvglImage> bg_image = FetchLessonImage", emit_error_idx)
     ack_idx = step_branch.index("emit_ack(root, sequence")
+    fatal_guard = step_branch[guard_idx:error_idx]
 
     assert 'Blank(poster_src)' in step_branch
-    assert 'Blank(object_src)' in step_branch
-    assert 'Blank(overlay_src)' in step_branch
+    assert 'Blank(object_src)' not in fatal_guard
+    assert 'Blank(overlay_src)' not in fatal_guard
+    assert 'const bool has_object_src = !Blank(object_src)' in step_branch
+    assert 'const bool has_overlay_src = !Blank(overlay_src)' in step_branch
+    assert 'if (lvgl_display != nullptr && has_object_src)' in step_branch
+    assert 'if (lvgl_display != nullptr && has_overlay_src)' in step_branch
     assert guard_idx < error_idx < emit_error_idx < fetch_idx < ack_idx
 
 def test_lesson_step_renders_layers_back_to_front_before_ack():
