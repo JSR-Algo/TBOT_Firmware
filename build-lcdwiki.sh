@@ -107,7 +107,10 @@ fi
 echo "OK: LCDWiki ES3C35P board confirmed in sdkconfig."
 
 # --- 5. build ---
-idf.py build
+if ! idf.py build; then
+    echo "WARN: idf.py build failed; retrying once (fresh build dependency-dir race)." >&2
+    idf.py build
+fi
 
 # --- 5b. report app binary size (source of truth: the flashed .bin) ---
 APP_BIN="$PROJECT_DIR/build/xiaozhi.bin"   # project(xiaozhi) in CMakeLists.txt
