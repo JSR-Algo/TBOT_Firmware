@@ -1948,6 +1948,30 @@ void test_caption_truncation_preserves_utf8_boundary() {
             "invalid UTF-8 lead byte is not preserved in caption");
 }
 
+void test_invalid_utf8_interactive_prompt_does_not_open_listen() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    std::string invalid_prompt = std::string("\xff", 1) + " barn?";
+    Handle(StepFrame(3, "s-invalid-prompt-listen", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"" + invalid_prompt + "\",\"stepType\":\"ask\","
+                     "\"completionClass\":\"interactive\"",
+                     ""));
+
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
+            "invalid UTF-8 interactive prompt is not shown as a child instruction");
+    require(App().prepare_listen_calls == 0,
+            "invalid UTF-8 interactive prompt does not open mic for an unseen question");
+}
+
 // HTTP status != 200, open fail, create-null, and read-error / chunked / size-cap paths.
 void test_step_http_error_paths() {
     LvglDisplay disp;
@@ -2585,6 +2609,7 @@ int main() {
     test_step_degraded_and_caption_fallback();
     test_step_missing_optional_object_overlay_uses_prompt_fallback();
     test_caption_truncation_preserves_utf8_boundary();
+    test_invalid_utf8_interactive_prompt_does_not_open_listen();
     test_step_http_error_paths();
     test_step_http_chunked_paths();
     test_decode_failure_branches();

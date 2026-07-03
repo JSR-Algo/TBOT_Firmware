@@ -65,7 +65,6 @@ size_t Utf8CharLen(unsigned char ch) {
 }
 
 void TruncateUtf8(std::string& value, size_t max_bytes) {
-    if (value.size() <= max_bytes) return;
     size_t pos = 0;
     size_t last_good = 0;
     while (pos < value.size() && pos < max_bytes) {
@@ -83,7 +82,9 @@ void TruncateUtf8(std::string& value, size_t max_bytes) {
         pos += len;
         last_good = pos;
     }
-    value.resize(last_good);
+    if (last_good < value.size()) {
+        value.resize(last_good);
+    }
 }
 
 bool Num(const cJSON* o, const char* k, double& out) {
@@ -1339,7 +1340,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const char* step_type       = Str(body, "stepType");
     const char* completion_class = Str(body, "completionClass");
     const bool passive = IsPassiveStep(completion_class, step_type);
-    const bool should_listen = !passive && has_visible_content && has_prompt;
+    const bool has_visible_child_prompt = has_prompt && !caption.empty();
+    const bool should_listen = !passive && has_visible_content && has_visible_child_prompt;
     const char* sid = Str(root, "stepId");
     if (!should_listen) {
         Application::GetInstance().CancelLessonInteractiveListening();
