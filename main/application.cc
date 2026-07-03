@@ -2809,6 +2809,9 @@ void Application::CancelLessonInteractiveListening() {
 void Application::SetLessonRuntimeActive(bool active) {
     lesson_runtime_active_.store(active);
     if (!active) {
+        lesson_interactive_listen_generation_.fetch_add(1);
+        lesson_interactive_listen_pending_.store(false);
+        lesson_interactive_listening_active_.store(false);
         const int status_code = deferred_heartbeat_auth_failure_status_.exchange(0);
         if (status_code != 0) {
             Schedule([this, status_code]() {

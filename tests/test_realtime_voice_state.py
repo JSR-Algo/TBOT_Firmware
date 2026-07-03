@@ -443,6 +443,27 @@ def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
     post_lesson = setter[setter.index("deferred_heartbeat_auth_failure_status_.exchange(0)") :]
     assert "Schedule([this, status_code]()" in post_lesson
 
+def test_lesson_runtime_deactivation_invalidates_stale_child_turn():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::SetLessonRuntimeActive")
+    end = app_cc.index("bool Application::IsLessonRuntimeActive", start)
+    setter = app_cc[start:end]
+    inactive_branch = setter[
+        setter.index("if (!active)") :
+        setter.index("xEventGroupSetBits(event_group_", setter.index("if (!active)"))
+    ]
+
+    assert "lesson_interactive_listen_generation_.fetch_add(1);" in inactive_branch
+    assert "lesson_interactive_listen_pending_.store(false);" in inactive_branch
+    assert "lesson_interactive_listening_active_.store(false);" in inactive_branch
+    assert inactive_branch.index("lesson_interactive_listen_generation_.fetch_add(1);") < inactive_branch.index(
+        "deferred_heartbeat_auth_failure_status_.exchange(0)"
+    )
+    assert inactive_branch.index("lesson_interactive_listen_pending_.store(false);") < inactive_branch.index(
+        "deferred_heartbeat_auth_failure_status_.exchange(0)"
+    )
+
 def test_lesson_runtime_ignores_activation_done_before_idle_repaint_and_success_sound():
     app_cc = read("main/application.cc")
 
