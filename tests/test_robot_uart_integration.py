@@ -27,10 +27,11 @@ def test_main_firmware_declares_robot_uart_bridge():
     assert "ROBOT_UART_TX_PIN" in source
     assert "ROBOT_UART_RX_PIN" in source
     assert "uart_write_bytes" in source
-    assert "WaitForAck" in source
-    assert "No UART ACK from servant" in source
-    assert "Retrying robot command on alternate UART pins" in source
+    assert "WaitForAck" not in source
+    assert "No UART ACK from servant" not in source
     assert "SendPayloadOnProfile" in header
+    assert "primary_sent" in source
+    assert "alternate_sent" in source
     assert '\\"cmd\\":\\"servo\\"' in source
     assert '\\"part\\":\\"' in source
     assert 'left_arm' in source
@@ -38,6 +39,43 @@ def test_main_firmware_declares_robot_uart_bridge():
     assert '\\"action\\":\\"' in source
     assert 'action == "raise"' in source
     assert 'lower' in source
+
+def test_robot_motion_uart_dispatch_does_not_block_on_servant_ack():
+    source = read("main/robot_uart.cc")
+
+    send_payload_body = re.search(
+        r"bool RobotUart::SendPayloadOnProfile\(.*?\n\}",
+        source,
+        re.S,
+    ).group(0)
+    send_sweep_body = re.search(
+        r"bool RobotUart::SendServoSweep\(.*?\n\}",
+        source,
+        re.S,
+    ).group(0)
+
+    assert "uart_write_bytes" in send_payload_body
+    assert "WaitForAck" not in send_payload_body
+    assert "timeout_ms" not in send_payload_body
+    assert "uart_read_bytes" not in send_payload_body
+    assert "primary_sent" in send_sweep_body
+    assert "alternate_sent" in send_sweep_body
+    assert "return primary_sent || alternate_sent;" in send_sweep_body
+
+def test_robot_uart_reads_servant_ack_asynchronously():
+    source = read("main/robot_uart.cc")
+    header = read("main/robot_uart.h")
+
+    assert "StartAckReader" in header
+    assert "AckReaderTask" in header
+    assert "ack_reader_started_" in header
+    assert "StartAckReader();" in source
+    assert "xTaskCreate(&RobotUart::AckReaderTask" in source
+    assert "uart_read_bytes" in source
+    assert "Servant ACK" in source
+    assert "primary-listen" in source
+    assert "ROBOT_UART_ALT_NUM == ROBOT_UART_NUM" in source
+    assert "WaitForAck" not in source
 
 
 def test_application_triggers_left_arm_from_websocket_and_mcp():
@@ -123,6 +161,9 @@ def test_servant_firmware_has_uart_servo_controller():
     assert "RIGHT_ARM_SERVO_LEDC_CHANNEL LEDC_CHANNEL_1" in main_c
     assert "UART_PORT UART_NUM_1" in main_c
     assert "LEDC_TIMER_50HZ" in main_c
+    assert "#define SERVO_SPEED_PERCENT 200" in main_c
+    assert "const int fine_step = clamp_int(step, 1, 10);" in main_c
+    assert "(void)step" not in main_c
     assert "servo_sweep" in main_c
     assert "find_servo" in main_c
     assert "cJSON_GetObjectItem" in main_c
