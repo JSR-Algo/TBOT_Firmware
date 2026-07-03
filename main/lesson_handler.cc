@@ -1291,8 +1291,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool passive = IsPassiveStep(completion_class, step_type);
     const bool has_visible_content = rendered &&
         (!caption.empty() || poster_drew || object_drew || overlay_drew);
+    const bool should_listen = !passive && has_visible_content;
     const char* sid = Str(root, "stepId");
-    if (!passive && has_visible_content) {
+    if (!should_listen) {
+        Application::GetInstance().CancelLessonInteractiveListening();
+    }
+    if (should_listen) {
         ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",
                  sid != nullptr ? sid : "?");
         Schedule([]() {

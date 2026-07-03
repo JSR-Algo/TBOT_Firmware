@@ -205,14 +205,18 @@ def test_interactive_step_opens_listening_instead_of_completing_from_render():
 
     assert "const bool has_visible_content = rendered &&" in render_tail
     assert "!caption.empty() || poster_drew || object_drew || overlay_drew" in render_tail
-    assert "if (!passive && has_visible_content)" in render_tail
+    assert "const bool should_listen = !passive && has_visible_content;" in render_tail
+    assert "if (!should_listen)" in render_tail
+    assert "Application::GetInstance().CancelLessonInteractiveListening();" in render_tail
+    assert "if (should_listen)" in render_tail
     listen_schedule = re.search(
         r"Schedule\(\[\]\(\)\s*\{\s*Application::GetInstance\(\)\.PrepareLessonInteractiveListening\(\);\s*\}\);",
         render_tail,
         re.S,
     )
     assert listen_schedule is not None
-    assert render_tail.index("if (!passive && has_visible_content)") < render_tail.index("Schedule([]()") < render_tail.index("PrepareLessonInteractiveListening")
+    assert render_tail.index("if (!should_listen)") < render_tail.index("if (should_listen)")
+    assert render_tail.index("if (should_listen)") < render_tail.index("Schedule([]()") < render_tail.index("PrepareLessonInteractiveListening")
 
 
 # ── FW-02: a session-opening prepare resets the F->S counter BEFORE the gate ───────

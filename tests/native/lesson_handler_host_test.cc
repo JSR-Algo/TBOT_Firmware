@@ -1485,6 +1485,37 @@ void test_step_interactive_opens_listen() {
     require(App().prepare_listen_calls == 0, "unknown completionClass -> type-set fallback (review passive)");
 }
 
+void test_passive_step_cancels_prior_interactive_listen() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s-interactive", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"What animal is this?\""
+                     ",\"stepType\":\"ask\""
+                     ",\"completionClass\":\"interactive\"",
+                     ""));
+    require(App().prepare_listen_calls == 1, "interactive step opens the child listen window");
+    const int cancel_after_interactive = App().cancel_listen_calls;
+
+    Handle(StepFrame(4, "s-passive", "http://x/p2.jpg", "http://x/o2.jpg", "http://x/r2.jpg",
+                     ",\"prompt\":\"Great listening. Now watch TeeBot show the next animal.\""
+                     ",\"stepType\":\"feedback\""
+                     ",\"completionClass\":\"passive\"",
+                     ""));
+
+    require(App().prepare_listen_calls == 1, "passive follow-up does not reopen the listen window");
+    require(App().cancel_listen_calls > cancel_after_interactive,
+            "passive follow-up cancels the prior interactive listen window");
+}
+
 void test_step_no_display_does_not_open_listen() {
     ResetObservable();
     NetworkInterface net;
@@ -2339,6 +2370,7 @@ int main() {
     test_step_http_fetch_sets_short_timeout_before_open();
     test_step_reuses_cached_layer_bytes_for_repeated_urls();
     test_step_interactive_opens_listen();
+    test_passive_step_cancels_prior_interactive_listen();
     test_step_no_display_does_not_open_listen();
     test_step_blank_visible_content_does_not_open_listen();
     test_step_degraded_and_caption_fallback();
