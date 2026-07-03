@@ -1293,6 +1293,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 display->SetEmotion("sad");
                 display->SetLessonCaption("");
                 display->SetChatMessage("assistant", "Bài học chưa tải được.");
+                Application::GetInstance().PlaySound(Lang::Sounds::OGG_EXCLAMATION);
                 return;
             }
             display->SetStatus("Đang học...");

@@ -1659,6 +1659,8 @@ void test_step_blank_visible_content_does_not_open_listen() {
     require(!disp.chat_messages.empty() &&
             disp.chat_messages.back().second == "Bài học chưa tải được.",
             "blank visible content shows child-safe failure copy");
+    require(App().last_sound == "exclamation",
+            "blank visible content plays an audible failure cue");
     require(App().prepare_listen_calls == 0,
             "blank visible content does not open mic for an unseen prompt");
 }
