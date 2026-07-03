@@ -1698,6 +1698,22 @@ void test_step_blank_visible_content_does_not_open_listen() {
             "blank visible content plays an audible failure cue");
     require(App().prepare_listen_calls == 0,
             "blank visible content does not open mic for an unseen prompt");
+    require(App().lesson_runtime_active == false,
+            "blank visible content clears active lesson runtime flag");
+
+    const size_t sent_after_blank = Sent().size();
+    Handle(StartFrame(4));
+    require(Sent().size() == sent_after_blank,
+            "late start after blank visible content failure is dropped");
+    require(disp.last_status == "Lỗi",
+            "late start after blank visible content failure leaves failure status visible");
+
+    Handle(StepFrame(5, "late-after-blank", "http://x/new-p.jpg", "http://x/new-o.jpg",
+                     "http://x/new-r.jpg", ",\"prompt\":\"Late prompt\"", ""));
+    require(Sent().size() == sent_after_blank,
+            "late step after blank visible content failure is dropped");
+    require(disp.last_status == "Lỗi",
+            "late step after blank visible content failure leaves failure status visible");
 }
 
 // ==========================================================================

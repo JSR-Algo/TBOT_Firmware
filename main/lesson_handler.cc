@@ -1322,6 +1322,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // narration step this ack IS the completion signal (the ESP auto-advances on it),
     // so it is the ONLY F->S frame for such a step.
     emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms);
+    if (!has_visible_content) {
+        Application::GetInstance().CancelLessonInteractiveListening();
+        Application::GetInstance().SetLessonRuntimeActive(false);
+        g_session.running = false;
+        g_session.paused = false;
+        g_session.prepared = false;
+        ClearTerminalLessonCursor();
+    }
 
     // FW-01 / FW-LESSON-01: render ack is not child-response evidence. Passive
     // narration steps auto-advance on this ack; interactive steps wait for the
