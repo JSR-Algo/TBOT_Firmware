@@ -22,7 +22,7 @@ else()
     idf_build_set_property(MINIMAL_BUILD ON)
 endif()
 
-set(PROJECT_VER "2.2.43")
+set(PROJECT_VER "2.2.44")
 project(xiaozhi)
 
 if(TBOT_NATIVE_COVERAGE)
