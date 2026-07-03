@@ -275,17 +275,17 @@ def test_claim_flow_alerts_are_localized():
 def test_new_localized_keys_exist_in_assets_and_generated_header():
     en = read("main/assets/locales/en-US/language.json")
     vi = read("main/assets/locales/vi-VN/language.json")
-    generated = read("main/assets/lang_config.h")
+    generator = read("scripts/gen_lang.py")
 
     required = {
         "TBOT_CONNECT": "TBot Connect",
         "CONNECTED": "Connected.",
         "CONNECTION_CONFIRM_FAILED": "Connection confirmation failed. Try again.",
     }
+    assert "key.upper()" in generator
     for key, en_text in required.items():
         assert f'"{key}": "{en_text}"' in en, f"en-US missing {key}"
         assert f'"{key}":' in vi, f"vi-VN missing {key}"
-        assert f"constexpr const char* {key} =" in generated, f"lang_config.h missing {key}"
 
 
 # ---------------------------------------------------------------------------

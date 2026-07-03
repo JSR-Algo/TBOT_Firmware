@@ -28,6 +28,7 @@ CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
 # Lesson runtime keeps a WebSocket open while downloading HTTPS poster/object
 # images. The default 3072-byte LWIP tcp/ip task stack overflows on ESP32-S3.
 CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=8192
+CONFIG_TCPIP_TASK_STACK_SIZE=8192
 
 # Fix "esp-aes: Failed to allocate memory" -> ws_disconnect -> "Máy chủ không
 # khả dụng" during conversation. While streaming audio, internal SRAM spiked

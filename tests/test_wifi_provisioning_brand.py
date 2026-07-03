@@ -7,7 +7,14 @@ CJK_SCRIPT_PATTERN = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00
 
 
 def read(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
+    candidate = ROOT / path
+    if not candidate.exists() and path.startswith("managed_components/78__esp-wifi-connect/"):
+        candidate = ROOT / path.replace(
+            "managed_components/78__esp-wifi-connect",
+            "components/esp-wifi-connect",
+            1,
+        )
+    return candidate.read_text(encoding="utf-8")
 
 def function_body(text: str, signature: str) -> str:
     start = text.index(signature)

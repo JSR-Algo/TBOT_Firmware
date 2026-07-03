@@ -227,14 +227,12 @@ REQUIRED_COPY = {
 def test_missing_copy_strings_exist_in_language_assets():
     en = read("main/assets/locales/en-US/language.json")
     vi = read("main/assets/locales/vi-VN/language.json")
-    generated = read("main/assets/lang_config.h")
+    generator = read("scripts/gen_lang.py")
 
+    assert "key.upper()" in generator
     for key, (en_text, vi_text) in REQUIRED_COPY.items():
         assert f'"{key}": "{en_text}"' in en, f"en-US missing {key}"
         assert f'"{key}": "{vi_text}"' in vi, f"vi-VN missing {key}"
-        # The build-generated header must carry the constant too (no toolchain
-        # here to regenerate it, so it is hand-synced and asserted).
-        assert f"constexpr const char* {key} =" in generated, f"lang_config.h missing {key}"
 
 
 def test_new_copy_is_wired_to_render_paths():

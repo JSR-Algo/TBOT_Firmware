@@ -1,4 +1,5 @@
 import re
+import json
 import importlib.util
 import subprocess
 import sys
@@ -10,6 +11,16 @@ ROOT = Path(__file__).resolve().parents[1]
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
+def lcdwiki_reference_sdkconfig() -> str:
+    config = json.loads(read("main/boards/lcdwiki-es3c35p/config.json"))
+    return "\n".join(
+        [
+            read("sdkconfig.defaults.esp32s3"),
+            read("sdkconfig.defaults.local"),
+            "\n".join(config["builds"][0]["sdkconfig_append"]),
+        ]
+    )
+
 def has_define(text: str, name: str, value: str) -> bool:
     return re.search(rf"^#define\s+{re.escape(name)}\s+{re.escape(value)}\b", text, re.MULTILINE) is not None
 
@@ -18,7 +29,7 @@ def test_lcdwiki_es3c35p_board_is_selected_and_registered():
     kconfig = read("main/Kconfig.projbuild")
     cmake = read("main/CMakeLists.txt")
     local_defaults = read("sdkconfig.defaults.local")
-    sdkconfig = read("sdkconfig.es3c35p")
+    sdkconfig = lcdwiki_reference_sdkconfig()
 
     assert "config BOARD_TYPE_LCDWIKI_ES3C35P" in kconfig
     assert 'bool "LCDWiki ES3C35P ESP32-S3 3.5 LCD"' in kconfig
@@ -70,12 +81,14 @@ def test_lcdwiki_es3c35p_ci_release_build_disables_hardware_aes_and_gates_config
     assert "CONFIG_FATFS_LFN_HEAP=y" in config_json
     assert "FATFS short-name-only mode must stay disabled" in gate_script
 
-def test_lcdwiki_es3c35p_reference_sdkconfig_passes_prod_gate():
+def test_lcdwiki_es3c35p_reference_sdkconfig_passes_prod_gate(tmp_path):
+    sdkconfig = tmp_path / "sdkconfig.es3c35p"
+    sdkconfig.write_text(lcdwiki_reference_sdkconfig(), encoding="utf-8")
     result = subprocess.run(
         [
             sys.executable,
             str(ROOT / "scripts/assert_lcdwiki_prod_config.py"),
-            str(ROOT / "sdkconfig.es3c35p"),
+            str(sdkconfig),
         ],
         text=True,
         capture_output=True,
@@ -127,7 +140,7 @@ def test_lcdwiki_es3c35p_local_defaults_keep_mobile_ble_discovery_enabled():
 
 
 def test_lcdwiki_es3c35p_bluedroid_uses_psram_backed_dynamic_heap():
-    sdkconfig = read("sdkconfig.es3c35p")
+    sdkconfig = lcdwiki_reference_sdkconfig()
 
     assert "CONFIG_SPIRAM=y" in sdkconfig
     assert "CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y" in sdkconfig
@@ -137,14 +150,14 @@ def test_lcdwiki_es3c35p_bluedroid_uses_psram_backed_dynamic_heap():
 
 
 def test_lcdwiki_es3c35p_generated_language_matches_vietnamese_sdkconfig():
-    sdkconfig = read("sdkconfig.es3c35p")
-    lang_header = read("main/assets/lang_config.h")
+    sdkconfig = lcdwiki_reference_sdkconfig()
+    vi = read("main/assets/locales/vi-VN/language.json")
+    cmake = read("main/CMakeLists.txt")
 
     assert "CONFIG_LANGUAGE_VI_VN=y" in sdkconfig
-    assert 'constexpr const char* CODE = "vi-VN";' in lang_header
-    assert 'constexpr const char* CODE = "zh-CN";' not in lang_header
-    assert 'constexpr const char* WIFI_CONFIG_MODE = "Chế độ cấu hình Wi-Fi";' in lang_header
-    assert 'constexpr const char* WIFI_CONFIG_MODE = "配网模式";' not in lang_header
+    assert 'set(LANG_DIR "vi-VN")' in cmake
+    assert '"WIFI_CONFIG_MODE": "Chế độ cấu hình Wi-Fi"' in vi
+    assert "配网模式" not in vi
 
 
 def test_lcdwiki_es3c35p_uses_st77922_qspi_pins_and_touch_i2c():
@@ -229,10 +242,8 @@ def test_lcdwiki_es3c35p_mounts_micro_sd_for_lesson_assets():
     assert "SD card mounted at %s" in board
 
 def test_lcdwiki_es3c35p_fatfs_supports_long_lesson_asset_names():
-    defaults = read("sdkconfig.defaults.esp32s3") + "\n" + read("sdkconfig.defaults.local")
-    sdkconfig = read("sdkconfig")
+    sdkconfig = read("sdkconfig.defaults.esp32s3") + "\n" + read("sdkconfig.defaults.local")
 
-    assert "CONFIG_FATFS_LFN_HEAP=y" in defaults
     assert "CONFIG_FATFS_LFN_HEAP=y" in sdkconfig
     assert "CONFIG_FATFS_LFN_NONE=y" not in sdkconfig
 

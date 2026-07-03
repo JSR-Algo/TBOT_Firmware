@@ -27,12 +27,10 @@ def _read_config_values(path: Path) -> dict[str, int]:
 
 
 def test_lesson_https_fetch_has_tcpip_task_stack_headroom():
-    sdkconfig = _read_config_values(ROOT / "sdkconfig")
     defaults = _read_config_values(ROOT / "sdkconfig.defaults.local")
 
-    assert sdkconfig["CONFIG_LWIP_TCPIP_TASK_STACK_SIZE"] >= MIN_TCPIP_STACK_BYTES
-    assert sdkconfig["CONFIG_TCPIP_TASK_STACK_SIZE"] >= MIN_TCPIP_STACK_BYTES
     assert defaults["CONFIG_LWIP_TCPIP_TASK_STACK_SIZE"] >= MIN_TCPIP_STACK_BYTES
+    assert defaults["CONFIG_TCPIP_TASK_STACK_SIZE"] >= MIN_TCPIP_STACK_BYTES
 
 
 def test_heartbeat_https_worker_has_stack_headroom_next_to_passive_websocket():

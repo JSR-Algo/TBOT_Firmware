@@ -13,7 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def read(path: str) -> str:
-    return (ROOT / path).read_text(encoding="utf-8")
+    candidate = ROOT / path
+    if not candidate.exists() and path.startswith("managed_components/78__esp-wifi-connect/"):
+        candidate = ROOT / path.replace(
+            "managed_components/78__esp-wifi-connect",
+            "components/esp-wifi-connect",
+            1,
+        )
+    return candidate.read_text(encoding="utf-8")
 
 
 def _function_body(src: str, signature: str, next_signature: str) -> str:

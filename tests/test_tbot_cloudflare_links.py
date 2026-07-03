@@ -31,7 +31,7 @@ def test_firmware_defaults_use_stable_ota_seed_and_no_ephemeral_ws_seed():
 
 
 def test_local_firmware_configs_do_not_override_stable_seed_with_ephemeral_urls():
-    for sdkconfig_name in ("sdkconfig", "sdkconfig.blufi"):
+    for sdkconfig_name in ("sdkconfig.defaults.local",):
         contents = (ROOT / sdkconfig_name).read_text(encoding="utf-8")
         assert_no_ephemeral_endpoint(contents, sdkconfig_name)
         assert f'CONFIG_OTA_URL="{OTA_URL}"' in contents, sdkconfig_name

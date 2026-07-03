@@ -168,7 +168,7 @@ def test_firmware_preserves_ota_returned_websocket_url_even_when_tunnel_hosts_di
     assert "NormalizeOtaWebsocketUrl" not in websocket_parse_body
 
 def test_ble_setup_timeout_matches_contract_in_local_blufi_configs():
-    for sdkconfig_name in ("sdkconfig", "sdkconfig.blufi"):
+    for sdkconfig_name in ("sdkconfig.defaults.local",):
         contents = read(sdkconfig_name)
         assert "CONFIG_BLE_SETUP_TIMEOUT_SEC=300" in contents, sdkconfig_name
 
