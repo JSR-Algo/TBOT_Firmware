@@ -332,7 +332,9 @@ def test_prepare_ack_requires_declared_positive_sd_asset_pack_file_size():
     helper = h[helper_start : h.index("// US-006 image render", helper_start)]
 
     assert "bool has_declared_size" in helper
-    assert "has_declared_size && size_value > 0.0" in helper
+    assert "size_value > 0.0" in helper
+    assert "size_value <= static_cast<double>(SIZE_MAX)" in helper
+    assert "static_cast<double>(static_cast<size_t>(size_value)) == size_value" in helper
     assert "!has_declared_size" in helper
 
 def test_prepare_ack_rejects_empty_sd_asset_pack():

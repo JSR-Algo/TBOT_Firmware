@@ -364,6 +364,31 @@ void test_prepare_assetpack_ready_with_real_file() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_fractional_size_not_ready() {
+    const char* dir = "/tmp/tbot-host-sd-fractional-size/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-fractional-size && mkdir -p /tmp/tbot-host-sd-fractional-size/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-fractional-size/lesson-assets/ready.png";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "fractional-size asset fixture opens");
+    const char bytes[10] = {1,2,3,4,5,6,7,8,9,10};
+    fwrite(bytes, 1, 10, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-fractional-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/ready.png\",\"size\":10.5}]}"));
+    require(FrameHasAssetPack(0), "fractional-size assetPack still returns correlated ack");
+    require(FrameAssetPackReady(0) == false,
+            "fractional declared asset size is invalid and not truncated to ready");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_ready_without_critical_asset_list() {
     // Some older ESP prepare frames may omit criticalAssets while still carrying a
     // fully materialized assetPack. Firmware must verify every asset on disk and
@@ -2875,6 +2900,7 @@ int main() {
     test_prepare_basic();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
+    test_prepare_assetpack_fractional_size_not_ready();
     test_prepare_assetpack_ready_without_critical_asset_list();
     test_prepare_assetpack_prefix_only_cache_key_not_ready();
     test_prepare_assetpack_stale_checksum_cache_key_not_ready();

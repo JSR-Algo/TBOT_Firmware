@@ -647,9 +647,11 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
                 state != nullptr && normalized_state == "READY" && cJSON_IsTrue(checksum_ok);
             const char* local_path = Str(asset, "localPath");
             double size_value = 0.0;
-            bool has_declared_size = Num(asset, "size", size_value) && size_value > 0.0;
+            bool has_declared_size = Num(asset, "size", size_value) && size_value > 0.0 &&
+                                     size_value <= static_cast<double>(SIZE_MAX) &&
+                                     static_cast<double>(static_cast<size_t>(size_value)) == size_value;
             size_t expected_size = 0;
-            if (has_declared_size && size_value > 0.0) {
+            if (has_declared_size) {
                 expected_size = static_cast<size_t>(size_value);
             }
             if (asset_key_value.empty() || !asset_verified ||
