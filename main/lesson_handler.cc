@@ -47,13 +47,25 @@ const char* Str(const cJSON* o, const char* k) {
     const cJSON* v = cJSON_GetObjectItem(o, k);
     return cJSON_IsString(v) ? v->valuestring : nullptr;
 }
+bool IsAsciiWhitespace(char value) {
+    return value == ' ' || value == '\t' || value == '\n' || value == '\r';
+}
 bool Blank(const char* value) {
     if (value == nullptr) return true;
     while (*value != '\0') {
-        if (*value != ' ' && *value != '\t' && *value != '\n' && *value != '\r') return false;
+        if (!IsAsciiWhitespace(*value)) return false;
         ++value;
     }
     return true;
+}
+void TrimAsciiWhitespace(std::string& value) {
+    size_t first = 0;
+    while (first < value.size() && IsAsciiWhitespace(value[first])) ++first;
+    size_t last = value.size();
+    while (last > first && IsAsciiWhitespace(value[last - 1])) --last;
+    if (first != 0 || last != value.size()) {
+        value = value.substr(first, last - first);
+    }
 }
 
 size_t Utf8CharLen(unsigned char ch) {
@@ -1273,6 +1285,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             caption += alt;
         }
     }
+    TrimAsciiWhitespace(caption);
     TruncateUtf8(caption, 96);  // truncate for the 480px line (STORYBOARD §46-48)
 
     // §7.5 degraded semantics: false only when all authored visual layers exist and drew.

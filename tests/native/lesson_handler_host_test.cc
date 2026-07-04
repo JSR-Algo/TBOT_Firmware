@@ -1972,6 +1972,30 @@ void test_invalid_utf8_interactive_prompt_does_not_open_listen() {
             "invalid UTF-8 interactive prompt does not open mic for an unseen question");
 }
 
+void test_interactive_prompt_caption_trims_ascii_whitespace() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s-trimmed-prompt-listen", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"\\n  What animal is this? \\t\","
+                     "\"stepType\":\"ask\",\"completionClass\":\"interactive\"",
+                     ""));
+
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "What animal is this?",
+            "interactive prompt caption trims leading/trailing ASCII whitespace");
+    require(App().prepare_listen_calls == 1,
+            "trimmed interactive prompt still opens the child response window");
+}
+
 // HTTP status != 200, open fail, create-null, and read-error / chunked / size-cap paths.
 void test_step_http_error_paths() {
     LvglDisplay disp;
@@ -2610,6 +2634,7 @@ int main() {
     test_step_missing_optional_object_overlay_uses_prompt_fallback();
     test_caption_truncation_preserves_utf8_boundary();
     test_invalid_utf8_interactive_prompt_does_not_open_listen();
+    test_interactive_prompt_caption_trims_ascii_whitespace();
     test_step_http_error_paths();
     test_step_http_chunked_paths();
     test_decode_failure_branches();
