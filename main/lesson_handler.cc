@@ -123,9 +123,14 @@ void NormalizeCaptionLine(std::string& value) {
     TruncateUtf8(value, 96);  // fit the 480px lesson caption line
 }
 
+bool IsValidUtf8String(const std::string& value) {
+    return Utf8PrefixLen(value, value.size(), nullptr) == value.size();
+}
+
 std::string CaptionCandidate(const char* value) {
     if (Blank(value)) return "";
     std::string out(value);
+    if (!IsValidUtf8String(out)) return "";
     NormalizeCaptionLine(out);
     return out;
 }
