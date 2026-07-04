@@ -616,9 +616,10 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
         cJSON_ArrayForEach(asset, assets) {
             const char* asset_key = Str(asset, "key");
             const char* state = Str(asset, "state");
+            const std::string normalized_state = NormalizeAsciiToken(state);
             const cJSON* checksum_ok = cJSON_GetObjectItem(asset, "checksumOk");
             const bool asset_verified =
-                state != nullptr && strcmp(state, "READY") == 0 && cJSON_IsTrue(checksum_ok);
+                state != nullptr && normalized_state == "READY" && cJSON_IsTrue(checksum_ok);
             const char* local_path = Str(asset, "localPath");
             double size_value = 0.0;
             bool has_declared_size = Num(asset, "size", size_value) && size_value > 0.0;

@@ -350,7 +350,8 @@ def test_prepare_ack_requires_esp_verified_ready_asset_pack_metadata():
     assert 'Str(asset, "key")' in helper
     assert "asset_key" in helper
     assert 'Str(asset, "state")' in helper
-    assert 'strcmp(state, "READY") == 0' in helper
+    assert "NormalizeAsciiToken(state)" in helper
+    assert 'normalized_state == "READY"' in helper
     assert 'cJSON_GetObjectItem(asset, "checksumOk")' in helper
     assert "cJSON_IsTrue(checksum_ok)" in helper
     assert "asset_verified" in helper

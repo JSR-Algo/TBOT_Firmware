@@ -357,9 +357,10 @@ void test_prepare_assetpack_ready_with_real_file() {
     Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
                           "\"criticalAssets\":[{\"key\":\"k1\"}],"
                           "\"assetPack\":{\"cacheKey\":\"ck5-abcdef1234567890\",\"assets\":["
-                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "{\"key\":\"k1\",\"state\":\" ready \",\"checksumOk\":true,"
                           "\"localPath\":\"sd://sdcard/tbot/lesson-assets/ready.png\",\"size\":10}]}"));
-    require(FrameAssetPackReady(0) == true, "verified asset + covered critical -> ready");
+    require(FrameAssetPackReady(0) == true,
+            "whitespace/case READY asset state + covered critical -> ready");
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
