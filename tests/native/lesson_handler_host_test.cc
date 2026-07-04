@@ -1025,6 +1025,21 @@ void test_stop_reason_controls_terminal_cue() {
             disp.chat_messages.back().second == "Bài học đã dừng.",
             "cancelled stop shows child-safe stopped copy");
     require(App().last_sound == "popup", "cancelled stop plays neutral transition cue");
+
+    ResetObservable();
+    disp.chat_messages.clear();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    disp.chat_messages.emplace_back("system", "Con nói nhé.");
+    Handle(StopFrame(3, "\"reason\":\"TIMEOUT\""));
+    require(FrameType(2) == "lesson_ack", "timeout stop is acked");
+    require(disp.last_status == "Lỗi", "unknown stop reason does not show completion status");
+    require(disp.last_emotion == "sad", "unknown stop reason does not show a happy completion face");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Bài học bị gián đoạn.",
+            "unknown stop reason shows child-safe interruption copy");
+    require(App().last_sound == "exclamation", "unknown stop reason plays failure cue");
 }
 
 // stop/error when display is a plain (non-LVGL) Display* -> lvgl_display branch nullptr,

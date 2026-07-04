@@ -1116,8 +1116,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (strcmp(type, "lesson_stop") == 0) {
         const char* stop_reason = Str(body, "reason");
-        const bool stop_failed = stop_reason != nullptr && strcmp(stop_reason, "FAILED") == 0;
         const bool stop_cancelled = stop_reason != nullptr && strcmp(stop_reason, "CANCELLED") == 0;
+        const bool stop_explicit_failed = stop_reason != nullptr && strcmp(stop_reason, "FAILED") == 0;
+        const bool stop_completed = stop_reason == nullptr ||
+                                    strcmp(stop_reason, "COMPLETED") == 0 ||
+                                    strcmp(stop_reason, "SUCCEEDED") == 0;
+        const bool stop_failed = stop_explicit_failed || (!stop_cancelled && !stop_completed);
         const char* stop_status = stop_failed ? Lang::Strings::ERROR
                                  : stop_cancelled ? "Bài học đã dừng"
                                                   : "Hoàn thành bài học";
