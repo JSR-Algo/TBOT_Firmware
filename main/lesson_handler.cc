@@ -120,6 +120,18 @@ void TruncateUtf8(std::string& value, size_t max_bytes) {
 
 void NormalizeCaptionLine(std::string& value) {
     TrimAsciiWhitespace(value);
+    size_t write = 0;
+    bool in_space = false;
+    for (char ch : value) {
+        if (IsAsciiWhitespace(ch)) {
+            if (!in_space && write > 0) value[write++] = ' ';
+            in_space = true;
+        } else {
+            value[write++] = ch;
+            in_space = false;
+        }
+    }
+    value.resize(write);
     TruncateUtf8(value, 96);  // fit the 480px lesson caption line
 }
 
