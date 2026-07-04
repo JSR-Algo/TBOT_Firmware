@@ -626,9 +626,12 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
     const char* cache_key = Str(pack, "cacheKey");
     const cJSON* manifest_ref = Obj(body, "manifestRef");
     const char* manifest_checksum = Str(manifest_ref, "manifestChecksum");
-    const bool manifest_checksum_required = !Blank(manifest_checksum);
+    std::string manifest_checksum_value = manifest_checksum == nullptr ? "" : manifest_checksum;
+    TrimAsciiWhitespace(manifest_checksum_value);
+    const bool manifest_checksum_required = !manifest_checksum_value.empty();
     const bool cache_key_has_manifest_checksum =
-        manifest_checksum_required && cache_key != nullptr && strstr(cache_key, manifest_checksum) != nullptr;
+        manifest_checksum_required && cache_key != nullptr &&
+        strstr(cache_key, manifest_checksum_value.c_str()) != nullptr;
     const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
     const cJSON* critical_assets = cJSON_GetObjectItem(body, "criticalAssets");
     bool ready = manifest_checksum_required && cache_key_has_manifest_checksum &&

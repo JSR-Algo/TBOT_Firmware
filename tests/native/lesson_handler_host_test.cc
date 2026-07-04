@@ -364,6 +364,31 @@ void test_prepare_assetpack_ready_with_real_file() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_trims_manifest_checksum_for_cache_key() {
+    const char* dir = "/tmp/tbot-host-sd-manifest-checksum/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-manifest-checksum && mkdir -p /tmp/tbot-host-sd-manifest-checksum/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-manifest-checksum/lesson-assets/ready.png";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "manifest-checksum asset fixture opens");
+    const char bytes[10] = {1,2,3,4,5,6,7,8,9,10};
+    fwrite(bytes, 1, 10, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\" \\nabcdef1234567890\\t\"},"
+                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-trimmed-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/ready.png\",\"size\":10}]}"));
+    require(FrameHasAssetPack(0), "trimmed manifest checksum assetPack returns correlated ack");
+    require(FrameAssetPackReady(0) == true,
+            "manifest checksum whitespace is trimmed before cacheKey readiness check");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_fractional_size_not_ready() {
     const char* dir = "/tmp/tbot-host-sd-fractional-size/lesson-assets";
     system("rm -rf /tmp/tbot-host-sd-fractional-size && mkdir -p /tmp/tbot-host-sd-fractional-size/lesson-assets");
@@ -2900,6 +2925,7 @@ int main() {
     test_prepare_basic();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
+    test_prepare_assetpack_trims_manifest_checksum_for_cache_key();
     test_prepare_assetpack_fractional_size_not_ready();
     test_prepare_assetpack_ready_without_critical_asset_list();
     test_prepare_assetpack_prefix_only_cache_key_not_ready();

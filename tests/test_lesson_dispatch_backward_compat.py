@@ -384,8 +384,10 @@ def test_prepare_ack_requires_asset_pack_cache_key_to_include_full_manifest_chec
     assert 'Obj(body, "manifestRef")' in helper
     assert 'Str(manifest_ref, "manifestChecksum")' in helper
     assert "manifest_checksum_required" in helper
-    assert "!Blank(manifest_checksum)" in helper
+    assert "std::string manifest_checksum_value" in helper
+    assert "TrimAsciiWhitespace(manifest_checksum_value)" in helper
+    assert "!manifest_checksum_value.empty()" in helper
     assert "cache_key_has_manifest_checksum" in helper
-    assert "strstr(cache_key, manifest_checksum)" in helper
+    assert "strstr(cache_key, manifest_checksum_value.c_str())" in helper
     assert "!manifest_checksum_required" in helper
     assert "!cache_key_has_manifest_checksum" in helper
