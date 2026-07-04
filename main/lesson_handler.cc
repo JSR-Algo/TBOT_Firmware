@@ -346,6 +346,8 @@ bool IsJpegImage(const void* data, size_t size) {
 
 constexpr size_t kMaxLessonImageBytes = 512 * 1024;
 constexpr size_t kMaxLessonDecodedImageBytes = 320 * 240 * 2;
+constexpr size_t kMaxLessonAssetPackAssets = 64;
+constexpr size_t kMaxLessonAssetPackDeclaredBytes = 4 * 1024 * 1024;
 constexpr int kLessonImageHttpTimeoutMs = 1200;
 constexpr size_t kLessonImageCacheMaxEntries = 8;
 constexpr size_t kLessonImageCacheMaxBytes = 384 * 1024;
@@ -652,9 +654,12 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
         strstr(cache_key_value.c_str(), manifest_checksum_value.c_str()) != nullptr;
     const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
     const cJSON* critical_assets = cJSON_GetObjectItem(body, "criticalAssets");
+    const int asset_count = cJSON_IsArray(assets) ? cJSON_GetArraySize(assets) : 0;
     bool ready = manifest_checksum_required && cache_key_has_manifest_checksum &&
-                 cJSON_IsArray(assets) && cJSON_GetArraySize(assets) > 0;
+                 cJSON_IsArray(assets) && cJSON_GetArraySize(assets) > 0 &&
+                 static_cast<size_t>(asset_count) <= kMaxLessonAssetPackAssets;
     std::set<std::string> ready_asset_keys;
+    size_t total_declared_size = 0;
     if (ready) {
         const cJSON* asset = nullptr;
         cJSON_ArrayForEach(asset, assets) {
@@ -676,12 +681,15 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
                 expected_size = static_cast<size_t>(size_value);
             }
             if (asset_key_value.empty() || !asset_verified ||
-                !has_declared_size || !LessonLocalFileReady(local_path, expected_size) ||
+                !has_declared_size ||
+                expected_size > kMaxLessonAssetPackDeclaredBytes - total_declared_size ||
+                !LessonLocalFileReady(local_path, expected_size) ||
                 !ready_asset_keys.insert(asset_key_value).second || !manifest_checksum_required ||
                 !cache_key_has_manifest_checksum) {
                 ready = false;
                 break;
             }
+            total_declared_size += expected_size;
         }
     }
     if (ready) {

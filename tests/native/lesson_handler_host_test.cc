@@ -560,6 +560,67 @@ void test_prepare_assetpack_malformed_critical_assets_not_ready() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_rejects_unbounded_count_and_total_size() {
+    const char* dir = "/tmp/tbot-host-sd-assetpack-bounds/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-assetpack-bounds && mkdir -p /tmp/tbot-host-sd-assetpack-bounds/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+
+    std::string many_assets;
+    for (int i = 0; i < 65; ++i) {
+        std::string name = "asset-" + std::to_string(i) + ".bin";
+        std::string path = std::string(dir) + "/" + name;
+        FILE* fp = fopen(path.c_str(), "wb");
+        require(fp != nullptr, "asset-count fixture opens");
+        fputc('x', fp);
+        fclose(fp);
+        if (!many_assets.empty()) many_assets += ",";
+        many_assets += "{\"key\":\"k" + std::to_string(i) +
+                       "\",\"state\":\"READY\",\"checksumOk\":true,"
+                       "\"localPath\":\"sd://sdcard/tbot/lesson-assets/" + name +
+                       "\",\"size\":1}";
+    }
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck-count-abcdef1234567890\",\"assets\":[" +
+                          many_assets + "]}"));
+    require(FrameHasAssetPack(0), "oversized-count assetPack still returns correlated ack");
+    require(FrameAssetPackReady(0) == false,
+            "assetPack with more than the bounded asset count is not ready");
+
+    std::string huge_assets;
+    const size_t file_size = 512 * 1024;
+    for (int i = 0; i < 9; ++i) {
+        std::string name = "huge-" + std::to_string(i) + ".bin";
+        std::string path = std::string(dir) + "/" + name;
+        FILE* fp = fopen(path.c_str(), "wb");
+        require(fp != nullptr, "asset-total fixture opens");
+        require(fseek(fp, static_cast<long>(file_size - 1), SEEK_SET) == 0,
+                "asset-total fixture seeks");
+        fputc('x', fp);
+        fclose(fp);
+        if (!huge_assets.empty()) huge_assets += ",";
+        huge_assets += "{\"key\":\"h" + std::to_string(i) +
+                       "\",\"state\":\"READY\",\"checksumOk\":true,"
+                       "\"localPath\":\"sd://sdcard/tbot/lesson-assets/" + name +
+                       "\",\"size\":" + std::to_string(file_size) + "}";
+    }
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck-total-abcdef1234567890\",\"assets\":[" +
+                          huge_assets + "]}"));
+    require(FrameHasAssetPack(0), "oversized-total assetPack still returns correlated ack");
+    require(FrameAssetPackReady(0) == false,
+            "assetPack above aggregate declared byte budget is not ready");
+
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_requires_manifest_checksum_before_ack() {
     ResetObservable();
     FreshSession();
@@ -3182,6 +3243,7 @@ int main() {
     test_prepare_assetpack_stale_checksum_cache_key_not_ready();
     test_prepare_assetpack_missing_declared_critical_key_not_ready();
     test_prepare_assetpack_malformed_critical_assets_not_ready();
+    test_prepare_assetpack_rejects_unbounded_count_and_total_size();
     test_prepare_assetpack_requires_manifest_checksum_before_ack();
     test_prepare_reject_clears_stale_lesson_scene();
     test_version_profile_gate();
