@@ -1525,19 +1525,19 @@ void test_step_fetches_canonical_layer_urls_in_order() {
     HostJpegDecodeMode() = 0;
 
     Handle(StepFrame(3, "s4",
-                     "https://cdn.example.test/bg/poster.jpg",
-                     "https://cdn.example.test/object/barn.png",
-                     "https://cdn.example.test/robot/teach.png",
+                     " \nhttps://cdn.example.test/bg/poster.jpg\t",
+                     "\thttps://cdn.example.test/object/barn.png ",
+                     " https://cdn.example.test/robot/teach.png\n",
                      ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
 
     require(HostHttp().open_calls.size() == 3, "three lesson layer URLs fetched");
     require(HostHttp().open_calls[0].method == "GET", "background fetch uses GET");
     require(HostHttp().open_calls[0].url == "https://cdn.example.test/bg/poster.jpg",
-            "backgroundScene poster URL fetched first");
+            "backgroundScene poster URL is trimmed and fetched first");
     require(HostHttp().open_calls[1].url == "https://cdn.example.test/object/barn.png",
-            "teachingObject asset URL fetched second");
+            "teachingObject asset URL is trimmed and fetched second");
     require(HostHttp().open_calls[2].url == "https://cdn.example.test/robot/teach.png",
-            "robotOverlay asset URL fetched third");
+            "robotOverlay asset URL is trimmed and fetched third");
 }
 
 void test_step_http_fetch_sets_short_timeout_before_open() {

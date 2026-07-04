@@ -671,12 +671,16 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
 // marshalled via Schedule().
 std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
     if (url == nullptr || url[0] == '\0') return nullptr;
+    std::string fetch_url(url);
+    TrimAsciiWhitespace(fetch_url);
+    if (fetch_url.empty()) return nullptr;
+    const char* canonical_url = fetch_url.c_str();
 
-    if (strncmp(url, "sd://", 5) == 0 || strncmp(url, "file://", 7) == 0) {
-        return FetchLessonLocalImage(url);
+    if (strncmp(canonical_url, "sd://", 5) == 0 || strncmp(canonical_url, "file://", 7) == 0) {
+        return FetchLessonLocalImage(canonical_url);
     }
 
-    if (auto cached = LessonImageCacheLookup(url)) {
+    if (auto cached = LessonImageCacheLookup(canonical_url)) {
         return cached;
     }
 
@@ -689,7 +693,7 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
     if (!http) return nullptr;
     http->SetTimeout(kLessonImageHttpTimeoutMs);
 
-    if (!http->Open("GET", url)) {
+    if (!http->Open("GET", canonical_url)) {
         ESP_LOGW(TAG, "lesson image fetch: open failed");
         return nullptr;
     }
@@ -785,7 +789,7 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         content_length = total_read;
     }
 
-    LessonImageCacheStore(url, data, content_length);
+    LessonImageCacheStore(canonical_url, data, content_length);
     return DecodeLessonImageBytes(data, content_length, "lesson image fetch");
 }
 

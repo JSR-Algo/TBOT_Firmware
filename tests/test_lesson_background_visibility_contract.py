@@ -501,10 +501,12 @@ def test_lesson_image_fetch_supports_sd_pack_paths_before_network_fetch():
     local_body = function_body(source, "std::unique_ptr<LvglImage> FetchLessonLocalImage")
     path_body = function_body(source, "std::string LessonLocalPath")
 
-    local_idx = fetch_body.index('strncmp(url, "sd://", 5) == 0')
+    trim_idx = fetch_body.index("TrimAsciiWhitespace(fetch_url);")
+    local_idx = fetch_body.index('strncmp(canonical_url, "sd://", 5) == 0')
     network_idx = fetch_body.index("Board::GetInstance().GetNetwork()")
+    assert trim_idx < local_idx
     assert local_idx < network_idx
-    assert 'return FetchLessonLocalImage(url);' in fetch_body
+    assert 'return FetchLessonLocalImage(canonical_url);' in fetch_body
 
     assert 'return ValidateLessonPackPath(std::string("/sdcard/") + tail);' in path_body
     assert 'return ValidateLessonPackPath(std::string("/") + tail);' in path_body
