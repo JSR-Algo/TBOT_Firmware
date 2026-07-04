@@ -355,8 +355,9 @@ def test_prepare_ack_requires_esp_verified_ready_asset_pack_metadata():
     assert 'cJSON_GetObjectItem(asset, "checksumOk")' in helper
     assert "cJSON_IsTrue(checksum_ok)" in helper
     assert "asset_verified" in helper
-    assert "asset_key == nullptr" in helper
-    assert "asset_key[0] == '\\0'" in helper
+    assert "std::string asset_key_value" in helper
+    assert "TrimAsciiWhitespace(asset_key_value)" in helper
+    assert "asset_key_value.empty()" in helper
     assert "!asset_verified" in helper
 
 
@@ -367,9 +368,11 @@ def test_prepare_ack_rejects_duplicate_and_missing_critical_asset_pack_keys():
 
     assert 'cJSON_GetObjectItem(body, "criticalAssets")' in helper
     assert "ready_asset_keys" in helper
-    assert "!ready_asset_keys.insert(asset_key).second" in helper
+    assert "!ready_asset_keys.insert(asset_key_value).second" in helper
     assert "critical_key" in helper
-    assert "ready_asset_keys.find(critical_key) == ready_asset_keys.end()" in helper
+    assert "std::string critical_key_value" in helper
+    assert "TrimAsciiWhitespace(critical_key_value)" in helper
+    assert "ready_asset_keys.find(critical_key_value) == ready_asset_keys.end()" in helper
 
 def test_prepare_ack_requires_asset_pack_cache_key_to_include_full_manifest_checksum():
     h = read("main/lesson_handler.cc")

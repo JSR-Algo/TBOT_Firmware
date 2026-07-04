@@ -621,6 +621,8 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
         const cJSON* asset = nullptr;
         cJSON_ArrayForEach(asset, assets) {
             const char* asset_key = Str(asset, "key");
+            std::string asset_key_value = asset_key == nullptr ? "" : asset_key;
+            TrimAsciiWhitespace(asset_key_value);
             const char* state = Str(asset, "state");
             const std::string normalized_state = NormalizeAsciiToken(state);
             const cJSON* checksum_ok = cJSON_GetObjectItem(asset, "checksumOk");
@@ -633,9 +635,9 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
             if (has_declared_size && size_value > 0.0) {
                 expected_size = static_cast<size_t>(size_value);
             }
-            if (asset_key == nullptr || asset_key[0] == '\0' || !asset_verified ||
+            if (asset_key_value.empty() || !asset_verified ||
                 !has_declared_size || !LessonLocalFileReady(local_path, expected_size) ||
-                !ready_asset_keys.insert(asset_key).second || !manifest_checksum_required ||
+                !ready_asset_keys.insert(asset_key_value).second || !manifest_checksum_required ||
                 !cache_key_has_manifest_checksum) {
                 ready = false;
                 break;
@@ -647,8 +649,10 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
             const cJSON* critical_asset = nullptr;
             cJSON_ArrayForEach(critical_asset, critical_assets) {
                 const char* critical_key = Str(critical_asset, "key");
-                if (critical_key == nullptr || critical_key[0] == '\0' ||
-                    ready_asset_keys.find(critical_key) == ready_asset_keys.end()) {
+                std::string critical_key_value = critical_key == nullptr ? "" : critical_key;
+                TrimAsciiWhitespace(critical_key_value);
+                if (critical_key_value.empty() ||
+                    ready_asset_keys.find(critical_key_value) == ready_asset_keys.end()) {
                     ready = false;
                     break;
                 }

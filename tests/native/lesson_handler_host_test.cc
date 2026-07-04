@@ -355,12 +355,12 @@ void test_prepare_assetpack_ready_with_real_file() {
     FreshSession();
     Board::GetInstance().display_ = nullptr;
     Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"criticalAssets\":[{\"key\":\"k1\"}],"
+                          "\"criticalAssets\":[{\"key\":\"\tk1\n\"}],"
                           "\"assetPack\":{\"cacheKey\":\"ck5-abcdef1234567890\",\"assets\":["
-                          "{\"key\":\"k1\",\"state\":\" ready \",\"checksumOk\":true,"
+                          "{\"key\":\" k1 \",\"state\":\" ready \",\"checksumOk\":true,"
                           "\"localPath\":\" \nsd://sdcard/tbot/lesson-assets/ready.png\t\",\"size\":10}]}"));
     require(FrameAssetPackReady(0) == true,
-            "whitespace/case READY asset state + trimmed localPath + covered critical -> ready");
+            "whitespace/case READY asset state + trimmed key/localPath + covered critical -> ready");
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
