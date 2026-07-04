@@ -1488,6 +1488,26 @@ void test_step_ignores_story_metadata_while_rendering_layers() {
             disp.lesson_captions.back() == "Look at the barn.",
             "passive storyBeat.ask without prompt falls back to non-question caption");
 
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s-passive-question-prompt\",\"sequence\":3,\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\",\"stepType\":\"greeting\","
+           "\"prompt\":\"Which animal is beside the barn?\","
+           "\"scene\":{"
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
+           "\"altCaption\":\"Look at the barn.\"},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}");
+    require(App().prepare_listen_calls == 0,
+            "passive question prompt does not open child response window");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Look at the barn.",
+            "passive question prompt falls back to non-question caption");
+
     // Step type is a protocol token, not child copy. Whitespace/case drift must
     // not turn a passive narration step into a question that opens the mic.
     ResetObservable();

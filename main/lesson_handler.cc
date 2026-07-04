@@ -158,6 +158,10 @@ std::string CaptionCandidate(const char* value) {
     return out;
 }
 
+bool LooksLikeChildQuestionCaption(const std::string& value) {
+    return value.find('?') != std::string::npos;
+}
+
 bool Num(const cJSON* o, const char* k, double& out) {
     if (o == nullptr) return false;
     const cJSON* v = cJSON_GetObjectItem(o, k);
@@ -1274,6 +1278,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     if (!passive) prompt_caption = CaptionCandidate(story_ask);
     if (prompt_caption.empty()) prompt_caption = CaptionCandidate(prompt);
     if (!passive && prompt_caption.empty()) prompt_caption = CaptionCandidate(story_ask);
+    if (passive && LooksLikeChildQuestionCaption(prompt_caption)) prompt_caption.clear();
 
     if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||
         Blank(poster_src)) {
