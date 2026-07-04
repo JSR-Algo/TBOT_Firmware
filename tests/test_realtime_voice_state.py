@@ -709,6 +709,31 @@ def test_lesson_runtime_blocks_stale_generic_open_continuations():
         "if (self->lesson_runtime_active_.load() && !lesson_answer_turn)"
     ) < before_set.index("self->online_intent_.store(false);")
 
+def test_lesson_runtime_open_failure_clears_answer_turn_without_generic_reconnect():
+    app_cc = read("main/application.cc")
+
+    task_start = app_cc.index("void Application::OpenChannelTask")
+    task_end = app_cc.index("void Application::ArmConnectWatchdog", task_start)
+    task_body = app_cc[task_start:task_end]
+    failure_start = task_body.index("} else {", task_body.index("if (ok)"))
+    failure_body = task_body[failure_start: task_body.index("    });", failure_start)]
+
+    lesson_start = failure_body.index("if (self->lesson_runtime_active_.load())")
+    lesson_branch = failure_body[lesson_start: failure_body.index("return;", lesson_start)]
+
+    assert "self->lesson_interactive_listen_generation_.fetch_add(1);" in lesson_branch
+    assert "self->lesson_interactive_listen_pending_.store(false);" in lesson_branch
+    assert "self->lesson_interactive_listening_active_.store(false);" in lesson_branch
+    assert "self->online_intent_.store(false);" in lesson_branch
+    assert "self->connect_attempt_active_.store(false);" in lesson_branch
+    assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
+    assert "display->SetEmotion(\"thinking\");" in lesson_branch
+    assert "self->ScheduleReconnect(mode);" not in lesson_branch
+    assert lesson_branch.index("self->lesson_interactive_listen_generation_.fetch_add(1);") < lesson_branch.index(
+        "self->lesson_interactive_listen_pending_.store(false);"
+    )
+    assert lesson_start < failure_body.index("if (passive_preconnect)")
+
 def test_lesson_runtime_audio_open_callback_suppresses_stale_side_effects():
     app_cc = read("main/application.cc")
 
@@ -1489,6 +1514,28 @@ def test_lesson_runtime_network_disconnect_clears_stale_answer_turn_flags():
     )
     assert lesson_branch.index("lesson_interactive_listening_active_.store(false);") < lesson_branch.index(
         "display->SetStatus(Lang::Strings::PLEASE_WAIT);"
+    )
+
+def test_lesson_runtime_connect_watchdog_clears_answer_turn_before_idle():
+    app_cc = read("main/application.cc")
+
+    watchdog_start = app_cc.index("void Application::HandleConnectWatchdog")
+    watchdog_end = app_cc.index("void Application::ScheduleReconnect", watchdog_start)
+    watchdog_body = app_cc[watchdog_start:watchdog_end]
+
+    lesson_start = watchdog_body.index("if (lesson_runtime_active_.load())")
+    lesson_branch = watchdog_body[lesson_start: watchdog_body.index("return;", lesson_start)]
+
+    assert "lesson_interactive_listen_generation_.fetch_add(1);" in lesson_branch
+    assert "lesson_interactive_listen_pending_.store(false);" in lesson_branch
+    assert "lesson_interactive_listening_active_.store(false);" in lesson_branch
+    assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
+    assert 'display->SetEmotion("thinking");' in lesson_branch
+    assert lesson_branch.index("lesson_interactive_listen_generation_.fetch_add(1);") < lesson_branch.index(
+        "lesson_interactive_listen_pending_.store(false);"
+    )
+    assert lesson_branch.index("lesson_interactive_listen_pending_.store(false);") < lesson_branch.index(
+        "SetDeviceState(kDeviceStateIdle);"
     )
 
 def test_lesson_runtime_network_event_callback_suppresses_generic_ui_but_keeps_events():

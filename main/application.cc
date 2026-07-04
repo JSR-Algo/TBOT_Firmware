@@ -3110,6 +3110,25 @@ void Application::OpenChannelTask(void* arg) {
                 self->SetListeningMode(mode);
             }
         } else {
+            if (self->lesson_runtime_active_.load()) {
+                if (!passive_preconnect && !wake_word_invoke) {
+                    ESP_LOGW(TAG, "lesson open_audio_channel_failed -> wait");
+                    self->backend_offline_.store(true);
+                    self->online_intent_.store(false);
+                    self->connect_attempt_active_.store(false);
+                    self->lesson_interactive_listen_generation_.fetch_add(1);
+                    self->lesson_interactive_listen_pending_.store(false);
+                    self->lesson_interactive_listening_active_.store(false);
+                    self->lesson_idle_repaint_suppressed_.store(true);
+                    if (self->GetDeviceState() == kDeviceStateConnecting) {
+                        self->SetDeviceState(kDeviceStateIdle);
+                    }
+                    auto display = Board::GetInstance().GetDisplay();
+                    display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                    display->SetEmotion("thinking");
+                    return;
+                }
+            }
             if (passive_preconnect) {
                 ESP_LOGW(TAG, "passive_lesson_websocket_failed");
                 self->passive_ws_intent_.store(false);
@@ -3187,6 +3206,12 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
         backend_offline_.store(true);
         online_intent_.store(false);
         connect_attempt_active_.store(false);
+        lesson_interactive_listen_generation_.fetch_add(1);
+        lesson_interactive_listen_pending_.store(false);
+        lesson_interactive_listening_active_.store(false);
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetStatus(Lang::Strings::PLEASE_WAIT);
+        display->SetEmotion("thinking");
         lesson_idle_repaint_suppressed_.store(true);
         if (GetDeviceState() == kDeviceStateConnecting) {
             SetDeviceState(kDeviceStateIdle);
