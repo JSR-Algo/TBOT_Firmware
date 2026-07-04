@@ -166,6 +166,8 @@ bool LooksLikeChildQuestionCaption(const std::string& value) {
     }
     if (lower.rfind("please ", 0) == 0) lower.erase(0, 7);
     return lower.rfind("say ", 0) == 0 ||
+           lower.rfind("try saying ", 0) == 0 ||
+           lower.rfind("try to say ", 0) == 0 ||
            lower.rfind("tell me ", 0) == 0 ||
            lower.rfind("repeat ", 0) == 0;
 }
