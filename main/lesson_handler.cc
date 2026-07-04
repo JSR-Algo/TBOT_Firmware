@@ -123,6 +123,16 @@ void NormalizeCaptionLine(std::string& value) {
     TruncateUtf8(value, 96);  // fit the 480px lesson caption line
 }
 
+std::string NormalizeAsciiToken(const char* value) {
+    if (value == nullptr) return "";
+    std::string out(value);
+    TrimAsciiWhitespace(out);
+    for (char& ch : out) {
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+    }
+    return out;
+}
+
 bool IsValidUtf8String(const std::string& value) {
     return Utf8PrefixLen(value, value.size(), nullptr) == value.size();
 }
@@ -1116,11 +1126,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (strcmp(type, "lesson_stop") == 0) {
         const char* stop_reason = Str(body, "reason");
-        const bool stop_cancelled = stop_reason != nullptr && strcmp(stop_reason, "CANCELLED") == 0;
-        const bool stop_explicit_failed = stop_reason != nullptr && strcmp(stop_reason, "FAILED") == 0;
+        const std::string normalized_stop_reason = NormalizeAsciiToken(stop_reason);
+        const bool stop_cancelled = normalized_stop_reason == "CANCELLED";
+        const bool stop_explicit_failed = normalized_stop_reason == "FAILED";
         const bool stop_completed = stop_reason == nullptr ||
-                                    strcmp(stop_reason, "COMPLETED") == 0 ||
-                                    strcmp(stop_reason, "SUCCEEDED") == 0;
+                                    normalized_stop_reason == "COMPLETED" ||
+                                    normalized_stop_reason == "SUCCEEDED";
         const bool stop_failed = stop_explicit_failed || (!stop_cancelled && !stop_completed);
         const char* stop_status = stop_failed ? Lang::Strings::ERROR
                                  : stop_cancelled ? "Bài học đã dừng"

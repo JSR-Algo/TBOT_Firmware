@@ -1031,6 +1031,23 @@ void test_stop_reason_controls_terminal_cue() {
     Board::GetInstance().display_ = &disp;
     Board::GetInstance().network_ = nullptr;
     OpenSession();
+    Handle(StopFrame(3, "\"reason\":\" cancelled \""));
+    require(FrameType(2) == "lesson_ack", "whitespace lowercase cancelled stop is acked");
+    require(disp.last_status == "Bài học đã dừng",
+            "whitespace lowercase cancelled stop does not show error status");
+    require(disp.last_emotion == "neutral",
+            "whitespace lowercase cancelled stop keeps a neutral face");
+    require(!disp.chat_messages.empty() &&
+            disp.chat_messages.back().second == "Bài học đã dừng.",
+            "whitespace lowercase cancelled stop shows stopped copy");
+    require(App().last_sound == "popup",
+            "whitespace lowercase cancelled stop plays neutral transition cue");
+
+    ResetObservable();
+    disp.chat_messages.clear();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
     disp.chat_messages.emplace_back("system", "Con nói nhé.");
     Handle(StopFrame(3, "\"reason\":\"TIMEOUT\""));
     require(FrameType(2) == "lesson_ack", "timeout stop is acked");
