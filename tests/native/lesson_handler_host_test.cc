@@ -1839,6 +1839,31 @@ void test_passive_step_cancels_prior_interactive_listen() {
             "passive follow-up cancels the prior interactive listen window");
 }
 
+void test_passive_imperative_prompt_falls_back_to_narration_caption() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s-passive-imperative-prompt\",\"sequence\":3,\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\",\"stepType\":\"greeting\","
+           "\"prompt\":\"Say barn.\","
+           "\"scene\":{"
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
+           "\"altCaption\":\"Look at the barn.\"},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}");
+
+    require(App().prepare_listen_calls == 0,
+            "passive imperative prompt does not open child response window");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Look at the barn.",
+            "passive imperative prompt falls back to narration caption");
+}
+
 void test_passive_step_invalidates_queued_interactive_listen_prepare() {
     ResetObservable();
     LvglDisplay disp;
@@ -3011,6 +3036,7 @@ int main() {
     test_step_reuses_cached_layer_bytes_for_repeated_urls();
     test_step_interactive_opens_listen();
     test_passive_step_cancels_prior_interactive_listen();
+    test_passive_imperative_prompt_falls_back_to_narration_caption();
     test_passive_step_invalidates_queued_interactive_listen_prepare();
     test_step_no_display_does_not_open_listen();
     test_step_no_display_object_does_not_open_listen();

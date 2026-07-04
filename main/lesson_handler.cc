@@ -159,7 +159,14 @@ std::string CaptionCandidate(const char* value) {
 }
 
 bool LooksLikeChildQuestionCaption(const std::string& value) {
-    return value.find('?') != std::string::npos;
+    if (value.find('?') != std::string::npos) return true;
+    std::string lower(value);
+    for (char& ch : lower) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    return lower.rfind("say ", 0) == 0 ||
+           lower.rfind("tell me ", 0) == 0 ||
+           lower.rfind("repeat ", 0) == 0;
 }
 
 bool Num(const cJSON* o, const char* k, double& out) {
