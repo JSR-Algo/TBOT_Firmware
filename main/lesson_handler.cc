@@ -225,6 +225,8 @@ struct LessonSession {
     bool        last_ack_rendered  = false;
     bool        last_ack_degraded  = false;
     std::string last_ack_asset_pack_json;
+    int64_t     prepare_ack_sequence = 0;   // prepare assetPack replay survives later lifecycle acks
+    std::string prepare_ack_asset_pack_json;
 };
 LessonSession g_session;
 
@@ -237,6 +239,8 @@ void ClearTerminalLessonCursor() {
     g_session.last_ack_rendered = false;
     g_session.last_ack_degraded = false;
     g_session.last_ack_asset_pack_json.clear();
+    g_session.prepare_ack_sequence = 0;
+    g_session.prepare_ack_asset_pack_json.clear();
     g_session.assignment_version = -1.0;
 }
 
@@ -900,6 +904,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 char* printed = cJSON_PrintUnformatted(asset_pack_ack);
                 if (printed != nullptr) {
                     g_session.last_ack_asset_pack_json = printed;
+                    const char* ack_type = Str(in, "type");
+                    if (ack_type != nullptr && strcmp(ack_type, "lesson_prepare") == 0) {
+                        g_session.prepare_ack_sequence = acked;
+                        g_session.prepare_ack_asset_pack_json = printed;
+                    }
                     cJSON_free(printed);
                 }
             }
@@ -1082,6 +1091,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         cJSON* re_asset_pack = nullptr;
         if (sequence == g_session.last_ack_sequence && !g_session.last_ack_asset_pack_json.empty()) {
             re_asset_pack = cJSON_Parse(g_session.last_ack_asset_pack_json.c_str());
+        } else if (is_prepare && sequence == g_session.prepare_ack_sequence &&
+                   !g_session.prepare_ack_asset_pack_json.empty()) {
+            re_asset_pack = cJSON_Parse(g_session.prepare_ack_asset_pack_json.c_str());
         }
         ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; re-acking rendered=%d degraded=%d",
                  (long long)sequence, re_rendered, re_degraded);

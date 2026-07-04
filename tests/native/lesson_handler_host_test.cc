@@ -777,6 +777,28 @@ void test_dedup_reack() {
     require(!FrameHasAssetPack(2), "older dup carries no cached assetPack");
 }
 
+void test_delayed_duplicate_prepare_replays_assetpack_after_start_ack() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck-delayed-abcdef1234567890\",\"assets\":[]}"));
+    require(Sent().size() == 1, "initial prepare emits assetPack ack");
+    require(FrameHasAssetPack(0), "initial prepare ack carries assetPack");
+
+    Handle(StartFrame(2));
+    require(Sent().size() == 2, "start emits lifecycle ack");
+    require(!FrameHasAssetPack(1), "start ack carries no assetPack");
+
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck-delayed-abcdef1234567890\",\"assets\":[]}"));
+    require(Sent().size() == 3, "delayed duplicate prepare re-acks");
+    require(FrameHasAssetPack(2), "delayed duplicate prepare replays original assetPack");
+    require(FrameBodyStr(2, "assetPack", "cacheKey") == "ck-delayed-abcdef1234567890",
+            "delayed duplicate prepare replays original assetPack cacheKey");
+}
+
 void test_prepare_new_assignment_version_same_session_resets_stream() {
     ResetObservable();
     FreshSession();
@@ -3166,6 +3188,7 @@ int main() {
     test_fresh_prepare_contract_reject_clears_stale_lesson_scene();
     test_unknown_session_and_staleness();
     test_dedup_reack();
+    test_delayed_duplicate_prepare_replays_assetpack_after_start_ack();
     test_prepare_new_assignment_version_same_session_resets_stream();
     test_fresh_prepare_clears_stale_active_lesson_before_start();
     test_prepare_after_stop_same_session_resets_stream();
