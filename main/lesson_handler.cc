@@ -1317,15 +1317,18 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool has_caption_prompt = !prompt_caption.empty();
     if (has_caption_prompt) caption = prompt_caption;
     if (!has_caption_prompt) {
+        const std::string glyph_caption = CaptionCandidate(glyph);
+        const std::string label_caption = CaptionCandidate(label);
+        const std::string alt_caption = CaptionCandidate(alt);
         if (!object_drew) {
-            if (glyph != nullptr) { caption += glyph; caption += ' '; }
-            if (label != nullptr) caption += label;
-        } else if (label != nullptr) {
-            caption = label;
+            if (!glyph_caption.empty()) { caption += glyph_caption; caption += ' '; }
+            if (!label_caption.empty()) caption += label_caption;
+        } else if (!label_caption.empty()) {
+            caption = label_caption;
         }
-        if (alt != nullptr) {
+        if (!alt_caption.empty()) {
             if (!caption.empty()) caption += " - ";
-            caption += alt;
+            caption += alt_caption;
         }
     }
     NormalizeCaptionLine(caption);

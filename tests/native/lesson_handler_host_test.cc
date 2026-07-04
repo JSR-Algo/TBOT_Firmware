@@ -2048,6 +2048,31 @@ void test_invalid_story_ask_suffix_falls_back_to_prompt_for_interactive_turn() {
             "valid prompt fallback still opens after invalid story ask suffix");
 }
 
+void test_invalid_fallback_label_uses_valid_alt_caption() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+
+    std::string invalid_label = "barn" + std::string("\xff", 1);
+    std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+        kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+        "\"stepId\":\"s-invalid-fallback-label\",\"sequence\":3,\"body\":{\"profile\":\"" +
+        kLessonProfileEspTft + "\",\"stepType\":\"greeting\",\"completionClass\":\"passive\","
+        "\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"altCaption\":\"Look at the barn.\","
+        "\"poster\":{\"src\":\"http://x/p.jpg\"}},\"teachingObject\":{\"primaryWord\":\"" +
+        invalid_label + "\",\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+        "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"happy\"}}}}";
+    Handle(frame);
+
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Look at the barn.",
+            "invalid fallback label is skipped so valid alt caption remains visible");
+    require(IsValidUtf8(disp.lesson_captions.back()),
+            "fallback caption remains valid UTF-8");
+}
+
 void test_interactive_prompt_caption_trims_ascii_whitespace() {
     ResetObservable();
     LvglDisplay disp;
@@ -2712,6 +2737,7 @@ int main() {
     test_invalid_utf8_interactive_prompt_does_not_open_listen();
     test_invalid_story_ask_falls_back_to_prompt_for_interactive_turn();
     test_invalid_story_ask_suffix_falls_back_to_prompt_for_interactive_turn();
+    test_invalid_fallback_label_uses_valid_alt_caption();
     test_interactive_prompt_caption_trims_ascii_whitespace();
     test_step_http_error_paths();
     test_step_http_chunked_paths();
