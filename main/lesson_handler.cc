@@ -164,6 +164,7 @@ bool LooksLikeChildQuestionCaption(const std::string& value) {
     for (char& ch : lower) {
         if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
     }
+    if (lower.rfind("please ", 0) == 0) lower.erase(0, 7);
     return lower.rfind("say ", 0) == 0 ||
            lower.rfind("tell me ", 0) == 0 ||
            lower.rfind("repeat ", 0) == 0;
