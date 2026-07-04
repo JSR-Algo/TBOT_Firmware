@@ -292,10 +292,10 @@ bool IsPassiveStep(const char* completion_class, const char* step_type) {
 // on-device renderer, so the robot overlay collapses to an emoji-face (the defined
 // espTft v1 full render — D-ATLAS-CRITICAL / DIV-FW-ATLAS).
 const char* ExpressionToEmotion(const char* expr) {
-    if (expr == nullptr) return "neutral";
-    if (strcmp(expr, "teaching") == 0 || strcmp(expr, "modeling") == 0)   return "happy";
-    if (strcmp(expr, "celebrating") == 0)                                 return "laughing";
-    if (strcmp(expr, "thinking") == 0 || strcmp(expr, "listening") == 0)  return "thinking";
+    const std::string expression = NormalizeAsciiToken(expr);
+    if (expression == "TEACHING" || expression == "MODELING")   return "happy";
+    if (expression == "CELEBRATING")                             return "laughing";
+    if (expression == "THINKING" || expression == "LISTENING")  return "thinking";
     return "neutral";
 }
 

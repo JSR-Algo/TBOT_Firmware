@@ -1305,8 +1305,14 @@ void test_step_full_render_http() {
     int seq = 3;
     disp.chat_messages.emplace_back("assistant", "Old transcript");
     // passive step (greeting) so degraded computes from drew flags and NO listen window.
-    Handle(StepFrame(seq, "s4", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
-                     ",\"prompt\":\"Xin chào\",\"stepType\":\"greeting\"", ""));
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s4\",\"lessonVersion\":3,\"lessonId\":\"L1\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\",\"prompt\":\"Xin chào\",\"stepType\":\"greeting\",\"scene\":{"
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\" Teaching \"}}}}");
     size_t idx = Sent().size() - 1;
     require(FrameType(idx) == "lesson_ack", "rendered step acks");
     // NOTE non-tautology: all three layers fetched+drew so degraded MUST be false.
@@ -1327,7 +1333,7 @@ void test_step_full_render_http() {
             disp.lesson_captions.back() == "Xin chào", "authored prompt caption drawn");
     require(disp.last_status == "Đang học...", "rendered step replaces loading status with active lesson status");
     require(disp.chat_messages.empty(), "new lesson step clears stale chat and does not enter normal chat history");
-    require(disp.last_emotion == "happy", "teaching expression -> happy emotion");
+    require(disp.last_emotion == "happy", "whitespace/case teaching expression -> happy emotion");
     // passive greeting: no interactive listen window opened.
     require(App().prepare_listen_calls == 0, "passive step opens NO listen window");
 }
