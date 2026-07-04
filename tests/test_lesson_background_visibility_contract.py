@@ -478,7 +478,7 @@ def test_lesson_error_clears_layers_and_shows_friendly_failure_without_ack_loop(
     assert "show_lesson_failure_display();" in failure_display
     assert "emit_ack" not in error_branch
 
-def test_lesson_step_caption_prefers_authored_prompt_over_asset_label():
+def test_lesson_step_caption_prefers_child_question_then_authored_prompt_over_asset_label():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     body = function_body(source, "void Application::HandleLessonMessage")
 
@@ -486,9 +486,13 @@ def test_lesson_step_caption_prefers_authored_prompt_over_asset_label():
     prompt_idx = step_branch.index('const char* prompt = Str(body, "prompt")')
     fallback_idx = step_branch.index('const cJSON* card = Obj(to, "primitiveFallbackCard")')
     assert prompt_idx < fallback_idx
-    assert "const bool has_prompt = !Blank(prompt)" in step_branch
-    assert "if (has_prompt) caption = prompt;" in step_branch
-    assert "if (!has_prompt)" in step_branch
+    assert 'const char* story_ask = Str(Obj(body, "storyBeat"), "ask")' in step_branch
+    assert "const char* caption_prompt = prompt;" in step_branch
+    assert "if (!passive && !Blank(story_ask)) caption_prompt = story_ask;" in step_branch
+    assert "if (Blank(caption_prompt)) caption_prompt = story_ask;" in step_branch
+    assert "const bool has_caption_prompt = !Blank(caption_prompt)" in step_branch
+    assert "if (has_caption_prompt) caption = caption_prompt;" in step_branch
+    assert "if (!has_caption_prompt)" in step_branch
 
 def test_lesson_image_fetch_supports_sd_pack_paths_before_network_fetch():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")

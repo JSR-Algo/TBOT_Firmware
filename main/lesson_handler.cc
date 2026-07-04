@@ -1177,7 +1177,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool has_object_src = !Blank(object_src);
     const bool has_overlay_src = !Blank(overlay_src);
     const char* prompt = Str(body, "prompt");
-    if (Blank(prompt)) prompt = Str(Obj(body, "storyBeat"), "ask");
+    const char* story_ask = Str(Obj(body, "storyBeat"), "ask");
+    const char* step_type       = Str(body, "stepType");
+    const char* completion_class = Str(body, "completionClass");
+    const bool passive = IsPassiveStep(completion_class, step_type);
+    const char* caption_prompt = prompt;
+    if (!passive && !Blank(story_ask)) caption_prompt = story_ask;
+    if (Blank(caption_prompt)) caption_prompt = story_ask;
 
     if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||
         Blank(poster_src)) {
@@ -1271,9 +1277,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // Caption line — AUTHORED lesson content only (COPPA-safe; never child speech,
     // never logged). When Layer-2 falls to the glyph card, fold glyph+label in.
     std::string caption;
-    const bool has_prompt = !Blank(prompt);
-    if (has_prompt) caption = prompt;
-    if (!has_prompt) {
+    const bool has_caption_prompt = !Blank(caption_prompt);
+    if (has_caption_prompt) caption = caption_prompt;
+    if (!has_caption_prompt) {
         if (!object_drew) {
             if (glyph != nullptr) { caption += glyph; caption += ' '; }
             if (label != nullptr) caption += label;
@@ -1350,10 +1356,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // server voice transcript path (or a future explicit tap/listen response) to
     // report step_completed. Do not fabricate result="success" with empty detail
     // here, because that advances the lesson before the child answers.
-    const char* step_type       = Str(body, "stepType");
-    const char* completion_class = Str(body, "completionClass");
-    const bool passive = IsPassiveStep(completion_class, step_type);
-    const bool has_visible_child_prompt = has_prompt && !caption.empty();
+    const bool has_visible_child_prompt = has_caption_prompt && !caption.empty();
     const bool should_listen = !passive && has_visible_content && has_visible_child_prompt;
     const char* sid = Str(root, "stepId");
     if (!should_listen) {

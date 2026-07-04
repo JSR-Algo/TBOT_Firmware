@@ -1374,6 +1374,9 @@ void test_step_ignores_story_metadata_while_rendering_layers() {
             "completionClass interactive opens child response window without waitForChild flag");
     require(!disp.background_calls.empty() && !disp.object_calls.empty() && !disp.overlay_calls.empty(),
             "story ask-only frame draws all three lesson layers");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Which animal is beside the barn?",
+            "interactive storyBeat.ask is the visible child question over generic prompt");
 
     // If the backend sends only the canonical storyBeat.ask question (no duplicate
     // prompt string), the child should still see the actual question while the mic

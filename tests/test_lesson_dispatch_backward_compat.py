@@ -205,8 +205,7 @@ def test_interactive_step_opens_listening_instead_of_completing_from_render():
 
     assert "const bool has_visible_content = rendered &&" in render_tail
     assert "!caption.empty() || poster_drew || object_drew || overlay_drew" in render_tail
-    assert "const bool has_prompt = !Blank(prompt);" in render_tail
-    assert "const bool has_visible_child_prompt = has_prompt && !caption.empty();" in render_tail
+    assert "const bool has_visible_child_prompt = has_caption_prompt && !caption.empty();" in render_tail
     assert "const bool should_listen = !passive && has_visible_content && has_visible_child_prompt;" in render_tail
     assert "if (!should_listen)" in render_tail
     assert "Application::GetInstance().CancelLessonInteractiveListening();" in render_tail
@@ -219,7 +218,6 @@ def test_interactive_step_opens_listening_instead_of_completing_from_render():
         re.S,
     )
     assert listen_schedule is not None
-    assert render_tail.index("const bool has_prompt") < render_tail.index("const bool should_listen")
     assert render_tail.index("const bool has_visible_child_prompt") < render_tail.index("const bool should_listen")
     assert render_tail.index("if (!should_listen)") < render_tail.index("if (should_listen)")
     assert render_tail.index("BeginLessonInteractiveListeningRequest") < render_tail.index("Schedule([listen_generation]")
