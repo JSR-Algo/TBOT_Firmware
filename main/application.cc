@@ -3095,6 +3095,15 @@ void Application::OpenChannelTask(void* arg) {
                 self->passive_reconnect_attempt_ = 0;
                 self->reconnect_passive_.store(false);
                 ESP_LOGI(TAG, "passive_lesson_websocket_opened");
+                const bool lesson_answer_turn =
+                    self->lesson_interactive_listen_pending_.load() ||
+                    self->lesson_interactive_listening_active_.load();
+                if (self->lesson_runtime_active_.load() && lesson_answer_turn) {
+                    self->passive_ws_intent_.store(false);
+                    self->StartHeartbeat();
+                    self->DispatchDeviceHeartbeat();
+                    self->SetListeningMode(kListeningModeManualStop);
+                }
             } else if (wake_word_invoke) {
                 self->FinishWakeWordInvoke(wake_word);
             } else {

@@ -693,13 +693,12 @@ def test_lesson_runtime_blocks_stale_generic_open_continuations():
     task_end = app_cc.index("void Application::ArmConnectWatchdog", task_start)
     task_body = app_cc[task_start:task_end]
     callback_start = task_body.index("self->Schedule")
-    set_listening = task_body.index("self->SetListeningMode(mode);", callback_start)
-    before_set = task_body[callback_start:set_listening]
+    wake_finish = task_body.index("self->FinishWakeWordInvoke(wake_word);", callback_start)
+    generic_start = task_body.index("} else {", wake_finish)
+    set_listening = task_body.index("self->SetListeningMode(mode);", generic_start)
+    before_set = task_body[generic_start:set_listening]
 
-    assert "self->FinishWakeWordInvoke(wake_word);" in before_set
-    assert before_set.index("self->FinishWakeWordInvoke(wake_word);") < before_set.index(
-        "const bool lesson_answer_turn ="
-    )
+    assert wake_finish < generic_start
     assert "lesson_interactive_listen_pending_.load()" in before_set
     assert "lesson_interactive_listening_active_.load()" in before_set
     assert "if (self->lesson_runtime_active_.load() && !lesson_answer_turn)" in before_set

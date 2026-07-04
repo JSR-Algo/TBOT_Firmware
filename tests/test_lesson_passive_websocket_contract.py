@@ -53,6 +53,30 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
     assert "online_intent_.store(true)" in set_listening
     assert "passive_ws_intent_.store(false)" in set_listening
 
+def test_passive_lesson_socket_open_promotes_pending_answer_turn_to_listening():
+    source = read("main/application.cc")
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    passive_success = open_task[
+        open_task.index("if (passive_preconnect)") :
+        open_task.index("} else if (wake_word_invoke)", open_task.index("if (passive_preconnect)"))
+    ]
+
+    assert "const bool lesson_answer_turn =" in passive_success
+    assert "self->lesson_interactive_listen_pending_.load()" in passive_success
+    assert "self->lesson_interactive_listening_active_.load()" in passive_success
+    assert "if (self->lesson_runtime_active_.load() && lesson_answer_turn)" in passive_success
+
+    promote = passive_success[
+        passive_success.index("if (self->lesson_runtime_active_.load() && lesson_answer_turn)") :
+    ]
+    assert "self->passive_ws_intent_.store(false);" in promote
+    assert "self->StartHeartbeat();" in promote
+    assert "self->DispatchDeviceHeartbeat();" in promote
+    assert "self->SetListeningMode(kListeningModeManualStop);" in promote
+    assert promote.index("self->passive_ws_intent_.store(false);") < promote.index(
+        "self->SetListeningMode(kListeningModeManualStop);"
+    )
+
 def test_passive_lesson_socket_reconnects_without_entering_listening_after_idle_timeout():
     source = read("main/application.cc")
     closed = source[source.index("protocol_->OnAudioChannelClosed") : source.index("protocol_->OnIncomingJson")]
