@@ -264,16 +264,25 @@ cJSON* MakeErrorBody(const char* code, const char* message, bool retryable, cons
 // identity teebot-lesson-renderer.v1 and the served-manifest negotiation are unchanged).
 bool IsPassiveStepType(const char* step_type) {
     if (step_type == nullptr) return false;  // unknown type -> treat as interactive
-    return strcmp(step_type, "greeting") == 0 ||
-           strcmp(step_type, "review")   == 0 ||
-           strcmp(step_type, "focus")    == 0 ||
-           strcmp(step_type, "feedback") == 0 ||
-           strcmp(step_type, "celebrate") == 0;
+    if (strcmp(step_type, "greeting") == 0 ||
+        strcmp(step_type, "review")   == 0 ||
+        strcmp(step_type, "focus")    == 0 ||
+        strcmp(step_type, "feedback") == 0 ||
+        strcmp(step_type, "celebrate") == 0) {
+        return true;
+    }
+    const std::string type = NormalizeAsciiToken(step_type);
+    return type == "GREETING" ||
+           type == "REVIEW" ||
+           type == "FOCUS" ||
+           type == "FEEDBACK" ||
+           type == "CELEBRATE";
 }
 bool IsPassiveStep(const char* completion_class, const char* step_type) {
-    if (completion_class != nullptr) {
-        if (strcmp(completion_class, "passive") == 0)     return true;
-        if (strcmp(completion_class, "interactive") == 0) return false;
+    const std::string completion = NormalizeAsciiToken(completion_class);
+    if (!completion.empty()) {
+        if (completion == "PASSIVE")     return true;
+        if (completion == "INTERACTIVE") return false;
         // unknown completionClass -> fall through to the type-set fallback below.
     }
     return IsPassiveStepType(step_type);
