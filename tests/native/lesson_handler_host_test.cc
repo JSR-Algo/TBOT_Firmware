@@ -1989,6 +1989,31 @@ void test_passive_can_you_tell_me_prompt_falls_back_to_narration_caption() {
             "passive can-you-tell-me prompt falls back to narration caption");
 }
 
+void test_passive_can_you_find_prompt_falls_back_to_narration_caption() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s-passive-can-you-find-prompt\",\"sequence\":3,\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\",\"stepType\":\"greeting\","
+           "\"prompt\":\"Can you find the barn.\","
+           "\"scene\":{"
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
+           "\"altCaption\":\"Look at the barn.\"},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}");
+
+    require(App().prepare_listen_calls == 0,
+            "passive can-you-find prompt does not open child response window");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Look at the barn.",
+            "passive can-you-find prompt falls back to narration caption");
+}
+
 void test_passive_step_invalidates_queued_interactive_listen_prepare() {
     ResetObservable();
     LvglDisplay disp;
@@ -3167,6 +3192,7 @@ int main() {
     test_passive_can_you_say_prompt_falls_back_to_narration_caption();
     test_passive_embedded_you_can_say_prompt_falls_back_to_narration_caption();
     test_passive_can_you_tell_me_prompt_falls_back_to_narration_caption();
+    test_passive_can_you_find_prompt_falls_back_to_narration_caption();
     test_passive_step_invalidates_queued_interactive_listen_prepare();
     test_step_no_display_does_not_open_listen();
     test_step_no_display_object_does_not_open_listen();

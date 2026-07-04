@@ -168,8 +168,7 @@ bool LooksLikeChildQuestionCaption(const std::string& value) {
     return lower.rfind("say ", 0) == 0 ||
            lower.rfind("try saying ", 0) == 0 ||
            lower.rfind("try to say ", 0) == 0 ||
-           lower.rfind("can you say ", 0) == 0 ||
-           lower.rfind("can you tell me ", 0) == 0 ||
+           lower.rfind("can you ", 0) == 0 ||
            lower.find("you can say ") != std::string::npos ||
            lower.rfind("tell me ", 0) == 0 ||
            lower.rfind("repeat ", 0) == 0;
