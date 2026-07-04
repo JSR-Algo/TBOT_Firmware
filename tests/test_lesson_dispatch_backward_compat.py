@@ -311,7 +311,7 @@ def test_prepare_ack_reports_sd_asset_pack_readiness_from_local_files():
     assert 'Str(asset, "localPath")' in helper
     assert "LessonLocalFileReady(local_path, expected_size)" in helper
     assert 'cJSON_AddBoolToObject(out, "ready", ready)' in helper
-    assert 'cJSON_AddStringToObject(out, "cacheKey", cache_key)' in helper
+    assert 'cJSON_AddStringToObject(out, "cacheKey", cache_key_value.c_str())' in helper
 
 def test_prepare_ack_validates_sd_asset_pack_file_size_when_declared():
     h = read("main/lesson_handler.cc")
@@ -384,11 +384,14 @@ def test_prepare_ack_requires_asset_pack_cache_key_to_include_full_manifest_chec
 
     assert 'Obj(body, "manifestRef")' in helper
     assert 'Str(manifest_ref, "manifestChecksum")' in helper
+    assert "std::string cache_key_value" in helper
+    assert "TrimAsciiWhitespace(cache_key_value)" in helper
     assert "manifest_checksum_required" in helper
     assert "std::string manifest_checksum_value" in helper
     assert "TrimAsciiWhitespace(manifest_checksum_value)" in helper
     assert "!manifest_checksum_value.empty()" in helper
     assert "cache_key_has_manifest_checksum" in helper
-    assert "strstr(cache_key, manifest_checksum_value.c_str())" in helper
+    assert "strstr(cache_key_value.c_str(), manifest_checksum_value.c_str())" in helper
     assert "!manifest_checksum_required" in helper
     assert "!cache_key_has_manifest_checksum" in helper
+    assert 'cJSON_AddStringToObject(out, "cacheKey", cache_key_value.c_str())' in helper

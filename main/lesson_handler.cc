@@ -624,14 +624,16 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
     if (pack == nullptr) return nullptr;
 
     const char* cache_key = Str(pack, "cacheKey");
+    std::string cache_key_value = cache_key == nullptr ? "" : cache_key;
+    TrimAsciiWhitespace(cache_key_value);
     const cJSON* manifest_ref = Obj(body, "manifestRef");
     const char* manifest_checksum = Str(manifest_ref, "manifestChecksum");
     std::string manifest_checksum_value = manifest_checksum == nullptr ? "" : manifest_checksum;
     TrimAsciiWhitespace(manifest_checksum_value);
     const bool manifest_checksum_required = !manifest_checksum_value.empty();
     const bool cache_key_has_manifest_checksum =
-        manifest_checksum_required && cache_key != nullptr &&
-        strstr(cache_key, manifest_checksum_value.c_str()) != nullptr;
+        manifest_checksum_required && !cache_key_value.empty() &&
+        strstr(cache_key_value.c_str(), manifest_checksum_value.c_str()) != nullptr;
     const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
     const cJSON* critical_assets = cJSON_GetObjectItem(body, "criticalAssets");
     bool ready = manifest_checksum_required && cache_key_has_manifest_checksum &&
@@ -686,7 +688,7 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
 
     cJSON* out = cJSON_CreateObject();
     cJSON_AddBoolToObject(out, "ready", ready);
-    if (cache_key != nullptr) cJSON_AddStringToObject(out, "cacheKey", cache_key);
+    if (cache_key != nullptr) cJSON_AddStringToObject(out, "cacheKey", cache_key_value.c_str());
     return out;
 }
 
