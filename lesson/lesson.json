@@ -71,6 +71,10 @@
         "prompt": "This is a barn. Listen: \"barn.\" TeeBot will say it first, then you can try.",
         "robotState": "modeling",
         "helperText": "Look at the barn and listen to TeeBot.",
+        "storyBeat": {
+          "ask": "Can you try saying barn after TeeBot models it?",
+          "waitForChild": true
+        },
         "videoHint": "lesson"
       },
       {
@@ -80,7 +84,11 @@
         "title": "Listen Carefully",
         "prompt": "Your turn. You try: \"barn.\" TeeBot is listening.",
         "robotState": "listening",
-        "helperText": "Say the word when you are ready."
+        "helperText": "Say the word when you are ready.",
+        "storyBeat": {
+          "ask": "What word do you see? You can say barn.",
+          "waitForChild": true
+        }
       },
       {
         "id": "s6",
@@ -90,6 +98,10 @@
         "prompt": "Say it with TeeBot: \"barn.\"",
         "robotState": "listening",
         "helperText": "TeeBot waits for your voice.",
+        "storyBeat": {
+          "ask": "Can you say barn with TeeBot?",
+          "waitForChild": true
+        },
         "l1TransferHint": "Let the child try freely first. Give support later if the parent asks for practice tips."
       },
       {
@@ -100,6 +112,10 @@
         "prompt": "TeeBot says: This is a ___. You can say barn.",
         "robotState": "thinking",
         "helperText": "TeeBot waits for your voice.",
+        "storyBeat": {
+          "ask": "This is a ___. What word fits here?",
+          "waitForChild": true
+        },
         "choices": [
           {
             "id": "c1",

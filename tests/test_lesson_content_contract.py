@@ -127,6 +127,7 @@ def test_packaged_lesson_story_stays_in_parity_with_backend_canonical_manifest()
         assert lesson_step.get("helperText") == backend_step.get("helperText")
         assert lesson_step.get("l1TransferHint") == backend_step.get("l1TransferHint")
         assert lesson_step.get("choices") == backend_step.get("choices")
+        assert lesson_step.get("storyBeat") == backend_step.get("storyBeat")
         assert lesson_step["completionClass"] == ("interactive" if step_id in expected_interactive else "passive")
         assert lesson_step["robotState"] == backend_step["robotState"]
         assert render_step["stepType"] == backend_step["type"]
