@@ -2131,6 +2131,30 @@ void test_prompt_caption_collapses_internal_ascii_whitespace() {
             "collapsed visible prompt still opens the child response window");
 }
 
+void test_prompt_caption_collapses_ascii_form_feed_and_vertical_tab() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "s-caption-control-whitespace", "http://x/p.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"prompt\":\"  Can\\fyou\\u000bsay barn?  \",\"stepType\":\"ask\","
+                     "\"completionClass\":\"interactive\"",
+                     ""));
+
+    require(!disp.lesson_captions.empty() &&
+                disp.lesson_captions.back() == "Can you say barn?",
+            "interactive prompt caption collapses ASCII form-feed and vertical-tab");
+    require(App().prepare_listen_calls == 1,
+            "control-whitespace-collapsed prompt still opens the child response window");
+}
+
 void test_invalid_story_ask_falls_back_to_prompt_for_interactive_turn() {
     ResetObservable();
     LvglDisplay disp;
@@ -2871,6 +2895,7 @@ int main() {
     test_caption_truncation_preserves_utf8_boundary();
     test_invalid_utf8_interactive_prompt_does_not_open_listen();
     test_prompt_caption_collapses_internal_ascii_whitespace();
+    test_prompt_caption_collapses_ascii_form_feed_and_vertical_tab();
     test_invalid_story_ask_falls_back_to_prompt_for_interactive_turn();
     test_invalid_story_ask_suffix_falls_back_to_prompt_for_interactive_turn();
     test_invalid_fallback_label_uses_valid_alt_caption();

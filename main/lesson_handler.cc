@@ -48,7 +48,8 @@ const char* Str(const cJSON* o, const char* k) {
     return cJSON_IsString(v) ? v->valuestring : nullptr;
 }
 bool IsAsciiWhitespace(char value) {
-    return value == ' ' || value == '\t' || value == '\n' || value == '\r';
+    return value == ' ' || value == '\t' || value == '\n' || value == '\r' ||
+           value == '\v' || value == '\f';
 }
 bool Blank(const char* value) {
     if (value == nullptr) return true;
