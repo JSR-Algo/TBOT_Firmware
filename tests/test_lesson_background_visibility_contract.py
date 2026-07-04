@@ -487,11 +487,12 @@ def test_lesson_step_caption_prefers_child_question_then_authored_prompt_over_as
     fallback_idx = step_branch.index('const cJSON* card = Obj(to, "primitiveFallbackCard")')
     assert prompt_idx < fallback_idx
     assert 'const char* story_ask = Str(Obj(body, "storyBeat"), "ask")' in step_branch
-    assert "const char* caption_prompt = prompt;" in step_branch
-    assert "if (!passive && !Blank(story_ask)) caption_prompt = story_ask;" in step_branch
-    assert "if (Blank(caption_prompt)) caption_prompt = story_ask;" in step_branch
-    assert "const bool has_caption_prompt = !Blank(caption_prompt)" in step_branch
-    assert "if (has_caption_prompt) caption = caption_prompt;" in step_branch
+    assert "std::string prompt_caption;" in step_branch
+    assert "if (!passive) prompt_caption = CaptionCandidate(story_ask);" in step_branch
+    assert "if (prompt_caption.empty()) prompt_caption = CaptionCandidate(prompt);" in step_branch
+    assert "if (prompt_caption.empty()) prompt_caption = CaptionCandidate(story_ask);" in step_branch
+    assert "const bool has_caption_prompt = !prompt_caption.empty()" in step_branch
+    assert "if (has_caption_prompt) caption = prompt_caption;" in step_branch
     assert "if (!has_caption_prompt)" in step_branch
 
 def test_lesson_image_fetch_supports_sd_pack_paths_before_network_fetch():

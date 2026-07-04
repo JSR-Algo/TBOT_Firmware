@@ -118,6 +118,18 @@ void TruncateUtf8(std::string& value, size_t max_bytes) {
     }
 }
 
+void NormalizeCaptionLine(std::string& value) {
+    TrimAsciiWhitespace(value);
+    TruncateUtf8(value, 96);  // fit the 480px lesson caption line
+}
+
+std::string CaptionCandidate(const char* value) {
+    if (Blank(value)) return "";
+    std::string out(value);
+    NormalizeCaptionLine(out);
+    return out;
+}
+
 bool Num(const cJSON* o, const char* k, double& out) {
     if (o == nullptr) return false;
     const cJSON* v = cJSON_GetObjectItem(o, k);
@@ -1200,9 +1212,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const char* step_type       = Str(body, "stepType");
     const char* completion_class = Str(body, "completionClass");
     const bool passive = IsPassiveStep(completion_class, step_type);
-    const char* caption_prompt = prompt;
-    if (!passive && !Blank(story_ask)) caption_prompt = story_ask;
-    if (Blank(caption_prompt)) caption_prompt = story_ask;
+    std::string prompt_caption;
+    if (!passive) prompt_caption = CaptionCandidate(story_ask);
+    if (prompt_caption.empty()) prompt_caption = CaptionCandidate(prompt);
+    if (prompt_caption.empty()) prompt_caption = CaptionCandidate(story_ask);
 
     if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||
         Blank(poster_src)) {
@@ -1296,8 +1309,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // Caption line — AUTHORED lesson content only (COPPA-safe; never child speech,
     // never logged). When Layer-2 falls to the glyph card, fold glyph+label in.
     std::string caption;
-    const bool has_caption_prompt = !Blank(caption_prompt);
-    if (has_caption_prompt) caption = caption_prompt;
+    const bool has_caption_prompt = !prompt_caption.empty();
+    if (has_caption_prompt) caption = prompt_caption;
     if (!has_caption_prompt) {
         if (!object_drew) {
             if (glyph != nullptr) { caption += glyph; caption += ' '; }
@@ -1310,8 +1323,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             caption += alt;
         }
     }
-    TrimAsciiWhitespace(caption);
-    TruncateUtf8(caption, 96);  // truncate for the 480px line (STORYBOARD §46-48)
+    NormalizeCaptionLine(caption);
 
     // §7.5 degraded semantics: false only when all authored visual layers exist and drew.
     // Missing optional object/overlay sources use caption/emoji fallback and stay degraded.

@@ -1996,6 +1996,32 @@ void test_invalid_utf8_interactive_prompt_does_not_open_listen() {
             "invalid UTF-8 interactive prompt does not open mic for an unseen question");
 }
 
+void test_invalid_story_ask_falls_back_to_prompt_for_interactive_turn() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostJpegDecodeMode() = 0;
+
+    std::string invalid_ask = std::string("\xff", 1) + " Which animal is beside the barn?";
+    Handle(StepFrame(3, "s-invalid-story-ask", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"Tell me what you see.\""
+                     ",\"stepType\":\"ask\",\"completionClass\":\"interactive\""
+                     ",\"storyBeat\":{\"ask\":\"" + invalid_ask + "\"}",
+                     ""));
+
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Tell me what you see.",
+            "invalid storyBeat.ask falls back to valid prompt caption");
+    require(App().prepare_listen_calls == 1,
+            "valid prompt fallback still opens the child response window");
+}
+
 void test_interactive_prompt_caption_trims_ascii_whitespace() {
     ResetObservable();
     LvglDisplay disp;
@@ -2658,6 +2684,7 @@ int main() {
     test_step_missing_optional_object_overlay_uses_prompt_fallback();
     test_caption_truncation_preserves_utf8_boundary();
     test_invalid_utf8_interactive_prompt_does_not_open_listen();
+    test_invalid_story_ask_falls_back_to_prompt_for_interactive_turn();
     test_interactive_prompt_caption_trims_ascii_whitespace();
     test_step_http_error_paths();
     test_step_http_chunked_paths();
