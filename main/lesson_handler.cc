@@ -1207,8 +1207,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // DIV-FW-EXPORT). A manifest forcing video -> ASSET_PROFILE_UNAVAILABLE, render
     // nothing. (Step-addressed error: stepId echoed from the inbound frame.)
     const char* bg_mode = Str(bg, "mode");
+    const std::string normalized_bg_mode = NormalizeAsciiToken(bg_mode);
     const cJSON* bg_video = (bg != nullptr) ? cJSON_GetObjectItem(bg, "video") : nullptr;
-    const bool video_forced = (bg_mode != nullptr && strcmp(bg_mode, "poster") != 0) ||
+    const bool video_forced = (bg_mode != nullptr && normalized_bg_mode != "POSTER") ||
                               (bg_video != nullptr && !cJSON_IsNull(bg_video));
     if (video_forced) {
         cJSON* eb = MakeErrorBody("ASSET_PROFILE_UNAVAILABLE",

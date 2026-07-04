@@ -1122,6 +1122,32 @@ void test_step_rejects() {
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
             "non-null video -> reject");
 
+    // Poster mode token drift from upstream JSON must remain poster, not a video
+    // profile request. The backend already normalizes similar step tokens.
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s5b\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\",\"prompt\":\"Look at the barn.\",\"scene\":{\"backgroundScene\":{\"mode\":\" Poster \","
+           "\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"teaching\"}}}}");
+    require(FrameType(Sent().size()-1) == "lesson_ack",
+            "whitespace/case poster mode token still renders");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "normalized poster mode draws background");
+    require(FrameBodyBool(Sent().size()-1, "rendered", false) == true,
+            "normalized poster mode ack is rendered");
+
     // missing required layer (no poster src) -> LESSON_FRAME_INVALID
     ResetObservable();
     Board::GetInstance().display_ = nullptr;
