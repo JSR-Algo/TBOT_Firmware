@@ -529,13 +529,19 @@ std::string ValidateLessonPackPath(std::string path) {
 
 std::string LessonLocalPath(const char* url) {
     if (url == nullptr) return "";
-    if (strncmp(url, "sd://", 5) == 0) {
-        const char* tail = url + 5;
+    std::string local_url(url);
+    TrimAsciiWhitespace(local_url);
+    if (local_url.empty()) return "";
+    const char* canonical_url = local_url.c_str();
+    if (strncmp(canonical_url, "sd://", 5) == 0) {
+        const char* tail = canonical_url + 5;
         if (strncmp(tail, "sdcard/", 7) == 0) return ValidateLessonPackPath(std::string("/") + tail);
         if (tail[0] == '/') return ValidateLessonPackPath(tail);
         return ValidateLessonPackPath(std::string("/sdcard/") + tail);
     }
-    if (strncmp(url, "file://", 7) == 0) return ValidateLessonPackPath(std::string(url + 7));
+    if (strncmp(canonical_url, "file://", 7) == 0) {
+        return ValidateLessonPackPath(std::string(canonical_url + 7));
+    }
     return "";
 }
 

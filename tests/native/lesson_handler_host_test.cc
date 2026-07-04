@@ -358,9 +358,9 @@ void test_prepare_assetpack_ready_with_real_file() {
                           "\"criticalAssets\":[{\"key\":\"k1\"}],"
                           "\"assetPack\":{\"cacheKey\":\"ck5-abcdef1234567890\",\"assets\":["
                           "{\"key\":\"k1\",\"state\":\" ready \",\"checksumOk\":true,"
-                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/ready.png\",\"size\":10}]}"));
+                          "\"localPath\":\" \nsd://sdcard/tbot/lesson-assets/ready.png\t\",\"size\":10}]}"));
     require(FrameAssetPackReady(0) == true,
-            "whitespace/case READY asset state + covered critical -> ready");
+            "whitespace/case READY asset state + trimmed localPath + covered critical -> ready");
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 

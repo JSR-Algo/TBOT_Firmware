@@ -510,7 +510,8 @@ def test_lesson_image_fetch_supports_sd_pack_paths_before_network_fetch():
 
     assert 'return ValidateLessonPackPath(std::string("/sdcard/") + tail);' in path_body
     assert 'return ValidateLessonPackPath(std::string("/") + tail);' in path_body
-    assert 'strncmp(url, "file://", 7) == 0' in path_body
+    assert "TrimAsciiWhitespace(local_url);" in path_body
+    assert 'strncmp(canonical_url, "file://", 7) == 0' in path_body
 
     assert 'std::string path = LessonLocalPath(url);' in local_body
     assert 'std::string fs_path = LessonPackFileSystemPath(path);' in local_body
@@ -537,7 +538,7 @@ def test_lesson_sd_pack_path_normalizes_esp_sdcard_uri_without_double_prefix():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     path_body = function_body(source, "std::string LessonLocalPath")
 
-    sd_branch = path_body[path_body.index('if (strncmp(url, "sd://", 5) == 0)') : path_body.index('if (strncmp(url, "file://", 7) == 0')]
+    sd_branch = path_body[path_body.index('if (strncmp(canonical_url, "sd://", 5) == 0)') : path_body.index('if (strncmp(canonical_url, "file://", 7) == 0')]
     esp_uri_guard = 'if (strncmp(tail, "sdcard/", 7) == 0) return ValidateLessonPackPath(std::string("/") + tail);'
     generic_sd_prefix = 'return ValidateLessonPackPath(std::string("/sdcard/") + tail);'
 
@@ -554,7 +555,7 @@ def test_lesson_local_paths_are_confined_to_lesson_asset_pack_root():
     assert 'path.rfind(kLessonAssetPackRoot, 0) != 0' in validator_body
     assert 'path.find("..") != std::string::npos' in validator_body
     assert 'path.find("\\\\") != std::string::npos' in validator_body
-    assert 'return ValidateLessonPackPath(std::string(url + 7));' in path_body
+    assert 'return ValidateLessonPackPath(std::string(canonical_url + 7));' in path_body
 
 def test_lesson_image_fetch_has_single_image_memory_cap_for_http_and_sd():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
