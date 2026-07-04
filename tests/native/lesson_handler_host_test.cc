@@ -1905,6 +1905,27 @@ void test_caption_truncation_preserves_utf8_boundary() {
     Board::GetInstance().network_ = &net;
     OpenSession();
     ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    std::string wordy_prompt =
+        "Today we visit a bright barn with farm animals and hay. "
+        "This caption should stop before the choppedwordtail";
+    Handle(StepFrame(3, "s-word-caption", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"prompt\":\"" + wordy_prompt + "\",\"stepType\":\"greeting\"",
+                     ""));
+    require(!disp.lesson_captions.empty(), "wordy long prompt caption drawn");
+    require(disp.lesson_captions.back().size() <= 96, "wordy caption remains capped");
+    require(IsValidUtf8(disp.lesson_captions.back()), "wordy caption remains valid UTF-8");
+    require(disp.lesson_captions.back().size() >= 3 &&
+                disp.lesson_captions.back().substr(disp.lesson_captions.back().size() - 3) == "...",
+            "wordy caption shows ellipsis when shortened");
+    require(disp.lesson_captions.back().find("choppedwordtail") == std::string::npos,
+            "wordy caption does not keep a chopped trailing word");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
     std::string three_byte_prompt = "€" + std::string(96, 'B');
     Handle(StepFrame(3, "s-utf8-3byte", "http://x/p.jpg", "http://x/o.jpg",
                      "http://x/r.jpg",

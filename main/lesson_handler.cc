@@ -76,9 +76,10 @@ size_t Utf8CharLen(unsigned char ch) {
     return 0;
 }
 
-void TruncateUtf8(std::string& value, size_t max_bytes) {
+size_t Utf8PrefixLen(const std::string& value, size_t max_bytes, size_t* last_space) {
     size_t pos = 0;
     size_t last_good = 0;
+    if (last_space != nullptr) *last_space = std::string::npos;
     while (pos < value.size() && pos < max_bytes) {
         size_t len = Utf8CharLen(static_cast<unsigned char>(value[pos]));
         if (len == 0 || pos + len > max_bytes) break;
@@ -91,11 +92,29 @@ void TruncateUtf8(std::string& value, size_t max_bytes) {
             }
         }
         if (!valid) break;
+        if (last_space != nullptr && IsAsciiWhitespace(value[pos])) *last_space = pos;
         pos += len;
         last_good = pos;
     }
+    return last_good;
+}
+
+void TruncateUtf8(std::string& value, size_t max_bytes) {
+    size_t last_space = std::string::npos;
+    const size_t last_good = Utf8PrefixLen(value, max_bytes, &last_space);
     if (last_good < value.size()) {
-        value.resize(last_good);
+        const char* suffix = "...";
+        const size_t suffix_len = 3;
+        size_t cut = last_good;
+        if (max_bytes > suffix_len && last_space != std::string::npos &&
+            last_space >= max_bytes / 2 && last_space + suffix_len <= max_bytes) {
+            cut = last_space;
+        } else if (max_bytes > suffix_len) {
+            cut = Utf8PrefixLen(value, max_bytes - suffix_len, nullptr);
+        }
+        value.resize(cut);
+        TrimAsciiWhitespace(value);
+        if (max_bytes > suffix_len && !value.empty()) value += suffix;
     }
 }
 
