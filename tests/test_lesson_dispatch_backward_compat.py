@@ -369,6 +369,7 @@ def test_prepare_ack_rejects_duplicate_and_missing_critical_asset_pack_keys():
     helper = h[helper_start : h.index("// US-006 image render", helper_start)]
 
     assert 'cJSON_GetObjectItem(body, "criticalAssets")' in helper
+    assert "critical_assets != nullptr && !cJSON_IsArray(critical_assets)" in helper
     assert "ready_asset_keys" in helper
     assert "!ready_asset_keys.insert(asset_key_value).second" in helper
     assert "critical_key" in helper

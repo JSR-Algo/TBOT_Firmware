@@ -508,6 +508,31 @@ void test_prepare_assetpack_missing_declared_critical_key_not_ready() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_malformed_critical_assets_not_ready() {
+    const char* dir = "/tmp/tbot-host-sd-malformed-critical/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-malformed-critical && mkdir -p /tmp/tbot-host-sd-malformed-critical/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-malformed-critical/lesson-assets/background.png";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "malformed-critical fixture opens");
+    const char bytes[8] = {1,2,3,4,5,6,7,8};
+    fwrite(bytes, 1, 8, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":{\"key\":\"backgroundScene.poster\"},"
+                          "\"assetPack\":{\"cacheKey\":\"ck-malformed-critical-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"backgroundScene.poster\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/background.png\",\"size\":8}]}"));
+    require(FrameHasAssetPack(0), "malformed criticalAssets still returns correlated assetPack ack");
+    require(FrameAssetPackReady(0) == false,
+            "non-array criticalAssets shape is invalid and not treated as omitted");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_requires_manifest_checksum_before_ack() {
     ResetObservable();
     FreshSession();
@@ -2931,6 +2956,7 @@ int main() {
     test_prepare_assetpack_prefix_only_cache_key_not_ready();
     test_prepare_assetpack_stale_checksum_cache_key_not_ready();
     test_prepare_assetpack_missing_declared_critical_key_not_ready();
+    test_prepare_assetpack_malformed_critical_assets_not_ready();
     test_prepare_assetpack_requires_manifest_checksum_before_ack();
     test_prepare_reject_clears_stale_lesson_scene();
     test_version_profile_gate();

@@ -667,7 +667,9 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
         }
     }
     if (ready) {
-        if (cJSON_IsArray(critical_assets) && cJSON_GetArraySize(critical_assets) > 0) {
+        if (critical_assets != nullptr && !cJSON_IsArray(critical_assets)) {
+            ready = false;
+        } else if (cJSON_IsArray(critical_assets) && cJSON_GetArraySize(critical_assets) > 0) {
             const cJSON* critical_asset = nullptr;
             cJSON_ArrayForEach(critical_asset, critical_assets) {
                 const char* critical_key = Str(critical_asset, "key");
