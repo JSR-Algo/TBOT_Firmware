@@ -1273,15 +1273,12 @@ def test_lesson_runtime_connect_watchdog_suppresses_generic_reconnect_and_idle_r
     ]
     assert "SchedulePassiveLessonReconnect();" in passive_branch
 
-    assert watchdog_body.index("if (lesson_runtime_active_.load())") < watchdog_body.index(
-        "SetDeviceState(kDeviceStateIdle);"
-    )
-    assert watchdog_body.index("if (lesson_runtime_active_.load())") < watchdog_body.index(
-        "ScheduleReconnect(reconnect_mode_);"
-    )
+    lesson_start = watchdog_body.index("if (lesson_runtime_active_.load())")
+    assert lesson_start < watchdog_body.index("SetDeviceState(kDeviceStateIdle);", lesson_start)
+    assert lesson_start < watchdog_body.index("ScheduleReconnect(reconnect_mode_);", lesson_start)
     lesson_branch = watchdog_body[
-        watchdog_body.index("if (lesson_runtime_active_.load())") :
-        watchdog_body.index('ESP_LOGW(TAG, "connect_watchdog_timeout -> idle + backoff"')
+        lesson_start :
+        watchdog_body.index('ESP_LOGW(TAG, "connect_watchdog_timeout -> idle + backoff"', lesson_start)
     ]
     assert "lesson connect watchdog timeout -> suppress generic reconnect" in lesson_branch
     assert "lesson_idle_repaint_suppressed_.store(true);" in lesson_branch

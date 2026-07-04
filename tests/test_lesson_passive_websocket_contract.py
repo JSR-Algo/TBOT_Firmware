@@ -110,19 +110,70 @@ def test_passive_lesson_socket_connect_failure_retries_passively():
     assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
     assert "passive_lesson_reconnect_scheduled" in passive_scheduler
 
+def test_passive_lesson_socket_failure_during_answer_turn_does_not_retry_passively():
+    source = read("main/application.cc")
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    failure = open_task[
+        open_task.index("} else {", open_task.index("if (ok)")) :
+        open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")')
+    ]
+
+    assert "const bool lesson_answer_turn =" in failure
+    assert "self->lesson_interactive_listen_pending_.load()" in failure
+    assert "self->lesson_interactive_listening_active_.load()" in failure
+    assert "if (self->lesson_runtime_active_.load())" in failure
+    assert "lesson_answer_turn || (!passive_preconnect && !wake_word_invoke)" in failure
+
+    lesson_failure = failure[
+        failure.index("lesson_answer_turn || (!passive_preconnect && !wake_word_invoke)") :
+    ]
+    assert "self->passive_ws_intent_.store(false);" in lesson_failure
+    assert "self->lesson_interactive_listen_generation_.fetch_add(1);" in lesson_failure
+    assert "self->lesson_interactive_listen_pending_.store(false);" in lesson_failure
+    assert "self->lesson_interactive_listening_active_.store(false);" in lesson_failure
+    assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_failure
+    assert "self->SchedulePassiveLessonReconnect();" not in lesson_failure
+    assert "return;" in lesson_failure
+
 def test_passive_lesson_socket_watchdog_timeout_retries_passively_from_idle():
     source = read("main/application.cc")
     watchdog = function_body(source, "void Application::HandleConnectWatchdog")
 
+    passive_start = watchdog.index("if (passive_ws_intent_.load())")
     passive_branch = watchdog[
-        watchdog.index("if (passive_ws_intent_.load())") :
-        watchdog.index("if (GetDeviceState() == kDeviceStateConnecting)")
+        passive_start :
+        watchdog.index('ESP_LOGW(TAG, "lesson connect watchdog timeout -> suppress generic reconnect"', passive_start)
     ]
 
     assert "passive_lesson_connect_watchdog_timeout -> passive backoff" in passive_branch
     assert "backend_offline_.store(true);" in passive_branch
     assert "SchedulePassiveLessonReconnect();" in passive_branch
     assert "ScheduleReconnect" not in passive_branch
+
+def test_passive_lesson_socket_watchdog_during_answer_turn_does_not_retry_passively():
+    source = read("main/application.cc")
+    watchdog = function_body(source, "void Application::HandleConnectWatchdog")
+    passive_branch = watchdog[
+        watchdog.index("if (passive_ws_intent_.load())") :
+        watchdog.index("if (lesson_runtime_active_.load())")
+    ]
+
+    assert "const bool lesson_answer_turn =" in passive_branch
+    assert "lesson_interactive_listen_pending_.load()" in passive_branch
+    assert "lesson_interactive_listening_active_.load()" in passive_branch
+    assert "if (lesson_runtime_active_.load() && lesson_answer_turn)" in passive_branch
+
+    lesson_timeout = passive_branch[
+        passive_branch.index("if (lesson_runtime_active_.load() && lesson_answer_turn)") :
+        passive_branch.index("return;", passive_branch.index("if (lesson_runtime_active_.load() && lesson_answer_turn)")) + len("return;")
+    ]
+    assert "passive_ws_intent_.store(false);" in lesson_timeout
+    assert "lesson_interactive_listen_generation_.fetch_add(1);" in lesson_timeout
+    assert "lesson_interactive_listen_pending_.store(false);" in lesson_timeout
+    assert "lesson_interactive_listening_active_.store(false);" in lesson_timeout
+    assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_timeout
+    assert "SchedulePassiveLessonReconnect();" not in lesson_timeout
+    assert "return;" in lesson_timeout
 
 def test_passive_lesson_reconnect_tick_defers_instead_of_abandoning_when_not_idle():
     source = read("main/application.cc")

@@ -3119,10 +3119,14 @@ void Application::OpenChannelTask(void* arg) {
                 self->SetListeningMode(mode);
             }
         } else {
+            const bool lesson_answer_turn =
+                self->lesson_interactive_listen_pending_.load() ||
+                self->lesson_interactive_listening_active_.load();
             if (self->lesson_runtime_active_.load()) {
-                if (!passive_preconnect && !wake_word_invoke) {
+                if (lesson_answer_turn || (!passive_preconnect && !wake_word_invoke)) {
                     ESP_LOGW(TAG, "lesson open_audio_channel_failed -> wait");
                     self->backend_offline_.store(true);
+                    self->passive_ws_intent_.store(false);
                     self->online_intent_.store(false);
                     self->connect_attempt_active_.store(false);
                     self->lesson_interactive_listen_generation_.fetch_add(1);
@@ -3205,6 +3209,27 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
     // blocked); HandleReconnectTick re-defers until it clears.
     ++connect_generation_;
     if (passive_ws_intent_.load()) {
+        const bool lesson_answer_turn =
+            lesson_interactive_listen_pending_.load() ||
+            lesson_interactive_listening_active_.load();
+        if (lesson_runtime_active_.load() && lesson_answer_turn) {
+            ESP_LOGW(TAG, "lesson passive connect watchdog timeout -> wait");
+            backend_offline_.store(true);
+            passive_ws_intent_.store(false);
+            online_intent_.store(false);
+            connect_attempt_active_.store(false);
+            lesson_interactive_listen_generation_.fetch_add(1);
+            lesson_interactive_listen_pending_.store(false);
+            lesson_interactive_listening_active_.store(false);
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetStatus(Lang::Strings::PLEASE_WAIT);
+            display->SetEmotion("thinking");
+            lesson_idle_repaint_suppressed_.store(true);
+            if (GetDeviceState() == kDeviceStateConnecting) {
+                SetDeviceState(kDeviceStateIdle);
+            }
+            return;
+        }
         ESP_LOGW(TAG, "passive_lesson_connect_watchdog_timeout -> passive backoff");
         backend_offline_.store(true);
         SchedulePassiveLessonReconnect();
