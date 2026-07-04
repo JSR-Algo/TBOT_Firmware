@@ -1224,7 +1224,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     std::string prompt_caption;
     if (!passive) prompt_caption = CaptionCandidate(story_ask);
     if (prompt_caption.empty()) prompt_caption = CaptionCandidate(prompt);
-    if (prompt_caption.empty()) prompt_caption = CaptionCandidate(story_ask);
+    if (!passive && prompt_caption.empty()) prompt_caption = CaptionCandidate(story_ask);
 
     if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||
         Blank(poster_src)) {

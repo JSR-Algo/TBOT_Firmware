@@ -490,7 +490,7 @@ def test_lesson_step_caption_prefers_child_question_then_authored_prompt_over_as
     assert "std::string prompt_caption;" in step_branch
     assert "if (!passive) prompt_caption = CaptionCandidate(story_ask);" in step_branch
     assert "if (prompt_caption.empty()) prompt_caption = CaptionCandidate(prompt);" in step_branch
-    assert "if (prompt_caption.empty()) prompt_caption = CaptionCandidate(story_ask);" in step_branch
+    assert "if (!passive && prompt_caption.empty()) prompt_caption = CaptionCandidate(story_ask);" in step_branch
     assert "const bool has_caption_prompt = !prompt_caption.empty()" in step_branch
     assert "if (has_caption_prompt) caption = prompt_caption;" in step_branch
     assert "if (!has_caption_prompt)" in step_branch

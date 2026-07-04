@@ -1414,6 +1414,29 @@ void test_step_ignores_story_metadata_while_rendering_layers() {
     require(!disp.lesson_captions.empty() &&
             disp.lesson_captions.back() == "Which animal is beside the barn?",
             "storyBeat.ask without prompt becomes the visible child question");
+
+    // A passive frame must not show an authored question unless the firmware will
+    // also open the child's response window; otherwise the child sees a question
+    // and the robot silently ignores the answer.
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+           "\"stepId\":\"s-passive-ask-only\",\"sequence\":3,\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\",\"stepType\":\"greeting\","
+           "\"storyBeat\":{\"ask\":\"Which animal is beside the barn?\"},"
+           "\"scene\":{"
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
+           "\"altCaption\":\"Look at the barn.\"},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}");
+    require(App().prepare_listen_calls == 0,
+            "passive storyBeat.ask frame does not open child response window");
+    require(!disp.lesson_captions.empty() &&
+            disp.lesson_captions.back() == "Look at the barn.",
+            "passive storyBeat.ask without prompt falls back to non-question caption");
 }
 
 void test_step_fetches_canonical_layer_urls_in_order() {
