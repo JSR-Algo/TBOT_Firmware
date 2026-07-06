@@ -48,3 +48,11 @@ CONFIG_TCPIP_TASK_STACK_SIZE=8192
 # robot can sync and read those files directly from the microSD card.
 # CONFIG_FATFS_LFN_NONE is not set
 CONFIG_FATFS_LFN_HEAP=y
+
+# Robot UART (UART1) dung GPIO44/43 de giao tiep voi slave. GPIO43/44 cung la
+# chan console UART0 mac dinh cua ESP32-S3 (U0TXD/U0RXD). Neu de console tren
+# UART0, no chu dong day log ra GPIO43 -> tranh chap voi tin hieu slave gui ve
+# (main khong doc duoc EVT nut TTP223). Chuyen console sang USB-Serial-JTAG (van
+# log/flash qua cong USB nhu cu) de giai phong GPIO43/44 cho robot UART.
+# CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

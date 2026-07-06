@@ -1,0 +1,31 @@
+{
+  "sound_format": "wav_pcm_s16le_mono_24000hz",
+  "sounds": {
+    "menu_move": "/sdcard/tbot_ui/sfx/menu_move.wav",
+    "menu_select": "/sdcard/tbot_ui/sfx/menu_select.wav",
+    "menu_back": "/sdcard/tbot_ui/sfx/menu_back.wav",
+    "open_chatbox": "/sdcard/tbot_ui/sfx/open_chatbox.wav",
+    "open_game": "/sdcard/tbot_ui/sfx/open_game.wav",
+    "menu_error": "/sdcard/tbot_ui/sfx/menu_error.wav"
+  },
+  "vi": {
+    "title": "TBOT",
+    "subtitle": "Chọn ứng dụng",
+    "chatbox": "Trò chuyện",
+    "game": "Trò chơi",
+    "music": "Âm nhạc",
+    "speed": "Tốc độ",
+    "speed_title": "Tốc độ tay & đầu",
+    "speed_hint": "Trái: chậm   Phải: nhanh   Chạm 2 nút: đặt lại 100%   Giữ 3s: menu",
+    "music_empty": "Không có nhạc trên thẻ",
+    "left_right_hint": "Trái/Phải: đổi lựa chọn",
+    "both_hint": "Chạm cả hai: chọn",
+    "hold_hint": "Giữ cả hai 3 giây: về menu",
+    "slave_ok": "Slave: OK",
+    "slave_wait": "Slave: đợi kết nối",
+    "sd_ok": "Thẻ nhớ: OK",
+    "sd_fail": "Thẻ nhớ: không có",
+    "chatbox_ready": "Trò chuyện sẵn sàng",
+    "game_ready": "Trò chơi sẵn sàng"
+  }
+}

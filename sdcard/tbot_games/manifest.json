@@ -1,0 +1,9 @@
+{
+  "games": [
+    {
+      "id": "flappy",
+      "name": "TBOT Flappy",
+      "config": "/sdcard/tbot_games/flappy/game_config.json"
+    }
+  ]
+}

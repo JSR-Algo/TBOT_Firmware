@@ -156,6 +156,10 @@ public:
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    // Phat truc tiep PCM 16-bit mono o output_sample_rate (24kHz) — dung cho SFX
+    // game doc tu SD (WAV). Chia frame va day thang vao playback queue, khong qua
+    // opus decoder. Best-effort: bo qua neu service dung hoac playback queue day.
+    void QueuePcmForPlayback(const std::vector<int16_t>& pcm);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);

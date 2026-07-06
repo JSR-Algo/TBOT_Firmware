@@ -1,0 +1,28 @@
+{
+  "gravity": 1,
+  "jump_velocity": -8,
+  "pipe_speed": 3,
+  "gap_size": 95,
+  "fps": 30,
+  "use_assets": true,
+  "background": "/sdcard/tbot_games/flappy/bg.bmp",
+  "ground": "/sdcard/tbot_games/flappy/ground.bmp",
+  "bird": "/sdcard/tbot_games/flappy/bird.bmp",
+  "pipe_top": "/sdcard/tbot_games/flappy/pipe_top.bmp",
+  "pipe_bottom": "/sdcard/tbot_games/flappy/pipe_bottom.bmp",
+  "transparent_key_rgb": [
+    255,
+    0,
+    255
+  ],
+  "sounds": {
+    "flap": "/sdcard/tbot_games/flappy/sfx/flap.wav",
+    "score": "/sdcard/tbot_games/flappy/sfx/score.wav",
+    "hit": "/sdcard/tbot_games/flappy/sfx/hit.wav",
+    "game_over": "/sdcard/tbot_games/flappy/sfx/game_over.wav",
+    "select": "/sdcard/tbot_games/flappy/sfx/select.wav",
+    "pause": "/sdcard/tbot_games/flappy/sfx/pause.wav",
+    "resume": "/sdcard/tbot_games/flappy/sfx/resume.wav"
+  },
+  "sound_format": "wav_pcm_s16le_mono_24000hz"
+}
