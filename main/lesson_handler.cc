@@ -321,17 +321,6 @@ bool IsPassiveStep(const char* completion_class, const char* step_type) {
     return IsPassiveStepType(step_type);
 }
 
-// Layer-3 pose -> a valid emoji-collection emotion name. The sprite-atlas has no
-// on-device renderer, so the robot overlay collapses to an emoji-face (the defined
-// espTft v1 full render — D-ATLAS-CRITICAL / DIV-FW-ATLAS).
-const char* ExpressionToEmotion(const char* expr) {
-    const std::string expression = NormalizeAsciiToken(expr);
-    if (expression == "TEACHING" || expression == "MODELING")   return "happy";
-    if (expression == "CELEBRATING")                             return "laughing";
-    if (expression == "THINKING" || expression == "LISTENING")  return "thinking";
-    return "neutral";
-}
-
 // (Removed AssetAvailable(): a presence-only flashed-asset probe that previously fed the
 // poster_drew rung. It only checked GetAssetData() presence and discarded the bytes, never
 // decoding nor calling SetLessonBackground(), so a flashed-only poster was acked as drawn
@@ -984,11 +973,20 @@ void Application::HandleLessonMessage(const cJSON* root) {
         is_prepare &&
         Num(body, "assignmentVersion", prepare_assignment_version) &&
         prepare_assignment_version > g_session.assignment_version;
+    const bool same_session =
+        g_session.assignment_id == assignment_id &&
+        g_session.session_id == session_id;
+    const bool restart_prepare =
+        is_prepare &&
+        same_session &&
+        sequence == 1 &&
+        g_session.running &&
+        g_session.last_in_sequence > 2;
     const bool duplicate_prepare =
         is_prepare &&
-        g_session.assignment_id == assignment_id &&
-        g_session.session_id == session_id &&
+        same_session &&
         sequence <= g_session.last_in_sequence &&
+        !restart_prepare &&
         !prepare_has_newer_assignment_version;
 
     // FW-02: a session-opening lesson_prepare resets the F->S counter + inbound cursor
@@ -1154,7 +1152,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 start_display->ClearChatMessages();
                 if (start_lvgl) start_lvgl->SetLessonMode(true);
                 start_display->SetStatus(Lang::Strings::PLEASE_WAIT);
-                start_display->SetEmotion("thinking");
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
             });
         }
@@ -1176,7 +1173,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
                 display->SetStatus("Tạm dừng bài học");
-                display->SetEmotion("thinking");
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
             });
         }
@@ -1199,7 +1195,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
                 display->SetStatus("Đang học...");
-                display->SetEmotion("thinking");
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
             });
         }
@@ -1407,7 +1402,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const char* glyph = Str(card, "glyph");
     const char* label = Str(card, "label");
     if (label == nullptr) label = Str(to, "primaryWord");
-    const char* emotion = ExpressionToEmotion(Str(ro, "expression"));
     const char* alt = Str(bg, "altCaption");
 
     // Caption line — AUTHORED lesson content only (COPPA-safe; never child speech,
@@ -1451,7 +1445,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool clear_object = !object_drew;
         const bool clear_overlay = !overlay_drew;
         Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
-                  has_visible_content, emo = std::string(emotion), cap = caption]() {
+                  has_visible_content, cap = caption]() {
             if (lvgl_display) lvgl_display->SetLessonMode(has_visible_content);
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
@@ -1459,14 +1453,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
             display->ClearChatMessages();
             if (!has_visible_content) {
                 display->SetStatus(Lang::Strings::ERROR);
-                display->SetEmotion("sad");
                 display->SetLessonCaption("");
                 display->SetChatMessage("assistant", "Bài học chưa tải được.");
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_EXCLAMATION);
                 return;
             }
             display->SetStatus("Đang học...");
-            display->SetEmotion(emo.c_str());
             display->SetLessonCaption(cap.c_str());
         });
     }

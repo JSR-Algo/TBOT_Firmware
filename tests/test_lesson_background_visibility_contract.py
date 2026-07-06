@@ -156,6 +156,9 @@ def test_lesson_lifecycle_cues_clear_stale_chat_copy():
     assert "start_display->ClearChatMessages()" in start_branch
     assert "display->ClearChatMessages()" in pause_branch
     assert "display->ClearChatMessages()" in resume_branch
+    assert "SetEmotion(" not in start_branch
+    assert "SetEmotion(" not in pause_branch
+    assert "SetEmotion(" not in resume_branch
 
 
 def test_lesson_lifecycle_aborts_active_speech_on_pause_or_terminal():
@@ -298,11 +301,14 @@ def test_lesson_step_renders_layers_back_to_front_before_ack():
     background_idx = step_branch.index("SetLessonBackground(std::unique_ptr<LvglImage>(raw_bg))")
     object_idx = step_branch.index("SetLessonObject(std::unique_ptr<LvglImage>(raw_object))")
     overlay_idx = step_branch.index("SetLessonRobotOverlay(std::unique_ptr<LvglImage>(raw_overlay))")
-    emotion_idx = step_branch.index("display->SetEmotion(emo.c_str())")
     caption_idx = step_branch.index("display->SetLessonCaption(cap.c_str())")
     ack_idx = step_branch.index("emit_ack(root, sequence")
+    success_branch = step_branch[step_branch.index('display->SetStatus("Đang học...")') : ack_idx]
+    no_content_branch = step_branch[step_branch.index("if (!has_visible_content)") : step_branch.index("return;", step_branch.index("if (!has_visible_content)"))]
 
-    assert background_idx < object_idx < overlay_idx < emotion_idx < caption_idx < ack_idx
+    assert "display->SetEmotion(" not in success_branch
+    assert "display->SetEmotion(" not in no_content_branch
+    assert background_idx < object_idx < overlay_idx < caption_idx < ack_idx
 
 def test_lesson_step_uses_dedicated_caption_overlay_not_chat_bubble():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")

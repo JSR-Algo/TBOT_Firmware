@@ -953,6 +953,31 @@ void test_prepare_after_stop_same_session_resets_stream() {
     require(FrameBodyNum(3, "acks") == 1, "new lesson prepare acks inbound sequence 1");
 }
 
+void test_prepare_during_running_same_session_resets_stream() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+    Handle(StartFrame(2));
+    Handle(StepFrame(3, "s1", "https://example.test/bg.jpg", "", ""));
+    require(Sent().size() == 3, "running lesson emitted prepare/start/step acks");
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+
+    require(Sent().size() == 4, "running same-session restart emits a fresh prepare ack");
+    require(FrameType(3) == "lesson_ack", "running restart prepare is acked");
+    require(FrameSeq(3) == 1, "running restart prepare restarts F->S stream at 1");
+    require(FrameBodyNum(3, "acks") == 1, "running restart prepare acks inbound sequence 1");
+}
+
 void test_prepare_after_terminal_error_same_session_resets_stream() {
     ResetObservable();
     FreshSession();
@@ -992,6 +1017,7 @@ void test_start_stop_error_lifecycle() {
     Handle(PrepareFrame(1));
     disp.chat_messages.emplace_back("system", "Con nói nhé.");
     App().device_state = kDeviceStateSpeaking;
+    const int emotion_calls_before_start = disp.set_emotion_calls;
     Handle(StartFrame(2));
     require(FrameType(1) == "lesson_ack" && FrameSeq(1) == 2, "start acks at seq 2");
     require(App().abort_speaking_calls == 1, "start aborts stale speech before lesson loading");
@@ -1004,7 +1030,8 @@ void test_start_stop_error_lifecycle() {
             "start hides the realtime emoji face");
     require(disp.chat_messages.empty(), "start clears stale bottom-bar chat copy");
     require(disp.last_status == "Vui lòng đợi...", "start replaces stale status with wait cue");
-    require(disp.last_emotion == "thinking", "start shows a child-visible loading face");
+    require(disp.set_emotion_calls == emotion_calls_before_start,
+            "start does not draw realtime emotion over lesson layers");
     require(App().last_sound == "popup", "start plays audible loading cue");
 
     // lesson_stop: acks, cancels listening, clears all three layers + child-visible completion cue.
@@ -1118,6 +1145,7 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
     disp.background_calls.push_back(true);
     disp.object_calls.push_back(true);
     disp.overlay_calls.push_back(true);
+    const int emotion_calls_before_pause = disp.set_emotion_calls;
     Handle(PauseFrame(3));
     require(FrameType(2) == "lesson_ack", "pause is acked");
     require(FrameBodyNum(2, "acks") == 3, "pause ack echoes inbound sequence");
@@ -1135,7 +1163,8 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
             "pause clears stale child-turn caption");
     require(disp.last_status == "Tạm dừng bài học", "pause shows child-visible paused status");
-    require(disp.last_emotion == "thinking", "pause keeps a calm thinking face");
+    require(disp.set_emotion_calls == emotion_calls_before_pause,
+            "pause does not draw realtime emotion over lesson layers");
     require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
             "pause restores realtime thinking face instead of hiding it");
     require(App().last_sound == "popup", "pause plays audible transition cue");
@@ -1155,6 +1184,7 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
     disp.background_calls.push_back(true);
     disp.object_calls.push_back(true);
     disp.overlay_calls.push_back(true);
+    const int emotion_calls_before_resume = disp.set_emotion_calls;
     Handle(ResumeFrame(5));
     require(FrameType(Sent().size() - 1) == "lesson_ack", "resume is acked");
     require(FrameBodyNum(Sent().size() - 1, "acks") == 5, "resume ack echoes inbound sequence");
@@ -1168,7 +1198,8 @@ void test_pause_resume_is_acknowledged_and_child_visible() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
             "resume clears stale child-turn caption");
     require(disp.last_status == "Đang học...", "resume restores lesson-active status");
-    require(disp.last_emotion == "thinking", "resume shows lesson-active thinking face");
+    require(disp.set_emotion_calls == emotion_calls_before_resume,
+            "resume does not draw realtime emotion over lesson layers");
     require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
             "resume restores realtime thinking face until the next lesson step renders");
 }
@@ -1489,6 +1520,7 @@ void test_step_full_render_http() {
 
     int seq = 3;
     disp.chat_messages.emplace_back("assistant", "Old transcript");
+    const int emotion_calls_before_step = disp.set_emotion_calls;
     // passive step (greeting) so degraded computes from drew flags and NO listen window.
     Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
@@ -1518,7 +1550,8 @@ void test_step_full_render_http() {
             disp.lesson_captions.back() == "Xin chào", "authored prompt caption drawn");
     require(disp.last_status == "Đang học...", "rendered step replaces loading status with active lesson status");
     require(disp.chat_messages.empty(), "new lesson step clears stale chat and does not enter normal chat history");
-    require(disp.last_emotion == "happy", "whitespace/case teaching expression -> happy emotion");
+    require(disp.set_emotion_calls == emotion_calls_before_step,
+            "lesson step does not draw realtime emotion over lesson layers");
     // passive greeting: no interactive listen window opened.
     require(App().prepare_listen_calls == 0, "passive step opens NO listen window");
 }
@@ -2224,6 +2257,7 @@ void test_step_blank_visible_content_does_not_open_listen() {
         "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
         "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
         "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"listening\"}}}}";
+    const int emotion_calls_before_step = disp.set_emotion_calls;
     Handle(frame);
 
     const size_t idx = Sent().size() - 1;
@@ -2236,10 +2270,10 @@ void test_step_blank_visible_content_does_not_open_listen() {
             "blank visible content leaves caption empty");
     require(disp.last_status == "Lỗi",
             "blank visible content shows a failure status instead of active lesson status");
-    require(disp.last_emotion == "sad",
-            "blank visible content shows a sad face instead of pretending the step is active");
-    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
-            "blank visible content restores realtime sad face instead of hiding it");
+	    require(disp.set_emotion_calls == emotion_calls_before_step,
+	            "blank visible content failure does not draw realtime emotion over lesson layers");
+	    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
+	            "blank visible content restores realtime layer visibility after clearing lesson layers");
     require(!disp.chat_messages.empty() &&
             disp.chat_messages.back().second == "Bài học chưa tải được.",
             "blank visible content shows child-safe failure copy");
@@ -2281,16 +2315,17 @@ void test_step_degraded_and_caption_fallback() {
         ",\"backgroundScene_unused\":0";  // keep builder simple; add card via object below
     // Build a step where teachingObject carries primitiveFallbackCard + primaryWord and
     // backgroundScene has an altCaption -> exercises the caption assembly w/o prompt.
-    std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
-        kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
-        "\"stepId\":\"s4\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
-        "\",\"stepType\":\"focus\",\"scene\":{"
-        "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
-        "\"altCaption\":\"alt text\"},"
-        "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"},"
-        "\"primitiveFallbackCard\":{\"glyph\":\"G\",\"label\":\"Lab\"},\"primaryWord\":\"Word\"},"
-        "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}";
-    Handle(frame);
+	    std::string frame = std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+	        kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
+	        "\"stepId\":\"s4\",\"sequence\":3,\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+	        "\",\"stepType\":\"focus\",\"scene\":{"
+	        "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"},"
+	        "\"altCaption\":\"alt text\"},"
+	        "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"},"
+	        "\"primitiveFallbackCard\":{\"glyph\":\"G\",\"label\":\"Lab\"},\"primaryWord\":\"Word\"},"
+	        "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"thinking\"}}}}";
+	    const int emotion_calls_before_step = disp.set_emotion_calls;
+	    Handle(frame);
     size_t idx = Sent().size() - 1;
     require(FrameType(idx) == "lesson_ack", "caption-only step still acks");
     // NOTE non-tautology: nothing drew (no network) so degraded MUST be true. Mutation:
@@ -2300,7 +2335,8 @@ void test_step_degraded_and_caption_fallback() {
     require(!disp.lesson_captions.empty(), "caption drawn");
     require(disp.lesson_captions.back() == std::string("G Lab - alt text"),
             "glyph+label+alt caption assembled");
-    require(disp.last_emotion == "thinking", "thinking expression -> thinking emotion");
+    require(disp.set_emotion_calls == emotion_calls_before_step,
+            "caption-only step does not draw realtime emotion");
     // caption-only step clears any stale layers (clear_bg true -> background_calls false)
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "caption-only clears stale background");
@@ -2345,6 +2381,7 @@ void test_step_missing_optional_object_overlay_uses_prompt_fallback() {
         "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
         "\"teachingObject\":{\"primitiveFallbackCard\":{\"glyph\":\"B\",\"label\":\"barn\"}},"
         "\"robotOverlay\":{\"expression\":\"listening\"}}}}";
+    const int emotion_calls_before_step = disp.set_emotion_calls;
     Handle(frame);
 
     const size_t idx = Sent().size() - 1;
@@ -2365,7 +2402,8 @@ void test_step_missing_optional_object_overlay_uses_prompt_fallback() {
     require(!disp.lesson_captions.empty() &&
             disp.lesson_captions.back() == "Which animal is beside the barn?",
             "authored prompt remains visible when optional assets are absent");
-    require(disp.last_emotion == "thinking", "listening overlay expression falls back to thinking face");
+    require(disp.set_emotion_calls == emotion_calls_before_step,
+            "missing optional overlay does not draw realtime emotion");
     require(App().prepare_listen_calls == 1,
             "interactive prompt fallback still opens child response window");
 }
@@ -3186,16 +3224,16 @@ void test_remaining_reachable_branches() {
             "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
             "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"},\"primaryWord\":\"Mèo\"},"
             "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"celebrating\"}}}}";
+        const int emotion_calls_before_step = disp.set_emotion_calls;
         Handle(frame);
         // object drew + no prompt + label(primaryWord) -> caption == label
         require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Mèo",
                 "object-drew + primaryWord -> caption is the label");
-        // NOTE non-tautology: "celebrating" expression MUST map to "laughing". Mutation:
-        // drop the celebrating case -> emotion would be "neutral".
-        require(disp.last_emotion == "laughing", "celebrating expression -> laughing emotion");
+        require(disp.set_emotion_calls == emotion_calls_before_step,
+                "celebrating expression does not draw realtime emotion");
     }
 
-    // --- unknown expression -> ExpressionToEmotion default "neutral" (line 175).
+    // --- unknown expression is ignored; lesson visuals stay in the authored layers.
     ResetObservable();
     Board::GetInstance().display_ = &disp; Board::GetInstance().network_ = &net;
     OpenSession();
@@ -3208,8 +3246,10 @@ void test_remaining_reachable_branches() {
             "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
             "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
             "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"mysterious\"}}}}";
+        const int emotion_calls_before_step = disp.set_emotion_calls;
         Handle(frame);
-        require(disp.last_emotion == "neutral", "unknown expression -> neutral emotion");
+        require(disp.set_emotion_calls == emotion_calls_before_step,
+                "unknown expression does not draw realtime emotion");
     }
 }
 
@@ -3254,6 +3294,7 @@ int main() {
     test_prepare_new_assignment_version_same_session_resets_stream();
     test_fresh_prepare_clears_stale_active_lesson_before_start();
     test_prepare_after_stop_same_session_resets_stream();
+    test_prepare_during_running_same_session_resets_stream();
     test_prepare_after_terminal_error_same_session_resets_stream();
     test_start_stop_error_lifecycle();
     test_start_clears_stale_lesson_scene_before_first_step();

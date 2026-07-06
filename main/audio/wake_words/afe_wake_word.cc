@@ -9,6 +9,10 @@
 
 #define TAG "AfeWakeWord"
 
+namespace {
+constexpr float kHiEspWakeThreshold = 0.55f;
+}  // namespace
+
 std::vector<int16_t> AfeWakeWord::SelectDominantMonoChannel(const std::vector<int16_t>& data,
                                                            int channels) {
     if (channels <= 1 || data.empty()) {
@@ -161,6 +165,10 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
+    // ponytail: fixed LCDWiki Hi ESP sensitivity; add board/env tuning if false wakes show up.
+    int threshold_ret = afe_iface_->set_wakenet_threshold(afe_data_, 1, kHiEspWakeThreshold);
+    ESP_LOGI(TAG, "hiesp_wakenet_threshold index=1 value=%.2f ret=%d",
+             kHiEspWakeThreshold, threshold_ret);
 
     // Wake-word fetch task. Keep it above Idle so AFE fetch drains during
     // TTS/display load, but below audio_input and audio_communication so the

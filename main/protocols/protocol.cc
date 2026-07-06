@@ -51,7 +51,8 @@ void Protocol::SendAbortSpeaking(AbortReason reason) {
 void Protocol::SendWakeWordDetected(const std::string& wake_word) {
     std::string json = "{\"session_id\":\"" + session_id_ + 
                       "\",\"type\":\"listen\",\"state\":\"detect\",\"text\":\"" + wake_word + "\"}";
-    SendText(json);
+    bool sent = SendText(json);
+    ESP_LOGI(TAG, "SendWakeWordDetected sent=%d", sent ? 1 : 0);
 }
 
 void Protocol::SendStartListening(ListeningMode mode) {
@@ -65,7 +66,8 @@ void Protocol::SendStartListening(ListeningMode mode) {
         message += ",\"mode\":\"manual\"";
     }
     message += "}";
-    SendText(message);
+    bool sent = SendText(message);
+    ESP_LOGI(TAG, "SendStartListening mode=%d sent=%d", static_cast<int>(mode), sent ? 1 : 0);
 }
 
 void Protocol::SendStopListening() {
@@ -96,9 +98,10 @@ bool Protocol::SendLessonFrame(const std::string& frame) {
 }
 
 bool Protocol::IsTimeout() const {
-    // WSS-3: 30s for the realtime audio channel (was 120s). A half-open WS that
-    // stops delivering data is detected far sooner -> faster reconnect.
-    const int kTimeoutSeconds = 30;
+    // WSS-3: server closes idle WebSocket at about 30s. Keep the firmware
+    // threshold lower so a new listen reconnects instead of writing to a
+    // half-closed channel.
+    const int kTimeoutSeconds = 25;
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
     bool timeout = duration.count() > kTimeoutSeconds;

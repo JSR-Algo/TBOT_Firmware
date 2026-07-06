@@ -22,6 +22,21 @@ def test_listening_transition_uses_bounded_playback_drain():
     assert "std::chrono::milliseconds(timeout_ms)" in audio_cc
 
 
+def test_audio_metrics_include_input_and_wake_state_for_real_device_wake_debug():
+    app_cc = read("main/application.cc")
+
+    assert "audio_metrics decode_q=%lu send_q=%lu playback_q=%lu input_count=%lu wake_running=%d" in app_cc
+    assert "(unsigned long)audio_stats.input_count" in app_cc
+    assert "audio_service_.IsWakeWordRunning() ? 1 : 0" in app_cc
+
+def test_afe_wake_word_uses_more_sensitive_hiesp_threshold_on_lcdwiki():
+    wake_cc = read("main/audio/wake_words/afe_wake_word.cc")
+
+    assert "kHiEspWakeThreshold" in wake_cc
+    assert "0.55f" in wake_cc
+    assert "afe_iface_->set_wakenet_threshold(afe_data_, 1, kHiEspWakeThreshold)" in wake_cc
+    assert "hiesp_wakenet_threshold" in wake_cc
+
 def test_abort_speaking_clears_playback_before_relistening():
     app_cc = read("main/application.cc")
     start = app_cc.index("void Application::AbortSpeaking")
@@ -93,6 +108,19 @@ def test_speaking_state_does_not_clear_tts_audio_accepted_before_state_transitio
     wifi_config = app_cc.index("case kDeviceStateWifiConfiguring:", speaking)
     speaking_body = app_cc[speaking:wifi_config]
     assert "audio_service_.ResetDecoder();" not in speaking_body
+
+def test_tts_start_stops_listening_audio_before_accepting_downlink_audio():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index('strcmp(state->valuestring, "start") == 0')
+    start_schedule = app_cc.index("Schedule([this]()", start)
+    start_body_before_schedule = app_cc[start:start_schedule]
+
+    assert "audio_service_.EnableVoiceProcessing(false);" in start_body_before_schedule
+    assert "listening_started_ms_.store(0);" in start_body_before_schedule
+    assert start_body_before_schedule.index("audio_service_.EnableVoiceProcessing(false);") < start_body_before_schedule.index(
+        "tts_audio_accepting_.store(true);"
+    )
 
 def test_tts_downlink_audio_pipeline_has_packet_decode_playback_diagnostics():
     audio_h = read("main/audio/audio_service.h")
@@ -510,6 +538,35 @@ def test_wake_word_listening_uses_autostop_even_when_default_mode_is_realtime():
     assert "SetListeningMode(GetDefaultListeningMode());" not in body
 
 
+def test_wake_word_data_is_sent_after_listen_control_frames():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::FinishWakeWordInvoke")
+    end = app_cc.index("// H3: localized screen copy", start)
+    body = app_cc[start:end]
+
+    assert body.index("protocol_->SendWakeWordDetected(wake_word);") < body.index(
+        "SetListeningMode(kListeningModeAutoStop);"
+    )
+    assert body.index("SetListeningMode(kListeningModeAutoStop);") < body.index(
+        "audio_service_.PopWakeWordPacket()"
+    )
+    assert body.index("SetListeningMode(kListeningModeAutoStop);") < body.index(
+        "protocol_->SendAudio(std::move(packet));"
+    )
+
+
+def test_protocol_idle_timeout_is_below_server_idle_close_window():
+    protocol_cc = read("main/protocols/protocol.cc")
+
+    timeout_start = protocol_cc.index("bool Protocol::IsTimeout() const")
+    timeout_body = protocol_cc[timeout_start:]
+
+    assert "server closes idle WebSocket at about 30s" in timeout_body
+    assert "const int kTimeoutSeconds = 25;" in timeout_body
+    assert "const int kTimeoutSeconds = 30;" not in timeout_body
+
+
 def test_lesson_owned_turns_ignore_wake_word_hijack():
     app_cc = read("main/application.cc")
 
@@ -726,7 +783,7 @@ def test_lesson_runtime_open_failure_clears_answer_turn_without_generic_reconnec
     assert "self->online_intent_.store(false);" in lesson_branch
     assert "self->connect_attempt_active_.store(false);" in lesson_branch
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
-    assert "display->SetEmotion(\"thinking\");" in lesson_branch
+    assert "display->SetEmotion(" not in lesson_branch
     assert "self->ScheduleReconnect(mode);" not in lesson_branch
     assert lesson_branch.index("self->lesson_interactive_listen_generation_.fetch_add(1);") < lesson_branch.index(
         "self->lesson_interactive_listen_pending_.store(false);"
@@ -824,6 +881,7 @@ def test_lesson_active_child_listening_repaint_preserves_child_turn_cue():
     ]
     assert 'display->SetStatus("Con nói nhé...");' in child_cue
     assert 'display->SetChatMessage("system", "Con nói nhé.");' in child_cue
+    assert 'display->SetEmotion("thinking");' not in child_cue
 
 
 def test_speaking_state_uses_default_child_friendly_face():
@@ -948,6 +1006,26 @@ def test_google_live_tts_stop_continue_listening_reopens_realtime_mic_loop():
     assert "mic_loop_resumed" in continue_body
 
 
+def test_google_live_manual_tts_stop_exits_stale_listening_state():
+    app_cc = read("main/application.cc")
+
+    stop = app_cc.index('strcmp(state->valuestring, "stop") == 0')
+    sentence_start = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop)
+    stop_body = app_cc[stop:sentence_start]
+
+    assert "explicit_stop_listening" in stop_body
+    assert 'strcmp(listen_mode->valuestring, "manual") == 0' in stop_body
+    explicit_start = stop_body.index("if (explicit_stop_listening")
+    explicit_body = stop_body[explicit_start:]
+    assert "GetDeviceState() == kDeviceStateListening" in explicit_body
+    assert "audio_service_.EnableVoiceProcessing(false);" in explicit_body
+    assert "listening_started_ms_.store(0);" in explicit_body
+    assert "last_listening_activity_ms_.store(0);" in explicit_body
+    assert "SetDeviceState(kDeviceStateIdle);" in explicit_body
+    assert explicit_body.index("audio_service_.EnableVoiceProcessing(false);") < explicit_body.index(
+        "SetDeviceState(kDeviceStateIdle);"
+    )
+
 def test_lesson_prompt_tts_stop_continue_listening_does_not_take_over_realtime():
     app_cc = read("main/application.cc")
 
@@ -1026,6 +1104,15 @@ def test_lesson_tts_stop_treats_active_child_listening_as_answer_turn():
     ]
     assert "if (lesson_interactive_turn)" in manual_body
     assert "lesson_interactive_listen_pending_.load()" not in manual_body
+    lesson_turn_body = manual_body[
+        manual_body.index("if (lesson_interactive_turn)") :
+        manual_body.index("} else {", manual_body.index("if (lesson_interactive_turn)"))
+    ]
+    assert "audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs)" in lesson_turn_body
+    assert "tts_stop_playback_drain_timeout" in lesson_turn_body
+    assert lesson_turn_body.index(
+        "audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs)"
+    ) < lesson_turn_body.index("SetDeviceState(kDeviceStateListening);")
     assert "SetDeviceState(kDeviceStateListening);" in manual_body
     assert "lesson prompt complete -> listening" in manual_body
 
@@ -1084,7 +1171,7 @@ def test_lesson_runtime_speaking_timeout_keeps_child_wait_cue():
         body.index("display->SetStatus(Lang::Strings::SERVER_TIMEOUT);")
     ]
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
-    assert 'display->SetEmotion("thinking");' in lesson_branch
+    assert "display->SetEmotion(" not in lesson_branch
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);" not in lesson_branch
 
 def test_lesson_prompt_speaking_timeout_preserves_pending_child_turn():
@@ -1175,7 +1262,7 @@ def test_lesson_runtime_listening_watchdog_keeps_child_wait_cue():
         watchdog_body.index("display->SetStatus(Lang::Strings::SERVER_TIMEOUT);")
     ]
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
-    assert 'display->SetEmotion("thinking");' in lesson_branch
+    assert "display->SetEmotion(" not in lesson_branch
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);" not in lesson_branch
 
 def test_listening_watchdog_clears_active_lesson_answer_turn():
@@ -1275,7 +1362,10 @@ def test_lesson_runtime_connect_watchdog_suppresses_generic_reconnect_and_idle_r
 
     lesson_start = watchdog_body.index("if (lesson_runtime_active_.load())")
     assert lesson_start < watchdog_body.index("SetDeviceState(kDeviceStateIdle);", lesson_start)
-    assert lesson_start < watchdog_body.index("ScheduleReconnect(reconnect_mode_);", lesson_start)
+    assert lesson_start < watchdog_body.index(
+        "ScheduleReconnect(reconnect_mode_, reconnect_resume_listening_.load());",
+        lesson_start,
+    )
     lesson_branch = watchdog_body[
         lesson_start :
         watchdog_body.index('ESP_LOGW(TAG, "connect_watchdog_timeout -> idle + backoff"', lesson_start)
@@ -1328,13 +1418,35 @@ def test_unexpected_online_websocket_close_is_child_visible_before_reconnect():
     assert 'display->SetEmotion("thinking");' in online_branch
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);" in online_branch
     assert online_branch.index("audio_service_.ResetDecoder();") < online_branch.index(
-        "ScheduleReconnect(GetDefaultListeningMode());"
+        "ScheduleReconnect(GetDefaultListeningMode(), false);"
     )
 
     idle_start = app_cc.index("case kDeviceStateIdle:")
     connecting_start = app_cc.index("case kDeviceStateConnecting:", idle_start)
     idle_body = app_cc[idle_start:connecting_start]
     assert 'backend_offline_.load() ? "thinking" : "neutral"' in idle_body
+
+def test_unexpected_online_websocket_reconnect_does_not_resume_stale_listening():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+
+    assert "reconnect_resume_listening_" in app_h
+    assert "void ScheduleReconnect(ListeningMode mode, bool resume_listening = true);" in app_h
+
+    closed_start = app_cc.index("protocol_->OnAudioChannelClosed")
+    incoming_json = app_cc.index("protocol_->OnIncomingJson", closed_start)
+    closed_body = app_cc[closed_start:incoming_json]
+    online_branch = closed_body[closed_body.index("if (online_intent_.load())") :]
+    assert "ScheduleReconnect(GetDefaultListeningMode(), false);" in online_branch
+
+    task_start = app_cc.index("void Application::OpenChannelTask")
+    task_end = app_cc.index("void Application::ArmConnectWatchdog", task_start)
+    task_body = app_cc[task_start:task_end]
+    generic_success = task_body[task_body.index("} else {", task_body.index("wake_word_invoke")) :]
+    assert "self->reconnect_resume_listening_.exchange(true)" in generic_success
+    no_resume = generic_success[generic_success.index("else {", generic_success.index("reconnect_resume_listening_")) :]
+    assert "self->SetDeviceState(kDeviceStateIdle);" in no_resume
+    assert no_resume.index("self->SetDeviceState(kDeviceStateIdle);") < no_resume.index("}")
 
 def test_lesson_runtime_audio_channel_close_preserves_lesson_chat():
     app_cc = read("main/application.cc")
@@ -1367,6 +1479,23 @@ def test_lesson_runtime_passive_socket_close_reconnects_before_idle_repaint():
     assert "StartPassiveLessonWebsocket();" in guard
     assert "return;" in guard
 
+
+def test_audio_channel_close_during_wake_reconnect_ignores_stale_close_before_idle_repaint():
+    app_cc = read("main/application.cc")
+
+    closed_start = app_cc.index("protocol_->OnAudioChannelClosed")
+    incoming_json = app_cc.index("protocol_->OnIncomingJson", closed_start)
+    closed_body = app_cc[closed_start:incoming_json]
+
+    set_idle = closed_body.index("SetDeviceState(kDeviceStateIdle);")
+    early_body = closed_body[:set_idle]
+
+    assert "connect_in_flight_.load()" in early_body
+    guard = early_body[early_body.index("connect_in_flight_.load()") :]
+    assert "ws_close_ignored_during_connect" in guard
+    assert "return;" in guard
+
+
 def test_lesson_runtime_suppresses_generic_reconnect_after_close():
     app_cc = read("main/application.cc")
 
@@ -1378,7 +1507,7 @@ def test_lesson_runtime_suppresses_generic_reconnect_after_close():
     assert "lesson_runtime_active_.load()" in online_branch
     assert "lesson ws dropped unexpected -> suppress generic reconnect" in online_branch
     assert online_branch.index("lesson_runtime_active_.load()") < online_branch.index(
-        "ScheduleReconnect(GetDefaultListeningMode());"
+        "ScheduleReconnect(GetDefaultListeningMode(), false);"
     )
     lesson_branch = online_branch[
         online_branch.index("lesson_runtime_active_.load()") :
@@ -1388,7 +1517,7 @@ def test_lesson_runtime_suppresses_generic_reconnect_after_close():
     assert "backend_offline_.store(true);" in lesson_branch
     assert "audio_service_.ResetDecoder();" in lesson_branch
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
-    assert "ScheduleReconnect(GetDefaultListeningMode());" not in lesson_branch
+    assert "ScheduleReconnect(GetDefaultListeningMode(), false);" not in lesson_branch
 
     tick_start = app_cc.index("void Application::HandleReconnectTick")
     tick_end = app_cc.index("void Application::HandleStartListeningEvent", tick_start)
@@ -1450,7 +1579,7 @@ def test_lesson_runtime_connecting_state_keeps_child_wait_cue():
         connecting_body.index("// BACKEND_CONNECTING")
     ]
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_connecting
-    assert 'display->SetEmotion("thinking");' in lesson_connecting
+    assert "display->SetEmotion(" not in lesson_connecting
     assert 'display->SetChatMessage("system", "");' not in lesson_connecting
 
 def test_active_network_disconnect_is_child_visible_and_stops_stale_audio():
@@ -1488,7 +1617,7 @@ def test_lesson_runtime_network_disconnect_keeps_child_wait_cue():
         active_branch.index("display->SetStatus(Lang::Strings::SERVER_UNAVAILABLE_RETRYING);")
     ]
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
-    assert 'display->SetEmotion("thinking");' in lesson_branch
+    assert "display->SetEmotion(" not in lesson_branch
     assert "audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);" not in lesson_branch
 
 def test_lesson_runtime_network_disconnect_clears_stale_answer_turn_flags():
@@ -1526,7 +1655,7 @@ def test_lesson_runtime_connect_watchdog_clears_answer_turn_before_idle():
     assert "lesson_interactive_listen_pending_.store(false);" in lesson_branch
     assert "lesson_interactive_listening_active_.store(false);" in lesson_branch
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
-    assert 'display->SetEmotion("thinking");' in lesson_branch
+    assert "display->SetEmotion(" not in lesson_branch
     assert lesson_branch.index("lesson_interactive_listen_generation_.fetch_add(1);") < lesson_branch.index(
         "lesson_interactive_listen_pending_.store(false);"
     )
@@ -1597,7 +1726,7 @@ def test_lesson_runtime_main_error_keeps_child_wait_cue():
         error_body.index("} else if (connect_attempt_active_.load()")
     ]
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_branch
-    assert 'display->SetEmotion("thinking");' in lesson_branch
+    assert "display->SetEmotion(" not in lesson_branch
     assert "Alert(" not in lesson_branch
     assert "OGG_EXCLAMATION" not in lesson_branch
 
@@ -1761,6 +1890,26 @@ def test_main_loop_bounds_audio_send_work_and_feeds_watchdog_between_packets():
     assert "vTaskDelay(pdMS_TO_TICKS(1));" in send_body
     assert "xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);" in send_body
 
+def test_main_loop_runs_scheduled_state_changes_before_audio_uplink_batch():
+    app_cc = read("main/application.cc")
+    loop_start = app_cc.index("while (true) {")
+    send_start = app_cc.index("if (bits & MAIN_EVENT_SEND_AUDIO)", loop_start)
+    schedule_start = app_cc.index("if (bits & MAIN_EVENT_SCHEDULE)", loop_start)
+
+    assert schedule_start < send_start
+
+
+def test_main_loop_reruns_scheduled_state_changes_after_audio_uplink_batch():
+    app_cc = read("main/application.cc")
+    loop_start = app_cc.index("while (true) {")
+    send_start = app_cc.index("if (bits & MAIN_EVENT_SEND_AUDIO)", loop_start)
+    wake_start = app_cc.index("if (bits & MAIN_EVENT_WAKE_WORD_DETECTED)", send_start)
+    send_body = app_cc[send_start:wake_start]
+
+    assert send_body.count("RunScheduledTasks();") >= 1
+    assert send_body.rindex("RunScheduledTasks();") > send_body.index("vTaskDelay(pdMS_TO_TICKS(1));")
+
+
 def test_audio_uplink_pipeline_has_send_boundary_diagnostics():
     app_cc = read("main/application.cc")
     audio_cc = read("main/audio/audio_service.cc")
@@ -1854,6 +2003,14 @@ def test_lesson_prompt_tts_stop_rearms_interactive_listening_instead_of_idling()
     manual_body = stop_body[stop_body.index("listening_mode_ == kListeningModeManualStop") :]
 
     assert "if (lesson_interactive_turn)" in manual_body
+    lesson_turn_body = manual_body[
+        manual_body.index("if (lesson_interactive_turn)") :
+        manual_body.index("} else {", manual_body.index("if (lesson_interactive_turn)"))
+    ]
+    assert "audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs)" in lesson_turn_body
+    assert lesson_turn_body.index(
+        "audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs)"
+    ) < lesson_turn_body.index("SetDeviceState(kDeviceStateListening);")
     assert "lesson_interactive_listen_pending_.exchange(false)" not in manual_body
     assert "SetDeviceState(kDeviceStateListening);" in manual_body
     assert "protocol_->SendStartListening(kListeningModeManualStop);" not in manual_body
@@ -1888,7 +2045,7 @@ def test_lesson_prompt_start_listening_defer_shows_waiting_turn_cue():
     assert "lesson_interactive_listen_pending_.load()" in speaking
     assert "display->ClearChatMessages();" in speaking
     assert 'display->SetStatus("Sắp đến lượt con...");' in speaking
-    assert 'display->SetEmotion("thinking");' in speaking
+    assert 'display->SetEmotion("thinking");' not in speaking
     assert speaking.index("display->ClearChatMessages();") < speaking.index(
         'display->SetStatus("Sắp đến lượt con...");'
     )
@@ -2082,7 +2239,7 @@ def test_lesson_runtime_idle_after_child_answer_shows_processing_cue():
     assert 'display->SetLessonCaption("");' in lesson_idle
     assert "display->ClearChatMessages();" in lesson_idle
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_idle
-    assert 'display->SetEmotion("thinking");' in lesson_idle
+    assert "display->SetEmotion(" not in lesson_idle
     assert lesson_idle.index('display->SetLessonCaption("");') < lesson_idle.index(
         "display->ClearChatMessages();"
     )
@@ -2219,9 +2376,9 @@ def test_lesson_interactive_listening_surfaces_visible_turn_cue():
     lesson_cue = listening[listening.index("lesson_interactive_listen_pending_.exchange(false)") :]
     assert "display->ClearChatMessages();" in lesson_cue
     assert 'display->SetStatus("Con nói nhé...");' in lesson_cue
-    assert 'display->SetEmotion("thinking");' in lesson_cue
+    assert 'display->SetEmotion("thinking");' not in lesson_cue
     assert 'display->SetChatMessage("system", "Con nói nhé.");' in lesson_cue
-    assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" in lesson_cue
+    assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" in listening
     assert lesson_cue.index("display->ClearChatMessages();") < lesson_cue.index(
         'display->SetChatMessage("system", "Con nói nhé.");'
     )
@@ -2240,18 +2397,49 @@ def test_lesson_interactive_listening_cue_survives_cold_channel_open():
     listening_body = app_cc[listening_start:speaking_start]
 
     assert "lesson_interactive_listen_pending_.exchange(false)" in listening_body
-    lesson_cue = listening_body[listening_body.index("lesson_interactive_listen_pending_.exchange(false)") :]
+    lesson_cue_start = listening_body.index("if (lesson_interactive_listen || lesson_interactive_active)")
+    lesson_cue = listening_body[
+        lesson_cue_start :
+        listening_body.index("} else {", lesson_cue_start)
+    ]
     assert "display->ClearChatMessages();" in lesson_cue
     assert 'display->SetStatus("Con nói nhé...");' in lesson_cue
+    assert 'display->SetEmotion("thinking");' not in lesson_cue
     assert 'display->SetChatMessage("system", "Con nói nhé.");' in lesson_cue
-    assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" in lesson_cue
+    assert "audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);" in listening_body
     assert lesson_cue.index("display->ClearChatMessages();") < lesson_cue.index(
         'display->SetChatMessage("system", "Con nói nhé.");'
     )
-    assert lesson_cue.index('display->SetStatus("Con nói nhé...");') < lesson_cue.index(
+    assert listening_body.index('display->SetStatus("Con nói nhé...");') < listening_body.index(
         "protocol_->SendStartListening(listening_mode_);"
     )
 
+
+def test_listening_state_always_sends_listen_start_even_if_audio_processor_is_running():
+    app_cc = read("main/application.cc")
+
+    listening_start = app_cc.index("case kDeviceStateListening:")
+    speaking_start = app_cc.index("case kDeviceStateSpeaking:", listening_start)
+    listening_body = app_cc[listening_start:speaking_start]
+
+    start_idx = listening_body.index("protocol_->SendStartListening(listening_mode_);")
+    processor_guard_idx = listening_body.index("if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning())")
+
+    assert start_idx < processor_guard_idx
+
+
+def test_set_listening_mode_rearms_listen_start_when_already_listening():
+    app_cc = read("main/application.cc")
+
+    start = app_cc.index("void Application::SetListeningMode")
+    end = app_cc.index("ListeningMode Application::GetDefaultListeningMode", start)
+    body = app_cc[start:end]
+
+    assert "const bool already_listening = GetDeviceState() == kDeviceStateListening;" in body
+    assert "if (already_listening)" in body
+    rearm = body[body.index("if (already_listening)") :]
+    assert "MAIN_EVENT_STATE_CHANGED" in rearm
+    assert body.index("SetDeviceState(kDeviceStateListening);") < body.index("MAIN_EVENT_STATE_CHANGED")
 
 def test_lesson_interactive_listening_pending_is_cleared_on_cancel_paths():
     app_cc = read("main/application.cc")
@@ -2300,7 +2488,7 @@ def test_lesson_interactive_listen_prepare_shows_pending_turn_cue():
     body = app_cc[start:end]
 
     assert 'display->SetStatus("Sắp đến lượt con...");' in body
-    assert 'display->SetEmotion("thinking");' in body
+    assert 'display->SetEmotion("thinking");' not in body
     assert "display->ClearChatMessages();" in body
     assert body.index("lesson_interactive_listen_pending_.store(true);") < body.index(
         "display->ClearChatMessages();"

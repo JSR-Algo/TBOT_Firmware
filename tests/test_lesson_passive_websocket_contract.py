@@ -77,6 +77,63 @@ def test_passive_lesson_socket_open_promotes_pending_answer_turn_to_listening():
         "self->SetListeningMode(kListeningModeManualStop);"
     )
 
+def test_passive_lesson_socket_success_rearms_wake_word_after_connect_worker_finishes():
+    source = read("main/application.cc")
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    passive_success = open_task[
+        open_task.index("if (passive_preconnect)") :
+        open_task.index("} else if (wake_word_invoke)", open_task.index("if (passive_preconnect)"))
+    ]
+
+    assert "self->connect_in_flight_.store(false);" in open_task
+    assert "if (!self->lesson_runtime_active_.load())" in passive_success
+    rearm = passive_success[passive_success.index("if (!self->lesson_runtime_active_.load())") :]
+    assert "self->audio_service_.EnableWakeWordDetection(true);" in rearm
+    assert "passive_lesson_wake_word_rearmed" in rearm
+    assert "self->audio_service_.IsWakeWordRunning()" in rearm
+
+def test_passive_lesson_socket_success_finishes_deferred_wake_before_rearming():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    continue_wake = function_body(source, "void Application::ContinueWakeWordInvoke")
+    passive_success = open_task[
+        open_task.index("if (passive_preconnect)") :
+        open_task.index("} else if (wake_word_invoke)", open_task.index("if (passive_preconnect)"))
+    ]
+
+    assert "std::string deferred_wake_word_;" in header
+    assert "passive_ws_intent_.load()" in continue_wake
+    assert "deferred_wake_word_ = wake_word;" in continue_wake
+    assert "const std::string deferred_wake_word = self->deferred_wake_word_;" in passive_success
+    assert "self->deferred_wake_word_.clear();" in passive_success
+
+    finish = passive_success[
+        passive_success.index("const std::string deferred_wake_word = self->deferred_wake_word_;") :
+        passive_success.index("self->audio_service_.EnableWakeWordDetection(true);")
+    ]
+    assert "self->FinishWakeWordInvoke(deferred_wake_word);" in finish
+    assert finish.index("self->deferred_wake_word_.clear();") < finish.index(
+        "self->FinishWakeWordInvoke(deferred_wake_word);"
+    )
+
+def test_claimed_idle_clock_tick_reopens_missing_passive_socket():
+    source = read("main/application.cc")
+    clock_start = source.index("if (bits & MAIN_EVENT_CLOCK_TICK)")
+    clock_end = source.index("void Application::HandleNetworkConnectedEvent", clock_start)
+    clock_body = source[clock_start:clock_end]
+
+    assert "passive_lesson_idle_socket_missing -> passive reconnect" in clock_body
+    reconnect = clock_body[
+        clock_body.index("passive_lesson_idle_socket_missing -> passive reconnect") :
+    ]
+    assert "IsDeviceClaimed()" in clock_body
+    assert "GetDeviceState() == kDeviceStateIdle" in clock_body
+    assert "protocol_ != nullptr" in clock_body
+    assert "!protocol_->IsAudioChannelOpened()" in clock_body
+    assert "!connect_in_flight_.load()" in clock_body
+    assert "StartPassiveLessonWebsocket();" in reconnect
+
 def test_passive_lesson_socket_reconnects_without_entering_listening_after_idle_timeout():
     source = read("main/application.cc")
     closed = source[source.index("protocol_->OnAudioChannelClosed") : source.index("protocol_->OnIncomingJson")]
@@ -110,7 +167,7 @@ def test_passive_lesson_socket_connect_failure_retries_passively():
     assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
     assert "passive_lesson_reconnect_scheduled" in passive_scheduler
 
-def test_passive_lesson_socket_failure_during_answer_turn_does_not_retry_passively():
+def test_passive_lesson_socket_failure_during_answer_turn_retries_passively():
     source = read("main/application.cc")
     open_task = function_body(source, "void Application::OpenChannelTask")
     failure = open_task[
@@ -128,11 +185,16 @@ def test_passive_lesson_socket_failure_during_answer_turn_does_not_retry_passive
         failure.index("lesson_answer_turn || (!passive_preconnect && !wake_word_invoke)") :
     ]
     assert "self->passive_ws_intent_.store(false);" in lesson_failure
-    assert "self->lesson_interactive_listen_generation_.fetch_add(1);" in lesson_failure
-    assert "self->lesson_interactive_listen_pending_.store(false);" in lesson_failure
-    assert "self->lesson_interactive_listening_active_.store(false);" in lesson_failure
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_failure
-    assert "self->SchedulePassiveLessonReconnect();" not in lesson_failure
+    assert "self->SchedulePassiveLessonReconnect();" in lesson_failure
+    before_retry = lesson_failure[: lesson_failure.index("self->SchedulePassiveLessonReconnect();")]
+    clear_guard = before_retry[
+        before_retry.index("if (!lesson_answer_turn)") :
+        before_retry.index("self->lesson_idle_repaint_suppressed_")
+    ]
+    assert "self->lesson_interactive_listen_generation_.fetch_add(1);" in clear_guard
+    assert "self->lesson_interactive_listen_pending_.store(false);" in clear_guard
+    assert "self->lesson_interactive_listening_active_.store(false);" in clear_guard
     assert "return;" in lesson_failure
 
 def test_passive_lesson_socket_watchdog_timeout_retries_passively_from_idle():
@@ -150,7 +212,7 @@ def test_passive_lesson_socket_watchdog_timeout_retries_passively_from_idle():
     assert "SchedulePassiveLessonReconnect();" in passive_branch
     assert "ScheduleReconnect" not in passive_branch
 
-def test_passive_lesson_socket_watchdog_during_answer_turn_does_not_retry_passively():
+def test_passive_lesson_socket_watchdog_during_answer_turn_retries_passively():
     source = read("main/application.cc")
     watchdog = function_body(source, "void Application::HandleConnectWatchdog")
     passive_branch = watchdog[
@@ -168,11 +230,12 @@ def test_passive_lesson_socket_watchdog_during_answer_turn_does_not_retry_passiv
         passive_branch.index("return;", passive_branch.index("if (lesson_runtime_active_.load() && lesson_answer_turn)")) + len("return;")
     ]
     assert "passive_ws_intent_.store(false);" in lesson_timeout
-    assert "lesson_interactive_listen_generation_.fetch_add(1);" in lesson_timeout
-    assert "lesson_interactive_listen_pending_.store(false);" in lesson_timeout
-    assert "lesson_interactive_listening_active_.store(false);" in lesson_timeout
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_timeout
-    assert "SchedulePassiveLessonReconnect();" not in lesson_timeout
+    assert "SchedulePassiveLessonReconnect();" in lesson_timeout
+    before_retry = lesson_timeout[: lesson_timeout.index("SchedulePassiveLessonReconnect();")]
+    assert "lesson_interactive_listen_generation_.fetch_add(1);" not in before_retry
+    assert "lesson_interactive_listen_pending_.store(false);" not in before_retry
+    assert "lesson_interactive_listening_active_.store(false);" not in before_retry
     assert "return;" in lesson_timeout
 
 def test_passive_lesson_reconnect_tick_defers_instead_of_abandoning_when_not_idle():
@@ -192,6 +255,32 @@ def test_passive_lesson_reconnect_tick_defers_instead_of_abandoning_when_not_idl
     assert "SchedulePassiveLessonReconnect();" in not_idle_branch
     assert "passive_reconnect_attempt_ = 0" not in not_idle_branch
     assert "return;" in not_idle_branch
+
+def test_passive_lesson_reconnect_tick_reopens_during_answer_turn_not_idle():
+    source = read("main/application.cc")
+    reconnect_tick = function_body(source, "void Application::HandleReconnectTick")
+    passive_start = reconnect_tick.index("if (reconnect_passive_.exchange(false))")
+    passive_branch = reconnect_tick[
+        passive_start :
+        reconnect_tick.index('ESP_LOGI(TAG, "passive_lesson_reconnect_tick attempt=%d"', passive_start)
+    ]
+    not_idle_branch = passive_branch[
+        passive_branch.index("if (state != kDeviceStateIdle)") :
+    ]
+
+    assert "const bool lesson_answer_turn =" in not_idle_branch
+    assert "lesson_runtime_active_.load()" in not_idle_branch
+    assert "lesson_interactive_listen_pending_.load()" in not_idle_branch
+    assert "lesson_interactive_listening_active_.load()" in not_idle_branch
+    assert "state == kDeviceStateSpeaking" in not_idle_branch
+    assert "state == kDeviceStateListening" in not_idle_branch
+    assert "state == kDeviceStateConnecting" in not_idle_branch
+    answer_turn = not_idle_branch[
+        not_idle_branch.index("if (lesson_answer_turn") :
+        not_idle_branch.index("SchedulePassiveLessonReconnect();")
+    ]
+    assert "StartPassiveLessonWebsocket();" in answer_turn
+    assert answer_turn.index("StartPassiveLessonWebsocket();") < answer_turn.index("return;")
 
 def test_idle_does_not_start_wake_word_while_passive_websocket_tls_is_connecting():
     source = read("main/application.cc")

@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MIN_TCPIP_STACK_BYTES = 6144
 MIN_HEARTBEAT_STACK_BYTES = 8192
+MIN_WEBSOCKET_OPEN_STACK_BYTES = 8192
 
 
 def _read_config_values(path: Path) -> dict[str, int]:
@@ -37,3 +38,9 @@ def test_heartbeat_https_worker_has_stack_headroom_next_to_passive_websocket():
     source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
 
     assert f'"heartbeat_http", {MIN_HEARTBEAT_STACK_BYTES}' in source
+
+def test_websocket_open_worker_has_tls_stack_headroom():
+    source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
+
+    for task_name in ("lesson_ws", "ws_open", "wake_ws_open"):
+        assert f'"{task_name}", {MIN_WEBSOCKET_OPEN_STACK_BYTES}' in source

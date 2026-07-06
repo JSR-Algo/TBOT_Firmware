@@ -261,6 +261,7 @@ private:
     int passive_reconnect_attempt_ = 0;
     ListeningMode reconnect_mode_ = kListeningModeAutoStop;
     std::atomic<bool> reconnect_passive_{false};
+    std::atomic<bool> reconnect_resume_listening_{true};
     // Sustained operation: true while we WANT an open audio channel. Set on
     // OnAudioChannelOpened; cleared by CloseAudioChannelByIntent() for every
     // user/system-initiated close. An UNEXPECTED drop leaves it true ->
@@ -269,6 +270,7 @@ private:
     // Passive lesson/nudge WebSocket: keep a claimed robot reachable by ESP
     // server without entering Listening or scheduling listen-mode reconnects.
     std::atomic<bool> passive_ws_intent_{false};
+    std::string deferred_wake_word_;
     QueueHandle_t lesson_message_queue_ = nullptr;
     TaskHandle_t lesson_message_task_handle_ = nullptr;
 
@@ -305,6 +307,7 @@ private:
     void HandleNetworkDisconnectedEvent();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
+    void RunScheduledTasks();
     static void SpeakingTimeoutTask(void* arg);
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);
@@ -316,7 +319,7 @@ private:
     void ArmConnectWatchdog();                         // SM-3: bound CONNECTING
     void CancelConnectWatchdog();
     void HandleConnectWatchdog(uint32_t generation);
-    void ScheduleReconnect(ListeningMode mode);        // T2/WSS-4: long-horizon backoff+jitter
+    void ScheduleReconnect(ListeningMode mode, bool resume_listening = true);        // T2/WSS-4: long-horizon backoff+jitter
     void SchedulePassiveLessonReconnect();             // passive lesson/nudge socket retry
     void HandleReconnectTick();
     void CloseAudioChannelByIntent();                  // intentional close -> clears online_intent_
