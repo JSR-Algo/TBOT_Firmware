@@ -82,14 +82,19 @@
 #define BAT_ADC_PIN   GPIO_NUM_8
 
 // ---- Robot arm UART (đặc thù TBOT) ----
+// Day noi main<->slave dau theo NHAN silkscreen TX/RX (cheo theo so GPIO):
+//   main GPIO43(nhan TX) <-> slave GPIO44(nhan RX)
+//   main GPIO44(nhan RX) <-> slave GPIO43(nhan TX)
+// Nen main phai TX=GPIO43 (toi slave RX44) va RX=GPIO44 (nhan slave TX43).
+// Profile alt giu chieu con lai de tuong thich kieu dau thang (43-43/44-44).
 #define ROBOT_UART_NUM        UART_NUM_1
-#define ROBOT_UART_TX_PIN     GPIO_NUM_44
-#define ROBOT_UART_RX_PIN     GPIO_NUM_43
+#define ROBOT_UART_TX_PIN     GPIO_NUM_43
+#define ROBOT_UART_RX_PIN     GPIO_NUM_44
 #define ROBOT_UART_BAUD_RATE  115200
 #define ROBOT_UART_ALT_NUM    UART_NUM_1
-#define ROBOT_UART_ALT_TX_PIN GPIO_NUM_43
-#define ROBOT_UART_ALT_RX_PIN GPIO_NUM_44
-#define ROBOT_UART_ACK_READER_ENABLED 0
+#define ROBOT_UART_ALT_TX_PIN GPIO_NUM_44
+#define ROBOT_UART_ALT_RX_PIN GPIO_NUM_43
+#define ROBOT_UART_ACK_READER_ENABLED 1
 
 // ---- MicroSD / TF card (SDIO 4-bit, LCDWiki ES3C35P spec) ----
 #define SDCARD_MOUNT_POINT    "/sdcard"

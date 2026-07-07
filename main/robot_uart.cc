@@ -6,6 +6,8 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <cstring>
+
 #ifndef ROBOT_UART_NUM
 #define ROBOT_UART_NUM UART_NUM_1
 #endif
@@ -323,8 +325,39 @@ void RobotUart::StartAckReader() {
     ESP_LOGI(TAG, "Robot UART ACK reader started");
 }
 
+// Parse mot dong tu slave. Chi nhan dang dong bat dau bang prefix ro rang; moi thu
+// khac (ACK servo JSON, log slave dinh mau ANSI qua chung day console UART) deu bo qua.
+void RobotUart::HandleReaderLine(const char* line) {
+    RobotInputEvent evt;
+    bool is_event = true;
+    if (strcmp(line, "EVT:LEFT_CLICK") == 0) {
+        evt = RobotInputEvent::LeftClick;
+    } else if (strcmp(line, "EVT:RIGHT_CLICK") == 0) {
+        evt = RobotInputEvent::RightClick;
+    } else if (strcmp(line, "EVT:BOTH_CLICK") == 0) {
+        evt = RobotInputEvent::BothClick;
+    } else if (strcmp(line, "EVT:MENU_HOLD_3S") == 0) {
+        evt = RobotInputEvent::MenuHold;
+    } else if (strcmp(line, "SLAVE:READY") == 0) {
+        evt = RobotInputEvent::SlaveReady;
+    } else {
+        is_event = false;
+    }
+
+    if (is_event) {
+        ESP_LOGI(TAG, "Slave event: %s", line);
+        if (event_cb_) {
+            event_cb_(evt);
+        }
+        return;
+    }
+
+    // PONG/ERR va ACK servo: chi ghi log muc thap, khong xu ly.
+    ESP_LOGD(TAG, "Slave line ignored: %s", line);
+}
+
 void RobotUart::AckReaderTask(void* arg) {
-    (void)arg;
+    RobotUart* self = static_cast<RobotUart*>(arg);
     char line[160];
     int line_len = 0;
     uint8_t byte = 0;
@@ -337,8 +370,8 @@ void RobotUart::AckReaderTask(void* arg) {
 
         if (byte == '\n') {
             line[line_len] = '\0';
-            if (line_len > 0) {
-                ESP_LOGI(TAG, "Servant ACK: %s", line);
+            if (line_len > 0 && self != nullptr) {
+                self->HandleReaderLine(line);
             }
             line_len = 0;
             continue;
@@ -351,8 +384,29 @@ void RobotUart::AckReaderTask(void* arg) {
         if (line_len < static_cast<int>(sizeof(line)) - 1) {
             line[line_len++] = static_cast<char>(byte);
         } else {
-            ESP_LOGW(TAG, "Servant ACK line too long, dropping");
+            ESP_LOGW(TAG, "Slave line too long, dropping");
             line_len = 0;
         }
     }
+}
+
+bool RobotUart::SendControlLine(const std::string& line) {
+    if (!Initialize()) {
+        return false;
+    }
+    if (!primary_ready_) {
+        return false;
+    }
+    // Dam bao ket thuc bang '\n'.
+    std::string payload = line;
+    if (payload.empty() || payload.back() != '\n') {
+        payload.push_back('\n');
+    }
+    // Chon lai profile primary (trung voi pin listen) roi ghi. Khong dung uart_flush_input
+    // de tranh xoa event dang den.
+    if (!SelectUartProfile("primary-control", ROBOT_UART_NUM, ROBOT_UART_TX_PIN, ROBOT_UART_RX_PIN)) {
+        return false;
+    }
+    int written = uart_write_bytes(ROBOT_UART_NUM, payload.data(), payload.size());
+    return written == static_cast<int>(payload.size());
 }

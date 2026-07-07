@@ -10,6 +10,7 @@
 #include "assets.h"
 #include "settings.h"
 #include "robot_uart.h"
+#include "app_manager.h"
 #include "tbot_connect_mapper.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
@@ -191,6 +192,27 @@ void Application::Initialize() {
     audio_service_.Initialize(codec);
     audio_service_.Start();
     robot_uart_.Initialize();
+
+    // App manager (Menu/Game overlay) + nhan su kien nut TTP223 tu slave qua UART.
+    // Su kien den trong task doc UART -> marshal sang main task truoc khi dung LVGL.
+    AppManagerInit();
+    AppManagerSetSlaveSender([this](const char* line) {
+        robot_uart_.SendControlLine(line);
+    });
+    AppManagerSetSoundPlayer([this](const std::vector<int16_t>& pcm) {
+        audio_service_.QueuePcmForPlayback(pcm);
+    });
+    robot_uart_.SetEventCallback([this](RobotInputEvent evt) {
+        Schedule([evt]() {
+            switch (evt) {
+                case RobotInputEvent::LeftClick:  AppHandleInputLeft(); break;
+                case RobotInputEvent::RightClick: AppHandleInputRight(); break;
+                case RobotInputEvent::BothClick:  AppHandleInputBothClick(); break;
+                case RobotInputEvent::MenuHold:   AppHandleMenuHold(); break;
+                case RobotInputEvent::SlaveReady: AppOnSlaveReady(); break;
+            }
+        });
+    });
 
     AudioServiceCallbacks callbacks;
     callbacks.on_send_queue_available = [this]() {

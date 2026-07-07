@@ -802,6 +802,33 @@ void AudioService::PlaySound(const std::string_view& ogg) {
     demuxer->Process(buf, size);
 }
 
+void AudioService::QueuePcmForPlayback(const std::vector<int16_t>& pcm) {
+    if (pcm.empty()) {
+        return;
+    }
+    constexpr size_t kFrame = 1440;  // 60ms @ 24kHz, khop khung playback thong thuong
+    constexpr size_t kMaxPlaybackForSfx = 24;  // bao ve: khong lam nghen TTS
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    if (service_stopped_) {
+        return;
+    }
+    if (audio_playback_queue_.size() >= kMaxPlaybackForSfx) {
+        return;  // dang ban phat audio khac -> bo SFX nay
+    }
+    for (size_t off = 0; off < pcm.size(); off += kFrame) {
+        size_t n = pcm.size() - off;
+        if (n > kFrame) {
+            n = kFrame;
+        }
+        auto task = std::make_unique<AudioTask>();
+        task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+        task->pcm.assign(pcm.begin() + off, pcm.begin() + off + n);
+        task->timestamp = 0;
+        audio_playback_queue_.push_back(std::move(task));
+    }
+    audio_queue_cv_.notify_all();
+}
+
 bool AudioService::IsIdle() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
     return audio_encode_queue_.empty() && audio_decode_queue_.empty() && audio_playback_queue_.empty() && audio_testing_queue_.empty();
