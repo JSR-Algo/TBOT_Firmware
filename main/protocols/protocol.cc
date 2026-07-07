@@ -98,10 +98,9 @@ bool Protocol::SendLessonFrame(const std::string& frame) {
 }
 
 bool Protocol::IsTimeout() const {
-    // WSS-3: server closes idle WebSocket at about 30s. Keep the firmware
-    // threshold lower so a new listen reconnects instead of writing to a
-    // half-closed channel.
-    const int kTimeoutSeconds = 25;
+    // WSS-3: server keeps WebSocket sessions open for 61 minutes. Keep the
+    // firmware threshold aligned so long lessons/conversations do not self-drop.
+    const int kTimeoutSeconds = 61 * 60;
     auto now = std::chrono::steady_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - last_incoming_time_);
     bool timeout = duration.count() > kTimeoutSeconds;

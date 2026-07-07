@@ -24,6 +24,8 @@ public:
 private:
     EventGroupHandle_t event_group_handle_;
     std::unique_ptr<WebSocket> websocket_;
+    std::string url_;
+    std::string token_;
     int version_ = 1;
 
     void ParseServerHello(const cJSON* root);

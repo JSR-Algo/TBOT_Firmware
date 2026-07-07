@@ -56,8 +56,9 @@ def test_tts_start_arms_speaking_timeout_watchdog():
     assert "speaking_generation_" in app_h
     assert "++speaking_generation_" in app_cc
     assert "current_generation = speaking_generation_" in app_cc
-    assert "vTaskDelay(pdMS_TO_TICKS(kSpeakingTimeoutMs))" in app_cc
-    assert "HandleSpeakingTimeout(current_generation)" in app_cc
+    assert "esp_timer_handle_t speaking_timeout_timer_" in app_h
+    assert "esp_timer_start_once(speaking_timeout_timer_, kSpeakingTimeoutMs * 1000ULL)" in app_cc
+    assert "SpeakingTimeoutTask" not in app_cc
     assert "void Application::HandleSpeakingTimeout" in app_cc
 
     start = app_cc.index('strcmp(state->valuestring, "start") == 0')
@@ -556,15 +557,15 @@ def test_wake_word_data_is_sent_after_listen_control_frames():
     )
 
 
-def test_protocol_idle_timeout_is_below_server_idle_close_window():
+def test_protocol_idle_timeout_allows_sixty_minute_sessions():
     protocol_cc = read("main/protocols/protocol.cc")
 
     timeout_start = protocol_cc.index("bool Protocol::IsTimeout() const")
     timeout_body = protocol_cc[timeout_start:]
 
-    assert "server closes idle WebSocket at about 30s" in timeout_body
-    assert "const int kTimeoutSeconds = 25;" in timeout_body
-    assert "const int kTimeoutSeconds = 30;" not in timeout_body
+    assert "server keeps WebSocket sessions open for 61 minutes" in timeout_body
+    assert "const int kTimeoutSeconds = 61 * 60;" in timeout_body
+    assert "const int kTimeoutSeconds = 25;" not in timeout_body
 
 
 def test_websocket_open_resets_idle_timer_before_hello_send():
@@ -743,7 +744,7 @@ def test_lesson_runtime_blocks_stale_wake_word_continuations():
     assert "lesson_runtime_active_.load()" in continue_body
     assert "lesson wake continue ignored" in continue_body
     assert continue_body.index("lesson_runtime_active_.load()") < continue_body.index(
-        "xTaskCreate(&Application::OpenChannelTask"
+        "xTaskCreateWithCaps(&Application::OpenChannelTask"
     )
 
     finish_end = app_cc.index("// H3: localized screen copy", finish_start)
@@ -775,7 +776,7 @@ def test_lesson_runtime_blocks_stale_generic_open_continuations():
     ) < continue_body.index("if (protocol_->IsAudioChannelOpened())")
     assert continue_body.index(
         "if (lesson_runtime_active_.load() && !lesson_answer_turn)"
-    ) < continue_body.index("xTaskCreate(&Application::OpenChannelTask")
+    ) < continue_body.index("xTaskCreateWithCaps(&Application::OpenChannelTask")
 
     task_end = app_cc.index("void Application::ArmConnectWatchdog", task_start)
     task_body = app_cc[task_start:task_end]
@@ -1420,7 +1421,7 @@ def test_cold_wake_word_open_uses_worker_instead_of_blocking_app_task():
     assert "void FinishWakeWordInvoke(const std::string& wake_word);" in app_h
     assert "connect_in_flight_.load()" in continue_body
     assert "ArmConnectWatchdog();" in continue_body
-    assert "xTaskCreate(&Application::OpenChannelTask" in continue_body
+    assert "xTaskCreateWithCaps(&Application::OpenChannelTask" in continue_body
     assert "protocol_->OpenAudioChannel()" not in continue_body
 
     open_start = app_cc.index("void Application::OpenChannelTask")
@@ -2055,6 +2056,34 @@ def test_firmware_exposes_sample_lesson_asset_sync_to_sd():
     assert "barn-round-field-poster.jpg" in mcp_server
     assert "bright-listening.png" in mcp_server
     assert "downloadedCount" in mcp_server
+
+def test_firmware_exposes_generic_lesson_asset_pack_sync_to_sd():
+    mcp_server = read("main/mcp_server.cc")
+
+    assert "self.lesson_assets.sync_to_sd" in mcp_server
+    assert 'Property("assetPack", kPropertyTypeObject' in mcp_server
+    assert '"localPath"' in mcp_server
+    assert '"url"' in mcp_server
+    assert '"sha256"' in mcp_server
+    assert "VerifyLessonAssetSha256" in mcp_server
+    assert "NormalizeLessonAssetSdPath" in mcp_server
+    assert '"downloadedCount"' in mcp_server
+    assert '"skippedCount"' in mcp_server
+    assert '"failedCount"' in mcp_server
+
+def test_lesson_asset_pack_sync_http_download_does_not_starve_main_watchdog():
+    mcp_server = read("main/mcp_server.cc")
+    start = mcp_server.index("bool DownloadLessonAssetToFile")
+    end = mcp_server.index("\n}\n}\n\nMcpServer::McpServer", start)
+    body = mcp_server[start:end]
+
+    assert "auto http = network->CreateHttp(1);" in body
+    assert "http->SetTimeout(2000);" in body
+    assert "http->SetTimeout(10000);" not in body
+    assert "http->SetTimeout(4000);" not in body
+    assert body.count("http->GetStatusCode()") == 1
+    assert "esp_task_wdt_reset();" in body
+    assert body.index("esp_task_wdt_reset();") < body.index('http->Open("GET", url)')
 
 def test_sample_lesson_asset_sync_does_not_mkdir_sd_mount_point():
     mcp_server = read("main/mcp_server.cc")

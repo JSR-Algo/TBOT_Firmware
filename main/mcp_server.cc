@@ -8,11 +8,15 @@
 #include <esp_app_desc.h>
 #include <esp_heap_caps.h>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
 #include <sys/stat.h>
 #include <esp_pthread.h>
+#include <esp_task_wdt.h>
+#include <mbedtls/sha256.h>
+#include <mbedtls/version.h>
 
 #include "application.h"
 #include "display.h"
@@ -27,6 +31,7 @@
 namespace {
 constexpr size_t kMcpToolsListMaxPayloadBytes = 2500;
 constexpr size_t kLessonAssetSyncMaxBytes = 512 * 1024;
+constexpr const char* kLessonAssetPackRoot = "/sdcard/tbot/lesson-assets/";
 constexpr const char* kSampleLessonAssetDir = "/sdcard/tbot/lesson-assets/sample-barn";
 constexpr const char* kSampleLessonAssetFiles[] = {
     "barn-round-field-poster.jpg",
@@ -37,11 +42,178 @@ constexpr const char* kSampleLessonAssetFiles[] = {
     "bright-celebrate.png",
 };
 
+bool DownloadLessonAssetToFile(const std::string& url, const std::string& dest_path, size_t& bytes_out);
+void EnsureDirOrThrow(const char* path);
+
 bool EnsureDir(const char* path) {
     if (path == nullptr || path[0] == '\0') return false;
     errno = 0;
     if (mkdir(path, 0755) == 0 || errno == EEXIST) return true;
     return false;
+}
+
+bool FileExists(const std::string& path) {
+    struct stat st;
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+std::string Trim(std::string value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+        value.erase(value.begin());
+    }
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+        value.pop_back();
+    }
+    return value;
+}
+
+std::string LowerHex(std::string value) {
+    for (char& ch : value) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    return value;
+}
+
+bool IsSha256Hex(const std::string& value) {
+    if (value.size() != 64) return false;
+    for (char ch : value) {
+        if (!std::isxdigit(static_cast<unsigned char>(ch))) return false;
+    }
+    return true;
+}
+
+std::string NormalizeLessonAssetSdPath(const char* raw_path) {
+    if (raw_path == nullptr) {
+        throw std::runtime_error("localPath is required");
+    }
+    std::string path = Trim(raw_path);
+    if (path.rfind("sd://", 0) == 0) {
+        std::string tail = path.substr(5);
+        if (tail.rfind("sdcard/", 0) == 0) {
+            path = "/" + tail;
+        } else if (!tail.empty() && tail[0] == '/') {
+            path = tail;
+        } else {
+            path = "/sdcard/" + tail;
+        }
+    } else if (path.rfind("file://", 0) == 0) {
+        path = path.substr(7);
+    }
+    if (path.rfind(kLessonAssetPackRoot, 0) != 0) {
+        throw std::runtime_error("localPath must stay under /sdcard/tbot/lesson-assets");
+    }
+    if (path.find("..") != std::string::npos || path.find('\\') != std::string::npos) {
+        throw std::runtime_error("localPath contains unsafe path segments");
+    }
+    return path;
+}
+
+void EnsureLessonAssetParentDirs(const std::string& file_path) {
+    EnsureDirOrThrow("/sdcard/tbot");
+    EnsureDirOrThrow("/sdcard/tbot/lesson-assets");
+    size_t pos = strlen(kLessonAssetPackRoot);
+    while ((pos = file_path.find('/', pos)) != std::string::npos) {
+        EnsureDirOrThrow(file_path.substr(0, pos).c_str());
+        ++pos;
+    }
+}
+
+std::string Sha256FileHex(const std::string& path) {
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (fp == nullptr) {
+        throw std::runtime_error("failed to open asset for sha256: " + path);
+    }
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+#if MBEDTLS_VERSION_MAJOR >= 3
+    int rc = mbedtls_sha256_starts(&ctx, 0);
+#else
+    int rc = mbedtls_sha256_starts_ret(&ctx, 0);
+#endif
+    if (rc != 0) {
+        fclose(fp);
+        mbedtls_sha256_free(&ctx);
+        throw std::runtime_error("failed to start sha256");
+    }
+
+    unsigned char buffer[4096];
+    while (true) {
+        size_t read = fread(buffer, 1, sizeof(buffer), fp);
+        if (read > 0) {
+#if MBEDTLS_VERSION_MAJOR >= 3
+            rc = mbedtls_sha256_update(&ctx, buffer, read);
+#else
+            rc = mbedtls_sha256_update_ret(&ctx, buffer, read);
+#endif
+            if (rc != 0) {
+                fclose(fp);
+                mbedtls_sha256_free(&ctx);
+                throw std::runtime_error("failed to update sha256");
+            }
+        }
+        if (read < sizeof(buffer)) {
+            if (ferror(fp)) {
+                fclose(fp);
+                mbedtls_sha256_free(&ctx);
+                throw std::runtime_error("failed to read asset for sha256: " + path);
+            }
+            break;
+        }
+    }
+
+    unsigned char digest[32];
+#if MBEDTLS_VERSION_MAJOR >= 3
+    rc = mbedtls_sha256_finish(&ctx, digest);
+#else
+    rc = mbedtls_sha256_finish_ret(&ctx, digest);
+#endif
+    fclose(fp);
+    mbedtls_sha256_free(&ctx);
+    if (rc != 0) {
+        throw std::runtime_error("failed to finish sha256");
+    }
+
+    char hex[65];
+    for (int i = 0; i < 32; ++i) {
+        snprintf(hex + i * 2, sizeof(hex) - i * 2, "%02x", digest[i]);
+    }
+    hex[64] = '\0';
+    return std::string(hex);
+}
+
+bool VerifyLessonAssetSha256(const std::string& path, const std::string& expected_sha256) {
+    std::string expected = LowerHex(Trim(expected_sha256));
+    if (!IsSha256Hex(expected) || !FileExists(path)) {
+        return false;
+    }
+    return Sha256FileHex(path) == expected;
+}
+
+const char* JsonStringField(const cJSON* object, const char* key) {
+    const cJSON* value = cJSON_GetObjectItem(object, key);
+    return cJSON_IsString(value) ? value->valuestring : nullptr;
+}
+
+void DownloadLessonAssetToVerifiedFile(
+    const std::string& url,
+    const std::string& dest_path,
+    const std::string& sha256,
+    size_t& bytes_out
+) {
+    EnsureLessonAssetParentDirs(dest_path);
+    std::string download_path = dest_path + ".download";
+    remove(download_path.c_str());
+    DownloadLessonAssetToFile(url, download_path, bytes_out);
+    if (!VerifyLessonAssetSha256(download_path, sha256)) {
+        remove(download_path.c_str());
+        throw std::runtime_error("sha256 mismatch for " + dest_path);
+    }
+    remove(dest_path.c_str());
+    if (rename(download_path.c_str(), dest_path.c_str()) != 0) {
+        remove(download_path.c_str());
+        throw std::runtime_error("failed to commit verified SD file: " + dest_path);
+    }
 }
 
 void EnsureDirOrThrow(const char* path) {
@@ -62,16 +234,19 @@ bool DownloadLessonAssetToFile(const std::string& url, const std::string& dest_p
     if (network == nullptr) {
         throw std::runtime_error("network unavailable");
     }
-    auto http = network->CreateHttp(3);
+    auto http = network->CreateHttp(1);
     if (!http) {
         throw std::runtime_error("failed to create HTTP client");
     }
-    http->SetTimeout(10000);
+    http->SetTimeout(2000);
+    esp_task_wdt_reset();
     if (!http->Open("GET", url)) {
         throw std::runtime_error("failed to open URL: " + url);
     }
-    if (http->GetStatusCode() != 200) {
-        int status = http->GetStatusCode();
+    esp_task_wdt_reset();
+    int status = http->GetStatusCode();
+    if (status != 200) {
+        esp_task_wdt_reset();
         http->Close();
         throw std::runtime_error("unexpected status " + std::to_string(status) + " for " + url);
     }
@@ -99,6 +274,7 @@ bool DownloadLessonAssetToFile(const std::string& url, const std::string& dest_p
     bool failed = false;
     std::string error;
     while (true) {
+        esp_task_wdt_reset();
         size_t want = 4096;
         if (content_length > 0) {
             if (bytes_out >= content_length) break;
@@ -620,6 +796,84 @@ void McpServer::AddUserOnlyTools() {
             return json;
         });
 
+    AddUserOnlyTool("self.lesson_assets.sync_to_sd",
+        "Download a lesson assetPack to the SD card and verify each asset by sha256.",
+        PropertyList({
+            Property("assetPack", kPropertyTypeObject)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            std::string asset_pack_json = properties["assetPack"].value<std::string>();
+            cJSON* pack = cJSON_Parse(asset_pack_json.c_str());
+            if (!cJSON_IsObject(pack)) {
+                if (pack != nullptr) cJSON_Delete(pack);
+                throw std::runtime_error("assetPack object is required");
+            }
+            const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
+            if (!cJSON_IsArray(assets)) {
+                cJSON_Delete(pack);
+                throw std::runtime_error("assetPack.assets array is required");
+            }
+
+            cJSON* json = cJSON_CreateObject();
+            const char* cache_key = JsonStringField(pack, "cacheKey");
+            if (cache_key != nullptr) {
+                cJSON_AddStringToObject(json, "cacheKey", cache_key);
+            }
+            cJSON* files = cJSON_CreateArray();
+            int downloaded = 0;
+            int skipped = 0;
+            int failed = 0;
+            size_t total_bytes = 0;
+
+            const cJSON* asset = nullptr;
+            cJSON_ArrayForEach(asset, assets) {
+                cJSON* item = cJSON_CreateObject();
+                const char* key = JsonStringField(asset, "key");
+                const char* path = JsonStringField(asset, "path");
+                if (key != nullptr) cJSON_AddStringToObject(item, "key", key);
+                if (path != nullptr) cJSON_AddStringToObject(item, "path", path);
+
+                try {
+                    const char* url = JsonStringField(asset, "url");
+                    const char* sha256 = JsonStringField(asset, "sha256");
+                    const char* local_path = JsonStringField(asset, "localPath");
+                    if (url == nullptr || url[0] == '\0' ||
+                        sha256 == nullptr || sha256[0] == '\0' ||
+                        local_path == nullptr || local_path[0] == '\0') {
+                        throw std::runtime_error("asset requires url, sha256, and localPath");
+                    }
+
+                    std::string dest = NormalizeLessonAssetSdPath(local_path);
+                    cJSON_AddStringToObject(item, "localPath", dest.c_str());
+                    if (VerifyLessonAssetSha256(dest, sha256)) {
+                        skipped += 1;
+                        cJSON_AddStringToObject(item, "state", "SKIPPED");
+                    } else {
+                        size_t bytes = 0;
+                        DownloadLessonAssetToVerifiedFile(url, dest, sha256, bytes);
+                        total_bytes += bytes;
+                        downloaded += 1;
+                        cJSON_AddStringToObject(item, "state", "DOWNLOADED");
+                        cJSON_AddNumberToObject(item, "bytes", static_cast<double>(bytes));
+                    }
+                } catch (const std::exception& e) {
+                    failed += 1;
+                    cJSON_AddStringToObject(item, "state", "FAILED");
+                    cJSON_AddStringToObject(item, "error", e.what());
+                }
+                cJSON_AddItemToArray(files, item);
+            }
+
+            cJSON_Delete(pack);
+            cJSON_AddBoolToObject(json, "ready", failed == 0);
+            cJSON_AddNumberToObject(json, "downloadedCount", downloaded);
+            cJSON_AddNumberToObject(json, "skippedCount", skipped);
+            cJSON_AddNumberToObject(json, "failedCount", failed);
+            cJSON_AddNumberToObject(json, "totalBytes", static_cast<double>(total_bytes));
+            cJSON_AddItemToObject(json, "files", files);
+            return json;
+        });
+
     AddUserOnlyTool("self.assets.set_download_url", "Set the download url for the assets",
             PropertyList({
                 Property("url", kPropertyTypeString)
@@ -874,6 +1128,11 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
                     found = true;
                 } else if (argument.type() == kPropertyTypeString && cJSON_IsString(value)) {
                     argument.set_value<std::string>(value->valuestring);
+                    found = true;
+                } else if (argument.type() == kPropertyTypeObject && cJSON_IsObject(value)) {
+                    char* json_str = cJSON_PrintUnformatted(value);
+                    argument.set_value<std::string>(json_str ? json_str : "{}");
+                    if (json_str != nullptr) cJSON_free(json_str);
                     found = true;
                 }
             }

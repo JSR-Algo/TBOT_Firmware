@@ -72,6 +72,13 @@ static std::string NewTraceParentHeader() {
 
 WebsocketProtocol::WebsocketProtocol() {
     event_group_handle_ = xEventGroupCreate();
+    Settings settings("websocket", false);
+    url_ = settings.GetString("url", CONFIG_WEBSOCKET_URL);
+    token_ = settings.GetString("token");
+    int version = settings.GetInt("version");
+    if (version != 0) {
+        version_ = version;
+    }
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
@@ -163,13 +170,8 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
-    Settings settings("websocket", false);
-    std::string url = settings.GetString("url", CONFIG_WEBSOCKET_URL);
-    std::string token = settings.GetString("token");
-    int version = settings.GetInt("version");
-    if (version != 0) {
-        version_ = version;
-    }
+    std::string url = url_;
+    std::string token = token_;
     const std::string device_id = SystemInfo::GetMacAddress();
     const std::string client_id = Board::GetInstance().GetUuid();
 

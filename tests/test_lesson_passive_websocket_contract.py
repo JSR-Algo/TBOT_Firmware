@@ -167,6 +167,19 @@ def test_passive_lesson_socket_connect_failure_retries_passively():
     assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
     assert "passive_lesson_reconnect_scheduled" in passive_scheduler
 
+def test_passive_lesson_socket_task_create_failure_retries_passively():
+    source = read("main/application.cc")
+    passive = function_body(source, "void Application::StartPassiveLessonWebsocket")
+    failure = passive[
+        passive.index("if (created != pdPASS)", passive.index('"lesson_ws", 8192')) :
+        passive.index("}", passive.index('ESP_LOGE(TAG, "lesson_ws task create failed")'))
+    ]
+
+    assert "connect_in_flight_.store(false);" in failure
+    assert "passive_ws_intent_.store(false);" in failure
+    assert "CancelConnectWatchdog();" in failure
+    assert "SchedulePassiveLessonReconnect();" in failure
+
 def test_passive_lesson_socket_failure_during_answer_turn_retries_passively():
     source = read("main/application.cc")
     open_task = function_body(source, "void Application::OpenChannelTask")

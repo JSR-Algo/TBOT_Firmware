@@ -100,7 +100,8 @@ def test_deferred_release_is_single_flight_and_off_the_app_task():
     assert "cloud_release_inflight_.compare_exchange_strong(expected, true)" in body
     # Run the blocking POST OFF the priority-10 task, low priority + not core-0
     # pinned (same starvation-avoidance pattern as the claim fetch).
-    assert 'xTaskCreate(&Application::CloudReleaseTask, "cloud_release"' in body
+    assert 'xTaskCreateWithCaps(&Application::CloudReleaseTask, "cloud_release"' in body
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in body
     assert "tskIDLE_PRIORITY + 1" in body
 
 

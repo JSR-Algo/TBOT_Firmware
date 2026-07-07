@@ -21,6 +21,7 @@
 
 #include <ctime>
 #include <cstring>
+#include <esp_err.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <freertos/idf_additions.h>
@@ -104,6 +105,10 @@ Application::~Application() {
     if (heartbeat_timer_ != nullptr) {
         esp_timer_stop(heartbeat_timer_);
         esp_timer_delete(heartbeat_timer_);
+    }
+    if (speaking_timeout_timer_ != nullptr) {
+        esp_timer_stop(speaking_timeout_timer_);
+        esp_timer_delete(speaking_timeout_timer_);
     }
     if (lesson_message_task_handle_ != nullptr) {
         vTaskDelete(lesson_message_task_handle_);
@@ -1148,8 +1153,9 @@ void Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
     // simply WAITS on the network at low priority while the wake-word AFE
     // fetch/feed pipeline keeps the CPU. The old design queued this blocking call
     // onto the priority-10 Application task, which is the starvation root cause.
-    if (xTaskCreate(&Application::ClaimFetchTask, "claim_fetch", 6144, ctx,
-                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+    if (xTaskCreateWithCaps(&Application::ClaimFetchTask, "claim_fetch", 6144, ctx,
+                            tskIDLE_PRIORITY + 1, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "claim_fetch task create failed; retrying next tick");
         delete ctx;
         claim_poll_inflight_.store(false);
@@ -1722,8 +1728,9 @@ void Application::MaybeDispatchDeferredCloudRelease() {
 
     // Low priority + not pinned to core 0 (same as ClaimFetchTask) so the blocking
     // POST waits on the network without starving the core-0 wake-word AFE pipeline.
-    if (xTaskCreate(&Application::CloudReleaseTask, "cloud_release", 6144, this,
-                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+    if (xTaskCreateWithCaps(&Application::CloudReleaseTask, "cloud_release", 6144, this,
+                            tskIDLE_PRIORITY + 1, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "cloud_release task create failed; retrying next refresh");
         cloud_release_inflight_.store(false);
     }
@@ -1827,8 +1834,9 @@ void Application::DispatchDeviceHeartbeat() {
     // Low priority (tskIDLE_PRIORITY+1) and NOT pinned to core 0 so the worker
     // simply WAITS on the network at low priority while the wake-word AFE
     // fetch/feed pipeline keeps the CPU (same pattern as ClaimFetchTask).
-    if (xTaskCreate(&Application::HeartbeatTask, "heartbeat_http", 8192, ctx,
-                    tskIDLE_PRIORITY + 1, nullptr) != pdPASS) {
+    if (xTaskCreateWithCaps(&Application::HeartbeatTask, "heartbeat_http", 8192, ctx,
+                            tskIDLE_PRIORITY + 1, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "heartbeat task create failed; retrying next tick");
         delete ctx;
         heartbeat_inflight_.store(false);
@@ -3030,13 +3038,16 @@ void Application::StartPassiveLessonWebsocket() {
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
     auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
-    if (xTaskCreate(&Application::OpenChannelTask, "lesson_ws", 8192, ctx,
-                    tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+    auto created = xTaskCreateWithCaps(&Application::OpenChannelTask, "lesson_ws", 8192, ctx,
+                                       tskIDLE_PRIORITY + 3, nullptr,
+                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (created != pdPASS) {
         delete ctx;
         connect_in_flight_.store(false);
         passive_ws_intent_.store(false);
         CancelConnectWatchdog();
         ESP_LOGE(TAG, "lesson_ws task create failed");
+        SchedulePassiveLessonReconnect();
     }
 }
 
@@ -3079,8 +3090,9 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     ArmConnectWatchdog();
     passive_ws_intent_.store(false);
     auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
-    if (xTaskCreate(&Application::OpenChannelTask, "ws_open", 8192, ctx,
-                    tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+    if (xTaskCreateWithCaps(&Application::OpenChannelTask, "ws_open", 8192, ctx,
+                            tskIDLE_PRIORITY + 3, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         delete ctx;
         connect_in_flight_.store(false);
         connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
@@ -3667,8 +3679,9 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         ArmConnectWatchdog();
         passive_ws_intent_.store(false);
         auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
-        if (xTaskCreate(&Application::OpenChannelTask, "wake_ws_open", 8192, ctx,
-                        tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+        if (xTaskCreateWithCaps(&Application::OpenChannelTask, "wake_ws_open", 8192, ctx,
+                                tskIDLE_PRIORITY + 3, nullptr,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
             delete ctx;
             connect_in_flight_.store(false);
             connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
@@ -4038,30 +4051,35 @@ void Application::RunScheduledTasks() {
     }
 }
 
-void Application::SpeakingTimeoutTask(void* arg) {
-    auto current_generation = *static_cast<uint32_t*>(arg);
-    delete static_cast<uint32_t*>(arg);
-
-    vTaskDelay(pdMS_TO_TICKS(kSpeakingTimeoutMs));
-    Application::GetInstance().Schedule([current_generation]() {
-        Application::GetInstance().HandleSpeakingTimeout(current_generation);
-    });
-    vTaskDelete(nullptr);
-}
-
 void Application::ArmSpeakingTimeout() {
     auto current_generation = speaking_generation_.load();
-    auto task_arg = new uint32_t(current_generation);
-    auto created = xTaskCreate(
-        &Application::SpeakingTimeoutTask,
-        "speaking_timeout",
-        4096,
-        task_arg,
-        tskIDLE_PRIORITY + 1,
-        nullptr);
-    if (created != pdPASS) {
-        delete task_arg;
-        ESP_LOGW(TAG, "speaking_timeout_task_failed generation=%lu", (unsigned long)current_generation);
+    speaking_timeout_generation_.store(current_generation, std::memory_order_relaxed);
+    if (speaking_timeout_timer_ == nullptr) {
+        esp_timer_create_args_t timer_args = {
+            .callback = [](void* arg) {
+                auto* app = static_cast<Application*>(arg);
+                auto generation = app->speaking_timeout_generation_.load(std::memory_order_relaxed);
+                app->Schedule([app, generation]() {
+                    app->HandleSpeakingTimeout(generation);
+                });
+            },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "speaking_timer",
+            .skip_unhandled_events = true
+        };
+        auto err = esp_timer_create(&timer_args, &speaking_timeout_timer_);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "speaking_timeout_timer_create_failed err=%s generation=%lu",
+                     esp_err_to_name(err), (unsigned long)current_generation);
+            return;
+        }
+    }
+    esp_timer_stop(speaking_timeout_timer_);
+    auto err = esp_timer_start_once(speaking_timeout_timer_, kSpeakingTimeoutMs * 1000ULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "speaking_timeout_timer_start_failed err=%s generation=%lu",
+                 esp_err_to_name(err), (unsigned long)current_generation);
     }
 }
 

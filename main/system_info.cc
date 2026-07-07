@@ -3,6 +3,7 @@
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_flash.h>
+#include <esp_heap_caps.h>
 #include <esp_mac.h>
 #include <esp_system.h>
 #include <esp_partition.h>
@@ -148,7 +149,9 @@ void SystemInfo::PrintTaskList() {
 void SystemInfo::PrintHeapStats() {
     int free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "free sram: %u minimal sram: %u", free_sram, min_free_sram);
+    int largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "free sram: %u minimal sram: %u largest_free_block: %u",
+             free_sram, min_free_sram, largest_free_block);
 }
 
 void SystemInfo::PrintPmLocks() {

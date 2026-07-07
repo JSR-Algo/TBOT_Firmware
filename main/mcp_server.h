@@ -52,7 +52,8 @@ using ReturnValue = std::variant<bool, int, std::string, cJSON*, ImageContent*>;
 enum PropertyType {
     kPropertyTypeBoolean,
     kPropertyTypeInteger,
-    kPropertyTypeString
+    kPropertyTypeString,
+    kPropertyTypeObject
 };
 
 class Property {
@@ -144,6 +145,8 @@ public:
             if (has_default_value_) {
                 cJSON_AddStringToObject(json, "default", value<std::string>().c_str());
             }
+        } else if (type_ == kPropertyTypeObject) {
+            cJSON_AddStringToObject(json, "type", "object");
         }
         
         char *json_str = cJSON_PrintUnformatted(json);

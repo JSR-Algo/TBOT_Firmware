@@ -286,6 +286,8 @@ private:
     TaskHandle_t activation_task_handle_ = nullptr;
     std::atomic<bool> tts_audio_accepting_{false};
     std::atomic<uint32_t> speaking_generation_{0};
+    std::atomic<uint32_t> speaking_timeout_generation_{0};
+    esp_timer_handle_t speaking_timeout_timer_ = nullptr; // one-shot
     std::atomic<int64_t> last_speaking_activity_ms_{0};
     std::atomic<int64_t> listening_started_ms_{0};
     std::atomic<int64_t> last_listening_activity_ms_{0};
@@ -308,7 +310,6 @@ private:
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
     void RunScheduledTasks();
-    static void SpeakingTimeoutTask(void* arg);
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);
     void HandleListeningWatchdogTick();
