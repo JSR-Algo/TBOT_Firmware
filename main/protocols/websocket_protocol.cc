@@ -90,7 +90,7 @@ bool WebsocketProtocol::Start() {
 }
 
 bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
-    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+    if (!IsAudioChannelOpened()) {
         ESP_LOGW(TAG, "Websocket SendAudio unavailable websocket=%d connected=%d payload_bytes=%u version=%d",
                  websocket_ != nullptr ? 1 : 0,
                  (websocket_ != nullptr && websocket_->IsConnected()) ? 1 : 0,
@@ -126,6 +126,9 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     } else {
         sent = websocket_->Send(packet->payload.data(), packet->payload.size(), true);
     }
+    if (sent) {
+        last_incoming_time_ = std::chrono::steady_clock::now();
+    }
     static uint32_t send_audio_count = 0;
     send_audio_count++;
     if (!sent || send_audio_count == 1 || send_audio_count % 25 == 0) {
@@ -137,7 +140,7 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
 }
 
 bool WebsocketProtocol::SendText(const std::string& text) {
-    if (websocket_ == nullptr || !websocket_->IsConnected()) {
+    if (!IsAudioChannelOpened()) {
         return false;
     }
 
@@ -171,6 +174,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     const std::string client_id = Board::GetInstance().GetUuid();
 
     error_occurred_ = false;
+    last_incoming_time_ = std::chrono::steady_clock::now();
 
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);

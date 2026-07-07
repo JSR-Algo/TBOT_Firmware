@@ -37,6 +37,7 @@ static constexpr uint32_t kListenPlaybackDrainTimeoutMs = 650;
 static constexpr uint32_t kSpeakingTimeoutMs = 12000;
 static constexpr uint32_t kTtsStopPlaybackDrainTimeoutMs = 15000;
 static constexpr uint32_t kListeningNoSpeechTimeoutMs = 15000;
+static constexpr uint32_t kListeningAutoStopMaxTurnMs = 10000;
 static constexpr uint32_t kListeningMaxTurnMs = 60000;
 static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
@@ -3683,6 +3684,14 @@ void Application::FinishWakeWordInvoke(const std::string& wake_word) {
 #if CONFIG_SEND_WAKE_WORD_DATA
     // Set the chat state to wake word detected
     protocol_->SendWakeWordDetected(wake_word);
+    if (!protocol_->IsAudioChannelOpened()) {
+        ESP_LOGW(TAG, "wake_detect_send_failed -> reopen audio channel");
+        SetDeviceState(kDeviceStateConnecting);
+        Schedule([this, wake_word]() {
+            ContinueWakeWordInvoke(wake_word);
+        });
+        return;
+    }
     SetListeningMode(kListeningModeAutoStop);
     // Send buffered wake audio only after the state event has sent listen/start.
     Schedule([this]() {
@@ -3754,7 +3763,10 @@ void Application::HandleListeningWatchdogTick() {
     const uint32_t idle_limit_ms = listening_mode_ == kListeningModeAutoStop
         ? kListeningNoSpeechTimeoutMs
         : kListeningMaxTurnMs;
-    if (idle_ms < idle_limit_ms && turn_ms < kListeningMaxTurnMs) {
+    const uint32_t turn_limit_ms = listening_mode_ == kListeningModeAutoStop
+        ? kListeningAutoStopMaxTurnMs
+        : kListeningMaxTurnMs;
+    if (idle_ms < idle_limit_ms && turn_ms < turn_limit_ms) {
         return;
     }
 
@@ -3895,6 +3907,16 @@ void Application::HandleStateChangedEvent() {
             }
 
             protocol_->SendStartListening(listening_mode_);
+            if (!protocol_->IsAudioChannelOpened()) {
+                ESP_LOGW(TAG, "listen_start_send_failed -> reconnect");
+                ListeningMode mode = listening_mode_;
+                audio_service_.EnableVoiceProcessing(false);
+                SetDeviceState(kDeviceStateConnecting);
+                Schedule([this, mode]() {
+                    ContinueOpenAudioChannel(mode);
+                });
+                break;
+            }
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {

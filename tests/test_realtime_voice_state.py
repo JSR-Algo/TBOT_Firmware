@@ -567,6 +567,36 @@ def test_protocol_idle_timeout_is_below_server_idle_close_window():
     assert "const int kTimeoutSeconds = 30;" not in timeout_body
 
 
+def test_websocket_open_resets_idle_timer_before_hello_send():
+    websocket_cc = read("main/protocols/websocket_protocol.cc")
+
+    open_start = websocket_cc.index("bool WebsocketProtocol::OpenAudioChannel()")
+    open_end = websocket_cc.index("std::string WebsocketProtocol::GetHelloMessage", open_start)
+    open_body = websocket_cc[open_start:open_end]
+
+    assert "last_incoming_time_ = std::chrono::steady_clock::now();" in open_body
+    reset_idx = open_body.index("last_incoming_time_ = std::chrono::steady_clock::now();")
+    create_idx = open_body.index("websocket_ = network->CreateWebSocket(1);")
+    hello_idx = open_body.index("if (!SendText(message))")
+
+    assert reset_idx < create_idx < hello_idx
+
+
+def test_websocket_audio_uplink_refreshes_timeout_activity_after_successful_send():
+    websocket_cc = read("main/protocols/websocket_protocol.cc")
+
+    send_audio_start = websocket_cc.index("bool WebsocketProtocol::SendAudio")
+    send_audio_end = websocket_cc.index("bool WebsocketProtocol::SendText", send_audio_start)
+    send_audio_body = websocket_cc[send_audio_start:send_audio_end]
+
+    assert "if (sent) {" in send_audio_body
+    assert "last_incoming_time_ = std::chrono::steady_clock::now();" in send_audio_body
+    refresh_idx = send_audio_body.index("last_incoming_time_ = std::chrono::steady_clock::now();")
+    log_idx = send_audio_body.index("static uint32_t send_audio_count = 0;")
+
+    assert refresh_idx < log_idx
+
+
 def test_lesson_owned_turns_ignore_wake_word_hijack():
     app_cc = read("main/application.cc")
 
@@ -1229,6 +1259,74 @@ def test_listening_watchdog_exits_stale_autostop_turns():
     assert "protocol_->SendStopListening();" in watchdog_body
     assert "audio_service_.EnableVoiceProcessing(false);" in watchdog_body
     assert "SetDeviceState(kDeviceStateIdle);" in watchdog_body
+
+
+def test_autostop_listening_has_shorter_hard_cap_than_manual_turns():
+    app_cc = read("main/application.cc")
+
+    assert "kListeningAutoStopMaxTurnMs" in app_cc
+    assert "kListeningMaxTurnMs" in app_cc
+    assert "kListeningAutoStopMaxTurnMs = 10000" in app_cc
+    assert "kListeningMaxTurnMs = 60000" in app_cc
+
+    watchdog_start = app_cc.index("void Application::HandleListeningWatchdogTick")
+    watchdog_end = app_cc.index("void Application::HandleStateChangedEvent", watchdog_start)
+    watchdog_body = app_cc[watchdog_start:watchdog_end]
+
+    assert "turn_limit_ms" in watchdog_body
+    assert "listening_mode_ == kListeningModeAutoStop" in watchdog_body
+    assert "kListeningAutoStopMaxTurnMs" in watchdog_body
+    assert "turn_ms < turn_limit_ms" in watchdog_body
+
+
+def test_wake_reopens_if_detect_frame_hits_stale_websocket():
+    app_cc = read("main/application.cc")
+    websocket_cc = read("main/protocols/websocket_protocol.cc")
+
+    send_audio_start = websocket_cc.index("bool WebsocketProtocol::SendAudio")
+    send_audio_end = websocket_cc.index("bool WebsocketProtocol::SendText", send_audio_start)
+    send_audio_body = websocket_cc[send_audio_start:send_audio_end]
+    assert "!IsAudioChannelOpened()" in send_audio_body
+    assert send_audio_body.index("!IsAudioChannelOpened()") < send_audio_body.index(
+        "const size_t payload_size"
+    )
+
+    send_text_start = websocket_cc.index("bool WebsocketProtocol::SendText")
+    send_text_end = websocket_cc.index("bool WebsocketProtocol::IsAudioChannelOpened", send_text_start)
+    send_text_body = websocket_cc[send_text_start:send_text_end]
+    assert "!IsAudioChannelOpened()" in send_text_body
+    assert send_text_body.index("!IsAudioChannelOpened()") < send_text_body.index(
+        "websocket_->Send(text)"
+    )
+
+    finish_start = app_cc.index("void Application::FinishWakeWordInvoke")
+    finish_end = app_cc.index("static const char* ConnectStateScreenCopy", finish_start)
+    finish_body = app_cc[finish_start:finish_end]
+
+    send_detect_idx = finish_body.index("protocol_->SendWakeWordDetected(wake_word);")
+    reconnect_idx = finish_body.index("ContinueWakeWordInvoke(wake_word);", send_detect_idx)
+    listen_idx = finish_body.index("SetListeningMode(kListeningModeAutoStop);")
+
+    assert "wake_detect_send_failed -> reopen audio channel" in finish_body
+    assert send_detect_idx < reconnect_idx < listen_idx
+    assert "SetDeviceState(kDeviceStateConnecting);" in finish_body[send_detect_idx:reconnect_idx]
+
+
+def test_listening_start_reconnects_if_listen_start_hits_stale_websocket():
+    app_cc = read("main/application.cc")
+
+    listening_start = app_cc.index("case kDeviceStateListening:")
+    speaking_start = app_cc.index("case kDeviceStateSpeaking:", listening_start)
+    listening_body = app_cc[listening_start:speaking_start]
+
+    send_start_idx = listening_body.index("protocol_->SendStartListening(listening_mode_);")
+    reconnect_idx = listening_body.index("ContinueOpenAudioChannel(mode);", send_start_idx)
+    enable_vp_idx = listening_body.index("audio_service_.EnableVoiceProcessing(true);")
+
+    assert "listen_start_send_failed -> reconnect" in listening_body
+    assert send_start_idx < reconnect_idx < enable_vp_idx
+    assert "SetDeviceState(kDeviceStateConnecting);" in listening_body[send_start_idx:reconnect_idx]
+    assert "audio_service_.EnableVoiceProcessing(false);" in listening_body[send_start_idx:reconnect_idx]
 
 
 def test_listening_watchdog_timeout_is_child_visible_before_idle():
