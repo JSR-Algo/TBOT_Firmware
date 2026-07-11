@@ -14,6 +14,7 @@
 #include "assets/lang_config.h"
 #include "protocol.h"
 #include "lesson_handler.h"
+#include "lesson_motion_presets.h"
 // US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
 // SetLessonBackground (the new persistent full-screen draw) and LvglAllocatedImage is
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
@@ -1327,6 +1328,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
         return;
     }
 
+    bool motion_degraded = false;
+    const char* entry_motion = Str(Obj(body, "motion"), "present");
+    if (entry_motion != nullptr) {
+        motion_degraded = DispatchLessonMotionPreset(robot_uart_, entry_motion) ==
+                          LessonMotionResult::kDegraded;
+    }
+
     // Resolve the display once and require it to be an LvglDisplay (the only class with
     // a real image draw path; OledDisplay/NoDisplay get caption-only). dynamic_cast
     // mirrors mcp_server.cc:255 and yields nullptr on non-LVGL boards.
@@ -1428,8 +1436,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
 
     // §7.5 degraded semantics: false only when all authored visual layers exist and drew.
     // Missing optional object/overlay sources use caption/emoji fallback and stay degraded.
-    const bool degraded = !(poster_drew && has_object_src && object_drew &&
-                            has_overlay_src && overlay_drew);
+    const bool degraded = motion_degraded ||
+        !(poster_drew && has_object_src && object_drew && has_overlay_src && overlay_drew);
 
     // Marshal the draw onto the LVGL task, exactly like the TTS-display pattern
     // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption are

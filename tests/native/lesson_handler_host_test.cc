@@ -20,7 +20,9 @@
 #include "assets.h"
 #include "jpeg_to_image.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "lesson_handler.h"
+#include "lesson_motion_presets.h"
 
 #include <cJSON.h>
 
@@ -3268,6 +3270,94 @@ void test_protocol_null_send_skip() {
     App().HostReset();  // restore protocol_ for any later test
 }
 
+void test_safe_motion_presets_and_auto_rest() {
+    ResetObservable();
+    HostEspTimerCreateOk() = false;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "listen") == LessonMotionResult::kDegraded,
+            "timer creation failure degrades");
+    HostEspTimerCreateOk() = true;
+
+    struct Case { const char* preset; std::vector<std::string> calls; };
+    const std::vector<Case> cases = {
+        {"rest", {"both_arms_lower", "head_center"}},
+        {"teach", {"right_arm_raise", "head_center"}},
+        {"presentLeft", {"head_turn_left"}},
+        {"presentRight", {"head_turn_right"}},
+        {"listen", {"head_center"}},
+        {"thinking", {"head_turn_left"}},
+        {"encourage", {"right_arm_raise"}},
+        {"tryAgain", {"head_center"}},
+        {"celebrate", {"both_arms_raise"}},
+        {"goodbye", {"right_arm_raise"}},
+    };
+    for (const auto& tc : cases) {
+        ResetObservable();
+        const auto result = DispatchLessonMotionPreset(App().robot_uart_, tc.preset);
+        require(result == LessonMotionResult::kApplied, "named motion preset applies");
+        require(App().robot_uart_.calls == tc.calls, "named preset exact RobotUart call order");
+        if (std::string(tc.preset) != "rest") {
+            HostEspFireTimer();
+            auto expected = tc.calls;
+            expected.push_back("both_arms_lower");
+            expected.push_back("head_center");
+            require(App().robot_uart_.calls == expected, "bounded preset auto-rests");
+        }
+    }
+}
+
+void test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades() {
+    ResetObservable();
+    require(DispatchLessonMotionPreset(App().robot_uart_, nullptr) == LessonMotionResult::kDegraded,
+            "null preset degrades");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "wave") == LessonMotionResult::kDegraded,
+            "unknown preset degrades");
+    require(App().robot_uart_.calls.empty(), "unknown preset sends nothing");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "90") == LessonMotionResult::kDegraded,
+            "raw-looking value degrades");
+
+    App().robot_uart_.send_ok = false;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "teach") == LessonMotionResult::kDegraded,
+            "UART send failure degrades");
+    App().robot_uart_.send_ok = true;
+
+    HostEspTimerStartOk() = false;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "listen") == LessonMotionResult::kDegraded,
+            "timer failure degrades");
+    HostEspTimerStartOk() = true;
+
+    App().robot_uart_.calls.clear();
+    require(DispatchLessonMotionPreset(App().robot_uart_, "celebrate") == LessonMotionResult::kApplied,
+            "first bounded preset applies");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "presentLeft") == LessonMotionResult::kApplied,
+            "new preset cancels stale rest");
+    HostEspFireTimer();
+    const std::vector<std::string> expected = {
+        "both_arms_raise", "head_turn_left", "both_arms_lower", "head_center"};
+    require(App().robot_uart_.calls == expected, "only newest generation auto-rest runs");
+}
+
+void test_step_reads_only_body_motion_present_and_motion_degrades_ack() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    App().robot_uart_.send_ok = true;
+    int seq = OpenSession();
+    const std::string extra =
+        ",\"motion\":{\"present\":\"teach\",\"angle\":90,\"percent\":50,\"step\":2,\"delay\":1},"
+        "\"outcomeMotion\":{\"present\":\"celebrate\"},\"motionPreset\":\"goodbye\"";
+    Handle(StepFrame(seq, "motion", "http://poster", "http://object", "http://overlay", extra));
+    const std::vector<std::string> expected = {"right_arm_raise", "head_center"};
+    require(App().robot_uart_.calls == expected, "step entry reads only motion.present");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "bad-motion", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"rawSweep\",\"angle\":90}"));
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "unknown motion is nonfatal");
+    require(FrameBodyBool(Sent().size() - 1, "degraded", false), "unknown motion marks ack degraded");
+}
+
 }  // namespace
 
 int main() {
@@ -3345,6 +3435,9 @@ int main() {
     test_flashed_poster_without_draw_is_not_drawn();
     test_remaining_reachable_branches();
     test_protocol_null_send_skip();
+    test_safe_motion_presets_and_auto_rest();
+    test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
+    test_step_reads_only_body_motion_present_and_motion_degrades_ack();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }

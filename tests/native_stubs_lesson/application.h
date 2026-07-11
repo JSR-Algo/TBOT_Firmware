@@ -9,6 +9,7 @@
 // device Schedule() marshals onto the LVGL/app task; the pixel pipeline that runs there
 // is ESP32-S3 hardware (CP-7) and is out of host scope.
 #include "protocol.h"
+#include "robot_uart.h"
 
 #include <cJSON.h>
 
@@ -47,6 +48,7 @@ public:
         lesson_interactive_listen_generation = 0;
         play_sound_calls = 0;
         last_sound = "";
+        robot_uart_.Reset();
     }
 
     // ---- members the renderer touches ----
@@ -67,6 +69,7 @@ public:
     uint32_t lesson_interactive_listen_generation = 0;
     int play_sound_calls = 0;
     std::string last_sound;
+    RobotUart robot_uart_;
 
     void Schedule(std::function<void()>&& cb) {
         schedule_calls++;
