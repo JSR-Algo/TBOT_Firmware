@@ -49,6 +49,16 @@ mkdir -p "${BUILD_DIR}/src"
 # coverage we measure is of the REAL source. gcovr maps it back via the original path.
 cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
 cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
+cp main/lesson_layer_state.cc "${BUILD_DIR}/src/lesson_layer_state.cc"
+
+"${CXX}" -std=c++17 -O0 -g --coverage \
+    -Itests/native_stubs_lesson \
+    -Imain \
+    tests/native/lesson_layer_state_test.cc \
+    "${BUILD_DIR}/src/lesson_layer_state.cc" \
+    -o "${BUILD_DIR}/lesson_layer_state_test"
+
+"${BUILD_DIR}/lesson_layer_state_test"
 
 "${CXX}" -std=c++17 -O0 -g --coverage \
     -DTBOT_HOST_NATIVE_COVERAGE \
@@ -59,6 +69,7 @@ cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
     tests/native/lesson_handler_host_test.cc \
     "${BUILD_DIR}/src/lesson_handler.cc" \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \
+    "${BUILD_DIR}/src/lesson_layer_state.cc" \
     "${CJSON_DIR}/cJSON.c" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 
@@ -69,6 +80,7 @@ cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
     --object-directory "${BUILD_DIR}" \
     --filter '.*lesson_handler\.cc' \
     --filter '.*lesson_motion_presets\.cc' \
+    --filter '.*lesson_layer_state\.cc' \
     --fail-under-line 100 \
     --print-summary \
     "$@"

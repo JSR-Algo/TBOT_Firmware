@@ -15,6 +15,7 @@
 #include "protocol.h"
 #include "lesson_handler.h"
 #include "lesson_motion_presets.h"
+#include "lesson_layer_state.h"
 // US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
 // SetLessonBackground (the new persistent full-screen draw) and LvglAllocatedImage is
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
@@ -228,8 +229,10 @@ struct LessonSession {
     std::string last_ack_asset_pack_json;
     int64_t     prepare_ack_sequence = 0;   // prepare assetPack replay survives later lifecycle acks
     std::string prepare_ack_asset_pack_json;
+    std::string last_ack_telemetry_json;
 };
 LessonSession g_session;
+LessonLayerState g_layer_state;
 
 void ClearTerminalLessonCursor() {
     // A completed/failed lesson is terminal. The server may reuse the same assignmentId
@@ -242,6 +245,7 @@ void ClearTerminalLessonCursor() {
     g_session.last_ack_asset_pack_json.clear();
     g_session.prepare_ack_sequence = 0;
     g_session.prepare_ack_asset_pack_json.clear();
+    g_session.last_ack_telemetry_json.clear();
     g_session.assignment_version = -1.0;
 }
 
@@ -335,12 +339,10 @@ bool IsJpegImage(const void* data, size_t size) {
 }
 
 constexpr size_t kMaxLessonImageBytes = 512 * 1024;
-constexpr size_t kMaxLessonDecodedImageBytes = 320 * 240 * 2;
+constexpr size_t kMaxLessonDecodedImageBytes = 480 * 320 * 2;
 constexpr size_t kMaxLessonAssetPackAssets = 64;
 constexpr size_t kMaxLessonAssetPackDeclaredBytes = 4 * 1024 * 1024;
 constexpr int kLessonImageHttpTimeoutMs = 1200;
-constexpr size_t kLessonImageCacheMaxEntries = 8;
-constexpr size_t kLessonImageCacheMaxBytes = 384 * 1024;
 constexpr int64_t kLessonRenderElapsedMaxMs = 60000;
 
 bool LessonDecodedImageFitsBudget(size_t decoded_len, size_t width, size_t height, size_t stride) {
@@ -375,6 +377,21 @@ std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_len
             return nullptr;
         }
 
+        // GCOVR_EXCL_START: host JPEG stub emits tiny buffers; device-only PSRAM move.
+        if (ret == ESP_OK && decoded_data != nullptr &&
+            decoded_len > kLessonSmallInternalAllocationThreshold) {
+            auto* psram_data = static_cast<uint8_t*>(
+                heap_caps_malloc(decoded_len, LessonAllocationCaps(decoded_len)));
+            if (psram_data == nullptr) {
+                heap_caps_free(decoded_data);
+                return nullptr;
+            }
+            memcpy(psram_data, decoded_data, decoded_len);
+            heap_caps_free(decoded_data);
+            decoded_data = psram_data;
+        }
+        // GCOVR_EXCL_STOP
+
         try {
             return std::make_unique<LvglAllocatedImage>(decoded_data, decoded_len,
                                                         static_cast<int>(width),
@@ -403,127 +420,6 @@ std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_len
         return nullptr;
     }
 }
-
-// GCOVR_EXCL_START: exercised by host behavior tests, but OOM/LRU defensive branches
-// are not useful to exhaustively line-cover in the native harness.
-struct LessonImageCacheEntry {
-    std::string url;
-    char* data = nullptr;
-    size_t size = 0;
-    uint32_t last_used = 0;
-};
-LessonImageCacheEntry g_lesson_image_cache[kLessonImageCacheMaxEntries];
-size_t g_lesson_image_cache_bytes = 0;
-uint32_t g_lesson_image_cache_clock = 0;
-
-void FreeLessonImageCacheEntry(LessonImageCacheEntry& entry) {
-    if (entry.data != nullptr) {
-        heap_caps_free(entry.data);
-    }
-    entry.url.clear();
-    entry.data = nullptr;
-    entry.size = 0;
-    entry.last_used = 0;
-}
-
-void ClearLessonImageCache() {
-    for (auto& entry : g_lesson_image_cache) {
-        FreeLessonImageCacheEntry(entry);
-    }
-    g_lesson_image_cache_bytes = 0;
-}
-
-void EvictLessonImageCacheEntry(size_t index) {
-    if (index >= kLessonImageCacheMaxEntries) return;
-    LessonImageCacheEntry& entry = g_lesson_image_cache[index];
-    if (entry.data == nullptr) return;
-    if (g_lesson_image_cache_bytes >= entry.size) {
-        g_lesson_image_cache_bytes -= entry.size;
-    } else {
-        g_lesson_image_cache_bytes = 0;
-    }
-    FreeLessonImageCacheEntry(entry);
-}
-
-int FindLessonImageCacheEntry(const char* url) {
-    if (url == nullptr) return -1;
-    for (size_t i = 0; i < kLessonImageCacheMaxEntries; ++i) {
-        if (g_lesson_image_cache[i].data != nullptr && g_lesson_image_cache[i].url == url) {
-            return static_cast<int>(i);
-        }
-    }
-    return -1;
-}
-
-int FindLessonImageCacheSlot() {
-    for (size_t i = 0; i < kLessonImageCacheMaxEntries; ++i) {
-        if (g_lesson_image_cache[i].data == nullptr) return static_cast<int>(i);
-    }
-    size_t lru_index = 0;
-    uint32_t lru_stamp = g_lesson_image_cache[0].last_used;
-    for (size_t i = 1; i < kLessonImageCacheMaxEntries; ++i) {
-        if (g_lesson_image_cache[i].last_used < lru_stamp) {
-            lru_stamp = g_lesson_image_cache[i].last_used;
-            lru_index = i;
-        }
-    }
-    return static_cast<int>(lru_index);
-}
-
-char* CloneLessonImageBytes(const char* data, size_t size) {
-    if (data == nullptr || size == 0 || size > kMaxLessonImageBytes) return nullptr;
-    char* copy = static_cast<char*>(heap_caps_malloc(size, MALLOC_CAP_8BIT));
-    if (copy == nullptr) return nullptr;
-    memcpy(copy, data, size);
-    return copy;
-}
-
-std::unique_ptr<LvglImage> LessonImageCacheLookup(const char* url) {
-    int index = FindLessonImageCacheEntry(url);
-    if (index < 0) return nullptr;
-    LessonImageCacheEntry& entry = g_lesson_image_cache[index];
-    char* copy = CloneLessonImageBytes(entry.data, entry.size);
-    if (copy == nullptr) {
-        ESP_LOGW(TAG, "lesson image fetch: cache clone failed");
-        return nullptr;
-    }
-    entry.last_used = ++g_lesson_image_cache_clock;
-    ESP_LOGI(TAG, "lesson image fetch: cache hit");
-    return DecodeLessonImageBytes(copy, entry.size, "lesson image cache");
-}
-
-void LessonImageCacheStore(const char* url, const char* data, size_t size) {
-    if (url == nullptr || url[0] == '\0' || data == nullptr || size == 0) return;
-    if (size > kMaxLessonImageBytes || size > kLessonImageCacheMaxBytes) return;
-
-    int existing = FindLessonImageCacheEntry(url);
-    if (existing >= 0) {
-        EvictLessonImageCacheEntry(static_cast<size_t>(existing));
-    }
-    while (g_lesson_image_cache_bytes + size > kLessonImageCacheMaxBytes) {
-        int evict = FindLessonImageCacheSlot();
-        if (evict < 0 || g_lesson_image_cache[evict].data == nullptr) break;
-        EvictLessonImageCacheEntry(static_cast<size_t>(evict));
-    }
-    int slot = FindLessonImageCacheSlot();
-    if (slot < 0) return;
-    if (g_lesson_image_cache[slot].data != nullptr) {
-        EvictLessonImageCacheEntry(static_cast<size_t>(slot));
-    }
-
-    char* copy = CloneLessonImageBytes(data, size);
-    if (copy == nullptr) {
-        ESP_LOGW(TAG, "lesson image fetch: cache store alloc failed");
-        return;
-    }
-    LessonImageCacheEntry& entry = g_lesson_image_cache[slot];
-    entry.url = url;
-    entry.data = copy;
-    entry.size = size;
-    entry.last_used = ++g_lesson_image_cache_clock;
-    g_lesson_image_cache_bytes += size;
-}
-// GCOVR_EXCL_STOP
 
 constexpr const char* kLessonAssetPackRoot = "/sdcard/tbot/lesson-assets/";
 
@@ -593,7 +489,7 @@ std::unique_ptr<LvglImage> FetchLessonLocalImage(const char* url) {
     rewind(fp);
 
     size_t content_length = static_cast<size_t>(file_size);
-    char* data = static_cast<char*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
+    char* data = static_cast<char*>(heap_caps_malloc(content_length, LessonAllocationCaps(content_length)));
     if (data == nullptr) {
         ESP_LOGW(TAG, "lesson image file: alloc %u failed", (unsigned)content_length);
         fclose(fp);
@@ -730,10 +626,6 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         return FetchLessonLocalImage(canonical_url);
     }
 
-    if (auto cached = LessonImageCacheLookup(canonical_url)) {
-        return cached;
-    }
-
     auto* network = Board::GetInstance().GetNetwork();
     if (network == nullptr) {
         ESP_LOGW(TAG, "lesson image fetch: no network");
@@ -764,7 +656,7 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
             http->Close();
             return nullptr;
         }
-        data = static_cast<char*>(heap_caps_malloc(content_length, MALLOC_CAP_8BIT));
+        data = static_cast<char*>(heap_caps_malloc(content_length, LessonAllocationCaps(content_length)));
         if (data == nullptr) {
             ESP_LOGW(TAG, "lesson image fetch: alloc %u failed", (unsigned)content_length);
             http->Close();
@@ -793,7 +685,7 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         // images): grow-as-you-read until EOF, capped (deep-audit #5: GetBodyLength()
         // == 0 was misread as "empty body" so chunked posters never rendered).
         size_t cap = 16 * 1024;
-        data = static_cast<char*>(heap_caps_malloc(cap, MALLOC_CAP_8BIT));
+        data = static_cast<char*>(heap_caps_malloc(cap, LessonAllocationCaps(cap)));
         if (data == nullptr) {
             ESP_LOGW(TAG, "lesson image fetch: alloc %u failed", (unsigned)cap);
             http->Close();
@@ -810,13 +702,15 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
                 }
                 size_t new_cap = cap * 2;
                 if (new_cap > kMaxLessonImageBytes) new_cap = kMaxLessonImageBytes;
-                char* grown = static_cast<char*>(heap_caps_realloc(data, new_cap, MALLOC_CAP_8BIT));
+                char* grown = static_cast<char*>(heap_caps_malloc(new_cap, LessonAllocationCaps(new_cap)));
                 if (grown == nullptr) {
                     ESP_LOGW(TAG, "lesson image fetch: realloc %u failed", (unsigned)new_cap);
                     heap_caps_free(data);
                     http->Close();
                     return nullptr;
                 }
+                memcpy(grown, data, total_read);
+                heap_caps_free(data);
                 data = grown;
                 cap = new_cap;
             }
@@ -839,7 +733,6 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
         content_length = total_read;
     }
 
-    LessonImageCacheStore(canonical_url, data, content_length);
     return DecodeLessonImageBytes(data, content_length, "lesson image fetch");
 }
 
@@ -882,7 +775,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // ackFor field. stepId is echoed (null on lifecycle, "s4" on a step).
     auto emit_ack = [&emit](const cJSON* in, int64_t acked, bool rendered, bool degraded,
                             cJSON* asset_pack_ack = nullptr, bool cache = true,
-                            int64_t render_elapsed_ms = -1) {
+                            int64_t render_elapsed_ms = -1, cJSON* telemetry = nullptr) {
         cJSON* b = cJSON_CreateObject();
         cJSON_AddNumberToObject(b, "acks", static_cast<double>(acked));
         cJSON_AddBoolToObject(b, "rendered", rendered);
@@ -898,6 +791,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.last_ack_rendered = rendered;
             g_session.last_ack_degraded = degraded;
             g_session.last_ack_asset_pack_json.clear();
+            g_session.last_ack_telemetry_json.clear();
             if (asset_pack_ack != nullptr) {
                 char* printed = cJSON_PrintUnformatted(asset_pack_ack);
                 if (printed != nullptr) {
@@ -910,8 +804,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     cJSON_free(printed);
                 }
             }
+            if (telemetry != nullptr) {
+                char* printed = cJSON_PrintUnformatted(telemetry);
+                if (printed != nullptr) {
+                    g_session.last_ack_telemetry_json = printed;
+                    cJSON_free(printed);
+                }
+            }
         }
         if (asset_pack_ack != nullptr) cJSON_AddItemToObject(b, "assetPack", asset_pack_ack);
+        if (telemetry != nullptr) cJSON_AddItemToObject(b, "telemetry", telemetry);
         emit(in, "lesson_ack", b);
     };
     auto show_lesson_failure_display = [this]() {
@@ -922,6 +824,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->SetStatus(Lang::Strings::ERROR);
@@ -945,7 +848,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
+        g_layer_state.ClearAll();
         ClearTerminalLessonCursor();
+        g_layer_state.ClearAll();
         show_lesson_failure_display();
     };
     auto clear_stale_lesson_for_fresh_prepare = [this]() {
@@ -959,6 +864,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
@@ -1003,7 +909,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
         // lesson_prepare (re)establishes the single active session and resets the
         // F->S counter + the inbound sequence cursor for this assignment.
         clear_stale_lesson_for_fresh_prepare();
-        ClearLessonImageCache();
         g_session = LessonSession{};
         g_session.assignment_id = assignment_id;
         g_session.session_id = session_id;
@@ -1096,15 +1001,20 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool re_degraded = (sequence == g_session.last_ack_sequence)
                                      ? g_session.last_ack_degraded : false;
         cJSON* re_asset_pack = nullptr;
+        cJSON* re_telemetry = nullptr;
         if (sequence == g_session.last_ack_sequence && !g_session.last_ack_asset_pack_json.empty()) {
             re_asset_pack = cJSON_Parse(g_session.last_ack_asset_pack_json.c_str());
         } else if (is_prepare && sequence == g_session.prepare_ack_sequence &&
                    !g_session.prepare_ack_asset_pack_json.empty()) {
             re_asset_pack = cJSON_Parse(g_session.prepare_ack_asset_pack_json.c_str());
         }
+        if (sequence == g_session.last_ack_sequence && !g_session.last_ack_telemetry_json.empty()) {
+            re_telemetry = cJSON_Parse(g_session.last_ack_telemetry_json.c_str());
+        }
         ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; re-acking rendered=%d degraded=%d",
                  (long long)sequence, re_rendered, re_degraded);
-        emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack, /*cache*/ false);
+        emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack, /*cache*/ false,
+                 -1, re_telemetry);
         return;
     }
     if (is_step && g_session.paused) {
@@ -1140,6 +1050,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         Application::GetInstance().SetLessonRuntimeActive(true);
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
+        g_layer_state.ClearAll();
         // Clear stale layers, enter lesson mode, then show a short child-visible loading
         // cue until the first real lesson_step redraws the authored scene.
         Display* start_display = Board::GetInstance().GetDisplay();
@@ -1149,6 +1060,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (start_lvgl) start_lvgl->SetLessonBackground(nullptr);
                 if (start_lvgl) start_lvgl->SetLessonObject(nullptr);
                 if (start_lvgl) start_lvgl->SetLessonRobotOverlay(nullptr);
+                if (start_lvgl) start_lvgl->SetLessonTeachingWord("");
                 start_display->SetLessonCaption("");
                 start_display->ClearChatMessages();
                 if (start_lvgl) start_lvgl->SetLessonMode(true);
@@ -1170,6 +1082,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
@@ -1192,6 +1105,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
@@ -1229,6 +1143,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
+        g_layer_state.ClearAll();
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
         ClearTerminalLessonCursor();
         // Return the robot display to its realtime face surface (protocol §4.6):
@@ -1240,6 +1155,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->SetStatus(stop_status);
@@ -1302,8 +1218,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // only through FetchLessonImage(); a poster that is merely flashed-present but never
     // decoded/drawn is treated as not-drawn (see the poster_drew block below).
     const char* poster_src = Str(Obj(bg, "poster"), "src");
+    const char* poster_key = Str(Obj(bg, "poster"), "key");
     const char* object_src = Str(Obj(to, "asset"), "src");
+    const char* object_key = Str(Obj(to, "asset"), "key");
     const char* overlay_src = Str(Obj(ro, "asset"), "src");
+    const char* overlay_key = Str(Obj(ro, "asset"), "key");
     const bool has_object_src = !Blank(object_src);
     const bool has_overlay_src = !Blank(overlay_src);
     const char* prompt = Str(body, "prompt");
@@ -1325,6 +1244,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
         end_lesson_after_failure();
         emit(root, "lesson_error", eb);
         ESP_LOGW(TAG, "lesson_step rejected: missing required scene or poster image source");
+        return;
+    }
+
+    const cJSON* teaching_word = Obj(body, "teachingWord");
+    const char* teaching_word_value = Str(teaching_word, "displayText");
+    if (Blank(teaching_word_value)) teaching_word_value = Str(teaching_word, "text");
+    std::string normalized_teaching_word;
+    if (!NormalizeLessonTeachingWord(teaching_word_value, normalized_teaching_word)) {
+        cJSON* eb = MakeErrorBody("LESSON_FRAME_INVALID",
+                                  "teachingWord displayText exceeds 12 codepoints or is invalid UTF-8",
+                                  false, "teachingWord");
+        end_lesson_after_failure();
+        emit(root, "lesson_error", eb);
         return;
     }
 
@@ -1351,9 +1283,30 @@ void Application::HandleLessonMessage(const cJSON* root) {
 
     // Try to fetch + decode the authored poster. On any failure FetchLessonImage
     // returns nullptr and we fall through to the caption-only render (never crash).
-    bool poster_drew = false;
+    const LessonLayerPlan background_plan =
+        g_layer_state.Plan(LessonLayer::kBackground, poster_key, poster_src);
+    const LessonLayerPlan object_plan =
+        g_layer_state.Plan(LessonLayer::kObject, object_key, object_src);
+    const LessonLayerPlan overlay_plan =
+        g_layer_state.Plan(LessonLayer::kOverlay, overlay_key, overlay_src);
+    if (lvgl_display != nullptr) {
+        if (background_plan.clear_before_load) {
+            lvgl_display->SetLessonBackground(nullptr);
+            g_layer_state.Clear(LessonLayer::kBackground);
+        }
+        if (object_plan.clear_before_load || (!has_object_src && g_layer_state.Has(LessonLayer::kObject))) {
+            lvgl_display->SetLessonObject(nullptr);
+            g_layer_state.Clear(LessonLayer::kObject);
+        }
+        if (overlay_plan.clear_before_load || (!has_overlay_src && g_layer_state.Has(LessonLayer::kOverlay))) {
+            lvgl_display->SetLessonRobotOverlay(nullptr);
+            g_layer_state.Clear(LessonLayer::kOverlay);
+        }
+    }
+
+    bool poster_drew = background_plan.reused;
     if (lvgl_display != nullptr && poster_src != nullptr) {
-        std::unique_ptr<LvglImage> bg_image = FetchLessonImage(poster_src);
+        std::unique_ptr<LvglImage> bg_image = background_plan.reused ? nullptr : FetchLessonImage(poster_src);
         if (bg_image != nullptr) {
             // Marshal the persistent full-screen draw onto the LVGL/app task (the LVGL
             // object tree is owned there). Schedule() takes a COPYABLE std::function, so
@@ -1366,8 +1319,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 lvgl_display->SetLessonBackground(std::unique_ptr<LvglImage>(raw_bg));
             });
             poster_drew = true;
+            g_layer_state.Commit(LessonLayer::kBackground, poster_key, poster_src);
             ESP_LOGI(TAG, "lesson_step poster fetched+drawn from URL");
-        } else {
+        } else if (!background_plan.reused) {
             ESP_LOGW(TAG, "lesson_step poster fetch failed; caption-only fallback");
         }
     }
@@ -1377,31 +1331,33 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // invisible poster as drawn (degraded=false) and suppressed the stale-poster clear
     // (clear_bg = !poster_drew). A poster with no real draw path must stay not-drawn so
     // the honest degraded ack fires and the previous-step background is cleared.
-    bool object_drew = false;
+    bool object_drew = object_plan.reused && has_object_src;
     if (lvgl_display != nullptr && has_object_src) {
-        std::unique_ptr<LvglImage> object_image = FetchLessonImage(object_src);
+        std::unique_ptr<LvglImage> object_image = object_plan.reused ? nullptr : FetchLessonImage(object_src);
         if (object_image != nullptr) {
             LvglImage* raw_object = object_image.release();
             Schedule([lvgl_display, raw_object]() {
                 lvgl_display->SetLessonObject(std::unique_ptr<LvglImage>(raw_object));
             });
             object_drew = true;
+            g_layer_state.Commit(LessonLayer::kObject, object_key, object_src);
             ESP_LOGI(TAG, "lesson_step teaching object fetched+drawn from URL");
-        } else {
+        } else if (!object_plan.reused) {
             ESP_LOGW(TAG, "lesson_step teaching object fetch failed; caption fallback");
         }
     }
-    bool overlay_drew = false;
+    bool overlay_drew = overlay_plan.reused && has_overlay_src;
     if (lvgl_display != nullptr && has_overlay_src) {
-        std::unique_ptr<LvglImage> overlay_image = FetchLessonImage(overlay_src);
+        std::unique_ptr<LvglImage> overlay_image = overlay_plan.reused ? nullptr : FetchLessonImage(overlay_src);
         if (overlay_image != nullptr) {
             LvglImage* raw_overlay = overlay_image.release();
             Schedule([lvgl_display, raw_overlay]() {
                 lvgl_display->SetLessonRobotOverlay(std::unique_ptr<LvglImage>(raw_overlay));
             });
             overlay_drew = true;
+            g_layer_state.Commit(LessonLayer::kOverlay, overlay_key, overlay_src);
             ESP_LOGI(TAG, "lesson_step robot overlay fetched+drawn from URL");
-        } else {
+        } else if (!overlay_plan.reused) {
             ESP_LOGW(TAG, "lesson_step robot overlay fetch failed; emoji fallback");
         }
     }
@@ -1453,11 +1409,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool clear_object = !object_drew;
         const bool clear_overlay = !overlay_drew;
         Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
-                  has_visible_content, cap = caption]() {
+                  has_visible_content, cap = caption, word = normalized_teaching_word]() {
             if (lvgl_display) lvgl_display->SetLessonMode(has_visible_content);
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
             if (clear_overlay && lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+            if (lvgl_display) lvgl_display->SetLessonTeachingWord(word.c_str());
             display->ClearChatMessages();
             if (!has_visible_content) {
                 display->SetStatus(Lang::Strings::ERROR);
@@ -1476,10 +1433,30 @@ void Application::HandleLessonMessage(const cJSON* root) {
                                           ? kLessonRenderElapsedMaxMs
                                           : render_elapsed_raw_ms;
 
+    cJSON* telemetry = cJSON_CreateObject();
+    cJSON_AddNumberToObject(telemetry, "internalFreeBytes",
+                            static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
+    cJSON_AddNumberToObject(telemetry, "internalMinimumFreeBytes",
+                            static_cast<double>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+    cJSON_AddNumberToObject(telemetry, "psramFreeBytes",
+                            static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    cJSON_AddNumberToObject(telemetry, "renderElapsedMs", static_cast<double>(render_elapsed_ms));
+    cJSON* reused = cJSON_CreateObject();
+    cJSON_AddBoolToObject(reused, "background", background_plan.reused);
+    cJSON_AddBoolToObject(reused, "object", object_plan.reused);
+    cJSON_AddBoolToObject(reused, "overlay", overlay_plan.reused);
+    cJSON_AddItemToObject(telemetry, "layersReused", reused);
+    const char* degraded_reason = motion_degraded ? "motionPreset"
+        : !poster_drew ? "backgroundUnavailable"
+        : has_object_src && !object_drew ? "objectUnavailable"
+        : has_overlay_src && !overlay_drew ? "overlayUnavailable"
+        : (!has_object_src || !has_overlay_src) ? "optionalLayerMissing" : "";
+    cJSON_AddStringToObject(telemetry, "degradedReason", degraded_reason);
+
     // Canonical step-ack first (body.acks echoes the step's sequence). For a PASSIVE
     // narration step this ack IS the completion signal (the ESP auto-advances on it),
     // so it is the ONLY F->S frame for such a step.
-    emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms);
+    emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms, telemetry);
     if (!has_visible_content) {
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);

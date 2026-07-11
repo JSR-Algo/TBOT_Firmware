@@ -3396,6 +3396,39 @@ void test_step_reads_only_body_motion_present_and_motion_degrades_ack() {
     require(FrameBodyBool(Sent().size() - 1, "degraded", false), "unknown motion marks ack degraded");
 }
 
+void test_teaching_word_telemetry_reuse_and_duplicate_ack_parity() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    int seq = OpenSession();
+    Handle(StepFrame(seq, "word", "http://word-bg", "http://word-object", "http://word-overlay",
+                     ",\"teachingWord\":{\"text\":\"TOO LONG FOR TFT\",\"displayText\":\"BARN\"}"));
+    require(!disp.teaching_word_calls.empty() && disp.teaching_word_calls.back() == "BARN",
+            "displayText renders as teaching word");
+    const std::string first_ack = Sent().back();
+    require(first_ack.find("\"internalFreeBytes\"") != std::string::npos,
+            "step ack reports internal SRAM telemetry");
+    require(first_ack.find("\"psramFreeBytes\"") != std::string::npos,
+            "step ack reports PSRAM telemetry");
+    require(first_ack.find("\"layersReused\"") != std::string::npos,
+            "step ack reports reuse flags");
+
+    Handle(StepFrame(seq, "word", "http://word-bg", "http://word-object", "http://word-overlay",
+                     ",\"teachingWord\":{\"displayText\":\"BARN\"}"));
+    require(Sent().back().find("\"telemetry\"") != std::string::npos,
+            "duplicate ack replays telemetry");
+    Handle(StopFrame(seq + 1));
+    require(!disp.teaching_word_calls.empty() && disp.teaching_word_calls.back().empty(),
+            "lesson stop clears teaching word pill");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "bad-word", "http://bad-bg", "http://bad-object", "http://bad-overlay",
+                     ",\"teachingWord\":{\"text\":\"ABCDEFGHIJKLM\"}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error", "overlong teaching word rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -3477,6 +3510,7 @@ int main() {
     test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
     test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
     test_step_reads_only_body_motion_present_and_motion_degrades_ack();
+    test_teaching_word_telemetry_reuse_and_duplicate_ack_parity();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }

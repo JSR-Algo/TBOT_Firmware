@@ -11,6 +11,13 @@
 #include <cstdlib>
 
 #define MALLOC_CAP_8BIT (1 << 2)
+#define MALLOC_CAP_INTERNAL (1 << 3)
+#define MALLOC_CAP_SPIRAM (1 << 4)
+
+inline size_t heap_caps_get_free_size(int caps) {
+    return (caps & MALLOC_CAP_SPIRAM) ? 4 * 1024 * 1024 : 128 * 1024;
+}
+inline size_t heap_caps_get_minimum_free_size(int) { return 96 * 1024; }
 
 // -1 disables the hook (default). Set to N to fail the Nth heap_caps_malloc/
 // heap_caps_realloc call (counting from 0) so OOM guards become reachable.

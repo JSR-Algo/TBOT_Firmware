@@ -280,7 +280,7 @@ def test_lesson_step_rejects_missing_required_scene_or_poster_before_ack():
     guard_idx = step_branch.index('if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||')
     error_idx = step_branch.index('MakeErrorBody("LESSON_FRAME_INVALID"', guard_idx)
     emit_error_idx = step_branch.index('emit(root, "lesson_error", eb)', error_idx)
-    fetch_idx = step_branch.index("std::unique_ptr<LvglImage> bg_image = FetchLessonImage", emit_error_idx)
+    fetch_idx = step_branch.index("FetchLessonImage(poster_src)", emit_error_idx)
     ack_idx = step_branch.index("emit_ack(root, sequence")
     fatal_guard = step_branch[guard_idx:error_idx]
 
@@ -399,11 +399,11 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     body = function_body(source, "void Application::HandleLessonMessage")
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
-    poster_idx = step_branch.index("bool poster_drew = false")
-    object_idx = step_branch.index("bool object_drew = false")
-    overlay_idx = step_branch.index("bool overlay_drew = false")
+    poster_idx = step_branch.index("bool poster_drew = background_plan.reused")
+    object_idx = step_branch.index("bool object_drew = object_plan.reused")
+    overlay_idx = step_branch.index("bool overlay_drew = overlay_plan.reused")
     degraded_idx = step_branch.index("const bool degraded =")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms, telemetry)")
 
     assert poster_idx < object_idx < overlay_idx < degraded_idx < ack_idx
     degraded_expr = step_branch[degraded_idx : step_branch.index(";", degraded_idx)]
@@ -419,7 +419,7 @@ def test_lesson_step_ack_rendered_requires_display_surface():
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
     display_idx = step_branch.index("Display* display = base_display;")
     rendered_idx = step_branch.index("const bool rendered = display != nullptr && dynamic_cast<NoDisplay*>(display) == nullptr;")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms, telemetry)")
 
     assert display_idx < rendered_idx < ack_idx
     assert "emit_ack(root, sequence, /*rendered*/ true, degraded)" not in step_branch
@@ -435,7 +435,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     overlay_idx = step_branch.index("FetchLessonImage(overlay_src)")
     schedule_idx = step_branch.index("Schedule([display, lvgl_display")
     elapsed_idx = step_branch.index("const int64_t render_elapsed_ms =")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms, telemetry)")
     log_idx = step_branch.index("renderElapsedMs=%lld")
 
     assert start_idx < poster_idx < object_idx < overlay_idx < schedule_idx < elapsed_idx < ack_idx < log_idx
@@ -578,6 +578,6 @@ def test_lesson_image_fetch_rejects_known_content_length_over_memory_cap_before_
     ]
 
     guard = "if (content_length > kMaxLessonImageBytes)"
-    alloc = "heap_caps_malloc(content_length, MALLOC_CAP_8BIT)"
+    alloc = "heap_caps_malloc(content_length, LessonAllocationCaps(content_length))"
     assert guard in known_length_branch
     assert known_length_branch.index(guard) < known_length_branch.index(alloc)

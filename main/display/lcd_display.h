@@ -35,6 +35,8 @@ protected:
     std::unique_ptr<LvglImage> lesson_robot_overlay_cached_ = nullptr;
     lv_obj_t* lesson_caption_bar_ = nullptr;  // Lesson-only bottom caption overlay
     lv_obj_t* lesson_caption_label_ = nullptr;
+    lv_obj_t* lesson_word_pill_ = nullptr;
+    lv_obj_t* lesson_word_label_ = nullptr;
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
     std::unique_ptr<LvglGif> gif_controller_ = nullptr;
@@ -62,6 +64,7 @@ public:
     virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonObject(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
+    virtual void SetLessonTeachingWord(const char* text) override;
     virtual void SetLessonMode(bool active) override;
     virtual void SetupUI() override;
     // Add theme switching function
