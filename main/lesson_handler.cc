@@ -229,6 +229,7 @@ struct LessonSession {
     bool        prepared           = false;
     bool        running            = false;
     bool        paused             = false;
+    bool        motion_presets_enabled = false;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
     // processed inbound sequence, so a duplicate re-ack can REPLAY the prior ack body
     // idempotently (protocol §6 / lesson-robot-protocol.md:436-438) instead of
@@ -1180,6 +1181,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
             ESP_LOGW(TAG, "lesson_prepare rejected: assetPack missing manifestChecksum");
             return;
         }
+        const cJSON* runtime_controls = Obj(body, "runtimeControls");
+        const cJSON* motion_enabled = runtime_controls != nullptr
+            ? cJSON_GetObjectItem(runtime_controls, "motionPresetsEnabled")
+            : nullptr;
+        // Defense in depth: every fresh manifest starts disabled. Only the explicit
+        // runtime control boolean can arm lesson motion for this session.
+        g_session.motion_presets_enabled = cJSON_IsTrue(motion_enabled);
         g_session.prepared = true;
         cJSON* asset_pack_ack = BuildAssetPackAck(body);
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false, asset_pack_ack);
@@ -1403,9 +1411,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
 
     bool motion_degraded = false;
     const char* entry_motion = Str(Obj(body, "motion"), "present");
-    if (entry_motion != nullptr) {
+    if (entry_motion != nullptr && g_session.motion_presets_enabled) {
         motion_degraded = DispatchLessonMotionPreset(robot_uart_, entry_motion) ==
                           LessonMotionResult::kDegraded;
+    } else if (entry_motion != nullptr) {
+        ESP_LOGI(TAG, "lesson_motion_dispatch outcome=disabled preset=%s", entry_motion);
     }
 
     // Resolve the display once and require it to be an LvglDisplay (the only class with

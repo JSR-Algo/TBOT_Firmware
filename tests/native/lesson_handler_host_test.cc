@@ -258,6 +258,13 @@ int OpenSession() {
     return 3;
 }
 
+int OpenMotionEnabledSession() {
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"runtimeControls\":{\"motionPresetsEnabled\":true}"));
+    Handle(StartFrame(2));
+    return 3;
+}
+
 // A small valid JPEG-magic body the fake Http/decoder accept.
 std::vector<unsigned char> JpegBody() {
     return {0xff, 0xd8, 0xff, 0x10, 0x20, 0x30};
@@ -3388,7 +3395,7 @@ void test_step_reads_only_body_motion_present_and_motion_degrades_ack() {
     LvglDisplay disp;
     Board::GetInstance().display_ = &disp;
     App().robot_uart_.send_ok = true;
-    int seq = OpenSession();
+    int seq = OpenMotionEnabledSession();
     const std::string extra =
         ",\"motion\":{\"present\":\"teach\",\"angle\":90,\"percent\":50,\"step\":2,\"delay\":1},"
         "\"outcomeMotion\":{\"present\":\"celebrate\"},\"motionPreset\":\"goodbye\"";
@@ -3398,11 +3405,38 @@ void test_step_reads_only_body_motion_present_and_motion_degrades_ack() {
 
     ResetObservable();
     Board::GetInstance().display_ = &disp;
-    seq = OpenSession();
+    seq = OpenMotionEnabledSession();
     Handle(StepFrame(seq, "bad-motion", "http://poster", "http://object", "http://overlay",
                      ",\"motion\":{\"present\":\"rawSweep\",\"angle\":90}"));
     require(FrameType(Sent().size() - 1) == "lesson_ack", "unknown motion is nonfatal");
     require(FrameBodyBool(Sent().size() - 1, "degraded", false), "unknown motion marks ack degraded");
+}
+
+void test_motion_runtime_control_defaults_disabled_and_resets_per_manifest() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    App().robot_uart_.send_ok = true;
+    int seq = OpenSession();
+    App().robot_uart_.calls.clear();
+    Handle(StepFrame(seq, "motion-off", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"celebrate\"}"));
+    require(App().robot_uart_.calls.empty(), "motion defaults disabled without runtime control");
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "disabled motion remains nonfatal");
+    require(!FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "operator-disabled motion is intentional, not render degradation");
+
+    seq = OpenMotionEnabledSession();
+    App().robot_uart_.calls.clear();
+    Handle(StepFrame(seq, "motion-on", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"celebrate\"}"));
+    require(!App().robot_uart_.calls.empty(), "manifest control enables named motion");
+
+    seq = OpenSession();
+    App().robot_uart_.calls.clear();
+    Handle(StepFrame(seq, "motion-reset", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"celebrate\"}"));
+    require(App().robot_uart_.calls.empty(), "fresh manifest resets motion control to disabled");
 }
 
 void test_teaching_word_telemetry_reuse_and_duplicate_ack_parity() {
@@ -3584,6 +3618,7 @@ int main() {
     test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
     test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
     test_step_reads_only_body_motion_present_and_motion_degrades_ack();
+    test_motion_runtime_control_defaults_disabled_and_resets_per_manifest();
     test_teaching_word_telemetry_reuse_and_duplicate_ack_parity();
     test_ack_replay_window_handles_delayed_and_expired_duplicates();
     test_layer_install_timeout_degrades_without_committing_layer_state();
