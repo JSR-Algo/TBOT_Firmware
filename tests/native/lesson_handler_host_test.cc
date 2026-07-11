@@ -3281,14 +3281,14 @@ void test_safe_motion_presets_and_auto_rest() {
     const std::vector<Case> cases = {
         {"rest", {"both_arms_lower", "head_center"}},
         {"teach", {"right_arm_raise", "head_center"}},
-        {"presentLeft", {"head_turn_left"}},
-        {"presentRight", {"head_turn_right"}},
-        {"listen", {"head_center"}},
-        {"thinking", {"head_turn_left"}},
-        {"encourage", {"right_arm_raise"}},
-        {"tryAgain", {"head_center"}},
-        {"celebrate", {"both_arms_raise"}},
-        {"goodbye", {"right_arm_raise"}},
+        {"presentLeft", {"left_arm_raise", "right_arm_lower", "head_turn_left"}},
+        {"presentRight", {"right_arm_raise", "left_arm_lower", "head_turn_right"}},
+        {"listen", {"both_arms_lower", "head_center"}},
+        {"thinking", {"left_arm_raise", "right_arm_lower", "head_turn_left"}},
+        {"encourage", {"both_arms_raise", "head_center"}},
+        {"tryAgain", {"both_arms_lower", "head_turn_right"}},
+        {"celebrate", {"both_arms_raise", "head_center"}},
+        {"goodbye", {"right_arm_raise", "left_arm_lower", "head_turn_right"}},
     };
     for (const auto& tc : cases) {
         ResetObservable();
@@ -3315,6 +3315,17 @@ void test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades() {
     require(DispatchLessonMotionPreset(App().robot_uart_, "90") == LessonMotionResult::kDegraded,
             "raw-looking value degrades");
 
+    App().robot_uart_.calls.clear();
+    require(DispatchLessonMotionPreset(App().robot_uart_, "celebrate") == LessonMotionResult::kApplied,
+            "bounded motion is armed before unknown input");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "rawSweep") == LessonMotionResult::kDegraded,
+            "unknown input remains degraded");
+    HostEspFireTimer();
+    const std::vector<std::string> preserved_rest = {
+        "both_arms_raise", "head_center", "both_arms_lower", "head_center"};
+    require(App().robot_uart_.calls == preserved_rest,
+            "unknown input does not cancel the active preset rest");
+
     App().robot_uart_.send_ok = false;
     require(DispatchLessonMotionPreset(App().robot_uart_, "teach") == LessonMotionResult::kDegraded,
             "UART send failure degrades");
@@ -3332,7 +3343,8 @@ void test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades() {
             "new preset cancels stale rest");
     HostEspFireTimer();
     const std::vector<std::string> expected = {
-        "both_arms_raise", "head_turn_left", "both_arms_lower", "head_center"};
+        "both_arms_raise", "head_center", "left_arm_raise", "right_arm_lower",
+        "head_turn_left", "both_arms_lower", "head_center"};
     require(App().robot_uart_.calls == expected, "only newest generation auto-rest runs");
 }
 

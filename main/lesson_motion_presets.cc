@@ -14,38 +14,47 @@ constexpr uint64_t kBoundedPresetDurationUs = 1500ULL * 1000ULL;
 class LessonMotionController {
 public:
     LessonMotionResult Dispatch(RobotUart& robot_uart, const char* preset) {
+        if (!IsKnownPreset(preset)) return LessonMotionResult::kDegraded;
+
         robot_uart_ = &robot_uart;
         ++generation_;
         if (rest_timer_ != nullptr) esp_timer_stop(rest_timer_);
 
         bool sent = true;
         bool bounded = true;
-        if (preset == nullptr) {
-            return LessonMotionResult::kDegraded;
-        } else if (std::strcmp(preset, "rest") == 0) {
+        if (std::strcmp(preset, "rest") == 0) {
             bounded = false;
             sent = SendRest();
         } else if (std::strcmp(preset, "teach") == 0) {
             sent = robot_uart.SendRightArmRaise();
             sent = robot_uart.SendHeadCenter() && sent;
         } else if (std::strcmp(preset, "presentLeft") == 0) {
-            sent = robot_uart.SendHeadTurnLeft();
+            sent = robot_uart.SendLeftArmRaise();
+            sent = robot_uart.SendRightArmLower() && sent;
+            sent = robot_uart.SendHeadTurnLeft() && sent;
         } else if (std::strcmp(preset, "presentRight") == 0) {
-            sent = robot_uart.SendHeadTurnRight();
-        } else if (std::strcmp(preset, "listen") == 0) {
-            sent = robot_uart.SendHeadCenter();
-        } else if (std::strcmp(preset, "thinking") == 0) {
-            sent = robot_uart.SendHeadTurnLeft();
-        } else if (std::strcmp(preset, "encourage") == 0) {
             sent = robot_uart.SendRightArmRaise();
+            sent = robot_uart.SendLeftArmLower() && sent;
+            sent = robot_uart.SendHeadTurnRight() && sent;
+        } else if (std::strcmp(preset, "listen") == 0) {
+            sent = SendRest();
+        } else if (std::strcmp(preset, "thinking") == 0) {
+            sent = robot_uart.SendLeftArmRaise();
+            sent = robot_uart.SendRightArmLower() && sent;
+            sent = robot_uart.SendHeadTurnLeft() && sent;
+        } else if (std::strcmp(preset, "encourage") == 0) {
+            sent = robot_uart.SendBothArmsRaise();
+            sent = robot_uart.SendHeadCenter() && sent;
         } else if (std::strcmp(preset, "tryAgain") == 0) {
-            sent = robot_uart.SendHeadCenter();
+            sent = robot_uart.SendBothArmsLower();
+            sent = robot_uart.SendHeadTurnRight() && sent;
         } else if (std::strcmp(preset, "celebrate") == 0) {
             sent = robot_uart.SendBothArmsRaise();
+            sent = robot_uart.SendHeadCenter() && sent;
         } else if (std::strcmp(preset, "goodbye") == 0) {
             sent = robot_uart.SendRightArmRaise();
-        } else {
-            return LessonMotionResult::kDegraded;
+            sent = robot_uart.SendLeftArmLower() && sent;
+            sent = robot_uart.SendHeadTurnRight() && sent;
         }
 
         if (bounded && !ScheduleRest()) sent = false;
@@ -53,6 +62,19 @@ public:
     }
 
 private:
+    static bool IsKnownPreset(const char* preset) {
+        if (preset == nullptr) return false;
+        return std::strcmp(preset, "rest") == 0 || std::strcmp(preset, "teach") == 0 ||
+               std::strcmp(preset, "presentLeft") == 0 ||
+               std::strcmp(preset, "presentRight") == 0 ||
+               std::strcmp(preset, "listen") == 0 ||
+               std::strcmp(preset, "thinking") == 0 ||
+               std::strcmp(preset, "encourage") == 0 ||
+               std::strcmp(preset, "tryAgain") == 0 ||
+               std::strcmp(preset, "celebrate") == 0 ||
+               std::strcmp(preset, "goodbye") == 0;
+    }
+
     static void RestTimerCallback(void* arg) {
         auto* self = static_cast<LessonMotionController*>(arg);
         const uint32_t callback_generation = self->armed_generation_;
