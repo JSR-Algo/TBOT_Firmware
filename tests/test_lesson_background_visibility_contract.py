@@ -581,3 +581,31 @@ def test_lesson_image_fetch_rejects_known_content_length_over_memory_cap_before_
     alloc = "heap_caps_malloc(content_length, LessonAllocationCaps(content_length))"
     assert guard in known_length_branch
     assert known_length_branch.index(guard) < known_length_branch.index(alloc)
+
+
+def test_lesson_png_decode_is_no_cache_psram_owned_and_frees_compressed_input():
+    handler = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    lcd = (ROOT / "main/display/lcd_display.cc").read_text(encoding="utf-8")
+    png = function_body(handler, "std::unique_ptr<LvglImage> DecodeLessonPngBytes")
+
+    assert "args.no_cache = true" in png
+    assert "lv_image_decoder_close(&decoder)" in png
+    assert "heap_caps_free(compressed)" in png
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in png
+    assert "mutable_decoded->data = nullptr" in png
+    assert "mutable_decoded->unaligned_data = nullptr" in png
+    assert "LvglAllocatedImage" in png
+    assert "lv_draw_buf_get_image_handlers()" in lcd
+    assert "handlers->buf_malloc_cb = LessonImageBufferMalloc" in lcd
+    assert "heap_caps_malloc(size, LessonAllocationCaps(size))" in lcd
+
+
+def test_lesson_duplicate_ack_replays_cached_full_body_before_reconstructing_fields():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+    duplicate = body[body.index("if (sequence <= g_session.last_in_sequence)") : body.index("if (is_step && g_session.paused)")]
+
+    full_body = duplicate.index("g_session.last_ack_body_json")
+    exact_emit = duplicate.index('emit(root, "lesson_ack", replay_body)')
+    reconstructed = duplicate.index("const bool re_rendered")
+    assert full_body < exact_emit < reconstructed

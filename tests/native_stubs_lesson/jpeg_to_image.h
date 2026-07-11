@@ -41,14 +41,14 @@ inline esp_err_t jpeg_to_image(const uint8_t* /*src*/, size_t /*src_len*/, uint8
         return ESP_OK;
     }
     if (mode == 3) {
-        // ESP_OK but too large once decoded: 400x400 RGB565 = 320000 bytes.
-        const size_t len = 400 * 400 * 2;
+        // ESP_OK but too large once decoded: 800x800 RGB565 exceeds 480x320 RGBA cap.
+        const size_t len = 800 * 800 * 2;
         *out = static_cast<uint8_t*>(std::malloc(len));
         std::memset(*out, 0, len);
         *out_len = len;
-        *width = 400;
-        *height = 400;
-        *stride = 400 * 2;
+        *width = 800;
+        *height = 800;
+        *stride = 800 * 2;
         return ESP_OK;
     }
     // Success: 2x2 RGB565 = 8 bytes. Allocated with malloc so heap_caps_free frees it.

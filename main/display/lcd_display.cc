@@ -14,12 +14,28 @@
 #include <esp_psram.h>
 #include <cstring>
 #include <src/misc/cache/lv_cache.h>
+#include <src/draw/lv_draw_buf_private.h>
 
 #include "board.h"
 
 #define TAG "LcdDisplay"
 
 namespace {
+void* LessonImageBufferMalloc(size_t size, lv_color_format_t) {
+    size += LV_DRAW_BUF_ALIGN - 1;
+    return heap_caps_malloc(size, LessonAllocationCaps(size));
+}
+
+void LessonImageBufferFree(void* buffer) {
+    heap_caps_free(buffer);
+}
+
+void InstallLessonImagePsramAllocator() {
+    lv_draw_buf_handlers_t* handlers = lv_draw_buf_get_image_handlers();
+    handlers->buf_malloc_cb = LessonImageBufferMalloc;
+    handlers->buf_free_cb = LessonImageBufferFree;
+}
+
 constexpr int kLessonObjectMaxWidthPercent = 46;
 constexpr int kLessonObjectMaxHeightPercent = 50;
 constexpr int kLessonObjectYOffsetDivisor = 12;
@@ -406,6 +422,7 @@ void LcdDisplay::SetupUI() {
     }
     
     Display::SetupUI();  // Mark SetupUI as called
+    InstallLessonImagePsramAllocator();
     DisplayLockGuard lock(this);
 
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
@@ -1023,6 +1040,7 @@ void LcdDisplay::SetupUI() {
     }
     
     Display::SetupUI();  // Mark SetupUI as called
+    InstallLessonImagePsramAllocator();
     DisplayLockGuard lock(this);
     LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     auto text_font = lvgl_theme->text_font()->font();

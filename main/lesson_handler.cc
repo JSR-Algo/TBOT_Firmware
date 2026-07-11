@@ -38,6 +38,9 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
+#ifndef TBOT_HOST_NATIVE_COVERAGE
+#include <src/draw/lv_image_decoder_private.h>
+#endif
 
 #define TAG "Lesson"
 
@@ -230,6 +233,7 @@ struct LessonSession {
     int64_t     prepare_ack_sequence = 0;   // prepare assetPack replay survives later lifecycle acks
     std::string prepare_ack_asset_pack_json;
     std::string last_ack_telemetry_json;
+    std::string last_ack_body_json;
 };
 LessonSession g_session;
 LessonLayerState g_layer_state;
@@ -246,6 +250,7 @@ void ClearTerminalLessonCursor() {
     g_session.prepare_ack_sequence = 0;
     g_session.prepare_ack_asset_pack_json.clear();
     g_session.last_ack_telemetry_json.clear();
+    g_session.last_ack_body_json.clear();
     g_session.assignment_version = -1.0;
 }
 
@@ -338,8 +343,16 @@ bool IsJpegImage(const void* data, size_t size) {
     return bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff;
 }
 
+#ifndef TBOT_HOST_NATIVE_COVERAGE
+bool IsPngImage(const void* data, size_t size) {
+    if (data == nullptr || size < 8) return false;
+    static constexpr uint8_t kPngSignature[] = {0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a};
+    return memcmp(data, kPngSignature, sizeof(kPngSignature)) == 0;
+}
+#endif
+
 constexpr size_t kMaxLessonImageBytes = 512 * 1024;
-constexpr size_t kMaxLessonDecodedImageBytes = 480 * 320 * 2;
+constexpr size_t kMaxLessonDecodedImageBytes = 480 * 320 * 4;
 constexpr size_t kMaxLessonAssetPackAssets = 64;
 constexpr size_t kMaxLessonAssetPackDeclaredBytes = 4 * 1024 * 1024;
 constexpr int kLessonImageHttpTimeoutMs = 1200;
@@ -355,9 +368,69 @@ bool LessonDecodedImageFitsBudget(size_t decoded_len, size_t width, size_t heigh
     return footprint <= kMaxLessonDecodedImageBytes && decoded_len <= kMaxLessonDecodedImageBytes;
 }
 
+#ifndef TBOT_HOST_NATIVE_COVERAGE
+std::unique_ptr<LvglImage> DecodeLessonPngBytes(char* compressed, size_t compressed_size,
+                                                const char* log_prefix) {
+    lv_image_dsc_t source{};
+    source.header.magic = LV_IMAGE_HEADER_MAGIC;
+    source.header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
+    source.data = reinterpret_cast<const uint8_t*>(compressed);
+    source.data_size = compressed_size;
+
+    lv_image_decoder_args_t args{};
+    args.no_cache = true;
+    lv_image_decoder_dsc_t decoder{};
+    const lv_result_t result = lv_image_decoder_open(&decoder, &source, &args);
+    if (result != LV_RESULT_OK || decoder.decoded == nullptr) {
+        ESP_LOGW(TAG, "%s: PNG decode failed", log_prefix);
+        heap_caps_free(compressed);
+        return nullptr;
+    }
+
+    const lv_draw_buf_t* decoded = decoder.decoded;
+    const size_t decoded_size = decoded->data_size;
+    if (!LessonDecodedImageFitsBudget(decoded_size, decoded->header.w, decoded->header.h,
+                                      decoded->header.stride)) {
+        lv_image_decoder_close(&decoder);
+        heap_caps_free(compressed);
+        return nullptr;
+    }
+    uint8_t* psram = nullptr;
+    if (decoded->data == decoded->unaligned_data) {
+        psram = decoded->data;
+        auto* mutable_decoded = const_cast<lv_draw_buf_t*>(decoded);
+        mutable_decoded->data = nullptr;
+        mutable_decoded->unaligned_data = nullptr;
+        mutable_decoded->data_size = 0;
+    } else {
+        psram = static_cast<uint8_t*>(
+            heap_caps_malloc(decoded_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (psram == nullptr) {
+            lv_image_decoder_close(&decoder);
+            heap_caps_free(compressed);
+            return nullptr;
+        }
+        memcpy(psram, decoded->data, decoded_size);
+    }
+    const int width = static_cast<int>(decoded->header.w);
+    const int height = static_cast<int>(decoded->header.h);
+    const int stride = static_cast<int>(decoded->header.stride);
+    const int color_format = decoded->header.cf;
+    lv_image_decoder_close(&decoder);  // no_cache frees LVGL's temporary decoded buffer
+    heap_caps_free(compressed);         // compressed PNG is transient only
+    return std::make_unique<LvglAllocatedImage>(psram, decoded_size, width, height, stride,
+                                                color_format);
+}
+#endif
+
 std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_length,
                                                   const char* log_prefix) {
     if (data == nullptr || content_length == 0) return nullptr;
+#ifndef TBOT_HOST_NATIVE_COVERAGE
+    if (IsPngImage(data, content_length)) {
+        return DecodeLessonPngBytes(data, content_length, log_prefix);
+    }
+#endif
     if (IsJpegImage(data, content_length)) {
         uint8_t* decoded_data = nullptr;
         size_t decoded_len = 0;
@@ -814,6 +887,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         if (asset_pack_ack != nullptr) cJSON_AddItemToObject(b, "assetPack", asset_pack_ack);
         if (telemetry != nullptr) cJSON_AddItemToObject(b, "telemetry", telemetry);
+        if (cache) {
+            char* printed = cJSON_PrintUnformatted(b);
+            if (printed != nullptr) {
+                g_session.last_ack_body_json = printed;
+                cJSON_free(printed);
+            }
+        }
         emit(in, "lesson_ack", b);
     };
     auto show_lesson_failure_display = [this]() {
@@ -996,25 +1076,23 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // duplicate is older than the single cached entry (slice-01 keeps only the last),
     // fall back to false/false — the conservative non-rendered ack.
     if (sequence <= g_session.last_in_sequence) {
-        const bool re_rendered = (sequence == g_session.last_ack_sequence)
-                                     ? g_session.last_ack_rendered : false;
-        const bool re_degraded = (sequence == g_session.last_ack_sequence)
-                                     ? g_session.last_ack_degraded : false;
+        if (sequence == g_session.last_ack_sequence && !g_session.last_ack_body_json.empty()) {
+            cJSON* replay_body = cJSON_Parse(g_session.last_ack_body_json.c_str());
+            ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; replaying exact ack body",
+                     (long long)sequence);
+            emit(root, "lesson_ack", replay_body);
+            return;
+        }
+        const bool re_rendered = false;
+        const bool re_degraded = false;
         cJSON* re_asset_pack = nullptr;
-        cJSON* re_telemetry = nullptr;
-        if (sequence == g_session.last_ack_sequence && !g_session.last_ack_asset_pack_json.empty()) {
-            re_asset_pack = cJSON_Parse(g_session.last_ack_asset_pack_json.c_str());
-        } else if (is_prepare && sequence == g_session.prepare_ack_sequence &&
+        if (is_prepare && sequence == g_session.prepare_ack_sequence &&
                    !g_session.prepare_ack_asset_pack_json.empty()) {
             re_asset_pack = cJSON_Parse(g_session.prepare_ack_asset_pack_json.c_str());
         }
-        if (sequence == g_session.last_ack_sequence && !g_session.last_ack_telemetry_json.empty()) {
-            re_telemetry = cJSON_Parse(g_session.last_ack_telemetry_json.c_str());
-        }
         ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; re-acking rendered=%d degraded=%d",
                  (long long)sequence, re_rendered, re_degraded);
-        emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack, /*cache*/ false,
-                 -1, re_telemetry);
+        emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack, /*cache*/ false);
         return;
     }
     if (is_step && g_session.paused) {

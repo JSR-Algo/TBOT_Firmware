@@ -112,6 +112,15 @@ double FrameBodyNum(size_t i, const char* key) {
     cJSON_Delete(f);
     return out;
 }
+std::string FrameBodyJson(size_t i) {
+    cJSON* frame = cJSON_Parse(Sent()[i].c_str());
+    cJSON* body = cJSON_GetObjectItem(frame, "body");
+    char* printed = body ? cJSON_PrintUnformatted(body) : nullptr;
+    std::string out = printed ? printed : "";
+    if (printed) cJSON_free(printed);
+    cJSON_Delete(frame);
+    return out;
+}
 std::string FrameBodyStr(size_t i, const char* obj, const char* key) {
     cJSON* f = cJSON_Parse(Sent()[i].c_str());
     cJSON* b = cJSON_GetObjectItem(f, "body");
@@ -3405,7 +3414,9 @@ void test_teaching_word_telemetry_reuse_and_duplicate_ack_parity() {
                      ",\"teachingWord\":{\"text\":\"TOO LONG FOR TFT\",\"displayText\":\"BARN\"}"));
     require(!disp.teaching_word_calls.empty() && disp.teaching_word_calls.back() == "BARN",
             "displayText renders as teaching word");
+    const size_t first_ack_index = Sent().size() - 1;
     const std::string first_ack = Sent().back();
+    const std::string first_body = FrameBodyJson(first_ack_index);
     require(first_ack.find("\"internalFreeBytes\"") != std::string::npos,
             "step ack reports internal SRAM telemetry");
     require(first_ack.find("\"psramFreeBytes\"") != std::string::npos,
@@ -3417,6 +3428,8 @@ void test_teaching_word_telemetry_reuse_and_duplicate_ack_parity() {
                      ",\"teachingWord\":{\"displayText\":\"BARN\"}"));
     require(Sent().back().find("\"telemetry\"") != std::string::npos,
             "duplicate ack replays telemetry");
+    require(FrameBodyJson(Sent().size() - 1) == first_body,
+            "duplicate ack body exactly matches original serialized body");
     Handle(StopFrame(seq + 1));
     require(!disp.teaching_word_calls.empty() && disp.teaching_word_calls.back().empty(),
             "lesson stop clears teaching word pill");
