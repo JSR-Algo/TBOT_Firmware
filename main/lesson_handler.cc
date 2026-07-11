@@ -32,6 +32,7 @@
 #include <string_view>
 #include <memory>
 #include <set>
+#include <deque>
 
 #include <cJSON.h>
 #include <esp_err.h>
@@ -40,6 +41,8 @@
 #include <esp_heap_caps.h>
 #ifndef TBOT_HOST_NATIVE_COVERAGE
 #include <src/draw/lv_image_decoder_private.h>
+#include <src/draw/lv_draw_buf_private.h>
+#include <src/osal/lv_os.h>
 #endif
 
 #define TAG "Lesson"
@@ -213,6 +216,11 @@ int64_t NowMs() { return static_cast<int64_t>(time(nullptr)) * 1000LL; }
 // firmware-owned wire state (shared by acks + progress, monotonic per
 // (assignmentId,sessionId), starting at 1 — fixture sequenceStreams F->S).
 struct LessonSession {
+    struct AckReplay {
+        int64_t sequence = 0;
+        std::string body_json;
+    };
+    static constexpr size_t kAckReplayWindow = 16;
     std::string assignment_id;
     std::string session_id;
     double      assignment_version = -1.0;  // staleness guard (plan §7.2)
@@ -234,6 +242,7 @@ struct LessonSession {
     std::string prepare_ack_asset_pack_json;
     std::string last_ack_telemetry_json;
     std::string last_ack_body_json;
+    std::deque<AckReplay> ack_history;
 };
 LessonSession g_session;
 LessonLayerState g_layer_state;
@@ -251,6 +260,7 @@ void ClearTerminalLessonCursor() {
     g_session.prepare_ack_asset_pack_json.clear();
     g_session.last_ack_telemetry_json.clear();
     g_session.last_ack_body_json.clear();
+    g_session.ack_history.clear();
     g_session.assignment_version = -1.0;
 }
 
@@ -369,8 +379,60 @@ bool LessonDecodedImageFitsBudget(size_t decoded_len, size_t width, size_t heigh
 }
 
 #ifndef TBOT_HOST_NATIVE_COVERAGE
+thread_local bool g_lesson_png_allocator_active = false;
+
+extern "C" void* lodepng_malloc(size_t size) {
+    return g_lesson_png_allocator_active
+        ? heap_caps_malloc(size, LessonAllocationCaps(size))
+        : lv_malloc(size);
+}
+
+extern "C" void* lodepng_realloc(void* pointer, size_t size) {
+    return g_lesson_png_allocator_active
+        ? heap_caps_realloc(pointer, size, LessonAllocationCaps(size))
+        : lv_realloc(pointer, size);
+}
+
+extern "C" void lodepng_free(void* pointer) {
+    if (g_lesson_png_allocator_active) heap_caps_free(pointer);
+    else lv_free(pointer);
+}
+
+void* LessonPngBufferMalloc(size_t size, lv_color_format_t) {
+    size += LV_DRAW_BUF_ALIGN - 1;
+    return heap_caps_malloc(size, LessonAllocationCaps(size));
+}
+
+void LessonPngBufferFree(void* buffer) {
+    heap_caps_free(buffer);
+}
+
+class LessonPngAllocatorScope {
+public:
+    LessonPngAllocatorScope() {
+        lv_lock();
+        handlers_ = lv_draw_buf_get_image_handlers();
+        previous_malloc_ = handlers_->buf_malloc_cb;
+        previous_free_ = handlers_->buf_free_cb;
+        handlers_->buf_malloc_cb = LessonPngBufferMalloc;
+        handlers_->buf_free_cb = LessonPngBufferFree;
+        g_lesson_png_allocator_active = true;
+    }
+    ~LessonPngAllocatorScope() {
+        g_lesson_png_allocator_active = false;
+        handlers_->buf_malloc_cb = previous_malloc_;
+        handlers_->buf_free_cb = previous_free_;
+        lv_unlock();
+    }
+private:
+    lv_draw_buf_handlers_t* handlers_ = nullptr;
+    lv_draw_buf_malloc_cb_t previous_malloc_ = nullptr;
+    lv_draw_buf_free_cb_t previous_free_ = nullptr;
+};
+
 std::unique_ptr<LvglImage> DecodeLessonPngBytes(char* compressed, size_t compressed_size,
                                                 const char* log_prefix) {
+    LessonPngAllocatorScope allocator_scope;
     lv_image_dsc_t source{};
     source.header.magic = LV_IMAGE_HEADER_MAGIC;
     source.header.cf = LV_COLOR_FORMAT_RAW_ALPHA;
@@ -891,6 +953,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
             char* printed = cJSON_PrintUnformatted(b);
             if (printed != nullptr) {
                 g_session.last_ack_body_json = printed;
+                g_session.ack_history.push_back({acked, printed});
+                while (g_session.ack_history.size() > LessonSession::kAckReplayWindow) {
+                    g_session.ack_history.pop_front();
+                }
                 cJSON_free(printed);
             }
         }
@@ -1076,23 +1142,20 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // duplicate is older than the single cached entry (slice-01 keeps only the last),
     // fall back to false/false — the conservative non-rendered ack.
     if (sequence <= g_session.last_in_sequence) {
-        if (sequence == g_session.last_ack_sequence && !g_session.last_ack_body_json.empty()) {
-            cJSON* replay_body = cJSON_Parse(g_session.last_ack_body_json.c_str());
-            ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; replaying exact ack body",
-                     (long long)sequence);
-            emit(root, "lesson_ack", replay_body);
-            return;
+        for (auto it = g_session.ack_history.rbegin(); it != g_session.ack_history.rend(); ++it) {
+            if (it->sequence == sequence) {
+                cJSON* replay_body = cJSON_Parse(it->body_json.c_str());
+                ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; replaying exact ack body",
+                         (long long)sequence);
+                emit(root, "lesson_ack", replay_body);
+                return;
+            }
         }
         const bool re_rendered = false;
         const bool re_degraded = false;
-        cJSON* re_asset_pack = nullptr;
-        if (is_prepare && sequence == g_session.prepare_ack_sequence &&
-                   !g_session.prepare_ack_asset_pack_json.empty()) {
-            re_asset_pack = cJSON_Parse(g_session.prepare_ack_asset_pack_json.c_str());
-        }
         ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; re-acking rendered=%d degraded=%d",
                  (long long)sequence, re_rendered, re_degraded);
-        emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack, /*cache*/ false);
+        emit_ack(root, sequence, re_rendered, re_degraded, nullptr, /*cache*/ false);
         return;
     }
     if (is_step && g_session.paused) {
@@ -1367,37 +1430,41 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_layer_state.Plan(LessonLayer::kObject, object_key, object_src);
     const LessonLayerPlan overlay_plan =
         g_layer_state.Plan(LessonLayer::kOverlay, overlay_key, overlay_src);
+    constexpr int kLessonLayerInstallTimeoutMs = 300;
+    bool background_clear_ok = true;
+    bool object_clear_ok = true;
+    bool overlay_clear_ok = true;
     if (lvgl_display != nullptr) {
         if (background_plan.clear_before_load) {
-            lvgl_display->SetLessonBackground(nullptr);
-            g_layer_state.Clear(LessonLayer::kBackground);
+            background_clear_ok = Application::GetInstance().ScheduleAndWait(
+                [lvgl_display]() { lvgl_display->SetLessonBackground(nullptr); },
+                kLessonLayerInstallTimeoutMs);
+            if (background_clear_ok) g_layer_state.Clear(LessonLayer::kBackground);
         }
         if (object_plan.clear_before_load || (!has_object_src && g_layer_state.Has(LessonLayer::kObject))) {
-            lvgl_display->SetLessonObject(nullptr);
-            g_layer_state.Clear(LessonLayer::kObject);
+            object_clear_ok = Application::GetInstance().ScheduleAndWait(
+                [lvgl_display]() { lvgl_display->SetLessonObject(nullptr); },
+                kLessonLayerInstallTimeoutMs);
+            if (object_clear_ok) g_layer_state.Clear(LessonLayer::kObject);
         }
         if (overlay_plan.clear_before_load || (!has_overlay_src && g_layer_state.Has(LessonLayer::kOverlay))) {
-            lvgl_display->SetLessonRobotOverlay(nullptr);
-            g_layer_state.Clear(LessonLayer::kOverlay);
+            overlay_clear_ok = Application::GetInstance().ScheduleAndWait(
+                [lvgl_display]() { lvgl_display->SetLessonRobotOverlay(nullptr); },
+                kLessonLayerInstallTimeoutMs);
+            if (overlay_clear_ok) g_layer_state.Clear(LessonLayer::kOverlay);
         }
     }
 
     bool poster_drew = background_plan.reused;
-    if (lvgl_display != nullptr && poster_src != nullptr) {
+    if (lvgl_display != nullptr && poster_src != nullptr && background_clear_ok) {
         std::unique_ptr<LvglImage> bg_image = background_plan.reused ? nullptr : FetchLessonImage(poster_src);
         if (bg_image != nullptr) {
-            // Marshal the persistent full-screen draw onto the LVGL/app task (the LVGL
-            // object tree is owned there). Schedule() takes a COPYABLE std::function, so
-            // we cannot capture the move-only unique_ptr directly; hand off ownership as
-            // a raw pointer (release) and re-wrap it in a unique_ptr inside the lambda,
-            // which then transfers ownership to SetLessonBackground. The lambda runs
-            // exactly once, so the raw pointer is always re-owned (no leak).
-            LvglImage* raw_bg = bg_image.release();
-            Schedule([lvgl_display, raw_bg]() {
-                lvgl_display->SetLessonBackground(std::unique_ptr<LvglImage>(raw_bg));
-            });
-            poster_drew = true;
-            g_layer_state.Commit(LessonLayer::kBackground, poster_key, poster_src);
+            auto holder = std::make_shared<std::unique_ptr<LvglImage>>(std::move(bg_image));
+            poster_drew = Application::GetInstance().ScheduleAndWait(
+                [lvgl_display, holder]() mutable {
+                    lvgl_display->SetLessonBackground(std::move(*holder));
+                }, kLessonLayerInstallTimeoutMs);
+            if (poster_drew) g_layer_state.Commit(LessonLayer::kBackground, poster_key, poster_src);
             ESP_LOGI(TAG, "lesson_step poster fetched+drawn from URL");
         } else if (!background_plan.reused) {
             ESP_LOGW(TAG, "lesson_step poster fetch failed; caption-only fallback");
@@ -1410,30 +1477,29 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // (clear_bg = !poster_drew). A poster with no real draw path must stay not-drawn so
     // the honest degraded ack fires and the previous-step background is cleared.
     bool object_drew = object_plan.reused && has_object_src;
-    if (lvgl_display != nullptr && has_object_src) {
+    if (lvgl_display != nullptr && has_object_src && object_clear_ok) {
         std::unique_ptr<LvglImage> object_image = object_plan.reused ? nullptr : FetchLessonImage(object_src);
         if (object_image != nullptr) {
-            LvglImage* raw_object = object_image.release();
-            Schedule([lvgl_display, raw_object]() {
-                lvgl_display->SetLessonObject(std::unique_ptr<LvglImage>(raw_object));
-            });
-            object_drew = true;
-            g_layer_state.Commit(LessonLayer::kObject, object_key, object_src);
+            auto holder = std::make_shared<std::unique_ptr<LvglImage>>(std::move(object_image));
+            object_drew = Application::GetInstance().ScheduleAndWait(
+                [lvgl_display, holder]() mutable { lvgl_display->SetLessonObject(std::move(*holder)); },
+                kLessonLayerInstallTimeoutMs);
+            if (object_drew) g_layer_state.Commit(LessonLayer::kObject, object_key, object_src);
             ESP_LOGI(TAG, "lesson_step teaching object fetched+drawn from URL");
         } else if (!object_plan.reused) {
             ESP_LOGW(TAG, "lesson_step teaching object fetch failed; caption fallback");
         }
     }
     bool overlay_drew = overlay_plan.reused && has_overlay_src;
-    if (lvgl_display != nullptr && has_overlay_src) {
+    if (lvgl_display != nullptr && has_overlay_src && overlay_clear_ok) {
         std::unique_ptr<LvglImage> overlay_image = overlay_plan.reused ? nullptr : FetchLessonImage(overlay_src);
         if (overlay_image != nullptr) {
-            LvglImage* raw_overlay = overlay_image.release();
-            Schedule([lvgl_display, raw_overlay]() {
-                lvgl_display->SetLessonRobotOverlay(std::unique_ptr<LvglImage>(raw_overlay));
-            });
-            overlay_drew = true;
-            g_layer_state.Commit(LessonLayer::kOverlay, overlay_key, overlay_src);
+            auto holder = std::make_shared<std::unique_ptr<LvglImage>>(std::move(overlay_image));
+            overlay_drew = Application::GetInstance().ScheduleAndWait(
+                [lvgl_display, holder]() mutable {
+                    lvgl_display->SetLessonRobotOverlay(std::move(*holder));
+                }, kLessonLayerInstallTimeoutMs);
+            if (overlay_drew) g_layer_state.Commit(LessonLayer::kOverlay, overlay_key, overlay_src);
             ESP_LOGI(TAG, "lesson_step robot overlay fetched+drawn from URL");
         } else if (!overlay_plan.reused) {
             ESP_LOGW(TAG, "lesson_step robot overlay fetch failed; emoji fallback");

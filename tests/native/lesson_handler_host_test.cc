@@ -3442,6 +3442,49 @@ void test_teaching_word_telemetry_reuse_and_duplicate_ack_parity() {
     require(FrameType(Sent().size() - 1) == "lesson_error", "overlong teaching word rejected");
 }
 
+void test_ack_replay_window_handles_delayed_and_expired_duplicates() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    int sequence = OpenSession();
+    std::vector<std::string> bodies(21);
+    for (; sequence <= 20; ++sequence) {
+        Handle((sequence % 2) ? PauseFrame(sequence) : ResumeFrame(sequence));
+        bodies[sequence] = FrameBodyJson(Sent().size() - 1);
+    }
+
+    Handle(PauseFrame(5));
+    require(FrameBodyJson(Sent().size() - 1) == bodies[5],
+            "delayed duplicate inside replay window preserves exact body");
+    Handle(ResumeFrame(6));
+    require(FrameBodyJson(Sent().size() - 1) == bodies[6],
+            "multiple older duplicates replay independently by sequence");
+    Handle(PauseFrame(3));
+    require(!FrameBodyBool(Sent().size() - 1, "rendered", true) &&
+            !FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "duplicate outside replay window receives conservative ack");
+}
+
+void test_layer_install_timeout_degrades_without_committing_layer_state() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    int sequence = OpenSession();
+    App().schedule_wait_succeeds = false;
+    Handle(StepFrame(sequence, "install-timeout", "http://timeout-bg", "http://timeout-object",
+                     "http://timeout-overlay", ",\"prompt\":\"Look\""));
+    require(FrameBodyBool(Sent().size() - 1, "degraded", false),
+            "application-task install timeout degrades step");
+    require(disp.background_calls.empty() || !disp.background_calls.back(),
+            "timed-out holder never installs background");
+
+    App().schedule_wait_succeeds = true;
+    Handle(StepFrame(sequence + 1, "install-retry", "http://timeout-bg", "http://timeout-object",
+                     "http://timeout-overlay", ",\"prompt\":\"Look\""));
+    require(!disp.background_calls.empty() && disp.background_calls.back(),
+            "retry reloads and installs layer because timeout did not commit state");
+}
+
 }  // namespace
 
 int main() {
@@ -3524,6 +3567,8 @@ int main() {
     test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
     test_step_reads_only_body_motion_present_and_motion_degrades_ack();
     test_teaching_word_telemetry_reuse_and_duplicate_ack_parity();
+    test_ack_replay_window_handles_delayed_and_expired_duplicates();
+    test_layer_install_timeout_degrades_without_committing_layer_state();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }

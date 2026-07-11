@@ -239,10 +239,10 @@ def test_prepare_resets_fs_counter_before_version_profile_gate():
 # ── FW-LESSON-02: duplicate re-ack replays the cached rendered/degraded ────────────
 def test_duplicate_reack_replays_cached_rendered_degraded():
     h = read("main/lesson_handler.cc")
-    assert "last_ack_body_json" in h and "last_ack_sequence" in h
+    assert "ack_history" in h and "last_ack_sequence" in h
     # Exact body replay includes rendered/degraded, elapsed time and telemetry.
     dedup = h.index("if (sequence <= g_session.last_in_sequence) {")
-    replay = h.index("cJSON_Parse(g_session.last_ack_body_json.c_str())", dedup)
+    replay = h.index("cJSON_Parse(it->body_json.c_str())", dedup)
     reack = h.index('emit(root, "lesson_ack", replay_body)', dedup)
     assert dedup < replay < reack
 
@@ -263,7 +263,7 @@ def test_duplicate_prepare_reack_replays_cached_asset_pack_metadata():
     assert "g_session.last_ack_asset_pack_json" in h
 
     dedup = h.index("if (sequence <= g_session.last_in_sequence) {")
-    replay_parse = h.index("cJSON_Parse(g_session.last_ack_body_json.c_str())", dedup)
+    replay_parse = h.index("cJSON_Parse(it->body_json.c_str())", dedup)
     reack = h.index('emit(root, "lesson_ack", replay_body)', dedup)
     assert dedup < replay_parse < reack
 

@@ -1043,6 +1043,9 @@ idf_component_register(SRCS ${SOURCES}
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 
+idf_component_get_property(TBOT_LVGL_COMPONENT_LIB lvgl__lvgl COMPONENT_LIB)
+target_compile_definitions(${TBOT_LVGL_COMPONENT_LIB} PRIVATE LODEPNG_NO_COMPILE_ALLOCATORS=1)
+
 if(TBOT_NATIVE_COVERAGE)
     set(TBOT_NATIVE_COVERAGE_SOURCES "" CACHE STRING "Semicolon-separated main component sources to instrument; empty instruments all main sources")
     target_compile_definitions(${COMPONENT_LIB} PRIVATE

@@ -5,6 +5,7 @@
 #include <freertos/event_groups.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <esp_timer.h>
 
 #include <string>
@@ -82,6 +83,7 @@ public:
      * Schedule a callback to be executed in the main task
      */
     void Schedule(std::function<void()>&& callback);
+    bool ScheduleAndWait(std::function<void()>&& callback, int timeout_ms);
 
     /**
      * Alert with status, message, emotion and optional sound

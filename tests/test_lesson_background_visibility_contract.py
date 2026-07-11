@@ -289,8 +289,8 @@ def test_lesson_step_rejects_missing_required_scene_or_poster_before_ack():
     assert 'Blank(overlay_src)' not in fatal_guard
     assert 'const bool has_object_src = !Blank(object_src)' in step_branch
     assert 'const bool has_overlay_src = !Blank(overlay_src)' in step_branch
-    assert 'if (lvgl_display != nullptr && has_object_src)' in step_branch
-    assert 'if (lvgl_display != nullptr && has_overlay_src)' in step_branch
+    assert 'if (lvgl_display != nullptr && has_object_src && object_clear_ok)' in step_branch
+    assert 'if (lvgl_display != nullptr && has_overlay_src && overlay_clear_ok)' in step_branch
     assert guard_idx < error_idx < emit_error_idx < fetch_idx < ack_idx
 
 def test_lesson_step_renders_layers_back_to_front_before_ack():
@@ -298,9 +298,9 @@ def test_lesson_step_renders_layers_back_to_front_before_ack():
     body = function_body(source, "void Application::HandleLessonMessage")
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
-    background_idx = step_branch.index("SetLessonBackground(std::unique_ptr<LvglImage>(raw_bg))")
-    object_idx = step_branch.index("SetLessonObject(std::unique_ptr<LvglImage>(raw_object))")
-    overlay_idx = step_branch.index("SetLessonRobotOverlay(std::unique_ptr<LvglImage>(raw_overlay))")
+    background_idx = step_branch.index("SetLessonBackground(std::move(*holder))")
+    object_idx = step_branch.index("SetLessonObject(std::move(*holder))")
+    overlay_idx = step_branch.index("SetLessonRobotOverlay(std::move(*holder))")
     caption_idx = step_branch.index("display->SetLessonCaption(cap.c_str())")
     ack_idx = step_branch.index("emit_ack(root, sequence")
     success_branch = step_branch[step_branch.index('display->SetStatus("Đang học...")') : ack_idx]
@@ -585,7 +585,6 @@ def test_lesson_image_fetch_rejects_known_content_length_over_memory_cap_before_
 
 def test_lesson_png_decode_is_no_cache_psram_owned_and_frees_compressed_input():
     handler = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
-    lcd = (ROOT / "main/display/lcd_display.cc").read_text(encoding="utf-8")
     png = function_body(handler, "std::unique_ptr<LvglImage> DecodeLessonPngBytes")
 
     assert "args.no_cache = true" in png
@@ -595,9 +594,13 @@ def test_lesson_png_decode_is_no_cache_psram_owned_and_frees_compressed_input():
     assert "mutable_decoded->data = nullptr" in png
     assert "mutable_decoded->unaligned_data = nullptr" in png
     assert "LvglAllocatedImage" in png
-    assert "lv_draw_buf_get_image_handlers()" in lcd
-    assert "handlers->buf_malloc_cb = LessonImageBufferMalloc" in lcd
-    assert "heap_caps_malloc(size, LessonAllocationCaps(size))" in lcd
+    assert "LessonPngAllocatorScope allocator_scope" in png
+    assert "handlers_->buf_malloc_cb = LessonPngBufferMalloc" in handler
+    assert "g_lesson_png_allocator_active = true" in handler
+    assert "g_lesson_png_allocator_active = false" in handler
+    assert "lv_lock()" in handler and "lv_unlock()" in handler
+    assert "LODEPNG_NO_COMPILE_ALLOCATORS" in (ROOT / "main/CMakeLists.txt").read_text(encoding="utf-8")
+    assert "heap_caps_realloc(pointer, size, LessonAllocationCaps(size))" in handler
 
 
 def test_lesson_duplicate_ack_replays_cached_full_body_before_reconstructing_fields():
@@ -605,7 +608,7 @@ def test_lesson_duplicate_ack_replays_cached_full_body_before_reconstructing_fie
     body = function_body(source, "void Application::HandleLessonMessage")
     duplicate = body[body.index("if (sequence <= g_session.last_in_sequence)") : body.index("if (is_step && g_session.paused)")]
 
-    full_body = duplicate.index("g_session.last_ack_body_json")
+    full_body = duplicate.index("g_session.ack_history.rbegin()")
     exact_emit = duplicate.index('emit(root, "lesson_ack", replay_body)')
     reconstructed = duplicate.index("const bool re_rendered")
     assert full_body < exact_emit < reconstructed

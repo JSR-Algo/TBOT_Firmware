@@ -4119,6 +4119,24 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+bool Application::ScheduleAndWait(std::function<void()>&& callback, int timeout_ms) {
+    struct WaitState {
+        SemaphoreHandle_t done = xSemaphoreCreateBinary();
+        std::atomic<bool> cancelled{false};
+        ~WaitState() { if (done != nullptr) vSemaphoreDelete(done); }
+    };
+    auto state = std::make_shared<WaitState>();
+    if (state->done == nullptr) return false;
+    Schedule([state, callback = std::move(callback)]() mutable {
+        if (state->cancelled.load()) return;
+        callback();
+        xSemaphoreGive(state->done);
+    });
+    if (xSemaphoreTake(state->done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) return true;
+    state->cancelled.store(true);
+    return false;
+}
+
 void Application::RunScheduledTasks() {
     std::unique_lock<std::mutex> lock(mutex_);
     auto tasks = std::move(main_tasks_);
