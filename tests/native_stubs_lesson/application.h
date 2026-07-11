@@ -45,6 +45,7 @@ public:
         schedule_calls = 0;
         defer_scheduled_callbacks = false;
         schedule_wait_succeeds = true;
+        schedule_wait_starts_before_timeout = false;
         deferred_callbacks.clear();
         lesson_interactive_listen_generation = 0;
         play_sound_calls = 0;
@@ -67,6 +68,7 @@ public:
     int schedule_calls = 0;
     bool defer_scheduled_callbacks = false;
     bool schedule_wait_succeeds = true;
+    bool schedule_wait_starts_before_timeout = false;
     std::vector<std::function<void()>> deferred_callbacks;
     uint32_t lesson_interactive_listen_generation = 0;
     int play_sound_calls = 0;
@@ -81,11 +83,10 @@ public:
         }
         if (cb) cb();  // run inline so the draw-lambda body executes against fakes
     }
-    bool ScheduleAndWait(std::function<void()>&& cb, int) {
+    bool ScheduleAndWait(std::function<bool()>&& cb, int) {
         schedule_calls++;
-        if (!schedule_wait_succeeds) return false;
-        if (cb) cb();
-        return true;
+        if (!schedule_wait_succeeds && !schedule_wait_starts_before_timeout) return false;
+        return cb ? cb() : false;
     }
     void FlushScheduledCallbacks() {
         auto callbacks = std::move(deferred_callbacks);

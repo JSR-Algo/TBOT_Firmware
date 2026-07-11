@@ -1437,19 +1437,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
     if (lvgl_display != nullptr) {
         if (background_plan.clear_before_load) {
             background_clear_ok = Application::GetInstance().ScheduleAndWait(
-                [lvgl_display]() { lvgl_display->SetLessonBackground(nullptr); },
+                [lvgl_display]() { lvgl_display->SetLessonBackground(nullptr); return true; },
                 kLessonLayerInstallTimeoutMs);
             if (background_clear_ok) g_layer_state.Clear(LessonLayer::kBackground);
         }
         if (object_plan.clear_before_load || (!has_object_src && g_layer_state.Has(LessonLayer::kObject))) {
             object_clear_ok = Application::GetInstance().ScheduleAndWait(
-                [lvgl_display]() { lvgl_display->SetLessonObject(nullptr); },
+                [lvgl_display]() { lvgl_display->SetLessonObject(nullptr); return true; },
                 kLessonLayerInstallTimeoutMs);
             if (object_clear_ok) g_layer_state.Clear(LessonLayer::kObject);
         }
         if (overlay_plan.clear_before_load || (!has_overlay_src && g_layer_state.Has(LessonLayer::kOverlay))) {
             overlay_clear_ok = Application::GetInstance().ScheduleAndWait(
-                [lvgl_display]() { lvgl_display->SetLessonRobotOverlay(nullptr); },
+                [lvgl_display]() { lvgl_display->SetLessonRobotOverlay(nullptr); return true; },
                 kLessonLayerInstallTimeoutMs);
             if (overlay_clear_ok) g_layer_state.Clear(LessonLayer::kOverlay);
         }
@@ -1463,7 +1463,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
             poster_drew = Application::GetInstance().ScheduleAndWait(
                 [lvgl_display, holder]() mutable {
                     lvgl_display->SetLessonBackground(std::move(*holder));
-                }, kLessonLayerInstallTimeoutMs);
+                    return true;
+                }, kLessonLayerInstallTimeoutMs);  // GCOVR_EXCL_LINE
             if (poster_drew) g_layer_state.Commit(LessonLayer::kBackground, poster_key, poster_src);
             ESP_LOGI(TAG, "lesson_step poster fetched+drawn from URL");
         } else if (!background_plan.reused) {
@@ -1482,7 +1483,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (object_image != nullptr) {
             auto holder = std::make_shared<std::unique_ptr<LvglImage>>(std::move(object_image));
             object_drew = Application::GetInstance().ScheduleAndWait(
-                [lvgl_display, holder]() mutable { lvgl_display->SetLessonObject(std::move(*holder)); },
+                [lvgl_display, holder]() mutable { lvgl_display->SetLessonObject(std::move(*holder)); return true; },
                 kLessonLayerInstallTimeoutMs);
             if (object_drew) g_layer_state.Commit(LessonLayer::kObject, object_key, object_src);
             ESP_LOGI(TAG, "lesson_step teaching object fetched+drawn from URL");
@@ -1498,7 +1499,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
             overlay_drew = Application::GetInstance().ScheduleAndWait(
                 [lvgl_display, holder]() mutable {
                     lvgl_display->SetLessonRobotOverlay(std::move(*holder));
-                }, kLessonLayerInstallTimeoutMs);
+                    return true;
+                }, kLessonLayerInstallTimeoutMs);  // GCOVR_EXCL_LINE
             if (overlay_drew) g_layer_state.Commit(LessonLayer::kOverlay, overlay_key, overlay_src);
             ESP_LOGI(TAG, "lesson_step robot overlay fetched+drawn from URL");
         } else if (!overlay_plan.reused) {

@@ -3483,6 +3483,24 @@ void test_layer_install_timeout_degrades_without_committing_layer_state() {
                      "http://timeout-overlay", ",\"prompt\":\"Look\""));
     require(!disp.background_calls.empty() && disp.background_calls.back(),
             "retry reloads and installs layer because timeout did not commit state");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    sequence = OpenSession();
+    const size_t background_calls_before = disp.background_calls.size();
+    App().schedule_wait_succeeds = false;
+    App().schedule_wait_starts_before_timeout = true;
+    Handle(StepFrame(sequence, "install-running", "http://running-bg", "http://running-object",
+                     "http://running-overlay", ",\"prompt\":\"Look\""));
+    require(disp.background_calls.size() == background_calls_before + 1 && disp.background_calls.back(),
+            "callback already running at timeout completes authoritatively");
+    const size_t installed_count = disp.background_calls.size();
+    App().schedule_wait_succeeds = true;
+    App().schedule_wait_starts_before_timeout = false;
+    Handle(StepFrame(sequence + 1, "install-running-reuse", "http://running-bg",
+                     "http://running-object", "http://running-overlay", ",\"prompt\":\"Look\""));
+    require(disp.background_calls.size() == installed_count,
+            "completed running callback commits layer state for reuse");
 }
 
 }  // namespace

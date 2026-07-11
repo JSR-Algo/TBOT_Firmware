@@ -4119,22 +4119,32 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
-bool Application::ScheduleAndWait(std::function<void()>&& callback, int timeout_ms) {
+bool Application::ScheduleAndWait(std::function<bool()>&& callback, int timeout_ms) {
     struct WaitState {
+        enum Status { kPending, kRunning, kDone, kCancelled };
         SemaphoreHandle_t done = xSemaphoreCreateBinary();
-        std::atomic<bool> cancelled{false};
+        std::atomic<Status> status{kPending};
+        std::atomic<bool> result{false};
         ~WaitState() { if (done != nullptr) vSemaphoreDelete(done); }
     };
     auto state = std::make_shared<WaitState>();
     if (state->done == nullptr) return false;
     Schedule([state, callback = std::move(callback)]() mutable {
-        if (state->cancelled.load()) return;
-        callback();
+        auto expected = WaitState::kPending;
+        if (!state->status.compare_exchange_strong(expected, WaitState::kRunning)) return;
+        state->result.store(callback());
+        state->status.store(WaitState::kDone);
         xSemaphoreGive(state->done);
     });
-    if (xSemaphoreTake(state->done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) return true;
-    state->cancelled.store(true);
-    return false;
+    if (xSemaphoreTake(state->done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+        return state->result.load();
+    }
+    auto expected = WaitState::kPending;
+    if (state->status.compare_exchange_strong(expected, WaitState::kCancelled)) return false;
+    if (expected == WaitState::kRunning) {
+        xSemaphoreTake(state->done, portMAX_DELAY);
+    }
+    return state->status.load() == WaitState::kDone && state->result.load();
 }
 
 void Application::RunScheduledTasks() {

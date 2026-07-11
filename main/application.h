@@ -83,7 +83,7 @@ public:
      * Schedule a callback to be executed in the main task
      */
     void Schedule(std::function<void()>&& callback);
-    bool ScheduleAndWait(std::function<void()>&& callback, int timeout_ms);
+    bool ScheduleAndWait(std::function<bool()>&& callback, int timeout_ms);
 
     /**
      * Alert with status, message, emotion and optional sound

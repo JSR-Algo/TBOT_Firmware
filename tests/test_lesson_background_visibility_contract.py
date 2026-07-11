@@ -612,3 +612,16 @@ def test_lesson_duplicate_ack_replays_cached_full_body_before_reconstructing_fie
     exact_emit = duplicate.index('emit(root, "lesson_ack", replay_body)')
     reconstructed = duplicate.index("const bool re_rendered")
     assert full_body < exact_emit < reconstructed
+
+
+def test_schedule_and_wait_cancels_only_pending_callbacks_and_waits_for_running_work():
+    source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
+    body = function_body(source, "bool Application::ScheduleAndWait")
+
+    assert "enum Status { kPending, kRunning, kDone, kCancelled }" in body
+    assert "compare_exchange_strong(expected, WaitState::kRunning)" in body
+    assert "compare_exchange_strong(expected, WaitState::kCancelled)" in body
+    running = body.index("if (expected == WaitState::kRunning)")
+    wait_done = body.index("xSemaphoreTake(state->done, portMAX_DELAY)", running)
+    result = body.index("state->result.load()", wait_done)
+    assert running < wait_done < result
