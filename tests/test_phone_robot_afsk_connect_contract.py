@@ -9,17 +9,12 @@ parser that persists credentials and exits config mode.
 import re
 from pathlib import Path
 
+from repo_paths import resolve_robot_path
+
 ROOT = Path(__file__).resolve().parents[1]
-MOBILE_ULTRASONIC = (
-    ROOT.parent
-    / "esp32-server"
-    / "main"
-    / "manager-mobile"
-    / "src"
-    / "pages"
-    / "device-config"
-    / "components"
-    / "ultrasonic-config.vue"
+MOBILE_ULTRASONIC = resolve_robot_path(
+    "esp32-server/main/manager-mobile/src/pages/device-config/components/ultrasonic-config.vue",
+    ROOT,
 )
 
 

@@ -252,7 +252,8 @@ def test_lcdwiki_es3c35p_uses_lcdwiki_audio_and_uart_pins():
     assert "#define AUDIO_I2S_GPIO_WS   GPIO_NUM_21" in config
     assert "#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_16" in config
     assert "#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_15" in config
-    assert "constexpr int kLcdWikiOutputVolume = 100" in board
+    # 92 is the measured Live TTS sweet spot for this PA without clipping.
+    assert "constexpr int kLcdWikiOutputVolume = 92" in board
     assert "class LcdWikiAudioCodec : public Es8311AudioCodec" in board
     assert "input_channels_ = 1;" in board
     assert "output_channels_ = 1;" in board

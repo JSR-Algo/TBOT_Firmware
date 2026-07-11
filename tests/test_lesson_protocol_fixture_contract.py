@@ -2,9 +2,13 @@ import json
 import hashlib
 from pathlib import Path
 
+from repo_paths import resolve_robot_path
+
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE = ROOT.parent / "docs" / "stories" / "US-006-learning-course-runtime" / "fixtures" / "lesson-protocol.v1.json"
+FIXTURE = resolve_robot_path(
+    "docs/stories/US-006-learning-course-runtime/fixtures/lesson-protocol.v1.json", ROOT
+)
 PROTOCOL = "teebot-lesson-renderer.v1"
 LAYERS = ("backgroundScene", "teachingObject", "robotOverlay")
 

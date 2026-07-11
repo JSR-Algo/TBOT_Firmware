@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from repo_paths import resolve_robot_path
 import re
 
 
@@ -229,7 +231,7 @@ def test_lcdwiki_enables_robot_uart_ack_reader_for_slave_events():
 
 
 def test_servant_firmware_has_uart_servo_controller():
-    main_c = read("../TBOT-Servant-Firmware/main/main.c")
+    main_c = resolve_robot_path("TBOT-Servant-Firmware/main/main.c", ROOT).read_text(encoding="utf-8")
 
     assert "LEFT_ARM_SERVO_GPIO GPIO_NUM_12" in main_c
     assert "RIGHT_ARM_SERVO_GPIO GPIO_NUM_13" in main_c
