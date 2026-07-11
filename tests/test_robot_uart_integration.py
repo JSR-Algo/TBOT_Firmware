@@ -58,6 +58,29 @@ def test_main_firmware_declares_robot_uart_bridge():
     assert 'clamp_percent' in source
     assert 'lower' in source
 
+
+def test_robot_uart_serializes_complete_profile_switch_and_write_transactions():
+    header = read("main/robot_uart.h")
+    source = read("main/robot_uart.cc")
+
+    assert "std::recursive_mutex uart_mutex_" in header
+    for signature in (
+        "bool RobotUart::Initialize()",
+        "bool RobotUart::SendBothArmsRaise()",
+        "bool RobotUart::SendBothArmsLower()",
+        "bool RobotUart::SendBothArmsSetPercent(int percent)",
+        "bool RobotUart::SendServoSweep(",
+        "bool RobotUart::SendControlLine(",
+    ):
+        body = source[source.index(signature):]
+        body = body[:body.index("\n}")]
+        assert "std::lock_guard<std::recursive_mutex> lock(uart_mutex_);" in body
+
+    transaction = source[source.index("bool RobotUart::SendPayloadOnProfile"):]
+    transaction = transaction[:transaction.index("\n}")]
+    assert transaction.index("SelectUartProfile") < transaction.index("uart_flush_input")
+    assert transaction.index("uart_flush_input") < transaction.index("uart_write_bytes")
+
 def test_robot_motion_uart_dispatch_does_not_block_on_servant_ack():
     source = read("main/robot_uart.cc")
 

@@ -5,6 +5,7 @@
 #include <driver/uart.h>
 
 #include <functional>
+#include <mutex>
 #include <string>
 
 // Su kien nhap tru tuong tu slave (2 nut TTP223) gui qua UART.
@@ -59,6 +60,7 @@ private:
     bool using_alt_profile_ = false;
     bool ack_reader_started_ = false;
     std::function<void(RobotInputEvent)> event_cb_;
+    std::recursive_mutex uart_mutex_;
 };
 
 #endif  // ROBOT_UART_H_

@@ -3296,6 +3296,7 @@ void test_safe_motion_presets_and_auto_rest() {
         require(result == LessonMotionResult::kApplied, "named motion preset applies");
         require(App().robot_uart_.calls == tc.calls, "named preset exact RobotUart call order");
         if (std::string(tc.preset) != "rest") {
+            HostEspAdvanceTimeUs(1500LL * 1000LL);
             HostEspFireTimer();
             auto expected = tc.calls;
             expected.push_back("both_arms_lower");
@@ -3320,6 +3321,7 @@ void test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades() {
             "bounded motion is armed before unknown input");
     require(DispatchLessonMotionPreset(App().robot_uart_, "rawSweep") == LessonMotionResult::kDegraded,
             "unknown input remains degraded");
+    HostEspAdvanceTimeUs(1500LL * 1000LL);
     HostEspFireTimer();
     const std::vector<std::string> preserved_rest = {
         "both_arms_raise", "head_center", "both_arms_lower", "head_center"};
@@ -3341,11 +3343,35 @@ void test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades() {
             "first bounded preset applies");
     require(DispatchLessonMotionPreset(App().robot_uart_, "presentLeft") == LessonMotionResult::kApplied,
             "new preset cancels stale rest");
+    HostEspAdvanceTimeUs(1500LL * 1000LL);
     HostEspFireTimer();
     const std::vector<std::string> expected = {
         "both_arms_raise", "head_center", "left_arm_raise", "right_arm_lower",
         "head_turn_left", "both_arms_lower", "head_center"};
     require(App().robot_uart_.calls == expected, "only newest generation auto-rest runs");
+}
+
+void test_queued_old_timer_callback_cannot_rest_a_new_pose_early() {
+    ResetObservable();
+    HostEspNowUs() = 1000;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "celebrate") == LessonMotionResult::kApplied,
+            "old bounded pose schedules rest");
+    const auto old_callback = HostEspQueueTimerCallback();
+    require(DispatchLessonMotionPreset(App().robot_uart_, "presentLeft") == LessonMotionResult::kApplied,
+            "new pose replaces the old deadline");
+    const auto before_early_callback = App().robot_uart_.calls;
+    HostEspInvokeQueuedCallback(old_callback);
+    require(App().robot_uart_.calls == before_early_callback,
+            "queued old callback does not rest before the new absolute deadline");
+
+    HostEspAdvanceTimeUs(1500LL * 1000LL);
+    HostEspFireTimer();
+    auto expected = before_early_callback;
+    expected.push_back("both_arms_lower");
+    expected.push_back("head_center");
+    require(App().robot_uart_.calls == expected, "new deadline performs exactly one rest");
+    HostEspInvokeQueuedCallback(old_callback);
+    require(App().robot_uart_.calls == expected, "late duplicate callback cannot rest twice");
 }
 
 void test_step_reads_only_body_motion_present_and_motion_degrades_ack() {
@@ -3449,6 +3475,7 @@ int main() {
     test_protocol_null_send_skip();
     test_safe_motion_presets_and_auto_rest();
     test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
+    test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
     test_step_reads_only_body_motion_present_and_motion_degrades_ack();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;

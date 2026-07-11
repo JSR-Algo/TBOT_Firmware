@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 #include <esp_timer.h>
 
@@ -14,10 +15,12 @@ constexpr uint64_t kBoundedPresetDurationUs = 1500ULL * 1000ULL;
 class LessonMotionController {
 public:
     LessonMotionResult Dispatch(RobotUart& robot_uart, const char* preset) {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!IsKnownPreset(preset)) return LessonMotionResult::kDegraded;
 
         robot_uart_ = &robot_uart;
         ++generation_;
+        rest_armed_ = false;
         if (rest_timer_ != nullptr) esp_timer_stop(rest_timer_);
 
         bool sent = true;
@@ -77,12 +80,17 @@ private:
 
     static void RestTimerCallback(void* arg) {
         auto* self = static_cast<LessonMotionController*>(arg);
-        const uint32_t callback_generation = self->armed_generation_;
-        self->RestIfCurrent(callback_generation);
+        self->RestIfDue();
     }
 
-    void RestIfCurrent(uint32_t callback_generation) {
-        if (callback_generation != generation_ || robot_uart_ == nullptr) return;
+    void RestIfDue() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const uint32_t callback_generation = armed_generation_;
+        if (!rest_armed_ || callback_generation != generation_ || robot_uart_ == nullptr ||
+            esp_timer_get_time() < rest_deadline_us_) {
+            return;
+        }
+        rest_armed_ = false;
         SendRest();
     }
 
@@ -103,13 +111,18 @@ private:
             if (esp_timer_create(&args, &rest_timer_) != ESP_OK) return false;
         }
         armed_generation_ = generation_;
-        return esp_timer_start_once(rest_timer_, kBoundedPresetDurationUs) == ESP_OK;
+        rest_deadline_us_ = esp_timer_get_time() + static_cast<int64_t>(kBoundedPresetDurationUs);
+        rest_armed_ = esp_timer_start_once(rest_timer_, kBoundedPresetDurationUs) == ESP_OK;
+        return rest_armed_;
     }
 
+    std::mutex mutex_;
     RobotUart* robot_uart_ = nullptr;
     esp_timer_handle_t rest_timer_ = nullptr;
     uint32_t generation_ = 0;
     uint32_t armed_generation_ = 0;
+    int64_t rest_deadline_us_ = 0;
+    bool rest_armed_ = false;
 };
 
 LessonMotionController g_lesson_motion_controller;

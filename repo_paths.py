@@ -51,18 +51,26 @@ def resolve_robot_root(start: Path, git_common_dir: Optional[Path] = None) -> Pa
         if _looks_like_robot_root(candidate):
             return candidate
     detail = "\n  ".join(searched) if searched else "no candidates discovered"
-    raise AssertionError(
+    raise FileNotFoundError(
         "Unable to locate the TBOT robot monorepo root. Set TBOT_ROBOT_ROOT or "
         f"run inside its source checkout. Searched:\n  {detail}"
     )
 
 
 def resolve_robot_path(relative: str, start: Optional[Path] = None) -> Path:
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ValueError(f"Expected a relative path contained by robot root: {relative}")
     checkout = Path(start) if start is not None else Path(__file__).resolve().parent
     root = resolve_robot_root(checkout)
-    path = root / relative
-    assert path.exists(), (
+    path = (root / relative_path).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ValueError(f"Expected a relative path contained by robot root: {relative}") from exc
+    if not path.exists():
+        raise FileNotFoundError(
         f"Resolved TBOT robot root to {root}, but required path is missing: {path}. "
         "Set TBOT_ROBOT_ROOT to the checkout containing this dependency."
-    )
+        )
     return path

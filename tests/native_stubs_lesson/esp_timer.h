@@ -26,6 +26,16 @@ struct HostEspTimer {
 inline bool& HostEspTimerCreateOk() { static bool v = true; return v; }
 inline bool& HostEspTimerStartOk() { static bool v = true; return v; }
 inline HostEspTimer*& HostEspLastTimer() { static HostEspTimer* v = nullptr; return v; }
+inline int64_t& HostEspNowUs() { static int64_t v = 0; return v; }
+struct HostEspQueuedCallback { void (*callback)(void*); void* arg; };
+inline HostEspQueuedCallback HostEspQueueTimerCallback() {
+    auto* timer = HostEspLastTimer();
+    return {timer->callback, timer->arg};
+}
+inline void HostEspInvokeQueuedCallback(const HostEspQueuedCallback& queued) {
+    queued.callback(queued.arg);
+}
+inline void HostEspAdvanceTimeUs(int64_t delta) { HostEspNowUs() += delta; }
 inline esp_err_t esp_timer_create(const esp_timer_create_args_t* args, esp_timer_handle_t* out) {
     if (!HostEspTimerCreateOk()) return -1;
     auto* timer = new HostEspTimer{args->callback, args->arg, false};
@@ -51,7 +61,5 @@ inline void HostEspFireTimer() {
 }
 
 inline int64_t esp_timer_get_time() {
-    static int64_t now_us = 0;
-    now_us += 1000;
-    return now_us;
+    return HostEspNowUs();
 }
