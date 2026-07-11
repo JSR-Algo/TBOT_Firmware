@@ -70,8 +70,7 @@ static std::string NewTraceParentHeader() {
     return std::string(buffer);
 }
 
-WebsocketProtocol::WebsocketProtocol() {
-    event_group_handle_ = xEventGroupCreate();
+void WebsocketProtocol::RefreshSettings() {
     Settings settings("websocket", false);
     url_ = settings.GetString("url", CONFIG_WEBSOCKET_URL);
     token_ = settings.GetString("token");
@@ -79,6 +78,11 @@ WebsocketProtocol::WebsocketProtocol() {
     if (version != 0) {
         version_ = version;
     }
+}
+
+WebsocketProtocol::WebsocketProtocol() {
+    event_group_handle_ = xEventGroupCreate();
+    RefreshSettings();
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
@@ -89,6 +93,7 @@ bool WebsocketProtocol::Start() {
     // Warm the websocket session during activation so the first wake word does
     // not block in the cold TLS/WebSocket handshake path.
     ESP_LOGI(TAG, "Preconnecting websocket audio channel");
+    RefreshSettings();
     bool opened = OpenAudioChannel();
     if (!opened) {
         ESP_LOGW(TAG, "Websocket preconnect failed; wake word will retry on demand");

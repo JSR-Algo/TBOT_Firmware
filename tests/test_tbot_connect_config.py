@@ -97,12 +97,25 @@ def test_firmware_prefers_ota_returned_websocket_url_before_compile_fallback():
     assert "settings.SetString(item->string, item->valuestring);" in websocket_parse_body
     assert "has_websocket_config_ = true;" in websocket_parse_body
 
+    refresh_start = websocket_cc.index("void WebsocketProtocol::RefreshSettings()")
+    refresh_end = websocket_cc.index("WebsocketProtocol::WebsocketProtocol()", refresh_start)
+    refresh_body = websocket_cc[refresh_start:refresh_end]
+
+    assert 'Settings settings("websocket", false);' in refresh_body
+    assert 'settings.GetString("url", CONFIG_WEBSOCKET_URL)' in refresh_body
+
+    constructor_start = websocket_cc.index("WebsocketProtocol::WebsocketProtocol()")
+    constructor_end = websocket_cc.index("WebsocketProtocol::~WebsocketProtocol()", constructor_start)
+    constructor_body = websocket_cc[constructor_start:constructor_end]
+
+    assert "RefreshSettings();" in constructor_body
+
     open_start = websocket_cc.index("bool WebsocketProtocol::OpenAudioChannel()")
     open_end = websocket_cc.index("websocket_->SetHeader", open_start)
     open_body = websocket_cc[open_start:open_end]
 
-    assert 'Settings settings("websocket", false);' in open_body
-    assert 'settings.GetString("url", CONFIG_WEBSOCKET_URL)' in open_body
+    assert "std::string url = url_;" in open_body
+    assert 'Settings settings("websocket", false);' not in open_body
 
 def test_firmware_persists_ota_returned_backend_api_url_for_device_config_polling():
     ota_cc = read("main/ota.cc")
@@ -148,10 +161,13 @@ def test_firmware_refreshes_websocket_url_from_authenticated_config_fetch_at_boo
     activation_start = application_cc.index("void Application::ActivationTask()")
     activation_end = application_cc.index("void Application::CheckAssetsVersion()", activation_start)
     activation_body = application_cc[activation_start:activation_end]
+    unclaimed_idx = activation_body.index("if (!IsDeviceClaimed())")
     check_idx = activation_body.index("CheckNewVersion();")
     refresh_idx = activation_body.index("RefreshWebsocketUrlFromConfigFetch();")
     init_idx = activation_body.index("InitializeProtocol();")
-    assert check_idx < refresh_idx < init_idx
+    # Claimed path still runs OTA -> websocket refresh -> protocol in order.
+    # Unclaimed path returns before CheckNewVersion to avoid Loading-setup hang.
+    assert unclaimed_idx < check_idx < refresh_idx < init_idx
 
 def test_firmware_preserves_ota_returned_websocket_url_even_when_tunnel_hosts_differ():
     ota_cc = read("main/ota.cc")

@@ -88,7 +88,7 @@ def test_robot_uart_reads_servant_ack_asynchronously():
     assert "StartAckReader();" in source
     assert "xTaskCreate(&RobotUart::AckReaderTask" in source
     assert "uart_read_bytes" in source
-    assert "Servant ACK" in source
+    assert "Slave line ignored" in source
     assert "primary-listen" in source
     assert "ROBOT_UART_ALT_NUM == ROBOT_UART_NUM" in source
     assert "WaitForAck" not in source
@@ -211,18 +211,18 @@ def test_lcdwiki_board_retries_swapped_uart_pins_for_servant_ack():
     config = read("main/boards/lcdwiki-es3c35p/config.h")
 
     assert "ROBOT_UART_NUM        UART_NUM_1" in config
-    assert "ROBOT_UART_TX_PIN     GPIO_NUM_44" in config
-    assert "ROBOT_UART_RX_PIN     GPIO_NUM_43" in config
+    assert "ROBOT_UART_TX_PIN     GPIO_NUM_43" in config
+    assert "ROBOT_UART_RX_PIN     GPIO_NUM_44" in config
     assert "ROBOT_UART_ALT_NUM    UART_NUM_1" in config
-    assert "ROBOT_UART_ALT_TX_PIN GPIO_NUM_43" in config
-    assert "ROBOT_UART_ALT_RX_PIN GPIO_NUM_44" in config
+    assert "ROBOT_UART_ALT_TX_PIN GPIO_NUM_44" in config
+    assert "ROBOT_UART_ALT_RX_PIN GPIO_NUM_43" in config
 
 
-def test_lcdwiki_disables_robot_uart_ack_reader_to_avoid_console_echo():
+def test_lcdwiki_enables_robot_uart_ack_reader_for_slave_events():
     config = read("main/boards/lcdwiki-es3c35p/config.h")
     source = read("main/robot_uart.cc")
 
-    assert "#define ROBOT_UART_ACK_READER_ENABLED 0" in config
+    assert "#define ROBOT_UART_ACK_READER_ENABLED 1" in config
     assert "#ifndef ROBOT_UART_ACK_READER_ENABLED" in source
     assert "#define ROBOT_UART_ACK_READER_ENABLED 1" in source
     assert "if (!ROBOT_UART_ACK_READER_ENABLED)" in source

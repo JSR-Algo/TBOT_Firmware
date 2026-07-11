@@ -258,8 +258,8 @@ def test_lcdwiki_es3c35p_uses_lcdwiki_audio_and_uart_pins():
     assert "output_channels_ = 1;" in board
     assert "SetOutputVolume(kLcdWikiOutputVolume);" in board
     assert "static LcdWikiAudioCodec audio_codec" in board
-    assert "#define ROBOT_UART_TX_PIN     GPIO_NUM_44" in config
-    assert "#define ROBOT_UART_RX_PIN     GPIO_NUM_43" in config
+    assert "#define ROBOT_UART_TX_PIN     GPIO_NUM_43" in config
+    assert "#define ROBOT_UART_RX_PIN     GPIO_NUM_44" in config
 
 def test_lcdwiki_es3c35p_mounts_micro_sd_for_lesson_assets():
     config = read("main/boards/lcdwiki-es3c35p/config.h")

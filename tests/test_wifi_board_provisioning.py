@@ -426,7 +426,8 @@ def test_wb9b_ble_advertised_name_is_tbot_prefixed():
     )
     # No Xiaozhi-Blufi device name leaks through.
     assert '#define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"' not in blufi
-    assert 'esp_ble_gap_set_device_name(device_name.c_str())' in blufi
+    assert 'StartTbotBlufiAdvertising' in blufi
+    assert 'esp_ble_gap_set_device_name(device_name)' in blufi
 
 
 # ---------------------------------------------------------------------------

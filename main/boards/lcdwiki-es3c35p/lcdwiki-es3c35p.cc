@@ -108,7 +108,9 @@ const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
 
 constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
 constexpr bool kHoldBootProbePattern = false;
-constexpr int kLcdWikiOutputVolume = 100;
+// Sweet spot for Live TTS on this PA: loud enough, usually no clipping.
+// User can still raise/lower via MCP (0-100).
+constexpr int kLcdWikiOutputVolume = 92;
 
 void EnableBacklightForBoot() {
     const gpio_config_t backlight_gpio_config = {
@@ -639,11 +641,21 @@ private:
             }
             app.ToggleChatState();
         });
+        // Double-click BOOT while online/idle: change Wi-Fi only (keep claim).
+        // Parent moves house / switches SSID without unpairing the account.
+        // Opens BluFi advertising so the phone can push new credentials.
+        boot_button_.OnDoubleClick([this]() {
+            auto& app = Application::GetInstance();
+            if (app.IsLessonRuntimeActive()) {
+                ESP_LOGI(TAG, "LCDWiki BOOT double-click ignored during lesson");
+                return;
+            }
+            ESP_LOGI(TAG, "LCDWiki BOOT double-click -> EnterWifiConfigMode (change Wi-Fi, keep claim)");
+            EnterWifiConfigMode();
+        });
         boot_button_.OnLongPress([]() {
-            // Re-pair: forget the current parent/claim and re-enter BLE pairing so a
-            // (possibly different) parent phone can connect & re-claim the robot. Does
-            // not block on Wi-Fi/cloud at press time — cloud ownership release is
-            // deferred until the robot is back online (see EnterRepairPairingMode).
+            // Long-press: full re-pair — forget claim + Wi-Fi so a new (or same)
+            // parent can re-claim. Prefer double-click for Wi-Fi-only changes.
             ESP_LOGI(TAG, "LCDWiki BOOT long-press -> EnterRepairPairingMode (re-pair)");
             Application::GetInstance().EnterRepairPairingMode();
         });

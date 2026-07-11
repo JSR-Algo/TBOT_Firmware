@@ -146,21 +146,21 @@ Current main UART config from `lcdwiki-es3c35p/config.h`:
 
 ```c
 #define ROBOT_UART_NUM        UART_NUM_1
-#define ROBOT_UART_TX_PIN     GPIO_NUM_44
-#define ROBOT_UART_RX_PIN     GPIO_NUM_43
+#define ROBOT_UART_TX_PIN     GPIO_NUM_43
+#define ROBOT_UART_RX_PIN     GPIO_NUM_44
 #define ROBOT_UART_BAUD_RATE  115200
 #define ROBOT_UART_ALT_NUM    UART_NUM_1
-#define ROBOT_UART_ALT_TX_PIN GPIO_NUM_43
-#define ROBOT_UART_ALT_RX_PIN GPIO_NUM_44
-#define ROBOT_UART_ACK_READER_ENABLED 0
+#define ROBOT_UART_ALT_TX_PIN GPIO_NUM_44
+#define ROBOT_UART_ALT_RX_PIN GPIO_NUM_43
+#define ROBOT_UART_ACK_READER_ENABLED 1
 ```
 
 Notes:
 
-- Main has a primary UART profile TX=44 RX=43.
-- Main also has an alternate reversed profile TX=43 RX=44.
-- ACK reader is currently disabled.
-- To receive TTP223 events, implement a real line listener/parser. Do not only log ACKs.
+- Main has a primary UART profile TX=43 RX=44.
+- Main also has an alternate reversed profile TX=44 RX=43.
+- ACK/event reader is currently enabled.
+- TTP223 events are parsed from explicit `EVT:*` / `SLAVE:*` lines.
 - If one UART port is used for both TX/RX, avoid repeatedly switching pins while a reader task is active. Prefer a single confirmed TX/RX wiring profile for final deployment.
 
 ## Current Main SD Card Discovery
@@ -305,20 +305,25 @@ Button behavior:
 LEFT short press:
   - Menu: previous/toggle selection
   - Game: pause/restart depending on state
-  - Chatbox: optional/no-op for phase 1
+  - Chatbox: ToggleChatState (talk / stop); ignored during lesson
 
 RIGHT short press:
   - Menu: next/toggle selection
   - Game: flap/jump
-  - Chatbox: optional/no-op for phase 1
+  - Chatbox: volume +10
 
 BOTH short press under 700 ms:
   - Menu: select highlighted app
   - Game: start/restart
-  - Chatbox: optional/no-op
+  - Chatbox: volume -10
 
 BOTH hold 3000 ms:
   - Always switch Main back to APP_MENU from any mode
+
+RIGHT hold 3000 ms:
+  - EVT:RIGHT_HOLD_3S → EnterWifiConfigMode (change Wi-Fi, keep claim)
+  - Ignored during lesson
+  - Product path when BOOT is internal / case sealed
 ```
 
 Conflict rule:
@@ -345,6 +350,7 @@ EVT:LEFT_CLICK\n
 EVT:RIGHT_CLICK\n
 EVT:BOTH_CLICK\n
 EVT:MENU_HOLD_3S\n
+EVT:RIGHT_HOLD_3S\n
 PONG\n
 ERR:<reason>\n
 ```

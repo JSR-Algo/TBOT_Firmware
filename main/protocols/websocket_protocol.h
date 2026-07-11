@@ -28,6 +28,7 @@ private:
     std::string token_;
     int version_ = 1;
 
+    void RefreshSettings();
     void ParseServerHello(const cJSON* root);
     bool SendText(const std::string& text) override;
     std::string GetHelloMessage();

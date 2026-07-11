@@ -214,6 +214,7 @@ void Application::Initialize() {
                 case RobotInputEvent::RightClick: AppHandleInputRight(); break;
                 case RobotInputEvent::BothClick:  AppHandleInputBothClick(); break;
                 case RobotInputEvent::MenuHold:   AppHandleMenuHold(); break;
+                case RobotInputEvent::RightHold:  AppHandleRightHold(); break;
                 case RobotInputEvent::SlaveReady: AppOnSlaveReady(); break;
             }
         });
@@ -567,17 +568,41 @@ void Application::HandleNetworkConnectedEvent() {
     if (state == kDeviceStateStarting) {
         // Network is ready, start activation
         SetDeviceState(kDeviceStateActivating);
+        // Unclaimed + BLE advertising leaves ~7–8KB largest free internal block.
+        // The normal activation worker needs 8KB stack and fails to create, so the
+        // UI freezes on "Loading setup..." forever. Unclaimed devices cannot
+        // finish cloud bootstrap without a parent claim — exit Activating now.
+        if (!IsDeviceClaimed()) {
+            ESP_LOGW(TAG,
+                     "Unclaimed device on Wi-Fi: skip activation worker "
+                     "(heap too tight with BLE; leave claim-standby)");
+            if (!ota_) {
+                ota_ = std::make_unique<Ota>();
+                ota_->MarkCurrentVersionValid();
+            }
+            xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+            return;
+        }
         if (activation_task_handle_ != nullptr) {
             ESP_LOGW(TAG, "Activation task already running");
             return;
         }
 
-        xTaskCreate([](void* arg) {
+        BaseType_t created = xTaskCreate([](void* arg) {
             Application* app = static_cast<Application*>(arg);
             app->ActivationTask();
             app->activation_task_handle_ = nullptr;
             vTaskDelete(NULL);
         }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+        if (created != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create activation task (heap exhausted?)");
+            activation_task_handle_ = nullptr;
+            if (!ota_) {
+                ota_ = std::make_unique<Ota>();
+                ota_->MarkCurrentVersionValid();
+            }
+            xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+        }
     }
 
     // Update the status bar immediately to show the network state
@@ -1073,6 +1098,20 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
     if (!SetDeviceState(kDeviceStateActivating)) {
         return;  // FSM rejected the transition; nothing more to do here.
     }
+    if (!IsDeviceClaimed()) {
+        // Same heap constraint as HandleNetworkConnectedEvent: with BLE still
+        // advertising for claim standby, the 8KB activation task often cannot
+        // be created. Signal done so we reach Idle and keep BLE discoverable.
+        ESP_LOGW(TAG,
+                 "Unclaimed after BluFi Wi-Fi success: skip activation worker, "
+                 "finish setup to Idle claim-standby");
+        if (!ota_) {
+            ota_ = std::make_unique<Ota>();
+            ota_->MarkCurrentVersionValid();
+        }
+        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+        return;
+    }
     if (activation_task_handle_ != nullptr) {
         ESP_LOGW(TAG, "Activation task already running");
         return;  // Activation already running -> it will reach Idle on its own.
@@ -1080,12 +1119,21 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
     // Reuse the same activation worker as a normal boot (OTA check + protocol/WS),
     // which ends by setting MAIN_EVENT_ACTIVATION_DONE -> HandleActivationDoneEvent
     // -> kDeviceStateIdle -> RefreshPendingTbotClaim() (the proven auto-confirm path).
-    xTaskCreate([](void* arg) {
+    BaseType_t created = xTaskCreate([](void* arg) {
         Application* app = static_cast<Application*>(arg);
         app->ActivationTask();
         app->activation_task_handle_ = nullptr;
         vTaskDelete(NULL);
     }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+    if (created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create activation task after provisioning");
+        activation_task_handle_ = nullptr;
+        if (!ota_) {
+            ota_ = std::make_unique<Ota>();
+            ota_->MarkCurrentVersionValid();
+        }
+        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+    }
 }
 
 void Application::RenderClaimSubstate(TbotClaimSubstate substate) {
@@ -1153,9 +1201,15 @@ void Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
     // simply WAITS on the network at low priority while the wake-word AFE
     // fetch/feed pipeline keeps the CPU. The old design queued this blocking call
     // onto the priority-10 Application task, which is the starvation root cause.
+    //
+    // Stack MUST be internal DRAM — not SPIRAM. The worker opens NVS + does
+    // TLS/HTTP; both disable the flash cache. A SPIRAM task stack is invalid
+    // while the cache is off and panics with:
+    //   esp_task_stack_is_sane_cache_disabled (spi_flash cache_utils).
+    // Live crash after BluFi Wi-Fi success was exactly this path.
     if (xTaskCreateWithCaps(&Application::ClaimFetchTask, "claim_fetch", 6144, ctx,
                             tskIDLE_PRIORITY + 1, nullptr,
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "claim_fetch task create failed; retrying next tick");
         delete ctx;
         claim_poll_inflight_.store(false);
@@ -1183,12 +1237,18 @@ void Application::ClaimFetchTask(void* arg) {
     self->Schedule([self, api_url, token, pending_claim, fetched, device_config_status]() {
         self->claim_poll_inflight_.store(false);
         // The periodic poll may have been stopped (claimed+online / WiFiConfiguring)
-        // while this fetch was outstanding; honor that and drop stale no-claim
-        // results. But a Wi-Fi provisioning completion dispatches a one-shot
-        // fetch before the poll timer is active. If that fetch already found an
-        // authenticated pending claim, it must still be applied or mobile stays
-        // stuck at WAITING_PHYSICAL_CONFIRM forever.
-        if (!self->claim_poll_active_ && !(fetched && pending_claim.active && !token.empty())) {
+        // while this fetch was outstanding; honor that and drop pure poll ticks
+        // that finished after stop.
+        //
+        // One-shot fetches (post-BluFi / unclaimed boot with bootstrap token)
+        // dispatch BEFORE StartClaimPoll() is active. Those must ALWAYS apply:
+        //  - active claim + token -> auto-confirm
+        //  - claim_present=0 + token -> Apply... reopens BLE standby
+        // Without the claim_present=0 branch, BLE stays down after the
+        // "Bootstrap token present; stopping BLE" path and phone scan times out
+        // (live E2E 2026-07-11: BLE_SCAN_TIMEOUT after claim_fetch http=200
+        // claim_present=0 with no EnsureBleAdvertisingForStandby).
+        if (!self->claim_poll_active_ && token.empty()) {
             return;
         }
         self->ApplyPendingTbotClaimFetchResult(api_url, token, pending_claim,
@@ -1728,9 +1788,10 @@ void Application::MaybeDispatchDeferredCloudRelease() {
 
     // Low priority + not pinned to core 0 (same as ClaimFetchTask) so the blocking
     // POST waits on the network without starving the core-0 wake-word AFE pipeline.
+    // Internal DRAM stack required: worker + result path touch NVS/flash (cache-off).
     if (xTaskCreateWithCaps(&Application::CloudReleaseTask, "cloud_release", 6144, this,
                             tskIDLE_PRIORITY + 1, nullptr,
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "cloud_release task create failed; retrying next refresh");
         cloud_release_inflight_.store(false);
     }
@@ -1834,9 +1895,11 @@ void Application::DispatchDeviceHeartbeat() {
     // Low priority (tskIDLE_PRIORITY+1) and NOT pinned to core 0 so the worker
     // simply WAITS on the network at low priority while the wake-word AFE
     // fetch/feed pipeline keeps the CPU (same pattern as ClaimFetchTask).
+    // Internal DRAM stack: TLS/HTTP + any Settings/NVS from this path need a
+    // cache-safe stack (SPIRAM stacks panic when flash cache is disabled).
     if (xTaskCreateWithCaps(&Application::HeartbeatTask, "heartbeat_http", 8192, ctx,
                             tskIDLE_PRIORITY + 1, nullptr,
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "heartbeat task create failed; retrying next tick");
         delete ctx;
         heartbeat_inflight_.store(false);
@@ -1931,6 +1994,20 @@ void Application::ActivationTask() {
     // activation task have started, so mark the running image valid before doing
     // any network-bound version or assets work.
     ota_->MarkCurrentVersionValid();
+
+    // Unclaimed + saved Wi-Fi keeps BLE advertising open for phone setup.
+    // Running OTA HTTPS (CheckNewVersion) at the same time exhausts internal
+    // heap (TLS + BluFi) and freezes the UI on "Loading setup..." with no
+    // further logs. Unclaimed robots cannot finish cloud activation without a
+    // parent claim, so skip network bootstrap and exit to Idle claim-standby.
+    if (!IsDeviceClaimed()) {
+        ESP_LOGW(TAG,
+                 "Unclaimed device: skip OTA/bootstrap HTTPS while BLE stays up "
+                 "(avoids Loading-setup hang; claim path remains via BLE)");
+        CheckAssetsVersion();
+        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+        return;
+    }
 
     // Check for new assets version
     CheckAssetsVersion();

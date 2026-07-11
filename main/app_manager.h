@@ -31,7 +31,8 @@ AppMode AppGetMode();
 void AppHandleInputLeft();
 void AppHandleInputRight();
 void AppHandleInputBothClick();
-void AppHandleMenuHold();   // giu 2 nut 5s: luon ve Menu
+void AppHandleMenuHold();   // giu 2 nut 3s: ve Menu
+void AppHandleRightHold();  // giu RIGHT 3s: doi Wi-Fi (giu claim)
 void AppOnSlaveReady();
 
 #endif  // APP_MANAGER_H_

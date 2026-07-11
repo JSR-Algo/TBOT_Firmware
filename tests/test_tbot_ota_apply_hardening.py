@@ -28,6 +28,18 @@ def test_new_ota_app_marks_valid_before_network_version_check():
 
     assert "ota_->MarkCurrentVersionValid();" in activation_body
     assert activation_body.index("ota_->MarkCurrentVersionValid();") < activation_body.index("CheckNewVersion();")
+    # Unclaimed devices must skip OTA HTTPS while BLE advertising stays up —
+    # otherwise heap is exhausted and the UI freezes on "Loading setup...".
+    assert "if (!IsDeviceClaimed())" in activation_body
+    assert activation_body.index("if (!IsDeviceClaimed())") < activation_body.index("CheckNewVersion();")
+    assert "skip OTA/bootstrap HTTPS" in activation_body
+
+    # Also short-circuit BEFORE xTaskCreate: with BLE+Wi-Fi the largest free
+    # internal block is often ~7KB, so an 8KB activation task never starts and
+    # the robot freezes on Activating / "Loading setup...".
+    source_full = source
+    assert "skip activation worker" in source_full
+    assert "Failed to create activation task" in source_full
 
 
 def test_ota_download_rejects_images_larger_than_update_partition_before_writing():

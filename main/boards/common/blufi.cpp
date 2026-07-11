@@ -115,6 +115,77 @@ static std::string GetBlufiDeviceName() {
     return std::string(name);
 }
 
+// Default esp_blufi_adv_start packs flags + TX power + 128-bit UUID + full local
+// name into the 31-byte ADV → "Partial data write into ADV". Android/Xiaomi then
+// often drops name and/or UUID, so the phone never allowlists the robot.
+// Compact raw layout (always ≤31 bytes):
+//   ADV:      flags + complete 16-bit UUID list (0xFFFF = BluFi)
+//   Scan RSP: complete local name (TBOT-<MAC>)
+static void StartTbotBlufiAdvertising(const char* device_name) {
+#ifdef CONFIG_BT_BLUEDROID_ENABLED
+    if (device_name != nullptr && device_name[0] != '\0') {
+        esp_err_t name_err = esp_ble_gap_set_device_name(device_name);
+        if (name_err != ESP_OK) {
+            ESP_LOGW(BLUFI_TAG, "set device name failed: %s", esp_err_to_name(name_err));
+        }
+    }
+
+    // Flags (LE General Discoverable | BR/EDR Not Supported) + 16-bit UUID 0xFFFF.
+    static const uint8_t adv_raw[] = {
+        0x02, 0x01, 0x06,
+        0x03, 0x03, 0xFF, 0xFF,
+    };
+
+    uint8_t scan_rsp[31] = {};
+    size_t rsp_len = 0;
+    if (device_name != nullptr && device_name[0] != '\0') {
+        size_t name_len = std::strlen(device_name);
+        if (name_len > 29) {
+            name_len = 29;
+        }
+        scan_rsp[0] = static_cast<uint8_t>(name_len + 1);
+        scan_rsp[1] = 0x09;  // Complete Local Name
+        std::memcpy(scan_rsp + 2, device_name, name_len);
+        rsp_len = name_len + 2;
+    }
+
+    esp_err_t err = esp_ble_gap_config_adv_data_raw(const_cast<uint8_t*>(adv_raw), sizeof(adv_raw));
+    if (err != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "raw ADV failed (%s); falling back to esp_blufi_adv_start",
+                 esp_err_to_name(err));
+        esp_blufi_adv_start();
+        return;
+    }
+    if (rsp_len > 0) {
+        err = esp_ble_gap_config_scan_rsp_data_raw(scan_rsp, rsp_len);
+        if (err != ESP_OK) {
+            ESP_LOGW(BLUFI_TAG, "raw scan RSP failed: %s", esp_err_to_name(err));
+        }
+    }
+
+    // BluFi's GAP handler only auto-starts advertising on structured ADV set
+    // complete — not on raw. Start explicitly with BluFi-compatible params.
+    esp_ble_adv_params_t params = {};
+    params.adv_int_min = 0x100;
+    params.adv_int_max = 0x100;
+    params.adv_type = ADV_TYPE_IND;
+    params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
+    params.channel_map = ADV_CHNL_ALL;
+    params.adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY;
+    err = esp_ble_gap_start_advertising(&params);
+    if (err != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "start advertising failed (%s); falling back to esp_blufi_adv_start",
+                 esp_err_to_name(err));
+        esp_blufi_adv_start();
+        return;
+    }
+    ESP_LOGI(BLUFI_TAG, "TBOT compact ADV: UUID16 0xFFFF + name in scan RSP");
+#else
+    (void)device_name;
+    esp_blufi_adv_start();
+#endif
+}
+
 static wifi_mode_t GetWifiModeWithFallback(const WifiManager& wifi) {
     if (wifi.IsConfigMode()) {
         return WIFI_MODE_AP;
@@ -1124,9 +1195,8 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             {
                 static const std::string device_name = GetBlufiDeviceName();
                 ESP_LOGI(BLUFI_TAG, "BLUFI advertised name: %s", device_name.c_str());
-                esp_ble_gap_set_device_name(device_name.c_str());
+                StartTbotBlufiAdvertising(device_name.c_str());
             }
-            esp_blufi_adv_start();
             break;
         case ESP_BLUFI_EVENT_DEINIT_FINISH:
             ESP_LOGI(BLUFI_TAG, "BLUFI deinit finish");
@@ -1167,7 +1237,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                     ++ble_readvertise_count_;
                     ESP_LOGI(BLUFI_TAG, "BLE re-advertise %d/%d after disconnect",
                              ble_readvertise_count_, kMaxBleReadvertiseAttempts);
-                    esp_blufi_adv_start();
+                    StartTbotBlufiAdvertising(GetBlufiDeviceName().c_str());
                 }
             } else {
                 esp_blufi_adv_stop();

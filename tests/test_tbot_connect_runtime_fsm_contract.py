@@ -203,7 +203,7 @@ def test_blufi_caps_re_advertising_on_disconnect():
     # Disconnect handler honours the cap and only then restarts advertising.
     assert "ble_readvertise_count_ >= kMaxBleReadvertiseAttempts" in disconnect_body
     assert "++ble_readvertise_count_;" in disconnect_body
-    assert "esp_blufi_adv_start();" in disconnect_body
+    assert "StartTbotBlufiAdvertising" in disconnect_body
     # Cap-reached path must NOT restart (it logs and stops).
     assert "NOT restarting advertising" in disconnect_body
 

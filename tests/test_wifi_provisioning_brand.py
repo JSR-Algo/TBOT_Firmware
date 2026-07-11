@@ -38,7 +38,8 @@ def test_wifi_provisioning_uses_tbot_brand_names():
     assert 'config.ssid_prefix = "TBot";' in wifi_board
     assert 'config.ssid_prefix = "Xiaozhi";' not in wifi_board
     assert 'static std::string GetBlufiDeviceName()' in blufi
-    assert 'esp_ble_gap_set_device_name(device_name.c_str())' in blufi
+    assert 'StartTbotBlufiAdvertising' in blufi
+    assert 'esp_ble_gap_set_device_name(device_name)' in blufi
     assert 'TBOT-%02X%02X%02X%02X%02X%02X' in blufi
     assert '#define BLUFI_DEVICE_NAME "TBot-Blufi"' not in blufi
     assert '#define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"' not in blufi

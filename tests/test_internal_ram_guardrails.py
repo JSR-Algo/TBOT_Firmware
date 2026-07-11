@@ -69,7 +69,13 @@ def test_passive_lesson_websocket_does_not_fallback_to_internal_stack():
     assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" not in passive
 
 
-def test_transient_http_workers_use_psram_stacks():
+def test_transient_http_workers_use_internal_dram_stacks():
+    """HTTP/NVS workers must NOT use SPIRAM stacks.
+
+    Live BluFi claim crash (2026-07-11): claim_fetch on SPIRAM panicked with
+    esp_task_stack_is_sane_cache_disabled when NVS/TLS disabled the flash cache.
+    Stacks for these workers must stay in internal DRAM.
+    """
     source = read("main/application.cc")
 
     for signature, task_name in [
@@ -84,8 +90,8 @@ def test_transient_http_workers_use_psram_stacks():
         create_call = source[create_start:create_end]
 
         assert create_start != -1, task_name
-        assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in create_call
-        assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" not in create_call
+        assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in create_call, task_name
+        assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" not in create_call, task_name
 
 
 def test_speaking_timeout_uses_esp_timer_not_transient_task_stack():

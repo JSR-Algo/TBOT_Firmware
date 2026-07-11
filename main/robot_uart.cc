@@ -338,6 +338,8 @@ void RobotUart::HandleReaderLine(const char* line) {
         evt = RobotInputEvent::BothClick;
     } else if (strcmp(line, "EVT:MENU_HOLD_3S") == 0) {
         evt = RobotInputEvent::MenuHold;
+    } else if (strcmp(line, "EVT:RIGHT_HOLD_3S") == 0) {
+        evt = RobotInputEvent::RightHold;
     } else if (strcmp(line, "SLAVE:READY") == 0) {
         evt = RobotInputEvent::SlaveReady;
     } else {

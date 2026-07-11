@@ -13,7 +13,8 @@ enum class RobotInputEvent {
     LeftClick,
     RightClick,
     BothClick,
-    MenuHold,
+    MenuHold,    // giu ca 2 nut 3s
+    RightHold,   // giu RIGHT 3s -> doi Wi-Fi (giu claim)
 };
 
 class RobotUart {

@@ -7,14 +7,18 @@
 #include <vector>
 
 #include "application.h"
+#include "assets/lang_config.h"
+#include "audio_codec.h"
 #include "board.h"
 #include "display.h"
 #include "game/flappy_config.h"
 #include "game/flappy_assets.h"
 #include "ui/menu_ui.h"
 #include "music/music_app.h"
+#include "wifi_board.h"
 
 #include <string>
+#include <algorithm>
 
 #define TAG "AppManager"
 
@@ -801,6 +805,40 @@ void AppHandleMenuHold() {
     SwitchToInternal(AppMode::Menu);
 }
 
+// RIGHT hold 3s (slave EVT:RIGHT_HOLD_3S): doi Wi-Fi, giu claim.
+// Tuong duong BOOT double-click tren main board (lab). Co the goi tu moi AppMode.
+void AppHandleRightHold() {
+    auto& app = Application::GetInstance();
+    if (app.IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "RIGHT_HOLD ignored during lesson");
+        PlaySfx(g_menu_sounds.error);
+        return;
+    }
+    ESP_LOGI(TAG, "RIGHT_HOLD -> EnterWifiConfigMode (change Wi-Fi, keep claim)");
+    // TBOT main (lcdwiki) la WifiBoard. static_cast giong cac board khac (RTTI off).
+    static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
+}
+
+// Chatbox volume: buoc 10, clamp 0..100. Man hinh co the an — van ShowNotification best-effort.
+static void AdjustChatboxVolume(int delta) {
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr) {
+        return;
+    }
+    int volume = codec->output_volume() + delta;
+    volume = std::max(0, std::min(100, volume));
+    codec->SetOutputVolume(volume);
+    auto* display = GetDisplay();
+    if (display != nullptr) {
+        if (volume == 0) {
+            display->ShowNotification(Lang::Strings::MUTED);
+        } else {
+            display->ShowNotification(Lang::Strings::VOLUME + std::to_string(volume / 10));
+        }
+    }
+    ESP_LOGI(TAG, "Chatbox volume -> %d", volume);
+}
+
 void AppHandleInputLeft() {
     switch (g_mode) {
         case AppMode::Menu: {
@@ -826,8 +864,16 @@ void AppHandleInputLeft() {
             break;
         }
         case AppMode::Chatbox:
-        default:
-            break;   // phase 1: no-op
+        default: {
+            // LEFT tap = talk / dung (tuong duong BOOT click).
+            auto& app = Application::GetInstance();
+            if (app.IsLessonRuntimeActive()) {
+                ESP_LOGI(TAG, "LEFT_CLICK ignored during lesson");
+                break;
+            }
+            app.ToggleChatState();
+            break;
+        }
     }
 }
 
@@ -857,6 +903,7 @@ void AppHandleInputRight() {
         }
         case AppMode::Chatbox:
         default:
+            AdjustChatboxVolume(+10);
             break;
     }
 }
@@ -893,6 +940,7 @@ void AppHandleInputBothClick() {
         }
         case AppMode::Chatbox:
         default:
+            AdjustChatboxVolume(-10);
             break;
     }
 }

@@ -137,22 +137,24 @@ def test_blufi_defers_connected_wifi_claim_refresh_until_after_possible_wifi_fra
     assert "deinit();" in helper_body
     assert "SchedulePendingTbotClaimRefresh();" in helper_body
 
-def test_one_shot_claim_fetch_after_wifi_success_applies_active_claim_even_without_poll_timer():
+def test_one_shot_claim_fetch_after_wifi_success_applies_even_without_poll_timer():
     source = read("main/application.cc")
     task_body = function_body(source, "void Application::ClaimFetchTask")
 
     # SchedulePendingTbotClaimRefresh() can dispatch a one-shot device/config
     # fetch immediately after Wi-Fi provisioning, before StartClaimPoll() has
-    # armed claim_poll_active_. If that result is dropped, firmware logs
-    # active=1/token=1 but never calls /claim/confirm, leaving mobile stuck at
-    # "Đang chờ Robot xác thực".
+    # armed claim_poll_active_. Results with a bootstrap token must still apply:
+    #  - active claim -> /claim/confirm (mobile "Đang chờ Robot xác thực")
+    #  - claim_present=0 -> EnsureBleAdvertisingForStandby (else phone BLE_SCAN_TIMEOUT)
     stale_guard_start = task_body.index("if (!self->claim_poll_active_")
     apply_idx = task_body.index("ApplyPendingTbotClaimFetchResult")
     stale_guard = task_body[stale_guard_start:apply_idx]
 
-    assert "fetched && pending_claim.active && !token.empty()" in stale_guard
+    # Drop only when poll is off AND there is no bootstrap token (pure poll tick).
+    assert "token.empty()" in stale_guard
     assert "return;" in stale_guard
-    assert stale_guard.index("fetched && pending_claim.active && !token.empty()") < stale_guard.index("return;")
+    # Must not require pending_claim.active — claim_present=0 still needs apply.
+    assert "pending_claim.active" not in stale_guard
 
 def test_blufi_waits_for_full_wifi_board_connect_timeout_before_reporting_failure():
     source = read("main/boards/common/blufi.cpp")

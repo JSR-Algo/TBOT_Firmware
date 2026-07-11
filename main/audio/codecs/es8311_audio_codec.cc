@@ -90,6 +90,19 @@ void Es8311AudioCodec::UpdateDeviceState() {
         };
         ESP_ERROR_CHECK(esp_codec_dev_open(dev_, &fs));
         ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, input_gain_));
+        // Stock top is 0 dB; +2 dB is a small step for quieter Live TTS without
+        // the PA clipping we hit at +4/+12 dB. No extra PCM digital multiply.
+        {
+            static esp_codec_dev_vol_map_t s_vol_map[] = {
+                {.vol = 0, .db_value = -50.0f},
+                {.vol = 100, .db_value = 2.0f},
+            };
+            esp_codec_dev_vol_curve_t curve = {
+                .vol_map = s_vol_map,
+                .count = 2,
+            };
+            ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_set_vol_curve(dev_, &curve));
+        }
         ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, output_volume_));
         opened = true;
     } else if (!input_enabled_ && !output_enabled_ && dev_ != nullptr) {
