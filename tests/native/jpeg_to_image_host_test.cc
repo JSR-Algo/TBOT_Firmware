@@ -56,6 +56,12 @@ void CheckFailureExact(const uint8_t* bytes, size_t size) {
 void CheckFailureExact(const std::vector<uint8_t>& jpeg) {
     CheckFailureExact(jpeg.data(), jpeg.size());
 }
+
+void CheckRejectedBeforeAllocation(const std::vector<uint8_t>& jpeg) {
+    const size_t allocations_before = allocation_caps.size();
+    CheckFailureExact(jpeg);
+    Check(allocation_caps.size() == allocations_before, "invalid pre-SOS structure is rejected before allocation");
+}
 }  // namespace
 
 extern "C" void* heap_caps_malloc(size_t size, uint32_t caps) {
@@ -123,6 +129,29 @@ int main(int argc, char** argv) {
     }
     Check(replaced, "baseline fixture contains SOF0");
     CheckFailureExact(progressive);
+
+    size_t sof_offset = 0;
+    for (size_t i = 0; i + 3 < jpeg.size(); ++i) {
+        if (jpeg[i] == 0xff && jpeg[i + 1] == 0xc0) {
+            sof_offset = i;
+            break;
+        }
+    }
+    Check(sof_offset != 0, "baseline SOF0 offset found");
+    const size_t sof_length = (static_cast<size_t>(jpeg[sof_offset + 2]) << 8) | jpeg[sof_offset + 3];
+    const size_t sof_end = sof_offset + 2 + sof_length;
+    Check(sof_end <= jpeg.size(), "baseline SOF0 segment is bounded");
+
+    std::vector<uint8_t> missing_sos(jpeg.begin(), jpeg.begin() + sof_end);
+    CheckRejectedBeforeAllocation(missing_sos);
+
+    auto truncated_com = missing_sos;
+    truncated_com.insert(truncated_com.end(), {0xff, 0xfe, 0x00, 0x10, 0x00});
+    CheckRejectedBeforeAllocation(truncated_com);
+
+    auto oversized_app = missing_sos;
+    oversized_app.insert(oversized_app.end(), {0xff, 0xe1, 0xff, 0xff});
+    CheckRejectedBeforeAllocation(oversized_app);
 
     std::cout << "jpeg_to_image host external-TJPG parity and ASan boundary checks passed\n";
     return 0;

@@ -56,6 +56,8 @@ static esp_err_t validate_baseline_jpeg(const uint8_t* src, size_t src_len, vali
     }
 
     size_t offset = 2;
+    bool found_sof = false;
+    uint8_t sof_components = 0;
     while (offset < src_len) {
         if (src[offset] != 0xff) {
             return ESP_FAIL;
@@ -68,7 +70,7 @@ static esp_err_t validate_baseline_jpeg(const uint8_t* src, size_t src_len, vali
         }
 
         const uint8_t marker = src[offset++];
-        if (marker == 0x00 || marker == 0xd8 || marker == 0xd9 || marker == 0xda || marker == 0x01 ||
+        if (marker == 0x00 || marker == 0xd8 || marker == 0xd9 || marker == 0x01 ||
             (marker >= 0xd0 && marker <= 0xd7)) {
             return ESP_FAIL;
         }
@@ -81,9 +83,21 @@ static esp_err_t validate_baseline_jpeg(const uint8_t* src, size_t src_len, vali
             return ESP_FAIL;
         }
 
+        if (marker == 0xda) {
+            if (!found_sof || segment_len < 6) {
+                return ESP_FAIL;
+            }
+            const uint8_t scan_components = src[offset + 2];
+            if (scan_components == 0 || scan_components > sof_components ||
+                segment_len != 6U + 2U * scan_components) {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            return ESP_OK;
+        }
+
         const bool is_sof = marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc;
         if (is_sof) {
-            if (marker != 0xc0 || segment_len < 8) {
+            if (found_sof || marker != 0xc0 || segment_len < 8) {
                 return ESP_ERR_NOT_SUPPORTED;
             }
             const uint8_t* sof = src + offset + 2;
@@ -111,7 +125,8 @@ static esp_err_t validate_baseline_jpeg(const uint8_t* src, size_t src_len, vali
             info->height = height;
             info->stride = stride;
             info->decoded_size = decoded_size;
-            return ESP_OK;
+            sof_components = components;
+            found_sof = true;
         }
 
         offset += segment_len;

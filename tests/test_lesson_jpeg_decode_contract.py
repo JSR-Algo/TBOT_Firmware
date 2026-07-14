@@ -76,6 +76,9 @@ def test_lesson_jpeg_decoder_uses_rom_tjpg_with_psram_work_and_output_buffers():
     assert "esp_jpeg_decode" in software_body
     assert "src_len > UINT32_MAX" in software_body
     assert "decoded_size > UINT32_MAX" in validator_body
+    assert "found_sof" in validator_body
+    assert "marker == 0xda" in validator_body
+    assert "scan_components" in validator_body
     assert "heap_caps_free(out_buf)" in software_body
     assert "heap_caps_free(work_buf)" in software_body
     assert "JPEG_MAX_DECODED_BYTES" in validator_body
