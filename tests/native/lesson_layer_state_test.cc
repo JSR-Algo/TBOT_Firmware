@@ -40,11 +40,13 @@ int main() {
     layers.Clear(LessonLayer::kBackground);
     Require(!layers.Has(LessonLayer::kBackground), "clear drops layer identity");
 
-    Require((LessonAllocationCaps(1024) & MALLOC_CAP_INTERNAL) != 0, "small buffers use SRAM");
-    Require((LessonAllocationCaps(kLessonSmallInternalAllocationThreshold + 1) & MALLOC_CAP_SPIRAM) != 0,
-            "large buffers require PSRAM");
-    Require((LessonAllocationCaps(kLessonSmallInternalAllocationThreshold + 1) & MALLOC_CAP_INTERNAL) == 0,
-            "large buffers have no internal SRAM fallback");
+    for (size_t size : {size_t{1}, size_t{1024}, size_t{8 * 1024}, size_t{12 * 1024},
+                        size_t{16 * 1024}, size_t{16 * 1024 + 1}}) {
+        const int caps = LessonAllocationCaps(size);
+        Require((caps & MALLOC_CAP_SPIRAM) != 0, "lesson buffers require PSRAM");
+        Require((caps & MALLOC_CAP_8BIT) != 0, "lesson buffers remain byte-addressable");
+        Require((caps & MALLOC_CAP_INTERNAL) == 0, "lesson buffers never consume internal SRAM");
+    }
 
     const auto geometry = LessonWordPillGeometry(480, 320);
     Require(geometry.x == 166 && geometry.y == 26 && geometry.width == 148 && geometry.height == 42,

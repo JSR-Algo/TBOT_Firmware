@@ -21,7 +21,7 @@
 #define TAG "jpeg_to_image"
 
 static esp_err_t decode_with_new_jpeg(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
-                                      size_t* height, size_t* stride) {
+                                      size_t* height, size_t* stride, uint32_t output_caps) {
     ESP_LOGD(TAG, "Decoding JPEG with software decoder");
     esp_err_t ret = ESP_OK;
     jpeg_error_t jpeg_ret = JPEG_ERR_OK;
@@ -53,7 +53,10 @@ static esp_err_t decode_with_new_jpeg(const uint8_t* src, size_t src_len, uint8_
 
     ESP_LOGD(TAG, "JPEG header info: width=%d, height=%d", out_info.width, out_info.height);
 
-    out_buf = jpeg_calloc_align(out_info.width * out_info.height * 2, 16);
+    const size_t decoded_size = out_info.width * out_info.height * 2;
+    out_buf = output_caps != 0
+                  ? heap_caps_aligned_calloc(16, 1, decoded_size, output_caps)
+                  : jpeg_calloc_align(decoded_size, 16);
     if (out_buf == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for JPEG output buffer");
         ret = ESP_ERR_NO_MEM;
@@ -87,7 +90,11 @@ jpeg_dec_failed:
         jpeg_dec = NULL;
     }
     if (out_buf) {
-        jpeg_free_align(out_buf);
+        if (output_caps != 0) {
+            heap_caps_free(out_buf);
+        } else {
+            jpeg_free_align(out_buf);
+        }
         out_buf = NULL;
     }
 
@@ -260,5 +267,18 @@ esp_err_t jpeg_to_image(const uint8_t* src, size_t src_len, uint8_t** out, size_
     ESP_LOGW(TAG, "Failed to decode with hardware JPEG, fallback to software decoder");
     // Fallback to esp_new_jpeg
 #endif
-    return decode_with_new_jpeg(src, src_len, out, out_len, width, height, stride);
+    return decode_with_new_jpeg(src, src_len, out, out_len, width, height, stride, 0);
+}
+
+esp_err_t jpeg_to_image_with_caps(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len,
+                                  size_t* width, size_t* height, size_t* stride, uint32_t output_caps) {
+    if (src == NULL || src_len == 0 || out == NULL || out_len == NULL || width == NULL || height == NULL ||
+        stride == NULL || output_caps == 0) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Custom-capability output is a software-decoder contract. Hardware JPEG requires
+    // driver-owned DMA buffers, so camera callers retain the hardware-first jpeg_to_image path.
+    return decode_with_new_jpeg(src, src_len, out, out_len, width, height, stride, output_caps);
 }

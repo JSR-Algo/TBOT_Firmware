@@ -108,10 +108,8 @@ bool NormalizeLessonTeachingWord(const char* value, std::string& output) {
     return true;
 }
 
-int LessonAllocationCaps(size_t size) {
-    return size > kLessonSmallInternalAllocationThreshold
-               ? (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
-               : (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+int LessonAllocationCaps(size_t) {
+    return MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
 }
 
 LessonWordPillRect LessonWordPillGeometry(int display_width, int display_height) {

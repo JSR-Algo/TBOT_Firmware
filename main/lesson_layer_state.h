@@ -7,7 +7,6 @@
 #include <esp_heap_caps.h>
 
 constexpr size_t kLessonMaxTeachingWordCodepoints = 12;
-constexpr size_t kLessonSmallInternalAllocationThreshold = 16 * 1024;
 
 enum class LessonLayer { kBackground = 0, kObject = 1, kOverlay = 2 };
 

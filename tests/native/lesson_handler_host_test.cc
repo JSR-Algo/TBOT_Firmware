@@ -26,6 +26,7 @@
 
 #include <cJSON.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -1535,6 +1536,11 @@ void test_step_full_render_http() {
     HostHttp().body = JpegBody();
     HostHttp().use_content_length = true;
     HostJpegDecodeMode() = 0;
+    HostJpegDecodeWithCapsCalls() = 0;
+    HostLastJpegDecodeCaps() = 0;
+    HostHeapCapsCalls().clear();
+    HostHeapSizeCalls().clear();
+    HostHeapAlignmentCalls().clear();
 
     int seq = 3;
     disp.chat_messages.emplace_back("assistant", "Old transcript");
@@ -1564,6 +1570,23 @@ void test_step_full_render_http() {
             "teaching object image drawn");
     require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == true,
             "robot overlay image drawn");
+    require(HostJpegDecodeWithCapsCalls() == 3,
+            "each lesson JPEG decodes directly with the lesson allocation contract");
+    require((HostLastJpegDecodeCaps() & MALLOC_CAP_SPIRAM) != 0,
+            "first decoded JPEG output allocation requires PSRAM");
+    require((HostLastJpegDecodeCaps() & MALLOC_CAP_INTERNAL) == 0,
+            "decoded JPEG output allocation never requests internal SRAM");
+    require(std::count(HostHeapAlignmentCalls().begin(), HostHeapAlignmentCalls().end(), size_t{16}) == 3,
+            "lesson JPEG decoded outputs are allocated with 16-byte alignment");
+    const auto first_decoded = std::find(HostHeapAlignmentCalls().begin(),
+                                         HostHeapAlignmentCalls().end(), size_t{16});
+    const size_t first_decoded_index = first_decoded - HostHeapAlignmentCalls().begin();
+    require(first_decoded_index < HostHeapCapsCalls().size() &&
+                HostHeapSizeCalls()[first_decoded_index] == 8,
+            "first decoded output allocation is directly observable before image ownership");
+    require((HostHeapCapsCalls()[first_decoded_index] & MALLOC_CAP_SPIRAM) != 0 &&
+                (HostHeapCapsCalls()[first_decoded_index] & MALLOC_CAP_INTERNAL) == 0,
+            "first decoded output allocation is directly backed by PSRAM");
     require(!disp.lesson_captions.empty() &&
             disp.lesson_captions.back() == "Xin chào", "authored prompt caption drawn");
     require(disp.last_status == "Đang học...", "rendered step replaces loading status with active lesson status");
@@ -2775,11 +2798,18 @@ void test_step_http_chunked_paths() {
     HostHttp().body[2] = 0x4e;
     HostHttp().max_chunk = 4096;                    // multiple reads -> exercise grow loop
     HostJpegDecodeMode() = 0;
+    HostHeapCapsCalls().clear();
     Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
                      ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
     require(FrameBodyBool(Sent().size()-1, "degraded", true) == false,
             "chunked growth fetch draws all layers -> not degraded");
     require(disp.background_calls.back() == true, "chunked poster drew");
+    require(!HostHeapCapsCalls().empty(), "chunked fetch records initial and grown allocations");
+    for (int caps : HostHeapCapsCalls()) {
+        require((caps & MALLOC_CAP_SPIRAM) != 0, "chunked buffers use PSRAM");
+        require((caps & MALLOC_CAP_8BIT) != 0, "chunked buffers remain byte-addressable");
+        require((caps & MALLOC_CAP_INTERNAL) == 0, "chunked buffers never use internal SRAM");
+    }
 
     // chunked empty body -> total_read==0 -> nullptr
     ResetObservable();

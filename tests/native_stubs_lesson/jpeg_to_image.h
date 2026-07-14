@@ -4,6 +4,7 @@
 // decoder so the JPEG branch of DecodeLessonImageBytes (success + failure guards) is
 // reachable without faking real pixels. Documented stubbed boundary.
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,14 @@
 //           post-decode validation guard rejects it.
 //   mode 3: return ESP_OK with a decoded RGB565 footprint above the firmware budget.
 inline int& HostJpegDecodeMode() {
+    static int v = 0;
+    return v;
+}
+inline int& HostJpegDecodeWithCapsCalls() {
+    static int v = 0;
+    return v;
+}
+inline int& HostLastJpegDecodeCaps() {
     static int v = 0;
     return v;
 }
@@ -55,6 +64,28 @@ inline esp_err_t jpeg_to_image(const uint8_t* /*src*/, size_t /*src_len*/, uint8
     const size_t len = 8;
     *out = static_cast<uint8_t*>(std::malloc(len));
     std::memset(*out, 0, len);
+    *out_len = len;
+    *width = 2;
+    *height = 2;
+    *stride = 4;
+    return ESP_OK;
+}
+
+inline esp_err_t jpeg_to_image_with_caps(const uint8_t* src, size_t src_len, uint8_t** out,
+                                         size_t* out_len, size_t* width, size_t* height,
+                                         size_t* stride, int caps) {
+    ++HostJpegDecodeWithCapsCalls();
+    HostLastJpegDecodeCaps() = caps;
+    if (HostJpegDecodeMode() != 0) {
+        return jpeg_to_image(src, src_len, out, out_len, width, height, stride);
+    }
+    const size_t len = 8;
+    *out = static_cast<uint8_t*>(heap_caps_aligned_calloc(16, 1, len, caps));
+    if (*out == nullptr) {
+        *out_len = 0;
+        *width = *height = *stride = 0;
+        return ESP_FAIL;
+    }
     *out_len = len;
     *width = 2;
     *height = 2;

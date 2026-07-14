@@ -501,8 +501,9 @@ std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_len
         size_t height = 0;
         size_t stride = 0;
 
-        esp_err_t ret = jpeg_to_image(reinterpret_cast<const uint8_t*>(data), content_length,
-                                      &decoded_data, &decoded_len, &width, &height, &stride);
+        esp_err_t ret = jpeg_to_image_with_caps(
+            reinterpret_cast<const uint8_t*>(data), content_length, &decoded_data, &decoded_len,
+            &width, &height, &stride, LessonAllocationCaps(content_length));
         heap_caps_free(data);
         data = nullptr;
 
@@ -512,21 +513,6 @@ std::unique_ptr<LvglImage> DecodeLessonImageBytes(char* data, size_t content_len
             if (decoded_data != nullptr) heap_caps_free(decoded_data);
             return nullptr;
         }
-
-        // GCOVR_EXCL_START: host JPEG stub emits tiny buffers; device-only PSRAM move.
-        if (ret == ESP_OK && decoded_data != nullptr &&
-            decoded_len > kLessonSmallInternalAllocationThreshold) {
-            auto* psram_data = static_cast<uint8_t*>(
-                heap_caps_malloc(decoded_len, LessonAllocationCaps(decoded_len)));
-            if (psram_data == nullptr) {
-                heap_caps_free(decoded_data);
-                return nullptr;
-            }
-            memcpy(psram_data, decoded_data, decoded_len);
-            heap_caps_free(decoded_data);
-            decoded_data = psram_data;
-        }
-        // GCOVR_EXCL_STOP
 
         try {
             return std::make_unique<LvglAllocatedImage>(decoded_data, decoded_len,
