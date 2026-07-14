@@ -284,7 +284,6 @@ bool RobotUart::SendPayloadOnProfile(const char* profile_name, uart_port_t port,
         return false;
     }
 
-    uart_flush_input(port);
     int written = uart_write_bytes(port, payload.data(), payload.size());
     if (written != static_cast<int>(payload.size())) {
         ESP_LOGW(TAG, "%s UART write incomplete: %d/%d", profile_name, written, static_cast<int>(payload.size()));

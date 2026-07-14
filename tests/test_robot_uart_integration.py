@@ -78,8 +78,8 @@ def test_robot_uart_serializes_complete_profile_switch_and_write_transactions():
 
     transaction = source[source.index("bool RobotUart::SendPayloadOnProfile"):]
     transaction = transaction[:transaction.index("\n}")]
-    assert transaction.index("SelectUartProfile") < transaction.index("uart_flush_input")
-    assert transaction.index("uart_flush_input") < transaction.index("uart_write_bytes")
+    assert transaction.index("SelectUartProfile") < transaction.index("uart_write_bytes")
+    assert "uart_flush_input" not in transaction
 
 def test_robot_motion_uart_dispatch_does_not_block_on_servant_ack():
     source = read("main/robot_uart.cc")
