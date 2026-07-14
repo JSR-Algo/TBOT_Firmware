@@ -78,6 +78,25 @@ void TrimAsciiWhitespace(std::string& value) {
     }
 }
 
+std::string EncodeLessonAssetPathSegment(const std::string& value) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(value.size());
+    for (unsigned char ch : value) {
+        const bool safe = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                          (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+                          ch == '.' || ch == '~';
+        if (safe) {
+            encoded.push_back(static_cast<char>(ch));
+        } else {
+            encoded.push_back('%');
+            encoded.push_back(kHex[(ch >> 4) & 0x0f]);
+            encoded.push_back(kHex[ch & 0x0f]);
+        }
+    }
+    return encoded;
+}
+
 size_t Utf8CharLen(unsigned char ch) {
     if ((ch & 0x80) == 0) return 1;
     if ((ch & 0xe0) == 0xc0) return 2;
@@ -662,6 +681,12 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
         manifest_checksum_required && !cache_key_value.empty() &&
         strstr(cache_key_value.c_str(), manifest_checksum_value.c_str()) != nullptr;
     const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
+    const char* local_root = Str(pack, "localRoot");
+    std::string local_root_value = local_root == nullptr ? "" : local_root;
+    TrimAsciiWhitespace(local_root_value);
+    while (!local_root_value.empty() && local_root_value.back() == '/') {
+        local_root_value.pop_back();
+    }
     const cJSON* critical_assets = cJSON_GetObjectItem(body, "criticalAssets");
     const int asset_count = cJSON_IsArray(assets) ? cJSON_GetArraySize(assets) : 0;
     bool ready = manifest_checksum_required && cache_key_has_manifest_checksum &&
@@ -681,6 +706,12 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
             const bool asset_verified =
                 state != nullptr && normalized_state == "READY" && cJSON_IsTrue(checksum_ok);
             const char* local_path = Str(asset, "localPath");
+            std::string derived_local_path;
+            if (Blank(local_path) && !local_root_value.empty() && !asset_key_value.empty()) {
+                derived_local_path = local_root_value + "/" +
+                                     EncodeLessonAssetPathSegment(asset_key_value);
+                local_path = derived_local_path.c_str();
+            }
             double size_value = 0.0;
             bool has_declared_size = Num(asset, "size", size_value) && size_value > 0.0 &&
                                      size_value <= static_cast<double>(SIZE_MAX) &&

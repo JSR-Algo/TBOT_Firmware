@@ -384,6 +384,31 @@ void test_prepare_assetpack_ready_with_real_file() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_derives_local_path_from_root_and_key() {
+    const char* dir = "/tmp/tbot-host-sd-derived/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-derived && mkdir -p /tmp/tbot-host-sd-derived/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-derived/lesson-assets/ready%40v1";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "derived local-path fixture opens");
+    const char bytes[10] = {1,2,3,4,5,6,7,8,9,10};
+    fwrite(bytes, 1, 10, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"ready@v1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-derived-abcdef1234567890\","
+                          "\"localRoot\":\"sd://sdcard/tbot/lesson-assets/\",\"assets\":["
+                          "{\"key\":\"ready@v1\",\"state\":\"READY\","
+                          "\"checksumOk\":true,\"size\":10}]}"));
+    require(FrameAssetPackReady(0),
+            "prepare derives an encoded local path from assetPack.localRoot and key");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_trims_manifest_checksum_for_cache_key() {
     const char* dir = "/tmp/tbot-host-sd-manifest-checksum/lesson-assets";
     system("rm -rf /tmp/tbot-host-sd-manifest-checksum && mkdir -p /tmp/tbot-host-sd-manifest-checksum/lesson-assets");
@@ -3582,6 +3607,7 @@ int main() {
     test_prepare_basic();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
+    test_prepare_assetpack_derives_local_path_from_root_and_key();
     test_prepare_assetpack_trims_manifest_checksum_for_cache_key();
     test_prepare_assetpack_trims_cache_key_before_ack();
     test_prepare_assetpack_fractional_size_not_ready();
