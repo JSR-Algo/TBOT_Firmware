@@ -20,6 +20,7 @@
 #include "assets.h"
 #include "jpeg_to_image.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "lesson_handler.h"
 #include "lesson_motion_presets.h"
@@ -106,6 +107,15 @@ bool FrameBodyBool(size_t i, const char* key, bool dflt) {
     cJSON_Delete(f);
     return out;
 }
+bool FrameBodyTelemetryBool(size_t i, const char* key, bool dflt) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* b = cJSON_GetObjectItem(f, "body");
+    cJSON* telemetry = b ? cJSON_GetObjectItem(b, "telemetry") : nullptr;
+    cJSON* v = telemetry ? cJSON_GetObjectItem(telemetry, key) : nullptr;
+    bool out = v && cJSON_IsBool(v) ? cJSON_IsTrue(v) : dflt;
+    cJSON_Delete(f);
+    return out;
+}
 double FrameBodyNum(size_t i, const char* key) {
     cJSON* f = cJSON_Parse(Sent()[i].c_str());
     cJSON* b = cJSON_GetObjectItem(f, "body");
@@ -182,7 +192,17 @@ void Handle(const std::string& json) {
     cJSON_Delete(root);
 }
 
-void ResetObservable() { App().HostReset(); }
+void ResetObservable() {
+    App().HostReset();
+    HostEspResetLogs();
+}
+
+bool LogContains(const std::string& needle) {
+    return std::any_of(HostEspLogs().begin(), HostEspLogs().end(),
+                       [&needle](const std::string& log) {
+                           return log.find(needle) != std::string::npos;
+                       });
+}
 
 // Per-test unique session identity. The renderer's g_session is FILE-STATIC and cannot be
 // reset from the test, so each test bumps these ids; a fresh assignmentId makes the
@@ -3518,6 +3538,121 @@ void test_motion_runtime_control_defaults_disabled_and_resets_per_manifest() {
     require(App().robot_uart_.calls.empty(), "fresh manifest resets motion control to disabled");
 }
 
+void test_step_evidence_telemetry_and_privacy_safe_logs() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    int seq = OpenMotionEnabledSession();
+    Handle(StepFrame(seq, "motion-success", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"teach\"}"));
+    const size_t success_ack = Sent().size() - 1;
+    require(Sent()[success_ack].find("\"renderDegraded\":false") != std::string::npos,
+            "complete visual render explicitly reports telemetry.renderDegraded=false");
+    require(!FrameBodyTelemetryBool(success_ack, "renderDegraded", true),
+            "complete visual render has visual-only degradation false");
+    require(FrameBodyStr(success_ack, "telemetry", "motionDispatch") == "success",
+            "applied UART preset reports telemetry.motionDispatch=success");
+    require(LogContains("lesson_step_started assignmentId=" + std::string(AID()) +
+                        " sessionId=" + SID() +
+                        " lessonId=L1 lessonVersion=3 stepId=motion-success sequence=3"),
+            "step-start evidence log carries canonical identity fields");
+    require(LogContains("motion_preset outcome=success"),
+            "successful preset emits canonical outcome log");
+    require(!LogContains("preset=teach") && !LogContains("angle=") &&
+                !LogContains("transcript="),
+            "evidence logs omit raw motion arguments and transcripts");
+    require(!LogContains("motion_degraded"),
+            "successful preset does not emit motion_degraded marker");
+    require(!LogContains("render_degraded"),
+            "complete visual render does not emit render_degraded marker");
+    require(!LogContains("optional_asset_missing"),
+            "complete visual render does not emit optional_asset_missing marker");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenMotionEnabledSession();
+    App().robot_uart_.send_ok = false;
+    Handle(StepFrame(seq, "motion-failed", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"teach\"}"));
+    const size_t failed_ack = Sent().size() - 1;
+    require(Sent()[failed_ack].find("\"renderDegraded\":false") != std::string::npos,
+            "motion-only failure explicitly keeps telemetry.renderDegraded=false");
+    require(!FrameBodyTelemetryBool(failed_ack, "renderDegraded", true),
+            "motion-only failure is not visual degradation");
+    require(FrameBodyStr(failed_ack, "telemetry", "motionDispatch") == "failed",
+            "UART preset failure reports telemetry.motionDispatch=failed");
+    require(FrameBodyBool(failed_ack, "degraded", false),
+            "UART preset failure preserves degraded ack semantics");
+    require(LogContains("motion_preset outcome=failed"),
+            "failed preset emits canonical outcome log");
+    require(LogContains("motion_degraded"),
+            "failed preset emits motion_degraded only-when-true marker");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "motion-skipped", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"teach\"}"));
+    const size_t skipped_ack = Sent().size() - 1;
+    require(FrameBodyStr(skipped_ack, "telemetry", "motionDispatch") == "skipped",
+            "disabled motion control reports telemetry.motionDispatch=skipped");
+    require(LogContains("motion_preset outcome=skipped"),
+            "disabled preset emits canonical skipped outcome log");
+    require(!LogContains("motion_degraded"),
+            "intentional motion skip does not emit motion_degraded");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "no-motion", "http://poster", "http://object", "http://overlay"));
+    require(Sent().back().find("\"motionDispatch\"") == std::string::npos,
+            "step without authored motion omits telemetry.motionDispatch");
+    require(!LogContains("motion_preset"),
+            "step without authored motion does not claim a motion preset outcome");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "optional-missing", "http://poster", "", ""));
+    const size_t optional_missing_ack = Sent().size() - 1;
+    require(Sent()[optional_missing_ack].find("\"renderDegraded\":true") != std::string::npos,
+            "missing visual layers explicitly report telemetry.renderDegraded=true");
+    require(FrameBodyTelemetryBool(optional_missing_ack, "renderDegraded", false),
+            "missing visual layers set visual-only degradation true");
+    require(LogContains("render_degraded"),
+            "visual fallback emits render_degraded only-when-true marker");
+    require(LogContains("optional_asset_missing"),
+            "missing optional layers emit canonical optional_asset_missing marker");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenMotionEnabledSession();
+    App().robot_uart_.send_ok = false;
+    Handle(StepFrame(seq, "motion-and-visual-failed", "http://poster", "", "",
+                     ",\"motion\":{\"present\":\"teach\"}"));
+    const size_t simultaneous_ack = Sent().size() - 1;
+    require(FrameBodyStr(simultaneous_ack, "telemetry", "degradedReason") == "motionPreset",
+            "legacy degradedReason priority remains motionPreset for simultaneous failures");
+    require(Sent()[simultaneous_ack].find("\"renderDegraded\":true") != std::string::npos,
+            "simultaneous motion and visual failure exposes visual-only degradation");
+    require(FrameBodyTelemetryBool(simultaneous_ack, "renderDegraded", false),
+            "simultaneous failure keeps render degradation observable");
+}
+
 void test_teaching_word_telemetry_reuse_and_duplicate_ack_parity() {
     ResetObservable();
     LvglDisplay disp;
@@ -3700,6 +3835,7 @@ int main() {
     test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
     test_step_reads_only_body_motion_present_and_motion_degrades_ack();
     test_motion_runtime_control_defaults_disabled_and_resets_per_manifest();
+    test_step_evidence_telemetry_and_privacy_safe_logs();
     test_teaching_word_telemetry_reuse_and_duplicate_ack_parity();
     test_ack_replay_window_handles_delayed_and_expired_duplicates();
     test_layer_install_timeout_degrades_without_committing_layer_state();

@@ -1359,6 +1359,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
 
     // =====================  lesson_step (render s4 "model")  ====================
+    const char* lesson_id = Str(root, "lessonId");
+    const char* step_id = Str(root, "stepId");
+    double lesson_version = -1.0;
+    Num(root, "lessonVersion", lesson_version);
+    ESP_LOGI(TAG,
+             "lesson_step_started assignmentId=%s sessionId=%s lessonId=%s "
+             "lessonVersion=%.0f stepId=%s sequence=%lld",
+             assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
+             lesson_version, step_id != nullptr ? step_id : "-", (long long)sequence);
+
     const cJSON* scene = Obj(body, "scene");
     const cJSON* bg    = Obj(scene, "backgroundScene");
     const cJSON* to    = Obj(scene, "teachingObject");
@@ -1437,12 +1447,29 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
 
     bool motion_degraded = false;
+    const char* motion_dispatch = nullptr;
     const char* entry_motion = Str(Obj(body, "motion"), "present");
-    if (entry_motion != nullptr && g_session.motion_presets_enabled) {
-        motion_degraded = DispatchLessonMotionPreset(robot_uart_, entry_motion) ==
-                          LessonMotionResult::kDegraded;
-    } else if (entry_motion != nullptr) {
-        ESP_LOGI(TAG, "lesson_motion_dispatch outcome=disabled preset=%s", entry_motion);
+    if (entry_motion != nullptr) {
+        if (g_session.motion_presets_enabled) {
+            motion_degraded = DispatchLessonMotionPreset(robot_uart_, entry_motion) ==
+                              LessonMotionResult::kDegraded;
+            motion_dispatch = motion_degraded ? "failed" : "success";
+        } else {
+            motion_dispatch = "skipped";
+        }
+        ESP_LOGI(TAG,
+                 "motion_preset outcome=%s assignmentId=%s sessionId=%s lessonId=%s "
+                 "stepId=%s sequence=%lld",
+                 motion_dispatch, assignment_id, session_id,
+                 lesson_id != nullptr ? lesson_id : "-", step_id != nullptr ? step_id : "-",
+                 (long long)sequence);
+    }
+    if (motion_degraded) {
+        ESP_LOGW(TAG,
+                 "motion_degraded assignmentId=%s sessionId=%s lessonId=%s stepId=%s "
+                 "sequence=%lld",
+                 assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
+                 step_id != nullptr ? step_id : "-", (long long)sequence);
     }
 
     // Resolve the display once and require it to be an LvglDisplay (the only class with
@@ -1576,8 +1603,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
 
     // §7.5 degraded semantics: false only when all authored visual layers exist and drew.
     // Missing optional object/overlay sources use caption/emoji fallback and stay degraded.
-    const bool degraded = motion_degraded ||
+    const bool optional_asset_missing = !has_object_src || !has_overlay_src;
+    const bool render_degraded =
         !(poster_drew && has_object_src && object_drew && has_overlay_src && overlay_drew);
+    const bool degraded = motion_degraded || render_degraded;
 
     // Marshal the draw onto the LVGL task, exactly like the TTS-display pattern
     // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption are
@@ -1627,6 +1656,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
     cJSON_AddNumberToObject(telemetry, "psramFreeBytes",
                             static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
     cJSON_AddNumberToObject(telemetry, "renderElapsedMs", static_cast<double>(render_elapsed_ms));
+    cJSON_AddBoolToObject(telemetry, "renderDegraded", render_degraded);
+    if (motion_dispatch != nullptr) {
+        cJSON_AddStringToObject(telemetry, "motionDispatch", motion_dispatch);
+    }
     cJSON* reused = cJSON_CreateObject();
     cJSON_AddBoolToObject(reused, "background", background_plan.reused);
     cJSON_AddBoolToObject(reused, "object", object_plan.reused);
@@ -1638,6 +1671,21 @@ void Application::HandleLessonMessage(const cJSON* root) {
         : has_overlay_src && !overlay_drew ? "overlayUnavailable"
         : (!has_object_src || !has_overlay_src) ? "optionalLayerMissing" : "";
     cJSON_AddStringToObject(telemetry, "degradedReason", degraded_reason);
+
+    if (render_degraded) {
+        ESP_LOGW(TAG,
+                 "render_degraded assignmentId=%s sessionId=%s lessonId=%s stepId=%s "
+                 "sequence=%lld",
+                 assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
+                 step_id != nullptr ? step_id : "-", (long long)sequence);
+    }
+    if (optional_asset_missing) {
+        ESP_LOGW(TAG,
+                 "optional_asset_missing assignmentId=%s sessionId=%s lessonId=%s stepId=%s "
+                 "sequence=%lld",
+                 assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
+                 step_id != nullptr ? step_id : "-", (long long)sequence);
+    }
 
     // Canonical step-ack first (body.acks echoes the step's sequence). For a PASSIVE
     // narration step this ack IS the completion signal (the ESP auto-advances on it),
@@ -1659,7 +1707,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // here, because that advances the lesson before the child answers.
     const bool has_visible_child_prompt = has_caption_prompt && !caption.empty();
     const bool should_listen = !passive && has_visible_content && has_visible_child_prompt;
-    const char* sid = Str(root, "stepId");
     if (!should_listen) {
         Application::GetInstance().CancelLessonInteractiveListening();
     }
@@ -1667,11 +1714,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const uint32_t listen_generation =
             Application::GetInstance().BeginLessonInteractiveListeningRequest();
         ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",
-                 sid != nullptr ? sid : "?");
+                 step_id != nullptr ? step_id : "?");
         Schedule([listen_generation]() {
             Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
         });
     }
     ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d renderElapsedMs=%lld",
-             sid != nullptr ? sid : "?", passive, degraded, (long long)render_elapsed_ms);
+             step_id != nullptr ? step_id : "?", passive, degraded, (long long)render_elapsed_ms);
 }

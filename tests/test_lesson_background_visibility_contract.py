@@ -402,14 +402,20 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     poster_idx = step_branch.index("bool poster_drew = background_plan.reused")
     object_idx = step_branch.index("bool object_drew = object_plan.reused")
     overlay_idx = step_branch.index("bool overlay_drew = overlay_plan.reused")
+    render_degraded_idx = step_branch.index("const bool render_degraded =")
     degraded_idx = step_branch.index("const bool degraded =")
     ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms, telemetry)")
 
-    assert poster_idx < object_idx < overlay_idx < degraded_idx < ack_idx
+    assert poster_idx < object_idx < overlay_idx < render_degraded_idx < degraded_idx < ack_idx
+    render_degraded_expr = step_branch[
+        render_degraded_idx : step_branch.index(";", render_degraded_idx)
+    ]
+    assert "poster_drew" in render_degraded_expr
+    assert "object_drew" in render_degraded_expr
+    assert "overlay_drew" in render_degraded_expr
     degraded_expr = step_branch[degraded_idx : step_branch.index(";", degraded_idx)]
-    assert "poster_drew" in degraded_expr
-    assert "object_drew" in degraded_expr
-    assert "overlay_drew" in degraded_expr
+    assert "motion_degraded" in degraded_expr
+    assert "render_degraded" in degraded_expr
     assert "false" not in step_branch[ack_idx : step_branch.index(";", ack_idx)]
 
 def test_lesson_step_ack_rendered_requires_display_surface():

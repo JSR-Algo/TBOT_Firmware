@@ -1,7 +1,28 @@
 #pragma once
-// Host stub mirroring tests/native_stubs/esp_log.h: log macros are no-ops on the
-// host. Log-emission lines are not meaningful statement coverage (documented
-// exception, same class as the afsk harness).
-#define ESP_LOGI(tag, fmt, ...) ((void)0)
-#define ESP_LOGW(tag, fmt, ...) ((void)0)
-#define ESP_LOGE(tag, fmt, ...) ((void)0)
+
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+inline std::vector<std::string>& HostEspLogs() {
+    static std::vector<std::string> logs;
+    return logs;
+}
+
+inline void HostEspResetLogs() {
+    HostEspLogs().clear();
+}
+
+inline void HostEspLog(const char* level, const char* tag, const char* format, ...) {
+    char message[1024];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    HostEspLogs().emplace_back(std::string(level) + " " + tag + " " + message);
+}
+
+#define ESP_LOGI(tag, fmt, ...) HostEspLog("I", tag, fmt, ##__VA_ARGS__)
+#define ESP_LOGW(tag, fmt, ...) HostEspLog("W", tag, fmt, ##__VA_ARGS__)
+#define ESP_LOGE(tag, fmt, ...) HostEspLog("E", tag, fmt, ##__VA_ARGS__)
