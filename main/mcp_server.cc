@@ -25,6 +25,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include <lesson_asset_sync_attestation.h>
 
 #define TAG "MCP"
 
@@ -820,16 +821,6 @@ void McpServer::AddUserOnlyTools() {
                 cJSON_AddStringToObject(json, "cacheKey", cache_key);
             }
             const char* manifest_checksum = JsonStringField(pack, "manifestChecksum");
-            const std::string manifest_checksum_value =
-                manifest_checksum == nullptr ? "" : Trim(manifest_checksum);
-            const std::string cache_key_value = cache_key == nullptr ? "" : Trim(cache_key);
-            const bool manifest_checksum_valid =
-                manifest_checksum != nullptr &&
-                manifest_checksum_value == manifest_checksum &&
-                IsSha256Hex(manifest_checksum_value);
-            const bool cache_key_matches_manifest =
-                !cache_key_value.empty() &&
-                cache_key_value.find(manifest_checksum_value) != std::string::npos;
             cJSON* files = cJSON_CreateArray();
             int downloaded = 0;
             int skipped = 0;
@@ -878,14 +869,9 @@ void McpServer::AddUserOnlyTools() {
                 cJSON_AddItemToArray(files, item);
             }
 
-            const bool pack_verified =
-                asset_count > 0 && verified == asset_count && failed == 0 &&
-                manifest_checksum_valid && cache_key_matches_manifest;
-            if (pack_verified) {
-                cJSON_AddStringToObject(json, "manifestChecksum", manifest_checksum);
-            }
+            AddLessonAssetSyncAttestation(
+                json, cache_key, manifest_checksum, asset_count, verified, failed);
             cJSON_Delete(pack);
-            cJSON_AddBoolToObject(json, "ready", pack_verified);
             cJSON_AddNumberToObject(json, "downloadedCount", downloaded);
             cJSON_AddNumberToObject(json, "skippedCount", skipped);
             cJSON_AddNumberToObject(json, "failedCount", failed);
