@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <vector>
 
 #include "jpeg_to_image.h"
@@ -30,17 +31,30 @@ std::vector<uint8_t> ReadFile(const char* path) {
     return bytes;
 }
 
-void CheckFailure(const std::vector<uint8_t>& jpeg) {
+struct FreeBytes {
+    void operator()(uint8_t* bytes) const { std::free(bytes); }
+};
+
+void CheckFailureExact(const uint8_t* bytes, size_t size) {
+    std::unique_ptr<uint8_t, FreeBytes> exact(static_cast<uint8_t*>(std::malloc(size == 0 ? 1 : size)));
+    Check(exact != nullptr, "exact invalid fixture allocates");
+    if (size != 0) {
+        std::memcpy(exact.get(), bytes, size);
+    }
     uint8_t* out = reinterpret_cast<uint8_t*>(1);
     size_t out_len = 1;
     size_t width = 1;
     size_t height = 1;
     size_t stride = 1;
-    Check(jpeg_to_image_with_caps(jpeg.data(), jpeg.size(), &out, &out_len, &width, &height, &stride,
+    Check(jpeg_to_image_with_caps(exact.get(), size, &out, &out_len, &width, &height, &stride,
                                   kPsramCaps) != ESP_OK,
           "invalid JPEG is rejected");
     Check(out == nullptr && out_len == 0 && width == 0 && height == 0 && stride == 0,
           "failure clears output contract");
+}
+
+void CheckFailureExact(const std::vector<uint8_t>& jpeg) {
+    CheckFailureExact(jpeg.data(), jpeg.size());
 }
 }  // namespace
 
@@ -82,9 +96,21 @@ int main(int argc, char** argv) {
           "work and output buffers use requested PSRAM caps");
     heap_caps_free(out);
 
-    auto corrupt = jpeg;
-    corrupt.resize(12);
-    CheckFailure(corrupt);
+    for (size_t truncated_size = 1; truncated_size < 32; ++truncated_size) {
+        CheckFailureExact(jpeg.data(), truncated_size);
+    }
+
+    const uint8_t malformed_length[] = {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00};
+    CheckFailureExact(malformed_length, sizeof(malformed_length));
+
+    const uint8_t zero_length[] = {0xff, 0xd8, 0xff, 0xe0, 0x00, 0x00};
+    CheckFailureExact(zero_length, sizeof(zero_length));
+
+    const uint8_t huge_dimensions[] = {
+        0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0xff, 0xff, 0xff, 0xff,
+        0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+    };
+    CheckFailureExact(huge_dimensions, sizeof(huge_dimensions));
 
     auto progressive = jpeg;
     bool replaced = false;
@@ -96,8 +122,8 @@ int main(int argc, char** argv) {
         }
     }
     Check(replaced, "baseline fixture contains SOF0");
-    CheckFailure(progressive);
+    CheckFailureExact(progressive);
 
-    std::cout << "jpeg_to_image host test: 13 checks passed\n";
+    std::cout << "jpeg_to_image host external-TJPG parity and ASan boundary checks passed\n";
     return 0;
 }

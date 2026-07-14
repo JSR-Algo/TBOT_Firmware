@@ -1,6 +1,7 @@
 #include <esp_check.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
+#include <stdbool.h>
 #include <sys/param.h>
 
 #include "jpeg_decoder.h"
@@ -18,7 +19,106 @@
 #endif
 
 #define TAG "jpeg_to_image"
-#define JPEG_ROM_WORK_BUFFER_SIZE 3100
+#define JPEG_MAX_DIMENSION 4096U
+#define JPEG_MAX_DECODED_BYTES (4U * 1024U * 1024U)
+
+// esp_jpeg 1.3.1 uses 3100 bytes unless external TJPG selects FASTDECODE=2.
+// ESP32-S3 must stay on its fixed ROM configuration; fail instead of silently
+// using a work-buffer size that belongs to a different decoder configuration.
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && CONFIG_IDF_TARGET_ESP32S3
+#if !defined(CONFIG_JD_USE_ROM) || !CONFIG_JD_USE_ROM
+#error "ESP32-S3 JPEG decoding requires CONFIG_JD_USE_ROM=y"
+#endif
+#if defined(CONFIG_JD_FASTDECODE) && CONFIG_JD_FASTDECODE == 2
+#error "ESP32-S3 ROM JPEG decoding is incompatible with CONFIG_JD_FASTDECODE=2"
+#endif
+#define JPEG_ROM_WORK_BUFFER_SIZE 3100U
+#elif defined(CONFIG_JD_FASTDECODE) && CONFIG_JD_FASTDECODE == 2
+#define JPEG_ROM_WORK_BUFFER_SIZE 65472U
+#else
+#define JPEG_ROM_WORK_BUFFER_SIZE 3100U
+#endif
+
+typedef struct {
+    size_t width;
+    size_t height;
+    size_t stride;
+    size_t decoded_size;
+} validated_jpeg_info_t;
+
+static uint16_t read_be16(const uint8_t* bytes) {
+    return ((uint16_t)bytes[0] << 8) | bytes[1];
+}
+
+static esp_err_t validate_baseline_jpeg(const uint8_t* src, size_t src_len, validated_jpeg_info_t* info) {
+    if (src == NULL || info == NULL || src_len < 4 || src[0] != 0xff || src[1] != 0xd8) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t offset = 2;
+    while (offset < src_len) {
+        if (src[offset] != 0xff) {
+            return ESP_FAIL;
+        }
+        while (offset < src_len && src[offset] == 0xff) {
+            ++offset;
+        }
+        if (offset >= src_len) {
+            return ESP_FAIL;
+        }
+
+        const uint8_t marker = src[offset++];
+        if (marker == 0x00 || marker == 0xd8 || marker == 0xd9 || marker == 0xda || marker == 0x01 ||
+            (marker >= 0xd0 && marker <= 0xd7)) {
+            return ESP_FAIL;
+        }
+        if (src_len - offset < 2) {
+            return ESP_FAIL;
+        }
+
+        const size_t segment_len = read_be16(src + offset);
+        if (segment_len < 2 || segment_len > src_len - offset) {
+            return ESP_FAIL;
+        }
+
+        const bool is_sof = marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc;
+        if (is_sof) {
+            if (marker != 0xc0 || segment_len < 8) {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            const uint8_t* sof = src + offset + 2;
+            const uint8_t components = sof[5];
+            if (sof[0] != 8 || (components != 1 && components != 3) || segment_len != 8U + 3U * components) {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+
+            const size_t height = read_be16(sof + 1);
+            const size_t width = read_be16(sof + 3);
+            if (width == 0 || height == 0 || width > JPEG_MAX_DIMENSION || height > JPEG_MAX_DIMENSION ||
+                width > SIZE_MAX / 2) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+            const size_t stride = width * 2;
+            if (height > SIZE_MAX / stride) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+            const size_t decoded_size = stride * height;
+            if (decoded_size == 0 || decoded_size > JPEG_MAX_DECODED_BYTES || decoded_size > UINT32_MAX) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+
+            info->width = width;
+            info->height = height;
+            info->stride = stride;
+            info->decoded_size = decoded_size;
+            return ESP_OK;
+        }
+
+        offset += segment_len;
+    }
+
+    return ESP_FAIL;
+}
 
 static esp_err_t decode_with_rom_jpeg(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
                                       size_t* height, size_t* stride, uint32_t output_caps) {
@@ -27,12 +127,17 @@ static esp_err_t decode_with_rom_jpeg(const uint8_t* src, size_t src_len, uint8_
     uint8_t* work_buf = NULL;
     uint8_t* out_buf = NULL;
     esp_jpeg_image_output_t out_info = {0};
+    validated_jpeg_info_t validated_info = {0};
 
     if (output_caps == 0) {
         output_caps = MALLOC_CAP_DEFAULT;
     }
     if (src_len > UINT32_MAX) {
         ret = ESP_ERR_INVALID_SIZE;
+        goto jpeg_rom_dec_failed;
+    }
+    ret = validate_baseline_jpeg(src, src_len, &validated_info);
+    if (ret != ESP_OK) {
         goto jpeg_rom_dec_failed;
     }
 
@@ -45,8 +150,8 @@ static esp_err_t decode_with_rom_jpeg(const uint8_t* src, size_t src_len, uint8_
     };
 
     ret = esp_jpeg_get_image_info(&config, &out_info);
-    if (ret != ESP_OK || out_info.width == 0 || out_info.height == 0 || out_info.output_len == 0 ||
-        out_info.output_len > UINT32_MAX) {
+    if (ret != ESP_OK || out_info.width != validated_info.width || out_info.height != validated_info.height ||
+        out_info.output_len != validated_info.decoded_size) {
         ESP_LOGE(TAG, "Failed to parse JPEG header");
         ret = ESP_FAIL;
         goto jpeg_rom_dec_failed;
@@ -61,7 +166,7 @@ static esp_err_t decode_with_rom_jpeg(const uint8_t* src, size_t src_len, uint8_
         goto jpeg_rom_dec_failed;
     }
 
-    const size_t decoded_size = out_info.output_len;
+    const size_t decoded_size = validated_info.decoded_size;
     out_buf = heap_caps_aligned_calloc(16, 1, decoded_size, output_caps);
     if (out_buf == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for JPEG output buffer");
@@ -88,9 +193,9 @@ static esp_err_t decode_with_rom_jpeg(const uint8_t* src, size_t src_len, uint8_
     *out = out_buf;
     out_buf = NULL;
     *out_len = decoded_size;
-    *width = (size_t)out_info.width;
-    *height = (size_t)out_info.height;
-    *stride = (size_t)out_info.width * 2;
+    *width = validated_info.width;
+    *height = validated_info.height;
+    *stride = validated_info.stride;
     heap_caps_free(work_buf);
     work_buf = NULL;
 
