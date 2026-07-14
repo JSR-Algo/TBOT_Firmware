@@ -187,7 +187,7 @@ def test_ble_setup_timeout_matches_contract_in_local_blufi_configs():
     for sdkconfig_name in ("sdkconfig.defaults.local",):
         contents = read(sdkconfig_name)
         # Parent setup plus password entry can exceed five minutes in practice.
-        assert "CONFIG_BLE_SETUP_TIMEOUT_SEC=900" in contents, sdkconfig_name
+        assert "CONFIG_BLE_SETUP_TIMEOUT_SEC=600" in contents, sdkconfig_name
 
 def test_websocket_protocol_sends_auth_token_as_header_not_query_param():
     websocket_cc = read("main/protocols/websocket_protocol.cc")
