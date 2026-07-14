@@ -16,6 +16,7 @@
 #include "lesson_handler.h"
 #include "lesson_motion_presets.h"
 #include "lesson_layer_state.h"
+#include "system_info.h"
 // US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
 // SetLessonBackground (the new persistent full-screen draw) and LvglAllocatedImage is
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
@@ -1411,6 +1412,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(base_display);
 
     const int64_t render_start_us = esp_timer_get_time();
+    SystemInfo::StartHeapPhaseMonitor();
     Application::GetInstance().BeginLessonNetworkRenderQuiet();
     struct LessonNetworkRenderQuietGuard {
         ~LessonNetworkRenderQuietGuard() {
@@ -1574,6 +1576,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const int64_t render_elapsed_ms = render_elapsed_raw_ms > kLessonRenderElapsedMaxMs
                                           ? kLessonRenderElapsedMaxMs
                                           : render_elapsed_raw_ms;
+    SystemInfo::PrintHeapCheckpoint("lesson_render.complete");
+    SystemInfo::StopHeapPhaseMonitor();
 
     cJSON* telemetry = cJSON_CreateObject();
     cJSON_AddNumberToObject(telemetry, "internalFreeBytes",

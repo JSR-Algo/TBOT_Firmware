@@ -1987,6 +1987,7 @@ TbotBleSubstate Application::GetBleSubstate() const {
 void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
+    SystemInfo::PrintHeapCheckpoint("activation.start");
 
     // Rollback is useful when a new image cannot boot, but waiting until the
     // network OTA check completes makes a healthy image vulnerable to rollback
@@ -2005,6 +2006,7 @@ void Application::ActivationTask() {
                  "Unclaimed device: skip OTA/bootstrap HTTPS while BLE stays up "
                  "(avoids Loading-setup hang; claim path remains via BLE)");
         CheckAssetsVersion();
+        SystemInfo::PrintHeapCheckpoint("activation.complete");
         xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
         return;
     }
@@ -2013,17 +2015,27 @@ void Application::ActivationTask() {
     CheckAssetsVersion();
 
     // Check for new firmware version
+    SystemInfo::StartHeapPhaseMonitor();
     CheckNewVersion();
+    SystemInfo::PrintHeapCheckpoint("ota_check.complete");
+    SystemInfo::StopHeapPhaseMonitor();
 
     // Claimed devices can override the OTA-provided websocket.url from the
     // backend's authenticated runtime config. If this fails, keep the existing
     // OTA/NVS value and compile-time placeholder fallback chain.
+    SystemInfo::StartHeapPhaseMonitor();
     RefreshWebsocketUrlFromConfigFetch();
+    SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
+    SystemInfo::StopHeapPhaseMonitor();
 
     // Initialize the protocol
+    SystemInfo::StartHeapPhaseMonitor();
     InitializeProtocol();
+    SystemInfo::PrintHeapCheckpoint("protocol_init.complete");
+    SystemInfo::StopHeapPhaseMonitor();
 
     // Signal completion to main loop
+    SystemInfo::PrintHeapCheckpoint("activation.complete");
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
 
@@ -2093,7 +2105,10 @@ void Application::CheckAssetsVersion() {
     // the mic — the locked Idle gate still owns enabling it — so the FEED ring
     // stays empty until then and OQ1 / the contention fix are untouched.
     if (IsDeviceClaimed()) {
+        SystemInfo::StartHeapPhaseMonitor();
         audio_service_.PrewarmWakeWord();
+        SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
+        SystemInfo::StopHeapPhaseMonitor();
     }
 
     display->SetChatMessage("system", "");

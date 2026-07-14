@@ -23,6 +23,7 @@
 #include "esp_timer.h"
 #include "lesson_handler.h"
 #include "lesson_motion_presets.h"
+#include "system_info.h"
 
 #include <cJSON.h>
 
@@ -1541,6 +1542,9 @@ void test_step_full_render_http() {
     HostHeapCapsCalls().clear();
     HostHeapSizeCalls().clear();
     HostHeapAlignmentCalls().clear();
+    HostHeapPhaseMonitorStarts() = 0;
+    HostHeapPhaseMonitorStops() = 0;
+    HostHeapCheckpointPhases().clear();
 
     int seq = 3;
     disp.chat_messages.emplace_back("assistant", "Old transcript");
@@ -1587,6 +1591,10 @@ void test_step_full_render_http() {
     require((HostHeapCapsCalls()[first_decoded_index] & MALLOC_CAP_SPIRAM) != 0 &&
                 (HostHeapCapsCalls()[first_decoded_index] & MALLOC_CAP_INTERNAL) == 0,
             "first decoded output allocation is directly backed by PSRAM");
+    require(HostHeapPhaseMonitorStarts() == 1 && HostHeapPhaseMonitorStops() == 1,
+            "lesson render brackets one phase-local heap monitor");
+    require(HostHeapCheckpointPhases() == std::vector<std::string>{"lesson_render.complete"},
+            "lesson render emits the phase checkpoint before ack");
     require(!disp.lesson_captions.empty() &&
             disp.lesson_captions.back() == "Xin chào", "authored prompt caption drawn");
     require(disp.last_status == "Đang học...", "rendered step replaces loading status with active lesson status");

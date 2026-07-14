@@ -16,6 +16,11 @@
 
 #define TAG "SystemInfo"
 
+namespace {
+bool phase_monitor_active = false;
+size_t phase_monitor_lifetime_min_internal = 0;
+}  // namespace
+
 size_t SystemInfo::GetFlashSize() {
     uint32_t flash_size;
     if (esp_flash_get_size(NULL, &flash_size) != ESP_OK) {
@@ -152,6 +157,55 @@ void SystemInfo::PrintHeapStats() {
     int largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     ESP_LOGI(TAG, "free sram: %u minimal sram: %u largest_free_block: %u",
              free_sram, min_free_sram, largest_free_block);
+}
+
+void SystemInfo::StartHeapPhaseMonitor() {
+    if (phase_monitor_active) {
+        ESP_LOGW(TAG, "heap phase monitor already active");
+        return;
+    }
+
+    phase_monitor_lifetime_min_internal =
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    const esp_err_t err = heap_caps_monitor_local_minimum_free_size_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "heap phase monitor start failed: %s", esp_err_to_name(err));
+        return;
+    }
+    phase_monitor_active = true;
+}
+
+void SystemInfo::StopHeapPhaseMonitor() {
+    if (!phase_monitor_active) return;
+
+    const esp_err_t err = heap_caps_monitor_local_minimum_free_size_stop();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "heap phase monitor stop failed: %s", esp_err_to_name(err));
+    }
+    phase_monitor_active = false;
+}
+
+void SystemInfo::PrintHeapCheckpoint(const char* phase) {
+    const size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t observed_min_internal =
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    const size_t lifetime_min_internal = phase_monitor_active
+                                             ? phase_monitor_lifetime_min_internal
+                                             : observed_min_internal;
+    const size_t phase_min_internal = phase_monitor_active
+                                          ? observed_min_internal
+                                          : internal_free;
+    const size_t largest_internal =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
+    ESP_LOGI(TAG,
+             "heap_checkpoint phase=%s internal_free=%u lifetime_min_internal=%u "
+             "phase_min_internal=%u largest_internal=%u psram_free=%u",
+             phase == nullptr ? "unknown" : phase,
+             (unsigned)internal_free, (unsigned)lifetime_min_internal,
+             (unsigned)phase_min_internal, (unsigned)largest_internal,
+             (unsigned)psram_free);
 }
 
 void SystemInfo::PrintPmLocks() {

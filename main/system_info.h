@@ -17,6 +17,9 @@ public:
     static esp_err_t PrintTaskCpuUsage(TickType_t xTicksToWait);
     static void PrintTaskList();
     static void PrintHeapStats();
+    static void StartHeapPhaseMonitor();
+    static void StopHeapPhaseMonitor();
+    static void PrintHeapCheckpoint(const char* phase);
     static void PrintPmLocks();
 };
 
