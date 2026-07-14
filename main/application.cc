@@ -540,9 +540,16 @@ void Application::Run() {
                          (unsigned long)audio_stats.stale_frame_count,
                          (unsigned long)interrupt_count_.load(),
                          (unsigned long)reconnect_count_.load());
-                // MEM-1: main-task stack high-water + PSRAM free (SRAM heap printed above).
-                ESP_LOGI(TAG, "sys_metrics stack_main_min=%u psram_free_b=%u",
+                // Stack high-water snapshots are sampled off the audio hot path.
+                auto stack_hwm = audio_service_.GetTaskStackHighWaterMarks();
+                ESP_LOGI(TAG, "sys_metrics stack_main_min=%u stack_audio_input_min=%ld "
+                              "stack_audio_output_min=%ld stack_opus_codec_min=%ld "
+                              "stack_afe_detection_min=%ld psram_free_b=%u",
                          (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+                         (long)stack_hwm.audio_input,
+                         (long)stack_hwm.audio_output,
+                         (long)stack_hwm.opus_codec,
+                         (long)stack_hwm.afe_detection,
                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
             }
         }

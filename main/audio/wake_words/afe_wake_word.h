@@ -33,6 +33,7 @@ public:
     void EncodeWakeWordData();
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
+    int32_t GetDetectionTaskStackHighWaterMark() const override;
 
 private:
     srmodel_list_t *models_ = nullptr;

@@ -145,6 +145,10 @@ void AudioService::Start() {
     xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioInputTask();
+        {
+            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
+            audio_service->audio_input_task_handle_ = nullptr;
+        }
         vTaskDelete(NULL);
     }, "audio_input", 2048 * 5, this, 8, &audio_input_task_handle_, 0);
 
@@ -152,6 +156,10 @@ void AudioService::Start() {
     xTaskCreate([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
+        {
+            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
+            audio_service->audio_output_task_handle_ = nullptr;
+        }
         vTaskDelete(NULL);
     }, "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);
 #else
@@ -159,6 +167,10 @@ void AudioService::Start() {
     xTaskCreate([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioInputTask();
+        {
+            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
+            audio_service->audio_input_task_handle_ = nullptr;
+        }
         vTaskDelete(NULL);
     }, "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_);
 
@@ -166,6 +178,10 @@ void AudioService::Start() {
     xTaskCreate([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
+        {
+            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
+            audio_service->audio_output_task_handle_ = nullptr;
+        }
         vTaskDelete(NULL);
     }, "audio_output", 2048, this, 4, &audio_output_task_handle_);
 #endif
@@ -174,8 +190,29 @@ void AudioService::Start() {
     xTaskCreate([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->OpusCodecTask();
+        {
+            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
+            audio_service->opus_codec_task_handle_ = nullptr;
+        }
         vTaskDelete(NULL);
     }, "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+}
+
+AudioTaskStackHighWaterMarks AudioService::GetTaskStackHighWaterMarks() {
+    const auto high_water_mark = [](TaskHandle_t handle) -> int32_t {
+        return handle == nullptr ? -1
+                                 : static_cast<int32_t>(uxTaskGetStackHighWaterMark(handle));
+    };
+
+    std::lock_guard<std::mutex> lock(task_handle_mutex_);
+    AudioTaskStackHighWaterMarks marks;
+    marks.audio_input = high_water_mark(audio_input_task_handle_);
+    marks.audio_output = high_water_mark(audio_output_task_handle_);
+    marks.opus_codec = high_water_mark(opus_codec_task_handle_);
+    marks.afe_detection = wake_word_ == nullptr
+                              ? -1
+                              : wake_word_->GetDetectionTaskStackHighWaterMark();
+    return marks;
 }
 
 void AudioService::Stop() {

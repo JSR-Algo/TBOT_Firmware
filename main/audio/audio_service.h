@@ -117,6 +117,13 @@ struct DebugStatistics {
     uint32_t stale_frame_count = 0;   // decode frames dropped by barge-in gen-gate
 };
 
+struct AudioTaskStackHighWaterMarks {
+    int32_t audio_input = -1;
+    int32_t audio_output = -1;
+    int32_t opus_codec = -1;
+    int32_t afe_detection = -1;
+};
+
 class AudioService {
 public:
     AudioService();
@@ -170,6 +177,7 @@ public:
     // is racy-but-benign (aligned 32-bit reads); queue depths take the lock.
     DebugStatistics GetDebugStatistics() const { return debug_statistics_; }
     void GetQueueDepths(uint32_t& decode, uint32_t& send, uint32_t& playback);
+    AudioTaskStackHighWaterMarks GetTaskStackHighWaterMarks();
 
 private:
     AudioCodec* codec_ = nullptr;
@@ -201,6 +209,7 @@ private:
     TaskHandle_t audio_input_task_handle_ = nullptr;
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
+    std::mutex task_handle_mutex_;
     std::mutex audio_queue_mutex_;
     std::condition_variable audio_queue_cv_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_;

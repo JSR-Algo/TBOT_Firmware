@@ -186,6 +186,12 @@ void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_
     wake_word_detected_callback_ = callback;
 }
 
+int32_t AfeWakeWord::GetDetectionTaskStackHighWaterMark() const {
+    return audio_detection_task_handle_ == nullptr
+               ? -1
+               : static_cast<int32_t>(uxTaskGetStackHighWaterMark(audio_detection_task_handle_));
+}
+
 void AfeWakeWord::Start() {
     xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
 }
