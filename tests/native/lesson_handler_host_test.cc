@@ -977,6 +977,22 @@ void test_fresh_prepare_clears_stale_active_lesson_before_start() {
             "fresh valid prepare shows a calm thinking face before new start");
 }
 
+void test_preload_reset_prepare_quiesces_without_arming_lesson_start() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    App().lesson_runtime_active = true;
+
+    Handle(PrepareFrame(1, ",\"preloadResetOnly\":true"));
+    require(FrameType(0) == "lesson_ack", "preload reset prepare is acknowledged");
+    require(App().lesson_runtime_active == false,
+            "preload reset clears the stale lesson runtime flag");
+
+    Handle(StartFrame(2));
+    require(App().lesson_runtime_active == false,
+            "preload reset does not arm a normal lesson_start");
+}
+
 void test_prepare_after_stop_same_session_resets_stream() {
     ResetObservable();
     FreshSession();
@@ -3626,6 +3642,7 @@ int main() {
     test_delayed_duplicate_prepare_replays_assetpack_after_start_ack();
     test_prepare_new_assignment_version_same_session_resets_stream();
     test_fresh_prepare_clears_stale_active_lesson_before_start();
+    test_preload_reset_prepare_quiesces_without_arming_lesson_start();
     test_prepare_after_stop_same_session_resets_stream();
     test_prepare_during_running_same_session_resets_stream();
     test_prepare_after_terminal_error_same_session_resets_stream();

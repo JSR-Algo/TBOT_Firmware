@@ -1018,14 +1018,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_layer_state.ClearAll();
         show_lesson_failure_display();
     };
-    auto clear_stale_lesson_for_fresh_prepare = [this]() {
+    auto clear_stale_lesson_for_fresh_prepare = [this](bool show_waiting_state) {
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);
         ClearTerminalLessonCursor();
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display, lvgl_display]() {
+            Schedule([display, lvgl_display, show_waiting_state]() {
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
@@ -1033,13 +1033,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (lvgl_display) lvgl_display->SetLessonMode(false);
                 display->SetLessonCaption("");
                 display->ClearChatMessages();
-                display->SetStatus(Lang::Strings::PLEASE_WAIT);
-                display->SetEmotion("thinking");
+                if (show_waiting_state) {
+                    display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                    display->SetEmotion("thinking");
+                }
             });
         }
     };
 
     const bool is_prepare = strcmp(type, "lesson_prepare") == 0;
+    const bool preload_reset_only =
+        is_prepare && cJSON_IsTrue(cJSON_GetObjectItem(body, "preloadResetOnly"));
     double prepare_assignment_version = 0.0;
     const bool prepare_has_newer_assignment_version =
         is_prepare &&
@@ -1073,7 +1077,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     if (is_prepare && !duplicate_prepare) {
         // lesson_prepare (re)establishes the single active session and resets the
         // F->S counter + the inbound sequence cursor for this assignment.
-        clear_stale_lesson_for_fresh_prepare();
+        clear_stale_lesson_for_fresh_prepare(!preload_reset_only);
         g_session = LessonSession{};
         g_session.assignment_id = assignment_id;
         g_session.session_id = session_id;
@@ -1185,6 +1189,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
 
     // --- slice subset dispatch ---
     if (is_prepare) {
+        if (preload_reset_only) {
+            g_session.prepared = false;
+            emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
+            return;
+        }
         const cJSON* asset_pack = Obj(body, "assetPack");
         const cJSON* manifest_ref = Obj(body, "manifestRef");
         const char* manifest_checksum = Str(manifest_ref, "manifestChecksum");
