@@ -262,6 +262,14 @@ def test_lcdwiki_es3c35p_uses_lcdwiki_audio_and_uart_pins():
     assert "#define ROBOT_UART_TX_PIN     GPIO_NUM_43" in config
     assert "#define ROBOT_UART_RX_PIN     GPIO_NUM_44" in config
 
+def test_lcdwiki_es3c35p_caps_output_volume_at_safe_hardware_maximum():
+    board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
+
+    assert "void SetOutputVolume(int volume) override" in board
+    assert "const int safe_volume = std::clamp(volume, 0, kLcdWikiOutputVolume);" in board
+    assert '"LCDWiki output volume limited requested=%d applied=%d"' in board
+    assert "Es8311AudioCodec::SetOutputVolume(safe_volume);" in board
+
 def test_lcdwiki_es3c35p_mounts_micro_sd_for_lesson_assets():
     config = read("main/boards/lcdwiki-es3c35p/config.h")
     board = read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")

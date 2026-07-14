@@ -216,6 +216,15 @@ public:
         output_channels_ = 1;
     }
 
+    void SetOutputVolume(int volume) override {
+        const int safe_volume = std::clamp(volume, 0, kLcdWikiOutputVolume);
+        if (safe_volume != volume) {
+            ESP_LOGW(TAG, "LCDWiki output volume limited requested=%d applied=%d",
+                     volume, safe_volume);
+        }
+        Es8311AudioCodec::SetOutputVolume(safe_volume);
+    }
+
     void Start() override {
         Es8311AudioCodec::Start();
         if (output_volume() != kLcdWikiOutputVolume) {
