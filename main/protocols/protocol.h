@@ -2,6 +2,7 @@
 #define PROTOCOL_H
 
 #include <cJSON.h>
+#include <atomic>
 #include <string>
 #include <functional>
 #include <chrono>
@@ -86,6 +87,12 @@ public:
     virtual bool OpenAudioChannel() = 0;
     virtual void CloseAudioChannel(bool send_goodbye = true) = 0;
     virtual bool IsAudioChannelOpened() const = 0;
+    // Maintains a passive WebSocket without starting voice or HTTP heartbeat
+    // intent. Non-WebSocket transports have no passive liveness work.
+    virtual bool MaintainPassiveLiveness() { return true; }
+    virtual void CompleteDeferredClose(uint32_t connection_epoch) {
+        (void)connection_epoch;
+    }
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
@@ -108,7 +115,7 @@ protected:
 
     int server_sample_rate_ = 24000;
     int server_frame_duration_ = 60;
-    bool error_occurred_ = false;
+    std::atomic<bool> error_occurred_{false};
     std::string session_id_;
     std::chrono::time_point<std::chrono::steady_clock> last_incoming_time_;
 
@@ -118,4 +125,3 @@ protected:
 };
 
 #endif // PROTOCOL_H
-

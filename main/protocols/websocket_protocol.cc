@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <inttypes.h>
 #include <esp_random.h>
+#include <esp_timer.h>
 
 #define TAG "WS"
 
@@ -86,6 +87,10 @@ WebsocketProtocol::WebsocketProtocol() {
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
+    {
+        auto failure_mutation = inbound_gate_.BeginFailureMutation();
+        DetachAndResetWebsocket();
+    }
     vEventGroupDelete(event_group_handle_);
 }
 
@@ -169,23 +174,107 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
     return websocket_ != nullptr && websocket_->IsConnected() && !error_occurred_ && !IsTimeout();
 }
 
+bool WebsocketProtocol::MaintainPassiveLiveness() {
+    if (!IsAudioChannelOpened()) {
+        return false;
+    }
+
+    const auto action = passive_liveness_.Poll(
+        static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    if (action == PassiveWebsocketLiveness::Action::kTimedOut) {
+        ESP_LOGW(TAG, "passive_ws_pong_timeout");
+        inbound_gate_.FailCurrent();
+        error_occurred_ = true;
+        return false;
+    }
+    if (action == PassiveWebsocketLiveness::Action::kSendPing) {
+        const bool sent = websocket_->Send("{\"type\":\"ping\"}");
+        if (!sent) {
+            inbound_gate_.FailCurrent();
+            error_occurred_ = true;
+        }
+        ESP_LOGD(TAG, "passive_ws_ping sent=%d", sent ? 1 : 0);
+        return sent;
+    }
+    return true;
+}
+
+void WebsocketProtocol::SetError(const std::string& message) {
+    inbound_gate_.FailCurrent();
+    Protocol::SetError(message);
+}
+
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
     (void)send_goodbye;  // Websocket doesn't need to send goodbye message
+    if (inbound_gate_.CurrentThreadHasLease()) {
+        // Never destroy the callback object from its own stack. Mark it stale;
+        // the next replacement or protocol destruction reclaims it safely.
+        inbound_gate_.FailCurrent();
+        error_occurred_ = true;
+        const uint32_t connection_epoch = inbound_gate_.CurrentEpoch();
+        if (close_state_.MarkDeferred(connection_epoch)) {
+            Application::GetInstance().ScheduleDeferredProtocolClose(this, connection_epoch);
+        }
+        return;
+    }
+    CompleteCloseAndNotify();
+}
+
+void WebsocketProtocol::CompleteDeferredClose(uint32_t connection_epoch) {
+    {
+        auto failure_mutation =
+            inbound_gate_.BeginFailureMutationIfCurrent(connection_epoch);
+        if (!failure_mutation.Matched()) {
+            return;
+        }
+        if (!close_state_.TakeDeferred(connection_epoch)) {
+            return;
+        }
+        error_occurred_ = true;
+        DetachAndResetWebsocket();
+        NotifyAudioChannelClosedOnce();
+    }
+}
+
+void WebsocketProtocol::CompleteCloseAndNotify() {
+    {
+        auto failure_mutation = inbound_gate_.BeginFailureMutation();
+        error_occurred_ = true;
+        DetachAndResetWebsocket();
+        NotifyAudioChannelClosedOnce();
+    }
+}
+
+void WebsocketProtocol::DetachAndResetWebsocket() {
+    if (websocket_ == nullptr) {
+        return;
+    }
+    websocket_->OnData(nullptr);
+    websocket_->OnDisconnected(nullptr);
     websocket_.reset();
 }
 
+void WebsocketProtocol::NotifyAudioChannelClosedOnce() {
+    if (close_state_.TakeNotification() && on_audio_channel_closed_ != nullptr) {
+        on_audio_channel_closed_();
+    }
+}
+
 bool WebsocketProtocol::OpenAudioChannel() {
+    if (inbound_gate_.CurrentThreadHasLease()) {
+        ESP_LOGE(TAG, "websocket replacement rejected from callback context");
+        return false;
+    }
     std::string url = url_;
     std::string token = token_;
     const std::string device_id = SystemInfo::GetMacAddress();
     const std::string client_id = Board::GetInstance().GetUuid();
 
-    error_occurred_ = false;
     last_incoming_time_ = std::chrono::steady_clock::now();
 
     auto network = Board::GetInstance().GetNetwork();
-    websocket_ = network->CreateWebSocket(1);
-    if (websocket_ == nullptr) {
+    auto replacement_websocket = network->CreateWebSocket(1);
+    if (replacement_websocket == nullptr) {
         ESP_LOGE(TAG, "Failed to create websocket");
         return false;
     }
@@ -196,11 +285,11 @@ bool WebsocketProtocol::OpenAudioChannel() {
             token = "Bearer " + token;
         }
     }
-    websocket_->SetHeader("protocol-version", std::to_string(version_).c_str());
+    replacement_websocket->SetHeader("protocol-version", std::to_string(version_).c_str());
     std::string traceparent = NewTraceParentHeader();
-    websocket_->SetHeader("traceparent", traceparent.c_str());
+    replacement_websocket->SetHeader("traceparent", traceparent.c_str());
     if (!token.empty()) {
-        websocket_->SetHeader("authorization", token.c_str());
+        replacement_websocket->SetHeader("authorization", token.c_str());
     }
 
     std::string connect_url = url;
@@ -209,7 +298,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
     ESP_LOGI(TAG, "Websocket auth identity: device-id=%s client-id=%s token_empty=%d",
              device_id.c_str(), client_id.c_str(), token.empty());
 
-    websocket_->OnData([this](const char* data, size_t len, bool binary) {
+    {
+        auto connection_mutation = inbound_gate_.BeginConnectionMutation();
+        const uint32_t connection_epoch = connection_mutation.epoch();
+        error_occurred_ = false;
+        close_state_.ResetForConnection();
+        websocket_ = std::move(replacement_websocket);
+
+        websocket_->OnData([this, connection_epoch](const char* data, size_t len, bool binary) {
+        auto inbound_lease = inbound_gate_.Acquire(connection_epoch);
+        if (!inbound_lease || error_occurred_) {
+            ESP_LOGD(TAG, "ws_stale_inbound_dropped");
+            return;
+        }
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
@@ -276,6 +377,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
             if (cJSON_IsString(type)) {
                 if (strcmp(type->valuestring, "hello") == 0) {
                     ParseServerHello(root);
+                } else if (strcmp(type->valuestring, "pong") == 0) {
+                    passive_liveness_.OnPong(
+                        static_cast<uint32_t>(esp_timer_get_time() / 1000));
+                    ESP_LOGD(TAG, "passive_ws_pong_received");
                 } else {
                     if (strncmp(type->valuestring, "lesson_", 7) == 0) {
                         auto sequence = cJSON_GetObjectItem(root, "sequence");
@@ -294,17 +399,23 @@ bool WebsocketProtocol::OpenAudioChannel() {
             cJSON_Delete(root);
         }
         last_incoming_time_ = std::chrono::steady_clock::now();
-    });
+        });
 
-    websocket_->OnDisconnected([this]() {
-        // OBS-1: log WHY the channel dropped (last error code + whether the
-        // app-level idle timeout tripped) so reconnect storms are debuggable.
-        int err_code = websocket_ != nullptr ? websocket_->GetLastError() : -1;
-        ESP_LOGW(TAG, "ws_disconnect err_code=%d idle_timeout=%d", err_code, IsTimeout() ? 1 : 0);
-        if (on_audio_channel_closed_ != nullptr) {
-            on_audio_channel_closed_();
-        }
-    });
+        websocket_->OnDisconnected([this, connection_epoch]() {
+            auto disconnect_lease = inbound_gate_.Acquire(connection_epoch);
+            // A replaced socket may synchronously invoke this callback from its
+            // destructor. Only the current epoch may dereference websocket_.
+            const bool current_connection = disconnect_lease.IsCurrentEpoch();
+            if (!current_connection) {
+                ESP_LOGD(TAG, "stale_ws_disconnect_dropped");
+                return;
+            }
+            int err_code = websocket_ != nullptr ? websocket_->GetLastError() : -1;
+            ESP_LOGW(TAG, "ws_disconnect err_code=%d idle_timeout=%d",
+                     err_code, IsTimeout() ? 1 : 0);
+            NotifyAudioChannelClosedOnce();
+        });
+    }
 
     ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
     if (!websocket_->Connect(connect_url.c_str())) {
@@ -326,6 +437,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
         SetError(Lang::Strings::SERVER_TIMEOUT);
         return false;
     }
+
+    passive_liveness_.OnOpened(
+        static_cast<uint32_t>(esp_timer_get_time() / 1000));
 
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();

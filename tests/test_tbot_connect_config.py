@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CURRENT_PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
 CURRENT_PRODUCTION_WEBSOCKET_URL = ""
-CURRENT_OTA_BUILD_VERSION = "2.2.84"
+CURRENT_OTA_BUILD_VERSION = "2.2.85"
 
 
 def read(path: str) -> str:
@@ -111,7 +111,7 @@ def test_firmware_prefers_ota_returned_websocket_url_before_compile_fallback():
     assert "RefreshSettings();" in constructor_body
 
     open_start = websocket_cc.index("bool WebsocketProtocol::OpenAudioChannel()")
-    open_end = websocket_cc.index("websocket_->SetHeader", open_start)
+    open_end = websocket_cc.index("replacement_websocket->SetHeader", open_start)
     open_body = websocket_cc[open_start:open_end]
 
     assert "std::string url = url_;" in open_body
@@ -192,11 +192,11 @@ def test_ble_setup_timeout_matches_contract_in_local_blufi_configs():
 def test_websocket_protocol_sends_auth_token_as_header_not_query_param():
     websocket_cc = read("main/protocols/websocket_protocol.cc")
 
-    assert 'websocket_->SetHeader("protocol-version", std::to_string(version_).c_str());' in websocket_cc
-    assert 'websocket_->SetHeader("authorization", token.c_str());' in websocket_cc
-    assert 'websocket_->SetHeader("device-id", device_id.c_str());' not in websocket_cc
-    assert 'websocket_->SetHeader("client-id", client_id.c_str());' not in websocket_cc
-    assert 'websocket_->SetHeader("Authorization", token.c_str());' not in websocket_cc
+    assert 'replacement_websocket->SetHeader("protocol-version", std::to_string(version_).c_str());' in websocket_cc
+    assert 'replacement_websocket->SetHeader("authorization", token.c_str());' in websocket_cc
+    assert 'SetHeader("device-id"' not in websocket_cc
+    assert 'SetHeader("client-id"' not in websocket_cc
+    assert 'SetHeader("Authorization"' not in websocket_cc
     assert 'websocket_->SetHeader("Device-Id", SystemInfo::GetMacAddress().c_str());' not in websocket_cc
     assert 'websocket_->SetHeader("Client-Id", Board::GetInstance().GetUuid().c_str());' not in websocket_cc
 
@@ -205,7 +205,7 @@ def test_websocket_protocol_sends_w3c_traceparent_header_on_connect():
 
     assert '#include <esp_random.h>' in websocket_cc
     assert "NewTraceParentHeader()" in websocket_cc
-    assert 'websocket_->SetHeader("traceparent", traceparent.c_str());' in websocket_cc
+    assert 'replacement_websocket->SetHeader("traceparent", traceparent.c_str());' in websocket_cc
 
 def test_websocket_protocol_adds_identity_query_params_without_auth_query_or_logging_token():
     websocket_cc = read("main/protocols/websocket_protocol.cc")

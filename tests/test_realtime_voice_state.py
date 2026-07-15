@@ -608,7 +608,7 @@ def test_websocket_open_resets_idle_timer_before_hello_send():
 
     assert "last_incoming_time_ = std::chrono::steady_clock::now();" in open_body
     reset_idx = open_body.index("last_incoming_time_ = std::chrono::steady_clock::now();")
-    create_idx = open_body.index("websocket_ = network->CreateWebSocket(1);")
+    create_idx = open_body.index("auto replacement_websocket = network->CreateWebSocket(1);")
     hello_idx = open_body.index("if (!SendText(message))")
 
     assert reset_idx < create_idx < hello_idx
@@ -1606,7 +1606,8 @@ def test_lesson_runtime_passive_socket_close_reconnects_before_idle_repaint():
     assert early_body.index("lesson_runtime_active_.load() && passive_ws_intent_.load()") < set_idle
     guard = early_body[early_body.index("lesson_runtime_active_.load() && passive_ws_intent_.load()") :]
     assert "while (audio_service_.PopPacketFromSendQueue() != nullptr) {}" in guard
-    assert "StartPassiveLessonWebsocket();" in guard
+    assert "SchedulePassiveLessonReconnect();" in guard
+    assert "StartPassiveLessonWebsocket();" not in guard
     assert "return;" in guard
 
 

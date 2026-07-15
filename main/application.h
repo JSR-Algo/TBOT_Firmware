@@ -23,6 +23,7 @@
 #include "robot_uart.h"
 #include "claim_confirmation_reporter.h"
 #include "tbot_connect_mapper.h"
+#include "connect_close_deferral.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -94,6 +95,7 @@ public:
      * Schedule a callback to be executed in the main task
      */
     void Schedule(std::function<void()>&& callback);
+    void ScheduleDeferredProtocolClose(Protocol* expected, uint32_t connection_epoch);
     bool ScheduleAndWait(std::function<bool()>&& callback, int timeout_ms);
 
     /**
@@ -182,6 +184,7 @@ private:
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
     std::unique_ptr<Protocol> protocol_;
+    std::atomic<uint64_t> protocol_generation_{0};
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
@@ -259,6 +262,8 @@ private:
     std::atomic<uint32_t> connect_generation_{0};
     std::atomic<bool> connect_in_flight_{false};
     std::atomic<bool> reset_pending_{false};
+    std::atomic<bool> reboot_pending_{false};
+    ConnectCloseDeferral connect_close_deferral_;
     // WSS-8: true from the start of a wake/listen/reconnect connect cycle until it
     // succeeds or the user/system cancels the online intent. While true, a per-attempt SetError is a
     // RECOVERABLE transient (the wake loop / ScheduleReconnect backoff retries),
@@ -337,6 +342,8 @@ private:
     void SchedulePassiveLessonReconnect();             // passive lesson/nudge socket retry
     void HandleReconnectTick();
     void CloseAudioChannelByIntent();                  // intentional close -> clears online_intent_
+    bool IsConnectSuccessPublicationSuppressed() const;
+    void CompleteReboot();
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void FinishWakeWordInvoke(const std::string& wake_word);
 

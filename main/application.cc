@@ -14,6 +14,8 @@
 #include "app_manager.h"
 #include "tbot_connect_mapper.h"
 #include "lesson_heap_probe.h"
+#include "passive_reconnect_policy.h"
+#include "protocol_lifetime_token.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
 #include "boards/common/system_reset.h"
@@ -637,7 +639,25 @@ void Application::Run() {
             display->UpdateStatusBar();
             HandleListeningWatchdogTick();
 
-            if (clock_ticks_ % 10 == 0 &&
+            bool passive_liveness_failed = false;
+            const DeviceState passive_state = GetDeviceState();
+            if (passive_ws_intent_.load() &&
+                IsDeviceClaimed() &&
+                protocol_ != nullptr &&
+                !connect_in_flight_.load() &&
+                passive_state != kDeviceStateWifiConfiguring &&
+                passive_state != kDeviceStateAudioTesting &&
+                protocol_->IsAudioChannelOpened() &&
+                !protocol_->MaintainPassiveLiveness()) {
+                ESP_LOGW(TAG, "passive_lesson_ws_liveness_failed -> passive backoff");
+                backend_offline_.store(true);
+                SchedulePassiveLessonReconnect();
+                passive_liveness_failed = true;
+            }
+
+            if (!passive_liveness_failed &&
+                !reconnect_passive_.load() &&
+                clock_ticks_ % 10 == 0 &&
                 IsDeviceClaimed() &&
                 !lesson_runtime_active_.load() &&
                 GetDeviceState() == kDeviceStateIdle &&
@@ -2368,6 +2388,7 @@ void Application::InitializeProtocol() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+    protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 
     if (is_websocket_protocol && lesson_message_queue_ == nullptr &&
         lesson_message_task_handle_ == nullptr) {
@@ -2386,6 +2407,12 @@ void Application::InitializeProtocol() {
     }
 
     protocol_->OnConnected([this]() {
+        if (IsConnectSuccessPublicationSuppressed()) {
+            ESP_LOGI(TAG, "connect success publication suppressed");
+            online_intent_.store(false);
+            StopHeartbeat();
+            return;
+        }
         backend_offline_.store(false);  // healthy session -> ONLINE, not retry
         DismissAlert();
         const bool lesson_answer_turn =
@@ -2423,6 +2450,12 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+        if (IsConnectSuccessPublicationSuppressed()) {
+            ESP_LOGI(TAG, "audio channel success publication suppressed");
+            online_intent_.store(false);
+            StopHeartbeat();
+            return;
+        }
         // User-driven listen/wake sessions own reconnect intent. Passive lesson
         // preconnect only makes the device reachable for server lesson pull/nudge;
         // it must not later reconnect into Listening without a wake/button action.
@@ -2477,9 +2510,14 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (lesson_runtime_active_.load() && passive_ws_intent_.load()) {
-                ESP_LOGW(TAG, "lesson passive ws dropped -> passive reconnect");
                 while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
-                StartPassiveLessonWebsocket();
+                if (PassiveReconnectHasOwner(reconnect_passive_.load(),
+                                             connect_in_flight_.load())) {
+                    ESP_LOGI(TAG, "lesson passive_liveness_reconnect_pending");
+                    return;
+                }
+                ESP_LOGW(TAG, "lesson passive ws dropped -> passive reconnect");
+                SchedulePassiveLessonReconnect();
                 return;
             }
             if (connect_in_flight_.load()) {
@@ -2495,8 +2533,12 @@ void Application::InitializeProtocol() {
             // Idle WebSocket timeout is an unexpected drop for that passive path;
             // reopen the same passive channel instead of using voice reconnect.
             if (passive_ws_intent_.load()) {
+                if (reconnect_passive_.load()) {
+                    ESP_LOGI(TAG, "passive_liveness_reconnect_pending");
+                    return;
+                }
                 ESP_LOGW(TAG, "passive_lesson_ws_dropped_unexpected -> passive reconnect");
-                StartPassiveLessonWebsocket();
+                SchedulePassiveLessonReconnect();
                 return;
             }
             // Sustained operation: an UNEXPECTED drop (server/tunnel closed the WS,
@@ -3380,10 +3422,23 @@ void Application::OpenChannelTask(void* arg) {
 
     self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
         self->CancelConnectWatchdog();
+        if (self->reboot_pending_.exchange(false)) {
+            self->reset_pending_.store(false);
+            self->connect_close_deferral_.Cancel();
+            self->CompleteReboot();
+            return;
+        }
         // A ResetProtocol arrived while we were mid-connect and deferred the
         // actual reset to us (now safe: the worker no longer touches protocol_).
         if (self->reset_pending_.exchange(false)) {
+            self->connect_close_deferral_.Cancel();
             self->DoResetProtocol();
+            return;
+        }
+        if (self->connect_close_deferral_.TakeAfterWorker()) {
+            if (self->protocol_ != nullptr) {
+                self->protocol_->CloseAudioChannel();
+            }
             return;
         }
         if (gen != self->connect_generation_.load()) {
@@ -3636,6 +3691,10 @@ void Application::ScheduleReconnect(ListeningMode mode, bool resume_listening) {
 }
 
 void Application::SchedulePassiveLessonReconnect() {
+    if (reconnect_passive_.load()) {
+        ESP_LOGD(TAG, "passive_lesson_reconnect_already_pending");
+        return;
+    }
     if (reconnect_timer_ == nullptr) {
         esp_timer_create_args_t args = {};
         args.callback = [](void* arg) {
@@ -3646,6 +3705,7 @@ void Application::SchedulePassiveLessonReconnect() {
         args.name = "reconnect";
         if (esp_timer_create(&args, &reconnect_timer_) != ESP_OK) {
             reconnect_timer_ = nullptr;
+            reconnect_passive_.store(false);
             return;
         }
     }
@@ -4285,6 +4345,19 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+void Application::ScheduleDeferredProtocolClose(Protocol* expected,
+                                                uint32_t connection_epoch) {
+    const uint64_t expected_generation = protocol_generation_.load(std::memory_order_acquire);
+    Schedule([this, expected, expected_generation, connection_epoch]() {
+        if (ProtocolLifetimeMatches(
+                protocol_.get(), expected,
+                protocol_generation_.load(std::memory_order_acquire),
+                expected_generation)) {
+            protocol_->CompleteDeferredClose(connection_epoch);
+        }
+    });
+}
+
 bool Application::ScheduleAndWait(std::function<bool()>&& callback, int timeout_ms) {
     struct WaitState {
         enum Status { kPending, kRunning, kDone, kCancelled };
@@ -4459,16 +4532,33 @@ void Application::Reboot() {
         ESP_LOGI(TAG, "lesson reboot ignored");
         return;
     }
+    if (connect_in_flight_.load()) {
+        reboot_pending_.store(true);
+        CloseAudioChannelByIntent();
+        ESP_LOGI(TAG, "reboot_deferred_until_connect_worker_exit");
+        return;
+    }
+    CompleteReboot();
+}
+
+void Application::CompleteReboot() {
     ESP_LOGI(TAG, "Rebooting...");
     // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         CloseAudioChannelByIntent();
     }
     protocol_.reset();
+    protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
     audio_service_.Stop();
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
+}
+
+bool Application::IsConnectSuccessPublicationSuppressed() const {
+    return connect_close_deferral_.Pending() ||
+           reset_pending_.load() ||
+           reboot_pending_.load();
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
@@ -4647,6 +4737,11 @@ void Application::CloseAudioChannelByIntent() {
     if (reconnect_timer_ != nullptr) {
         esp_timer_stop(reconnect_timer_);
     }
+    if (!connect_close_deferral_.Request(connect_in_flight_.load())) {
+        ++connect_generation_;
+        ESP_LOGI(TAG, "channel_close_deferred_until_connect_worker_exit");
+        return;
+    }
     if (protocol_) {
         protocol_->CloseAudioChannel();
     }
@@ -4657,6 +4752,7 @@ void Application::DoResetProtocol() {
         CloseAudioChannelByIntent();
     }
     protocol_.reset();
+    protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void Application::ResetProtocol() {
