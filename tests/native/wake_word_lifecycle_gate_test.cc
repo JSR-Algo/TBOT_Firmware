@@ -215,21 +215,29 @@ int main() {
     ProvisioningSessionBinding binding;
     const auto session_a = binding_controller.BeginProvisioningAndQuiesce([]() {});
     Require(binding_controller.FinishProvisioningReset(session_a), "session A owns reset");
-    binding.Bind(session_a);
+    Require(binding.Bind(session_a), "session A binds");
     const auto delayed_callback_a = binding.Capture();
     const auto session_b = binding_controller.BeginProvisioningAndQuiesce([]() {});
     Require(binding_controller.FinishProvisioningReset(session_b), "session B owns reset");
-    binding.Bind(session_b);
+    {
+        auto completion_a = binding.Claim(session_a);
+        Require(static_cast<bool>(completion_a), "session A atomically claims completion");
+        Require(!binding.Bind(session_b), "session B cannot replace binding during A completion");
+        Require(binding.Matches(session_a), "A binding remains held while completion is active");
+    }
+    Require(binding.Matches(session_a), "failed A completion retains binding for retry");
+    Require(binding.Bind(session_b), "session B binds after A completion releases");
     int deinit_calls = 0;
     const auto complete = [&](WakeWordLifecycleController::ProvisioningToken token) {
-        if (!binding.Matches(token)) {
+        auto completion = binding.Claim(token);
+        if (!completion) {
             return false;
         }
         ++deinit_calls;
         if (!binding_controller.EndProvisioningAndRearm(token)) {
             return false;
         }
-        binding.ClearIfMatches(token);
+        completion.ConsumeSuccess();
         return true;
     };
     Require(!complete(delayed_callback_a),
@@ -239,6 +247,7 @@ int main() {
             "session B remains provisioning-owned after stale integration callback");
     Require(complete(session_b), "bound session B completes successfully");
     Require(deinit_calls == 1, "only current session owns BLE deinit");
+    Require(!binding.Capture().valid(), "successful completion consumes binding once");
 
     FakeAsyncWakeWord async;
     async.StartEncode();

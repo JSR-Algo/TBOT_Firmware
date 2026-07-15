@@ -57,7 +57,7 @@ public:
      */
     esp_err_t deinit();
 
-    void BindProvisioningSession(ProvisioningToken token);
+    bool BindProvisioningSession(ProvisioningToken token);
     ProvisioningToken CaptureProvisioningSession() const;
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);

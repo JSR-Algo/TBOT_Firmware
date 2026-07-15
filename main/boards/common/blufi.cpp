@@ -389,8 +389,8 @@ esp_err_t Blufi::_deinit_impl() {
     return first_error;
 }
 
-void Blufi::BindProvisioningSession(ProvisioningToken token) {
-    provisioning_session_.Bind(token);
+bool Blufi::BindProvisioningSession(ProvisioningToken token) {
+    return provisioning_session_.Bind(token);
 }
 
 Blufi::ProvisioningToken Blufi::CaptureProvisioningSession() const {
@@ -399,7 +399,8 @@ Blufi::ProvisioningToken Blufi::CaptureProvisioningSession() const {
 
 bool Blufi::CompleteSuccessfulProvisioningTeardown(
         const char* reason, ProvisioningToken provisioning_token) {
-    if (!provisioning_session_.Matches(provisioning_token)) {
+    auto completion = provisioning_session_.Claim(provisioning_token);
+    if (!completion) {
         ESP_LOGW(BLUFI_TAG, "Ignoring stale provisioning teardown: reason=%s token=%llu",
                  reason ? reason : "unknown",
                  static_cast<unsigned long long>(provisioning_token.generation));
@@ -423,7 +424,12 @@ bool Blufi::CompleteSuccessfulProvisioningTeardown(
                  static_cast<unsigned long long>(provisioning_token.generation));
         return false;
     }
-    provisioning_session_.ClearIfMatches(provisioning_token);
+    if (!completion.ConsumeSuccess()) {
+        ESP_LOGE(BLUFI_TAG, "Provisioning completion ownership lost: reason=%s token=%llu",
+                 reason ? reason : "unknown",
+                 static_cast<unsigned long long>(provisioning_token.generation));
+        return false;
+    }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
              reason ? reason : "unknown", static_cast<int>(rearmed));
     return true;

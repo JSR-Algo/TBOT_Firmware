@@ -127,46 +127,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             // AP hard-timeout so a stale callback cannot post a redundant
             // StopConfigAp after we have already moved on.
             CancelApSetupTimeout();
-#if defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING) && defined(CONFIG_TBOT_PROVISIONING_REPORT_ENABLED)
-            {
-                auto& blufi = Blufi::GetInstance();
-                const std::string& token = blufi.GetBootstrapToken();
-                const std::string& code  = blufi.GetProvisioningCode();
-                // Report() now lives in blufi.cpp success branch (single owner).
-                // Do not call Report() here to avoid duplicate POST + prior-reconnect race.
-                ESP_LOGI(TAG,
-                         "NetworkEvent::Connected token_empty=%d code_empty=%d — report owned by BluFi success branch",
-                         (int)token.empty(), (int)code.empty());
-                const bool should_release_ble =
-                    Application::GetInstance().IsDeviceClaimed() ||
-                    !token.empty() ||
-                    !code.empty();
-                if (should_release_ble) {
-                    const auto provisioning_token = blufi.CaptureProvisioningSession();
-                    blufi.CompleteSuccessfulProvisioningTeardown(
-                        "network_connected", provisioning_token);
-                } else {
-                    ESP_LOGI(TAG,
-                             "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
-                }
-            }
-#elif defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
-            {
-                auto& blufi = Blufi::GetInstance();
-                const bool should_release_ble =
-                    Application::GetInstance().IsDeviceClaimed() ||
-                    !blufi.GetBootstrapToken().empty() ||
-                    !blufi.GetProvisioningCode().empty();
-                if (should_release_ble) {
-                    const auto provisioning_token = blufi.CaptureProvisioningSession();
-                    blufi.CompleteSuccessfulProvisioningTeardown(
-                        "network_connected", provisioning_token);
-                } else {
-                    ESP_LOGI(TAG,
-                             "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
-                }
-            }
-#endif
+            // BluFi success workers carry their originating provisioning token
+            // and exclusively own BLE teardown/rearm. A generic Connected event
+            // cannot safely identify which provisioning attempt produced it.
             in_config_mode_ = false;
             ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
             break;
@@ -332,7 +295,10 @@ void WifiBoard::StartWifiConfigMode() {
         ESP_LOGE(TAG, "WiFi config aborted: wake-word shutdown did not quiesce");
         return;
     }
-    blufi.BindProvisioningSession(provisioning_token);
+    if (!blufi.BindProvisioningSession(provisioning_token)) {
+        ESP_LOGE(TAG, "WiFi config aborted: prior provisioning completion still active");
+        return;
+    }
     // initialize esp-blufi protocol.
     // Guard against double-init: the Application now also brings BLE up while the
     // robot is unclaimed in claimable standby (so the app can discover it over

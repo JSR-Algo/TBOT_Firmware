@@ -64,7 +64,9 @@ def test_wifi_provisioning_rearms_only_after_ble_deinit():
     start_body = source[start:source.index("void WifiBoard::EnterWifiConfigMode()", start)]
     assert start_body.index("BeginWifiProvisioning()") < start_body.index("blufi.init();")
 
-    assert source.count('"network_connected", provisioning_token') == 2
+    connected = source[source.index("case NetworkEvent::Connected:"):]
+    connected = connected[:connected.index("case NetworkEvent::Scanning:")]
+    assert "CompleteSuccessfulProvisioningTeardown" not in connected
     blufi = read("main/boards/common/blufi.cpp")
     helper = blufi[blufi.index("bool Blufi::CompleteSuccessfulProvisioningTeardown"):]
     helper = helper[:helper.index("#ifdef CONFIG_BT_BLUEDROID_ENABLED")]

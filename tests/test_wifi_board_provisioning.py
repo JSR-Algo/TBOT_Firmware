@@ -322,12 +322,9 @@ def test_wb6_connected_event_does_not_post_report_blufi_owns_it():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _connected_event_body(wifi_board)
 
-    # Explicit comment-of-record that the report is owned elsewhere.
-    assert "report owned by BluFi success branch" in body, (
+    # Explicit comment-of-record that origin-token workers own completion.
+    assert "BluFi success workers carry their originating provisioning token" in body, (
         "the Connected handler must document that the report is owned by BluFi"
-    )
-    assert "Do not call Report() here" in body, (
-        "the Connected handler must document that it does not own the report"
     )
 
     # Hard guard: no ProvisioningStatusReporter::Report( call in this handler.
@@ -355,8 +352,8 @@ def test_wb7_connected_cancels_timeouts_before_ble_teardown():
         "NetworkEvent::Connected must cancel the AP setup hard-timeout"
     )
 
-    # The centralized success helper owns cancel -> deinit -> conditional rearm.
-    assert body.count('"network_connected", provisioning_token') == 2
+    # Generic Connected cannot identify the originating provisioning session.
+    assert "CompleteSuccessfulProvisioningTeardown" not in body
 
     # Connecting/idle bookkeeping: in_config_mode_ is cleared after teardown.
     assert "in_config_mode_ = false;" in body
@@ -432,14 +429,10 @@ def test_wb9b_ble_advertised_name_is_tbot_prefixed():
 def test_wb10_no_credential_value_logged_in_wifi_board():
     wifi_board = read("main/boards/common/wifi_board.cc")
 
-    # The Connected handler logs presence as a boolean only.
+    # The generic Connected handler no longer reads provisioning secrets.
     body = _connected_event_body(wifi_board)
-    assert "token_empty=%d" in body and "code_empty=%d" in body, (
-        "the Connected handler must log token/code presence as a boolean, not "
-        "the value"
-    )
-    assert "(int)token.empty()" in body
-    assert "(int)code.empty()" in body
+    assert "GetBootstrapToken" not in body
+    assert "GetProvisioningCode" not in body
 
     # No ESP_LOG statement in the whole file may format the raw token/code value
     # (.c_str() of the secret) into the message. Collapse multi-line ESP_LOG
@@ -561,22 +554,10 @@ def test_wb12c_unclaimed_saved_ssid_connect_does_not_teardown_ble_without_claim_
     case_end = fn.index("case NetworkEvent::Scanning:", case_idx)
     body = fn[case_idx:case_end]
 
-    token_idx = body.index('const std::string& token = blufi.GetBootstrapToken();')
-    code_idx = body.index('const std::string& code  = blufi.GetProvisioningCode();')
-    release_idx = body.index("const bool should_release_ble")
-    deinit_idx = body.index("blufi.CompleteSuccessfulProvisioningTeardown", release_idx)
-
-    assert token_idx < release_idx
-    assert code_idx < release_idx
-    assert "Application::GetInstance().IsDeviceClaimed()" in body[release_idx:deinit_idx]
-    assert "!token.empty()" in body[release_idx:deinit_idx]
-    assert "!code.empty()" in body[release_idx:deinit_idx]
-    assert "keeping BLE advertising open" in body[release_idx:case_end]
-    assert body.index("if (should_release_ble)", release_idx) < deinit_idx, (
-        "saved-SSID reconnect on an unclaimed robot must not tear down BLE when "
-        "no BluFi claim/provisioning token has arrived; otherwise the mobile app "
-        "cannot rediscover the robot and send the bootstrap token"
-    )
+    assert "CaptureProvisioningSession" not in body
+    assert "CompleteSuccessfulProvisioningTeardown" not in body
+    assert "blufi.deinit" not in body
+    assert "cannot safely identify which provisioning attempt produced it" in body
 
 
 def test_wb12d_wifi_board_claim_gate_uses_public_application_api():
