@@ -37,7 +37,9 @@ for unsupported in (
 
 Extend the native invalid matrix with exact strings for `v+1`, leading `../`,
 `file://`, `https://`, `%2f`, doubled `/`, dotted slug, and an embedded NUL
-constructed with an explicit length.
+constructed with an explicit length. Add public target-compatible limits of 128
+slug bytes and 10 version digits, and prove each maximum is accepted while
+maximum plus one is rejected before substring allocation.
 
 - [ ] **Step 2: Run RED tests**
 
@@ -116,7 +118,11 @@ Expect(
 Also test move construction/assignment, destructor release, same-session
 idempotence, foreign-session refusal, foreign release refusal, exact owner
 release, force teardown, mutation versus prepare barrier races using two host
-threads, and no leaked reservation after exceptions/early returns.
+threads, and no leaked reservation after exceptions/early returns. Add empty,
+embedded-NUL, 128-byte, and 129-byte identity cases. Prove force/reacquire with
+the same IDs issues a fresh generation and both sequential and concurrent stale
+terminal releases cannot release the replacement. Exercise 64-bit exhaustion
+with a host-only seam and require fail-closed behavior without zero or reuse.
 
 - [ ] **Step 2: Add the host runner and confirm RED**
 
@@ -142,6 +148,15 @@ enum class LessonAssetReservationCode {
     kMutationActive,
     kLessonSessionActive,
     kLessonSessionMismatch,
+    kInvalidIdentity,
+    kGenerationExhausted,
+};
+
+struct LessonAssetSessionResult {
+    LessonAssetReservationCode code;
+    bool acquired;
+    bool idempotent;
+    std::uint64_t generation;
 };
 
 class LessonAssetMutationLease {
@@ -161,6 +176,12 @@ The singleton stores a short-held `std::mutex`, mutation-active flag, operation
 label for diagnostics, and current assignment/session IDs. The lease does not
 hold the mutex while filesystem work runs; it owns the reservation flag and
 releases it under the mutex exactly once.
+
+Session identities are 1 through 128 bytes with no embedded NUL. Validate and
+copy them before locking, then swap them into state before publishing active.
+Each new session receives a never-reused nonzero 64-bit generation; duplicate
+prepare returns the same generation, `EndLessonSession` requires IDs plus that
+generation, and exhaustion refuses rather than wrapping.
 
 - [ ] **Step 4: Add CMake wiring and static contracts**
 
@@ -191,6 +212,80 @@ git add main/lesson_asset_storage_coordinator.h \
   main/lesson_asset_cache_evict.h main/lesson_asset_cache_evict.cc \
   tests/native/lesson_asset_cache_evict_host_test.cc
 git commit -m "feat(firmware): coordinate lesson asset storage reservations"
+```
+
+### Task 1A: Align Cache-Key Limits Across All Producers and Consumers
+
+**Files (Nest backend repository):**
+- Create: `src/lessons/lesson-cache-key.contract.ts`
+- Modify: `src/lessons/authoring/lesson-authoring.dto.ts`
+- Modify: `src/lessons/authoring/lesson-authoring.controller.ts`
+- Modify: `src/lessons/authoring/lesson-authoring.service.ts`
+- Modify: `src/lessons/dto/create-assignment.dto.ts`
+- Modify: `src/lessons/dto/create-assignment.dto.spec.ts`
+- Create: `src/lessons/authoring/lesson-cache-key-contract.spec.ts`
+- Create: `src/lessons/authoring/lesson-cache-key-http-boundary.spec.ts`
+
+**Files (ESP server repository):**
+- Modify: `main/tbot-server/core/lesson/sd_pack_evict.py`
+- Modify: `main/tbot-server/tests/test_lesson_sd_pack_evict.py`
+
+- [ ] **Step 1: Write RED shared-limit tests**
+
+Apply one exact protocol contract everywhere:
+
+```text
+slug bytes: 1..128 ASCII
+version digits: 1..10, first digit 1..9
+checksum bytes: exactly 64 lowercase hex
+complete cache key bytes: <=205
+```
+
+Nest tests accept a 128-byte canonical slug and reject 129 bytes, uppercase,
+edge/doubled hyphens, non-ASCII, whitespace, URI/percent/traversal strings,
+empty IDs, and non-string values. ESP tests accept version `9999999999` and
+reject 11 digits, accept a 128-byte slug and reject 129, and retain every
+existing invalid path case.
+
+The Nest HTTP/controller test must invoke the real create-lesson endpoint path,
+not only instantiate `CreateLessonDraftDto`. It proves the anonymous authoring
+body cannot bypass the production validator and that the service performs the
+same check before any database write.
+
+- [ ] **Step 2: Run RED tests**
+
+Run the focused Nest authoring/assignment DTO tests and ESP
+`tests/test_lesson_sd_pack_evict.py`.
+
+Expected: one or more upstream boundaries accept values firmware refuses.
+
+- [ ] **Step 3: Implement the shared boundary**
+
+Create one Nest pure contract helper exporting the canonical regex, 128-byte
+limit, predicate, and an assertion that throws the existing sanitized bad-input
+error. Nest DTOs use `@IsString`, `@IsNotEmpty`, `@MaxLength(128)`, and the
+shared ASCII regex on both `CreateLessonDraftDto.lessonKey` and
+`CreateAssignmentDto.lessonId`. The live authoring controller/service calls the
+shared assertion before persistence because the current endpoint's anonymous
+`@Body()` type is not a runtime validation boundary. Do not normalize or
+truncate. ESP checks ASCII byte counts before regex matching and preserves
+sanitized invalid-key errors.
+
+- [ ] **Step 4: Audit existing published keys**
+
+Run a read-only database query or fixture audit listing published `lesson_key`
+values outside the new contract. Expected before rollout: zero rows. If rows
+exist, stop and create an explicit migration; never rewrite identifiers inside
+this task.
+
+- [ ] **Step 5: Run GREEN and commit per repository**
+
+Run focused and adjacent assignment/authoring and ESP eviction suites. Commit
+Nest and ESP changes separately:
+
+```bash
+git commit -m "fix(lessons): enforce robot cache key limits"
+git commit -m "fix(server): align lesson cache key limits"
 ```
 
 ### Task 2: Reserve the Lesson Session Before Asset Reads
@@ -246,12 +341,15 @@ const auto reservation =
         assignment_id, session_id);
 ```
 
-If it reports mutation active or a foreign lesson session, emit a stable
-retryable error and return before asset access. Track whether the current
-prepare newly acquired the reservation so every later rejection releases only
-what it acquired.
+Handle every `!reservation.acquired` result, including mutation active, foreign
+lesson session, invalid identity, and generation exhaustion. Emit a stable
+retryable or validation error and return before asset access. Store the returned
+non-zero generation. Track whether the current prepare newly acquired the
+reservation so every later rejection releases only what it acquired.
 
-Release using the exact assignment/session IDs on terminal paths. Use
+Release using the exact assignment/session IDs and coordinator-issued
+generation on terminal paths. Zero, stale, or wrong generations must not
+release the active session. Use
 `ForceEndLessonSession()` only on connection/device teardown that invalidates
 all lesson state.
 

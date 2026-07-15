@@ -61,8 +61,8 @@ Create one process-wide `LessonAssetStorageCoordinator` for
 reservation states:
 
 - one move-only mutation lease; or
-- one prepared/running lesson session identified by `assignmentId` and
-  `sessionId`.
+- one prepared/running lesson session identified by `assignmentId`,
+  `sessionId`, and a coordinator-issued generation token.
 
 Acquisition never waits. A conflicting caller gets a stable refusal so network
 and lesson tasks cannot deadlock each other.
@@ -73,6 +73,8 @@ enum class LessonAssetReservationCode {
     kMutationActive,
     kLessonSessionActive,
     kLessonSessionMismatch,
+    kInvalidIdentity,
+    kGenerationExhausted,
 };
 
 class LessonAssetMutationLease {
@@ -88,6 +90,7 @@ struct LessonAssetSessionResult {
     LessonAssetReservationCode code;
     bool acquired;
     bool idempotent;
+    std::uint64_t generation;
 };
 
 class LessonAssetStorageCoordinator {
@@ -101,7 +104,8 @@ public:
     );
     bool EndLessonSession(
         const std::string& assignment_id,
-        const std::string& session_id
+        const std::string& session_id,
+        std::uint64_t generation
     );
     void ForceEndLessonSession();
     bool HasMutation() const;
@@ -109,10 +113,15 @@ public:
 };
 ```
 
-The lease is RAII and releases exactly once. Duplicate prepare for the same
-assignment/session is idempotent. A different assignment/session cannot steal
-or release an active reservation. Forced release is limited to device-level
-reset/disconnect teardown where the current lesson can no longer continue.
+The lease is RAII and releases exactly once. Assignment and session identities
+are byte strings from 1 through 128 bytes with no embedded NUL. They are copied
+before the mutex is acquired and moved into state before the active flag is
+published. Duplicate prepare for the same assignment/session is idempotent and
+returns the same nonzero generation. A different identity or stale generation
+cannot steal or release an active reservation. Every newly acquired session
+gets the next never-reused 64-bit generation; exhaustion fails closed instead
+of wrapping to zero. Forced release is limited to device-level reset/disconnect
+teardown where the current lesson can no longer continue.
 
 ### Lesson lifecycle
 
@@ -144,15 +153,24 @@ writer fails CI.
 
 ### Exact path policy
 
-The cache key grammar remains byte-exact:
+The cache key grammar and bounds are a shared Nest/backend, ESP server, and
+firmware protocol:
 
 ```text
 [a-z0-9]+(?:-[a-z0-9]+)*/v[1-9][0-9]*-[0-9a-f]{64}
 ```
 
-The parser is character-by-character, reconstructs the key, and requires byte
-equality. It never trims, normalizes, URL-decodes, or accepts a URI. Invalid
-input is not echoed in logs or responses.
+The slug is 1-128 ASCII bytes, the decimal version is 1-10 digits with a
+non-zero first digit, the checksum is exactly 64 lowercase hexadecimal bytes,
+and the complete key is at most 205 bytes. The parser is character-by-character,
+checks these bounds before allocation-heavy copies, reconstructs the key, and
+requires byte equality. It never trims, normalizes, URL-decodes, or accepts a
+URI. Invalid input is not echoed in logs or responses.
+
+Nest lesson authoring and assignment DTOs reject lesson keys outside the same
+contract. The ESP server exact-key validator applies the same byte limits before
+it can call firmware. Rollout includes a read-only audit of existing published
+keys; identifiers are never silently truncated or rewritten.
 
 On FAT the helper uses `stat`, `opendir`, and `readdir`; it must not use
 unsupported `lstat`/`openat` APIs or claim inode identity. Root, slug parent,
