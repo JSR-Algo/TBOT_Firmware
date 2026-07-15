@@ -13,18 +13,28 @@ def test_runtime_logs_use_target_supported_integer_formats():
     lesson_cc = read("main/lesson_handler.cc")
 
     unsupported_logs = []
+    unsupported_sd_helpers = []
     for source_path in (ROOT / "main").rglob("*"):
         if source_path.suffix not in {".c", ".cc", ".cpp", ".h", ".hpp"}:
             continue
         contents = source_path.read_text(encoding="utf-8")
         if "%lld" in contents or "%llu" in contents:
             unsupported_logs.append(str(source_path.relative_to(ROOT)))
+        if "sdmmc_card_print_info(" in contents:
+            unsupported_sd_helpers.append(str(source_path.relative_to(ROOT)))
 
     assert unsupported_logs == []
+    assert unsupported_sd_helpers == []
     assert "tts_stop_received ts=%lu%03lu" in app_cc
     assert "lesson_* dropped: sequence must be an integer between 0 and INT32_MAX" in lesson_cc
     assert "sequence_d > static_cast<double>(INT32_MAX)" in lesson_cc
     assert "token=%lu%09lu%09lu" in read("main/boards/common/blufi.cpp")
+    sd_board_sources = (
+        read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
+        + read("main/boards/wireless-tag-wtp4c5mp07s/wireless-tag-wtp4c5mp07s.cc")
+    )
+    assert sd_board_sources.count("size_mb=%lu sector_size=%lu") == 3
+    assert sd_board_sources.count("static_cast<uint64_t>(card->csd.capacity)") == 3
     assert "lesson_step_started assignmentId=%s" in lesson_cc
     assert "sequence=%ld" in lesson_cc
 

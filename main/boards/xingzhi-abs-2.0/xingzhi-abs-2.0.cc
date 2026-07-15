@@ -210,7 +210,6 @@ private:
             ESP_LOGI(TAG, "SD卡挂载成功");
             is_sdcard_found = true;
         }
-        // sdmmc_card_print_info(stdout, card); // 打印SD卡信息
     }
 
     void InitializePhysicalButtons() {

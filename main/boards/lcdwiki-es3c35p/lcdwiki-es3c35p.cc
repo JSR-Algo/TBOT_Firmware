@@ -7,6 +7,7 @@
 #include "led/single_led.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <vector>
 
 #include <driver/gpio.h>
@@ -695,8 +696,12 @@ private:
                      SDCARD_MOUNT_POINT, esp_err_to_name(ret));
             return;
         }
-        ESP_LOGI(TAG, "SD card mounted at %s", SDCARD_MOUNT_POINT);
-        sdmmc_card_print_info(stdout, card);
+        const uint64_t size_mb =
+            (static_cast<uint64_t>(card->csd.capacity) * card->csd.sector_size) /
+            (1024ULL * 1024ULL);
+        ESP_LOGI(TAG, "SD card mounted at %s size_mb=%lu sector_size=%lu",
+                 SDCARD_MOUNT_POINT, static_cast<unsigned long>(size_mb),
+                 static_cast<unsigned long>(card->csd.sector_size));
     }
 
 public:
