@@ -14,6 +14,12 @@ public:
         bool valid() const { return generation != 0; }
     };
 
+    struct ProvisioningToken {
+        uint64_t generation = 0;
+        bool valid() const { return generation != 0; }
+        explicit operator bool() const { return valid(); }
+    };
+
     class Lease {
     public:
         Lease() = default;
@@ -78,11 +84,13 @@ public:
     }
 
     template <typename Callback>
-    void BeginProvisioningAndQuiesce(Callback&& on_quiescing) {
+    ProvisioningToken BeginProvisioningAndQuiesce(Callback&& on_quiescing) {
+        uint64_t provisioning_generation = 0;
         {
             std::lock_guard<std::mutex> transition_lock(transition_mutex_);
             const uint64_t state = state_.load(std::memory_order_relaxed);
-            state_.store(Pack(Generation(state) + 1, kProvisioning | kQuiescing),
+            provisioning_generation = Generation(state) + 1;
+            state_.store(Pack(provisioning_generation, kProvisioning | kQuiescing),
                          std::memory_order_release);
         }
         std::forward<Callback>(on_quiescing)();
@@ -90,18 +98,25 @@ public:
         idle_cv_.wait(wait_lock, [this]() {
             return active_leases_.load(std::memory_order_acquire) == 0;
         });
+        return ProvisioningToken{provisioning_generation};
     }
 
-    void FinishProvisioningReset() {
+    bool FinishProvisioningReset(ProvisioningToken token) {
         std::lock_guard<std::mutex> lock(transition_mutex_);
         const uint64_t state = state_.load(std::memory_order_relaxed);
+        if (!token.valid() || Generation(state) != token.generation ||
+            (Flags(state) & kProvisioning) == 0) {
+            return false;
+        }
         state_.store(Pack(Generation(state), kProvisioning), std::memory_order_release);
+        return true;
     }
 
-    bool EndProvisioningAndRearm() {
+    bool EndProvisioningAndRearm(ProvisioningToken token) {
         std::lock_guard<std::mutex> lock(transition_mutex_);
         const uint64_t state = state_.load(std::memory_order_relaxed);
-        if ((Flags(state) & kProvisioning) == 0) {
+        if (!token.valid() || Generation(state) != token.generation ||
+            (Flags(state) & kProvisioning) == 0) {
             return false;
         }
         state_.store(Pack(Generation(state) + 1, 0), std::memory_order_release);

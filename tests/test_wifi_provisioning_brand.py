@@ -143,8 +143,8 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     init_idx = body.index("blufi.init();")
     assert release_idx < init_idx
 
-    assert "bool BeginWifiProvisioning();" in audio_h
-    release_start = audio_cc.index("bool AudioService::BeginWifiProvisioning()")
+    assert "WifiProvisioningToken BeginWifiProvisioning();" in audio_h
+    release_start = audio_cc.index("AudioService::WifiProvisioningToken AudioService::BeginWifiProvisioning()")
     release_body = audio_cc[release_start:audio_cc.index("void AudioService::EnableVoiceProcessing", release_start)]
     prewarm_body = function_body(audio_cc, "void AudioService::PrewarmWakeWord")
     assert "WakeWordLifecycleController wake_word_lifecycle_;" in audio_h

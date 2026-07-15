@@ -25,7 +25,7 @@ def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_
     event = enable.index("xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING)", publish)
     assert accepted < publish < event
 
-    provision = source[source.index("bool AudioService::BeginWifiProvisioning"):source.index("bool AudioService::EndWifiProvisioningAndRearm")]
+    provision = source[source.index("AudioService::WifiProvisioningToken AudioService::BeginWifiProvisioning"):source.index("bool AudioService::EndWifiProvisioningAndRearm")]
     quiesced = provision.index("BeginProvisioningAndQuiesce")
     assert provision.index("wake_word_feed_target_.store(nullptr", quiesced) > quiesced
     assert provision.index("xEventGroupClearBits", quiesced) > quiesced
@@ -68,8 +68,10 @@ def test_wifi_provisioning_rearms_only_after_ble_deinit():
     blufi = read("main/boards/common/blufi.cpp")
     helper = blufi[blufi.index("bool Blufi::CompleteSuccessfulProvisioningTeardown"):]
     helper = helper[:helper.index("#ifdef CONFIG_BT_BLUEDROID_ENABLED")]
-    assert helper.index("deinit()") < helper.index("EndWifiProvisioningAndRearm()")
-    assert helper.index("if (deinit_error != ESP_OK)") < helper.index("EndWifiProvisioningAndRearm()")
+    rearm = helper.index("EndWifiProvisioningAndRearm(")
+    assert helper.index("deinit()") < rearm
+    assert helper.index("if (deinit_error != ESP_OK)") < rearm
+    assert "provisioning_token" in helper[rearm:rearm + 120]
 
 
 def test_ci_runs_deterministic_wake_word_lifecycle_gate():

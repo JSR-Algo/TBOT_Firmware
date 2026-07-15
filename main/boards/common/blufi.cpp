@@ -379,7 +379,17 @@ esp_err_t Blufi::_deinit_impl() {
     return first_error;
 }
 
+void Blufi::BindProvisioningSession(ProvisioningToken token) {
+    std::lock_guard<std::mutex> lock(provisioning_session_mutex_);
+    provisioning_token_ = token;
+}
+
 bool Blufi::CompleteSuccessfulProvisioningTeardown(const char* reason) {
+    ProvisioningToken provisioning_token;
+    {
+        std::lock_guard<std::mutex> lock(provisioning_session_mutex_);
+        provisioning_token = provisioning_token_;
+    }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown requested: reason=%s",
              reason ? reason : "unknown");
     CancelBleSetupTimeout();
@@ -390,7 +400,14 @@ bool Blufi::CompleteSuccessfulProvisioningTeardown(const char* reason) {
         return false;
     }
 
-    const bool rearmed = Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
+    const bool rearmed = Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm(
+        provisioning_token);
+    if (rearmed) {
+        std::lock_guard<std::mutex> lock(provisioning_session_mutex_);
+        if (provisioning_token_.generation == provisioning_token.generation) {
+            provisioning_token_ = {};
+        }
+    }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
              reason ? reason : "unknown", static_cast<int>(rearmed));
     return true;

@@ -153,13 +153,14 @@ public:
     // stays empty until the locked Idle gate enables the mic, so the BLE/AFE
     // contention gate is untouched. Caller MUST gate on IsDeviceClaimed().
     using WakeWordPrewarmToken = WakeWordLifecycleController::PrewarmToken;
+    using WifiProvisioningToken = WakeWordLifecycleController::ProvisioningToken;
     WakeWordPrewarmToken CaptureWakeWordPrewarmToken() const;
     void PrewarmWakeWord(WakeWordPrewarmToken token);
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
-    bool BeginWifiProvisioning();
-    bool EndWifiProvisioningAndRearm();
+    WifiProvisioningToken BeginWifiProvisioning();
+    bool EndWifiProvisioningAndRearm(WifiProvisioningToken token);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 

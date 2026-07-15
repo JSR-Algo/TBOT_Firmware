@@ -29,11 +29,38 @@ def test_one_helper_owns_cancel_deinit_and_conditional_rearm():
     assert "bool CompleteSuccessfulProvisioningTeardown(const char* reason);" in header
     cancel = body.index("CancelBleSetupTimeout()")
     deinit = body.index("deinit()", cancel)
-    rearm = body.index("EndWifiProvisioningAndRearm()", deinit)
-    assert cancel < deinit < rearm
+    snapshot = body.index("provisioning_token", 0, deinit)
+    rearm = body.index("EndWifiProvisioningAndRearm(", deinit)
+    assert snapshot < cancel < deinit < rearm
+    assert "provisioning_token" in body[rearm:rearm + 120]
     assert "if (deinit_error != ESP_OK)" in body
     assert body.index("if (deinit_error != ESP_OK)") < rearm
     assert "reason" in body
+    assert "provisioning_token_.generation == provisioning_token.generation" in body
+
+
+def test_provisioning_token_is_plain_generation_state_for_low_memory_paths():
+    controller = read("main/audio/wake_word_lifecycle_controller.h")
+    token = controller[controller.index("struct ProvisioningToken"):]
+    token = token[:token.index("};")]
+    assert "uint64_t generation" in token
+    assert "string" not in token
+    assert "shared_ptr" not in token
+
+
+def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
+    audio_h = read("main/audio/audio_service.h")
+    wifi = read("main/boards/common/wifi_board.cc")
+    blufi_h = read("main/boards/common/blufi.h")
+    start = function_body(wifi, "void WifiBoard::StartWifiConfigMode")
+    assert "WifiProvisioningToken BeginWifiProvisioning();" in audio_h
+    begin = start.index("BeginWifiProvisioning()")
+    bind = start.index("BindProvisioningSession", begin)
+    init = start.index("blufi.init()", bind)
+    assert begin < bind < init
+    assert "void BindProvisioningSession(ProvisioningToken token);" in blufi_h
+    assert "ProvisioningToken provisioning_token_" in blufi_h
+    assert "std::mutex provisioning_session_mutex_" in blufi_h
 
 
 def test_duplicate_success_callers_cannot_double_delete_the_timeout_timer():

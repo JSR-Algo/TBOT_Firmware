@@ -322,10 +322,13 @@ void WifiBoard::StartWifiConfigMode() {
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
-    if (!Application::GetInstance().GetAudioService().BeginWifiProvisioning()) {
+    const auto provisioning_token =
+        Application::GetInstance().GetAudioService().BeginWifiProvisioning();
+    if (!provisioning_token) {
         ESP_LOGE(TAG, "WiFi config aborted: wake-word shutdown did not quiesce");
         return;
     }
+    blufi.BindProvisioningSession(provisioning_token);
     // initialize esp-blufi protocol.
     // Guard against double-init: the Application now also brings BLE up while the
     // robot is unclaimed in claimable standby (so the app can discover it over

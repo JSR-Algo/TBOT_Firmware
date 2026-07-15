@@ -71,7 +71,7 @@ private:
 int main() {
     WakeWordLifecycleController controller;
     const auto initial_generation = controller.CapturePrewarmToken().generation;
-    Require(!controller.EndProvisioningAndRearm(),
+    Require(!controller.EndProvisioningAndRearm({}),
             "rearm is a no-op when provisioning does not own the lifecycle");
     Require(controller.CapturePrewarmToken().generation == initial_generation,
             "no-op rearm does not advance generation");
@@ -89,8 +89,9 @@ int main() {
     std::mutex enable_race_mutex;
     std::condition_variable enable_race_cv;
     bool enable_quiescing = false;
+    WakeWordLifecycleController::ProvisioningToken enable_token;
     std::thread enable_release([&]() {
-        controller.BeginProvisioningAndQuiesce([&]() {
+        enable_token = controller.BeginProvisioningAndQuiesce([&]() {
             std::lock_guard<std::mutex> lock(enable_race_mutex);
             enable_quiescing = true;
             enable_race_cv.notify_all();
@@ -105,10 +106,10 @@ int main() {
     enabling = {};
     feed = {};
     enable_release.join();
-    controller.FinishProvisioningReset();
-    Require(controller.EndProvisioningAndRearm(), "provisioning owner rearms once");
+    Require(controller.FinishProvisioningReset(enable_token), "current begin token finishes reset");
+    Require(controller.EndProvisioningAndRearm(enable_token), "provisioning owner rearms once");
     const auto first_rearm_generation = controller.CapturePrewarmToken().generation;
-    Require(!controller.EndProvisioningAndRearm(), "duplicate success rearm is ignored");
+    Require(!controller.EndProvisioningAndRearm(enable_token), "duplicate success rearm is ignored");
     Require(controller.CapturePrewarmToken().generation == first_rearm_generation,
             "duplicate success does not advance generation");
     Require(controller.SetRunning(true, controller.CapturePrewarmToken().generation),
@@ -119,8 +120,9 @@ int main() {
     std::condition_variable barrier_cv;
     bool quiescing = false;
     std::atomic<bool> quiesced{false};
+    WakeWordLifecycleController::ProvisioningToken release_token;
     std::thread release([&]() {
-        controller.BeginProvisioningAndQuiesce([&]() {
+        release_token = controller.BeginProvisioningAndQuiesce([&]() {
             std::lock_guard<std::mutex> lock(barrier_mutex);
             quiescing = true;
             barrier_cv.notify_all();
@@ -139,9 +141,9 @@ int main() {
     Require(quiesced.load(), "release completes after feed lease exits");
     Require(!controller.TryAcquirePrewarm(boot_token), "old activation token stays invalid");
 
-    controller.FinishProvisioningReset();
+    Require(controller.FinishProvisioningReset(release_token), "release token finishes reset");
     Require(!controller.TryAcquireAccess(), "provisioning ownership remains fail-closed");
-    Require(controller.EndProvisioningAndRearm(), "accessor cycle rearms");
+    Require(controller.EndProvisioningAndRearm(release_token), "accessor cycle rearms");
     const auto rearmed_token = controller.CapturePrewarmToken();
     Require(rearmed_token.valid(), "successful terminal path issues a new token");
     Require(rearmed_token.generation != boot_token.generation, "rearm advances generation");
@@ -154,8 +156,9 @@ int main() {
     std::mutex accessor_barrier_mutex;
     std::condition_variable accessor_barrier_cv;
     bool accessor_quiescing = false;
+    WakeWordLifecycleController::ProvisioningToken accessor_token;
     std::thread accessor_release([&]() {
-        controller.BeginProvisioningAndQuiesce([&]() {
+        accessor_token = controller.BeginProvisioningAndQuiesce([&]() {
             std::lock_guard<std::mutex> lock(accessor_barrier_mutex);
             accessor_quiescing = true;
             accessor_barrier_cv.notify_all();
@@ -169,8 +172,43 @@ int main() {
     Require(!accessor_quiesced.load(), "destroy waits for accessor/metrics lease");
     metrics_access = {};
     accessor_release.join();
-    controller.FinishProvisioningReset();
-    controller.EndProvisioningAndRearm();
+    Require(controller.FinishProvisioningReset(accessor_token), "accessor token finishes reset");
+    Require(controller.EndProvisioningAndRearm(accessor_token), "accessor token rearms");
+
+    const auto old_success = controller.BeginProvisioningAndQuiesce([]() {});
+    Require(controller.FinishProvisioningReset(old_success), "old session reaches teardown pause");
+    std::mutex overlap_mutex;
+    std::condition_variable overlap_cv;
+    bool old_deinit_complete = false;
+    bool release_old_success = false;
+    std::atomic<bool> old_rearm_result{true};
+    std::thread old_completion([&]() {
+        {
+            std::unique_lock<std::mutex> lock(overlap_mutex);
+            old_deinit_complete = true;
+            overlap_cv.notify_all();
+            overlap_cv.wait(lock, [&]() { return release_old_success; });
+        }
+        old_rearm_result.store(controller.EndProvisioningAndRearm(old_success));
+    });
+    {
+        std::unique_lock<std::mutex> lock(overlap_mutex);
+        overlap_cv.wait(lock, [&]() { return old_deinit_complete; });
+    }
+    const auto new_session = controller.BeginProvisioningAndQuiesce([]() {});
+    Require(controller.FinishProvisioningReset(new_session), "new session owns provisioning");
+    {
+        std::lock_guard<std::mutex> lock(overlap_mutex);
+        release_old_success = true;
+        overlap_cv.notify_all();
+    }
+    old_completion.join();
+    Require(!old_rearm_result.load(),
+            "old success cannot clear newer provisioning ownership");
+    Require(!controller.TryAcquireAccess(),
+            "new session remains provisioning-owned after stale success");
+    Require(controller.EndProvisioningAndRearm(new_session),
+            "current session can complete after stale success rejection");
 
     FakeAsyncWakeWord async;
     async.StartEncode();
@@ -203,9 +241,9 @@ int main() {
     Require(shutdown_done.load(), "shutdown completes after encode exit acknowledgement");
 
     for (int i = 0; i < 3; ++i) {
-        controller.BeginProvisioningAndQuiesce([]() {});
-        controller.FinishProvisioningReset();
-        Require(controller.EndProvisioningAndRearm(), "repeated transition rearms once");
+        const auto token = controller.BeginProvisioningAndQuiesce([]() {});
+        Require(controller.FinishProvisioningReset(token), "repeated token finishes reset");
+        Require(controller.EndProvisioningAndRearm(token), "repeated transition rearms once");
     }
     Require(controller.CapturePrewarmToken().valid(), "repeated transitions remain rearmable");
 

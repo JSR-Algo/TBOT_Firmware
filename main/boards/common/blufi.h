@@ -15,9 +15,11 @@
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
 #include "blufi_transition_gate.h"
+#include "audio/wake_word_lifecycle_controller.h"
 
 class Blufi {
 public:
+    using ProvisioningToken = WakeWordLifecycleController::ProvisioningToken;
     /**
      * @brief BLE setup state for heartbeat / observability.
      */
@@ -55,6 +57,7 @@ public:
      */
     esp_err_t deinit();
 
+    void BindProvisioningSession(ProvisioningToken token);
     bool CompleteSuccessfulProvisioningTeardown(const char* reason);
 
     /**
@@ -120,6 +123,8 @@ private:
     bool nimble_services_active_ = false;
     bool controller_enabled_ = false;
     bool controller_initialized_ = false;
+    std::mutex provisioning_session_mutex_;
+    ProvisioningToken provisioning_token_{};
 
     Blufi();
 
