@@ -1034,10 +1034,9 @@ def test_fw25_token_persisted_to_nvs_but_code_is_ram_only():
 
 
 # ---------------------------------------------------------------------------
-# FW26: blufi.cpp — deinit() is ordered (host before controller) and idempotent.
-#       A second deinit() must early-return via m_deinited so we never double
-#       free the BLE stack, and host_deinit must precede controller_deinit so the
-#       profile/host is gone before the controller is pulled out from under it.
+# FW26: blufi.cpp — deinit() is ordered and transactionally idempotent. A
+#       completed transaction returns early, while partial failures leave the
+#       failed layer active for a retry without repeating successful layers.
 # ---------------------------------------------------------------------------
 def test_fw26_deinit_is_idempotent_and_host_precedes_controller():
     blufi = read("main/boards/common/blufi.cpp")
@@ -1045,15 +1044,13 @@ def test_fw26_deinit_is_idempotent_and_host_precedes_controller():
     fn_end = blufi.index("#ifdef CONFIG_BT_BLUEDROID_ENABLED", fn_idx)
     body = blufi[fn_idx:fn_end]
 
-    # Idempotency: only act when inited_, and early-return when already deinited.
-    assert "if (inited_) {" in body
-    guard_idx = body.index("if (m_deinited) {")
+    # Idempotency: only a fully completed transaction may return stale success.
+    guard_idx = body.index("if (m_deinited && !host_active_ && !controller_active_) {")
     return_idx = body.index("return ESP_OK;", guard_idx)
-    set_deinited = body.index("m_deinited = true;", guard_idx)
-    assert guard_idx < return_idx < set_deinited, (
-        "deinit() must early-return on the already-deinited path BEFORE setting "
-        "m_deinited again / tearing down a second time"
-    )
+    host_guard_idx = body.index("if (host_active_)", return_idx)
+    controller_guard_idx = body.index("if (controller_active_)", host_guard_idx)
+    set_deinited = body.index("m_deinited = true;", controller_guard_idx)
+    assert guard_idx < return_idx < host_guard_idx < controller_guard_idx < set_deinited
 
     # Ordering: host deinit precedes controller deinit.
     host_idx = body.index("_host_deinit();")

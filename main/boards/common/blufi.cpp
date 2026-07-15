@@ -73,6 +73,12 @@ static const char* BLUFI_TAG = "BLUFI_CLASS";
 static constexpr int kClaimRefreshAfterTokenHandoffDelayMs = 2500;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
 
+static void CaptureFirstError(esp_err_t& first_error, esp_err_t error) {
+    if (first_error == ESP_OK && error != ESP_OK) {
+        first_error = error;
+    }
+}
+
 static std::string SanitizedSerial(const uint8_t* bytes, size_t max_len) {
     std::string serial;
     for (size_t i = 0; i < max_len && bytes[i] != 0; ++i) {
@@ -231,9 +237,12 @@ Blufi::~Blufi() {
 
 esp_err_t Blufi::init() {
     esp_err_t ret = ESP_FAIL;
-    // inited_ is set true only on the success path below. On any early
-    // failure-return we force inited_=false / m_deinited=true so GetBleState()
-    // reports kOff and wifi_board.cc re-runs init() on the next config-mode entry.
+    if (host_active_ || controller_active_) {
+        ESP_LOGE(BLUFI_TAG, "BLUFI init rejected while prior teardown is incomplete");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // inited_ is set true only after both stack layers initialize successfully.
     inited_ = false;
     m_provisioned = false;
     m_deinited = false;
@@ -262,18 +271,23 @@ esp_err_t Blufi::init() {
         m_deinited = true;
         return ret;
     }
+    controller_active_ = true;
 #endif
 
     ret = _host_and_cb_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "BLUFI host and cb init failed: %s", esp_err_to_name(ret));
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-        _controller_deinit();
+        const esp_err_t cleanup_error = _controller_deinit();
+        if (cleanup_error == ESP_OK) {
+            controller_active_ = false;
+        }
 #endif
         inited_ = false;
-        m_deinited = true;
+        m_deinited = !host_active_ && !controller_active_;
         return ret;
     }
+    host_active_ = true;
 
     ESP_LOGI(BLUFI_TAG, "BLUFI VERSION %04x", esp_blufi_get_version());
     inited_ = true;
@@ -281,32 +295,46 @@ esp_err_t Blufi::init() {
 }
 
 esp_err_t Blufi::deinit() {
-    esp_err_t ret = ESP_OK;
+    esp_err_t first_error = ESP_OK;
 
-    if (inited_) {
-        if (m_deinited) {
-            return ESP_OK;
-        }
-        m_deinited = true;
-        if (scan_event_instance_ != nullptr) {
-            esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
-                                                  scan_event_instance_);
-            scan_event_instance_ = nullptr;
-        }
-        m_scan_in_progress = false;
-        m_send_list_after_scan = false;
-        ret = _host_deinit();
-        if (ret) {
-            ESP_LOGE(BLUFI_TAG, "Host deinit failed: %s", esp_err_to_name(ret));
-        }
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-        ret = _controller_deinit();
-        if (ret) {
-            ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s", esp_err_to_name(ret));
-        }
-#endif
+    if (m_deinited && !host_active_ && !controller_active_) {
+        return ESP_OK;
     }
-    return ret;
+    if (scan_event_instance_ != nullptr) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
+                                              scan_event_instance_);
+        scan_event_instance_ = nullptr;
+    }
+    m_scan_in_progress = false;
+    m_send_list_after_scan = false;
+
+    if (host_active_) {
+        const esp_err_t host_error = _host_deinit();
+        CaptureFirstError(first_error, host_error);
+        if (host_error == ESP_OK) {
+            host_active_ = false;
+        } else {
+            ESP_LOGE(BLUFI_TAG, "Host deinit failed: %s", esp_err_to_name(host_error));
+        }
+    }
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    if (controller_active_) {
+        const esp_err_t controller_error = _controller_deinit();
+        CaptureFirstError(first_error, controller_error);
+        if (controller_error == ESP_OK) {
+            controller_active_ = false;
+        } else {
+            ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s",
+                     esp_err_to_name(controller_error));
+        }
+    }
+#endif
+
+    if (first_error == ESP_OK && !host_active_ && !controller_active_) {
+        m_deinited = true;
+        inited_ = false;
+    }
+    return first_error;
 }
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
@@ -326,21 +354,20 @@ esp_err_t Blufi::_host_init() {
 }
 
 esp_err_t Blufi::_host_deinit() {
-    esp_err_t ret = esp_blufi_profile_deinit();
-    if (ret != ESP_OK)
-        return ret;
+    esp_err_t first_error = ESP_OK;
+    CaptureFirstError(first_error, esp_blufi_profile_deinit());
 
-    ret = esp_bluedroid_disable();
+    esp_err_t ret = esp_bluedroid_disable();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s disable bluedroid failed: %s", __func__, esp_err_to_name(ret));
-        return ESP_FAIL;
     }
+    CaptureFirstError(first_error, ret);
     ret = esp_bluedroid_deinit();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s deinit bluedroid failed: %s", __func__, esp_err_to_name(ret));
-        return ESP_FAIL;
     }
-    return ESP_OK;
+    CaptureFirstError(first_error, ret);
+    return first_error;
 }
 
 esp_err_t Blufi::_gap_register_callback() {
@@ -420,14 +447,17 @@ esp_err_t Blufi::_host_init() {
 }
 
 esp_err_t Blufi::_host_deinit(void) {
+    esp_err_t first_error = ESP_OK;
     esp_err_t ret = nimble_port_stop();
+    CaptureFirstError(first_error, ret);
     if (ret == ESP_OK) {
-        esp_nimble_deinit();
+        CaptureFirstError(first_error, esp_nimble_deinit());
     }
     esp_blufi_gatt_svr_deinit();
     ret = esp_blufi_profile_deinit();
+    CaptureFirstError(first_error, ret);
     esp_blufi_btc_deinit();
-    return ret;
+    return first_error;
 }
 
 esp_err_t Blufi::_gap_register_callback(void) { return ESP_OK; }
@@ -482,15 +512,18 @@ esp_err_t Blufi::_controller_init() {
 }
 
 esp_err_t Blufi::_controller_deinit() {
+    esp_err_t first_error = ESP_OK;
     esp_err_t ret = esp_bt_controller_disable();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s disable controller failed: %s", __func__, esp_err_to_name(ret));
     }
+    CaptureFirstError(first_error, ret);
     ret = esp_bt_controller_deinit();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s deinit controller failed: %s", __func__, esp_err_to_name(ret));
     }
-    return ret;
+    CaptureFirstError(first_error, ret);
+    return first_error;
 }
 #endif
 

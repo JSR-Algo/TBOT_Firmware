@@ -107,6 +107,8 @@ public:
 
 private:
     bool inited_ = false;
+    bool host_active_ = false;
+    bool controller_active_ = false;
 
     Blufi();
 
