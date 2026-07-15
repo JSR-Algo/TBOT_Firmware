@@ -71,11 +71,11 @@ void Cst816x::touchpad_daemon(void* arg) {
 
         const auto& config = cst816x->getThresholdConfig(tp.x, tp.y);
         if (tp.num > 0) {
-            ESP_LOGD(TAG, "Touch at (%d,%d) → SingleThresh:%lldms, DoubleWindow:%lldms, LongThresh:%lldms",
+            ESP_LOGD(TAG, "Touch at (%d,%d) → SingleThresh:%ldms, DoubleWindow:%ldms, LongThresh:%ldms",
                 tp.x, tp.y,
-                config.single_click_thresh_us / 1000,
-                config.double_click_window_us / 1000,
-                config.long_press_thresh_us / 1000);
+                static_cast<long>(config.single_click_thresh_us / 1000),
+                static_cast<long>(config.double_click_window_us / 1000),
+                static_cast<long>(config.long_press_thresh_us / 1000));
         }
 
         TouchEvent current_event;  

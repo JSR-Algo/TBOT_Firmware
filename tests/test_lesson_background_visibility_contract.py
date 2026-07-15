@@ -442,7 +442,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     schedule_idx = step_branch.index("Schedule([display, lvgl_display")
     elapsed_idx = step_branch.index("const int64_t render_elapsed_ms =")
     ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms, telemetry)")
-    log_idx = step_branch.index("renderElapsedMs=%lld")
+    log_idx = step_branch.index("renderElapsedMs=%ld")
 
     assert start_idx < poster_idx < object_idx < overlay_idx < schedule_idx < elapsed_idx < ack_idx < log_idx
     raw_elapsed_idx = step_branch.index("const int64_t render_elapsed_us = esp_timer_get_time() - render_start_us;")
@@ -450,6 +450,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     assert "render_elapsed_us < 0 ? 0 : render_elapsed_us / 1000" in step_branch
     assert "kLessonRenderElapsedMaxMs" in step_branch[elapsed_idx : step_branch.index(";", elapsed_idx)]
     assert 'cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));' in body
+    assert "static_cast<long>(render_elapsed_ms)" in step_branch[ack_idx:]
     assert "renderElapsedMs" not in step_branch[:start_idx]
 
 def test_lesson_stop_and_caption_only_steps_clear_foreground_object():

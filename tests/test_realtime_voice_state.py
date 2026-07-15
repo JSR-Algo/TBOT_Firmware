@@ -8,6 +8,27 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def test_runtime_logs_use_target_supported_integer_formats():
+    app_cc = read("main/application.cc")
+    lesson_cc = read("main/lesson_handler.cc")
+
+    unsupported_logs = []
+    for source_path in (ROOT / "main").rglob("*"):
+        if source_path.suffix not in {".c", ".cc", ".cpp", ".h", ".hpp"}:
+            continue
+        contents = source_path.read_text(encoding="utf-8")
+        if "%lld" in contents or "%llu" in contents:
+            unsupported_logs.append(str(source_path.relative_to(ROOT)))
+
+    assert unsupported_logs == []
+    assert "tts_stop_received ts=%lu%03lu" in app_cc
+    assert "lesson_* dropped: sequence must be an integer between 0 and INT32_MAX" in lesson_cc
+    assert "sequence_d > static_cast<double>(INT32_MAX)" in lesson_cc
+    assert "token=%lu%09lu%09lu" in read("main/boards/common/blufi.cpp")
+    assert "lesson_step_started assignmentId=%s" in lesson_cc
+    assert "sequence=%ld" in lesson_cc
+
+
 def test_listening_transition_uses_bounded_playback_drain():
     app_cc = read("main/application.cc")
     audio_h = read("main/audio/audio_service.h")

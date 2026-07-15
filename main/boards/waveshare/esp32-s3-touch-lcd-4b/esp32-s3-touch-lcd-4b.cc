@@ -329,7 +329,8 @@ private:
                 ESP_LOGD(TAG, "Button pressed, start time recorded");
             } else {
                 uint64_t press_duration = (esp_timer_get_time() / 1000) - press_start_time_ms;
-                ESP_LOGI(TAG, "Button released after %llums", press_duration);
+                ESP_LOGI(TAG, "Button released after %lums",
+                         static_cast<unsigned long>(press_duration));
 
                 if (press_duration < 1000) {
                     ESP_LOGI(TAG, "Short press detected, switching to factory partition");

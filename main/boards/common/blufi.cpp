@@ -416,11 +416,19 @@ bool Blufi::AbortProvisioningSetup(ProvisioningToken token) {
 
 bool Blufi::CompleteSuccessfulProvisioningTeardown(
         const char* reason, ProvisioningToken provisioning_token) {
+    constexpr uint64_t kTokenChunkBase = 1000000000ULL;
+    const uint64_t token_generation = provisioning_token.generation;
+    const auto token_high = static_cast<unsigned long>(
+        token_generation / (kTokenChunkBase * kTokenChunkBase));
+    const auto token_middle = static_cast<unsigned long>(
+        (token_generation / kTokenChunkBase) % kTokenChunkBase);
+    const auto token_low = static_cast<unsigned long>(token_generation % kTokenChunkBase);
     auto completion = provisioning_session_.Claim(provisioning_token);
     if (!completion) {
-        ESP_LOGW(BLUFI_TAG, "Ignoring stale provisioning teardown: reason=%s token=%llu",
+        ESP_LOGW(BLUFI_TAG,
+                 "Ignoring stale provisioning teardown: reason=%s token=%lu%09lu%09lu",
                  reason ? reason : "unknown",
-                 static_cast<unsigned long long>(provisioning_token.generation));
+                 token_high, token_middle, token_low);
         return false;
     }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown requested: reason=%s",
@@ -436,15 +444,17 @@ bool Blufi::CompleteSuccessfulProvisioningTeardown(
     const bool rearmed = Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm(
         provisioning_token);
     if (!rearmed) {
-        ESP_LOGW(BLUFI_TAG, "Provisioning teardown did not rearm: reason=%s token=%llu",
+        ESP_LOGW(BLUFI_TAG,
+                 "Provisioning teardown did not rearm: reason=%s token=%lu%09lu%09lu",
                  reason ? reason : "unknown",
-                 static_cast<unsigned long long>(provisioning_token.generation));
+                 token_high, token_middle, token_low);
         return false;
     }
     if (!completion.ConsumeSuccess()) {
-        ESP_LOGE(BLUFI_TAG, "Provisioning completion ownership lost: reason=%s token=%llu",
+        ESP_LOGE(BLUFI_TAG,
+                 "Provisioning completion ownership lost: reason=%s token=%lu%09lu%09lu",
                  reason ? reason : "unknown",
-                 static_cast<unsigned long long>(provisioning_token.generation));
+                 token_high, token_middle, token_low);
         return false;
     }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",

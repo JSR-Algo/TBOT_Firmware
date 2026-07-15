@@ -1416,8 +1416,8 @@ void Application::StartClaimPoll() {
         esp_timer_stop(claim_poll_timer_);
         claim_poll_interval_us_ = desired_interval_us;
         esp_timer_start_periodic(claim_poll_timer_, claim_poll_interval_us_);
-        ESP_LOGI(TAG, "Claim poll re-armed (every %llus)",
-                 claim_poll_interval_us_ / 1000000ULL);
+        ESP_LOGI(TAG, "Claim poll re-armed (every %lus)",
+                 static_cast<unsigned long>(claim_poll_interval_us_ / 1000000ULL));
         return;
     }
     if (claim_poll_timer_ == nullptr) {
@@ -1442,8 +1442,9 @@ void Application::StartClaimPoll() {
     claim_poll_active_ = true;
     claim_poll_interval_us_ = desired_interval_us;
     esp_timer_start_periodic(claim_poll_timer_, claim_poll_interval_us_);
-    ESP_LOGI(TAG, "Claim poll started (every %llus, %llds cap)",
-             claim_poll_interval_us_ / 1000000ULL, kClaimPollWindowMs / 1000);
+    ESP_LOGI(TAG, "Claim poll started (every %lus, %lds cap)",
+             static_cast<unsigned long>(claim_poll_interval_us_ / 1000000ULL),
+             static_cast<long>(kClaimPollWindowMs / 1000));
 }
 
 void Application::StopClaimPoll() {
@@ -1527,7 +1528,7 @@ void Application::ArmClaimExpiryTimer() {
         return;
     }
     esp_timer_start_once(claim_expiry_timer_, static_cast<uint64_t>(remaining_s) * 1000000ULL);
-    ESP_LOGI(TAG, "Claim expiry armed in %llds", remaining_s);
+    ESP_LOGI(TAG, "Claim expiry armed in %lds", static_cast<long>(remaining_s));
 }
 
 void Application::CancelClaimExpiryTimer() {
@@ -1759,7 +1760,8 @@ void Application::StartHeartbeat() {
     }
     heartbeat_active_ = true;
     esp_timer_start_periodic(heartbeat_timer_, kHeartbeatIntervalUs);
-    ESP_LOGI(TAG, "Heartbeat started (every %llus)", kHeartbeatIntervalUs / 1000000ULL);
+    ESP_LOGI(TAG, "Heartbeat started (every %lus)",
+             static_cast<unsigned long>(kHeartbeatIntervalUs / 1000000ULL));
 }
 
 void Application::StopHeartbeat() {
@@ -2560,7 +2562,9 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 tts_audio_accepting_.store(false);
                 int64_t t_recv = esp_timer_get_time() / 1000;
-                ESP_LOGI(TAG, "tts_stop_received ts=%lld", t_recv);
+                const auto t_recv_sec = static_cast<unsigned long>(t_recv / 1000);
+                const auto t_recv_ms = static_cast<unsigned long>(t_recv % 1000);
+                ESP_LOGI(TAG, "tts_stop_received ts=%lu%03lu", t_recv_sec, t_recv_ms);
                 // Patch 3.4: the backend tags an interrupt-driven stop with
                 // reason="interrupt" (barge-in) vs a normal end-of-turn stop.
                 auto reason = cJSON_GetObjectItem(root, "reason");
@@ -2582,7 +2586,8 @@ void Application::InitializeProtocol() {
                     // local VAD path already aborted.
                     audio_service_.SetPlaybackGeneration(++speaking_generation_);
                     audio_service_.ResetDecoder();
-                    ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lld", t_recv);
+                    ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lu%03lu",
+                             t_recv_sec, t_recv_ms);
                 }
                 // NOTE: for a NORMAL end-of-turn stop we deliberately do NOT
                 // ResetDecoder — that cut the final 200-500ms of every response
@@ -2630,8 +2635,11 @@ void Application::InitializeProtocol() {
                             protocol_->SendStartListening(kListeningModeRealtime);
                         }
                         audio_service_.EnableVoiceProcessing(true);
-                        ESP_LOGI(TAG, "mic_loop_resumed ts=%lld reason=tts_stop_continue_listening",
-                                 esp_timer_get_time() / 1000);
+                        const uint64_t resumed_ms = esp_timer_get_time() / 1000;
+                        ESP_LOGI(TAG,
+                                 "mic_loop_resumed ts=%lu%03lu reason=tts_stop_continue_listening",
+                                 static_cast<unsigned long>(resumed_ms / 1000),
+                                 static_cast<unsigned long>(resumed_ms % 1000));
                         return;
                     }
                     if (GetDeviceState() == kDeviceStateSpeaking) {
@@ -2658,8 +2666,10 @@ void Application::InitializeProtocol() {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
-                            ESP_LOGI(TAG, "mic_loop_resumed ts=%lld",
-                                     esp_timer_get_time() / 1000);
+                            const uint64_t resumed_ms = esp_timer_get_time() / 1000;
+                            ESP_LOGI(TAG, "mic_loop_resumed ts=%lu%03lu",
+                                     static_cast<unsigned long>(resumed_ms / 1000),
+                                     static_cast<unsigned long>(resumed_ms % 1000));
                         }
                     }
                 });
@@ -4032,10 +4042,10 @@ void Application::HandleListeningWatchdogTick() {
     audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
     auto audio_stats = audio_service_.GetDebugStatistics();
     ESP_LOGW(TAG,
-             "listening_watchdog_timeout mode=%d idle_ms=%lld turn_ms=%lld decode_q=%lu send_q=%lu playback_q=%lu decode_drop=%lu encode_drop=%lu reconnects=%lu",
+             "listening_watchdog_timeout mode=%d idle_ms=%ld turn_ms=%ld decode_q=%lu send_q=%lu playback_q=%lu decode_drop=%lu encode_drop=%lu reconnects=%lu",
              static_cast<int>(listening_mode_),
-             idle_ms,
-             turn_ms,
+             static_cast<long>(idle_ms),
+             static_cast<long>(turn_ms),
              (unsigned long)decode_q,
              (unsigned long)send_q,
              (unsigned long)playback_q,
@@ -4346,9 +4356,9 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
         return;
     }
 
-    ESP_LOGW(TAG, "speaking_timeout generation=%lu idle_ms=%lld",
+    ESP_LOGW(TAG, "speaking_timeout generation=%lu idle_ms=%ld",
              (unsigned long)generation,
-             last_activity_ms > 0 ? now_ms - last_activity_ms : -1);
+             static_cast<long>(last_activity_ms > 0 ? now_ms - last_activity_ms : -1));
     tts_audio_accepting_.store(false);
     ++speaking_generation_;
     // Publish the new generation (cancel path) so late frames from the timed-out
@@ -4388,8 +4398,10 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
         show_timeout_cue();
     } else {
         SetDeviceState(kDeviceStateListening);
-        ESP_LOGI(TAG, "mic_loop_resumed ts=%lld reason=speaking_timeout",
-                 esp_timer_get_time() / 1000);
+        const uint64_t resumed_ms = esp_timer_get_time() / 1000;
+        ESP_LOGI(TAG, "mic_loop_resumed ts=%lu%03lu reason=speaking_timeout",
+                 static_cast<unsigned long>(resumed_ms / 1000),
+                 static_cast<unsigned long>(resumed_ms % 1000));
     }
 }
 

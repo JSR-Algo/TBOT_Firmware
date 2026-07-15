@@ -25,6 +25,8 @@
 #include "jpeg_to_image.h"
 
 #include <ctime>
+#include <climits>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -911,6 +913,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
         ESP_LOGW(TAG, "lesson_* dropped: missing assignmentId/sessionId/sequence");
         return;
     }
+    if (!std::isfinite(sequence_d) || sequence_d < 0.0 ||
+        sequence_d > static_cast<double>(INT32_MAX) || std::trunc(sequence_d) != sequence_d) {
+        ESP_LOGW(TAG, "lesson_* dropped: sequence must be an integer between 0 and INT32_MAX");
+        return;
+    }
     const int64_t sequence = static_cast<int64_t>(sequence_d);
 
     // emit helper: one outbound frame per call, advancing the F->S counter.
@@ -1168,16 +1175,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
         for (auto it = g_session.ack_history.rbegin(); it != g_session.ack_history.rend(); ++it) {
             if (it->sequence == sequence) {
                 cJSON* replay_body = cJSON_Parse(it->body_json.c_str());
-                ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; replaying exact ack body",
-                         (long long)sequence);
+                ESP_LOGI(TAG, "lesson_* duplicate seq=%ld; replaying exact ack body",
+                         static_cast<long>(sequence));
                 emit(root, "lesson_ack", replay_body);
                 return;
             }
         }
         const bool re_rendered = false;
         const bool re_degraded = false;
-        ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; re-acking rendered=%d degraded=%d",
-                 (long long)sequence, re_rendered, re_degraded);
+        ESP_LOGI(TAG, "lesson_* duplicate seq=%ld; re-acking rendered=%d degraded=%d",
+                 static_cast<long>(sequence), re_rendered, re_degraded);
         emit_ack(root, sequence, re_rendered, re_degraded, nullptr, /*cache*/ false);
         return;
     }
@@ -1365,9 +1372,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
     Num(root, "lessonVersion", lesson_version);
     ESP_LOGI(TAG,
              "lesson_step_started assignmentId=%s sessionId=%s lessonId=%s "
-             "lessonVersion=%.0f stepId=%s sequence=%lld",
+             "lessonVersion=%.0f stepId=%s sequence=%ld",
              assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
-             lesson_version, step_id != nullptr ? step_id : "-", (long long)sequence);
+             lesson_version, step_id != nullptr ? step_id : "-", static_cast<long>(sequence));
 
     const cJSON* scene = Obj(body, "scene");
     const cJSON* bg    = Obj(scene, "backgroundScene");
@@ -1459,17 +1466,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         ESP_LOGI(TAG,
                  "motion_preset outcome=%s assignmentId=%s sessionId=%s lessonId=%s "
-                 "stepId=%s sequence=%lld",
+                 "stepId=%s sequence=%ld",
                  motion_dispatch, assignment_id, session_id,
                  lesson_id != nullptr ? lesson_id : "-", step_id != nullptr ? step_id : "-",
-                 (long long)sequence);
+                 static_cast<long>(sequence));
     }
     if (motion_degraded) {
         ESP_LOGW(TAG,
                  "motion_degraded assignmentId=%s sessionId=%s lessonId=%s stepId=%s "
-                 "sequence=%lld",
+                 "sequence=%ld",
                  assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
-                 step_id != nullptr ? step_id : "-", (long long)sequence);
+                 step_id != nullptr ? step_id : "-", static_cast<long>(sequence));
     }
 
     // Resolve the display once and require it to be an LvglDisplay (the only class with
@@ -1675,16 +1682,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
     if (render_degraded) {
         ESP_LOGW(TAG,
                  "render_degraded assignmentId=%s sessionId=%s lessonId=%s stepId=%s "
-                 "sequence=%lld",
+                 "sequence=%ld",
                  assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
-                 step_id != nullptr ? step_id : "-", (long long)sequence);
+                 step_id != nullptr ? step_id : "-", static_cast<long>(sequence));
     }
     if (optional_asset_missing) {
         ESP_LOGW(TAG,
                  "optional_asset_missing assignmentId=%s sessionId=%s lessonId=%s stepId=%s "
-                 "sequence=%lld",
+                 "sequence=%ld",
                  assignment_id, session_id, lesson_id != nullptr ? lesson_id : "-",
-                 step_id != nullptr ? step_id : "-", (long long)sequence);
+                 step_id != nullptr ? step_id : "-", static_cast<long>(sequence));
     }
 
     // Canonical step-ack first (body.acks echoes the step's sequence). For a PASSIVE
@@ -1719,6 +1726,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
         });
     }
-    ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d renderElapsedMs=%lld",
-             step_id != nullptr ? step_id : "?", passive, degraded, (long long)render_elapsed_ms);
+    ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d renderElapsedMs=%ld",
+             step_id != nullptr ? step_id : "?", passive, degraded,
+             static_cast<long>(render_elapsed_ms));
 }
