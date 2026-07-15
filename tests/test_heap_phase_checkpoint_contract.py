@@ -106,6 +106,22 @@ def test_unclaimed_activation_returns_before_afe_prewarm_and_protocol():
     assert "InitializeProtocol" not in unclaimed_branch
 
 
+def test_claimed_activation_interrupted_by_setup_or_audio_test_skips_afe_prewarm():
+    source = APPLICATION_SOURCE.read_text(encoding="utf-8")
+    activation = function_body(source, "void Application::ActivationTask")
+
+    config = activation.index("RefreshWebsocketUrlFromConfigFetch();")
+    state = activation.index("const auto activation_state = GetDeviceState();", config)
+    prewarm = activation.index("audio_service_.PrewarmWakeWord();", state)
+    protocol = activation.index("InitializeProtocol();", prewarm)
+    prewarm_guard = activation[state:prewarm]
+
+    assert state < prewarm < protocol
+    assert "if (IsDeviceClaimed() &&" in prewarm_guard
+    assert "activation_state != kDeviceStateWifiConfiguring" in prewarm_guard
+    assert "activation_state != kDeviceStateAudioTesting" in prewarm_guard
+
+
 def test_local_minimum_monitor_preserves_lifetime_snapshot_until_checkpoint_is_logged():
     source = SYSTEM_SOURCE.read_text(encoding="utf-8")
     start = function_body(source, "void SystemInfo::StartHeapPhaseMonitor")

@@ -2037,7 +2037,10 @@ void Application::ActivationTask() {
 
     // Build the AFE only after boot HTTP/TLS transients have released their
     // internal SRAM, but before protocol startup and the Idle wake-word gate.
-    if (IsDeviceClaimed()) {
+    const auto activation_state = GetDeviceState();
+    if (IsDeviceClaimed() &&
+        activation_state != kDeviceStateWifiConfiguring &&
+        activation_state != kDeviceStateAudioTesting) {
         SystemInfo::StartHeapPhaseMonitor();
         audio_service_.PrewarmWakeWord();
         SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
