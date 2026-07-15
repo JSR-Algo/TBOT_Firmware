@@ -397,8 +397,17 @@ Blufi::ProvisioningReservation Blufi::TryReserveProvisioningSession() {
     return provisioning_session_.TryReserve();
 }
 
+bool Blufi::ClearProvisioningSession(ProvisioningToken token) {
+    return provisioning_session_.Clear(token);
+}
+
 Blufi::ProvisioningToken Blufi::CaptureProvisioningSession() const {
     return provisioning_session_.Capture();
+}
+
+bool Blufi::IsBleStackFullyOff() const {
+    return !transition_gate_.IsTransitionActive() && !inited_ && !host_active_ &&
+           !controller_active_;
 }
 
 bool Blufi::CompleteSuccessfulProvisioningTeardown(

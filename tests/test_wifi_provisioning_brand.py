@@ -110,7 +110,7 @@ def test_blufi_config_mode_is_wired_into_firmware():
 
 def test_blufi_config_mode_reopens_robot_scan_after_ble_timeout():
     wifi_board = read("main/boards/common/wifi_board.cc")
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
 
     assert "Blufi::BleState::kTimeout" in body
@@ -137,7 +137,7 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     afe_h = read("main/audio/wake_words/afe_wake_word.h")
     afe_cc = read("main/audio/wake_words/afe_wake_word.cc")
 
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
     release_idx = body.index("BeginWifiProvisioning")
     init_idx = body.index("blufi.init();")
@@ -198,26 +198,27 @@ def test_wifi_config_mode_can_be_rearmed_while_already_configuring():
     )
     wifi_config_idx = enter_body.index("state == kDeviceStateWifiConfiguring")
     allowed_branch = enter_body[wifi_config_idx:enter_body.index("device state is not allowed for WiFi config")]
-    assert "StartWifiConfigMode();" in allowed_branch
+    assert "StartWifiConfigMode(" in allowed_branch
 
 def test_wifi_config_entry_ignores_active_lesson_before_setup_side_effects():
     wifi_board = read("main/boards/common/wifi_board.cc")
     enter_body = function_body(wifi_board, "void WifiBoard::EnterWifiConfigMode")
+    start_body = function_body(wifi_board, "void WifiBoard::StartWifiConfigMode")
 
     assert "app.IsLessonRuntimeActive()" in enter_body
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("ShowNotification")
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("ResetProtocol")
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("StopStation")
     assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("StartWifiConfigMode")
     guard = enter_body[
         enter_body.index("app.IsLessonRuntimeActive()") :
-        enter_body.index("GetDisplay()->ShowNotification")
+        enter_body.index("auto state = app.GetDeviceState()")
     ]
     assert "return;" in guard
     assert "ShowNotification" not in guard
     assert "ResetProtocol" not in guard
     assert "StopStation" not in guard
     assert "StartWifiConfigMode" not in guard
+    assert "ShowNotification" in start_body
+    assert "ResetProtocol" in start_body
+    assert "StopStation" in start_body
 
 def test_runtime_state_machine_can_interrupt_backend_connect_for_wifi_config():
     state_machine = read("main/device_state_machine.cc")

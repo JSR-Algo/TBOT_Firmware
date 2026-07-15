@@ -74,9 +74,11 @@ public:
             if (owner_ == nullptr || !token.valid()) {
                 return false;
             }
-            auto* owner = owner_;
+            if (!owner_->CommitReservation(token)) {
+                return false;
+            }
             owner_ = nullptr;
-            return owner->CommitReservation(token);
+            return true;
         }
 
     private:
@@ -110,6 +112,16 @@ public:
     Token Capture() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return token_;
+    }
+
+    bool Clear(Token token) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!token.valid() || completion_active_ || reservation_active_ ||
+            token_.generation != token.generation) {
+            return false;
+        }
+        token_ = {};
+        return true;
     }
 
     bool Matches(Token token) const {

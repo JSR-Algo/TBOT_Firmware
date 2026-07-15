@@ -66,6 +66,8 @@ def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
     init = start.index("blufi.init()", commit)
     assert reserve < begin < commit < init
     assert "ProvisioningReservation TryReserveProvisioningSession();" in blufi_h
+    assert "bool ClearProvisioningSession(ProvisioningToken token);" in blufi_h
+    assert "bool IsBleStackFullyOff() const;" in blufi_h
     assert "ProvisioningSessionBinding provisioning_session_" in blufi_h
     assert "if (!provisioning_reservation)" in start
 

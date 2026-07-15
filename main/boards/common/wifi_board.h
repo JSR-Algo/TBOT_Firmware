@@ -57,7 +57,7 @@ protected:
     /**
      * Enter WiFi configuration mode
      */
-    void StartWifiConfigMode();
+    void StartWifiConfigMode(bool reset_protocol = false, bool show_notification = false);
 
     /**
      * WiFi connection timeout callback

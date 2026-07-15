@@ -21,7 +21,7 @@ def read(path: str) -> str:
 
 def _start_wifi_config_body(wifi_board: str) -> str:
     """The body of WifiBoard::StartWifiConfigMode() up to the next function."""
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     end = wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)
     return wifi_board[start:end]
 

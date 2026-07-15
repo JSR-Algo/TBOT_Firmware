@@ -254,6 +254,9 @@ int main() {
     const WakeWordLifecycleController::ProvisioningToken held_token{41};
     Require(reservation_binding.Bind(held_token), "reservation test binds existing session");
     int begin_callback_count = 0;
+    int stop_station_count = 0;
+    int device_state_update_count = 0;
+    bool config_mode_flag = false;
     const auto generation_before_rejected_reservation =
         reservation_controller.CapturePrewarmToken().generation;
     {
@@ -262,10 +265,20 @@ int main() {
         auto rejected_reservation = reservation_binding.TryReserve();
         if (rejected_reservation) {
             ++begin_callback_count;
-            reservation_controller.BeginProvisioningAndQuiesce([]() {});
+            const auto token = reservation_controller.BeginProvisioningAndQuiesce([]() {});
+            if (reservation_controller.FinishProvisioningReset(token) &&
+                rejected_reservation.Commit(token)) {
+                ++stop_station_count;
+                config_mode_flag = true;
+                ++device_state_update_count;
+            }
         }
         Require(!rejected_reservation, "reservation is rejected while completion is active");
         Require(begin_callback_count == 0, "rejected reservation never calls Begin");
+        Require(stop_station_count == 0, "rejected reservation never stops station");
+        Require(!config_mode_flag, "rejected reservation leaves config flag unchanged");
+        Require(device_state_update_count == 0,
+                "rejected reservation leaves device state unchanged");
         Require(reservation_controller.CapturePrewarmToken().generation ==
                     generation_before_rejected_reservation,
                 "rejected reservation leaves lifecycle generation unchanged");
@@ -279,6 +292,12 @@ int main() {
                 "reserved Begin finishes reset");
         Require(reservation.Commit(token), "reservation atomically commits Begin token");
         Require(reservation_binding.Matches(token), "committed token becomes current binding");
+        Require(!reservation_binding.Clear({token.generation + 1}),
+                "stale token cannot clear committed binding");
+        Require(reservation_binding.Matches(token),
+                "stale clear leaves committed binding unchanged");
+        Require(reservation_binding.Clear(token), "exact token clears committed binding");
+        Require(!reservation_binding.Capture().valid(), "exact clear consumes binding");
         Require(reservation_controller.EndProvisioningAndRearm(token),
                 "reservation test lifecycle rearms");
     }

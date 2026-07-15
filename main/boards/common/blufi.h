@@ -60,7 +60,9 @@ public:
 
     bool BindProvisioningSession(ProvisioningToken token);
     ProvisioningReservation TryReserveProvisioningSession();
+    bool ClearProvisioningSession(ProvisioningToken token);
     ProvisioningToken CaptureProvisioningSession() const;
+    bool IsBleStackFullyOff() const;
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);
 

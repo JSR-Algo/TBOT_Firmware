@@ -41,7 +41,7 @@ def _start_wifi_config_body(wifi_board: str) -> str:
     """Body of WifiBoard::StartWifiConfigMode() up to EnterWifiConfigMode()."""
     return _func_body(
         wifi_board,
-        "void WifiBoard::StartWifiConfigMode()",
+        "void WifiBoard::StartWifiConfigMode(",
         "void WifiBoard::EnterWifiConfigMode()",
     )
 
@@ -66,8 +66,8 @@ def _connected_event_body(wifi_board: str) -> str:
 
 # ---------------------------------------------------------------------------
 # WB1: StartWifiConfigMode() full setup ordering for the BLE provisioning path:
-#      BeginWifiProvisioning -> GetBleState() ->
-#      blufi.init() -> StartBleSetupTimeout(). The wake-word release must free
+#      reserve -> BeginWifiProvisioning -> commit -> GetBleState() ->
+#      successful blufi.init() -> visible state mutation -> timeout. The wake-word release must free
 #      the AFE detection task before BLE comes up; the state read gates the
 #      conditional init; the hard-timeout is armed last so advertising cannot
 #      run forever.
@@ -76,15 +76,27 @@ def test_wb1_start_config_mode_setup_step_ordering():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
+    reserve_idx = body.index("TryReserveProvisioningSession")
     release_idx = body.index("BeginWifiProvisioning")
+    commit_idx = body.index("provisioning_reservation.Commit(provisioning_token)")
     get_state_idx = body.index("blufi.GetBleState();")
     init_idx = body.index("blufi.init();")
+    stop_idx = body.index("WifiManager::GetInstance().StopStation();")
+    config_idx = body.index("in_config_mode_ = true;")
+    state_idx = body.index("SetDeviceState(kDeviceStateWifiConfiguring);")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
 
-    assert release_idx < get_state_idx < init_idx < timer_idx, (
+    assert reserve_idx < release_idx < commit_idx < get_state_idx < init_idx
+    assert init_idx < stop_idx < config_idx < state_idx < timer_idx, (
         "StartWifiConfigMode() BLE setup steps must run in order: "
-        "wake-word release -> GetBleState() -> init() -> StartBleSetupTimeout()"
+        "reservation -> wake-word release -> binding -> init success -> "
+        "station/config/state mutation -> StartBleSetupTimeout()"
     )
+    assert "if (blufi_init_error != ESP_OK)" in body
+    init_failure = body[body.index("if (blufi_init_error != ESP_OK)"):stop_idx]
+    assert "IsBleStackFullyOff()" in init_failure
+    assert "ClearProvisioningSession(provisioning_token)" in init_failure
+    assert "EndWifiProvisioningAndRearm(provisioning_token)" in init_failure
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +193,7 @@ def test_wb4_ap_state_string_active_requires_both_flags_else_off():
     body = _func_body(
         wifi_board,
         "const char* WifiBoard::GetApStateString()",
-        "void WifiBoard::StartWifiConfigMode()",
+        "void WifiBoard::StartWifiConfigMode(",
     )
 
     # "active" is gated on BOTH the board flag AND the manager's IsConfigMode().
@@ -216,17 +228,14 @@ def test_wb5_station_connect_timeout_is_60_seconds():
         "the connect timer must be armed with CONNECT_TIMEOUT_SEC (seconds, in us)"
     )
 
-    # On timeout the station is stopped and config mode is (re)entered.
+    # StartWifiConfigMode owns station mutation after its setup transaction.
     timeout_body = _func_body(
         wifi_board,
         "void WifiBoard::OnWifiConnectTimeout(",
         "// ---",
     )
-    stop_idx = timeout_body.index("WifiManager::GetInstance().StopStation();")
-    reenter_idx = timeout_body.index("StartWifiConfigMode();")
-    assert stop_idx < reenter_idx, (
-        "connect-timeout must stop the station before re-entering config mode"
-    )
+    assert "StartWifiConfigMode();" in timeout_body
+    assert "StopStation" not in timeout_body
 
 
 def test_wifi_connect_timeout_ignores_active_lesson_before_station_or_setup_side_effects():
@@ -239,10 +248,9 @@ def test_wifi_connect_timeout_ignores_active_lesson_before_station_or_setup_side
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in timeout_body
     guard_idx = timeout_body.index("Application::GetInstance().IsLessonRuntimeActive()")
-    stop_idx = timeout_body.index("WifiManager::GetInstance().StopStation();")
     setup_idx = timeout_body.index("StartWifiConfigMode();")
-    assert guard_idx < stop_idx < setup_idx
-    guard = timeout_body[guard_idx:stop_idx]
+    assert guard_idx < setup_idx
+    guard = timeout_body[guard_idx:setup_idx]
     assert "return;" in guard
     assert "StopStation" not in guard
     assert "StartWifiConfigMode" not in guard
@@ -261,13 +269,29 @@ def test_wifi_config_delayed_entry_rechecks_active_lesson_before_setup_side_effe
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in delayed_task
     guard_idx = delayed_task.index("Application::GetInstance().IsLessonRuntimeActive()")
-    stop_idx = delayed_task.index("WifiManager::GetInstance().StopStation();")
-    setup_idx = delayed_task.index("board->StartWifiConfigMode();")
-    assert guard_idx < stop_idx < setup_idx
-    guard = delayed_task[guard_idx:stop_idx]
+    setup_idx = delayed_task.index("board->StartWifiConfigMode(")
+    assert guard_idx < setup_idx
+    guard = delayed_task[guard_idx:setup_idx]
     assert "return;" in guard
     assert "StopStation" not in guard
     assert "StartWifiConfigMode" not in guard
+    assert "StopStation" not in delayed_task
+    assert "esp_timer_stop" not in delayed_task
+
+
+def test_enter_wifi_config_mode_delegates_all_station_and_state_mutation_to_start():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    enter_body = _func_body(
+        wifi_board,
+        "void WifiBoard::EnterWifiConfigMode()",
+        "bool WifiBoard::IsInWifiConfigMode()",
+    )
+
+    assert "StartWifiConfigMode" in enter_body
+    assert "StopStation" not in enter_body
+    assert "esp_timer_stop" not in enter_body
+    assert "in_config_mode_" not in enter_body
+    assert "SetDeviceState" not in enter_body
 
 def test_ap_setup_timeout_rechecks_active_lesson_before_deferred_teardown():
     wifi_board = read("main/boards/common/wifi_board.cc")
@@ -298,10 +322,11 @@ def test_start_wifi_config_mode_ignores_active_lesson_before_setup_side_effects(
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in body
     guard_idx = body.index("Application::GetInstance().IsLessonRuntimeActive()")
+    preflight_idx = body.index("TryReserveProvisioningSession()")
     config_flag_idx = body.index("in_config_mode_ = true;")
     state_idx = body.index("SetDeviceState(kDeviceStateWifiConfiguring);")
-    assert guard_idx < config_flag_idx < state_idx
-    guard = body[guard_idx:config_flag_idx]
+    assert guard_idx < preflight_idx < config_flag_idx < state_idx
+    guard = body[guard_idx:preflight_idx]
     assert "return;" in guard
     assert "in_config_mode_" not in guard
     assert "SetDeviceState" not in guard
