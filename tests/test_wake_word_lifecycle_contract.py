@@ -25,7 +25,7 @@ def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_
     event = enable.index("xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING)", publish)
     assert accepted < publish < event
 
-    provision = source[source.index("bool AudioService::BeginWifiProvisioning"):source.index("void AudioService::EndWifiProvisioningAndRearm")]
+    provision = source[source.index("bool AudioService::BeginWifiProvisioning"):source.index("bool AudioService::EndWifiProvisioningAndRearm")]
     quiesced = provision.index("BeginProvisioningAndQuiesce")
     assert provision.index("wake_word_feed_target_.store(nullptr", quiesced) > quiesced
     assert provision.index("xEventGroupClearBits", quiesced) > quiesced
@@ -46,7 +46,16 @@ def test_concrete_wake_words_ack_shutdown_and_preserve_borrowed_models():
         assert "shutting_down_" in source
         assert "encode_active_" in source
         assert "wake_word_cv_.notify_all()" in source
-    assert "detection_exited_" in afe
+        encode_task = source[source.index('"encode_wake_word"') - 6500:source.index('"encode_wake_word"')]
+        ack = encode_task.rindex("xEventGroupSetBits(exit_events, ENCODE_EXITED_EVENT)")
+        assert encode_task.rfind("this_->", 0, ack) >= 0
+        assert "this_->" not in encode_task[ack:]
+        assert "vTaskDeleteWithCaps(nullptr)" in encode_task[ack:]
+    detection = afe[afe.index("const BaseType_t detection_created"):afe.index('"audio_detection"')]
+    detection_ack = detection.index("xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT)")
+    assert "this_->" not in detection[detection_ack:]
+    assert detection.index("audio_detection_task_handle_ = nullptr") < detection_ack
+    assert "DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT" in afe
 
 
 def test_wifi_provisioning_rearms_only_after_ble_deinit():
@@ -55,15 +64,17 @@ def test_wifi_provisioning_rearms_only_after_ble_deinit():
     start_body = source[start:source.index("void WifiBoard::EnterWifiConfigMode()", start)]
     assert start_body.index("BeginWifiProvisioning()") < start_body.index("blufi.init();")
 
-    for deinit in (index for index in range(len(source)) if source.startswith("blufi.deinit();", index)):
-        tail = source[deinit:deinit + 420]
-        assert "== ESP_OK" in tail
-        assert "EndWifiProvisioningAndRearm();" in tail
-        assert "ESP_LOGE" in tail
+    assert source.count('blufi.CompleteSuccessfulProvisioningTeardown("network_connected")') == 2
+    blufi = read("main/boards/common/blufi.cpp")
+    helper = blufi[blufi.index("bool Blufi::CompleteSuccessfulProvisioningTeardown"):]
+    helper = helper[:helper.index("#ifdef CONFIG_BT_BLUEDROID_ENABLED")]
+    assert helper.index("deinit()") < helper.index("EndWifiProvisioningAndRearm()")
+    assert helper.index("if (deinit_error != ESP_OK)") < helper.index("EndWifiProvisioningAndRearm()")
 
 
 def test_ci_runs_deterministic_wake_word_lifecycle_gate():
     workflow = read(".github/workflows/build.yml")
     assert "host-tests:" in workflow
     assert "scripts/run_host_native_wake_word_lifecycle_test.sh" in workflow
+    assert "scripts/run_host_native_blufi_transition_gate_test.sh" in workflow
     assert "tests/test_wake_word_lifecycle_contract.py" in workflow

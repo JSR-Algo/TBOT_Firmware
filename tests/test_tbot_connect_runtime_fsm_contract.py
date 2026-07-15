@@ -193,7 +193,7 @@ def test_blufi_caps_re_advertising_on_disconnect():
     header = read("main/boards/common/blufi.h")
     source = read("main/boards/common/blufi.cpp")
     disconnect_body = function_body(source, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
-    init_body = function_body(source, "esp_err_t Blufi::init()")
+    init_body = function_body(source, "esp_err_t Blufi::_init_impl()")
 
     # Bounded attempt counter declared + reset per setup entry.
     assert "ble_readvertise_count_" in header

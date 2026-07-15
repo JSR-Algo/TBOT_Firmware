@@ -812,8 +812,8 @@ bool AudioService::BeginWifiProvisioning() {
     return true;
 }
 
-void AudioService::EndWifiProvisioningAndRearm() {
-    wake_word_lifecycle_.EndProvisioningAndRearm();
+bool AudioService::EndWifiProvisioningAndRearm() {
+    return wake_word_lifecycle_.EndProvisioningAndRearm();
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {

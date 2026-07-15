@@ -3,6 +3,7 @@
 #include <aes/esp_aes.h>
 #include <cassert>
 #include <cstring>
+#include <mutex>
 #include <vector>
 #include "esp_blufi_api.h"
 #include "esp_err.h"
@@ -13,6 +14,7 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
+#include "blufi_transition_gate.h"
 
 class Blufi {
 public:
@@ -52,6 +54,8 @@ public:
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t deinit();
+
+    bool CompleteSuccessfulProvisioningTeardown(const char* reason);
 
     /**
      * @brief Returns the bootstrap token received via BluFi custom-data (tag=0x01).
@@ -106,6 +110,7 @@ public:
     Blufi &operator=(const Blufi &) = delete;
 
 private:
+    BlufiTransitionGate transition_gate_{ESP_ERR_INVALID_STATE};
     bool inited_ = false;
     bool host_active_ = false;
     bool controller_active_ = false;
@@ -119,6 +124,9 @@ private:
     Blufi();
 
     ~Blufi();
+
+    esp_err_t _init_impl();
+    esp_err_t _deinit_impl();
 
     // Initialization logic
     esp_err_t _controller_init();
@@ -230,6 +238,7 @@ private:
 
     // BLE hard-timeout safety gate (#1)
     esp_timer_handle_t ble_setup_timer_ = nullptr;  // one-shot timer; nullptr when not armed
+    std::mutex ble_setup_timer_mutex_;
     bool ble_timed_out_ = false;                    // set by timer callback; prevents adv restart
 
     // BLE re-advertise cap (C8): bound how many times advertising is restarted

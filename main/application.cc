@@ -1038,7 +1038,11 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     StopClaimPoll();
     // Claim confirmed -> the device is becoming claimed. Stop advertising for
     // pairing; an owned robot must not be BLE-discoverable for a new claim.
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown("claim_confirmed");
+#else
     StopBleAdvertising();
+#endif
     if (protocol_) {
         CloseAudioChannelByIntent();
     }

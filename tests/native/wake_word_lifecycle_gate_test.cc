@@ -36,9 +36,15 @@ public:
         cv_.wait(lock, [&]() { return pop_waiting_; });
     }
 
-    void FinishEncode() {
+    void FinishFinalAccess() {
         std::lock_guard<std::mutex> lock(mutex_);
-        encode_active_ = false;
+        final_access_complete_ = true;
+        cv_.notify_all();
+    }
+
+    void PublishExitAck() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        exit_ack_ = true;
         cv_.notify_all();
     }
 
@@ -47,13 +53,15 @@ public:
         shutting_down_ = true;
         requested();
         cv_.notify_all();
-        cv_.wait(lock, [&]() { return !encode_active_; });
+        cv_.wait(lock, [&]() { return exit_ack_; });
     }
 
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
     bool encode_active_ = false;
+    bool final_access_complete_ = false;
+    bool exit_ack_ = false;
     bool pop_waiting_ = false;
     bool packet_ready_ = false;
     bool shutting_down_ = false;
@@ -62,6 +70,11 @@ private:
 
 int main() {
     WakeWordLifecycleController controller;
+    const auto initial_generation = controller.CapturePrewarmToken().generation;
+    Require(!controller.EndProvisioningAndRearm(),
+            "rearm is a no-op when provisioning does not own the lifecycle");
+    Require(controller.CapturePrewarmToken().generation == initial_generation,
+            "no-op rearm does not advance generation");
     const auto boot_token = controller.CapturePrewarmToken();
     Require(boot_token.valid(), "boot activation receives a prewarm token");
 
@@ -93,7 +106,11 @@ int main() {
     feed = {};
     enable_release.join();
     controller.FinishProvisioningReset();
-    controller.EndProvisioningAndRearm();
+    Require(controller.EndProvisioningAndRearm(), "provisioning owner rearms once");
+    const auto first_rearm_generation = controller.CapturePrewarmToken().generation;
+    Require(!controller.EndProvisioningAndRearm(), "duplicate success rearm is ignored");
+    Require(controller.CapturePrewarmToken().generation == first_rearm_generation,
+            "duplicate success does not advance generation");
     Require(controller.SetRunning(true, controller.CapturePrewarmToken().generation),
             "rearmed generation can publish running");
     feed = controller.TryAcquireFeed();
@@ -124,7 +141,7 @@ int main() {
 
     controller.FinishProvisioningReset();
     Require(!controller.TryAcquireAccess(), "provisioning ownership remains fail-closed");
-    controller.EndProvisioningAndRearm();
+    Require(controller.EndProvisioningAndRearm(), "accessor cycle rearms");
     const auto rearmed_token = controller.CapturePrewarmToken();
     Require(rearmed_token.valid(), "successful terminal path issues a new token");
     Require(rearmed_token.generation != boot_token.generation, "rearm advances generation");
@@ -179,14 +196,16 @@ int main() {
     pop.join();
     Require(!pop_result.load(), "shutdown wakes blocked Pop with terminal false");
     Require(!shutdown_done.load(), "shutdown waits for async encode acknowledgement");
-    async.FinishEncode();
+    async.FinishFinalAccess();
+    Require(!shutdown_done.load(), "shutdown does not treat final access as exit acknowledgement");
+    async.PublishExitAck();
     shutdown.join();
     Require(shutdown_done.load(), "shutdown completes after encode exit acknowledgement");
 
     for (int i = 0; i < 3; ++i) {
         controller.BeginProvisioningAndQuiesce([]() {});
         controller.FinishProvisioningReset();
-        controller.EndProvisioningAndRearm();
+        Require(controller.EndProvisioningAndRearm(), "repeated transition rearms once");
     }
     Require(controller.CapturePrewarmToken().valid(), "repeated transitions remain rearmable");
 

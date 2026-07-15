@@ -10,9 +10,12 @@
 #include <cJSON.h>
 
 #define TAG "CustomWakeWord"
+#define ENCODE_EXITED_EVENT 1
 
 CustomWakeWord::CustomWakeWord()
     : wake_word_pcm_(), wake_word_opus_() {
+    shutdown_event_group_ = xEventGroupCreate();
+    xEventGroupSetBits(shutdown_event_group_, ENCODE_EXITED_EVENT);
 }
 
 CustomWakeWord::~CustomWakeWord() {
@@ -22,17 +25,10 @@ CustomWakeWord::~CustomWakeWord() {
         multinet_model_data_ = nullptr;
     }
 
-    if (wake_word_encode_task_stack_ != nullptr) {
-        heap_caps_free(wake_word_encode_task_stack_);
-    }
-
-    if (wake_word_encode_task_buffer_ != nullptr) {
-        heap_caps_free(wake_word_encode_task_buffer_);
-    }
-
     if (models_ != nullptr && owns_models_) {
         esp_srmodel_deinit(models_);
     }
+    vEventGroupDelete(shutdown_event_group_);
 }
 
 void CustomWakeWord::ParseWakenetModelConfig() {
@@ -223,25 +219,17 @@ void CustomWakeWord::EncodeWakeWordData() {
         return;
     }
     const size_t stack_size = 4096 * 7;
+    xEventGroupClearBits(shutdown_event_group_, ENCODE_EXITED_EVENT);
     {
         std::lock_guard<std::mutex> lock(wake_word_mutex_);
         wake_word_opus_.clear();
     }
-    if (wake_word_encode_task_stack_ == nullptr) {
-        wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
-        assert(wake_word_encode_task_stack_ != nullptr);
-    }
-    if (wake_word_encode_task_buffer_ == nullptr) {
-        wake_word_encode_task_buffer_ = (StaticTask_t*)heap_caps_malloc(sizeof(StaticTask_t), MALLOC_CAP_INTERNAL);
-        assert(wake_word_encode_task_buffer_ != nullptr);
-    }
-
-    wake_word_encode_task_ = xTaskCreateStatic([](void* arg) {
+    const BaseType_t encode_created = xTaskCreateWithCaps([](void* arg) {
         auto this_ = (CustomWakeWord*)arg;
+        const EventGroupHandle_t exit_events = this_->shutdown_event_group_;
         const auto finish = [this_]() {
             this_->encode_active_.store(false);
             this_->wake_word_encode_task_ = nullptr;
-            this_->shutdown_cv_.notify_all();
         };
         {
             auto start_time = esp_timer_get_time();
@@ -251,11 +239,14 @@ void CustomWakeWord::EncodeWakeWordData() {
             auto ret = esp_opus_enc_open(&opus_enc_cfg, sizeof(esp_opus_enc_config_t), &encoder_handle);
             if (encoder_handle == nullptr) {
                 ESP_LOGE(TAG, "Failed to create audio encoder, error code: %d", ret);
-                std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
-                this_->wake_word_opus_.push_back(std::vector<uint8_t>());
-                this_->wake_word_cv_.notify_all();
+                {
+                    std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
+                    this_->wake_word_opus_.push_back(std::vector<uint8_t>());
+                    this_->wake_word_cv_.notify_all();
+                }
                 finish();
-                vTaskDelete(NULL);
+                xEventGroupSetBits(exit_events, ENCODE_EXITED_EVENT);
+                vTaskDeleteWithCaps(nullptr);
                 return;
             }
             // Get frame size
@@ -305,11 +296,13 @@ void CustomWakeWord::EncodeWakeWordData() {
             this_->wake_word_cv_.notify_all();
         }
         finish();
-        vTaskDelete(NULL);
-    }, "encode_wake_word", stack_size, this, 2, wake_word_encode_task_stack_, wake_word_encode_task_buffer_);
-    if (wake_word_encode_task_ == nullptr) {
+        xEventGroupSetBits(exit_events, ENCODE_EXITED_EVENT);
+        vTaskDeleteWithCaps(nullptr);
+    }, "encode_wake_word", stack_size, this, 2, &wake_word_encode_task_, MALLOC_CAP_SPIRAM);
+    if (encode_created != pdPASS) {
+        wake_word_encode_task_ = nullptr;
         encode_active_.store(false);
-        shutdown_cv_.notify_all();
+        xEventGroupSetBits(shutdown_event_group_, ENCODE_EXITED_EVENT);
     }
 }
 
@@ -334,17 +327,10 @@ bool CustomWakeWord::Shutdown(uint32_t timeout_ms) {
         wake_word_opus_.push_back({});
     }
     wake_word_cv_.notify_all();
-    const auto idle = [this]() { return !encode_active_.load(); };
-    if (idle()) {
-        return true;
-    }
-    if (timeout_ms == 0) {
-        return false;
-    }
-    std::unique_lock<std::mutex> lock(shutdown_mutex_);
-    if (timeout_ms == UINT32_MAX) {
-        shutdown_cv_.wait(lock, idle);
-        return true;
-    }
-    return shutdown_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), idle);
+    const TickType_t wait_ticks = timeout_ms == UINT32_MAX
+                                      ? portMAX_DELAY
+                                      : pdMS_TO_TICKS(timeout_ms);
+    const EventBits_t exited = xEventGroupWaitBits(shutdown_event_group_, ENCODE_EXITED_EVENT,
+                                                   pdFALSE, pdTRUE, wait_ticks);
+    return (exited & ENCODE_EXITED_EVENT) != 0;
 }

@@ -159,7 +159,7 @@ public:
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
     bool BeginWifiProvisioning();
-    void EndWifiProvisioningAndRearm();
+    bool EndWifiProvisioningAndRearm();
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 

@@ -355,16 +355,8 @@ def test_wb7_connected_cancels_timeouts_before_ble_teardown():
         "NetworkEvent::Connected must cancel the AP setup hard-timeout"
     )
 
-    # BLE hard-timeout cancelled BEFORE deinit() so the timer cannot re-post a
-    # teardown after BLE resources are released.
-    assert "blufi.CancelBleSetupTimeout();" in body
-    assert "blufi.deinit();" in body
-    cancel_idx = body.index("blufi.CancelBleSetupTimeout();")
-    deinit_idx = body.index("blufi.deinit();")
-    assert cancel_idx < deinit_idx, (
-        "CancelBleSetupTimeout() must precede deinit() so a stale BLE timer "
-        "cannot post a redundant teardown after deinit()"
-    )
+    # The centralized success helper owns cancel -> deinit -> conditional rearm.
+    assert body.count('blufi.CompleteSuccessfulProvisioningTeardown("network_connected")') == 2
 
     # Connecting/idle bookkeeping: in_config_mode_ is cleared after teardown.
     assert "in_config_mode_ = false;" in body
@@ -572,7 +564,7 @@ def test_wb12c_unclaimed_saved_ssid_connect_does_not_teardown_ble_without_claim_
     token_idx = body.index('const std::string& token = blufi.GetBootstrapToken();')
     code_idx = body.index('const std::string& code  = blufi.GetProvisioningCode();')
     release_idx = body.index("const bool should_release_ble")
-    deinit_idx = body.index("blufi.deinit();", release_idx)
+    deinit_idx = body.index("blufi.CompleteSuccessfulProvisioningTeardown", release_idx)
 
     assert token_idx < release_idx
     assert code_idx < release_idx

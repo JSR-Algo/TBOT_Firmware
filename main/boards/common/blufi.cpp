@@ -236,6 +236,18 @@ Blufi::~Blufi() {
 }
 
 esp_err_t Blufi::init() {
+    auto turn = transition_gate_.Acquire(
+        BlufiTransitionGate::Operation::kInit,
+        reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
+    if (!turn.owner()) {
+        return static_cast<esp_err_t>(turn.result());
+    }
+    const esp_err_t result = _init_impl();
+    transition_gate_.Complete(turn, result);
+    return result;
+}
+
+esp_err_t Blufi::_init_impl() {
     esp_err_t ret = ESP_FAIL;
     if (host_active_ || controller_active_) {
         ESP_LOGE(BLUFI_TAG, "BLUFI init rejected while prior teardown is incomplete");
@@ -308,6 +320,18 @@ esp_err_t Blufi::init() {
 }
 
 esp_err_t Blufi::deinit() {
+    auto turn = transition_gate_.Acquire(
+        BlufiTransitionGate::Operation::kDeinit,
+        reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
+    if (!turn.owner()) {
+        return static_cast<esp_err_t>(turn.result());
+    }
+    const esp_err_t result = _deinit_impl();
+    transition_gate_.Complete(turn, result);
+    return result;
+}
+
+esp_err_t Blufi::_deinit_impl() {
     esp_err_t first_error = ESP_OK;
 
     if (m_deinited && !host_active_ && !controller_active_) {
@@ -353,6 +377,23 @@ esp_err_t Blufi::deinit() {
         inited_ = false;
     }
     return first_error;
+}
+
+bool Blufi::CompleteSuccessfulProvisioningTeardown(const char* reason) {
+    ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown requested: reason=%s",
+             reason ? reason : "unknown");
+    CancelBleSetupTimeout();
+    const esp_err_t deinit_error = deinit();
+    if (deinit_error != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Successful provisioning teardown failed: reason=%s error=%s",
+                 reason ? reason : "unknown", esp_err_to_name(deinit_error));
+        return false;
+    }
+
+    const bool rearmed = Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
+    ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
+             reason ? reason : "unknown", static_cast<int>(rearmed));
+    return true;
 }
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
@@ -844,11 +885,9 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
                     return;
                 }
 
-                self->CancelBleSetupTimeout();
-                if (self->GetBleState() != Blufi::BleState::kOff) {
-                    ESP_LOGI(BLUFI_TAG,
-                             "Received claim token on connected WiFi; stopping BLE before claim refresh");
-                    self->deinit();
+                if (!self->CompleteSuccessfulProvisioningTeardown(
+                        "connected_wifi_token_handoff")) {
+                    return;
                 }
                 Application::GetInstance().SchedulePendingTbotClaimRefresh();
             });
@@ -894,11 +933,9 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason) {
         if (!m_sta_is_connecting) {
             auto* self = this;
             Application::GetInstance().Schedule([self, reason]() {
-                self->CancelBleSetupTimeout();
-                if (self->GetBleState() != Blufi::BleState::kOff) {
-                    ESP_LOGI(BLUFI_TAG,
-                             "Provisioning authenticated report requested while BLE active; stopping BLE first");
-                    self->deinit();
+                if (!self->CompleteSuccessfulProvisioningTeardown(
+                        "authenticated_report_ble_release")) {
+                    return;
                 }
                 self->TryReportProvisioningAuthenticated(reason);
             });
@@ -1066,10 +1103,9 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 // poll performs HTTPS/TLS on ESP32-S3. Real hardware otherwise
                 // fails inside mbedTLS AES allocation while BLE remains active.
                 Application::GetInstance().Schedule([self]() {
-                    self->CancelBleSetupTimeout();
-                    if (self->GetBleState() != Blufi::BleState::kOff) {
-                        ESP_LOGI(BLUFI_TAG, "WiFi provisioned; stopping BLE before claim refresh");
-                        self->deinit();
+                    if (!self->CompleteSuccessfulProvisioningTeardown(
+                            "wifi_credentials_connected")) {
+                        return;
                     }
                     self->TryReportProvisioningAuthenticated("wifi_success_after_ble_teardown");
                     Application::GetInstance().SchedulePendingTbotClaimRefresh();
@@ -1351,7 +1387,8 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 if (!m_deinited) {
                     xTaskCreate(
                         [](void* ctx) {
-                            static_cast<Blufi*>(ctx)->deinit();
+                            static_cast<Blufi*>(ctx)->CompleteSuccessfulProvisioningTeardown(
+                                "provisioned_ble_disconnect");
                             vTaskDelete(nullptr);
                         },
                         "blufi_deinit", 4096, this, 5, nullptr);
@@ -1616,6 +1653,7 @@ void Blufi::_ble_setup_timeout_cb(void* arg) {
 }
 
 void Blufi::StartBleSetupTimeout(int seconds) {
+    std::lock_guard<std::mutex> lock(ble_setup_timer_mutex_);
     if (ble_setup_timer_ != nullptr) {
         // Already armed — stop and delete so we can re-create cleanly.
         esp_timer_stop(ble_setup_timer_);
@@ -1648,6 +1686,7 @@ void Blufi::StartBleSetupTimeout(int seconds) {
 }
 
 void Blufi::CancelBleSetupTimeout() {
+    std::lock_guard<std::mutex> lock(ble_setup_timer_mutex_);
     if (ble_setup_timer_ == nullptr) {
         return;  // Never armed or already cancelled — no-op.
     }
@@ -1658,6 +1697,9 @@ void Blufi::CancelBleSetupTimeout() {
 }
 
 Blufi::BleState Blufi::GetBleState() const {
+    if (transition_gate_.IsTransitionActive()) {
+        return BleState::kOff;
+    }
     if (ble_timed_out_) {
         return BleState::kTimeout;
     }

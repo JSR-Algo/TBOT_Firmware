@@ -98,10 +98,14 @@ public:
         state_.store(Pack(Generation(state), kProvisioning), std::memory_order_release);
     }
 
-    void EndProvisioningAndRearm() {
+    bool EndProvisioningAndRearm() {
         std::lock_guard<std::mutex> lock(transition_mutex_);
         const uint64_t state = state_.load(std::memory_order_relaxed);
+        if ((Flags(state) & kProvisioning) == 0) {
+            return false;
+        }
         state_.store(Pack(Generation(state) + 1, 0), std::memory_order_release);
+        return true;
     }
 
 private:

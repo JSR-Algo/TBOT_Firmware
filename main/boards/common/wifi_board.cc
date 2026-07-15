@@ -142,17 +142,7 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     !token.empty() ||
                     !code.empty();
                 if (should_release_ble) {
-                    // Cancel the BLE hard-timeout before releasing BLE resources so
-                    // the timer cannot post a redundant teardown after deinit().
-                    blufi.CancelBleSetupTimeout();
-                    // Release BLE resources
-                    const esp_err_t deinit_err = blufi.deinit();
-                    if (deinit_err == ESP_OK) {
-                        Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
-                    } else {
-                        ESP_LOGE(TAG, "BluFi teardown failed; wake-word lifecycle stays provisioning-owned: %s",
-                                 esp_err_to_name(deinit_err));
-                    }
+                    blufi.CompleteSuccessfulProvisioningTeardown("network_connected");
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
@@ -166,17 +156,7 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     !blufi.GetBootstrapToken().empty() ||
                     !blufi.GetProvisioningCode().empty();
                 if (should_release_ble) {
-                    // Cancel BLE hard-timeout before deinit to prevent a stale
-                    // timer callback from posting a redundant teardown.
-                    blufi.CancelBleSetupTimeout();
-                    // make sure blufi resources has been released
-                    const esp_err_t deinit_err = blufi.deinit();
-                    if (deinit_err == ESP_OK) {
-                        Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
-                    } else {
-                        ESP_LOGE(TAG, "BluFi teardown failed; wake-word lifecycle stays provisioning-owned: %s",
-                                 esp_err_to_name(deinit_err));
-                    }
+                    blufi.CompleteSuccessfulProvisioningTeardown("network_connected");
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");

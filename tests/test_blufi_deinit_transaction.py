@@ -39,7 +39,7 @@ def function_body_at(start: int) -> str:
 
 
 def test_deinit_tracks_host_and_controller_cleanup_independently():
-    body = function_body("esp_err_t Blufi::deinit()")
+    body = function_body("esp_err_t Blufi::_deinit_impl()")
     assert "bool host_active_" in HEADER
     assert "bool controller_active_" in HEADER
     for state in (
@@ -55,7 +55,7 @@ def test_deinit_tracks_host_and_controller_cleanup_independently():
 
 
 def test_host_failure_prevents_controller_teardown():
-    body = function_body("esp_err_t Blufi::deinit()")
+    body = function_body("esp_err_t Blufi::_deinit_impl()")
     host = body.index("_host_deinit()")
     controller = body.index("_controller_deinit()", host)
     between = body[host:controller]
@@ -65,7 +65,7 @@ def test_host_failure_prevents_controller_teardown():
 
 
 def test_partial_failure_remains_retryable_and_never_sets_stale_success_flag():
-    body = function_body("esp_err_t Blufi::deinit()")
+    body = function_body("esp_err_t Blufi::_deinit_impl()")
     mark = body.index("m_deinited = true")
     assert body.index("if (host_active_)") < mark
     assert body.index("if (controller_active_)") < mark
@@ -115,7 +115,7 @@ def test_nimble_retry_tracks_profile_stop_and_deinit_separately():
 
 
 def test_full_success_is_the_only_path_that_marks_deinitialized():
-    body = function_body("esp_err_t Blufi::deinit()")
+    body = function_body("esp_err_t Blufi::_deinit_impl()")
     mark = body.index("m_deinited = true")
     completion_guard = body[body.rfind("if (", 0, mark):mark]
     assert "first_error == ESP_OK" in completion_guard
@@ -127,8 +127,26 @@ def test_full_success_is_the_only_path_that_marks_deinitialized():
 
 
 def test_init_cannot_overwrite_an_unfinished_cleanup_transaction():
-    body = function_body("esp_err_t Blufi::init()")
+    body = function_body("esp_err_t Blufi::_init_impl()")
     guard = body.index("if (host_active_ || controller_active_)")
     reset = body.index("m_deinited = false")
     assert guard < reset
     assert "return ESP_ERR_INVALID_STATE;" in body[guard:reset]
+
+
+def test_public_transitions_use_the_host_tested_serialization_gate():
+    init = function_body("esp_err_t Blufi::init()")
+    deinit = function_body("esp_err_t Blufi::deinit()")
+    state = function_body("Blufi::BleState Blufi::GetBleState() const")
+    assert "BlufiTransitionGate::Operation::kInit" in init
+    assert "BlufiTransitionGate::Operation::kDeinit" in deinit
+    for body, impl in ((init, "_init_impl()"), (deinit, "_deinit_impl()")):
+        assert impl in body
+        assert "transition_gate_.Complete" in body
+    assert "transition_gate_.IsTransitionActive()" in state
+
+
+def test_transition_gate_does_not_allocate_during_low_memory_teardown():
+    gate = (ROOT / "main/boards/common/blufi_transition_gate.h").read_text(encoding="utf-8")
+    assert "shared_ptr" not in gate
+    assert "make_shared" not in gate

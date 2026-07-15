@@ -162,8 +162,8 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     assert "TaskHandle_t audio_detection_task_handle_" in afe_h
     assert "bool Shutdown(uint32_t timeout_ms) override;" in afe_h
     shutdown_body = function_body(afe_cc, "bool AfeWakeWord::Shutdown")
-    assert "detection_exited_" in shutdown_body
-    assert "encode_active_" in shutdown_body
+    assert "DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT" in shutdown_body
+    assert "xEventGroupWaitBits" in shutdown_body
 
 def test_assets_model_load_does_not_create_afe_before_claimed_audio_gate():
     audio_cc = read("main/audio/audio_service.cc")

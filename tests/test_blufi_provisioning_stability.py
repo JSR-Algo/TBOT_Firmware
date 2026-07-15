@@ -247,16 +247,9 @@ def test_fw4_conn_success_report_precedes_ble_teardown():
     success_idx = blufi.index("ESP_BLUFI_STA_CONN_SUCCESS")
 
     # The conn-success report fires first; BLE teardown is scheduled afterwards.
-    teardown_idx = blufi.index(
-        "WiFi provisioned; stopping BLE before claim refresh"
-    )
-    deinit_after = blufi.index("self->deinit();", success_idx)
+    teardown_idx = blufi.index("CompleteSuccessfulProvisioningTeardown", success_idx)
     assert success_idx < teardown_idx
-    assert success_idx < deinit_after
-
-    # The success report and the deferred CancelBleSetupTimeout ordering holds.
-    cancel_idx = blufi.index("self->CancelBleSetupTimeout();", success_idx)
-    assert success_idx < cancel_idx
+    assert '"wifi_credentials_connected"' in blufi[teardown_idx:teardown_idx + 180]
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +267,7 @@ def test_fw5_authenticated_report_defers_while_ble_active():
     # While BLE is active it must NOT post: it schedules a BLE teardown and
     # re-attempt, then returns early before reaching the xTaskCreate report path.
     guard_idx = body.index("if (ble_state != BleState::kOff)")
-    deinit_idx = body.index("self->deinit();")
+    deinit_idx = body.index("self->CompleteSuccessfulProvisioningTeardown")
     reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(reason);")
     early_return_idx = body.index("return;", guard_idx)
     report_task_idx = body.index('xTaskCreate(')
@@ -831,7 +824,7 @@ def test_fw19_device_authenticated_reported_only_after_ble_off():
 
     ble_guard = body.index("if (ble_state != BleState::kOff)")
     # Inside the BLE-active branch: cancel timeout, deinit, re-attempt, early return.
-    deinit_idx = body.index("self->deinit();", ble_guard)
+    deinit_idx = body.index("self->CompleteSuccessfulProvisioningTeardown", ble_guard)
     reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(reason);", ble_guard)
     defer_return = body.index("return;", body.index("ble_state=%s", ble_guard))
 
@@ -903,14 +896,14 @@ def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect
     sched_idx = success.index("Application::GetInstance().Schedule(")
     assert report_idx < sched_idx
     sched_body = success[sched_idx:]
-    assert "self->deinit();" in sched_body
+    assert "self->CompleteSuccessfulProvisioningTeardown" in sched_body
     assert (
         'self->TryReportProvisioningAuthenticated("wifi_success_after_ble_teardown");'
         in sched_body
     )
     assert "SchedulePendingTbotClaimRefresh();" in sched_body
     # Teardown precedes the authenticated report inside the deferred lambda.
-    assert sched_body.index("self->deinit();") < sched_body.index(
+    assert sched_body.index("self->CompleteSuccessfulProvisioningTeardown") < sched_body.index(
         "TryReportProvisioningAuthenticated"
     )
 
@@ -946,7 +939,7 @@ def test_fw22_no_authenticated_post_or_claim_refresh_inline_while_ble_up():
     # Inside the deferred lambda, deinit() precedes both the authenticated report
     # and the claim refresh (so TLS only ever runs after BLE is down).
     sched_body = success[sched_idx:]
-    deinit_pos = sched_body.index("self->deinit();")
+    deinit_pos = sched_body.index("self->CompleteSuccessfulProvisioningTeardown")
     assert deinit_pos < sched_body.index("SchedulePendingTbotClaimRefresh")
 
 
