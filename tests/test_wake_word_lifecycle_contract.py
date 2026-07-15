@@ -105,3 +105,4 @@ def test_ci_runs_deterministic_wake_word_lifecycle_gate():
     assert "scripts/run_host_native_wake_word_lifecycle_test.sh" in workflow
     assert "scripts/run_host_native_blufi_transition_gate_test.sh" in workflow
     assert "tests/test_wake_word_lifecycle_contract.py" in workflow
+    assert "tests/test_provisioning_success_teardown_contract.py" in workflow
