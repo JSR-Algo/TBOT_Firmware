@@ -10,6 +10,7 @@ cd "${ROOT_DIR}"
 ${CXX:-c++} -std=c++17 -Wall -Wextra -Werror -pthread \
     -Imain/protocols \
     -Imain \
+    -Icomponents/esp-ml307/src/esp \
     tests/native/passive_websocket_liveness_host_test.cc \
     -o "${BUILD_DIR}/passive_websocket_liveness_host_test"
 

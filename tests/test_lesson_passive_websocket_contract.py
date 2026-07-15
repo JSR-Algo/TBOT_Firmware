@@ -281,8 +281,11 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     assert callback_context.index("error_occurred_ = true;") < callback_context.index("return;")
     assert "CompleteCloseAndNotify();" in close
     detach = function_body(source, "void WebsocketProtocol::DetachAndResetWebsocket")
-    assert "websocket_->OnData(nullptr);" in detach
-    assert "websocket_->OnDisconnected(nullptr);" in detach
+    assert "websocket_->OnData(nullptr);" not in detach
+    assert "websocket_->OnDisconnected(nullptr);" not in detach
+    assert "websocket_.reset();" in detach
+    complete_close = function_body(source, "void WebsocketProtocol::CompleteCloseAndNotify")
+    assert "}\n    DetachAndResetWebsocket();" in complete_close
     assert "websocket_.reset();" in detach
     destructor = function_body(source, "WebsocketProtocol::~WebsocketProtocol")
     assert "DetachAndResetWebsocket();" in destructor
@@ -294,11 +297,11 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     assert "if (!failure_mutation.Matched())" in complete
     assert "close_state_.TakeDeferred(connection_epoch)" in complete
     assert "DetachAndResetWebsocket();" in complete
-    assert "DetachAndResetWebsocket();\n        NotifyAudioChannelClosedOnce();\n    }" in complete
+    assert "}\n    DetachAndResetWebsocket();\n    NotifyAudioChannelClosedOnce();" in complete
     complete_now = function_body(source, "void WebsocketProtocol::CompleteCloseAndNotify")
     assert "BeginFailureMutation()" in complete_now
     assert "DetachAndResetWebsocket();" in complete_now
-    assert "DetachAndResetWebsocket();\n        NotifyAudioChannelClosedOnce();\n    }" in complete_now
+    assert "}\n    DetachAndResetWebsocket();\n    NotifyAudioChannelClosedOnce();" in complete_now
     reentrant = close[close.index("if (inbound_gate_.CurrentThreadHasLease())") :]
     assert "const uint32_t connection_epoch = inbound_gate_.CurrentEpoch();" in reentrant
     assert "close_state_.MarkDeferred(connection_epoch)" in reentrant

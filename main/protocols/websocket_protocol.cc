@@ -89,8 +89,8 @@ WebsocketProtocol::WebsocketProtocol() {
 WebsocketProtocol::~WebsocketProtocol() {
     {
         auto failure_mutation = inbound_gate_.BeginFailureMutation();
-        DetachAndResetWebsocket();
     }
+    DetachAndResetWebsocket();
     vEventGroupDelete(event_group_handle_);
 }
 
@@ -231,26 +231,24 @@ void WebsocketProtocol::CompleteDeferredClose(uint32_t connection_epoch) {
             return;
         }
         error_occurred_ = true;
-        DetachAndResetWebsocket();
-        NotifyAudioChannelClosedOnce();
     }
+    DetachAndResetWebsocket();
+    NotifyAudioChannelClosedOnce();
 }
 
 void WebsocketProtocol::CompleteCloseAndNotify() {
     {
         auto failure_mutation = inbound_gate_.BeginFailureMutation();
         error_occurred_ = true;
-        DetachAndResetWebsocket();
-        NotifyAudioChannelClosedOnce();
     }
+    DetachAndResetWebsocket();
+    NotifyAudioChannelClosedOnce();
 }
 
 void WebsocketProtocol::DetachAndResetWebsocket() {
     if (websocket_ == nullptr) {
         return;
     }
-    websocket_->OnData(nullptr);
-    websocket_->OnDisconnected(nullptr);
     websocket_.reset();
 }
 

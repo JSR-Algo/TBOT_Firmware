@@ -4,6 +4,7 @@
 #include "connection_close_state.h"
 #include "protocol_lifetime_token.h"
 #include "connect_close_deferral.h"
+#include "esp_tcp_shutdown_state.h"
 
 #include <atomic>
 #include <chrono>
@@ -387,6 +388,147 @@ int main() {
                  "close during handshake must defer transport teardown") ||
         !Require(publication_close.Pending(),
                  "deferred close must suppress handshake success publication")) {
+        return 1;
+    }
+
+    EspTcpShutdownState tcp_shutdown;
+    tcp_shutdown.TaskStarted();
+    if (!Require(!tcp_shutdown.CanDeleteSynchronization(),
+                 "live receive task must retain synchronization ownership")) {
+        return 1;
+    }
+    if (!Require(tcp_shutdown.TaskWillExit(),
+                 "receive task must claim cooperative exit ownership")) {
+        return 1;
+    }
+    tcp_shutdown.TaskExited();
+    if (!Require(!tcp_shutdown.CanDeleteSynchronization(),
+                 "exited receive task remains unsafe until its signal is joined")) {
+        return 1;
+    }
+    tcp_shutdown.TaskJoined();
+    if (!Require(tcp_shutdown.CanDeleteSynchronization(),
+                 "joined receive task must release synchronization ownership")) {
+        return 1;
+    }
+    EspTcpShutdownState callback_shutdown;
+    callback_shutdown.TaskStarted();
+    std::atomic<bool> callback_entered{false};
+    std::atomic<bool> release_callback{false};
+    std::atomic<bool> callback_completed{false};
+    std::atomic<bool> exit_signaled{false};
+    std::atomic<bool> waiter_destroyed{false};
+    std::thread receive_exit([&]() {
+        callback_entered.store(true);
+        while (!release_callback.load()) {
+            std::this_thread::yield();
+        }
+        callback_completed.store(true);
+        callback_shutdown.TaskWillExit();
+        callback_shutdown.TaskExited();
+        exit_signaled.store(true);
+    });
+    while (!callback_entered.load()) {
+        std::this_thread::yield();
+    }
+    std::thread exit_waiter([&]() {
+        while (!exit_signaled.load()) {
+            std::this_thread::yield();
+        }
+        callback_shutdown.TaskJoined();
+        waiter_destroyed.store(true);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (!Require(!waiter_destroyed.load(),
+                 "timeout must not force-delete a task while its callback is running") ||
+        !Require(callback_shutdown.NeedsJoin(),
+                 "running callback must retain task and synchronization ownership")) {
+        release_callback.store(true);
+        receive_exit.join();
+        exit_waiter.join();
+        return 1;
+    }
+    release_callback.store(true);
+    receive_exit.join();
+    exit_waiter.join();
+    if (!Require(callback_completed.load() && waiter_destroyed.load(),
+                 "waiter may destroy only after callback completion and exit signal")) {
+        return 1;
+    }
+
+    EspSslShutdownState wss_shutdown;
+    wss_shutdown.TaskStarted();
+    std::mutex wss_callback_mutex;
+    std::atomic<bool> wss_callback_entered{false};
+    std::atomic<bool> release_wss_callback{false};
+    std::atomic<bool> wss_exit_signaled{false};
+    std::thread wss_receive_exit([&]() {
+        std::lock_guard<std::mutex> callback_guard(wss_callback_mutex);
+        wss_callback_entered.store(true);
+        while (!release_wss_callback.load()) {
+            std::this_thread::yield();
+        }
+        wss_shutdown.TaskWillExit();
+        wss_shutdown.TaskExited();
+        wss_exit_signaled.store(true);
+    });
+    while (!wss_callback_entered.load()) {
+        std::this_thread::yield();
+    }
+    if (!Require(wss_shutdown.NeedsJoin() &&
+                     !wss_shutdown.CanDeleteSynchronization(),
+                 "WSS timeout must fail fast instead of deleting a TLS task in callback/lock scope")) {
+        release_wss_callback.store(true);
+        wss_receive_exit.join();
+        return 1;
+    }
+    release_wss_callback.store(true);
+    wss_receive_exit.join();
+    if (!Require(wss_exit_signaled.load(),
+                 "WSS callback must complete before TLS exit publication")) {
+        return 1;
+    }
+    wss_shutdown.TaskJoined();
+    if (!Require(wss_shutdown.CanDeleteSynchronization(),
+                 "WSS TLS synchronization is deletable only after joined exit")) {
+        return 1;
+    }
+
+    std::mutex transport_send_mutex;
+    std::atomic<int> owned_fd{41};
+    std::atomic<bool> stop_transport{false};
+    std::atomic<bool> sender_loaded_fd{false};
+    std::atomic<bool> release_sender{false};
+    std::atomic<int> sender_observed_fd{-1};
+    std::thread in_flight_sender([&]() {
+        std::lock_guard<std::mutex> send_guard(transport_send_mutex);
+        if (!stop_transport.load()) {
+            sender_observed_fd.store(owned_fd.load());
+            sender_loaded_fd.store(true);
+            while (!release_sender.load()) {
+                std::this_thread::yield();
+            }
+        }
+    });
+    while (!sender_loaded_fd.load()) {
+        std::this_thread::yield();
+    }
+    stop_transport.store(true);
+    if (!Require(owned_fd.load() == 41,
+                 "shutdown must retain fd ownership until receive join and send drain")) {
+        release_sender.store(true);
+        in_flight_sender.join();
+        return 1;
+    }
+    release_sender.store(true);
+    in_flight_sender.join();
+    {
+        std::lock_guard<std::mutex> send_guard(transport_send_mutex);
+        owned_fd.store(-1);
+    }
+    owned_fd.store(41);  // Simulate descriptor reuse only after the old sender drained.
+    if (!Require(sender_observed_fd.load() == 41 && owned_fd.load() == 41,
+                 "old send must finish before a reused descriptor is published")) {
         return 1;
     }
     if (!publication_close.Pending()) {

@@ -26,7 +26,9 @@ dependencies:
     override_path: ../components/esp-wifi-connect
   espressif/esp_audio_effects: ~1.2.1
   espressif/esp_audio_codec: ~2.4.1
-  78/esp-ml307: ~3.6.5
+  78/esp-ml307:
+    version: ~3.6.5
+    override_path: ../components/esp-ml307
   78/uart-eth-modem:
     version: ~0.4.0
     rules:
