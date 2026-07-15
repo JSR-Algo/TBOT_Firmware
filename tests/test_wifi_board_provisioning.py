@@ -356,7 +356,7 @@ def test_wb7_connected_cancels_timeouts_before_ble_teardown():
     )
 
     # The centralized success helper owns cancel -> deinit -> conditional rearm.
-    assert body.count('blufi.CompleteSuccessfulProvisioningTeardown("network_connected")') == 2
+    assert body.count('"network_connected", provisioning_token') == 2
 
     # Connecting/idle bookkeeping: in_config_mode_ is cleared after teardown.
     assert "in_config_mode_ = false;" in body

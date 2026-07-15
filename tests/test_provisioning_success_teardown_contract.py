@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,17 +27,19 @@ def test_one_helper_owns_cancel_deinit_and_conditional_rearm():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
     body = function_body(source, "bool Blufi::CompleteSuccessfulProvisioningTeardown")
-    assert "bool CompleteSuccessfulProvisioningTeardown(const char* reason);" in header
+    assert "bool CompleteSuccessfulProvisioningTeardown(const char* reason," in header
+    assert "ProvisioningToken provisioning_token);" in header
+    match = body.index("provisioning_session_.Matches(provisioning_token)")
     cancel = body.index("CancelBleSetupTimeout()")
     deinit = body.index("deinit()", cancel)
-    snapshot = body.index("provisioning_token", 0, deinit)
     rearm = body.index("EndWifiProvisioningAndRearm(", deinit)
-    assert snapshot < cancel < deinit < rearm
+    assert match < cancel < deinit < rearm
     assert "provisioning_token" in body[rearm:rearm + 120]
     assert "if (deinit_error != ESP_OK)" in body
     assert body.index("if (deinit_error != ESP_OK)") < rearm
     assert "reason" in body
-    assert "provisioning_token_.generation == provisioning_token.generation" in body
+    assert "if (!rearmed)" in body
+    assert body.index("if (!rearmed)") < body.index("ClearIfMatches")
 
 
 def test_provisioning_token_is_plain_generation_state_for_low_memory_paths():
@@ -46,6 +49,9 @@ def test_provisioning_token_is_plain_generation_state_for_low_memory_paths():
     assert "uint64_t generation" in token
     assert "string" not in token
     assert "shared_ptr" not in token
+    binding = read("main/audio/provisioning_session_binding.h")
+    assert "shared_ptr" not in binding
+    assert "new " not in binding
 
 
 def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
@@ -59,8 +65,56 @@ def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
     init = start.index("blufi.init()", bind)
     assert begin < bind < init
     assert "void BindProvisioningSession(ProvisioningToken token);" in blufi_h
-    assert "ProvisioningToken provisioning_token_" in blufi_h
-    assert "std::mutex provisioning_session_mutex_" in blufi_h
+    assert "ProvisioningSessionBinding provisioning_session_" in blufi_h
+
+
+def test_every_success_owner_passes_an_explicit_originating_token():
+    sources = read("main/boards/common/blufi.cpp") + read("main/boards/common/wifi_board.cc") + read("main/application.cc")
+    reasons = (
+        "network_connected",
+        "connected_wifi_token_handoff",
+        "authenticated_report_ble_release",
+        "wifi_credentials_connected",
+        "provisioned_ble_disconnect",
+        "claim_confirmed",
+    )
+    for reason in reasons:
+        assert re.search(
+            rf'CompleteSuccessfulProvisioningTeardown\(\s*"{reason}"\s*,\s*[^)]+\)',
+            sources,
+        ), reason
+    assert "CaptureProvisioningSession()" in sources
+
+
+def test_wifi_connect_worker_captures_session_before_any_delayed_work():
+    blufi = read("main/boards/common/blufi.cpp")
+    body = function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+    capture = body.index("CaptureProvisioningSession()")
+    delay = body.index("vTaskDelay(pdMS_TO_TICKS(500))")
+    task = body.index("xTaskCreate(", delay)
+    assert capture < delay < task
+
+
+def test_each_other_delayed_owner_captures_before_scheduling_or_http():
+    blufi = read("main/boards/common/blufi.cpp")
+    app = read("main/application.cc")
+
+    handoff = function_body(blufi, "void Blufi::ScheduleClaimRefreshAfterTokenHandoff")
+    assert handoff.index("CaptureProvisioningSession()") < handoff.index("xTaskCreate(")
+
+    report = function_body(blufi, "void Blufi::TryReportProvisioningAuthenticated")
+    capture = report.index("CaptureProvisioningSession()")
+    assert capture < report.index("Application::GetInstance().Schedule(", capture)
+
+    disconnect = blufi[blufi.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT:"):]
+    disconnect = disconnect[:disconnect.index("case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:")]
+    capture = disconnect.index("CaptureProvisioningSession()")
+    assert capture < disconnect.index("Application::GetInstance().Schedule(", capture)
+
+    confirm = function_body(app, "bool Application::ConfirmPendingTbotClaim")
+    assert confirm.index("CaptureProvisioningSession()") < confirm.index(
+        "ClaimConfirmationReporter::Confirm"
+    )
 
 
 def test_duplicate_success_callers_cannot_double_delete_the_timeout_timer():
@@ -85,8 +139,8 @@ def test_every_approved_success_owner_uses_the_central_helper():
     ):
         assert "CompleteSuccessfulProvisioningTeardown" in blufi
         assert f'"{reason}"' in blufi
-    assert wifi.count('CompleteSuccessfulProvisioningTeardown("network_connected")') == 2
-    assert 'CompleteSuccessfulProvisioningTeardown("claim_confirmed")' in app
+    assert wifi.count('"network_connected", provisioning_token') == 2
+    assert '"claim_confirmed", provisioning_token' in app
 
 
 def test_timeout_failure_preconfirm_and_manual_teardown_never_rearm():
@@ -104,7 +158,7 @@ def test_timeout_failure_preconfirm_and_manual_teardown_never_rearm():
     assert "StopBleAdvertising();" in preconfirm
     assert "CompleteSuccessfulProvisioningTeardown" not in preconfirm
     confirmed_tail = confirm[confirm.index("if (!confirmed)"):]
-    assert 'CompleteSuccessfulProvisioningTeardown("claim_confirmed")' in confirmed_tail
+    assert '"claim_confirmed", provisioning_token' in confirmed_tail
     failed_wifi = blufi[blufi.index("Failed to connect to WiFi via esp-wifi-connect"):]
     failed_wifi = failed_wifi[:failed_wifi.index("vTaskDelete(nullptr)")]
     assert "CompleteSuccessfulProvisioningTeardown" not in failed_wifi

@@ -73,6 +73,16 @@ static const char* BLUFI_TAG = "BLUFI_CLASS";
 static constexpr int kClaimRefreshAfterTokenHandoffDelayMs = 2500;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
 
+struct DelayedClaimRefreshContext {
+    Blufi* self;
+    Blufi::ProvisioningToken provisioning_token;
+};
+
+struct WifiConnectTaskContext {
+    Blufi* self;
+    Blufi::ProvisioningToken provisioning_token;
+};
+
 static void CaptureFirstError(esp_err_t& first_error, esp_err_t error) {
     if (first_error == ESP_OK && error != ESP_OK) {
         first_error = error;
@@ -380,15 +390,20 @@ esp_err_t Blufi::_deinit_impl() {
 }
 
 void Blufi::BindProvisioningSession(ProvisioningToken token) {
-    std::lock_guard<std::mutex> lock(provisioning_session_mutex_);
-    provisioning_token_ = token;
+    provisioning_session_.Bind(token);
 }
 
-bool Blufi::CompleteSuccessfulProvisioningTeardown(const char* reason) {
-    ProvisioningToken provisioning_token;
-    {
-        std::lock_guard<std::mutex> lock(provisioning_session_mutex_);
-        provisioning_token = provisioning_token_;
+Blufi::ProvisioningToken Blufi::CaptureProvisioningSession() const {
+    return provisioning_session_.Capture();
+}
+
+bool Blufi::CompleteSuccessfulProvisioningTeardown(
+        const char* reason, ProvisioningToken provisioning_token) {
+    if (!provisioning_session_.Matches(provisioning_token)) {
+        ESP_LOGW(BLUFI_TAG, "Ignoring stale provisioning teardown: reason=%s token=%llu",
+                 reason ? reason : "unknown",
+                 static_cast<unsigned long long>(provisioning_token.generation));
+        return false;
     }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown requested: reason=%s",
              reason ? reason : "unknown");
@@ -402,12 +417,13 @@ bool Blufi::CompleteSuccessfulProvisioningTeardown(const char* reason) {
 
     const bool rearmed = Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm(
         provisioning_token);
-    if (rearmed) {
-        std::lock_guard<std::mutex> lock(provisioning_session_mutex_);
-        if (provisioning_token_.generation == provisioning_token.generation) {
-            provisioning_token_ = {};
-        }
+    if (!rearmed) {
+        ESP_LOGW(BLUFI_TAG, "Provisioning teardown did not rearm: reason=%s token=%llu",
+                 reason ? reason : "unknown",
+                 static_cast<unsigned long long>(provisioning_token.generation));
+        return false;
     }
+    provisioning_session_.ClearIfMatches(provisioning_token);
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
              reason ? reason : "unknown", static_cast<int>(rearmed));
     return true;
@@ -885,12 +901,20 @@ bool Blufi::IsWifiScanCacheFresh() const {
 }
 
 void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
-    auto* self = this;
+    auto* ctx = new (std::nothrow) DelayedClaimRefreshContext{
+        this, CaptureProvisioningSession()};
+    if (ctx == nullptr) {
+        ESP_LOGE(BLUFI_TAG, "Failed to allocate claim token delay context");
+        return;
+    }
     BaseType_t created = xTaskCreate(
-        [](void* ctx) {
-            auto* self = static_cast<Blufi*>(ctx);
+        [](void* raw_ctx) {
+            auto* ctx = static_cast<DelayedClaimRefreshContext*>(raw_ctx);
+            auto* self = ctx->self;
+            const auto provisioning_token = ctx->provisioning_token;
+            delete ctx;
             vTaskDelay(pdMS_TO_TICKS(kClaimRefreshAfterTokenHandoffDelayMs));
-            Application::GetInstance().Schedule([self]() {
+            Application::GetInstance().Schedule([self, provisioning_token]() {
                 if (self->m_sta_is_connecting) {
                     ESP_LOGI(BLUFI_TAG,
                              "Deferring claim refresh: WiFi credential handoff in progress");
@@ -903,15 +927,16 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
                 }
 
                 if (!self->CompleteSuccessfulProvisioningTeardown(
-                        "connected_wifi_token_handoff")) {
+                        "connected_wifi_token_handoff", provisioning_token)) {
                     return;
                 }
                 Application::GetInstance().SchedulePendingTbotClaimRefresh();
             });
             vTaskDelete(nullptr);
         },
-        "claim_token_delay", 4096, self, 5, nullptr);
+        "claim_token_delay", 4096, ctx, 5, nullptr);
     if (created != pdPASS) {
+        delete ctx;
         ESP_LOGE(BLUFI_TAG, "Failed to create claim token delay task");
     }
 }
@@ -949,9 +974,10 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason) {
     if (ble_state != BleState::kOff) {
         if (!m_sta_is_connecting) {
             auto* self = this;
-            Application::GetInstance().Schedule([self, reason]() {
+            const auto provisioning_token = CaptureProvisioningSession();
+            Application::GetInstance().Schedule([self, reason, provisioning_token]() {
                 if (!self->CompleteSuccessfulProvisioningTeardown(
-                        "authenticated_report_ble_release")) {
+                        "authenticated_report_ble_release", provisioning_token)) {
                     return;
                 }
                 self->TryReportProvisioningAuthenticated(reason);
@@ -1030,6 +1056,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         m_sta_is_connecting = false;
         return;
     }
+    const auto provisioning_token = CaptureProvisioningSession();
 
     ESP_LOGI(BLUFI_TAG, "Starting WiFi connect from BluFi credentials: %s",
              reason ? reason : "unknown");
@@ -1067,9 +1094,20 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
 
     wifi_manager.StartStation();
 
-    xTaskCreate(
-        [](void* ctx) {
-            auto* self = static_cast<Blufi*>(ctx);
+    auto* task_ctx = new (std::nothrow) WifiConnectTaskContext{
+        this, provisioning_token};
+    if (task_ctx == nullptr) {
+        ESP_LOGE(BLUFI_TAG, "Failed to allocate WiFi connect task context");
+        m_wifi_connect_task_started = false;
+        m_sta_is_connecting = false;
+        return;
+    }
+    const BaseType_t created = xTaskCreate(
+        [](void* raw_ctx) {
+            auto* ctx = static_cast<WifiConnectTaskContext*>(raw_ctx);
+            auto* self = ctx->self;
+            const auto provisioning_token = ctx->provisioning_token;
+            delete ctx;
             auto& wifi = WifiManager::GetInstance();
             constexpr int kConnectTimeoutMs = 60000;
             constexpr TickType_t kDelayTick = pdMS_TO_TICKS(200);
@@ -1119,9 +1157,9 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 // above for the phone, then free the BLE stack before the claim
                 // poll performs HTTPS/TLS on ESP32-S3. Real hardware otherwise
                 // fails inside mbedTLS AES allocation while BLE remains active.
-                Application::GetInstance().Schedule([self]() {
+                Application::GetInstance().Schedule([self, provisioning_token]() {
                     if (!self->CompleteSuccessfulProvisioningTeardown(
-                            "wifi_credentials_connected")) {
+                            "wifi_credentials_connected", provisioning_token)) {
                         return;
                     }
                     self->TryReportProvisioningAuthenticated("wifi_success_after_ble_teardown");
@@ -1169,7 +1207,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             }
             vTaskDelete(nullptr);
         },
-        "blufi_wifi_conn", 4096, this, 5, nullptr);
+        "blufi_wifi_conn", 4096, task_ctx, 5, nullptr);
+    if (created != pdPASS) {
+        delete task_ctx;
+        m_wifi_connect_task_started = false;
+        m_sta_is_connecting = false;
+        ESP_LOGE(BLUFI_TAG, "Failed to create WiFi connect task");
+    }
 }
 
 void Blufi::ScheduleStationConnectFallback() {
@@ -1402,13 +1446,12 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             } else {
                 esp_blufi_adv_stop();
                 if (!m_deinited) {
-                    xTaskCreate(
-                        [](void* ctx) {
-                            static_cast<Blufi*>(ctx)->CompleteSuccessfulProvisioningTeardown(
-                                "provisioned_ble_disconnect");
-                            vTaskDelete(nullptr);
-                        },
-                        "blufi_deinit", 4096, this, 5, nullptr);
+                    auto* self = this;
+                    const auto provisioning_token = CaptureProvisioningSession();
+                    Application::GetInstance().Schedule([self, provisioning_token]() {
+                        self->CompleteSuccessfulProvisioningTeardown(
+                            "provisioned_ble_disconnect", provisioning_token);
+                    });
                 }
             }
             break;

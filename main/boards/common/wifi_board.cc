@@ -142,7 +142,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     !token.empty() ||
                     !code.empty();
                 if (should_release_ble) {
-                    blufi.CompleteSuccessfulProvisioningTeardown("network_connected");
+                    const auto provisioning_token = blufi.CaptureProvisioningSession();
+                    blufi.CompleteSuccessfulProvisioningTeardown(
+                        "network_connected", provisioning_token);
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
@@ -156,7 +158,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     !blufi.GetBootstrapToken().empty() ||
                     !blufi.GetProvisioningCode().empty();
                 if (should_release_ble) {
-                    blufi.CompleteSuccessfulProvisioningTeardown("network_connected");
+                    const auto provisioning_token = blufi.CaptureProvisioningSession();
+                    blufi.CompleteSuccessfulProvisioningTeardown(
+                        "network_connected", provisioning_token);
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");

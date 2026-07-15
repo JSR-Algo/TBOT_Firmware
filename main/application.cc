@@ -1020,6 +1020,9 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
         return true;
     }
 
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    const auto provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
+#endif
     const bool confirmed = ClaimConfirmationReporter::Confirm(pending_tbot_claim_,
         pending_tbot_claim_api_url_, pending_tbot_claim_token_);
     if (!confirmed) {
@@ -1039,7 +1042,8 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     // Claim confirmed -> the device is becoming claimed. Stop advertising for
     // pairing; an owned robot must not be BLE-discoverable for a new claim.
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown("claim_confirmed");
+    Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
+        "claim_confirmed", provisioning_token);
 #else
     StopBleAdvertising();
 #endif

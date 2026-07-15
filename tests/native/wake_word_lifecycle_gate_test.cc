@@ -1,4 +1,5 @@
 #include "audio/wake_word_lifecycle_controller.h"
+#include "audio/provisioning_session_binding.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -209,6 +210,35 @@ int main() {
             "new session remains provisioning-owned after stale success");
     Require(controller.EndProvisioningAndRearm(new_session),
             "current session can complete after stale success rejection");
+
+    WakeWordLifecycleController binding_controller;
+    ProvisioningSessionBinding binding;
+    const auto session_a = binding_controller.BeginProvisioningAndQuiesce([]() {});
+    Require(binding_controller.FinishProvisioningReset(session_a), "session A owns reset");
+    binding.Bind(session_a);
+    const auto delayed_callback_a = binding.Capture();
+    const auto session_b = binding_controller.BeginProvisioningAndQuiesce([]() {});
+    Require(binding_controller.FinishProvisioningReset(session_b), "session B owns reset");
+    binding.Bind(session_b);
+    int deinit_calls = 0;
+    const auto complete = [&](WakeWordLifecycleController::ProvisioningToken token) {
+        if (!binding.Matches(token)) {
+            return false;
+        }
+        ++deinit_calls;
+        if (!binding_controller.EndProvisioningAndRearm(token)) {
+            return false;
+        }
+        binding.ClearIfMatches(token);
+        return true;
+    };
+    Require(!complete(delayed_callback_a),
+            "delayed session A callback is rejected after session B binds");
+    Require(deinit_calls == 0, "stale session is rejected before BLE deinit");
+    Require(!binding_controller.TryAcquireAccess(),
+            "session B remains provisioning-owned after stale integration callback");
+    Require(complete(session_b), "bound session B completes successfully");
+    Require(deinit_calls == 1, "only current session owns BLE deinit");
 
     FakeAsyncWakeWord async;
     async.StartEncode();
