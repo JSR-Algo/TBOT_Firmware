@@ -16,6 +16,7 @@ CustomWakeWord::CustomWakeWord()
 }
 
 CustomWakeWord::~CustomWakeWord() {
+    Shutdown(UINT32_MAX);
     if (multinet_model_data_ != nullptr && multinet_ != nullptr) {
         multinet_->destroy(multinet_model_data_);
         multinet_model_data_ = nullptr;
@@ -29,7 +30,7 @@ CustomWakeWord::~CustomWakeWord() {
         heap_caps_free(wake_word_encode_task_buffer_);
     }
 
-    if (models_ != nullptr) {
+    if (models_ != nullptr && owns_models_) {
         esp_srmodel_deinit(models_);
     }
 }
@@ -89,12 +90,14 @@ bool CustomWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) 
     if (models_list == nullptr) {
         language_ = "cn";
         models_ = esp_srmodel_init("model");
+        owns_models_ = true;
 #ifdef CONFIG_CUSTOM_WAKE_WORD
         threshold_ = CONFIG_CUSTOM_WAKE_WORD_THRESHOLD / 100.0f;
         commands_.push_back({CONFIG_CUSTOM_WAKE_WORD, CONFIG_CUSTOM_WAKE_WORD_DISPLAY, "wake"});
 #endif
     } else {
         models_ = models_list;
+        owns_models_ = false;
         ParseWakenetModelConfig();
     }
 
@@ -216,8 +219,14 @@ void CustomWakeWord::StoreWakeWordData(const std::vector<int16_t>& data) {
 }
 
 void CustomWakeWord::EncodeWakeWordData() {
+    if (shutting_down_.load() || encode_active_.exchange(true)) {
+        return;
+    }
     const size_t stack_size = 4096 * 7;
-    wake_word_opus_.clear();
+    {
+        std::lock_guard<std::mutex> lock(wake_word_mutex_);
+        wake_word_opus_.clear();
+    }
     if (wake_word_encode_task_stack_ == nullptr) {
         wake_word_encode_task_stack_ = (StackType_t*)heap_caps_malloc(stack_size, MALLOC_CAP_SPIRAM);
         assert(wake_word_encode_task_stack_ != nullptr);
@@ -229,6 +238,11 @@ void CustomWakeWord::EncodeWakeWordData() {
 
     wake_word_encode_task_ = xTaskCreateStatic([](void* arg) {
         auto this_ = (CustomWakeWord*)arg;
+        const auto finish = [this_]() {
+            this_->encode_active_.store(false);
+            this_->wake_word_encode_task_ = nullptr;
+            this_->shutdown_cv_.notify_all();
+        };
         {
             auto start_time = esp_timer_get_time();
             // Create encoder
@@ -240,6 +254,8 @@ void CustomWakeWord::EncodeWakeWordData() {
                 std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
                 this_->wake_word_opus_.push_back(std::vector<uint8_t>());
                 this_->wake_word_cv_.notify_all();
+                finish();
+                vTaskDelete(NULL);
                 return;
             }
             // Get frame size
@@ -288,16 +304,47 @@ void CustomWakeWord::EncodeWakeWordData() {
             this_->wake_word_opus_.push_back(std::vector<uint8_t>());
             this_->wake_word_cv_.notify_all();
         }
+        finish();
         vTaskDelete(NULL);
     }, "encode_wake_word", stack_size, this, 2, wake_word_encode_task_stack_, wake_word_encode_task_buffer_);
+    if (wake_word_encode_task_ == nullptr) {
+        encode_active_.store(false);
+        shutdown_cv_.notify_all();
+    }
 }
 
 bool CustomWakeWord::GetWakeWordOpus(std::vector<uint8_t>& opus) {
     std::unique_lock<std::mutex> lock(wake_word_mutex_);
     wake_word_cv_.wait(lock, [this]() {
-        return !wake_word_opus_.empty();
+        return shutting_down_.load() || !wake_word_opus_.empty();
     });
+    if (wake_word_opus_.empty()) {
+        return false;
+    }
     opus.swap(wake_word_opus_.front());
     wake_word_opus_.pop_front();
     return !opus.empty();
+}
+
+bool CustomWakeWord::Shutdown(uint32_t timeout_ms) {
+    shutting_down_.store(true);
+    Stop();
+    {
+        std::lock_guard<std::mutex> lock(wake_word_mutex_);
+        wake_word_opus_.push_back({});
+    }
+    wake_word_cv_.notify_all();
+    const auto idle = [this]() { return !encode_active_.load(); };
+    if (idle()) {
+        return true;
+    }
+    if (timeout_ms == 0) {
+        return false;
+    }
+    std::unique_lock<std::mutex> lock(shutdown_mutex_);
+    if (timeout_ms == UINT32_MAX) {
+        shutdown_cv_.wait(lock, idle);
+        return true;
+    }
+    return shutdown_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), idle);
 }

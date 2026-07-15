@@ -8,8 +8,11 @@ EspWakeWord::EspWakeWord() {
 }
 
 EspWakeWord::~EspWakeWord() {
+    Shutdown(0);
     if (wakenet_data_ != nullptr) {
         wakenet_iface_->destroy(wakenet_data_);
+    }
+    if (wakenet_model_ != nullptr && owns_models_) {
         esp_srmodel_deinit(wakenet_model_);
     }
 }
@@ -19,8 +22,10 @@ bool EspWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
 
     if (models_list == nullptr) {
         wakenet_model_ = esp_srmodel_init("model");
+        owns_models_ = true;
     } else {
         wakenet_model_ = models_list;
+        owns_models_ = false;
     }
 
     if (wakenet_model_ == nullptr || wakenet_model_->num == -1) {
@@ -107,4 +112,9 @@ void EspWakeWord::EncodeWakeWordData() {
 
 bool EspWakeWord::GetWakeWordOpus(std::vector<uint8_t>& opus) {
     return false;
+}
+
+bool EspWakeWord::Shutdown(uint32_t) {
+    Stop();
+    return true;
 }

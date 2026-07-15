@@ -70,7 +70,7 @@ def test_activation_wraps_high_risk_boot_phases_with_local_minimum_monitors():
         activation, "RefreshWebsocketUrlFromConfigFetch();", "config_fetch.complete"
     )
     assert_monitored_phase(
-        activation, "audio_service_.PrewarmWakeWord();", "afe_prewarm.complete"
+        activation, "audio_service_.PrewarmWakeWord(wake_word_prewarm_token);", "afe_prewarm.complete"
     )
     assert_monitored_phase(activation, "InitializeProtocol();", "protocol_init.complete")
     assert "PrewarmWakeWord" not in assets
@@ -84,7 +84,7 @@ def test_claimed_activation_finishes_boot_http_before_afe_prewarm_and_protocol()
     assets = activation.index("CheckAssetsVersion();", activation.index("if (!IsDeviceClaimed())"))
     ota = activation.index("CheckNewVersion();", assets)
     config = activation.index("RefreshWebsocketUrlFromConfigFetch();", ota)
-    prewarm = activation.index("audio_service_.PrewarmWakeWord();", config)
+    prewarm = activation.index("audio_service_.PrewarmWakeWord(wake_word_prewarm_token);", config)
     protocol = activation.index("InitializeProtocol();", prewarm)
     activation_done = activation.index(
         "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);", protocol
@@ -112,7 +112,7 @@ def test_claimed_activation_interrupted_by_setup_or_audio_test_skips_afe_prewarm
 
     config = activation.index("RefreshWebsocketUrlFromConfigFetch();")
     state = activation.index("const auto activation_state = GetDeviceState();", config)
-    prewarm = activation.index("audio_service_.PrewarmWakeWord();", state)
+    prewarm = activation.index("audio_service_.PrewarmWakeWord(wake_word_prewarm_token);", state)
     protocol = activation.index("InitializeProtocol();", prewarm)
     prewarm_guard = activation[state:prewarm]
 

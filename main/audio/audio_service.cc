@@ -204,12 +204,14 @@ AudioTaskStackHighWaterMarks AudioService::GetTaskStackHighWaterMarks() {
                                  : static_cast<int32_t>(uxTaskGetStackHighWaterMark(handle));
     };
 
-    std::lock_guard<std::mutex> lock(task_handle_mutex_);
     AudioTaskStackHighWaterMarks marks;
+    auto lease = wake_word_lifecycle_.TryAcquireAccess();
+    std::lock_guard<std::mutex> control_lock(wake_word_control_mutex_);
+    std::lock_guard<std::mutex> lock(task_handle_mutex_);
     marks.audio_input = high_water_mark(audio_input_task_handle_);
     marks.audio_output = high_water_mark(audio_output_task_handle_);
     marks.opus_codec = high_water_mark(opus_codec_task_handle_);
-    marks.afe_detection = wake_word_ == nullptr
+    marks.afe_detection = !lease || wake_word_ == nullptr
                               ? -1
                               : wake_word_->GetDetectionTaskStackHighWaterMark();
     return marks;
@@ -320,7 +322,7 @@ void AudioService::AudioInputTask() {
             std::vector<int16_t> data;
             if (ReadAudioData(data, 16000, samples)) {
                 if (bits & AS_EVENT_WAKE_WORD_RUNNING) {
-                    wake_word_->Feed(data);
+                    FeedWakeWord(data);
                 }
                 if (bits & AS_EVENT_AUDIO_PROCESSOR_RUNNING) {
                     audio_processor_->Feed(std::move(data));
@@ -672,24 +674,40 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
 }
 
 void AudioService::EncodeWakeWord() {
+    auto lease = wake_word_lifecycle_.TryAcquireAccess();
+    if (!lease) return;
+    std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
     if (wake_word_) {
         wake_word_->EncodeWakeWordData();
     }
 }
 
-const std::string& AudioService::GetLastWakeWord() const {
-    return wake_word_->GetLastDetectedWakeWord();
+std::string AudioService::GetLastWakeWord() {
+    auto lease = wake_word_lifecycle_.TryAcquireAccess();
+    if (!lease) return {};
+    std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
+    return wake_word_ == nullptr ? std::string{} : wake_word_->GetLastDetectedWakeWord();
 }
 
 std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
+    auto lease = wake_word_lifecycle_.TryAcquireAccess();
+    if (!lease) return nullptr;
     auto packet = std::make_unique<AudioStreamPacket>();
-    if (wake_word_->GetWakeWordOpus(packet->payload)) {
+    WakeWord* wake_word = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
+        wake_word = wake_word_.get();
+    }
+    if (wake_word != nullptr && wake_word->GetWakeWordOpus(packet->payload)) {
         return packet;
     }
     return nullptr;
 }
 
 void AudioService::EnableWakeWordDetection(bool enable) {
+    auto lease = wake_word_lifecycle_.TryAcquireAccess();
+    if (!lease) return;
+    std::lock_guard<std::mutex> control_lock(wake_word_control_mutex_);
     if (!wake_word_ && enable) {
         CreateWakeWordIfAvailable();
     }
@@ -715,14 +733,22 @@ void AudioService::EnableWakeWordDetection(bool enable) {
             }
         }
         wake_word_->Start();
+        wake_word_feed_target_.store(wake_word_.get(), std::memory_order_release);
+        wake_word_lifecycle_.SetRunning(true);
         xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
     } else {
-        wake_word_->Stop();
+        wake_word_feed_target_.store(nullptr, std::memory_order_release);
+        wake_word_lifecycle_.SetRunning(false);
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+        wake_word_->Stop();
     }
 }
 
-void AudioService::PrewarmWakeWord() {
+AudioService::WakeWordPrewarmToken AudioService::CaptureWakeWordPrewarmToken() const {
+    return wake_word_lifecycle_.CapturePrewarmToken();
+}
+
+void AudioService::PrewarmWakeWord(WakeWordPrewarmToken token) {
     // Runs the one-time lazy-init body from EnableWakeWordDetection(true) MINUS
     // Start(): build the AFE (esp_afe create_from_config) and spawn the
     // audio_detection fetch task ahead of Idle, on the prio-2 activation task,
@@ -732,41 +758,55 @@ void AudioService::PrewarmWakeWord() {
     // AS_EVENT_WAKE_WORD_RUNNING: the FEED ring must stay empty until the locked
     // IsDeviceClaimed()-gated Idle gate enables the mic, preserving the BLE/AFE
     // contention fix. Callers gate this on IsDeviceClaimed().
-    const bool ran = wake_word_lifecycle_gate_.RunPrewarm([this]() {
-        if (!wake_word_) {
-            CreateWakeWordIfAvailable();
-        }
-        if (!wake_word_) {
+    auto lease = wake_word_lifecycle_.TryAcquirePrewarm(token);
+    if (!lease) {
+        ESP_LOGI(TAG, "Wake word prewarm rejected by lifecycle generation");
+        return;
+    }
+    std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
+    if (!wake_word_) {
+        CreateWakeWordIfAvailable();
+    }
+    if (!wake_word_) {
+        return;
+    }
+    if (!wake_word_initialized_) {
+        if (!wake_word_->Initialize(codec_, models_list_)) {
+            ESP_LOGE(TAG, "Failed to prewarm wake word");
             return;
         }
-        if (!wake_word_initialized_) {
-            if (!wake_word_->Initialize(codec_, models_list_)) {
-                ESP_LOGE(TAG, "Failed to prewarm wake word");
-                return;
-            }
-            wake_word_initialized_ = true;
-            ESP_LOGI(TAG, "Wake word prewarmed (AFE built; not started)");
-        }
-    });
-    if (!ran) {
-        ESP_LOGI(TAG, "Wake word prewarm cancelled by WiFi config ownership");
+        wake_word_initialized_ = true;
+        ESP_LOGI(TAG, "Wake word prewarmed (AFE built; not started)");
     }
 }
 
-void AudioService::ReleaseWakeWordResourcesForWifiConfig() {
-    wake_word_lifecycle_gate_.CancelPrewarmAndRunRelease([this]() {
-        if (!wake_word_) {
-            return;
+bool AudioService::BeginWifiProvisioning() {
+    wake_word_feed_target_.store(nullptr, std::memory_order_release);
+    wake_word_lifecycle_.BeginProvisioningAndQuiesce([this]() {
+        xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+        std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
+        wake_word_feed_target_.store(nullptr, std::memory_order_release);
+        if (wake_word_ != nullptr) {
+            wake_word_->Shutdown(0);
         }
+    });
 
-        EnableWakeWordDetection(false);
-        // Give the audio input task one scheduling slice to observe the stopped bit
-        // before destroying the AFE object. This path runs only on explicit setup.
-        vTaskDelay(pdMS_TO_TICKS(80));
+    std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
+    if (wake_word_ != nullptr) {
+        if (!wake_word_->Shutdown(5000)) {
+            ESP_LOGE(TAG, "Wake word shutdown timed out; provisioning stays fail-closed");
+            return false;
+        }
         wake_word_.reset();
         wake_word_initialized_ = false;
         ESP_LOGI(TAG, "Wake word resources released for WiFi config");
-    });
+    }
+    wake_word_lifecycle_.FinishProvisioningReset();
+    return true;
+}
+
+void AudioService::EndWifiProvisioningAndRearm() {
+    wake_word_lifecycle_.EndProvisioningAndRearm();
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {
@@ -972,8 +1012,20 @@ void AudioService::CreateWakeWordIfAvailable() {
 
 bool AudioService::IsAfeWakeWord() {
 #if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32P4
+    auto lease = wake_word_lifecycle_.TryAcquireAccess();
+    if (!lease) return false;
+    std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
     return wake_word_ != nullptr && dynamic_cast<AfeWakeWord*>(wake_word_.get()) != nullptr;
 #else
     return false;
 #endif
+}
+
+void AudioService::FeedWakeWord(const std::vector<int16_t>& data) {
+    auto lease = wake_word_lifecycle_.TryAcquireFeed();
+    if (!lease) return;
+    WakeWord* target = wake_word_feed_target_.load(std::memory_order_acquire);
+    if (target != nullptr) {
+        target->Feed(data);
+    }
 }

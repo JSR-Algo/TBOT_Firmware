@@ -1,75 +1,168 @@
-#include "audio/wake_word_lifecycle_gate.h"
+#include "audio/wake_word_lifecycle_controller.h"
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <mutex>
 #include <thread>
 
 namespace {
-
 void Require(bool condition, const char* message) {
     if (!condition) {
-        std::cerr << "wake word lifecycle gate test failed: " << message << "\n";
+        std::cerr << "wake word lifecycle controller test failed: " << message << "\n";
         std::exit(1);
     }
 }
 
+class FakeAsyncWakeWord {
+public:
+    void StartEncode() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        encode_active_ = true;
+    }
+
+    bool Pop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        pop_waiting_ = true;
+        cv_.notify_all();
+        cv_.wait(lock, [&]() { return shutting_down_ || packet_ready_; });
+        return packet_ready_;
+    }
+
+    void WaitUntilPopBlocked() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [&]() { return pop_waiting_; });
+    }
+
+    void FinishEncode() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        encode_active_ = false;
+        cv_.notify_all();
+    }
+
+    void Shutdown(const std::function<void()>& requested) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        shutting_down_ = true;
+        requested();
+        cv_.notify_all();
+        cv_.wait(lock, [&]() { return !encode_active_; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool encode_active_ = false;
+    bool pop_waiting_ = false;
+    bool packet_ready_ = false;
+    bool shutting_down_ = false;
+};
 }  // namespace
 
 int main() {
-    WakeWordLifecycleGate gate;
-    std::mutex rendezvous_mutex;
-    std::condition_variable rendezvous_cv;
-    bool prewarm_entered = false;
-    bool allow_prewarm_finish = false;
-    std::atomic<bool> release_attempted{false};
-    std::atomic<bool> release_ran{false};
+    WakeWordLifecycleController controller;
+    const auto boot_token = controller.CapturePrewarmToken();
+    Require(boot_token.valid(), "boot activation receives a prewarm token");
 
-    std::thread prewarm([&]() {
-        Require(gate.RunPrewarm([&]() {
-            std::unique_lock<std::mutex> lock(rendezvous_mutex);
-            prewarm_entered = true;
-            rendezvous_cv.notify_all();
-            rendezvous_cv.wait(lock, [&]() { return allow_prewarm_finish; });
-        }), "initial prewarm acquires lifecycle ownership");
-    });
+    auto feed = controller.TryAcquireFeed();
+    Require(!feed, "feed is rejected before running is published");
+    controller.SetRunning(true);
+    feed = controller.TryAcquireFeed();
+    Require(static_cast<bool>(feed), "running feed acquires a lease");
 
-    {
-        std::unique_lock<std::mutex> lock(rendezvous_mutex);
-        rendezvous_cv.wait(lock, [&]() { return prewarm_entered; });
-    }
-
+    std::mutex barrier_mutex;
+    std::condition_variable barrier_cv;
+    bool quiescing = false;
+    std::atomic<bool> quiesced{false};
     std::thread release([&]() {
-        release_attempted.store(true);
-        gate.CancelPrewarmAndRunRelease([&]() { release_ran.store(true); });
+        controller.BeginProvisioningAndQuiesce([&]() {
+            std::lock_guard<std::mutex> lock(barrier_mutex);
+            quiescing = true;
+            barrier_cv.notify_all();
+        });
+        quiesced.store(true);
     });
-
-    while (!release_attempted.load()) {
-        std::this_thread::yield();
-    }
-    Require(!release_ran.load(), "release waits for in-flight prewarm ownership");
-
     {
-        std::lock_guard<std::mutex> lock(rendezvous_mutex);
-        allow_prewarm_finish = true;
+        std::unique_lock<std::mutex> lock(barrier_mutex);
+        barrier_cv.wait(lock, [&]() { return quiescing; });
     }
-    rendezvous_cv.notify_all();
-    prewarm.join();
+    Require(!controller.TryAcquireFeed(), "stale running hint cannot acquire after quiesce");
+    Require(!controller.TryAcquireAccess(), "accessors are rejected while quiescing");
+    Require(!quiesced.load(), "release waits for the active feed acknowledgement");
+    feed = {};
     release.join();
+    Require(quiesced.load(), "release completes after feed lease exits");
+    Require(!controller.TryAcquirePrewarm(boot_token), "old activation token stays invalid");
 
-    Require(release_ran.load(), "release runs after prewarm exits");
-    bool late_prewarm_ran = false;
-    Require(!gate.RunPrewarm([&]() { late_prewarm_ran = true; }),
-            "release cancellation rejects later prewarm");
-    Require(!late_prewarm_ran, "rejected prewarm callback never touches wake-word state");
+    controller.FinishProvisioningReset();
+    Require(!controller.TryAcquireAccess(), "provisioning ownership remains fail-closed");
+    controller.EndProvisioningAndRearm();
+    const auto rearmed_token = controller.CapturePrewarmToken();
+    Require(rearmed_token.valid(), "successful terminal path issues a new token");
+    Require(rearmed_token.generation != boot_token.generation, "rearm advances generation");
+    Require(static_cast<bool>(controller.TryAcquirePrewarm(rearmed_token)),
+            "new activation token can prewarm");
+    Require(!controller.TryAcquirePrewarm(boot_token), "rearm never revives an old token");
 
-    WakeWordLifecycleGate cancelled_first;
-    cancelled_first.CancelPrewarmAndRunRelease([]() {});
-    Require(!cancelled_first.RunPrewarm([]() {}),
-            "release-first interleaving remains fail-closed");
+    auto metrics_access = controller.TryAcquireAccess();
+    std::atomic<bool> accessor_quiesced{false};
+    std::mutex accessor_barrier_mutex;
+    std::condition_variable accessor_barrier_cv;
+    bool accessor_quiescing = false;
+    std::thread accessor_release([&]() {
+        controller.BeginProvisioningAndQuiesce([&]() {
+            std::lock_guard<std::mutex> lock(accessor_barrier_mutex);
+            accessor_quiescing = true;
+            accessor_barrier_cv.notify_all();
+        });
+        accessor_quiesced.store(true);
+    });
+    {
+        std::unique_lock<std::mutex> lock(accessor_barrier_mutex);
+        accessor_barrier_cv.wait(lock, [&]() { return accessor_quiescing; });
+    }
+    Require(!accessor_quiesced.load(), "destroy waits for accessor/metrics lease");
+    metrics_access = {};
+    accessor_release.join();
+    controller.FinishProvisioningReset();
+    controller.EndProvisioningAndRearm();
 
-    std::cout << "wake word lifecycle gate test OK\n";
+    FakeAsyncWakeWord async;
+    async.StartEncode();
+    std::atomic<bool> pop_result{true};
+    std::thread pop([&]() { pop_result.store(async.Pop()); });
+    async.WaitUntilPopBlocked();
+    std::mutex shutdown_barrier_mutex;
+    std::condition_variable shutdown_barrier_cv;
+    bool shutdown_requested = false;
+    std::atomic<bool> shutdown_done{false};
+    std::thread shutdown([&]() {
+        async.Shutdown([&]() {
+            std::lock_guard<std::mutex> lock(shutdown_barrier_mutex);
+            shutdown_requested = true;
+            shutdown_barrier_cv.notify_all();
+        });
+        shutdown_done.store(true);
+    });
+    {
+        std::unique_lock<std::mutex> lock(shutdown_barrier_mutex);
+        shutdown_barrier_cv.wait(lock, [&]() { return shutdown_requested; });
+    }
+    pop.join();
+    Require(!pop_result.load(), "shutdown wakes blocked Pop with terminal false");
+    Require(!shutdown_done.load(), "shutdown waits for async encode acknowledgement");
+    async.FinishEncode();
+    shutdown.join();
+    Require(shutdown_done.load(), "shutdown completes after encode exit acknowledgement");
+
+    for (int i = 0; i < 3; ++i) {
+        controller.BeginProvisioningAndQuiesce([]() {});
+        controller.FinishProvisioningReset();
+        controller.EndProvisioningAndRearm();
+    }
+    Require(controller.CapturePrewarmToken().valid(), "repeated transitions remain rearmable");
+
+    std::cout << "wake word lifecycle controller test OK\n";
     return 0;
 }

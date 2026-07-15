@@ -23,7 +23,7 @@
 #include "audio_processor.h"
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
-#include "wake_word_lifecycle_gate.h"
+#include "wake_word_lifecycle_controller.h"
 #include "protocol.h"
 #include "ogg_demuxer.h"
 
@@ -135,7 +135,7 @@ public:
     void Stop();
     void EncodeWakeWord();
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
-    const std::string& GetLastWakeWord() const;
+    std::string GetLastWakeWord();
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsIdle();
     bool WaitForPlaybackQueueEmpty(uint32_t timeout_ms = 0);
@@ -152,11 +152,14 @@ public:
     // init. Must NOT Start() / set AS_EVENT_WAKE_WORD_RUNNING — the FEED ring
     // stays empty until the locked Idle gate enables the mic, so the BLE/AFE
     // contention gate is untouched. Caller MUST gate on IsDeviceClaimed().
-    void PrewarmWakeWord();
+    using WakeWordPrewarmToken = WakeWordLifecycleController::PrewarmToken;
+    WakeWordPrewarmToken CaptureWakeWordPrewarmToken() const;
+    void PrewarmWakeWord(WakeWordPrewarmToken token);
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
-    void ReleaseWakeWordResourcesForWifiConfig();
+    bool BeginWifiProvisioning();
+    void EndWifiProvisioningAndRearm();
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
@@ -184,7 +187,9 @@ private:
     AudioServiceCallbacks callbacks_;
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<WakeWord> wake_word_;
-    WakeWordLifecycleGate wake_word_lifecycle_gate_;
+    WakeWordLifecycleController wake_word_lifecycle_;
+    std::mutex wake_word_control_mutex_;
+    std::atomic<WakeWord*> wake_word_feed_target_{nullptr};
     std::unique_ptr<AudioDebugger> audio_debugger_;
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;
@@ -239,6 +244,7 @@ private:
     void AudioOutputTask();
     void OpusCodecTask();
     void CreateWakeWordIfAvailable();
+    void FeedWakeWord(const std::vector<int16_t>& data);
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();

@@ -139,18 +139,19 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
 
     start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
-    release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
+    release_idx = body.index("BeginWifiProvisioning")
     init_idx = body.index("blufi.init();")
     assert release_idx < init_idx
 
-    assert "void ReleaseWakeWordResourcesForWifiConfig();" in audio_h
-    release_start = audio_cc.index("void AudioService::ReleaseWakeWordResourcesForWifiConfig()")
+    assert "bool BeginWifiProvisioning();" in audio_h
+    release_start = audio_cc.index("bool AudioService::BeginWifiProvisioning()")
     release_body = audio_cc[release_start:audio_cc.index("void AudioService::EnableVoiceProcessing", release_start)]
     prewarm_body = function_body(audio_cc, "void AudioService::PrewarmWakeWord")
-    assert "WakeWordLifecycleGate wake_word_lifecycle_gate_;" in audio_h
-    assert "wake_word_lifecycle_gate_.RunPrewarm" in prewarm_body
-    assert "wake_word_lifecycle_gate_.CancelPrewarmAndRunRelease" in release_body
-    assert "EnableWakeWordDetection(false);" in release_body
+    assert "WakeWordLifecycleController wake_word_lifecycle_;" in audio_h
+    assert "wake_word_lifecycle_.TryAcquirePrewarm" in prewarm_body
+    assert "wake_word_lifecycle_.BeginProvisioningAndQuiesce" in release_body
+    assert "Shutdown(0)" in release_body
+    assert "Shutdown(5000)" in release_body
     assert "wake_word_.reset();" in release_body
     assert "wake_word_initialized_ = false;" in release_body
 
@@ -159,10 +160,10 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     assert "CreateWakeWordIfAvailable();" in enable_body
 
     assert "TaskHandle_t audio_detection_task_handle_" in afe_h
-    dtor_start = afe_cc.index("AfeWakeWord::~AfeWakeWord()")
-    dtor_body = afe_cc[dtor_start:afe_cc.index("bool AfeWakeWord::Initialize", dtor_start)]
-    assert "vTaskDelete(audio_detection_task_handle_)" in dtor_body
-    assert dtor_body.index("vTaskDelete(audio_detection_task_handle_)") < dtor_body.index("afe_iface_->destroy")
+    assert "bool Shutdown(uint32_t timeout_ms) override;" in afe_h
+    shutdown_body = function_body(afe_cc, "bool AfeWakeWord::Shutdown")
+    assert "detection_exited_" in shutdown_body
+    assert "encode_active_" in shutdown_body
 
 def test_assets_model_load_does_not_create_afe_before_claimed_audio_gate():
     audio_cc = read("main/audio/audio_service.cc")

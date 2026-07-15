@@ -1119,6 +1119,7 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
         return;
     }
+
     if (activation_task_handle_ != nullptr) {
         ESP_LOGW(TAG, "Activation task already running");
         return;  // Activation already running -> it will reach Idle on its own.
@@ -2018,6 +2019,8 @@ void Application::ActivationTask() {
         return;
     }
 
+    const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
+
     // Check for new assets version
     CheckAssetsVersion();
 
@@ -2042,7 +2045,7 @@ void Application::ActivationTask() {
         activation_state != kDeviceStateWifiConfiguring &&
         activation_state != kDeviceStateAudioTesting) {
         SystemInfo::StartHeapPhaseMonitor();
-        audio_service_.PrewarmWakeWord();
+        audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
         SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
         SystemInfo::StopHeapPhaseMonitor();
     }

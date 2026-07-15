@@ -41,7 +41,7 @@ def _function_body(text: str, signature: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# FW1: wifi_board.cc — ReleaseWakeWordResourcesForWifiConfig appears BEFORE
+# FW1: wifi_board.cc — BeginWifiProvisioning appears BEFORE
 #      blufi.init() in the explicit Wi-Fi-config setup path.
 # ---------------------------------------------------------------------------
 def test_fw1_release_wake_word_before_ble_init_in_config_path():
@@ -50,9 +50,9 @@ def test_fw1_release_wake_word_before_ble_init_in_config_path():
 
     # The wake-word resource release must run before the BLE stack is brought up,
     # otherwise the AFE detection task contends with BLE during provisioning.
-    assert "ReleaseWakeWordResourcesForWifiConfig" in body
+    assert "BeginWifiProvisioning" in body
     assert "blufi.init();" in body
-    release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
+    release_idx = body.index("BeginWifiProvisioning")
     init_idx = body.index("blufi.init();")
     assert release_idx < init_idx
 

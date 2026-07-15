@@ -147,6 +147,7 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     blufi.CancelBleSetupTimeout();
                     // Release BLE resources
                     blufi.deinit();
+                    Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
@@ -165,6 +166,7 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     blufi.CancelBleSetupTimeout();
                     // make sure blufi resources has been released
                     blufi.deinit();
+                    Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
@@ -330,7 +332,10 @@ void WifiBoard::StartWifiConfigMode() {
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
-    Application::GetInstance().GetAudioService().ReleaseWakeWordResourcesForWifiConfig();
+    if (!Application::GetInstance().GetAudioService().BeginWifiProvisioning()) {
+        ESP_LOGE(TAG, "WiFi config aborted: wake-word shutdown did not quiesce");
+        return;
+    }
     // initialize esp-blufi protocol.
     // Guard against double-init: the Application now also brings BLE up while the
     // robot is unclaimed in claimable standby (so the app can discover it over

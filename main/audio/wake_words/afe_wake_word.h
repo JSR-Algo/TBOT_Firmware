@@ -15,6 +15,8 @@
 #include <functional>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
+#include <chrono>
 
 #include "audio_codec.h"
 #include "wake_word.h"
@@ -33,10 +35,12 @@ public:
     void EncodeWakeWordData();
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
+    bool Shutdown(uint32_t timeout_ms) override;
     int32_t GetDetectionTaskStackHighWaterMark() const override;
 
 private:
     srmodel_list_t *models_ = nullptr;
+    bool owns_models_ = false;
     const esp_afe_sr_iface_t* afe_iface_ = nullptr;
     esp_afe_sr_data_t* afe_data_ = nullptr;
     char* wakenet_model_ = NULL;
@@ -69,6 +73,11 @@ private:
     std::mutex wake_word_mutex_;
     std::condition_variable wake_word_cv_;
     TaskHandle_t audio_detection_task_handle_ = nullptr;
+    std::atomic<bool> shutting_down_{false};
+    std::atomic<bool> detection_exited_{true};
+    std::atomic<bool> encode_active_{false};
+    std::mutex shutdown_mutex_;
+    std::condition_variable shutdown_cv_;
 
     void StoreWakeWordData(const int16_t* data, size_t size);
     void AudioDetectionTask();

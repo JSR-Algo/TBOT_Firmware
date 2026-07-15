@@ -66,7 +66,7 @@ def _connected_event_body(wifi_board: str) -> str:
 
 # ---------------------------------------------------------------------------
 # WB1: StartWifiConfigMode() full setup ordering for the BLE provisioning path:
-#      ReleaseWakeWordResourcesForWifiConfig -> GetBleState() ->
+#      BeginWifiProvisioning -> GetBleState() ->
 #      blufi.init() -> StartBleSetupTimeout(). The wake-word release must free
 #      the AFE detection task before BLE comes up; the state read gates the
 #      conditional init; the hard-timeout is armed last so advertising cannot
@@ -76,7 +76,7 @@ def test_wb1_start_config_mode_setup_step_ordering():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
+    release_idx = body.index("BeginWifiProvisioning")
     get_state_idx = body.index("blufi.GetBleState();")
     init_idx = body.index("blufi.init();")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
@@ -306,7 +306,7 @@ def test_start_wifi_config_mode_ignores_active_lesson_before_setup_side_effects(
     assert "in_config_mode_" not in guard
     assert "SetDeviceState" not in guard
     assert "StartConfigAp" not in guard
-    assert "ReleaseWakeWordResourcesForWifiConfig" not in guard
+    assert "BeginWifiProvisioning" not in guard
     assert "StartBleSetupTimeout" not in guard
     assert "ReceiveWifiCredentialsFromAudio" not in guard
 
