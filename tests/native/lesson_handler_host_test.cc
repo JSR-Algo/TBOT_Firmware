@@ -256,12 +256,14 @@ std::string ErrorFrame(int seq) {
 std::string StepFrame(int seq, const std::string& step_id,
                       const std::string& poster_src, const std::string& object_src,
                       const std::string& overlay_src, const std::string& extra_body = "",
-                      const std::string& extra_scene = "") {
+                      const std::string& extra_scene = "",
+                      const std::string& robot_state = "talking") {
     std::string scene =
         "\"scene\":{"
         "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"" + poster_src + "\"}},"
         "\"teachingObject\":{\"asset\":{\"src\":\"" + object_src + "\"}},"
-        "\"robotOverlay\":{\"asset\":{\"src\":\"" + overlay_src + "\"},\"expression\":\"teaching\"}"
+        "\"robotOverlay\":{\"asset\":{\"src\":\"" + overlay_src +
+        "\"},\"expression\":\"teaching\",\"robotState\":\"" + robot_state + "\"}"
         + extra_scene + "}";
     return std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -532,6 +534,12 @@ void test_prepare_assetpack_ready_without_critical_asset_list() {
             "no-critical cacheKey echoed");
     require(FrameAssetPackReady(0) == true,
             "verified assetPack without criticalAssets list is ready");
+    require(LogContains("lesson_ack TX assignmentId=" + std::string(AID()) +
+                        " sessionId=" + SID() +
+                        " stepId=- body.acks=1 rendered=false degraded=false "
+                        "renderElapsedMs=-1 assetPack.ready=true "
+                        "cacheKey=ck6-abcdef1234567890"),
+            "prepare ack log exposes the privacy-safe assetPack attestation payload");
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
@@ -884,6 +892,7 @@ void test_dedup_reack() {
 
     // duplicate prepare (same assignment/session, sequence <= last) -> re-ack path.
     // duplicate_prepare==true so NO session reset; sequence<=last triggers replay.
+    HostEspResetLogs();
     Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
                           "\"assetPack\":{\"cacheKey\":\"ckD-abcdef1234567890\",\"assets\":[]}"));
     require(Sent().size() == 2, "duplicate prepare re-acks");
@@ -892,6 +901,12 @@ void test_dedup_reack() {
     // cached-assetPack replay (re_asset_pack=nullptr) -> the re-ack would carry NO assetPack.
     require(FrameHasAssetPack(1), "duplicate re-ack replays cached assetPack body");
     require(FrameAssetPackReady(1) == first_ready, "re-ack replays cached ready flag");
+    require(LogContains("lesson_ack TX assignmentId=" + std::string(AID()) +
+                        " sessionId=" + SID() +
+                        " stepId=- body.acks=1 rendered=false degraded=false "
+                        "renderElapsedMs=-1 assetPack.ready=false "
+                        "cacheKey=ckD-abcdef1234567890"),
+            "exact duplicate replay emits structured cached ack evidence");
 
     // a duplicate of an OLDER sequence than the cached one -> conservative false/false,
     // no assetPack. Advance to seq 3 first via start(2)+a step? Simpler: send seq 0 dup.
@@ -1618,7 +1633,8 @@ void test_step_full_render_http() {
            "\",\"prompt\":\"Xin chào\",\"stepType\":\"greeting\",\"scene\":{"
            "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
            "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
-           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\" Teaching \"}}}}");
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},"
+           "\"expression\":\" Teaching \",\"robotState\":\"talking\"}}}}");
     size_t idx = Sent().size() - 1;
     require(FrameType(idx) == "lesson_ack", "rendered step acks");
     // NOTE non-tautology: all three layers fetched+drew so degraded MUST be false.
@@ -1626,6 +1642,8 @@ void test_step_full_render_http() {
     require(FrameBodyBool(idx, "rendered", false) == true, "step ack rendered=true");
     require(FrameBodyBool(idx, "degraded", true) == false,
             "all three layers drew -> degraded=false");
+    require(FrameBodyStr(idx, nullptr, "robotState") == "talking",
+            "step ack echoes the rendered robotState for strict evidence correlation");
     require(disp.lesson_mode_calls.size() > lesson_mode_calls_before_step &&
             disp.lesson_mode_calls.back() == true,
             "step hides the start loading face before drawing scene layers");
@@ -3548,7 +3566,7 @@ void test_step_evidence_telemetry_and_privacy_safe_logs() {
     ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
     int seq = OpenMotionEnabledSession();
     Handle(StepFrame(seq, "motion-success", "http://poster", "http://object", "http://overlay",
-                     ",\"motion\":{\"present\":\"teach\"}"));
+                     ",\"motion\":{\"present\":\"teach\"}", "", "modeling"));
     const size_t success_ack = Sent().size() - 1;
     require(Sent()[success_ack].find("\"renderDegraded\":false") != std::string::npos,
             "complete visual render explicitly reports telemetry.renderDegraded=false");
@@ -3562,6 +3580,11 @@ void test_step_evidence_telemetry_and_privacy_safe_logs() {
             "step-start evidence log carries canonical identity fields");
     require(LogContains("motion_preset outcome=success"),
             "successful preset emits canonical outcome log");
+    require(LogContains("lesson_ack TX assignmentId=" + std::string(AID()) +
+                        " sessionId=" + SID() +
+                        " stepId=motion-success body.acks=3 rendered=true degraded=false "
+                        "robotState=modeling"),
+            "firmware logs privacy-safe canonical ack payload evidence");
     require(!LogContains("preset=teach") && !LogContains("angle=") &&
                 !LogContains("transcript="),
             "evidence logs omit raw motion arguments and transcripts");
@@ -3571,6 +3594,31 @@ void test_step_evidence_telemetry_and_privacy_safe_logs() {
             "complete visual render does not emit render_degraded marker");
     require(!LogContains("optional_asset_missing"),
             "complete visual render does not emit optional_asset_missing marker");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "unsafe-state", "http://poster", "http://object", "http://overlay",
+                     "", "", "modeling\\ntranscript=private-child-text"));
+    const size_t unsafe_state_ack = Sent().size() - 1;
+    require(FrameBodyStr(unsafe_state_ack, nullptr, "robotState").empty(),
+            "noncanonical robotState is not echoed into the ack body");
+    require(!LogContains("private-child-text") && !LogContains("transcript="),
+            "control characters cannot inject child text into ack evidence logs");
+
+    ResetObservable();
+    FreshSession();
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion +
+           "\",\"assignmentId\":\"unsafe\\ntranscript=private-child-text\","
+           "\"sessionId\":\"safe-session\",\"sequence\":1,"
+           "\"body\":{\"profile\":\"" + kLessonProfileEspTft + "\"}}");
+    require(LogContains("lesson_ack TX assignmentId=invalid sessionId=safe-session"),
+            "invalid identity tokens are replaced instead of logged verbatim");
+    require(!LogContains("private-child-text") && !LogContains("transcript="),
+            "identity log sanitization prevents newline injection and transcript leakage");
 
     ResetObservable();
     Board::GetInstance().display_ = &disp;

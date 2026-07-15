@@ -311,6 +311,59 @@ std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON*
     return out;
 }
 
+const char* CanonicalRobotState(const char* value) {
+    if (value == nullptr) return nullptr;
+    for (const char* allowed : {"talking", "modeling", "listening", "thinking", "celebrating"}) {
+        if (strcmp(value, allowed) == 0) return allowed;
+    }
+    return nullptr;
+}
+
+std::string SafeEvidenceToken(const char* value, bool allow_slash) {
+    if (Blank(value)) return "-";
+    std::string token(value);
+    if (token.size() > 160) return "invalid";
+    for (unsigned char ch : token) {
+        const bool safe = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                          (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
+                          ch == '.' || ch == ':' || ch == '~' || (allow_slash && ch == '/');
+        if (!safe) return "invalid";
+    }
+    return token;
+}
+
+void LogLessonAckEvidence(const cJSON* in, const cJSON* ack_body) {
+    double acked_d = -1.0;
+    double render_elapsed_d = -1.0;
+    Num(ack_body, "acks", acked_d);
+    Num(ack_body, "renderElapsedMs", render_elapsed_d);
+    const bool rendered = cJSON_IsTrue(cJSON_GetObjectItem(ack_body, "rendered"));
+    const bool degraded = cJSON_IsTrue(cJSON_GetObjectItem(ack_body, "degraded"));
+    const char* robot_state = CanonicalRobotState(Str(ack_body, "robotState"));
+    const cJSON* asset_pack = Obj(ack_body, "assetPack");
+    const bool asset_pack_ready = cJSON_IsTrue(cJSON_GetObjectItem(asset_pack, "ready"));
+    const char* cache_key = Str(asset_pack, "cacheKey");
+
+    std::string evidence =
+        "assignmentId=" + SafeEvidenceToken(Str(in, "assignmentId"), false) +
+        " sessionId=" + SafeEvidenceToken(Str(in, "sessionId"), false) +
+        " stepId=" + SafeEvidenceToken(Str(in, "stepId"), false) +
+        " body.acks=" + std::to_string(static_cast<long>(acked_d)) +
+        " rendered=" + (rendered ? "true" : "false") +
+        " degraded=" + (degraded ? "true" : "false");
+    if (robot_state != nullptr) {
+        evidence += " robotState=";
+        evidence += robot_state;
+    }
+    evidence += " renderElapsedMs=" + std::to_string(static_cast<long>(render_elapsed_d));
+    if (asset_pack != nullptr) {
+        evidence += " assetPack.ready=";
+        evidence += asset_pack_ready ? "true" : "false";
+        evidence += " cacheKey=" + SafeEvidenceToken(cache_key, true);
+    }
+    ESP_LOGI(TAG, "lesson_ack TX %s", evidence.c_str());
+}
+
 cJSON* MakeErrorBody(const char* code, const char* message, bool retryable, const char* reason) {
     cJSON* b = cJSON_CreateObject();
     cJSON_AddStringToObject(b, "code", code);
@@ -941,6 +994,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
         cJSON_AddNumberToObject(b, "acks", static_cast<double>(acked));
         cJSON_AddBoolToObject(b, "rendered", rendered);
         cJSON_AddBoolToObject(b, "degraded", degraded);
+        const cJSON* inbound_scene = Obj(Obj(in, "body"), "scene");
+        const char* robot_state = CanonicalRobotState(
+            Str(Obj(inbound_scene, "robotOverlay"), "robotState"));
+        if (robot_state != nullptr) {
+            cJSON_AddStringToObject(b, "robotState", robot_state);
+        }
         if (render_elapsed_ms >= 0) {
             cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));
         }
@@ -975,6 +1034,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         if (asset_pack_ack != nullptr) cJSON_AddItemToObject(b, "assetPack", asset_pack_ack);
         if (telemetry != nullptr) cJSON_AddItemToObject(b, "telemetry", telemetry);
+        LogLessonAckEvidence(in, b);
         if (cache) {
             char* printed = cJSON_PrintUnformatted(b);
             if (printed != nullptr) {
@@ -1177,6 +1237,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 cJSON* replay_body = cJSON_Parse(it->body_json.c_str());
                 ESP_LOGI(TAG, "lesson_* duplicate seq=%ld; replaying exact ack body",
                          static_cast<long>(sequence));
+                LogLessonAckEvidence(root, replay_body);
                 emit(root, "lesson_ack", replay_body);
                 return;
             }
