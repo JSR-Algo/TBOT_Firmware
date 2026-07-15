@@ -154,12 +154,17 @@ public:
     // contention gate is untouched. Caller MUST gate on IsDeviceClaimed().
     using WakeWordPrewarmToken = WakeWordLifecycleController::PrewarmToken;
     using WifiProvisioningToken = WakeWordLifecycleController::ProvisioningToken;
+    struct WifiProvisioningBeginResult {
+        WifiProvisioningToken token{};
+        bool rollback_complete = false;
+        explicit operator bool() const { return token.valid(); }
+    };
     WakeWordPrewarmToken CaptureWakeWordPrewarmToken() const;
     void PrewarmWakeWord(WakeWordPrewarmToken token);
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
-    WifiProvisioningToken BeginWifiProvisioning();
+    WifiProvisioningBeginResult BeginWifiProvisioning();
     bool EndWifiProvisioningAndRearm(WifiProvisioningToken token);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);

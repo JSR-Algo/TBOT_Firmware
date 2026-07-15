@@ -1,4 +1,5 @@
 #include "application.h"
+#include "wifi_config_entry_policy.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -180,6 +181,123 @@ void Application::LessonMessageTask(void* arg) {
 
 bool Application::SetDeviceState(DeviceState state) {
     return state_machine_.TransitionTo(state);
+}
+
+bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation) {
+    preparation = {};
+    const DeviceState state = GetDeviceState();
+    if (!WifiConfigEntryPolicy::CanPrepare(
+            state, lesson_runtime_active_.load(), connect_in_flight_.load(),
+            reset_pending_.load())) {
+        ESP_LOGW(TAG, "WiFi config preparation rejected: state=%d connect=%d reset=%d",
+                 static_cast<int>(state), connect_in_flight_.load() ? 1 : 0,
+                 reset_pending_.load() ? 1 : 0);
+        return false;
+    }
+
+    preparation.original_state = state;
+    preparation.resume_mode = state == kDeviceStateConnecting ? reconnect_mode_ : listening_mode_;
+    preparation.resume_realtime = state == kDeviceStateConnecting ||
+                                  state == kDeviceStateListening ||
+                                  state == kDeviceStateSpeaking;
+    preparation.resume_listening = state != kDeviceStateConnecting ||
+                                   reconnect_resume_listening_.load();
+    preparation.valid = true;
+
+    ++connect_generation_;
+    CancelConnectWatchdog();
+    if (reconnect_timer_ != nullptr) {
+        esp_timer_stop(reconnect_timer_);
+    }
+    connect_attempt_active_.store(false);
+    passive_ws_intent_.store(false);
+    reconnect_passive_.store(false);
+
+    if (state == kDeviceStateSpeaking) {
+        AbortSpeaking(kAbortReasonNone);
+    }
+    if (GetDeviceState() == kDeviceStateListening) {
+        if (protocol_) {
+            protocol_->SendStopListening();
+        }
+        listening_started_ms_.store(0);
+        last_listening_activity_ms_.store(0);
+        audio_service_.EnableVoiceProcessing(false);
+        audio_service_.EnableWakeWordDetection(false);
+    }
+    CloseAudioChannelByIntent();
+    audio_service_.ResetDecoder();
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+
+    const DeviceState settled_state = GetDeviceState();
+    if (settled_state != kDeviceStateStarting &&
+        settled_state != kDeviceStateWifiConfiguring &&
+        settled_state != kDeviceStateIdle) {
+        if (!SetDeviceState(kDeviceStateIdle)) {
+            ESP_LOGE(TAG, "WiFi config preparation could not settle state=%d",
+                     static_cast<int>(settled_state));
+            if (!RollbackWifiConfigEntry(preparation)) {
+                ESP_LOGE(TAG, "WiFi config preparation rollback failed");
+            }
+            preparation.valid = false;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Application::PublishWifiConfigEntry(
+        const WifiConfigEntryPreparation& preparation) {
+    if (!preparation.valid) {
+        return false;
+    }
+    if (!SetDeviceState(kDeviceStateWifiConfiguring)) {
+        ESP_LOGE(TAG, "WiFi config state publication rejected from state=%d",
+                 static_cast<int>(GetDeviceState()));
+        return false;
+    }
+    return true;
+}
+
+bool Application::RollbackWifiConfigEntry(
+        const WifiConfigEntryPreparation& preparation) {
+    if (!preparation.valid) {
+        return false;
+    }
+    if (preparation.original_state == kDeviceStateStarting ||
+        preparation.original_state == kDeviceStateWifiConfiguring) {
+        if (GetDeviceState() != preparation.original_state) {
+            return false;
+        }
+        xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+        return true;
+    }
+    if (preparation.original_state == kDeviceStateActivating) {
+        return SetDeviceState(kDeviceStateActivating);
+    }
+    if (!preparation.resume_realtime) {
+        if (!SetDeviceState(kDeviceStateIdle)) {
+            return false;
+        }
+        xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+        return true;
+    }
+    if (!SetDeviceState(kDeviceStateIdle)) {
+        return false;
+    }
+    if (protocol_ == nullptr) {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+        return true;
+    }
+    reconnect_resume_listening_.store(preparation.resume_listening);
+    if (!SetDeviceState(kDeviceStateConnecting)) {
+        return false;
+    }
+    Schedule([this, mode = preparation.resume_mode]() {
+        ContinueOpenAudioChannel(mode);
+    });
+    return true;
 }
 
 void Application::Initialize() {

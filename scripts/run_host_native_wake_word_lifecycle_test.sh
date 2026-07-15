@@ -6,8 +6,10 @@ BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tbot-wake-word-lifecycle.XXXXXX")"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 
 "${CXX:-c++}" -std=c++17 -pthread \
+    -I"${ROOT_DIR}/tests/native_stubs" \
     -I"${ROOT_DIR}/main" \
     "${ROOT_DIR}/tests/native/wake_word_lifecycle_gate_test.cc" \
+    "${ROOT_DIR}/main/device_state_machine.cc" \
     -o "${BUILD_DIR}/wake_word_lifecycle_controller_test"
 
 "${BUILD_DIR}/wake_word_lifecycle_controller_test"

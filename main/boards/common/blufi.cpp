@@ -410,6 +410,10 @@ bool Blufi::IsBleStackFullyOff() const {
            !controller_active_;
 }
 
+bool Blufi::AbortProvisioningSetup(ProvisioningToken token) {
+    return CompleteSuccessfulProvisioningTeardown("setup_abort", token);
+}
+
 bool Blufi::CompleteSuccessfulProvisioningTeardown(
         const char* reason, ProvisioningToken provisioning_token) {
     auto completion = provisioning_session_.Claim(provisioning_token);

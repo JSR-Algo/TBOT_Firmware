@@ -785,7 +785,7 @@ void AudioService::PrewarmWakeWord(WakeWordPrewarmToken token) {
     }
 }
 
-AudioService::WifiProvisioningToken AudioService::BeginWifiProvisioning() {
+AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning() {
     wake_word_feed_target_.store(nullptr, std::memory_order_release);
     const auto provisioning_token = wake_word_lifecycle_.BeginProvisioningAndQuiesce([this]() {
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
@@ -801,8 +801,8 @@ AudioService::WifiProvisioningToken AudioService::BeginWifiProvisioning() {
     std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
     if (wake_word_ != nullptr) {
         if (!wake_word_->Shutdown(5000)) {
-            ESP_LOGE(TAG, "Wake word shutdown timed out; provisioning stays fail-closed");
-            return {};
+            ESP_LOGE(TAG, "Wake word shutdown timed out; rolling provisioning generation back");
+            return {{}, wake_word_lifecycle_.EndProvisioningAndRearm(provisioning_token)};
         }
         wake_word_.reset();
         wake_word_initialized_ = false;
@@ -810,9 +810,9 @@ AudioService::WifiProvisioningToken AudioService::BeginWifiProvisioning() {
     }
     if (!wake_word_lifecycle_.FinishProvisioningReset(provisioning_token)) {
         ESP_LOGE(TAG, "Wake word provisioning token became stale during reset");
-        return {};
+        return {{}, wake_word_lifecycle_.EndProvisioningAndRearm(provisioning_token)};
     }
-    return provisioning_token;
+    return {provisioning_token, false};
 }
 
 bool AudioService::EndWifiProvisioningAndRearm(WifiProvisioningToken token) {

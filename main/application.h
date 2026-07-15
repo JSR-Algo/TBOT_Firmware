@@ -48,6 +48,14 @@ enum AecMode {
 
 class Application {
 public:
+    struct WifiConfigEntryPreparation {
+        DeviceState original_state = kDeviceStateUnknown;
+        ListeningMode resume_mode = kListeningModeAutoStop;
+        bool resume_realtime = false;
+        bool resume_listening = true;
+        bool valid = false;
+    };
+
     static Application& GetInstance() {
         static Application instance;
         return instance;
@@ -78,6 +86,9 @@ public:
      * Returns true if transition was successful
      */
     bool SetDeviceState(DeviceState state);
+    bool PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation);
+    bool PublishWifiConfigEntry(const WifiConfigEntryPreparation& preparation);
+    bool RollbackWifiConfigEntry(const WifiConfigEntryPreparation& preparation);
 
     /**
      * Schedule a callback to be executed in the main task

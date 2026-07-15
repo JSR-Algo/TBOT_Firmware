@@ -25,7 +25,7 @@ def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_
     event = enable.index("xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING)", publish)
     assert accepted < publish < event
 
-    provision = source[source.index("AudioService::WifiProvisioningToken AudioService::BeginWifiProvisioning"):source.index("bool AudioService::EndWifiProvisioningAndRearm")]
+    provision = source[source.index("AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning"):source.index("bool AudioService::EndWifiProvisioningAndRearm")]
     quiesced = provision.index("BeginProvisioningAndQuiesce")
     assert provision.index("wake_word_feed_target_.store(nullptr", quiesced) > quiesced
     assert provision.index("xEventGroupClearBits", quiesced) > quiesced

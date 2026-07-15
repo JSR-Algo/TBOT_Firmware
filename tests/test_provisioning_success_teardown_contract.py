@@ -59,7 +59,7 @@ def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
     wifi = read("main/boards/common/wifi_board.cc")
     blufi_h = read("main/boards/common/blufi.h")
     start = function_body(wifi, "void WifiBoard::StartWifiConfigMode")
-    assert "WifiProvisioningToken BeginWifiProvisioning();" in audio_h
+    assert "WifiProvisioningBeginResult BeginWifiProvisioning();" in audio_h
     reserve = start.index("TryReserveProvisioningSession()")
     begin = start.index("BeginWifiProvisioning()", reserve)
     commit = start.index("provisioning_reservation.Commit(provisioning_token)", begin)

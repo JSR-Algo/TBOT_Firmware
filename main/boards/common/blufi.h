@@ -63,6 +63,7 @@ public:
     bool ClearProvisioningSession(ProvisioningToken token);
     ProvisioningToken CaptureProvisioningSession() const;
     bool IsBleStackFullyOff() const;
+    bool AbortProvisioningSetup(ProvisioningToken token);
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);
 

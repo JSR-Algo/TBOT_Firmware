@@ -1,5 +1,7 @@
 #include "audio/wake_word_lifecycle_controller.h"
 #include "audio/provisioning_session_binding.h"
+#include "device_state_machine.h"
+#include "wifi_config_entry_policy.h"
 
 #include <atomic>
 #include <condition_variable>
@@ -70,6 +72,41 @@ private:
 }  // namespace
 
 int main() {
+    Require(WifiConfigEntryPolicy::CanPrepare(kDeviceStateListening, false, false, false),
+            "listening can prepare when realtime workers are settled");
+    Require(!WifiConfigEntryPolicy::CanPrepare(kDeviceStateListening, false, true, false),
+            "connect-in-flight rejects before preparation mutation");
+    Require(!WifiConfigEntryPolicy::CanPrepare(kDeviceStateConnecting, false, false, true),
+            "pending reset rejects before preparation mutation");
+    Require(!WifiConfigEntryPolicy::CanPrepare(kDeviceStateListening, true, false, false),
+            "lesson runtime rejects WiFi preparation");
+
+    auto require_wifi_config_route = [](DeviceState realtime_state,
+                                        const char* route_name) {
+        DeviceStateMachine machine;
+        Require(machine.TransitionTo(kDeviceStateStarting), route_name);
+        Require(machine.TransitionTo(kDeviceStateActivating), route_name);
+        Require(machine.TransitionTo(kDeviceStateIdle), route_name);
+        if (realtime_state == kDeviceStateConnecting) {
+            Require(machine.TransitionTo(kDeviceStateConnecting), route_name);
+        } else if (realtime_state == kDeviceStateListening) {
+            Require(machine.TransitionTo(kDeviceStateListening), route_name);
+        } else {
+            Require(machine.TransitionTo(kDeviceStateSpeaking), route_name);
+        }
+        if (realtime_state != kDeviceStateConnecting) {
+            Require(!machine.TransitionTo(kDeviceStateWifiConfiguring),
+                    "realtime state cannot publish WiFi config directly");
+        }
+        Require(machine.TransitionTo(kDeviceStateIdle),
+                "preparation settles realtime state to idle");
+        Require(machine.TransitionTo(kDeviceStateWifiConfiguring),
+                "prepared idle state publishes WiFi config");
+    };
+    require_wifi_config_route(kDeviceStateListening, "listening entry route");
+    require_wifi_config_route(kDeviceStateSpeaking, "speaking entry route");
+    require_wifi_config_route(kDeviceStateConnecting, "connecting entry route");
+
     WakeWordLifecycleController controller;
     const auto initial_generation = controller.CapturePrewarmToken().generation;
     Require(!controller.EndProvisioningAndRearm({}),
