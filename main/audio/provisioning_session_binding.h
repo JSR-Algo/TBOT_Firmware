@@ -53,9 +53,54 @@ public:
         Token token_{};
     };
 
+    class ReservationGuard {
+    public:
+        ReservationGuard() = default;
+        ReservationGuard(const ReservationGuard&) = delete;
+        ReservationGuard& operator=(const ReservationGuard&) = delete;
+        ReservationGuard(ReservationGuard&& other) noexcept { MoveFrom(other); }
+        ReservationGuard& operator=(ReservationGuard&& other) noexcept {
+            if (this != &other) {
+                Release();
+                MoveFrom(other);
+            }
+            return *this;
+        }
+        ~ReservationGuard() { Release(); }
+
+        explicit operator bool() const { return owner_ != nullptr; }
+
+        bool Commit(Token token) {
+            if (owner_ == nullptr || !token.valid()) {
+                return false;
+            }
+            auto* owner = owner_;
+            owner_ = nullptr;
+            return owner->CommitReservation(token);
+        }
+
+    private:
+        friend class ProvisioningSessionBinding;
+        explicit ReservationGuard(ProvisioningSessionBinding* owner) : owner_(owner) {}
+
+        void Release() {
+            if (owner_ != nullptr) {
+                owner_->ReleaseReservation();
+                owner_ = nullptr;
+            }
+        }
+
+        void MoveFrom(ReservationGuard& other) {
+            owner_ = other.owner_;
+            other.owner_ = nullptr;
+        }
+
+        ProvisioningSessionBinding* owner_ = nullptr;
+    };
+
     bool Bind(Token token) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (completion_active_) {
+        if (completion_active_ || reservation_active_) {
             return false;
         }
         token_ = token;
@@ -74,7 +119,8 @@ public:
 
     CompletionGuard Claim(Token token) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (completion_active_ || token_.generation != token.generation) {
+        if (completion_active_ || reservation_active_ ||
+            token_.generation != token.generation) {
             return {};
         }
         completion_active_ = true;
@@ -82,7 +128,31 @@ public:
         return CompletionGuard(this, token);
     }
 
+    ReservationGuard TryReserve() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (completion_active_ || reservation_active_) {
+            return {};
+        }
+        reservation_active_ = true;
+        return ReservationGuard(this);
+    }
+
 private:
+    bool CommitReservation(Token token) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!reservation_active_ || completion_active_ || !token.valid()) {
+            return false;
+        }
+        token_ = token;
+        reservation_active_ = false;
+        return true;
+    }
+
+    void ReleaseReservation() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        reservation_active_ = false;
+    }
+
     bool ReleaseCompletion(Token token, bool consume) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!completion_active_ || completion_token_.generation != token.generation) {
@@ -98,6 +168,7 @@ private:
 
     mutable std::mutex mutex_;
     Token token_{};
+    bool reservation_active_ = false;
     bool completion_active_ = false;
     Token completion_token_{};
 };

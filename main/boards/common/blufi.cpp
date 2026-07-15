@@ -393,6 +393,10 @@ bool Blufi::BindProvisioningSession(ProvisioningToken token) {
     return provisioning_session_.Bind(token);
 }
 
+Blufi::ProvisioningReservation Blufi::TryReserveProvisioningSession() {
+    return provisioning_session_.TryReserve();
+}
+
 Blufi::ProvisioningToken Blufi::CaptureProvisioningSession() const {
     return provisioning_session_.Capture();
 }

@@ -20,6 +20,7 @@
 class Blufi {
 public:
     using ProvisioningToken = ProvisioningSessionBinding::Token;
+    using ProvisioningReservation = ProvisioningSessionBinding::ReservationGuard;
     /**
      * @brief BLE setup state for heartbeat / observability.
      */
@@ -58,6 +59,7 @@ public:
     esp_err_t deinit();
 
     bool BindProvisioningSession(ProvisioningToken token);
+    ProvisioningReservation TryReserveProvisioningSession();
     ProvisioningToken CaptureProvisioningSession() const;
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);

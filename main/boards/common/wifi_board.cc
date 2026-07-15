@@ -289,14 +289,19 @@ void WifiBoard::StartWifiConfigMode() {
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
+    auto provisioning_reservation = blufi.TryReserveProvisioningSession();
+    if (!provisioning_reservation) {
+        ESP_LOGE(TAG, "WiFi config aborted: prior provisioning completion still active");
+        return;
+    }
     const auto provisioning_token =
         Application::GetInstance().GetAudioService().BeginWifiProvisioning();
     if (!provisioning_token) {
         ESP_LOGE(TAG, "WiFi config aborted: wake-word shutdown did not quiesce");
         return;
     }
-    if (!blufi.BindProvisioningSession(provisioning_token)) {
-        ESP_LOGE(TAG, "WiFi config aborted: prior provisioning completion still active");
+    if (!provisioning_reservation.Commit(provisioning_token)) {
+        ESP_LOGE(TAG, "WiFi config aborted: failed to bind provisioning token");
         return;
     }
     // initialize esp-blufi protocol.

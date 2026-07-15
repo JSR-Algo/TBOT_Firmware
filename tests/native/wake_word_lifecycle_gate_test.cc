@@ -249,6 +249,48 @@ int main() {
     Require(deinit_calls == 1, "only current session owns BLE deinit");
     Require(!binding.Capture().valid(), "successful completion consumes binding once");
 
+    WakeWordLifecycleController reservation_controller;
+    ProvisioningSessionBinding reservation_binding;
+    const WakeWordLifecycleController::ProvisioningToken held_token{41};
+    Require(reservation_binding.Bind(held_token), "reservation test binds existing session");
+    int begin_callback_count = 0;
+    const auto generation_before_rejected_reservation =
+        reservation_controller.CapturePrewarmToken().generation;
+    {
+        auto active_completion = reservation_binding.Claim(held_token);
+        Require(static_cast<bool>(active_completion), "existing completion owns binding");
+        auto rejected_reservation = reservation_binding.TryReserve();
+        if (rejected_reservation) {
+            ++begin_callback_count;
+            reservation_controller.BeginProvisioningAndQuiesce([]() {});
+        }
+        Require(!rejected_reservation, "reservation is rejected while completion is active");
+        Require(begin_callback_count == 0, "rejected reservation never calls Begin");
+        Require(reservation_controller.CapturePrewarmToken().generation ==
+                    generation_before_rejected_reservation,
+                "rejected reservation leaves lifecycle generation unchanged");
+    }
+    {
+        auto reservation = reservation_binding.TryReserve();
+        Require(static_cast<bool>(reservation), "reservation succeeds after completion releases");
+        ++begin_callback_count;
+        const auto token = reservation_controller.BeginProvisioningAndQuiesce([]() {});
+        Require(reservation_controller.FinishProvisioningReset(token),
+                "reserved Begin finishes reset");
+        Require(reservation.Commit(token), "reservation atomically commits Begin token");
+        Require(reservation_binding.Matches(token), "committed token becomes current binding");
+        Require(reservation_controller.EndProvisioningAndRearm(token),
+                "reservation test lifecycle rearms");
+    }
+    {
+        auto failed_begin_reservation = reservation_binding.TryReserve();
+        Require(static_cast<bool>(failed_begin_reservation), "Begin failure holds reservation");
+        const WakeWordLifecycleController::ProvisioningToken failed_token{};
+        Require(!failed_token, "failed Begin produces invalid token");
+    }
+    Require(static_cast<bool>(reservation_binding.TryReserve()),
+            "failed Begin releases reservation without binding mutation");
+
     FakeAsyncWakeWord async;
     async.StartEncode();
     std::atomic<bool> pop_result{true};
