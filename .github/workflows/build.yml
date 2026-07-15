@@ -29,15 +29,17 @@ jobs:
       - name: Install Python test dependencies
         run: python3 -m pip install pytest
 
-      - name: Run wake-word lifecycle tests
+      - name: Run native lifecycle and lesson heap tests
         run: |
           scripts/run_host_native_wake_word_lifecycle_test.sh
           scripts/run_host_native_blufi_transition_gate_test.sh
+          scripts/run_host_native_lesson_heap_probe_test.sh
           python3 -m pytest \
             tests/test_wake_word_lifecycle_contract.py \
             tests/test_provisioning_success_teardown_contract.py \
             tests/test_blufi_deinit_transaction.py \
             tests/test_heap_phase_checkpoint_contract.py \
+            tests/test_lesson_heap_boundary_contract.py \
             tests/test_wifi_board_provisioning.py \
             tests/test_wifi_provisioning_brand.py -q
 

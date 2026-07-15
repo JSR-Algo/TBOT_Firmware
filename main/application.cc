@@ -13,6 +13,7 @@
 #include "robot_uart.h"
 #include "app_manager.h"
 #include "tbot_connect_mapper.h"
+#include "lesson_heap_probe.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
 #include "boards/common/system_reset.h"
@@ -138,7 +139,10 @@ void Application::EnqueueLessonMessage(const cJSON* root) {
         return;
     }
 
+    LogLessonHeapBoundary("enqueue.before_serialize", 0);
     char* payload = cJSON_PrintUnformatted(root);
+    const size_t payload_bytes = payload != nullptr ? strlen(payload) : 0;
+    LogLessonHeapBoundary("enqueue.after_serialize", payload_bytes);
     if (payload == nullptr) {
         ESP_LOGW(TAG, "lesson_* dropped: serialize failed type=%s seq=%d",
                  type_value, sequence_value);
@@ -151,7 +155,7 @@ void Application::EnqueueLessonMessage(const cJSON* root) {
         cJSON_free(payload);
     } else {
         ESP_LOGI(TAG, "lesson_* enqueued type=%s seq=%d bytes=%u",
-                 type_value, sequence_value, (unsigned)strlen(payload));
+                 type_value, sequence_value, (unsigned)payload_bytes);
     }
 }
 
@@ -162,7 +166,10 @@ void Application::LessonMessageTask(void* arg) {
         if (xQueueReceive(self->lesson_message_queue_, &payload, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+        const size_t payload_bytes = strlen(payload);
+        LogLessonHeapBoundary("worker.before_parse", payload_bytes);
         cJSON* root = cJSON_Parse(payload);
+        LogLessonHeapBoundary("worker.after_parse", payload_bytes);
         if (root != nullptr) {
             const cJSON* type = cJSON_GetObjectItem(root, "type");
             const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
@@ -170,12 +177,15 @@ void Application::LessonMessageTask(void* arg) {
                      cJSON_IsString(type) ? type->valuestring : "(missing)",
                      cJSON_IsNumber(sequence) ? sequence->valueint : -1);
             self->HandleLessonMessage(root);
+            LogLessonHeapBoundary("worker.after_handle", payload_bytes);
             cJSON_Delete(root);
+            LogLessonHeapBoundary("worker.after_delete", payload_bytes);
         } else {
             ESP_LOGW(TAG, "lesson_* dropped: worker parse failed");
         }
         cJSON_free(payload);
         payload = nullptr;
+        LogLessonHeapBoundary("worker.after_payload_free", payload_bytes);
     }
 }
 
