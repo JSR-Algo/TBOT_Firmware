@@ -733,12 +733,17 @@ void AudioService::EnableWakeWordDetection(bool enable) {
             }
         }
         wake_word_->Start();
-        wake_word_feed_target_.store(wake_word_.get(), std::memory_order_release);
-        wake_word_lifecycle_.SetRunning(true);
-        xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+        if (wake_word_lifecycle_.SetRunning(true, lease.generation())) {
+            wake_word_feed_target_.store(wake_word_.get(), std::memory_order_release);
+            xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+        } else {
+            wake_word_feed_target_.store(nullptr, std::memory_order_release);
+            xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
+            wake_word_->Stop();
+        }
     } else {
         wake_word_feed_target_.store(nullptr, std::memory_order_release);
-        wake_word_lifecycle_.SetRunning(false);
+        wake_word_lifecycle_.SetRunning(false, lease.generation());
         xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
         wake_word_->Stop();
     }
@@ -790,6 +795,8 @@ bool AudioService::BeginWifiProvisioning() {
             wake_word_->Shutdown(0);
         }
     });
+    wake_word_feed_target_.store(nullptr, std::memory_order_release);
+    xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
 
     std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
     if (wake_word_ != nullptr) {

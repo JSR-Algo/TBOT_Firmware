@@ -67,9 +67,36 @@ int main() {
 
     auto feed = controller.TryAcquireFeed();
     Require(!feed, "feed is rejected before running is published");
-    controller.SetRunning(true);
+    Require(controller.SetRunning(true, controller.CapturePrewarmToken().generation),
+            "running publication accepts the current generation");
     feed = controller.TryAcquireFeed();
     Require(static_cast<bool>(feed), "running feed acquires a lease");
+
+    auto enabling = controller.TryAcquireAccess();
+    std::mutex enable_race_mutex;
+    std::condition_variable enable_race_cv;
+    bool enable_quiescing = false;
+    std::thread enable_release([&]() {
+        controller.BeginProvisioningAndQuiesce([&]() {
+            std::lock_guard<std::mutex> lock(enable_race_mutex);
+            enable_quiescing = true;
+            enable_race_cv.notify_all();
+        });
+    });
+    {
+        std::unique_lock<std::mutex> lock(enable_race_mutex);
+        enable_race_cv.wait(lock, [&]() { return enable_quiescing; });
+    }
+    Require(!controller.SetRunning(true, enabling.generation()),
+            "pre-quiesce enable lease cannot publish running after generation changes");
+    enabling = {};
+    feed = {};
+    enable_release.join();
+    controller.FinishProvisioningReset();
+    controller.EndProvisioningAndRearm();
+    Require(controller.SetRunning(true, controller.CapturePrewarmToken().generation),
+            "rearmed generation can publish running");
+    feed = controller.TryAcquireFeed();
 
     std::mutex barrier_mutex;
     std::condition_variable barrier_cv;

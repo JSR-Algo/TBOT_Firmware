@@ -19,6 +19,16 @@ def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_
     assert "wake_word_lifecycle_.TryAcquirePrewarm(token)" in source
     assert "wake_word_lifecycle_.BeginProvisioningAndQuiesce" in source
     assert "const std::string& GetLastWakeWord()" not in header
+    enable = source[source.index("void AudioService::EnableWakeWordDetection"):source.index("AudioService::WakeWordPrewarmToken")]
+    accepted = enable.index("if (wake_word_lifecycle_.SetRunning(true, lease.generation()))")
+    publish = enable.index("wake_word_feed_target_.store(wake_word_.get()", accepted)
+    event = enable.index("xEventGroupSetBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING)", publish)
+    assert accepted < publish < event
+
+    provision = source[source.index("bool AudioService::BeginWifiProvisioning"):source.index("void AudioService::EndWifiProvisioningAndRearm")]
+    quiesced = provision.index("BeginProvisioningAndQuiesce")
+    assert provision.index("wake_word_feed_target_.store(nullptr", quiesced) > quiesced
+    assert provision.index("xEventGroupClearBits", quiesced) > quiesced
 
 
 def test_concrete_wake_words_ack_shutdown_and_preserve_borrowed_models():
@@ -46,8 +56,10 @@ def test_wifi_provisioning_rearms_only_after_ble_deinit():
     assert start_body.index("BeginWifiProvisioning()") < start_body.index("blufi.init();")
 
     for deinit in (index for index in range(len(source)) if source.startswith("blufi.deinit();", index)):
-        tail = source[deinit:deinit + 180]
+        tail = source[deinit:deinit + 420]
+        assert "== ESP_OK" in tail
         assert "EndWifiProvisioningAndRearm();" in tail
+        assert "ESP_LOGE" in tail
 
 
 def test_ci_runs_deterministic_wake_word_lifecycle_gate():

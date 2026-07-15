@@ -146,8 +146,13 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     // the timer cannot post a redundant teardown after deinit().
                     blufi.CancelBleSetupTimeout();
                     // Release BLE resources
-                    blufi.deinit();
-                    Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
+                    const esp_err_t deinit_err = blufi.deinit();
+                    if (deinit_err == ESP_OK) {
+                        Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
+                    } else {
+                        ESP_LOGE(TAG, "BluFi teardown failed; wake-word lifecycle stays provisioning-owned: %s",
+                                 esp_err_to_name(deinit_err));
+                    }
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
@@ -165,8 +170,13 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
                     // timer callback from posting a redundant teardown.
                     blufi.CancelBleSetupTimeout();
                     // make sure blufi resources has been released
-                    blufi.deinit();
-                    Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
+                    const esp_err_t deinit_err = blufi.deinit();
+                    if (deinit_err == ESP_OK) {
+                        Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm();
+                    } else {
+                        ESP_LOGE(TAG, "BluFi teardown failed; wake-word lifecycle stays provisioning-owned: %s",
+                                 esp_err_to_name(deinit_err));
+                    }
                 } else {
                     ESP_LOGI(TAG,
                              "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");

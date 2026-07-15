@@ -63,16 +63,18 @@ public:
         return token.valid() ? TryAcquire(0, token.generation) : Lease{};
     }
 
-    void SetRunning(bool running) {
+    bool SetRunning(bool running, uint64_t expected_generation) {
         std::lock_guard<std::mutex> lock(transition_mutex_);
         uint64_t state = state_.load(std::memory_order_relaxed);
         uint8_t flags = Flags(state);
-        if (flags & (kProvisioning | kQuiescing)) {
-            return;
+        if (Generation(state) != expected_generation ||
+            (flags & (kProvisioning | kQuiescing))) {
+            return false;
         }
         flags = running ? static_cast<uint8_t>(flags | kRunning)
                         : static_cast<uint8_t>(flags & ~kRunning);
         state_.store(Pack(Generation(state), flags), std::memory_order_release);
+        return true;
     }
 
     template <typename Callback>
