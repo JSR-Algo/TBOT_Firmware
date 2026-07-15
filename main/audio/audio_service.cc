@@ -801,16 +801,16 @@ AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning() 
     std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
     if (wake_word_ != nullptr) {
         if (!wake_word_->Shutdown(5000)) {
-            ESP_LOGE(TAG, "Wake word shutdown timed out; rolling provisioning generation back");
-            return {{}, wake_word_lifecycle_.EndProvisioningAndRearm(provisioning_token)};
+            ESP_LOGE(TAG, "Wake word shutdown timed out; provisioning remains fail-closed");
+            return {{}, false};
         }
         wake_word_.reset();
         wake_word_initialized_ = false;
         ESP_LOGI(TAG, "Wake word resources released for WiFi config");
     }
     if (!wake_word_lifecycle_.FinishProvisioningReset(provisioning_token)) {
-        ESP_LOGE(TAG, "Wake word provisioning token became stale during reset");
-        return {{}, wake_word_lifecycle_.EndProvisioningAndRearm(provisioning_token)};
+        ESP_LOGE(TAG, "Wake word provisioning token became stale; provisioning remains fail-closed");
+        return {{}, false};
     }
     return {provisioning_token, false};
 }

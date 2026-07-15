@@ -31,6 +31,29 @@ def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_
     assert provision.index("xEventGroupClearBits", quiesced) > quiesced
 
 
+def test_begin_failure_after_quiescence_stays_fail_closed_without_rearm():
+    source = read("main/audio/audio_service.cc")
+    wifi = read("main/boards/common/wifi_board.cc")
+    provision = source[
+        source.index("AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning"):
+        source.index("bool AudioService::EndWifiProvisioningAndRearm")
+    ]
+
+    timeout = provision[provision.index("if (!wake_word_->Shutdown(5000))"):]
+    timeout = timeout[:timeout.index("wake_word_.reset();")]
+    stale = provision[provision.index("if (!wake_word_lifecycle_.FinishProvisioningReset") :]
+    stale = stale[:stale.index("return {provisioning_token")]
+    for failure in (timeout, stale):
+        assert "return {{}, false};" in failure
+        assert "EndProvisioningAndRearm" not in failure
+
+    start = wifi[wifi.index("void WifiBoard::StartWifiConfigMode("):]
+    start = start[:wifi.index("void WifiBoard::EnterWifiConfigMode()") - wifi.index("void WifiBoard::StartWifiConfigMode(")]
+    begin_failure = start[start.index("if (!begin_result)"):start.index("const auto provisioning_token")]
+    assert "if (begin_result.rollback_complete)" in begin_failure
+    assert "RollbackWifiConfigEntry(preparation)" in begin_failure
+
+
 def test_concrete_wake_words_ack_shutdown_and_preserve_borrowed_models():
     for stem in ("afe_wake_word", "custom_wake_word", "esp_wake_word"):
         header = read(f"main/audio/wake_words/{stem}.h")

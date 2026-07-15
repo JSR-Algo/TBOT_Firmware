@@ -107,6 +107,17 @@ int main() {
     require_wifi_config_route(kDeviceStateSpeaking, "speaking entry route");
     require_wifi_config_route(kDeviceStateConnecting, "connecting entry route");
 
+    WakeWordLifecycleController timeout_controller;
+    Require(timeout_controller.SetRunning(
+                true, timeout_controller.CapturePrewarmToken().generation),
+            "timeout scenario starts with running lifecycle");
+    const auto timed_out_token = timeout_controller.BeginProvisioningAndQuiesce([]() {});
+    Require(timed_out_token.valid(), "timeout scenario owns a provisioning generation");
+    Require(!timeout_controller.TryAcquireAccess(),
+            "shutdown timeout keeps access rejected while provisioning owns lifecycle");
+    Require(!timeout_controller.TryAcquireFeed(),
+            "shutdown timeout keeps feed rejected while provisioning owns lifecycle");
+
     WakeWordLifecycleController controller;
     const auto initial_generation = controller.CapturePrewarmToken().generation;
     Require(!controller.EndProvisioningAndRearm({}),
