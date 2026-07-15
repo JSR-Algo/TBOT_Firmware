@@ -2035,6 +2035,15 @@ void Application::ActivationTask() {
     SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
     SystemInfo::StopHeapPhaseMonitor();
 
+    // Build the AFE only after boot HTTP/TLS transients have released their
+    // internal SRAM, but before protocol startup and the Idle wake-word gate.
+    if (IsDeviceClaimed()) {
+        SystemInfo::StartHeapPhaseMonitor();
+        audio_service_.PrewarmWakeWord();
+        SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
+        SystemInfo::StopHeapPhaseMonitor();
+    }
+
     // Initialize the protocol
     SystemInfo::StartHeapPhaseMonitor();
     InitializeProtocol();
@@ -2100,23 +2109,6 @@ void Application::CheckAssetsVersion() {
 
     // Apply assets
     assets.Apply();
-
-    // Cold-boot first-wake latency fix: prewarm the AFE wake-word pipeline here,
-    // on the prio-2 activation task, so the expensive one-time AFE create + the
-    // audio_detection fetch-task spawn overlap the OTA/protocol network waits that
-    // still run before Idle. Without this the AFE is built lazily on the FIRST
-    // EnableWakeWordDetection(true) at the prio-10 Idle transition, and the very
-    // first "Hi ESP" spoken right at Idle races AFE init and is dropped (1-2
-    // tries). Strictly gated on IsDeviceClaimed() so an UNCLAIMED robot never
-    // builds/runs the mic (BLE+AFE-FEED contention gate). Prewarm does NOT Start()
-    // the mic — the locked Idle gate still owns enabling it — so the FEED ring
-    // stays empty until then and OQ1 / the contention fix are untouched.
-    if (IsDeviceClaimed()) {
-        SystemInfo::StartHeapPhaseMonitor();
-        audio_service_.PrewarmWakeWord();
-        SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
-        SystemInfo::StopHeapPhaseMonitor();
-    }
 
     display->SetChatMessage("system", "");
     display->SetEmotion("microchip_ai");
