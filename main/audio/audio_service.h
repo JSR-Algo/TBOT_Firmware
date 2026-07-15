@@ -23,6 +23,7 @@
 #include "audio_processor.h"
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
+#include "wake_word_lifecycle_gate.h"
 #include "protocol.h"
 #include "ogg_demuxer.h"
 
@@ -145,8 +146,7 @@ public:
     void EnableWakeWordDetection(bool enable);
     // Materialize the AFE wake-word pipeline (create_from_config + spawn the
     // audio_detection fetch task) WITHOUT starting it. Hoisted off the Idle-time
-    // prio-10 state transition onto the prio-2 activation task so the expensive
-    // one-time AFE build overlaps the OTA/protocol network waits before Idle.
+    // prio-10 state transition onto the prio-2 activation task after boot HTTP.
     // After this, the Idle EnableWakeWordDetection(true) only has to Start()
     // (cheap), so the very first "Hi ESP" lands first try instead of racing AFE
     // init. Must NOT Start() / set AS_EVENT_WAKE_WORD_RUNNING — the FEED ring
@@ -184,6 +184,7 @@ private:
     AudioServiceCallbacks callbacks_;
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<WakeWord> wake_word_;
+    WakeWordLifecycleGate wake_word_lifecycle_gate_;
     std::unique_ptr<AudioDebugger> audio_debugger_;
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;

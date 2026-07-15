@@ -146,6 +146,10 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     assert "void ReleaseWakeWordResourcesForWifiConfig();" in audio_h
     release_start = audio_cc.index("void AudioService::ReleaseWakeWordResourcesForWifiConfig()")
     release_body = audio_cc[release_start:audio_cc.index("void AudioService::EnableVoiceProcessing", release_start)]
+    prewarm_body = function_body(audio_cc, "void AudioService::PrewarmWakeWord")
+    assert "WakeWordLifecycleGate wake_word_lifecycle_gate_;" in audio_h
+    assert "wake_word_lifecycle_gate_.RunPrewarm" in prewarm_body
+    assert "wake_word_lifecycle_gate_.CancelPrewarmAndRunRelease" in release_body
     assert "EnableWakeWordDetection(false);" in release_body
     assert "wake_word_.reset();" in release_body
     assert "wake_word_initialized_ = false;" in release_body

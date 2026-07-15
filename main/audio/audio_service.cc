@@ -732,34 +732,41 @@ void AudioService::PrewarmWakeWord() {
     // AS_EVENT_WAKE_WORD_RUNNING: the FEED ring must stay empty until the locked
     // IsDeviceClaimed()-gated Idle gate enables the mic, preserving the BLE/AFE
     // contention fix. Callers gate this on IsDeviceClaimed().
-    if (!wake_word_) {
-        CreateWakeWordIfAvailable();
-    }
-    if (!wake_word_) {
-        return;
-    }
-    if (!wake_word_initialized_) {
-        if (!wake_word_->Initialize(codec_, models_list_)) {
-            ESP_LOGE(TAG, "Failed to prewarm wake word");
+    const bool ran = wake_word_lifecycle_gate_.RunPrewarm([this]() {
+        if (!wake_word_) {
+            CreateWakeWordIfAvailable();
+        }
+        if (!wake_word_) {
             return;
         }
-        wake_word_initialized_ = true;
-        ESP_LOGI(TAG, "Wake word prewarmed (AFE built; not started)");
+        if (!wake_word_initialized_) {
+            if (!wake_word_->Initialize(codec_, models_list_)) {
+                ESP_LOGE(TAG, "Failed to prewarm wake word");
+                return;
+            }
+            wake_word_initialized_ = true;
+            ESP_LOGI(TAG, "Wake word prewarmed (AFE built; not started)");
+        }
+    });
+    if (!ran) {
+        ESP_LOGI(TAG, "Wake word prewarm cancelled by WiFi config ownership");
     }
 }
 
 void AudioService::ReleaseWakeWordResourcesForWifiConfig() {
-    if (!wake_word_) {
-        return;
-    }
+    wake_word_lifecycle_gate_.CancelPrewarmAndRunRelease([this]() {
+        if (!wake_word_) {
+            return;
+        }
 
-    EnableWakeWordDetection(false);
-    // Give the audio input task one scheduling slice to observe the stopped bit
-    // before destroying the AFE object. This path runs only on explicit setup.
-    vTaskDelay(pdMS_TO_TICKS(80));
-    wake_word_.reset();
-    wake_word_initialized_ = false;
-    ESP_LOGI(TAG, "Wake word resources released for WiFi config");
+        EnableWakeWordDetection(false);
+        // Give the audio input task one scheduling slice to observe the stopped bit
+        // before destroying the AFE object. This path runs only on explicit setup.
+        vTaskDelay(pdMS_TO_TICKS(80));
+        wake_word_.reset();
+        wake_word_initialized_ = false;
+        ESP_LOGI(TAG, "Wake word resources released for WiFi config");
+    });
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {
