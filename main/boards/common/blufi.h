@@ -109,23 +109,29 @@ private:
     bool inited_ = false;
     bool host_active_ = false;
     bool controller_active_ = false;
+    bool profile_active_ = false;
+    bool host_enabled_ = false;
+    bool host_initialized_ = false;
+    bool nimble_services_active_ = false;
+    bool controller_enabled_ = false;
+    bool controller_initialized_ = false;
 
     Blufi();
 
     ~Blufi();
 
     // Initialization logic
-    static esp_err_t _controller_init();
+    esp_err_t _controller_init();
 
-    static esp_err_t _controller_deinit();
+    esp_err_t _controller_deinit();
 
-    static esp_err_t _host_init();
+    esp_err_t _host_init();
 
-    static esp_err_t _host_deinit();
+    esp_err_t _host_deinit();
 
-    static esp_err_t _gap_register_callback();
+    esp_err_t _gap_register_callback();
 
-    static esp_err_t _host_and_cb_init();
+    esp_err_t _host_and_cb_init();
 
     void _security_init();
 
