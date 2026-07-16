@@ -1,6 +1,5 @@
 #include "lesson_asset_download_staging.h"
 #include "lesson_storage_hil_controller.h"
-#include "lesson_storage_hil_hooks.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -17,7 +16,10 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char* kRoot = "/tmp/tbot-lesson-asset-staging-host";
+#ifndef TBOT_LESSON_ASSET_STAGING_TEST_ROOT
+#define TBOT_LESSON_ASSET_STAGING_TEST_ROOT "/tmp/tbot-lesson-asset-staging-host"
+#endif
+constexpr const char* kRoot = TBOT_LESSON_ASSET_STAGING_TEST_ROOT;
 constexpr const char* kZeroSha256 =
     "0000000000000000000000000000000000000000000000000000000000000000";
 constexpr const char* kHilKey =
@@ -78,76 +80,6 @@ void ArmSync(
 void ExpectArmConsumed(const char* message) {
     const auto status = LessonStorageHilController::GetInstance().Status();
     Expect(status.reached && status.consumed && !status.armed, message);
-}
-
-bool SimulateDownloadToStaging(
-    LessonAssetDownloadStagingFile& staging,
-    const char* cache_key,
-    bool has_declared_size,
-    std::size_t declared_size,
-    const std::string& source,
-    std::size_t& bytes_out,
-    std::vector<std::size_t>& read_wants
-) {
-    const std::string tmp = staging.path() + ".tmp";
-    fs::remove(tmp);
-    bytes_out = 0;
-    bool wrote = false;
-    try {
-        std::ofstream stream(tmp, std::ios::binary);
-        while (bytes_out < source.size()) {
-            std::size_t want = source.size() - bytes_out;
-            if (has_declared_size) {
-                want = LessonStorageHilController::GetInstance().LimitDownloadRead(
-                    cache_key, bytes_out, want, declared_size);
-                if (want == 0) {
-                    const auto outcome = RunLessonStorageHilCheckpoint(
-                        cache_key,
-                        LessonStorageHilOperation::kSync,
-                        LessonStorageHilCheckpoint::kAfterDownloadBytes,
-                        static_cast<std::uint32_t>(bytes_out),
-                        static_cast<std::uint32_t>(declared_size));
-                    if (outcome != LessonStorageHilHookOutcome::kContinue) {
-                        throw std::runtime_error("injected local write failure");
-                    }
-                    continue;
-                }
-            }
-            read_wants.push_back(want);
-            const std::size_t count = std::min(want, source.size() - bytes_out);
-            if (!wrote) {
-                const auto outcome = RunLessonStorageHilCheckpoint(
-                    cache_key,
-                    LessonStorageHilOperation::kSync,
-                    LessonStorageHilCheckpoint::kBeforeDownloadWrite,
-                    0,
-                    has_declared_size ? static_cast<std::uint32_t>(declared_size) : 0);
-                if (outcome != LessonStorageHilHookOutcome::kContinue) {
-                    throw std::runtime_error("injected local write failure");
-                }
-                wrote = true;
-            }
-            stream.write(source.data() + bytes_out, static_cast<std::streamsize>(count));
-            bytes_out += count;
-            if (has_declared_size) {
-                const auto outcome = RunLessonStorageHilCheckpoint(
-                    cache_key,
-                    LessonStorageHilOperation::kSync,
-                    LessonStorageHilCheckpoint::kAfterDownloadBytes,
-                    static_cast<std::uint32_t>(bytes_out),
-                    static_cast<std::uint32_t>(declared_size));
-                if (outcome != LessonStorageHilHookOutcome::kContinue) {
-                    throw std::runtime_error("injected local write failure");
-                }
-            }
-        }
-        stream.close();
-        fs::rename(tmp, staging.path());
-        return true;
-    } catch (...) {
-        fs::remove(tmp);
-        return false;
-    }
 }
 
 void TestScopeCleanupOnDownloadException() {
@@ -352,75 +284,6 @@ void TestSuccessfulReplacementCleansBackupAndStaging() {
            "successful replacement left backup file");
 }
 
-void TestBeforeFirstWriteFailuresLeaveNoPartialState() {
-    for (const auto action : {
-             LessonStorageHilAction::kFail,
-             LessonStorageHilAction::kNoSpace,
-         }) {
-        const std::string destination = std::string(kRoot) + "/before-write.png";
-        Write(destination, "known-good");
-        ArmSync(LessonStorageHilCheckpoint::kBeforeDownloadWrite, action);
-        std::size_t bytes = 999;
-        std::vector<std::size_t> wants;
-        {
-            LessonAssetDownloadStagingFile staging(destination);
-            Expect(!SimulateDownloadToStaging(
-                       staging, kHilKey, true, 11, "replacement", bytes, wants),
-                   "before-write fault did not stop download");
-            Expect(bytes == 0, "before-write fault wrote destination bytes");
-            Expect(!fs::exists(staging.path()), "before-write fault left .download");
-            Expect(!fs::exists(staging.path() + ".tmp"), "before-write fault left .tmp");
-        }
-        Expect(Read(destination) == "known-good", "before-write fault replaced destination");
-        ExpectArmConsumed("before-write fault did not consume arm");
-    }
-}
-
-void TestAfterBytesCapsReadExactlyAndNoSpaceCleans() {
-    const std::string destination = std::string(kRoot) + "/after-bytes.png";
-    Write(destination, "known-good");
-    ArmSync(LessonStorageHilCheckpoint::kAfterDownloadBytes,
-            LessonStorageHilAction::kNoSpace, 5, 11);
-    std::size_t bytes = 0;
-    std::vector<std::size_t> wants;
-    {
-        LessonAssetDownloadStagingFile staging(destination);
-        Expect(!SimulateDownloadToStaging(
-                   staging, kHilKey, true, 11, "replacement", bytes, wants),
-               "after-bytes no-space did not stop download");
-        Expect(bytes == 5, "after-bytes progress overshot exact threshold");
-        Expect(wants.size() == 1 && wants.front() == 5,
-               "HTTP read was not capped to exact threshold");
-        Expect(!fs::exists(staging.path()), "after-bytes fault left .download");
-        Expect(!fs::exists(staging.path() + ".tmp"), "after-bytes fault left .tmp");
-    }
-    Expect(Read(destination) == "known-good", "after-bytes fault replaced destination");
-    ExpectArmConsumed("after-bytes fault did not consume arm");
-}
-
-void TestAfterBytesRequiresExactDeclaredSize() {
-    for (const auto declared : {std::size_t{0}, std::size_t{12}}) {
-        ArmSync(LessonStorageHilCheckpoint::kAfterDownloadBytes,
-                LessonStorageHilAction::kFail, 5, 11);
-        const bool has_declared_size = declared != 0;
-        const std::string destination = std::string(kRoot) + "/declared-" +
-                                        std::to_string(declared) + ".png";
-        std::size_t bytes = 0;
-        std::vector<std::size_t> wants;
-        {
-            LessonAssetDownloadStagingFile staging(destination);
-            Expect(SimulateDownloadToStaging(
-                       staging, kHilKey, has_declared_size, declared,
-                       "replacement", bytes, wants),
-                   "missing/mismatched declared size affected download");
-        }
-        const auto status = LessonStorageHilController::GetInstance().Status();
-        Expect(status.armed && !status.reached && !status.consumed,
-               "missing/mismatched declared size consumed arm");
-        LessonStorageHilController::GetInstance().Reset();
-    }
-}
-
 void TestCorruptStagingUsesNormalChecksumFailure() {
     const std::string destination = std::string(kRoot) + "/corrupt.png";
     Write(destination, "known-good");
@@ -510,9 +373,6 @@ int main() {
     TestInterruptedReplacementRecoversOnNextAttempt();
     TestFailedRestoreLeavesTruthfulRecoverableState();
     TestSuccessfulReplacementCleansBackupAndStaging();
-    TestBeforeFirstWriteFailuresLeaveNoPartialState();
-    TestAfterBytesCapsReadExactlyAndNoSpaceCleans();
-    TestAfterBytesRequiresExactDeclaredSize();
     TestCorruptStagingUsesNormalChecksumFailure();
     TestPreCommitFaultRestoresOldDestination();
     TestSampleContextCannotConsumeCanonicalArm();

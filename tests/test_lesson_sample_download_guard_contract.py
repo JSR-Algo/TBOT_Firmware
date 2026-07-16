@@ -57,13 +57,16 @@ def test_sample_manifest_is_fixed_to_server_filename_digest_pairs():
 
 def test_download_resources_and_temp_commit_are_scope_owned():
     source = SOURCE.read_text(encoding="utf-8")
-    body = source[
+    mcp_body = source[
         source.index("bool DownloadLessonAssetToFile(") :
         source.index("\n}\n}\n\nMcpServer::McpServer", source.index("bool DownloadLessonAssetToFile("))
     ]
+    body = (ROOT / "main" / "lesson_asset_http_transfer.cc").read_text(
+        encoding="utf-8"
+    )
 
-    assert '#include "lesson_asset_download_raii.h"' in source
-    assert "ScopedHttpClose" in body
+    assert '#include "lesson_asset_download_raii.h"' in body
+    assert "ScopedHttpClose" in mcp_body
     assert "ScopedCFile" in body
     assert "ScopedHeapAllocation" in body
     assert "ScopedTempPath" in body

@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tbot-lesson-staging.XXXXXX")"
-trap 'rm -rf "${BUILD_DIR}" /tmp/tbot-lesson-asset-staging-host' EXIT
+trap 'rm -rf "${BUILD_DIR}"' EXIT
 CXX_BIN="${CXX:-clang++}"
 IDF_ROOT="${IDF_PATH:-${HOME:+${HOME}/esp/esp-idf}}"
 SANITIZER_FLAGS=()
@@ -26,6 +26,7 @@ fi
   "${SANITIZER_FLAGS[@]}" \
   -DTBOT_LESSON_ASSET_STAGING_TESTING=1 \
   -DTBOT_LESSON_STORAGE_HIL_HOOKS_TESTING=1 \
+  -DTBOT_LESSON_ASSET_STAGING_TEST_ROOT=\"${BUILD_DIR}/root\" \
   -I"${ROOT}/tests/native_stubs_staging" \
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_download_staging.cc" \

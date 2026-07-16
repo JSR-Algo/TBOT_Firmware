@@ -30,20 +30,15 @@
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_asset_download_raii.h"
 #include "lesson_asset_download_staging.h"
+#include "lesson_asset_http_transfer.h"
 #include "lesson_asset_sample_url_policy.h"
 #include "lesson_asset_sync_path_policy.h"
 #include <lesson_asset_sync_attestation.h>
-#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
-    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
-#include "lesson_storage_hil_controller.h"
-#include "lesson_storage_hil_hooks.h"
-#endif
 
 #define TAG "MCP"
 
 namespace {
 constexpr size_t kMcpToolsListMaxPayloadBytes = 2500;
-constexpr size_t kLessonAssetSyncMaxBytes = 512 * 1024;
 constexpr size_t kLessonAssetSyncMaxAssets = 64;
 constexpr const char* kLessonAssetPackRoot = "/sdcard/tbot/lesson-assets/";
 constexpr const char* kSampleLessonAssetDir = "/sdcard/tbot/lesson-assets/sample-barn";
@@ -365,133 +360,14 @@ bool DownloadLessonAssetToFile(
         esp_task_wdt_reset();
         throw std::runtime_error("unexpected status " + std::to_string(status) + " for " + url);
     }
-    size_t content_length = http->GetBodyLength();
-    if (content_length > kLessonAssetSyncMaxBytes) {
-        throw std::runtime_error("asset too large: " + url);
-    }
-
-    ScopedTempPath tmp_path(dest_path + ".tmp");
-    tmp_path.RemoveIfPresent();
-    FILE* raw_file = fopen(tmp_path.path().c_str(), "wb");
-    if (raw_file == nullptr) {
-        throw std::runtime_error("failed to open SD file: " + tmp_path.path());
-    }
-    ScopedCFile fp(raw_file);
-
-    void* raw_buffer = heap_caps_malloc(4096, MALLOC_CAP_8BIT);
-    if (raw_buffer == nullptr) {
-        throw std::runtime_error("failed to allocate download buffer");
-    }
-    ScopedHeapAllocation buffer_allocation(raw_buffer, heap_caps_free);
-    char* buffer = static_cast<char*>(buffer_allocation.get());
-
-    bool failed = false;
-#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
-    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
-    bool first_write = true;
-#endif
-    std::string error;
-    while (true) {
-        esp_task_wdt_reset();
-        size_t want = 4096;
-        if (content_length > 0) {
-            if (bytes_out >= content_length) break;
-            want = std::min(want, content_length - bytes_out);
-        }
-#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
-    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
-        if (has_declared_size) {
-            want = LessonStorageHilController::GetInstance().LimitDownloadRead(
-                cache_key, bytes_out, want, declared_size);
-            if (want == 0) {
-                if (RunLessonStorageHilCheckpoint(
-                        cache_key,
-                        LessonStorageHilOperation::kSync,
-                        LessonStorageHilCheckpoint::kAfterDownloadBytes,
-                        static_cast<std::uint32_t>(bytes_out),
-                        static_cast<std::uint32_t>(declared_size)) !=
-                    LessonStorageHilHookOutcome::kContinue) {
-                    failed = true;
-                    error = "lesson asset storage write failed";
-                    break;
-                }
-                continue;
-            }
-        }
-#else
-        (void)cache_key;
-        (void)has_declared_size;
-        (void)declared_size;
-#endif
-        int ret = http->Read(buffer, want);
-        if (ret < 0) {
-            failed = true;
-            error = "read error for " + url;
-            break;
-        }
-        if (ret == 0) break;
-        if (bytes_out + static_cast<size_t>(ret) > kLessonAssetSyncMaxBytes) {
-            failed = true;
-            error = "asset too large: " + url;
-            break;
-        }
-#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
-    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
-        if (first_write && RunLessonStorageHilCheckpoint(
-                cache_key,
-                LessonStorageHilOperation::kSync,
-                LessonStorageHilCheckpoint::kBeforeDownloadWrite,
-                0,
-                has_declared_size ? static_cast<std::uint32_t>(declared_size) : 0) !=
-            LessonStorageHilHookOutcome::kContinue) {
-            failed = true;
-            error = "lesson asset storage write failed";
-            break;
-        }
-#endif
-#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
-    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
-        first_write = false;
-#endif
-        if (fwrite(buffer, 1, static_cast<size_t>(ret), fp.get()) != static_cast<size_t>(ret)) {
-            failed = true;
-            error = "write error for " + tmp_path.path();
-            break;
-        }
-        bytes_out += static_cast<size_t>(ret);
-#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
-    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
-        if (has_declared_size && RunLessonStorageHilCheckpoint(
-                cache_key,
-                LessonStorageHilOperation::kSync,
-                LessonStorageHilCheckpoint::kAfterDownloadBytes,
-                static_cast<std::uint32_t>(bytes_out),
-                static_cast<std::uint32_t>(declared_size)) !=
-            LessonStorageHilHookOutcome::kContinue) {
-            failed = true;
-            error = "lesson asset storage write failed";
-            break;
-        }
-#endif
-    }
-
-    if (fp.Close() != 0 && !failed) {
-        failed = true;
-        error = "write error for " + tmp_path.path();
-    }
-
-    if (!failed && content_length > 0 && bytes_out != content_length) {
-        failed = true;
-        error = "short read for " + url;
-    }
-    if (!failed && bytes_out == 0) {
-        failed = true;
-        error = "empty asset: " + url;
-    }
-    if (failed) {
-        throw std::runtime_error(error);
-    }
-    tmp_path.CommitTo(dest_path);
+    DownloadLessonAssetHttpBodyToFile(
+        *http,
+        cache_key,
+        has_declared_size,
+        declared_size,
+        url,
+        dest_path,
+        bytes_out);
     return true;
 }
 }

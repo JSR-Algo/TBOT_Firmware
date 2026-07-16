@@ -216,13 +216,11 @@ def test_generic_sync_propagates_exact_declared_size_without_making_size_require
 
 
 def test_sync_hil_read_and_write_checkpoints_are_exact_and_cleanup_owned():
-    source = SOURCE.read_text(encoding="utf-8")
-    start = source.index(
-        "bool DownloadLessonAssetToFile(", source.index("void EnsureSampleLessonAssetDir")
+    body = (ROOT / "main" / "lesson_asset_http_transfer.cc").read_text(
+        encoding="utf-8"
     )
-    body = source[start : source.index("\n}\n}\n\nMcpServer::McpServer", start)]
     limit = body.index("LimitDownloadRead(")
-    read = body.index("http->Read(buffer, want)")
+    read = body.index("http.Read(buffer, want)")
     before_write = body.index("kBeforeDownloadWrite")
     fwrite = body.index("fwrite(buffer")
     increment = body.index("bytes_out +=")
@@ -230,11 +228,34 @@ def test_sync_hil_read_and_write_checkpoints_are_exact_and_cleanup_owned():
 
     assert limit < read < before_write < fwrite < increment < after_bytes
     assert "if (want == 0)" in body[limit:read]
-    assert "has_declared_size" in body[limit:read]
+    assert body.rindex("if (has_declared_size)", 0, limit) < limit
     assert "lesson asset storage write failed" in body
-    assert 'ScopedTempPath tmp_path(dest_path + ".tmp")' in body
+    assert 'ScopedTempPath tmp_path(destination + ".tmp")' in body
     assert "CONFIG_TBOT_HIL_STORAGE_FAULTS" in body
     assert "TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING" in body
+
+
+def test_mcp_delegates_the_real_transfer_loop_to_the_host_tested_unit():
+    source = SOURCE.read_text(encoding="utf-8")
+    cmake = MAIN_CMAKE.read_text(encoding="utf-8")
+    transfer = (ROOT / "main" / "lesson_asset_http_transfer.cc").read_text(
+        encoding="utf-8"
+    )
+    start = source.index(
+        "bool DownloadLessonAssetToFile(", source.index("void EnsureSampleLessonAssetDir")
+    )
+    body = source[start : source.index("\n}\n}\n\nMcpServer::McpServer", start)]
+
+    assert '"lesson_asset_http_transfer.cc"' in cmake
+    assert "DownloadLessonAssetHttpBodyToFile(" in body
+    assert "http->Read(" not in body
+    assert "fwrite(" not in body
+    assert "ScopedTempPath" not in body
+    assert "http.Read(buffer, want)" in transfer
+    assert "ret > static_cast<int>(want)" in transfer
+    assert "LimitDownloadRead(" in transfer
+    assert "if (want == 0)" in transfer
+    assert "second_limit == 0" in transfer
 
 
 def test_sample_sync_passes_empty_hil_context_but_generic_uses_canonical_key():

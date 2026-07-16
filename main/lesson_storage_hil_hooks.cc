@@ -11,6 +11,7 @@
 #include <cinttypes>
 
 #include <esp_log.h>
+#include <esp_task_wdt.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #endif
@@ -23,6 +24,7 @@ std::atomic<LessonStorageHilPauseCallback> g_pause_callback{nullptr};
 
 #ifdef ESP_PLATFORM
 constexpr const char* kTag = "LessonStorageHil";
+constexpr std::uint32_t kPauseSliceSeconds = 1;
 
 const char* OperationName(LessonStorageHilOperation operation) noexcept {
     switch (operation) {
@@ -57,7 +59,17 @@ const char* CheckpointName(LessonStorageHilCheckpoint checkpoint) noexcept {
 
 bool YieldingPause(std::uint32_t seconds) noexcept {
 #ifdef ESP_PLATFORM
-    vTaskDelay(pdMS_TO_TICKS(seconds * 1000U));
+    std::uint32_t remaining_seconds = seconds;
+    esp_task_wdt_reset();
+    while (remaining_seconds > 0) {
+        const std::uint32_t slice_seconds =
+            remaining_seconds > kPauseSliceSeconds
+                ? kPauseSliceSeconds
+                : remaining_seconds;
+        vTaskDelay(pdMS_TO_TICKS(slice_seconds * 1000U));
+        remaining_seconds -= slice_seconds;
+        esp_task_wdt_reset();
+    }
     return true;
 #elif defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
     const auto callback = g_pause_callback.load(std::memory_order_acquire);

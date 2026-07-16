@@ -99,8 +99,10 @@ def test_hil_pause_uses_yielding_delay_and_stable_markers():
 
     assert "HIL_STORAGE_CHECKPOINT_REACHED" in source
     assert "HIL_STORAGE_CHECKPOINT_CONTINUED" in source
-    assert "vTaskDelay(pdMS_TO_TICKS(seconds * 1000U))" in source
-    assert "while (" not in source
+    assert "kPauseSliceSeconds" in source
+    assert "while (remaining_seconds > 0)" in source
+    assert "vTaskDelay(pdMS_TO_TICKS(slice_seconds * 1000U))" in source
+    assert "esp_task_wdt_reset()" in source
     assert "sleep(" not in source
     corrupt_start = source.index("case LessonStorageHilAction::kCorruptStaging:")
     corrupt = source[corrupt_start : source.index("\n    }", corrupt_start)]
