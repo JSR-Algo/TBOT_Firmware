@@ -18,11 +18,16 @@ namespace {
 
 int g_checks = 0;
 int g_mkdir_calls = 0;
+int g_fsync_calls = 0;
 int g_unlink_calls = 0;
 int g_rmdir_calls = 0;
 int g_fail_mkdir_call = 0;
+int g_fail_fsync_call = 0;
 int g_fail_unlink_call = 0;
 int g_fail_rmdir_call = 0;
+int g_inspect_path_calls = 0;
+int g_fail_inspect_path_call = 0;
+std::string g_inspect_failure_path;
 
 int InjectedMkdir(const char* path) {
     ++g_mkdir_calls;
@@ -31,6 +36,23 @@ int InjectedMkdir(const char* path) {
         return -1;
     }
     return mkdir(path, 0755);
+}
+
+int InjectedFsync(int descriptor) {
+    ++g_fsync_calls;
+    if (g_fsync_calls == g_fail_fsync_call) {
+        errno = EIO;
+        return -1;
+    }
+    return fsync(descriptor);
+}
+
+bool InjectedInspectFailure(const char* path) {
+    if (g_inspect_failure_path != path) {
+        return false;
+    }
+    ++g_inspect_path_calls;
+    return g_inspect_path_calls == g_fail_inspect_path_call;
 }
 
 int InjectedUnlink(const char* path) {
@@ -53,12 +75,19 @@ int InjectedRmdir(const char* path) {
 
 void ResetMutationInjection() {
     g_mkdir_calls = 0;
+    g_fsync_calls = 0;
     g_unlink_calls = 0;
     g_rmdir_calls = 0;
     g_fail_mkdir_call = 0;
+    g_fail_fsync_call = 0;
     g_fail_unlink_call = 0;
     g_fail_rmdir_call = 0;
+    g_inspect_path_calls = 0;
+    g_fail_inspect_path_call = 0;
+    g_inspect_failure_path.clear();
     SetLessonStorageHilFixtureMkdirCallbackForTest(nullptr);
+    SetLessonStorageHilFixtureFsyncCallbackForTest(nullptr);
+    SetLessonStorageHilFixtureInspectFailureCallbackForTest(nullptr);
     SetLessonStorageHilFixtureUnlinkCallbackForTest(nullptr);
     SetLessonStorageHilFixtureRmdirCallbackForTest(nullptr);
 }
@@ -333,6 +362,165 @@ void TestLeafRegularFileFixtureRequiresExactMagic() {
         Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode,
                "directory at regular-file leaf was accepted");
     }
+}
+
+void TestNestedStageRollbackReportsEveryResidual() {
+    const std::string key = Key("hil-nested-rollback", 1, 'a');
+    const fs::path leaf = Leaf(key);
+    const auto stage = [&]() {
+        auto lease = Lease();
+        return StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kNestedDirectory, ""
+        );
+    };
+    const auto cleanup = [&]() {
+        auto lease = Lease();
+        return CleanupLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kNestedDirectory, ""
+        );
+    };
+
+    ResetRoot();
+    ResetMutationInjection();
+    g_fail_mkdir_call = 2;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    auto result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && !result.changed,
+           "clean nested parent rollback reported a residual");
+    Expect(!fs::exists(Root()), "clean nested parent rollback left storage");
+
+    ResetRoot();
+    ResetMutationInjection();
+    g_fail_mkdir_call = 2;
+    g_fail_rmdir_call = 1;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "nested EnsureParents rollback hid a created root");
+    Expect(fs::is_directory(Root()) && fs::is_empty(Root()),
+           "nested EnsureParents rollback residual was not exact");
+
+    ResetRoot();
+    ResetMutationInjection();
+    g_fail_mkdir_call = 3;
+    g_fail_rmdir_call = 1;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "nested leaf mkdir parent rollback hid an empty slug");
+    Expect(fs::is_directory(leaf.parent_path()) && fs::is_empty(leaf.parent_path()),
+           "nested leaf mkdir rollback residual was not exact");
+
+    ResetRoot();
+    ResetMutationInjection();
+    fs::create_directories(leaf.parent_path());
+    g_fail_mkdir_call = 2;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && !result.changed,
+           "clean nested leaf rollback reported a residual");
+    Expect(!fs::exists(leaf), "clean nested leaf rollback left a leaf");
+
+    ResetMutationInjection();
+    g_fail_mkdir_call = 1;
+    g_inspect_failure_path = leaf.string();
+    g_fail_inspect_path_call = 2;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    SetLessonStorageHilFixtureInspectFailureCallbackForTest(
+        InjectedInspectFailure
+    );
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "uncertain nested rollback inspection was reported as restored");
+    Expect(!fs::exists(leaf),
+           "uncertain nested rollback test unexpectedly left a physical leaf");
+
+    ResetMutationInjection();
+    g_fail_mkdir_call = 2;
+    g_fail_rmdir_call = 1;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "nested sentinel rollback hid an empty owned leaf");
+    Expect(fs::is_directory(leaf) && fs::is_empty(leaf),
+           "nested sentinel rollback residual was not exact");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+           "nested cleanup did not remove an exact rollback residual");
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && !result.changed,
+           "repeated nested rollback cleanup did not converge");
+}
+
+void TestLeafStageRollbackReportsEveryResidual() {
+    const std::string key = Key("hil-leaf-rollback", 1, 'b');
+    const fs::path leaf = Leaf(key);
+    const auto stage = [&]() {
+        auto lease = Lease();
+        return StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kLeafRegularFile, ""
+        );
+    };
+    const auto cleanup = [&]() {
+        auto lease = Lease();
+        return CleanupLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kLeafRegularFile, ""
+        );
+    };
+
+    ResetRoot();
+    ResetMutationInjection();
+    g_fail_mkdir_call = 2;
+    g_fail_rmdir_call = 1;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+    auto result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "leaf EnsureParents rollback hid a created root");
+
+    ResetRoot();
+    ResetMutationInjection();
+    fs::create_directories(leaf.parent_path());
+    g_fail_fsync_call = 1;
+    SetLessonStorageHilFixtureFsyncCallbackForTest(InjectedFsync);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && !result.changed,
+           "clean leaf file rollback reported a residual");
+    Expect(!fs::exists(leaf), "clean leaf file rollback left a file");
+
+    ResetMutationInjection();
+    g_fail_fsync_call = 1;
+    g_fail_unlink_call = 1;
+    SetLessonStorageHilFixtureFsyncCallbackForTest(InjectedFsync);
+    SetLessonStorageHilFixtureUnlinkCallbackForTest(InjectedUnlink);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "leaf file rollback unlink failure hid exact owned bytes");
+    Expect(Read(leaf) == "TBOT-HIL-LEAF-FIXTURE-V1\n",
+           "leaf file rollback residual did not retain exact magic");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+           "leaf cleanup did not remove an exact rollback residual");
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && !result.changed,
+           "repeated leaf rollback cleanup did not converge");
+
+    ResetRoot();
+    ResetMutationInjection();
+    g_fail_fsync_call = 1;
+    g_fail_rmdir_call = 1;
+    SetLessonStorageHilFixtureFsyncCallbackForTest(InjectedFsync);
+    SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "leaf write parent rollback hid an empty slug");
+    Expect(fs::is_directory(leaf.parent_path()) && fs::is_empty(leaf.parent_path()),
+           "leaf write parent rollback residual was not exact");
 }
 
 void TestPreservationSetUsesTwoPhaseCleanup() {
@@ -935,6 +1123,8 @@ int main() {
     TestValidationAndLeaseRefusalPrecedeFilesystemAccess();
     TestNestedDirectoryFixtureIsExactAndNonRecursive();
     TestLeafRegularFileFixtureRequiresExactMagic();
+    TestNestedStageRollbackReportsEveryResidual();
+    TestLeafStageRollbackReportsEveryResidual();
     TestPreservationSetUsesTwoPhaseCleanup();
     TestPreservationCleanupResumesOwnedPartialStates();
     TestPreservationStageRollbackReportsResidualTruthAndCleanupConverges();

@@ -217,6 +217,8 @@ def test_fixture_inspection_is_bounded_read_only_and_uses_mbedtls_sha256():
     assert 'constexpr char kHex[] = "0123456789ABCDEF"' in source
     assert "TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING" in source
     assert "SetLessonStorageHilFixtureMkdirCallbackForTest" in source
+    assert "SetLessonStorageHilFixtureFsyncCallbackForTest" in source
+    assert "SetLessonStorageHilFixtureInspectFailureCallbackForTest" in source
     assert "SetLessonStorageHilFixtureUnlinkCallbackForTest" in source
     assert "SetLessonStorageHilFixtureRmdirCallbackForTest" in source
     assert "std::sort(inspection.entries.begin(), inspection.entries.end()" in source

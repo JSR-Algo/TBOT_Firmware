@@ -12,6 +12,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fcntl.h>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <sys/stat.h>
@@ -39,6 +40,8 @@ constexpr std::size_t kSha256BufferBytes = 512;
 
 #ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
 LessonStorageHilFixtureMkdirCallback g_mkdir_callback = nullptr;
+LessonStorageHilFixtureFsyncCallback g_fsync_callback = nullptr;
+LessonStorageHilFixtureInspectFailureCallback g_inspect_failure_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_unlink_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_rmdir_callback = nullptr;
 #endif
@@ -129,6 +132,15 @@ int CreateFixtureDirectory(const std::string& path) {
     return mkdir(path.c_str(), 0755);
 }
 
+int SyncFixtureFile(int descriptor) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_fsync_callback != nullptr) {
+        return g_fsync_callback(descriptor);
+    }
+#endif
+    return fsync(descriptor);
+}
+
 int RemoveFixtureDirectory(const std::string& path) {
 #ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
     if (g_rmdir_callback != nullptr) {
@@ -183,6 +195,12 @@ LessonStorageHilFixtureResult ValidationFailure(
 }
 
 NodeKind ReadNodeKind(const std::string& path, struct stat* metadata = nullptr) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_inspect_failure_callback != nullptr &&
+        g_inspect_failure_callback(path.c_str())) {
+        return NodeKind::kIoFailed;
+    }
+#endif
 #ifndef ESP_PLATFORM
     // ESP-IDF FAT VFS cannot create symlinks. Native tests can, so reject the
     // exact component before stat follows it into an external fixture target.
@@ -442,7 +460,6 @@ bool EnsureParents(
     if (slug_missing) {
         if (CreateFixtureDirectory(SlugPath(slug)) != 0) {
             RollBackParents(slug, *creation);
-            *creation = {};
             return false;
         }
         creation->slug_created = true;
@@ -468,7 +485,7 @@ bool WriteExactFile(const std::string& path, const char* bytes) {
         }
         written += static_cast<std::size_t>(result);
     }
-    if (ok && fsync(descriptor) != 0) {
+    if (ok && SyncFixtureFile(descriptor) != 0) {
         ok = false;
     }
     if (close(descriptor) != 0) {
@@ -478,6 +495,24 @@ bool WriteExactFile(const std::string& path, const char* bytes) {
         RemoveFixtureFile(path);
     }
     return ok;
+}
+
+bool RollbackChangedStorage(
+    std::initializer_list<const std::string*> owned_paths,
+    const std::string& slug,
+    const ParentCreation& creation
+) {
+    for (const std::string* path : owned_paths) {
+        if (ReadNodeKind(*path) != NodeKind::kMissing) {
+            return true;
+        }
+    }
+    if (creation.slug_created &&
+        ReadNodeKind(SlugPath(slug)) != NodeKind::kMissing) {
+        return true;
+    }
+    return creation.root_created &&
+           ReadNodeKind(RootPath()) != NodeKind::kMissing;
 }
 
 LessonStorageHilFixtureResult StageNested(
@@ -503,17 +538,32 @@ LessonStorageHilFixtureResult StageNested(
 
     ParentCreation creation;
     if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
-        return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
+        return Result(
+            LessonStorageHilFixtureCode::kIoFailed,
+            RollbackChangedStorage({&leaf_path}, slug, creation),
+            cache_key,
+            ""
+        );
     }
     if (CreateFixtureDirectory(leaf_path) != 0) {
         RollBackParents(slug, creation);
-        return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
+        return Result(
+            LessonStorageHilFixtureCode::kIoFailed,
+            RollbackChangedStorage({&leaf_path}, slug, creation),
+            cache_key,
+            ""
+        );
     }
     const std::string sentinel_path = JoinPath(leaf_path, kNestedSentinelName);
     if (CreateFixtureDirectory(sentinel_path) != 0) {
         RemoveFixtureDirectory(leaf_path);
         RollBackParents(slug, creation);
-        return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
+        return Result(
+            LessonStorageHilFixtureCode::kIoFailed,
+            RollbackChangedStorage({&leaf_path}, slug, creation),
+            cache_key,
+            ""
+        );
     }
     return Result(LessonStorageHilFixtureCode::kStaged, true, cache_key, "");
 }
@@ -541,11 +591,21 @@ LessonStorageHilFixtureResult StageLeafFile(
 
     ParentCreation creation;
     if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
-        return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
+        return Result(
+            LessonStorageHilFixtureCode::kIoFailed,
+            RollbackChangedStorage({&leaf_path}, slug, creation),
+            cache_key,
+            ""
+        );
     }
     if (!WriteExactFile(leaf_path, kLeafMagic)) {
         RollBackParents(slug, creation);
-        return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
+        return Result(
+            LessonStorageHilFixtureCode::kIoFailed,
+            RollbackChangedStorage({&leaf_path}, slug, creation),
+            cache_key,
+            ""
+        );
     }
     return Result(LessonStorageHilFixtureCode::kStaged, true, cache_key, "");
 }
@@ -568,24 +628,6 @@ bool CreatePreservationLeaf(
 void RemovePreservationLeaf(const std::string& leaf_path) {
     RemoveFixtureFile(JoinPath(leaf_path, kPreservationSentinelName));
     RemoveFixtureDirectory(leaf_path);
-}
-
-bool PreservationRollbackChangedStorage(
-    const std::string& first_leaf,
-    const std::string& second_leaf,
-    const std::string& slug,
-    const ParentCreation& creation
-) {
-    const auto may_exist = [](const std::string& path) {
-        return ReadNodeKind(path) != NodeKind::kMissing;
-    };
-    if (may_exist(first_leaf) || may_exist(second_leaf)) {
-        return true;
-    }
-    if (creation.slug_created && may_exist(SlugPath(slug))) {
-        return true;
-    }
-    return creation.root_created && may_exist(RootPath());
 }
 
 LessonStorageHilFixtureResult StagePreservation(
@@ -632,7 +674,9 @@ LessonStorageHilFixtureResult StagePreservation(
     if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            false,
+            RollbackChangedStorage(
+                {&first_leaf, &second_leaf}, slug, creation
+            ),
             cache_key,
             sibling_cache_key
         );
@@ -641,8 +685,8 @@ LessonStorageHilFixtureResult StagePreservation(
         RollBackParents(slug, creation);
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            PreservationRollbackChangedStorage(
-                first_leaf, second_leaf, slug, creation
+            RollbackChangedStorage(
+                {&first_leaf, &second_leaf}, slug, creation
             ),
             cache_key,
             sibling_cache_key
@@ -653,8 +697,8 @@ LessonStorageHilFixtureResult StagePreservation(
         RollBackParents(slug, creation);
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            PreservationRollbackChangedStorage(
-                first_leaf, second_leaf, slug, creation
+            RollbackChangedStorage(
+                {&first_leaf, &second_leaf}, slug, creation
             ),
             cache_key,
             sibling_cache_key
@@ -988,6 +1032,18 @@ void SetLessonStorageHilFixtureMkdirCallbackForTest(
     LessonStorageHilFixtureMkdirCallback callback
 ) {
     g_mkdir_callback = callback;
+}
+
+void SetLessonStorageHilFixtureFsyncCallbackForTest(
+    LessonStorageHilFixtureFsyncCallback callback
+) {
+    g_fsync_callback = callback;
+}
+
+void SetLessonStorageHilFixtureInspectFailureCallbackForTest(
+    LessonStorageHilFixtureInspectFailureCallback callback
+) {
+    g_inspect_failure_callback = callback;
 }
 
 void SetLessonStorageHilFixtureUnlinkCallbackForTest(
