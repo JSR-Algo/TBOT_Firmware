@@ -577,6 +577,14 @@ choice BOARD_TYPE
         depends on IDF_TARGET_ESP32S3
 endchoice
 
+config TBOT_HIL_STORAGE_FAULTS
+    bool "Enable attended lesson-storage HIL fault controls"
+    default n
+    depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P
+    help
+        Non-production attended HIL controls for disposable hil-* lesson cache keys.
+        Never enable this option in production/default sdkconfig chains.
+
 choice
     depends on BOARD_TYPE_LILYGO_T_DISPLAY_P4
     prompt "Select the screen type"

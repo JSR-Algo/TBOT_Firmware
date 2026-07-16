@@ -119,6 +119,27 @@ def test_lcdwiki_es3c35p_reference_sdkconfig_passes_prod_gate(tmp_path):
 
     assert result.returncode == 0, result.stderr
 
+
+def test_lcdwiki_es3c35p_prod_gate_rejects_hil_storage_profile(tmp_path):
+    sdkconfig = tmp_path / "sdkconfig.es3c35p-hil"
+    sdkconfig.write_text(
+        lcdwiki_reference_sdkconfig() + "\nCONFIG_TBOT_HIL_STORAGE_FAULTS=y\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/assert_lcdwiki_prod_config.py"),
+            str(sdkconfig),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "HIL storage faults must stay disabled" in result.stderr
+
 def test_release_sdkconfig_append_replaces_existing_values_for_ci_gate(tmp_path):
     spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")
     release = importlib.util.module_from_spec(spec)

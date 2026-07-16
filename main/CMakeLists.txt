@@ -56,6 +56,15 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
+if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
+    list(APPEND SOURCES
+        "lesson_storage_hil_controller.cc"
+        "lesson_storage_hil_hooks.cc"
+        "lesson_storage_hil_fixture.cc"
+        "lesson_storage_hil_mcp_tools.cc"
+    )
+endif()
+
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 
 # Add board common files
