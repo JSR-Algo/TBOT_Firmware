@@ -38,6 +38,7 @@ constexpr std::size_t kInspectionLabelMaxBytes = 384;
 constexpr std::size_t kSha256BufferBytes = 512;
 
 #ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+LessonStorageHilFixtureMkdirCallback g_mkdir_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_unlink_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_rmdir_callback = nullptr;
 #endif
@@ -117,6 +118,15 @@ int RemoveFixtureFile(const std::string& path) {
     }
 #endif
     return unlink(path.c_str());
+}
+
+int CreateFixtureDirectory(const std::string& path) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_mkdir_callback != nullptr) {
+        return g_mkdir_callback(path.c_str());
+    }
+#endif
+    return mkdir(path.c_str(), 0755);
 }
 
 int RemoveFixtureDirectory(const std::string& path) {
@@ -380,24 +390,6 @@ FixtureState PreservationStageFailure(
     return FixtureState::kUnexpected;
 }
 
-bool IsReachablePreservationCleanupPair(
-    FixtureState first,
-    FixtureState second
-) {
-    return (first == FixtureState::kComplete &&
-            second == FixtureState::kComplete) ||
-           (first == FixtureState::kEmptyPartial &&
-            second == FixtureState::kComplete) ||
-           (first == FixtureState::kEmptyPartial &&
-            second == FixtureState::kEmptyPartial) ||
-           (first == FixtureState::kMissing &&
-            second == FixtureState::kComplete) ||
-           (first == FixtureState::kMissing &&
-            second == FixtureState::kEmptyPartial) ||
-           (first == FixtureState::kMissing &&
-            second == FixtureState::kMissing);
-}
-
 LessonStorageHilFixtureCode ValidateParents(
     const std::string& slug,
     bool* root_missing,
@@ -442,13 +434,13 @@ bool EnsureParents(
     ParentCreation* creation
 ) {
     if (root_missing) {
-        if (mkdir(RootPath().c_str(), 0755) != 0) {
+        if (CreateFixtureDirectory(RootPath()) != 0) {
             return false;
         }
         creation->root_created = true;
     }
     if (slug_missing) {
-        if (mkdir(SlugPath(slug).c_str(), 0755) != 0) {
+        if (CreateFixtureDirectory(SlugPath(slug)) != 0) {
             RollBackParents(slug, *creation);
             *creation = {};
             return false;
@@ -513,12 +505,12 @@ LessonStorageHilFixtureResult StageNested(
     if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
         return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
     }
-    if (mkdir(leaf_path.c_str(), 0755) != 0) {
+    if (CreateFixtureDirectory(leaf_path) != 0) {
         RollBackParents(slug, creation);
         return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
     }
     const std::string sentinel_path = JoinPath(leaf_path, kNestedSentinelName);
-    if (mkdir(sentinel_path.c_str(), 0755) != 0) {
+    if (CreateFixtureDirectory(sentinel_path) != 0) {
         RemoveFixtureDirectory(leaf_path);
         RollBackParents(slug, creation);
         return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
@@ -562,7 +554,7 @@ bool CreatePreservationLeaf(
     const std::string& leaf_path,
     const char* magic
 ) {
-    if (mkdir(leaf_path.c_str(), 0755) != 0) {
+    if (CreateFixtureDirectory(leaf_path) != 0) {
         return false;
     }
     const std::string sentinel = JoinPath(leaf_path, kPreservationSentinelName);
@@ -576,6 +568,24 @@ bool CreatePreservationLeaf(
 void RemovePreservationLeaf(const std::string& leaf_path) {
     RemoveFixtureFile(JoinPath(leaf_path, kPreservationSentinelName));
     RemoveFixtureDirectory(leaf_path);
+}
+
+bool PreservationRollbackChangedStorage(
+    const std::string& first_leaf,
+    const std::string& second_leaf,
+    const std::string& slug,
+    const ParentCreation& creation
+) {
+    const auto may_exist = [](const std::string& path) {
+        return ReadNodeKind(path) != NodeKind::kMissing;
+    };
+    if (may_exist(first_leaf) || may_exist(second_leaf)) {
+        return true;
+    }
+    if (creation.slug_created && may_exist(SlugPath(slug))) {
+        return true;
+    }
+    return creation.root_created && may_exist(RootPath());
 }
 
 LessonStorageHilFixtureResult StagePreservation(
@@ -631,7 +641,9 @@ LessonStorageHilFixtureResult StagePreservation(
         RollBackParents(slug, creation);
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            false,
+            PreservationRollbackChangedStorage(
+                first_leaf, second_leaf, slug, creation
+            ),
             cache_key,
             sibling_cache_key
         );
@@ -641,7 +653,9 @@ LessonStorageHilFixtureResult StagePreservation(
         RollBackParents(slug, creation);
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            false,
+            PreservationRollbackChangedStorage(
+                first_leaf, second_leaf, slug, creation
+            ),
             cache_key,
             sibling_cache_key
         );
@@ -767,15 +781,6 @@ LessonStorageHilFixtureResult CleanupPreservation(
                                          : second_state;
         return Result(CodeForState(failure), false, cache_key, sibling_cache_key);
     }
-    if (!IsReachablePreservationCleanupPair(first_state, second_state)) {
-        return Result(
-            LessonStorageHilFixtureCode::kUnexpectedExistingNode,
-            false,
-            cache_key,
-            sibling_cache_key
-        );
-    }
-
     bool changed = false;
     const std::string first_sentinel =
         JoinPath(first_leaf, kPreservationSentinelName);
@@ -979,6 +984,12 @@ void InspectPathAndDirectChildren(
 }  // namespace
 
 #ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+void SetLessonStorageHilFixtureMkdirCallbackForTest(
+    LessonStorageHilFixtureMkdirCallback callback
+) {
+    g_mkdir_callback = callback;
+}
+
 void SetLessonStorageHilFixtureUnlinkCallbackForTest(
     LessonStorageHilFixtureRemoveCallback callback
 ) {

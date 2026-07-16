@@ -67,6 +67,10 @@ LessonStorageHilInspection InspectLessonStorageHilStorage(
 
 #ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
 using LessonStorageHilFixtureRemoveCallback = int (*)(const char* path);
+using LessonStorageHilFixtureMkdirCallback = int (*)(const char* path);
+void SetLessonStorageHilFixtureMkdirCallbackForTest(
+    LessonStorageHilFixtureMkdirCallback callback
+);
 void SetLessonStorageHilFixtureUnlinkCallbackForTest(
     LessonStorageHilFixtureRemoveCallback callback
 );
