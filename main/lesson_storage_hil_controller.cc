@@ -135,7 +135,7 @@ LessonStorageHilArmResult LessonStorageHilController::Arm(
     std::copy(request.cache_key.begin(), request.cache_key.end(),
               validated_key.begin());
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    LockGuard lock(mutex_);
     if (active_) {
         return {LessonStorageHilArmCode::kAlreadyArmed, true, arm_sequence_};
     }
@@ -160,7 +160,7 @@ LessonStorageHilArmResult LessonStorageHilController::Arm(
 }
 
 LessonStorageHilStatus LessonStorageHilController::Status() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    LockGuard lock(mutex_);
     return {
         active_,
         reached_,
@@ -178,7 +178,7 @@ LessonStorageHilStatus LessonStorageHilController::Status() const {
 }
 
 void LessonStorageHilController::Reset() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    LockGuard lock(mutex_);
     ClearStatus();
 }
 
@@ -188,7 +188,7 @@ std::size_t LessonStorageHilController::LimitDownloadRead(
     std::size_t requested,
     std::size_t declared_asset_bytes
 ) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    LockGuard lock(mutex_);
     if (!active_ || operation_ != LessonStorageHilOperation::kSync ||
         checkpoint_ != LessonStorageHilCheckpoint::kAfterDownloadBytes ||
         declared_asset_bytes != declared_asset_bytes_ || !KeyMatches(cache_key)) {
@@ -207,7 +207,7 @@ LessonStorageHilDecision LessonStorageHilController::Observe(
     std::uint32_t progress,
     std::uint32_t declared_asset_bytes
 ) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    LockGuard lock(mutex_);
     LessonStorageHilDecision decision{
         false, false, LessonStorageHilAction::kFail, 0, 0};
     if (!active_ || operation != operation_ || checkpoint != checkpoint_ ||

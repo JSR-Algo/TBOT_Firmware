@@ -11,7 +11,7 @@
 struct LessonStorageHilControllerTestPeer {
     static void SetNextSequence(std::uint64_t value) {
         auto& controller = LessonStorageHilController::GetInstance();
-        std::lock_guard<std::mutex> lock(controller.mutex_);
+        LessonStorageHilController::LockGuard lock(controller.mutex_);
         controller.next_sequence_ = value;
     }
 };

@@ -4,10 +4,15 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <string>
 
 #include "lesson_asset_cache_evict.h"
+
+#ifdef ESP_PLATFORM
+#include "freertos/FreeRTOS.h"
+#else
+#include <mutex>
+#endif
 
 enum class LessonStorageHilOperation { kEvict, kSync };
 
@@ -93,6 +98,54 @@ public:
     ) noexcept;
 
 private:
+    class Mutex {
+    public:
+        Mutex() noexcept = default;
+
+        void lock() noexcept {
+#ifdef ESP_PLATFORM
+            portENTER_CRITICAL(&mutex_);
+#else
+            mutex_.lock();
+#endif
+        }
+
+        void unlock() noexcept {
+#ifdef ESP_PLATFORM
+            portEXIT_CRITICAL(&mutex_);
+#else
+            mutex_.unlock();
+#endif
+        }
+
+        Mutex(const Mutex&) = delete;
+        Mutex& operator=(const Mutex&) = delete;
+
+    private:
+#ifdef ESP_PLATFORM
+        portMUX_TYPE mutex_ = portMUX_INITIALIZER_UNLOCKED;
+#else
+        std::mutex mutex_;
+#endif
+    };
+
+    class LockGuard {
+    public:
+        explicit LockGuard(Mutex& mutex) noexcept : mutex_(mutex) {
+            mutex_.lock();
+        }
+
+        ~LockGuard() {
+            mutex_.unlock();
+        }
+
+        LockGuard(const LockGuard&) = delete;
+        LockGuard& operator=(const LockGuard&) = delete;
+
+    private:
+        Mutex& mutex_;
+    };
+
     LessonStorageHilController() = default;
 
 #ifdef TBOT_LESSON_STORAGE_HIL_CONTROLLER_TESTING
@@ -104,7 +157,7 @@ private:
     std::uint64_t TakeSequence() noexcept;
     void ClearStatus() noexcept;
 
-    mutable std::mutex mutex_;
+    mutable Mutex mutex_;
     std::array<char, kLessonAssetCacheKeyMaxBytes + 1> cache_key_{};
     bool active_ = false;
     bool reached_ = false;

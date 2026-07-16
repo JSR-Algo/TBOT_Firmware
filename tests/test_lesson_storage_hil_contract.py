@@ -37,6 +37,21 @@ def test_hil_sources_are_conditionally_compiled():
     assert '"lesson_storage_hil_mcp_tools.cc"' in conditional
 
 
+def test_controller_uses_static_esp_critical_section_without_std_mutex():
+    header = read("main/lesson_storage_hil_controller.h")
+    source = read("main/lesson_storage_hil_controller.cc")
+    mutex_class = header[header.index("class Mutex") : header.index("class LockGuard")]
+
+    assert '#ifdef ESP_PLATFORM\n#include "freertos/FreeRTOS.h"' in header
+    assert "portMUX_TYPE mutex_ = portMUX_INITIALIZER_UNLOCKED;" in mutex_class
+    assert "portENTER_CRITICAL(&mutex_)" in mutex_class
+    assert "portEXIT_CRITICAL(&mutex_)" in mutex_class
+    for branch in mutex_class.split("#ifdef ESP_PLATFORM")[1:]:
+        assert "std::mutex" not in branch.split("#else", 1)[0]
+    assert "std::lock_guard<std::mutex>" not in source
+    assert "LockGuard lock(mutex_);" in source
+
+
 def test_eviction_hil_hook_surface_is_noexcept_and_fixed_outcome():
     header = read("main/lesson_storage_hil_hooks.h")
 
