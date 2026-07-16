@@ -76,3 +76,24 @@ def test_atomic_write_replaces_destination_without_temp_residue(tmp_path):
 
     assert output.read_bytes() == b"new"
     assert list(tmp_path.glob(".artifact.*")) == []
+
+
+def test_artifact_chronology_rejects_bin_older_than_linked_elf(tmp_path):
+    archive = tmp_path / "libmain.a"
+    elf = tmp_path / "xiaozhi.elf"
+    binary = tmp_path / "xiaozhi.bin"
+    for path in (archive, elf, binary):
+        path.write_bytes(b"artifact")
+    archive.touch()
+    elf.touch()
+    binary.touch()
+
+    AUDITOR.validate_artifact_chronology(
+        {"mainArchive": archive, "elf": elf, "bin": binary}
+    )
+    binary.touch()
+    archive.touch()
+    with pytest.raises(AUDITOR.AuditFailure):
+        AUDITOR.validate_artifact_chronology(
+            {"mainArchive": archive, "elf": elf, "bin": binary}
+        )

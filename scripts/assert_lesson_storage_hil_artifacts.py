@@ -146,6 +146,14 @@ def resolve_artifacts(build_dir: Path, description: dict) -> dict[str, Path]:
     return artifacts
 
 
+def validate_artifact_chronology(artifacts: dict[str, Path]) -> None:
+    archive_time = artifacts["mainArchive"].stat().st_mtime_ns
+    elf_time = artifacts["elf"].stat().st_mtime_ns
+    binary_time = artifacts["bin"].stat().st_mtime_ns
+    require(archive_time <= elf_time, "ELF predates the linked main archive")
+    require(elf_time <= binary_time, "application binary predates the linked ELF")
+
+
 def resolve_nm(description: dict) -> str:
     compiler = Path(str(description.get("c_compiler", "")))
     require(compiler.name.endswith("gcc"), "C compiler identity missing")
@@ -245,6 +253,7 @@ def audit(profile: str, build_dir_argument: str) -> dict:
             "project description build directory mismatch")
 
     artifacts = resolve_artifacts(build_dir, description)
+    validate_artifact_chronology(artifacts)
     sdkconfig = parse_sdkconfig(artifacts["sdkconfig"])
     enabled = sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y"
     require(enabled == (profile == "hil"), "CONFIG_TBOT_HIL_STORAGE_FAULTS profile mismatch")
