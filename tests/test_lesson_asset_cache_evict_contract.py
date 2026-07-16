@@ -13,14 +13,17 @@ SYNC_POLICY_HEADER = ROOT / "main" / "lesson_asset_sync_path_policy.h"
 SYNC_POLICY_SOURCE = ROOT / "main" / "lesson_asset_sync_path_policy.cc"
 
 
-def test_exact_eviction_helper_is_built_but_not_exposed_before_task4():
+def test_exact_eviction_helper_is_built_and_exposed_as_user_only_after_task4():
     source = MCP_SOURCE.read_text(encoding="utf-8")
     cmake = MAIN_CMAKE.read_text(encoding="utf-8")
     helper = HELPER_SOURCE.read_text(encoding="utf-8")
 
-    assert "self.lesson_assets.evict_cache_key" not in source
-    assert '#include "lesson_asset_cache_evict.h"' not in source
-    assert "is_lesson_cache_evict" not in source
+    assert '#include "lesson_asset_cache_evict.h"' in source
+    registration = source[source.index('AddUserOnlyTool("self.lesson_assets.evict_cache_key"') :]
+    registration = registration[: registration.index("\n    AddUserOnlyTool(", 1)]
+    assert registration.count("Property(") == 1
+    assert 'Property("cacheKey", kPropertyTypeString)' in registration
+    assert "EvictLessonAssetCacheKey(cache_key, false)" in registration
     assert '"lesson_asset_cache_evict.cc"' in cmake
     assert '"/sdcard/tbot/lesson-assets"' in helper
 
@@ -42,11 +45,9 @@ def test_sync_path_policy_reuses_the_canonical_key_parser_and_is_built():
     assert "remove_suffix(1)" in source
 
 
-def test_all_lesson_asset_mutators_are_lease_guarded_and_eviction_stays_hidden():
+def test_all_lesson_asset_mutators_are_lease_guarded():
     source = MCP_SOURCE.read_text(encoding="utf-8")
 
-    assert "self.lesson_assets.evict_cache_key" not in source
-    assert '#include "lesson_asset_cache_evict.h"' not in source
     for helper in (
         "EnsureLessonAssetParentDirs(",
         "DownloadLessonAssetToVerifiedFile(",
@@ -157,3 +158,47 @@ def test_storage_coordinator_is_move_only_non_waiting_and_privacy_safe():
     assert "last_generation_" in header
     assert "assignment_id_.swap(validated_assignment_id)" in source
     assert "session_id_.swap(validated_session_id)" in source
+
+
+def test_eviction_acquires_coordinator_before_any_filesystem_scan():
+    source = HELPER_SOURCE.read_text(encoding="utf-8")
+    body = source[source.index("LessonAssetCacheEvictResult EvictLessonAssetCacheKey(") :]
+
+    lease = body.index('TryBeginMutation("evict")')
+    assert lease < body.index("InspectRequiredDirectory(root)")
+    assert lease < body.index("stat(leaf_path.c_str()")
+    assert "kPartialEvictRecoveryRequired" in source
+    assert "deleted_count" in body
+    assert "second_pass_names != validated_names" in body
+    assert "TBOT_TEST_LESSON_CACHE_EVICT_FAIL_FINAL_STAT" in source
+    assert "#ifndef ESP_PLATFORM" in source
+    assert "defined(ESP_PLATFORM)" in source
+    runner = (ROOT / "scripts" / "run_host_native_lesson_asset_cache_evict_test.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "TBOT_LESSON_ASSET_CACHE_EVICT_TESTING" in runner
+
+
+def test_eviction_tool_has_exact_six_field_envelope_and_runtime_bypass():
+    source = MCP_SOURCE.read_text(encoding="utf-8")
+    registration = source[source.index('AddUserOnlyTool("self.lesson_assets.evict_cache_key"') :]
+    registration = registration[: registration.index("\n    AddUserOnlyTool(", 1)]
+
+    response = registration[registration.index("auto json = MakeCheckedCJsonObject();") :]
+    expected_fields = ("cacheKey", "status", "evicted", "notFound", "fileCount", "reason")
+    for field in expected_fields:
+        assert response.count(f'"{field}"') == 1
+    assert "LessonAssetCacheEvictCodeName(result.code)" in registration
+    assert "result.evicted" in registration
+    assert "result.not_found" in registration
+    assert "result.file_count" in registration
+
+    dispatch = source[source.index("void McpServer::DoToolCall(") :]
+    assert 'tool_name == "self.lesson_assets.evict_cache_key"' in dispatch
+    assert dispatch.count("is_lesson_cache_evict") >= 3
+    immediate_guard = dispatch.index("Application::GetInstance().IsLessonRuntimeActive()")
+    assert dispatch.rfind("is_lesson_cache_evict", 0, immediate_guard) != -1
+    scheduled_guard = dispatch.index(
+        "Application::GetInstance().IsLessonRuntimeActive()", immediate_guard + 1
+    )
+    assert dispatch.rfind("is_lesson_cache_evict", 0, scheduled_guard) != -1

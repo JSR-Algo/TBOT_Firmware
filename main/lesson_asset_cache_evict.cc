@@ -1,5 +1,9 @@
 #include "lesson_asset_cache_evict.h"
 
+#if defined(ESP_PLATFORM) || defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING)
+#include "lesson_asset_storage_coordinator.h"
+#endif
+
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -7,6 +11,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -72,13 +77,10 @@ bool HasExactPrefix(const std::string& path, const std::string& prefix) {
     return path.size() > prefix.size() && path.compare(0, prefix.size(), prefix) == 0;
 }
 
-LessonAssetCacheEvictCode InspectDirectory(const std::string& path) {
+LessonAssetCacheEvictCode InspectRequiredDirectory(const std::string& path) {
     struct stat directory_stat {};
     errno = 0;
     if (stat(path.c_str(), &directory_stat) != 0) {
-        if (errno == ENOENT) {
-            return LessonAssetCacheEvictCode::kNotFound;
-        }
         return LessonAssetCacheEvictCode::kScanFailed;
     }
     if (!S_ISDIR(directory_stat.st_mode)) {
@@ -164,7 +166,22 @@ bool ShouldFailUnlink(const std::string& name) {
     const char* requested = std::getenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_UNLINK");
     return requested != nullptr && name == requested;
 }
+
+bool HasFailureSeam(const char* name) {
+    return std::getenv(name) != nullptr;
+}
 #endif
+
+LessonAssetCacheEvictResult MutationFailure(
+    LessonAssetCacheEvictCode code,
+    const std::string& cache_key,
+    int deleted_count
+) {
+    if (deleted_count > 0) {
+        code = LessonAssetCacheEvictCode::kPartialEvictRecoveryRequired;
+    }
+    return MakeResult(code, cache_key, deleted_count);
+}
 
 }  // namespace
 
@@ -266,9 +283,6 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
     if (!IsCanonicalLessonCacheKey(cache_key)) {
         return Finish(MakeResult(LessonAssetCacheEvictCode::kInvalidCacheKey));
     }
-    if (lesson_session_active) {
-        return Finish(MakeResult(LessonAssetCacheEvictCode::kLessonSessionActive, cache_key));
-    }
 
     const std::string root(TBOT_LESSON_ASSET_ROOT);
     const std::string root_prefix = root + "/";
@@ -284,25 +298,57 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
         return Finish(MakeResult(LessonAssetCacheEvictCode::kPathMismatch, cache_key));
     }
 
+#if defined(ESP_PLATFORM) || defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING)
+    auto mutation =
+        LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("evict");
+    const bool mutation_refused = !mutation;
+#else
+    const bool mutation_refused = false;
+#endif
+    if (mutation_refused || lesson_session_active) {
+        return Finish(MakeResult(
+            LessonAssetCacheEvictCode::kLessonSessionActive, cache_key));
+    }
+
+    auto code = InspectRequiredDirectory(root);
+    if (code != LessonAssetCacheEvictCode::kEvicted) {
+        return Finish(MakeResult(code, cache_key));
+    }
+    code = InspectRequiredDirectory(slug_path);
+    if (code != LessonAssetCacheEvictCode::kEvicted) {
+        return Finish(MakeResult(code, cache_key));
+    }
+
     struct stat leaf_stat {};
+#ifndef ESP_PLATFORM
+    if (HasFailureSeam("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_LEAF_STAT")) {
+        return Finish(MakeResult(LessonAssetCacheEvictCode::kScanFailed, cache_key));
+    }
+#endif
     errno = 0;
     if (stat(leaf_path.c_str(), &leaf_stat) != 0) {
         if (errno == ENOENT) {
+            code = InspectRequiredDirectory(root);
+            if (code != LessonAssetCacheEvictCode::kEvicted) {
+                return Finish(MakeResult(code, cache_key));
+            }
+#ifndef ESP_PLATFORM
+            if (HasFailureSeam(
+                    "TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SLUG_RECHECK")) {
+                return Finish(MakeResult(
+                    LessonAssetCacheEvictCode::kScanFailed, cache_key));
+            }
+#endif
+            code = InspectRequiredDirectory(slug_path);
+            if (code != LessonAssetCacheEvictCode::kEvicted) {
+                return Finish(MakeResult(code, cache_key));
+            }
             return Finish(MakeResult(LessonAssetCacheEvictCode::kNotFound, cache_key));
         }
         return Finish(MakeResult(LessonAssetCacheEvictCode::kScanFailed, cache_key));
     }
     if (!S_ISDIR(leaf_stat.st_mode)) {
         return Finish(MakeResult(LessonAssetCacheEvictCode::kUnexpectedNodeType, cache_key));
-    }
-
-    auto code = InspectDirectory(root);
-    if (code != LessonAssetCacheEvictCode::kEvicted) {
-        return Finish(MakeResult(code, cache_key));
-    }
-    code = InspectDirectory(slug_path);
-    if (code != LessonAssetCacheEvictCode::kEvicted) {
-        return Finish(MakeResult(code, cache_key));
     }
 
     std::vector<std::string> validated_names;
@@ -319,54 +365,75 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
     if (second_pass_names != validated_names) {
         return Finish(MakeResult(LessonAssetCacheEvictCode::kScanFailed, cache_key));
     }
+    if (validated_names.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return Finish(MakeResult(LessonAssetCacheEvictCode::kScanFailed, cache_key));
+    }
 
-    code = InspectDirectory(root);
+    code = InspectRequiredDirectory(root);
     if (code != LessonAssetCacheEvictCode::kEvicted) {
         return Finish(MakeResult(code, cache_key));
     }
-    code = InspectDirectory(slug_path);
+    code = InspectRequiredDirectory(slug_path);
     if (code != LessonAssetCacheEvictCode::kEvicted) {
         return Finish(MakeResult(code, cache_key));
     }
-    code = InspectDirectory(leaf_path);
+    code = InspectRequiredDirectory(leaf_path);
     if (code != LessonAssetCacheEvictCode::kEvicted) {
         return Finish(MakeResult(code, cache_key));
     }
+    int deleted_count = 0;
     for (const auto& name : validated_names) {
         const std::string child_path = leaf_prefix + name;
         if (!HasExactPrefix(child_path, leaf_prefix)) {
-            return Finish(MakeResult(LessonAssetCacheEvictCode::kPathMismatch, cache_key));
+            return Finish(MutationFailure(
+                LessonAssetCacheEvictCode::kPathMismatch, cache_key, deleted_count));
         }
 
         struct stat child_stat {};
         if (stat(child_path.c_str(), &child_stat) != 0) {
-            return Finish(MakeResult(LessonAssetCacheEvictCode::kUnlinkFailed, cache_key));
+            return Finish(MutationFailure(
+                LessonAssetCacheEvictCode::kUnlinkFailed, cache_key, deleted_count));
         }
         code = NodeCode(child_stat);
         if (code != LessonAssetCacheEvictCode::kEvicted) {
-            return Finish(MakeResult(code, cache_key));
+            return Finish(MutationFailure(code, cache_key, deleted_count));
         }
 #ifndef ESP_PLATFORM
         if (ShouldFailUnlink(name)) {
-            return Finish(MakeResult(LessonAssetCacheEvictCode::kUnlinkFailed, cache_key));
+            return Finish(MutationFailure(
+                LessonAssetCacheEvictCode::kUnlinkFailed, cache_key, deleted_count));
         }
 #endif
         if (unlink(child_path.c_str()) != 0) {
-            return Finish(MakeResult(LessonAssetCacheEvictCode::kUnlinkFailed, cache_key));
+            return Finish(MutationFailure(
+                LessonAssetCacheEvictCode::kUnlinkFailed, cache_key, deleted_count));
         }
+        ++deleted_count;
     }
 
 #ifndef ESP_PLATFORM
-    if (std::getenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR") != nullptr) {
-        return Finish(MakeResult(LessonAssetCacheEvictCode::kRmdirFailed, cache_key));
+    if (HasFailureSeam("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR")) {
+        return Finish(MutationFailure(
+            LessonAssetCacheEvictCode::kRmdirFailed, cache_key, deleted_count));
     }
 #endif
     if (rmdir(leaf_path.c_str()) != 0) {
-        return Finish(MakeResult(LessonAssetCacheEvictCode::kRmdirFailed, cache_key));
+        return Finish(MutationFailure(
+            LessonAssetCacheEvictCode::kRmdirFailed, cache_key, deleted_count));
+    }
+
+#ifndef ESP_PLATFORM
+    if (HasFailureSeam("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_FINAL_STAT")) {
+        return Finish(MutationFailure(
+            LessonAssetCacheEvictCode::kScanFailed, cache_key, deleted_count));
+    }
+#endif
+    errno = 0;
+    if (stat(leaf_path.c_str(), &leaf_stat) == 0 || errno != ENOENT) {
+        return Finish(MutationFailure(
+            LessonAssetCacheEvictCode::kScanFailed, cache_key, deleted_count));
     }
     return Finish(MakeResult(
-        LessonAssetCacheEvictCode::kEvicted,
-        cache_key,
-        static_cast<int>(validated_names.size())
-    ));
+        LessonAssetCacheEvictCode::kEvicted, cache_key, deleted_count));
 }

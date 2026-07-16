@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "lesson_asset_cache_evict.h"
+#include "lesson_asset_storage_coordinator.h"
 
 namespace {
 
@@ -31,8 +32,18 @@ void ResetRoot() {
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SCAN");
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_UNLINK");
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_FINAL_STAT");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_LEAF_STAT");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SLUG_RECHECK");
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
     fs::remove_all(kRoot);
     fs::create_directories(kRoot);
+}
+
+std::string ReadFile(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return std::string(
+        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
 }
 
 fs::path Leaf(const std::string& key = kKey) {
@@ -137,11 +148,41 @@ void TestActiveAndAbsent() {
            "active refusal flags must be false and count zero");
 
     ResetRoot();
+    fs::create_directories(Leaf().parent_path());
     result = EvictLessonAssetCacheKey(kKey, false);
     ExpectCode(result, LessonAssetCacheEvictCode::kNotFound,
                "absent cache leaf must be idempotent");
     Expect(!result.evicted && result.not_found && result.file_count == 0,
            "not-found flags mismatch");
+}
+
+void TestCoordinatorRefusesBeforeScan() {
+    ResetRoot();
+    WriteFile(Leaf() / "one.bin", "prepared");
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    const auto session =
+        coordinator.TryBeginLessonSession("assignment-a", "session-a");
+    Expect(session.acquired, "lesson fixture reservation must acquire");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SCAN", "1", 1);
+    auto result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kLessonSessionActive,
+               "prepared lesson must refuse before any scan");
+    Expect(ReadFile(Leaf() / "one.bin") == "prepared",
+           "prepared refusal must preserve the exact leaf");
+    Expect(coordinator.EndLessonSession(
+               "assignment-a", "session-a", session.generation),
+           "lesson fixture reservation must release");
+
+    ResetRoot();
+    WriteFile(Leaf() / "one.bin", "syncing");
+    auto sync = coordinator.TryBeginMutation("sync");
+    Expect(static_cast<bool>(sync), "sync fixture lease must acquire");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SCAN", "1", 1);
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kLessonSessionActive,
+               "concurrent mutation must use the stable public refusal");
+    Expect(ReadFile(Leaf() / "one.bin") == "syncing",
+           "mutation conflict must refuse before any scan");
 }
 
 void TestExactFlatLeafDeletionAndPreservation() {
@@ -151,7 +192,7 @@ void TestExactFlatLeafDeletionAndPreservation() {
     const fs::path sibling = fs::path(kRoot) / "pip-farm-3m" / ("v2-" + kChecksum);
     WriteFile(sibling / "keep.bin");
     WriteFile(fs::path(kRoot) / "current.json", "current");
-    WriteFile(fs::path(kRoot) / "previous-good-version.json", "pvg");
+    WriteFile(fs::path(kRoot) / "pvg" / "manifest.json", "pvg");
     WriteFile(fs::path(kRoot) / "shared" / "keep.bin", "shared");
 
     const auto result = EvictLessonAssetCacheKey(kKey, false);
@@ -161,11 +202,14 @@ void TestExactFlatLeafDeletionAndPreservation() {
     Expect(!fs::exists(Leaf()), "exact leaf must be removed");
     Expect(fs::exists(fs::path(kRoot) / "pip-farm-3m"), "slug parent must remain");
     Expect(fs::exists(sibling / "keep.bin"), "sibling version must remain");
-    Expect(fs::exists(fs::path(kRoot) / "current.json"), "current metadata must remain");
-    Expect(fs::exists(fs::path(kRoot) / "previous-good-version.json"),
-           "PVG metadata must remain");
-    Expect(fs::exists(fs::path(kRoot) / "shared" / "keep.bin"),
-           "shared assets must remain");
+    Expect(ReadFile(sibling / "keep.bin") == "asset",
+           "sibling version bytes must remain");
+    Expect(ReadFile(fs::path(kRoot) / "current.json") == "current",
+           "current metadata bytes must remain");
+    Expect(ReadFile(fs::path(kRoot) / "pvg" / "manifest.json") == "pvg",
+           "PVG directory bytes must remain");
+    Expect(ReadFile(fs::path(kRoot) / "shared" / "keep.bin") == "shared",
+           "shared asset bytes must remain");
 }
 
 void ExpectFirstPassRefusal(
@@ -217,6 +261,93 @@ void TestDeterministicSecondPassFailures() {
                "deterministic rmdir failure must be reported");
     Expect(!result.evicted && result.file_count == 0 && fs::exists(Leaf()),
            "rmdir failure must not claim success or count");
+}
+
+void TestPartialMutationTruthAndRetry() {
+    ResetRoot();
+    WriteFile(Leaf() / "a.bin", "a");
+    WriteFile(Leaf() / "b.bin", "b");
+    WriteFile(Leaf() / "c.bin", "c");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_UNLINK", "b.bin", 1);
+    auto result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kPartialEvictRecoveryRequired,
+               "later unlink failure must report partial recovery");
+    Expect(!result.evicted && !result.not_found && result.file_count == 1,
+           "later unlink failure must report exact deleted count");
+    Expect(!fs::exists(Leaf() / "a.bin") && fs::exists(Leaf() / "b.bin") &&
+               fs::exists(Leaf() / "c.bin"),
+           "partial unlink must expose the exact remaining files");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_UNLINK");
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kEvicted,
+               "retry must finish a partial exact leaf");
+    Expect(result.file_count == 2 && !fs::exists(Leaf()),
+           "retry must report only files deleted by that attempt");
+
+    ResetRoot();
+    WriteFile(Leaf() / "a.bin", "a");
+    WriteFile(Leaf() / "b.bin", "b");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR", "1", 1);
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kPartialEvictRecoveryRequired,
+               "rmdir after file deletion must report partial recovery");
+    Expect(result.file_count == 2 && fs::exists(Leaf()) && fs::is_empty(Leaf()),
+           "rmdir partial must preserve exact deleted count and empty leaf");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR");
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kEvicted,
+               "retry must remove an empty partial leaf");
+    Expect(result.file_count == 0 && !fs::exists(Leaf()),
+           "empty-leaf retry must report zero newly deleted files");
+}
+
+void TestFinalAbsenceVerification() {
+    ResetRoot();
+    WriteFile(Leaf() / "one.bin");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_FINAL_STAT", "1", 1);
+    const auto result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kPartialEvictRecoveryRequired,
+               "failed final absence proof after deletion must report partial");
+    Expect(!result.evicted && !result.not_found && result.file_count == 1,
+           "failed final absence proof must never claim eviction");
+}
+
+void TestAuthoritativeNotFoundOnly() {
+    ResetRoot();
+    fs::remove_all(kRoot);
+    auto result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kScanFailed,
+               "missing root must not become false not_found");
+    Expect(!result.not_found, "missing root must not set notFound");
+
+    ResetRoot();
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kScanFailed,
+               "missing slug must not become false not_found");
+    Expect(!result.not_found, "missing slug must not set notFound");
+
+    ResetRoot();
+    fs::create_directories(Leaf().parent_path());
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kNotFound,
+               "exact leaf ENOENT under valid topology must be idempotent");
+    Expect(result.not_found, "authoritative exact-leaf ENOENT must set notFound");
+
+    ResetRoot();
+    fs::create_directories(Leaf().parent_path());
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SLUG_RECHECK", "1", 1);
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kScanFailed,
+               "slug loss around exact-leaf ENOENT must not become not_found");
+    Expect(!result.not_found, "slug recheck failure must not set notFound");
+
+    ResetRoot();
+    fs::create_directories(Leaf().parent_path());
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_LEAF_STAT", "1", 1);
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kScanFailed,
+               "exact leaf SD error must not become false not_found");
+    Expect(!result.not_found, "exact leaf SD error must not set notFound");
 
 }
 
@@ -236,9 +367,13 @@ int main() {
     TestCanonicalGrammar();
     TestCodeNames();
     TestActiveAndAbsent();
+    TestCoordinatorRefusesBeforeScan();
     TestExactFlatLeafDeletionAndPreservation();
     TestFirstPassHazards();
     TestDeterministicSecondPassFailures();
+    TestPartialMutationTruthAndRetry();
+    TestFinalAbsenceVerification();
+    TestAuthoritativeNotFoundOnly();
     TestLeafTypeRefusals();
     ResetRoot();
     std::cout << "lesson asset cache eviction host test OK (" << checks << " checks)"

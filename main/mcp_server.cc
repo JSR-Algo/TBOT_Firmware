@@ -26,6 +26,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "lesson_asset_cache_evict.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_asset_download_raii.h"
 #include "lesson_asset_download_staging.h"
@@ -834,6 +835,28 @@ void McpServer::AddUserOnlyTools() {
     }
 #endif // HAVE_LVGL
 
+    AddUserOnlyTool("self.lesson_assets.evict_cache_key",
+        "Evict one exact lesson asset cache key from the SD card.",
+        PropertyList({
+            Property("cacheKey", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            const std::string cache_key =
+                properties["cacheKey"].value<std::string>();
+            const auto result = EvictLessonAssetCacheKey(cache_key, false);
+            auto json = MakeCheckedCJsonObject();
+            CheckedCJsonAddStringToObject(
+                json.get(), "cacheKey", result.cache_key.c_str());
+            CheckedCJsonAddStringToObject(
+                json.get(), "status", LessonAssetCacheEvictCodeName(result.code));
+            CheckedCJsonAddBoolToObject(json.get(), "evicted", result.evicted);
+            CheckedCJsonAddBoolToObject(json.get(), "notFound", result.not_found);
+            CheckedCJsonAddNumberToObject(json.get(), "fileCount", result.file_count);
+            CheckedCJsonAddStringToObject(
+                json.get(), "reason", LessonAssetCacheEvictCodeName(result.code));
+            return json.release();
+        });
+
     // Assets download url (always registered — Settings storage works regardless of partition layout)
     AddUserOnlyTool("self.lesson_assets.sync_sample_to_sd",
         "Download the built-in sample lesson images to the SD card for offline lesson rendering.",
@@ -1207,7 +1230,10 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         return;
     }
 
-    if (Application::GetInstance().IsLessonRuntimeActive()) {
+    const bool is_lesson_cache_evict =
+        tool_name == "self.lesson_assets.evict_cache_key";
+    if (!is_lesson_cache_evict &&
+        Application::GetInstance().IsLessonRuntimeActive()) {
         ESP_LOGI(TAG, "MCP tool call rejected during lesson: %s", tool_name.c_str());
         ReplyError(id, "MCP tools disabled during lesson");
         return;
@@ -1248,8 +1274,10 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool_iter, tool_name, arguments = std::move(arguments)]() {
-        if (Application::GetInstance().IsLessonRuntimeActive()) {
+    app.Schedule([this, id, tool_iter, tool_name, is_lesson_cache_evict,
+                  arguments = std::move(arguments)]() {
+        if (!is_lesson_cache_evict &&
+            Application::GetInstance().IsLessonRuntimeActive()) {
             ESP_LOGI(TAG, "scheduled MCP tool call rejected during lesson: %s", tool_name.c_str());
             ReplyError(id, "MCP tools disabled during lesson");
             return;
