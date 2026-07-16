@@ -5,6 +5,13 @@ BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tbot-lesson-transfer.XXXXXX")"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 CXX_BIN="${CXX:-clang++}"
 
+"${CXX_BIN}" -std=c++17 -Wall -Wextra -Werror ${CXXFLAGS:-} \
+  -I"${ROOT}/tests/native_stubs_transfer" \
+  -I"${ROOT}/components/esp-ml307/include" \
+  -I"${ROOT}/main" \
+  -c "${ROOT}/main/lesson_asset_http_transfer.cc" \
+  -o "${BUILD_DIR}/lesson_asset_http_transfer_config_off.o"
+
 "${CXX_BIN}" -std=c++17 -pthread -Wall -Wextra -Werror ${CXXFLAGS:-} \
   -DTBOT_LESSON_ASSET_STAGING_TESTING=1 \
   -DTBOT_LESSON_STORAGE_HIL_HOOKS_TESTING=1 \
