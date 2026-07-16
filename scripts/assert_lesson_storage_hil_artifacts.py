@@ -129,22 +129,54 @@ def app_partition_metrics(repo: Path, sdkconfig: dict[str, str], app_bin: Path) 
     }
 
 
+def confined_regular_file(build_dir: Path, path: Path, label: str) -> Path:
+    build_root = build_dir.resolve()
+    try:
+        relative = path.relative_to(build_dir)
+    except ValueError as error:
+        raise AuditFailure(f"artifact path escapes build directory: {label}") from error
+    probe = build_dir
+    for component in relative.parts:
+        probe = probe / component
+        require(not probe.is_symlink(), f"artifact path contains symlink: {label}")
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise AuditFailure(f"required artifact missing: {label}") from error
+    require(resolved != build_root and build_root in resolved.parents,
+            f"artifact path escapes build directory: {label}")
+    require(resolved.is_file(), f"required artifact is not a regular file: {label}")
+    require(resolved.stat().st_size > 0, f"required artifact empty: {label}")
+    return resolved
+
+
+def declared_artifact(build_dir: Path, value: str, label: str) -> Path:
+    declared = Path(value)
+    require(
+        not declared.is_absolute() and ".." not in declared.parts,
+        f"declared artifact must be a confined relative path: {label}",
+    )
+    return build_dir / declared
+
+
 def resolve_artifacts(build_dir: Path, description: dict) -> dict[str, Path]:
-    app_bin = build_dir / description.get("app_bin", "xiaozhi.bin")
-    app_elf = build_dir / description.get("app_elf", "xiaozhi.elf")
-    artifacts = {
-        "bin": app_bin,
-        "elf": app_elf,
+    candidates = {
+        "bin": declared_artifact(
+            build_dir, description.get("app_bin", "xiaozhi.bin"), "bin"
+        ),
+        "elf": declared_artifact(
+            build_dir, description.get("app_elf", "xiaozhi.elf"), "elf"
+        ),
         "map": build_dir / "xiaozhi.map",
         "mainArchive": build_dir / "esp-idf/main/libmain.a",
         "projectDescription": build_dir / "project_description.json",
         "sdkconfig": build_dir / "sdkconfig",
         "partitionBinary": build_dir / "partition_table/partition-table.bin",
     }
-    for label, path in artifacts.items():
-        require(path.is_file(), f"required artifact missing: {label}")
-        require(path.stat().st_size > 0, f"required artifact empty: {label}")
-    return artifacts
+    return {
+        label: confined_regular_file(build_dir, path, label)
+        for label, path in candidates.items()
+    }
 
 
 def validate_artifact_chronology(artifacts: dict[str, Path]) -> None:
@@ -260,8 +292,9 @@ def audit(profile: str, build_dir_argument: str) -> dict:
         run(["git", "show", "-s", "--format=%ct", "HEAD"], repo).strip()
     )
 
-    description_path = build_dir / "project_description.json"
-    require(description_path.is_file(), "project_description.json missing")
+    description_path = confined_regular_file(
+        build_dir, build_dir / "project_description.json", "projectDescription"
+    )
     description = json.loads(description_path.read_text(encoding="utf-8"))
     require(description.get("target") == "esp32s3", "unexpected build target")
     require(description.get("project_name") == "xiaozhi", "unexpected project name")

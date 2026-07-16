@@ -119,3 +119,52 @@ def test_artifact_freshness_rejects_every_file_older_than_source_commit(tmp_path
     )
     with pytest.raises(AUDITOR.AuditFailure, match="predates source commit"):
         AUDITOR.validate_artifact_freshness(artifacts, commit_time)
+
+
+def _artifact_fixture(build_dir: Path):
+    paths = {
+        "bin": build_dir / "xiaozhi.bin",
+        "elf": build_dir / "xiaozhi.elf",
+        "map": build_dir / "xiaozhi.map",
+        "mainArchive": build_dir / "esp-idf/main/libmain.a",
+        "projectDescription": build_dir / "project_description.json",
+        "sdkconfig": build_dir / "sdkconfig",
+        "partitionBinary": build_dir / "partition_table/partition-table.bin",
+    }
+    for path in paths.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"artifact")
+    return paths
+
+
+@pytest.mark.parametrize(
+    "label",
+    (
+        "bin", "elf", "map", "mainArchive", "projectDescription",
+        "sdkconfig", "partitionBinary",
+    ),
+)
+def test_resolve_artifacts_rejects_symlink_for_every_artifact(tmp_path, label):
+    build_dir = tmp_path / "build"
+    paths = _artifact_fixture(build_dir)
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"outside")
+    paths[label].unlink()
+    paths[label].symlink_to(outside)
+    description = {"app_bin": "xiaozhi.bin", "app_elf": "xiaozhi.elf"}
+
+    with pytest.raises(AUDITOR.AuditFailure, match="symlink"):
+        AUDITOR.resolve_artifacts(build_dir, description)
+
+
+@pytest.mark.parametrize("field", ("app_bin", "app_elf"))
+def test_resolve_artifacts_rejects_declared_path_traversal(tmp_path, field):
+    build_dir = tmp_path / "build"
+    _artifact_fixture(build_dir)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    description = {"app_bin": "xiaozhi.bin", "app_elf": "xiaozhi.elf"}
+    description[field] = "../outside.bin"
+
+    with pytest.raises(AUDITOR.AuditFailure, match="relative path"):
+        AUDITOR.resolve_artifacts(build_dir, description)
