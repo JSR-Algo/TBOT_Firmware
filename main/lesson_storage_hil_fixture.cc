@@ -369,6 +369,22 @@ FixtureState PreservationStageFailure(
     return FixtureState::kUnexpected;
 }
 
+bool IsReachablePreservationCleanupPair(
+    FixtureState first,
+    FixtureState second
+) {
+    return (first == FixtureState::kComplete &&
+            second == FixtureState::kComplete) ||
+           (first == FixtureState::kEmptyPartial &&
+            second == FixtureState::kComplete) ||
+           (first == FixtureState::kEmptyPartial &&
+            second == FixtureState::kEmptyPartial) ||
+           (first == FixtureState::kMissing &&
+            second == FixtureState::kEmptyPartial) ||
+           (first == FixtureState::kMissing &&
+            second == FixtureState::kMissing);
+}
+
 LessonStorageHilFixtureCode ValidateParents(
     const std::string& slug,
     bool* root_missing,
@@ -727,16 +743,24 @@ LessonStorageHilFixtureResult CleanupPreservation(
             sibling_cache_key
         );
     }
-    const auto is_resumable = [](FixtureState state) {
+    const auto is_known_partial = [](FixtureState state) {
         return state == FixtureState::kMissing ||
                state == FixtureState::kEmptyPartial ||
                state == FixtureState::kComplete;
     };
-    if (!is_resumable(first_state) || !is_resumable(second_state)) {
-        const FixtureState failure = !is_resumable(first_state)
+    if (!is_known_partial(first_state) || !is_known_partial(second_state)) {
+        const FixtureState failure = !is_known_partial(first_state)
                                          ? first_state
                                          : second_state;
         return Result(CodeForState(failure), false, cache_key, sibling_cache_key);
+    }
+    if (!IsReachablePreservationCleanupPair(first_state, second_state)) {
+        return Result(
+            LessonStorageHilFixtureCode::kUnexpectedExistingNode,
+            false,
+            cache_key,
+            sibling_cache_key
+        );
     }
 
     bool changed = false;

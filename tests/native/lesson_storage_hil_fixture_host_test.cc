@@ -487,6 +487,61 @@ void TestPreservationCleanupResumesOwnedPartialStates() {
            "retry cleanup left fixture-owned leaves");
 }
 
+void TestPreservationCleanupRejectsUnreachablePartialOrder() {
+    const std::string key = Key("hil-order", 1, 'c');
+    const std::string sibling = Key("hil-order", 2, 'd');
+    const fs::path first_leaf = Leaf(key);
+    const fs::path second_leaf = Leaf(sibling);
+    const fs::path first = first_leaf / ".tbot-hil-sentinel";
+    const fs::path second = second_leaf / ".tbot-hil-sentinel";
+    const auto stage = [&]() {
+        ResetRoot();
+        auto lease = Lease();
+        const auto result = StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kStaged && result.changed,
+               "ordered fixture did not stage");
+    };
+    const auto reject = [&](const char* message) {
+        auto lease = Lease();
+        const auto result = CleanupLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                   !result.changed,
+               message);
+    };
+
+    stage();
+    fs::remove(first);
+    fs::remove(second);
+    fs::remove(second_leaf);
+    reject("empty-primary/missing-sibling cleanup was accepted");
+    Expect(fs::is_directory(first_leaf),
+           "empty-primary/missing-sibling refusal mutated primary");
+
+    stage();
+    fs::remove(second);
+    fs::remove(second_leaf);
+    reject("complete-primary/missing-sibling cleanup was accepted");
+    Expect(fs::is_regular_file(first),
+           "complete-primary/missing-sibling refusal mutated primary");
+
+    stage();
+    fs::remove(first);
+    fs::remove(first_leaf);
+    reject("missing-primary/complete-sibling cleanup was accepted");
+    Expect(fs::is_regular_file(second),
+           "missing-primary/complete-sibling refusal mutated sibling");
+
+    stage();
+    fs::remove(second);
+    reject("complete-primary/empty-sibling cleanup was accepted");
+    Expect(fs::is_regular_file(first) && fs::is_directory(second_leaf),
+           "complete-primary/empty-sibling refusal mutated pair");
+}
+
 void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
     ResetRoot();
     const std::string key = Key("hil-inspect", 1, 'e');
@@ -610,6 +665,7 @@ int main() {
     TestLeafRegularFileFixtureRequiresExactMagic();
     TestPreservationSetUsesTwoPhaseCleanup();
     TestPreservationCleanupResumesOwnedPartialStates();
+    TestPreservationCleanupRejectsUnreachablePartialOrder();
     TestInspectionIsReadOnlyBoundedSortedAndDataSensitive();
     ResetRoot();
     std::cout << "lesson storage HIL fixture host checks: " << g_checks << '\n';
