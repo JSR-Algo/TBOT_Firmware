@@ -26,6 +26,7 @@ bool VerifyLessonAssetSha256(
 
 void CommitVerifiedLessonAssetDownload(
     LessonAssetDownloadStagingFile& staging,
+    const char* cache_key,
     const std::string& destination,
     const std::string& expected_sha256
 );

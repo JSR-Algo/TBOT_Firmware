@@ -15,6 +15,15 @@ LessonStorageHilHookOutcome RunLessonStorageHilCheckpoint(
     std::uint32_t declared_asset_bytes
 ) noexcept;
 
+LessonStorageHilHookOutcome RunLessonStorageHilStagingCheckpoint(
+    const char* cache_key,
+    LessonStorageHilOperation operation,
+    LessonStorageHilCheckpoint checkpoint,
+    std::uint32_t progress,
+    std::uint32_t declared_asset_bytes,
+    const char* staging_path
+) noexcept;
+
 #ifdef TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING
 using LessonStorageHilPauseCallback = void (*)(std::uint32_t seconds) noexcept;
 

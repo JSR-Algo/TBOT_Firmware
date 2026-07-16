@@ -1,5 +1,8 @@
 #include "lesson_storage_hil_hooks.h"
 
+#include <cstdio>
+#include <unistd.h>
+
 #ifdef TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING
 #include <atomic>
 #endif
@@ -109,18 +112,13 @@ void LogCheckpointContinued(
 #endif
 }
 
-}  // namespace
-
-LessonStorageHilHookOutcome RunLessonStorageHilCheckpoint(
+LessonStorageHilHookOutcome ExecuteDecision(
+    const LessonStorageHilDecision& decision,
     const char* cache_key,
     LessonStorageHilOperation operation,
     LessonStorageHilCheckpoint checkpoint,
-    std::uint32_t progress,
-    std::uint32_t declared_asset_bytes
+    std::uint32_t progress
 ) noexcept {
-    const LessonStorageHilDecision decision =
-        LessonStorageHilController::GetInstance().Observe(
-            cache_key, operation, checkpoint, progress, declared_asset_bytes);
     if (!decision.matched || !decision.consumed) {
         return LessonStorageHilHookOutcome::kContinue;
     }
@@ -141,6 +139,74 @@ LessonStorageHilHookOutcome RunLessonStorageHilCheckpoint(
             return LessonStorageHilHookOutcome::kFail;
     }
     return LessonStorageHilHookOutcome::kFail;
+}
+
+bool CorruptLessonStorageHilStagingFile(const char* staging_path) noexcept {
+    if (staging_path == nullptr || staging_path[0] == '\0') {
+        return false;
+    }
+    FILE* file = std::fopen(staging_path, "rb+");
+    if (file == nullptr) {
+        return false;
+    }
+
+    unsigned char byte = 0;
+    bool ok = std::fread(&byte, 1, 1, file) == 1;
+    if (ok) {
+        byte ^= 0x01U;
+        ok = std::fseek(file, 0, SEEK_SET) == 0 &&
+             std::fwrite(&byte, 1, 1, file) == 1 &&
+             std::fflush(file) == 0;
+    }
+    const int descriptor = fileno(file);
+    if (ok) {
+        ok = descriptor >= 0 && fsync(descriptor) == 0;
+    }
+    if (std::fclose(file) != 0) {
+        ok = false;
+    }
+    return ok;
+}
+
+}  // namespace
+
+LessonStorageHilHookOutcome RunLessonStorageHilCheckpoint(
+    const char* cache_key,
+    LessonStorageHilOperation operation,
+    LessonStorageHilCheckpoint checkpoint,
+    std::uint32_t progress,
+    std::uint32_t declared_asset_bytes
+) noexcept {
+    const LessonStorageHilDecision decision =
+        LessonStorageHilController::GetInstance().Observe(
+            cache_key, operation, checkpoint, progress, declared_asset_bytes);
+    return ExecuteDecision(decision, cache_key, operation, checkpoint, progress);
+}
+
+LessonStorageHilHookOutcome RunLessonStorageHilStagingCheckpoint(
+    const char* cache_key,
+    LessonStorageHilOperation operation,
+    LessonStorageHilCheckpoint checkpoint,
+    std::uint32_t progress,
+    std::uint32_t declared_asset_bytes,
+    const char* staging_path
+) noexcept {
+    if (operation != LessonStorageHilOperation::kSync ||
+        checkpoint != LessonStorageHilCheckpoint::kBeforeChecksumVerify) {
+        return LessonStorageHilHookOutcome::kFail;
+    }
+    const LessonStorageHilDecision decision =
+        LessonStorageHilController::GetInstance().Observe(
+            cache_key, operation, checkpoint, progress, declared_asset_bytes);
+    if (!decision.matched || !decision.consumed) {
+        return LessonStorageHilHookOutcome::kContinue;
+    }
+    if (decision.action == LessonStorageHilAction::kCorruptStaging) {
+        return CorruptLessonStorageHilStagingFile(staging_path)
+                   ? LessonStorageHilHookOutcome::kContinue
+                   : LessonStorageHilHookOutcome::kFail;
+    }
+    return ExecuteDecision(decision, cache_key, operation, checkpoint, progress);
 }
 
 #ifdef TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING

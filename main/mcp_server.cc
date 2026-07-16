@@ -33,6 +33,11 @@
 #include "lesson_asset_sample_url_policy.h"
 #include "lesson_asset_sync_path_policy.h"
 #include <lesson_asset_sync_attestation.h>
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+#include "lesson_storage_hil_controller.h"
+#include "lesson_storage_hil_hooks.h"
+#endif
 
 #define TAG "MCP"
 
@@ -57,6 +62,9 @@ constexpr SampleLessonAsset kSampleLessonAssets[] = {
 
 bool DownloadLessonAssetToFile(
     const LessonAssetMutationLease& mutation,
+    const char* cache_key,
+    bool has_declared_size,
+    size_t declared_size,
     const std::string& url,
     const std::string& dest_path,
     size_t& bytes_out
@@ -109,6 +117,8 @@ struct ValidatedLessonAsset {
     const char* url;
     const char* sha256;
     const char* destination;
+    bool has_declared_size;
+    size_t declared_size;
 };
 
 template <size_t N>
@@ -245,6 +255,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
         const char* url = JsonStringField(asset, "url");
         const char* sha256 = JsonStringField(asset, "sha256");
         const char* local_path = JsonStringField(asset, "localPath");
+        const cJSON* declared_size = cJSON_GetObjectItem(asset, "size");
         if (!HasOnlyAllowedJsonFields(asset, kAssetFields) ||
             !IsBoundedMetadataString(key, kLessonAssetSyncKeyMaxBytes) ||
             !IsBoundedMetadataString(path, kLessonAssetSyncMetadataPathMaxBytes) ||
@@ -277,6 +288,10 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             url,
             sha256,
             local_path,
+            declared_size != nullptr,
+            declared_size == nullptr
+                ? 0
+                : static_cast<size_t>(declared_size->valuedouble),
         });
     }
     return validated;
@@ -284,6 +299,9 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
 
 void DownloadLessonAssetToVerifiedFile(
     const LessonAssetMutationLease& mutation,
+    const char* cache_key,
+    bool has_declared_size,
+    size_t declared_size,
     const std::string& url,
     const std::string& dest_path,
     const std::string& sha256,
@@ -292,8 +310,15 @@ void DownloadLessonAssetToVerifiedFile(
     RequireLessonAssetMutationLease(mutation);
     EnsureLessonAssetParentDirs(mutation, dest_path);
     LessonAssetDownloadStagingFile staging(dest_path);
-    DownloadLessonAssetToFile(mutation, url, staging.path(), bytes_out);
-    CommitVerifiedLessonAssetDownload(staging, dest_path, sha256);
+    DownloadLessonAssetToFile(
+        mutation,
+        cache_key,
+        has_declared_size,
+        declared_size,
+        url,
+        staging.path(),
+        bytes_out);
+    CommitVerifiedLessonAssetDownload(staging, cache_key, dest_path, sha256);
 }
 
 void EnsureDirOrThrow(const LessonAssetMutationLease& mutation, const char* path) {
@@ -311,6 +336,9 @@ void EnsureSampleLessonAssetDir(const LessonAssetMutationLease& mutation) {
 
 bool DownloadLessonAssetToFile(
     const LessonAssetMutationLease& mutation,
+    const char* cache_key,
+    bool has_declared_size,
+    size_t declared_size,
     const std::string& url,
     const std::string& dest_path,
     size_t& bytes_out
@@ -358,6 +386,10 @@ bool DownloadLessonAssetToFile(
     char* buffer = static_cast<char*>(buffer_allocation.get());
 
     bool failed = false;
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+    bool first_write = true;
+#endif
     std::string error;
     while (true) {
         esp_task_wdt_reset();
@@ -366,6 +398,31 @@ bool DownloadLessonAssetToFile(
             if (bytes_out >= content_length) break;
             want = std::min(want, content_length - bytes_out);
         }
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+        if (has_declared_size) {
+            want = LessonStorageHilController::GetInstance().LimitDownloadRead(
+                cache_key, bytes_out, want, declared_size);
+            if (want == 0) {
+                if (RunLessonStorageHilCheckpoint(
+                        cache_key,
+                        LessonStorageHilOperation::kSync,
+                        LessonStorageHilCheckpoint::kAfterDownloadBytes,
+                        static_cast<std::uint32_t>(bytes_out),
+                        static_cast<std::uint32_t>(declared_size)) !=
+                    LessonStorageHilHookOutcome::kContinue) {
+                    failed = true;
+                    error = "lesson asset storage write failed";
+                    break;
+                }
+                continue;
+            }
+        }
+#else
+        (void)cache_key;
+        (void)has_declared_size;
+        (void)declared_size;
+#endif
         int ret = http->Read(buffer, want);
         if (ret < 0) {
             failed = true;
@@ -378,12 +435,44 @@ bool DownloadLessonAssetToFile(
             error = "asset too large: " + url;
             break;
         }
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+        if (first_write && RunLessonStorageHilCheckpoint(
+                cache_key,
+                LessonStorageHilOperation::kSync,
+                LessonStorageHilCheckpoint::kBeforeDownloadWrite,
+                0,
+                has_declared_size ? static_cast<std::uint32_t>(declared_size) : 0) !=
+            LessonStorageHilHookOutcome::kContinue) {
+            failed = true;
+            error = "lesson asset storage write failed";
+            break;
+        }
+#endif
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+        first_write = false;
+#endif
         if (fwrite(buffer, 1, static_cast<size_t>(ret), fp.get()) != static_cast<size_t>(ret)) {
             failed = true;
             error = "write error for " + tmp_path.path();
             break;
         }
         bytes_out += static_cast<size_t>(ret);
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+        if (has_declared_size && RunLessonStorageHilCheckpoint(
+                cache_key,
+                LessonStorageHilOperation::kSync,
+                LessonStorageHilCheckpoint::kAfterDownloadBytes,
+                static_cast<std::uint32_t>(bytes_out),
+                static_cast<std::uint32_t>(declared_size)) !=
+            LessonStorageHilHookOutcome::kContinue) {
+            failed = true;
+            error = "lesson asset storage write failed";
+            break;
+        }
+#endif
     }
 
     if (fp.Close() != 0 && !failed) {
@@ -890,7 +979,7 @@ void McpServer::AddUserOnlyTools() {
                 size_t bytes = 0;
                 try {
                     DownloadLessonAssetToVerifiedFile(
-                        mutation, url, dest, asset.sha256, bytes);
+                        mutation, nullptr, false, 0, url, dest, asset.sha256, bytes);
                 } catch (...) {
                     throw std::runtime_error("lesson asset transfer failed");
                 }
@@ -959,7 +1048,14 @@ void McpServer::AddUserOnlyTools() {
                     } else {
                         size_t bytes = 0;
                         DownloadLessonAssetToVerifiedFile(
-                            mutation, asset.url, asset.destination, asset.sha256, bytes);
+                            mutation,
+                            cache_key,
+                            asset.has_declared_size,
+                            asset.declared_size,
+                            asset.url,
+                            asset.destination,
+                            asset.sha256,
+                            bytes);
                         total_bytes += bytes;
                         downloaded += 1;
                         CheckedCJsonAddStringToObject(

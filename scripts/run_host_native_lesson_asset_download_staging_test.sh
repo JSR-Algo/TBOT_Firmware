@@ -22,11 +22,16 @@ fi
 : "${IDF_ROOT}"
 
 "${CXX_BIN}" -std=c++17 -Wall -Wextra -Werror \
+  ${CXXFLAGS:-} \
   "${SANITIZER_FLAGS[@]}" \
   -DTBOT_LESSON_ASSET_STAGING_TESTING=1 \
+  -DTBOT_LESSON_STORAGE_HIL_HOOKS_TESTING=1 \
   -I"${ROOT}/tests/native_stubs_staging" \
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_download_staging.cc" \
+  "${ROOT}/main/lesson_asset_cache_evict.cc" \
+  "${ROOT}/main/lesson_storage_hil_controller.cc" \
+  "${ROOT}/main/lesson_storage_hil_hooks.cc" \
   "${ROOT}/tests/native/lesson_asset_download_staging_host_test.cc" \
   -o "${BUILD_DIR}/lesson_asset_download_staging_host_test"
 "${BUILD_DIR}/lesson_asset_download_staging_host_test"

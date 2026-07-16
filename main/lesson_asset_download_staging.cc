@@ -11,6 +11,11 @@
 #include <mbedtls/sha256.h>
 #include <mbedtls/version.h>
 
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+#include "lesson_storage_hil_hooks.h"
+#endif
+
 namespace {
 
 #if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
@@ -228,9 +233,24 @@ bool VerifyLessonAssetSha256(
 
 void CommitVerifiedLessonAssetDownload(
     LessonAssetDownloadStagingFile& staging,
+    const char* cache_key,
     const std::string& destination,
     const std::string& expected_sha256
 ) {
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+    if (RunLessonStorageHilStagingCheckpoint(
+            cache_key,
+            LessonStorageHilOperation::kSync,
+            LessonStorageHilCheckpoint::kBeforeChecksumVerify,
+            0,
+            0,
+            staging.path().c_str()) != LessonStorageHilHookOutcome::kContinue) {
+        throw std::runtime_error("lesson asset checksum verification failed");
+    }
+#else
+    (void)cache_key;
+#endif
     if (!VerifyLessonAssetSha256(staging.path(), expected_sha256)) {
         throw std::runtime_error("lesson asset checksum mismatch");
     }
@@ -252,11 +272,22 @@ void CommitVerifiedLessonAssetDownload(
         staging.Disarm();
         throw std::runtime_error("interrupted lesson asset replacement");
     }
-    const bool replace_failed =
+    bool replace_failed =
         ShouldInject(LessonAssetStagingFsTestFailure::kReplaceRename) ||
         ShouldInject(LessonAssetStagingFsTestFailure::kRestoreRename);
 #else
-    const bool replace_failed = false;
+    bool replace_failed = false;
+#endif
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+    if (RunLessonStorageHilCheckpoint(
+            cache_key,
+            LessonStorageHilOperation::kSync,
+            LessonStorageHilCheckpoint::kBeforeCommitRename,
+            0,
+            0) != LessonStorageHilHookOutcome::kContinue) {
+        replace_failed = true;
+    }
 #endif
     if (replace_failed || std::rename(staging.path().c_str(), destination.c_str()) != 0) {
         if (destination_exists) {

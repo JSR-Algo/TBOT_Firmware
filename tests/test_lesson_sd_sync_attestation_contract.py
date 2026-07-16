@@ -103,6 +103,8 @@ def test_prelease_validation_keeps_cjson_fields_borrowed_and_bounded():
     assert "const char* url;" in struct_body
     assert "const char* sha256;" in struct_body
     assert "const char* destination;" in struct_body
+    assert "bool has_declared_size;" in struct_body
+    assert "size_t declared_size;" in struct_body
     assert "std::string" not in struct_body
     assert "kLessonAssetSyncMaxAssets = 64" in source
     policy_header = (ROOT / "main" / "lesson_asset_sync_path_policy.h").read_text(
@@ -175,8 +177,8 @@ def test_sync_response_is_checked_and_staging_cleanup_is_scope_bound():
 
     assert '"lesson_asset_download_staging.cc"' in cmake
     assert "LessonAssetDownloadStagingFile staging(dest_path);" in source
-    assert "DownloadLessonAssetToFile(mutation, url, staging.path(), bytes_out);" in source
-    assert "CommitVerifiedLessonAssetDownload(staging, dest_path, sha256);" in source
+    assert "DownloadLessonAssetToFile(" in source
+    assert "CommitVerifiedLessonAssetDownload(staging, cache_key, dest_path, sha256);" in source
     assert "staging.Disarm();" in staging_source
     assert "~LessonAssetDownloadStagingFile" in staging_header
     assert "TBOT_LESSON_ASSET_STAGING_TESTING" in staging_header + staging_source
@@ -188,3 +190,65 @@ def test_sync_response_is_checked_and_staging_cleanup_is_scope_bound():
     assert '"MCP response allocation failed"' in checked
     assert "std::string(printed.get())" in checked
     assert "argument.set_value<std::string>(CheckedCJsonPrint(value));" in source
+
+
+def test_generic_sync_propagates_exact_declared_size_without_making_size_required():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = source[
+        source.index("ValidateLessonAssetSyncPackOrThrow(") :
+        source.index("void DownloadLessonAssetToVerifiedFile(")
+    ]
+    helper_start = source.index("void DownloadLessonAssetToVerifiedFile(")
+    helper = source[
+        helper_start : source.index("void EnsureDirOrThrow(", helper_start)
+    ]
+    body = sync_body()
+
+    assert 'const cJSON* declared_size = cJSON_GetObjectItem(asset, "size");' in validation
+    assert "declared_size != nullptr" in validation
+    assert "static_cast<size_t>(declared_size->valuedouble)" in validation
+    assert "asset.has_declared_size" in body
+    assert "asset.declared_size" in body
+    assert "const char* cache_key" in helper
+    assert "bool has_declared_size" in helper
+    assert "size_t declared_size" in helper
+    assert "IsOptionalNonNegativeInteger(asset, \"size\")" in validation
+
+
+def test_sync_hil_read_and_write_checkpoints_are_exact_and_cleanup_owned():
+    source = SOURCE.read_text(encoding="utf-8")
+    start = source.index(
+        "bool DownloadLessonAssetToFile(", source.index("void EnsureSampleLessonAssetDir")
+    )
+    body = source[start : source.index("\n}\n}\n\nMcpServer::McpServer", start)]
+    limit = body.index("LimitDownloadRead(")
+    read = body.index("http->Read(buffer, want)")
+    before_write = body.index("kBeforeDownloadWrite")
+    fwrite = body.index("fwrite(buffer")
+    increment = body.index("bytes_out +=")
+    after_bytes = body.index("kAfterDownloadBytes", increment)
+
+    assert limit < read < before_write < fwrite < increment < after_bytes
+    assert "if (want == 0)" in body[limit:read]
+    assert "has_declared_size" in body[limit:read]
+    assert "lesson asset storage write failed" in body
+    assert 'ScopedTempPath tmp_path(dest_path + ".tmp")' in body
+    assert "CONFIG_TBOT_HIL_STORAGE_FAULTS" in body
+    assert "TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING" in body
+
+
+def test_sample_sync_passes_empty_hil_context_but_generic_uses_canonical_key():
+    source = SOURCE.read_text(encoding="utf-8")
+    sample_start = source.index('AddUserOnlyTool("self.lesson_assets.sync_sample_to_sd"')
+    generic_start = source.index(
+        'AddUserOnlyTool("self.lesson_assets.sync_to_sd"', sample_start
+    )
+    sample = source[sample_start:generic_start]
+    generic = sync_body()
+
+    assert "mutation, nullptr, false, 0, url, dest" in sample
+    compact_generic = " ".join(generic.split())
+    assert (
+        "mutation, cache_key, asset.has_declared_size, asset.declared_size"
+        in compact_generic
+    )

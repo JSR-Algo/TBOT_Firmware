@@ -107,3 +107,41 @@ def test_hil_pause_uses_yielding_delay_and_stable_markers():
     assert "return LessonStorageHilHookOutcome::kFail;" in corrupt
     for forbidden_field in ("sequence=", "action=", "pause_seconds="):
         assert forbidden_field not in source
+
+
+def test_sync_staging_corruption_is_typed_bounded_and_fail_closed_elsewhere():
+    header = read("main/lesson_storage_hil_hooks.h")
+    source = read("main/lesson_storage_hil_hooks.cc")
+    staging = read("main/lesson_asset_download_staging.cc")
+
+    assert "RunLessonStorageHilStagingCheckpoint(" in header
+    assert "const char* staging_path" in header
+    assert "CorruptLessonStorageHilStagingFile(" in source
+    assert "std::fread(&byte, 1, 1, file)" in source
+    assert "byte ^= 0x01U" in source
+    assert "std::fwrite(&byte, 1, 1, file)" in source
+    assert "std::fflush(file)" in source
+    assert "fsync(descriptor)" in source
+    assert "checkpoint != LessonStorageHilCheckpoint::kBeforeChecksumVerify" in source
+    execute = source[
+        source.index("LessonStorageHilHookOutcome ExecuteDecision(") :
+        source.index("bool CorruptLessonStorageHilStagingFile(")
+    ]
+    assert "case LessonStorageHilAction::kCorruptStaging:" in execute
+    assert "return LessonStorageHilHookOutcome::kFail;" in execute
+    assert "RunLessonStorageHilStagingCheckpoint(" in staging
+
+
+def test_sync_commit_checkpoints_are_guarded_and_use_existing_restore_branch():
+    source = read("main/lesson_asset_download_staging.cc")
+    checksum = source.index("kBeforeChecksumVerify")
+    verify = source.index("VerifyLessonAssetSha256(staging.path()")
+    backup = source.index("std::rename(destination.c_str(), backup.c_str())")
+    commit_checkpoint = source.index("kBeforeCommitRename", backup)
+    replacement = source.index("std::rename(staging.path().c_str(), destination.c_str())")
+    restore = source.index("std::rename(backup.c_str(), destination.c_str())", replacement)
+
+    assert checksum < verify < backup < commit_checkpoint < replacement < restore
+    assert "CONFIG_TBOT_HIL_STORAGE_FAULTS" in source
+    assert "TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING" in source
+    assert "replace_failed = true" in source[commit_checkpoint:replacement]
