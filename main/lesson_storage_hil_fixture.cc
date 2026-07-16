@@ -33,7 +33,14 @@ constexpr char kPreservationPrimaryMagic[] =
 constexpr char kPreservationSiblingMagic[] =
     "TBOT-HIL-PRESERVATION-SIBLING-V1\n";
 constexpr std::size_t kInspectionDirectChildCap = 16;
+constexpr std::size_t kInspectionRawNameMaxBytes = 48;
+constexpr std::size_t kInspectionLabelMaxBytes = 384;
 constexpr std::size_t kSha256BufferBytes = 512;
+
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+LessonStorageHilFixtureRemoveCallback g_unlink_callback = nullptr;
+LessonStorageHilFixtureRemoveCallback g_rmdir_callback = nullptr;
+#endif
 
 enum class NodeKind {
     kMissing,
@@ -75,6 +82,12 @@ std::string SlugFromCacheKey(const std::string& cache_key) {
     return cache_key.substr(0, cache_key.find('/'));
 }
 
+std::string VersionFromCacheKey(const std::string& cache_key) {
+    const std::size_t version_start = cache_key.find('/') + 2;
+    const std::size_t version_end = cache_key.find('-', version_start);
+    return cache_key.substr(version_start, version_end - version_start);
+}
+
 std::string SlugPath(const std::string& slug) {
     return JoinPath(RootPath(), slug);
 }
@@ -97,6 +110,24 @@ bool IsHilCacheKey(const std::string& cache_key, std::string* slug_out) {
     return true;
 }
 
+int RemoveFixtureFile(const std::string& path) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_unlink_callback != nullptr) {
+        return g_unlink_callback(path.c_str());
+    }
+#endif
+    return unlink(path.c_str());
+}
+
+int RemoveFixtureDirectory(const std::string& path) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_rmdir_callback != nullptr) {
+        return g_rmdir_callback(path.c_str());
+    }
+#endif
+    return rmdir(path.c_str());
+}
+
 ValidatedKeys ValidateKeys(
     const std::string& cache_key,
     LessonStorageHilFixture fixture,
@@ -115,7 +146,8 @@ ValidatedKeys ValidateKeys(
 
     std::string sibling_slug;
     if (!IsHilCacheKey(sibling_cache_key, &sibling_slug) ||
-        sibling_slug != slug || sibling_cache_key == cache_key) {
+        sibling_slug != slug ||
+        VersionFromCacheKey(sibling_cache_key) == VersionFromCacheKey(cache_key)) {
         return {false, LessonStorageHilFixtureCode::kInvalidSibling, slug};
     }
     return {true, LessonStorageHilFixtureCode::kStaged, slug};
@@ -321,6 +353,22 @@ LessonStorageHilFixtureCode CodeForState(FixtureState state) {
     return LessonStorageHilFixtureCode::kUnexpectedExistingNode;
 }
 
+FixtureState PreservationStageFailure(
+    FixtureState first,
+    FixtureState second
+) {
+    const auto is_actual_failure = [](FixtureState state) {
+        return state != FixtureState::kMissing && state != FixtureState::kComplete;
+    };
+    if (is_actual_failure(first)) {
+        return first;
+    }
+    if (is_actual_failure(second)) {
+        return second;
+    }
+    return FixtureState::kUnexpected;
+}
+
 LessonStorageHilFixtureCode ValidateParents(
     const std::string& slug,
     bool* root_missing,
@@ -351,10 +399,10 @@ LessonStorageHilFixtureCode ValidateParents(
 
 void RollBackParents(const std::string& slug, const ParentCreation& creation) {
     if (creation.slug_created) {
-        rmdir(SlugPath(slug).c_str());
+        RemoveFixtureDirectory(SlugPath(slug));
     }
     if (creation.root_created) {
-        rmdir(RootPath().c_str());
+        RemoveFixtureDirectory(RootPath());
     }
 }
 
@@ -406,7 +454,7 @@ bool WriteExactFile(const std::string& path, const char* bytes) {
         ok = false;
     }
     if (!ok) {
-        unlink(path.c_str());
+        RemoveFixtureFile(path);
     }
     return ok;
 }
@@ -442,7 +490,7 @@ LessonStorageHilFixtureResult StageNested(
     }
     const std::string sentinel_path = JoinPath(leaf_path, kNestedSentinelName);
     if (mkdir(sentinel_path.c_str(), 0755) != 0) {
-        rmdir(leaf_path.c_str());
+        RemoveFixtureDirectory(leaf_path);
         RollBackParents(slug, creation);
         return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
     }
@@ -490,15 +538,15 @@ bool CreatePreservationLeaf(
     }
     const std::string sentinel = JoinPath(leaf_path, kPreservationSentinelName);
     if (!WriteExactFile(sentinel, magic)) {
-        rmdir(leaf_path.c_str());
+        RemoveFixtureDirectory(leaf_path);
         return false;
     }
     return true;
 }
 
 void RemovePreservationLeaf(const std::string& leaf_path) {
-    unlink(JoinPath(leaf_path, kPreservationSentinelName).c_str());
-    rmdir(leaf_path.c_str());
+    RemoveFixtureFile(JoinPath(leaf_path, kPreservationSentinelName));
+    RemoveFixtureDirectory(leaf_path);
 }
 
 LessonStorageHilFixtureResult StagePreservation(
@@ -536,9 +584,8 @@ LessonStorageHilFixtureResult StagePreservation(
     }
     if (first_state != FixtureState::kMissing ||
         second_state != FixtureState::kMissing) {
-        const FixtureState failure = first_state != FixtureState::kMissing
-                                         ? first_state
-                                         : second_state;
+        const FixtureState failure =
+            PreservationStageFailure(first_state, second_state);
         return Result(CodeForState(failure), false, cache_key, sibling_cache_key);
     }
 
@@ -597,7 +644,7 @@ LessonStorageHilFixtureResult CleanupNested(
         return Result(LessonStorageHilFixtureCode::kCleaned, false, cache_key, "");
     }
     if (state == FixtureState::kEmptyPartial) {
-        const bool removed = rmdir(leaf_path.c_str()) == 0;
+        const bool removed = RemoveFixtureDirectory(leaf_path) == 0;
         return Result(
             removed ? LessonStorageHilFixtureCode::kCleaned
                     : LessonStorageHilFixtureCode::kIoFailed,
@@ -610,10 +657,10 @@ LessonStorageHilFixtureResult CleanupNested(
         return Result(CodeForState(state), false, cache_key, "");
     }
     const std::string sentinel_path = JoinPath(leaf_path, kNestedSentinelName);
-    if (rmdir(sentinel_path.c_str()) != 0) {
+    if (RemoveFixtureDirectory(sentinel_path) != 0) {
         return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
     }
-    if (rmdir(leaf_path.c_str()) != 0) {
+    if (RemoveFixtureDirectory(leaf_path) != 0) {
         return Result(LessonStorageHilFixtureCode::kIoFailed, true, cache_key, "");
     }
     return Result(LessonStorageHilFixtureCode::kCleaned, true, cache_key, "");
@@ -640,7 +687,7 @@ LessonStorageHilFixtureResult CleanupLeafFile(
     if (state != FixtureState::kComplete) {
         return Result(CodeForState(state), false, cache_key, "");
     }
-    if (unlink(leaf_path.c_str()) != 0) {
+    if (RemoveFixtureFile(leaf_path) != 0) {
         return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
     }
     return Result(LessonStorageHilFixtureCode::kCleaned, true, cache_key, "");
@@ -680,9 +727,13 @@ LessonStorageHilFixtureResult CleanupPreservation(
             sibling_cache_key
         );
     }
-    if (first_state != FixtureState::kComplete ||
-        second_state != FixtureState::kComplete) {
-        const FixtureState failure = first_state != FixtureState::kComplete
+    const auto is_resumable = [](FixtureState state) {
+        return state == FixtureState::kMissing ||
+               state == FixtureState::kEmptyPartial ||
+               state == FixtureState::kComplete;
+    };
+    if (!is_resumable(first_state) || !is_resumable(second_state)) {
+        const FixtureState failure = !is_resumable(first_state)
                                          ? first_state
                                          : second_state;
         return Result(CodeForState(failure), false, cache_key, sibling_cache_key);
@@ -693,17 +744,41 @@ LessonStorageHilFixtureResult CleanupPreservation(
         JoinPath(first_leaf, kPreservationSentinelName);
     const std::string second_sentinel =
         JoinPath(second_leaf, kPreservationSentinelName);
-    if (unlink(first_sentinel.c_str()) != 0) {
-        return Result(
-            LessonStorageHilFixtureCode::kIoFailed,
-            false,
-            cache_key,
-            sibling_cache_key
-        );
+    if (first_state == FixtureState::kComplete) {
+        if (RemoveFixtureFile(first_sentinel) != 0) {
+            return Result(
+                LessonStorageHilFixtureCode::kIoFailed,
+                false,
+                cache_key,
+                sibling_cache_key
+            );
+        }
+        changed = true;
     }
-    changed = true;
-    if (unlink(second_sentinel.c_str()) != 0 || rmdir(first_leaf.c_str()) != 0 ||
-        rmdir(second_leaf.c_str()) != 0) {
+    if (second_state == FixtureState::kComplete) {
+        if (RemoveFixtureFile(second_sentinel) != 0) {
+            return Result(
+                LessonStorageHilFixtureCode::kIoFailed,
+                changed,
+                cache_key,
+                sibling_cache_key
+            );
+        }
+        changed = true;
+    }
+    if (first_state != FixtureState::kMissing) {
+        if (RemoveFixtureDirectory(first_leaf) != 0) {
+            return Result(
+                LessonStorageHilFixtureCode::kIoFailed,
+                changed,
+                cache_key,
+                sibling_cache_key
+            );
+        }
+        changed = true;
+    }
+    if (second_state != FixtureState::kMissing &&
+        RemoveFixtureDirectory(second_leaf) != 0) {
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
             changed,
@@ -711,9 +786,10 @@ LessonStorageHilFixtureResult CleanupPreservation(
             sibling_cache_key
         );
     }
+    changed = changed || second_state != FixtureState::kMissing;
     return Result(
         LessonStorageHilFixtureCode::kCleaned,
-        true,
+        changed,
         cache_key,
         sibling_cache_key
     );
@@ -808,6 +884,29 @@ LessonStorageHilInspectionEntry InspectEntry(
     return {label, "regular_file", bytes, std::move(sha256)};
 }
 
+bool EncodeLabelComponent(const std::string& raw, std::string* encoded) {
+    if (raw.size() > kInspectionRawNameMaxBytes) {
+        return false;
+    }
+    constexpr char kHex[] = "0123456789ABCDEF";
+    encoded->clear();
+    encoded->reserve(raw.size() * 3);
+    for (const unsigned char byte : raw) {
+        const bool safe = (byte >= 'A' && byte <= 'Z') ||
+                          (byte >= 'a' && byte <= 'z') ||
+                          (byte >= '0' && byte <= '9') || byte == '.' ||
+                          byte == '_' || byte == '-';
+        if (safe) {
+            encoded->push_back(static_cast<char>(byte));
+            continue;
+        }
+        encoded->push_back('%');
+        encoded->push_back(kHex[byte >> 4U]);
+        encoded->push_back(kHex[byte & 0x0FU]);
+    }
+    return true;
+}
+
 void InspectPathAndDirectChildren(
     const std::string& path,
     const std::string& label,
@@ -828,13 +927,33 @@ void InspectPathAndDirectChildren(
     }
     inspection->truncated = inspection->truncated || truncated;
     for (const auto& name : names) {
+        std::string encoded_name;
+        if (!EncodeLabelComponent(name, &encoded_name) ||
+            label.size() + 1 + encoded_name.size() > kInspectionLabelMaxBytes) {
+            inspection->truncated = true;
+            continue;
+        }
         inspection->entries.push_back(
-            InspectEntry(JoinPath(path, name), JoinPath(label, name))
+            InspectEntry(JoinPath(path, name), JoinPath(label, encoded_name))
         );
     }
 }
 
 }  // namespace
+
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+void SetLessonStorageHilFixtureUnlinkCallbackForTest(
+    LessonStorageHilFixtureRemoveCallback callback
+) {
+    g_unlink_callback = callback;
+}
+
+void SetLessonStorageHilFixtureRmdirCallbackForTest(
+    LessonStorageHilFixtureRemoveCallback callback
+) {
+    g_rmdir_callback = callback;
+}
+#endif
 
 LessonStorageHilFixtureResult StageLessonStorageHilFixture(
     const LessonAssetMutationLease& mutation,
@@ -896,30 +1015,32 @@ LessonStorageHilInspection InspectLessonStorageHilStorage(
     if (!sibling_cache_key.empty()) {
         std::string sibling_slug;
         if (!IsHilCacheKey(sibling_cache_key, &sibling_slug) ||
-            sibling_slug != slug || sibling_cache_key == cache_key) {
+            sibling_slug != slug ||
+            VersionFromCacheKey(sibling_cache_key) ==
+                VersionFromCacheKey(cache_key)) {
             return inspection;
         }
     }
     inspection.cache_key = cache_key;
     inspection.sibling_cache_key = sibling_cache_key;
     InspectPathAndDirectChildren(
-        LeafPath(cache_key), "/lesson-assets/" + cache_key, &inspection
+        LeafPath(cache_key), "lesson-assets/" + cache_key, &inspection
     );
     if (!sibling_cache_key.empty()) {
         InspectPathAndDirectChildren(
             LeafPath(sibling_cache_key),
-            "/lesson-assets/" + sibling_cache_key,
+            "lesson-assets/" + sibling_cache_key,
             &inspection
         );
     }
     inspection.entries.push_back(InspectEntry(
-        JoinPath(RootPath(), "current.json"), "/lesson-assets/current.json"
+        JoinPath(RootPath(), "current.json"), "lesson-assets/current.json"
     ));
     InspectPathAndDirectChildren(
-        JoinPath(RootPath(), "pvg"), "/lesson-assets/pvg", &inspection
+        JoinPath(RootPath(), "pvg"), "lesson-assets/pvg", &inspection
     );
     InspectPathAndDirectChildren(
-        JoinPath(RootPath(), "shared"), "/lesson-assets/shared", &inspection
+        JoinPath(RootPath(), "shared"), "lesson-assets/shared", &inspection
     );
     std::sort(inspection.entries.begin(), inspection.entries.end(), [](const auto& a,
                                                                        const auto& b) {

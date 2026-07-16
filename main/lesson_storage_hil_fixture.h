@@ -65,4 +65,14 @@ LessonStorageHilInspection InspectLessonStorageHilStorage(
     const std::string& sibling_cache_key
 );
 
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+using LessonStorageHilFixtureRemoveCallback = int (*)(const char* path);
+void SetLessonStorageHilFixtureUnlinkCallbackForTest(
+    LessonStorageHilFixtureRemoveCallback callback
+);
+void SetLessonStorageHilFixtureRmdirCallbackForTest(
+    LessonStorageHilFixtureRemoveCallback callback
+);
+#endif
+
 #endif  // LESSON_STORAGE_HIL_FIXTURE_H

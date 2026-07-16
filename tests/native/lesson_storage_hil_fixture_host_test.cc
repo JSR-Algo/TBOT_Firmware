@@ -1,6 +1,7 @@
 #include "lesson_storage_hil_fixture.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -8,12 +9,44 @@
 #include <iterator>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 
 namespace {
 
 int g_checks = 0;
+int g_unlink_calls = 0;
+int g_rmdir_calls = 0;
+int g_fail_unlink_call = 0;
+int g_fail_rmdir_call = 0;
+
+int InjectedUnlink(const char* path) {
+    ++g_unlink_calls;
+    if (g_unlink_calls == g_fail_unlink_call) {
+        errno = EIO;
+        return -1;
+    }
+    return unlink(path);
+}
+
+int InjectedRmdir(const char* path) {
+    ++g_rmdir_calls;
+    if (g_rmdir_calls == g_fail_rmdir_call) {
+        errno = EIO;
+        return -1;
+    }
+    return rmdir(path);
+}
+
+void ResetMutationInjection() {
+    g_unlink_calls = 0;
+    g_rmdir_calls = 0;
+    g_fail_unlink_call = 0;
+    g_fail_rmdir_call = 0;
+    SetLessonStorageHilFixtureUnlinkCallbackForTest(nullptr);
+    SetLessonStorageHilFixtureRmdirCallbackForTest(nullptr);
+}
 
 void Expect(bool condition, const char* message) {
     ++g_checks;
@@ -120,6 +153,23 @@ void TestValidationAndLeaseRefusalPrecedeFilesystemAccess() {
     );
     Expect(bad_same.code == LessonStorageHilFixtureCode::kInvalidSibling,
            "identical preservation sibling was accepted");
+    const std::string same_version = Key("hil-child", 1, 'b');
+    const auto bad_version = StageLessonStorageHilFixture(
+        lease, valid, LessonStorageHilFixture::kPreservationSet, same_version
+    );
+    Expect(bad_version.code == LessonStorageHilFixtureCode::kInvalidSibling,
+           "same-version different-SHA sibling was accepted by stage");
+    const auto bad_cleanup_version = CleanupLessonStorageHilFixture(
+        lease, valid, LessonStorageHilFixture::kPreservationSet, same_version
+    );
+    Expect(bad_cleanup_version.code == LessonStorageHilFixtureCode::kInvalidSibling,
+           "same-version different-SHA sibling was accepted by cleanup");
+    const auto bad_inspect_version =
+        InspectLessonStorageHilStorage(valid, same_version);
+    Expect(bad_inspect_version.cache_key.empty() &&
+               bad_inspect_version.sibling_cache_key.empty() &&
+               bad_inspect_version.entries.empty(),
+           "same-version different-SHA sibling was accepted by inspect");
     Expect(!fs::exists(Root()), "sibling validation touched filesystem");
 
     auto refused = Lease();
@@ -134,7 +184,7 @@ void TestValidationAndLeaseRefusalPrecedeFilesystemAccess() {
     fs::create_directories(Root().parent_path());
     Write(Root(), "not-a-directory");
     const auto root_type = InspectLessonStorageHilStorage(valid, "");
-    const auto* root_leaf = FindEntry(root_type, "/lesson-assets/" + valid);
+    const auto* root_leaf = FindEntry(root_type, "lesson-assets/" + valid);
     Expect(root_leaf != nullptr && root_leaf->node_type == "unexpected",
            "inspection followed invalid root node");
 }
@@ -298,6 +348,14 @@ void TestPreservationSetUsesTwoPhaseCleanup() {
     Write(second, second_magic + "foreign");
     {
         auto lease = Lease();
+        const auto result = StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kSentinelMismatch,
+               "stage did not report actual sibling sentinel mismatch");
+    }
+    {
+        auto lease = Lease();
         const auto result = CleanupLessonStorageHilFixture(
             lease, key, LessonStorageHilFixture::kPreservationSet, sibling
         );
@@ -307,6 +365,19 @@ void TestPreservationSetUsesTwoPhaseCleanup() {
     }
     Expect(Read(first) == first_magic, "two-phase cleanup mutated primary first");
     Write(second, second_magic);
+    Write(Leaf(sibling) / "foreign.bin", "foreign");
+    {
+        auto lease = Lease();
+        const auto result = StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                   !result.changed,
+               "stage did not report actual unknown sibling state");
+    }
+    Expect(Read(first) == first_magic && Read(second) == second_magic,
+           "stage mutated pair while reporting unknown sibling");
+    fs::remove(Leaf(sibling) / "foreign.bin");
     Write(Leaf(key) / "unknown.bin", "preserve");
     {
         auto lease = Lease();
@@ -350,6 +421,72 @@ void TestPreservationSetUsesTwoPhaseCleanup() {
            "cleanup mutated protected storage");
 }
 
+void TestPreservationCleanupResumesOwnedPartialStates() {
+    ResetRoot();
+    const std::string key = Key("hil-retry", 1, 'a');
+    const std::string sibling = Key("hil-retry", 2, 'b');
+    const auto stage = [&]() {
+        auto lease = Lease();
+        const auto result = StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kStaged && result.changed,
+               "retry fixture did not stage");
+    };
+    const auto cleanup = [&]() {
+        auto lease = Lease();
+        return CleanupLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+    };
+
+    stage();
+    g_fail_unlink_call = 1;
+    SetLessonStorageHilFixtureUnlinkCallbackForTest(InjectedUnlink);
+    auto result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && !result.changed,
+           "first unlink failure was not truthful");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+           "cleanup did not retry after first unlink failure");
+
+    stage();
+    g_fail_unlink_call = 2;
+    SetLessonStorageHilFixtureUnlinkCallbackForTest(InjectedUnlink);
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "second unlink failure did not report partial mutation");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+           "cleanup did not resume empty-primary plus complete-sibling state");
+
+    stage();
+    g_fail_rmdir_call = 1;
+    SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "first rmdir failure did not report deleted sentinels");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+           "cleanup did not resume two empty fixture leaves");
+
+    stage();
+    g_fail_rmdir_call = 2;
+    SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "second rmdir failure did not report partial removal");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+           "cleanup did not resume missing-primary plus empty-sibling state");
+    Expect(!fs::exists(Leaf(key)) && !fs::exists(Leaf(sibling)),
+           "retry cleanup left fixture-owned leaves");
+}
+
 void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
     ResetRoot();
     const std::string key = Key("hil-inspect", 1, 'e');
@@ -357,11 +494,16 @@ void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
     Write(Leaf(key) / "z.txt", "z");
     Write(Leaf(key) / "a.txt", "alpha");
     Write(Leaf(key) / "nested" / "too-deep" / "secret.txt", "secret");
+    const std::string overlong_name(49, 'q');
+    Write(Leaf(key) / overlong_name, "overlong");
     Write(Leaf(sibling) / "sibling.bin", "sibling");
     Write(Root() / "current.json", "current-v1");
     Write(Root() / "pvg" / "b.bin", "pvg-b");
     Write(Root() / "pvg" / "a.bin", "pvg-a");
     Write(Root() / "shared" / "shared.bin", "shared");
+    Write(Root() / "pvg" / "line\nbreak", "newline");
+    Write(Root() / "pvg" / "percent%name", "percent");
+    Write(Root() / "pvg" / (std::string("utf8-") + "\xC3\xA9"), "utf8");
     for (int index = 0; index < 40; ++index) {
         Write(Root() / "shared" / ("cap-" + std::to_string(index)), "x");
     }
@@ -388,10 +530,16 @@ void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
                "repeated inspection changed label ordering");
     }
     for (const auto& entry : first.entries) {
-        Expect(entry.label.rfind("/lesson-assets", 0) == 0,
+        Expect(entry.label.rfind("lesson-assets", 0) == 0,
                "inspection label was not stable-relative");
+        Expect(entry.label.empty() || entry.label[0] != '/',
+               "inspection label began with slash");
         Expect(entry.label.find("/sdcard") == std::string::npos,
                "inspection leaked absolute root");
+        Expect(entry.label.find('\n') == std::string::npos &&
+                   entry.label.find('\r') == std::string::npos,
+               "inspection label leaked raw control bytes");
+        Expect(entry.label.size() <= 384, "inspection label exceeded byte cap");
         Expect(entry.node_type == "missing" || entry.node_type == "regular_file" ||
                    entry.node_type == "directory" || entry.node_type == "unexpected",
                "inspection emitted unstable node type");
@@ -399,7 +547,16 @@ void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
                "inspection recursed below direct children");
     }
 
-    const std::string label = "/lesson-assets/" + key + "/a.txt";
+    Expect(FindEntry(first, "lesson-assets/pvg/line%0Abreak") != nullptr,
+           "newline filename was not safely encoded");
+    Expect(FindEntry(first, "lesson-assets/pvg/percent%25name") != nullptr,
+           "percent filename was not safely encoded");
+    Expect(FindEntry(first, "lesson-assets/pvg/utf8-%C3%A9") != nullptr,
+           "non-ASCII filename was not safely encoded");
+    Expect(FindEntry(first, "lesson-assets/" + key + "/" + overlong_name) == nullptr,
+           "overlong raw filename was emitted");
+
+    const std::string label = "lesson-assets/" + key + "/a.txt";
     const auto* before = FindEntry(first, label);
     Expect(before != nullptr && before->node_type == "regular_file" &&
                before->bytes == 5 && before->sha256.size() == 64,
@@ -408,9 +565,9 @@ void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
                return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
            }),
            "fingerprint was not lowercase hex");
-    Expect(FindEntry(first, "/lesson-assets/current.json") != nullptr &&
-               FindEntry(first, "/lesson-assets/pvg") != nullptr &&
-               FindEntry(first, "/lesson-assets/shared") != nullptr,
+    Expect(FindEntry(first, "lesson-assets/current.json") != nullptr &&
+               FindEntry(first, "lesson-assets/pvg") != nullptr &&
+               FindEntry(first, "lesson-assets/shared") != nullptr,
            "inspection omitted a protected location");
     const std::string old_sha = before->sha256;
     Write(Leaf(key) / "a.txt", "bravo");
@@ -422,10 +579,18 @@ void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
            "inspection mutated protected metadata");
 
     ResetRoot();
+    Write(Leaf(key) / overlong_name, "overlong-only");
+    const auto overlong = InspectLessonStorageHilStorage(key, "");
+    Expect(overlong.truncated, "raw filename cap did not set truncated");
+    Expect(FindEntry(overlong, "lesson-assets/" + key + "/" + overlong_name) ==
+               nullptr,
+           "raw filename cap emitted overlong label");
+
+    ResetRoot();
     const auto missing = InspectLessonStorageHilStorage(key, "");
     Expect(!fs::exists(Root()), "inspection created root");
-    const auto* missing_leaf = FindEntry(missing, "/lesson-assets/" + key);
-    const auto* missing_current = FindEntry(missing, "/lesson-assets/current.json");
+    const auto* missing_leaf = FindEntry(missing, "lesson-assets/" + key);
+    const auto* missing_current = FindEntry(missing, "lesson-assets/current.json");
     Expect(missing_leaf != nullptr && missing_leaf->node_type == "missing",
            "missing leaf was not reported");
     Expect(missing_current != nullptr && missing_current->node_type == "missing",
@@ -444,6 +609,7 @@ int main() {
     TestNestedDirectoryFixtureIsExactAndNonRecursive();
     TestLeafRegularFileFixtureRequiresExactMagic();
     TestPreservationSetUsesTwoPhaseCleanup();
+    TestPreservationCleanupResumesOwnedPartialStates();
     TestInspectionIsReadOnlyBoundedSortedAndDataSensitive();
     ResetRoot();
     std::cout << "lesson storage HIL fixture host checks: " << g_checks << '\n';

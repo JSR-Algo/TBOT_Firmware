@@ -8,6 +8,7 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
 # shellcheck disable=SC2086
 "${CXX:-clang++}" -std=c++17 -pthread -Wall -Wextra -Werror ${CXXFLAGS:-} \
   -DTBOT_LESSON_STORAGE_HIL_ROOT='"'"${STORAGE_ROOT}"'"' \
+  -DTBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING \
   -I"${ROOT}/tests/native_stubs_staging" \
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_cache_evict.cc" \
