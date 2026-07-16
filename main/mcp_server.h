@@ -13,6 +13,8 @@
 
 #include <cJSON.h>
 
+#include "checked_cjson.h"
+
 class ImageContent {
 private:
     std::string encoded_data_;
@@ -34,15 +36,11 @@ public:
     }
 
     std::string to_json() const {
-        cJSON *json = cJSON_CreateObject();
-        cJSON_AddStringToObject(json, "type", "image");
-        cJSON_AddStringToObject(json, "mimeType", mime_type_.c_str());
-        cJSON_AddStringToObject(json, "data", encoded_data_.c_str());
-        char* json_str = cJSON_PrintUnformatted(json);
-        std::string result(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(json);
-        return result;
+        auto json = MakeCheckedCJsonObject();
+        CheckedCJsonAddStringToObject(json.get(), "type", "image");
+        CheckedCJsonAddStringToObject(json.get(), "mimeType", mime_type_.c_str());
+        CheckedCJsonAddStringToObject(json.get(), "data", encoded_data_.c_str());
+        return CheckedCJsonPrint(json.get());
     }
 };
 
@@ -122,39 +120,35 @@ public:
     }
 
     std::string to_json() const {
-        cJSON *json = cJSON_CreateObject();
+        auto json = MakeCheckedCJsonObject();
         
         if (type_ == kPropertyTypeBoolean) {
-            cJSON_AddStringToObject(json, "type", "boolean");
+            CheckedCJsonAddStringToObject(json.get(), "type", "boolean");
             if (has_default_value_) {
-                cJSON_AddBoolToObject(json, "default", value<bool>());
+                CheckedCJsonAddBoolToObject(json.get(), "default", value<bool>());
             }
         } else if (type_ == kPropertyTypeInteger) {
-            cJSON_AddStringToObject(json, "type", "integer");
+            CheckedCJsonAddStringToObject(json.get(), "type", "integer");
             if (has_default_value_) {
-                cJSON_AddNumberToObject(json, "default", value<int>());
+                CheckedCJsonAddNumberToObject(json.get(), "default", value<int>());
             }
             if (min_value_.has_value()) {
-                cJSON_AddNumberToObject(json, "minimum", min_value_.value());
+                CheckedCJsonAddNumberToObject(json.get(), "minimum", min_value_.value());
             }
             if (max_value_.has_value()) {
-                cJSON_AddNumberToObject(json, "maximum", max_value_.value());
+                CheckedCJsonAddNumberToObject(json.get(), "maximum", max_value_.value());
             }
         } else if (type_ == kPropertyTypeString) {
-            cJSON_AddStringToObject(json, "type", "string");
+            CheckedCJsonAddStringToObject(json.get(), "type", "string");
             if (has_default_value_) {
-                cJSON_AddStringToObject(json, "default", value<std::string>().c_str());
+                CheckedCJsonAddStringToObject(
+                    json.get(), "default", value<std::string>().c_str());
             }
         } else if (type_ == kPropertyTypeObject) {
-            cJSON_AddStringToObject(json, "type", "object");
+            CheckedCJsonAddStringToObject(json.get(), "type", "object");
         }
-        
-        char *json_str = cJSON_PrintUnformatted(json);
-        std::string result(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(json);
-        
-        return result;
+
+        return CheckedCJsonPrint(json.get());
     }
 };
 
@@ -192,19 +186,16 @@ public:
     }
 
     std::string to_json() const {
-        cJSON *json = cJSON_CreateObject();
+        auto json = MakeCheckedCJsonObject();
         
         for (const auto& property : properties_) {
-            cJSON *prop_json = cJSON_Parse(property.to_json().c_str());
-            cJSON_AddItemToObject(json, property.name().c_str(), prop_json);
+            const std::string property_json = property.to_json();
+            auto parsed_property = ParseCheckedCJson(property_json.c_str());
+            CheckedCJsonAddItemToObject(
+                json.get(), property.name().c_str(), std::move(parsed_property));
         }
-        
-        char *json_str = cJSON_PrintUnformatted(json);
-        std::string result(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(json);
-        
-        return result;
+
+        return CheckedCJsonPrint(json.get());
     }
 };
 
@@ -235,82 +226,77 @@ public:
     std::string to_json() const {
         std::vector<std::string> required = properties_.GetRequired();
         
-        cJSON *json = cJSON_CreateObject();
-        cJSON_AddStringToObject(json, "name", name_.c_str());
-        cJSON_AddStringToObject(json, "description", description_.c_str());
+        auto json = MakeCheckedCJsonObject();
+        CheckedCJsonAddStringToObject(json.get(), "name", name_.c_str());
+        CheckedCJsonAddStringToObject(json.get(), "description", description_.c_str());
         
-        cJSON *input_schema = cJSON_CreateObject();
-        cJSON_AddStringToObject(input_schema, "type", "object");
+        auto input_schema = MakeCheckedCJsonObject();
+        CheckedCJsonAddStringToObject(input_schema.get(), "type", "object");
         
-        cJSON *properties = cJSON_Parse(properties_.to_json().c_str());
-        cJSON_AddItemToObject(input_schema, "properties", properties);
+        const std::string properties_json = properties_.to_json();
+        auto properties = ParseCheckedCJson(properties_json.c_str());
+        CheckedCJsonAddItemToObject(
+            input_schema.get(), "properties", std::move(properties));
         
         if (!required.empty()) {
-            cJSON *required_array = cJSON_CreateArray();
+            auto required_array = MakeCheckedCJsonArray();
             for (const auto& property : required) {
-                cJSON_AddItemToArray(required_array, cJSON_CreateString(property.c_str()));
+                CheckedCJsonAddItemToArray(
+                    required_array.get(), MakeCheckedCJsonString(property.c_str()));
             }
-            cJSON_AddItemToObject(input_schema, "required", required_array);
+            CheckedCJsonAddItemToObject(
+                input_schema.get(), "required", std::move(required_array));
         }
         
-        cJSON_AddItemToObject(json, "inputSchema", input_schema);
+        CheckedCJsonAddItemToObject(json.get(), "inputSchema", std::move(input_schema));
 
         // Add audience annotation if the tool is user only (invisible to AI)
         if (user_only_) {
-            cJSON *annotations = cJSON_CreateObject();
-            cJSON *audience = cJSON_CreateArray();
-            cJSON_AddItemToArray(audience, cJSON_CreateString("user"));
-            cJSON_AddItemToObject(annotations, "audience", audience);
-            cJSON_AddItemToObject(json, "annotations", annotations);
+            auto annotations = MakeCheckedCJsonObject();
+            auto audience = MakeCheckedCJsonArray();
+            CheckedCJsonAddItemToArray(audience.get(), MakeCheckedCJsonString("user"));
+            CheckedCJsonAddItemToObject(
+                annotations.get(), "audience", std::move(audience));
+            CheckedCJsonAddItemToObject(
+                json.get(), "annotations", std::move(annotations));
         }
-        
-        char *json_str = cJSON_PrintUnformatted(json);
-        std::string result(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(json);
-        
-        return result;
+
+        return CheckedCJsonPrint(json.get());
     }
 
     std::string Call(const PropertyList& properties) {
         ReturnValue return_value = callback_(properties);
-        // 返回结果
-        cJSON* result = cJSON_CreateObject();
-        cJSON* content = cJSON_CreateArray();
-
+        std::string payload;
         if (std::holds_alternative<ImageContent*>(return_value)) {
-            auto image_content = std::get<ImageContent*>(return_value);
-            cJSON* image = cJSON_CreateObject();
-            cJSON_AddStringToObject(image, "type", "image");
-            cJSON_AddStringToObject(image, "image", image_content->to_json().c_str());
-            cJSON_AddItemToArray(content, image);
-            delete image_content;
-        } else {
-            cJSON* text = cJSON_CreateObject();
-            cJSON_AddStringToObject(text, "type", "text");
-            if (std::holds_alternative<std::string>(return_value)) {
-                cJSON_AddStringToObject(text, "text", std::get<std::string>(return_value).c_str());
-            } else if (std::holds_alternative<bool>(return_value)) {
-                cJSON_AddStringToObject(text, "text", std::get<bool>(return_value) ? "true" : "false");
-            } else if (std::holds_alternative<int>(return_value)) {
-                cJSON_AddStringToObject(text, "text", std::to_string(std::get<int>(return_value)).c_str());
-            } else if (std::holds_alternative<cJSON*>(return_value)) {
-                cJSON* json = std::get<cJSON*>(return_value);
-                char* json_str = cJSON_PrintUnformatted(json);
-                cJSON_AddStringToObject(text, "text", json_str);
-                cJSON_free(json_str);
-                cJSON_Delete(json);
-            }
-            cJSON_AddItemToArray(content, text);
+            std::unique_ptr<ImageContent> image(std::get<ImageContent*>(return_value));
+            if (!image) ThrowCJsonAllocationFailure();
+            payload = image->to_json();
+        } else if (std::holds_alternative<std::string>(return_value)) {
+            payload = std::get<std::string>(return_value);
+        } else if (std::holds_alternative<bool>(return_value)) {
+            payload = std::get<bool>(return_value) ? "true" : "false";
+        } else if (std::holds_alternative<int>(return_value)) {
+            payload = std::to_string(std::get<int>(return_value));
+        } else if (std::holds_alternative<cJSON*>(return_value)) {
+            CheckedCJsonPtr json(std::get<cJSON*>(return_value));
+            if (!json) ThrowCJsonAllocationFailure();
+            payload = CheckedCJsonPrint(json.get());
         }
-        cJSON_AddItemToObject(result, "content", content);
-        cJSON_AddBoolToObject(result, "isError", false);
 
-        auto json_str = cJSON_PrintUnformatted(result);
-        std::string result_str(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(result);
-        return result_str;
+        auto result = MakeCheckedCJsonObject();
+        auto content = MakeCheckedCJsonArray();
+        auto item = MakeCheckedCJsonObject();
+        CheckedCJsonAddStringToObject(
+            item.get(), "type",
+            std::holds_alternative<ImageContent*>(return_value) ? "image" : "text");
+        CheckedCJsonAddStringToObject(
+            item.get(),
+            std::holds_alternative<ImageContent*>(return_value) ? "image" : "text",
+            payload.c_str());
+        CheckedCJsonAddItemToArray(content.get(), std::move(item));
+        CheckedCJsonAddItemToObject(result.get(), "content", std::move(content));
+        CheckedCJsonAddBoolToObject(result.get(), "isError", false);
+        return CheckedCJsonPrint(result.get());
     }
 };
 

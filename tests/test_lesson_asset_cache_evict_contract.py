@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -8,6 +9,8 @@ HELPER_SOURCE = ROOT / "main" / "lesson_asset_cache_evict.cc"
 MAIN_CMAKE = ROOT / "main" / "CMakeLists.txt"
 COORDINATOR_HEADER = ROOT / "main" / "lesson_asset_storage_coordinator.h"
 COORDINATOR_SOURCE = ROOT / "main" / "lesson_asset_storage_coordinator.cc"
+SYNC_POLICY_HEADER = ROOT / "main" / "lesson_asset_sync_path_policy.h"
+SYNC_POLICY_SOURCE = ROOT / "main" / "lesson_asset_sync_path_policy.cc"
 
 
 def test_exact_eviction_helper_is_built_but_not_exposed_before_task4():
@@ -20,6 +23,63 @@ def test_exact_eviction_helper_is_built_but_not_exposed_before_task4():
     assert "is_lesson_cache_evict" not in source
     assert '"lesson_asset_cache_evict.cc"' in cmake
     assert '"/sdcard/tbot/lesson-assets"' in helper
+
+
+def test_sync_path_policy_reuses_the_canonical_key_parser_and_is_built():
+    cmake = MAIN_CMAKE.read_text(encoding="utf-8")
+    header = SYNC_POLICY_HEADER.read_text(encoding="utf-8")
+    source = SYNC_POLICY_SOURCE.read_text(encoding="utf-8")
+
+    assert '"lesson_asset_sync_path_policy.cc"' in cmake
+    assert '#include "lesson_asset_cache_evict.h"' in source
+    assert "IsCanonicalLessonCacheKey(std::string(cache_key))" in source
+    assert "kLessonAssetCacheKeyMaxBytes" in source
+    assert "ValidateLessonAssetSyncPath(" in header
+    assert "LessonAssetSyncDestinationsCollide(" in header
+    assert "IsExactLowerLessonAssetSha256(" in header
+    assert "IsAllowedLessonAssetSyncUrl(" in header
+    assert "lowered.back() == '.'" in source
+    assert "remove_suffix(1)" in source
+
+
+def test_all_lesson_asset_mutators_are_lease_guarded_and_eviction_stays_hidden():
+    source = MCP_SOURCE.read_text(encoding="utf-8")
+
+    assert "self.lesson_assets.evict_cache_key" not in source
+    assert '#include "lesson_asset_cache_evict.h"' not in source
+    for helper in (
+        "EnsureLessonAssetParentDirs(",
+        "DownloadLessonAssetToVerifiedFile(",
+        "EnsureSampleLessonAssetDir(",
+        "DownloadLessonAssetToFile(",
+    ):
+        definition = re.search(
+            rf"\n(?:void|bool)\s+{re.escape(helper[:-1])}\([^;]*?\)\s*\{{",
+            source,
+            re.DOTALL,
+        )
+        assert definition is not None
+        body_start = source.index("{", definition.start())
+        body_end = source.index("\n}", body_start)
+        body = source[body_start:body_end]
+        assert "RequireLessonAssetMutationLease(mutation);" in body
+
+    mutation_tokens = ("mkdir(", "remove(", 'fopen(tmp_path.c_str(), "wb")', "rename(")
+    for token in mutation_tokens:
+        for offset in _all_indexes(source, token):
+            enclosing_start = max(source.rfind("\nvoid ", 0, offset), source.rfind("\nbool ", 0, offset))
+            lease_guard = source.rfind("RequireLessonAssetMutationLease(mutation);", enclosing_start, offset)
+            assert lease_guard != -1, f"unguarded lesson asset mutation: {token} at {offset}"
+
+
+def _all_indexes(text: str, needle: str):
+    start = 0
+    while True:
+        found = text.find(needle, start)
+        if found == -1:
+            return
+        yield found
+        start = found + len(needle)
 
 
 def test_public_helper_surface_and_privacy_contract_are_stable():

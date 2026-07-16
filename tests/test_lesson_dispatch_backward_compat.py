@@ -101,7 +101,11 @@ def test_handle_robot_action_message_untouched_and_mcp_arm_tools_have_no_lesson_
     mcp = read("main/mcp_server.cc")
     assert "HandleLessonMessage" not in mcp
     assert "SendLessonFrame" not in mcp
-    assert '"lesson_' not in mcp
+    robot_tools_start = mcp.index("auto add_robot_arm_tool")
+    robot_tools = mcp[
+        robot_tools_start : mcp.index("auto backlight =", robot_tools_start)
+    ]
+    assert '"lesson_' not in robot_tools
 
 
 def test_hello_features_advertises_lesson_capability_additively():

@@ -3,6 +3,8 @@
 #include <cctype>
 #include <string>
 
+#include "checked_cjson.h"
+
 namespace {
 
 std::string Trim(std::string value) {
@@ -48,7 +50,7 @@ void AddLessonAssetSyncAttestation(
         cache_key_matches_manifest;
 
     if (pack_verified) {
-        cJSON_AddStringToObject(response, "manifestChecksum", manifest_checksum);
+        CheckedCJsonAddStringToObject(response, "manifestChecksum", manifest_checksum);
     }
-    cJSON_AddBoolToObject(response, "ready", pack_verified);
+    CheckedCJsonAddBoolToObject(response, "ready", pack_verified);
 }
