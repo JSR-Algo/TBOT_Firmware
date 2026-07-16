@@ -3,11 +3,33 @@
 #include <cstdlib>
 #include <functional>
 #include <iostream>
+#include <new>
 #include <string>
 #include <unordered_set>
 
 #include "checked_cjson.h"
 #include "mcp_server.h"
+
+bool g_fail_cpp_allocations = false;
+
+void* operator new(std::size_t size) {
+    if (g_fail_cpp_allocations) {
+        throw std::bad_alloc();
+    }
+    if (void* pointer = std::malloc(size)) {
+        return pointer;
+    }
+    throw std::bad_alloc();
+}
+
+void* operator new[](std::size_t size) {
+    return ::operator new(size);
+}
+
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete[](void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
+void operator delete[](void* pointer, std::size_t) noexcept { std::free(pointer); }
 
 namespace {
 
@@ -235,6 +257,33 @@ void TestPreparedMcpCallOomCannotReachMutation() {
     Expect(observed_success, "prepared response never completed");
 }
 
+void TestPreparedMutationResponsesFinishWithoutHeapAllocation() {
+    for (const char* operation : {"arm", "stage", "cleanup"}) {
+        int mutations = 0;
+        McpTool tool(
+            std::string("test.prepared.") + operation, "test", PropertyList(),
+            PreparedMcpCall{}, [&](const PropertyList&) -> std::string {
+                auto payload = MakeCheckedCJsonObject();
+                CheckedCJsonAddStringToObject(payload.get(), "status", operation);
+                PreparedMcpTextResult response(std::move(payload), 256, 768);
+                ++mutations;
+                g_fail_cpp_allocations = true;
+                return response.Finish();
+            });
+        std::string result;
+        try {
+            result = tool.Call(PropertyList());
+        } catch (...) {
+            g_fail_cpp_allocations = false;
+            throw;
+        }
+        g_fail_cpp_allocations = false;
+        Expect(mutations == 1, "prepared mutation did not execute once");
+        Expect(result.find(operation) != std::string::npos,
+               "prepared mutation response missing");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -244,6 +293,7 @@ int main() {
     TestMcpSchemaSerializationUsesTheSameStableOomContract();
     TestPreparedMcpCallAllocatesAllCJsonBeforeMutation();
     TestPreparedMcpCallOomCannotReachMutation();
+    TestPreparedMutationResponsesFinishWithoutHeapAllocation();
     std::cout << "MCP cJSON OOM host tests passed\n";
     return 0;
 }

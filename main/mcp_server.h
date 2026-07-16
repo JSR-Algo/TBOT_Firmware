@@ -61,7 +61,7 @@ public:
         std::size_t max_result_bytes
     ) : payload_(std::move(payload)),
         payload_buffer_(max_payload_bytes),
-        result_buffer_(max_result_bytes),
+        result_buffer_(max_result_bytes, '\0'),
         text_capacity_(max_payload_bytes) {
         if (!payload_ || max_payload_bytes < 16 || max_result_bytes < 32) {
             ThrowCJsonAllocationFailure();
@@ -98,14 +98,15 @@ public:
                 static_cast<int>(result_buffer_.size()), false)) {
             ThrowCJsonAllocationFailure();
         }
-        return std::string(result_buffer_.data());
+        result_buffer_.resize(std::strlen(result_buffer_.data()));
+        return std::move(result_buffer_);
     }
 
 private:
     CheckedCJsonPtr payload_;
     CheckedCJsonPtr wrapper_;
     std::vector<char> payload_buffer_;
-    std::vector<char> result_buffer_;
+    std::string result_buffer_;
     cJSON* text_node_ = nullptr;
     std::size_t text_capacity_ = 0;
 };
