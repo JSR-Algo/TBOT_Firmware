@@ -147,3 +147,67 @@ def test_sync_commit_checkpoints_are_guarded_and_use_existing_restore_branch():
     assert "CONFIG_TBOT_HIL_STORAGE_FAULTS" in source
     assert "TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING" in source
     assert "replace_failed = true" in source[commit_checkpoint:replacement]
+
+
+def test_fixture_surface_has_fixed_root_and_checked_mutation_lease():
+    header = read("main/lesson_storage_hil_fixture.h")
+    source = read("main/lesson_storage_hil_fixture.cc")
+
+    for token in (
+        "enum class LessonStorageHilFixture",
+        "kNestedDirectory",
+        "kLeafRegularFile",
+        "kPreservationSet",
+        "enum class LessonStorageHilFixtureCode",
+        "LessonStorageHilFixtureResult",
+        "LessonStorageHilInspectionEntry",
+        "LessonStorageHilInspection",
+        "StageLessonStorageHilFixture(",
+        "CleanupLessonStorageHilFixture(",
+        "InspectLessonStorageHilStorage(",
+    ):
+        assert token in header
+
+    assert '#define TBOT_LESSON_STORAGE_HIL_ROOT "/sdcard/tbot/lesson-assets"' in source
+    assert "if (!mutation)" in source
+    assert "TryBeginMutation(" not in source
+    assert "IsCanonicalLessonCacheKey(cache_key)" in source
+    assert 'slug.compare(0, 4, "hil-")' in source
+
+
+def test_fixture_mutation_is_exact_nonrecursive_and_uses_fixed_sentinels():
+    source = read("main/lesson_storage_hil_fixture.cc")
+
+    assert '".tbot-hil-nested"' in source
+    assert '".tbot-hil-sentinel"' in source
+    assert "TBOT-HIL-LEAF-FIXTURE-V1" in source
+    assert "TBOT-HIL-PRESERVATION-PRIMARY-V1" in source
+    assert "TBOT-HIL-PRESERVATION-SIBLING-V1" in source
+    for banned in (
+        "remove_all",
+        "recursive_directory_iterator",
+        "nftw(",
+        "FTW_",
+        "system(",
+        '"rm ',
+        "glob(",
+    ):
+        assert banned not in source
+
+
+def test_fixture_inspection_is_bounded_read_only_and_uses_mbedtls_sha256():
+    source = read("main/lesson_storage_hil_fixture.cc")
+
+    assert "kInspectionDirectChildCap" in source
+    assert "mbedtls_sha256_starts" in source
+    assert "mbedtls_sha256_update" in source
+    assert "mbedtls_sha256_finish" in source
+    assert '"/lesson-assets/current.json"' in source
+    assert '"/lesson-assets/pvg"' in source
+    assert '"/lesson-assets/shared"' in source
+    assert "std::sort(inspection.entries.begin(), inspection.entries.end()" in source
+    inspect = source[
+        source.index("LessonStorageHilInspection InspectLessonStorageHilStorage(") :
+    ]
+    for forbidden in ("mkdir(", "unlink(", "rmdir(", "WriteExactFile("):
+        assert forbidden not in inspect
