@@ -487,6 +487,45 @@ void TestPreservationCleanupResumesOwnedPartialStates() {
            "retry cleanup left fixture-owned leaves");
 }
 
+void TestPreservationCleanupAcceptsAnExactlyEvictedPrimary() {
+    ResetRoot();
+    const std::string key = Key("hil-evicted", 1, 'a');
+    const std::string sibling = Key("hil-evicted", 2, 'b');
+    {
+        auto lease = Lease();
+        const auto result = StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kStaged && result.changed,
+               "eviction preservation fixture did not stage");
+    }
+
+    Write(Root() / "current.json", "current");
+    Write(Root() / "pvg" / "protected.bin", "pvg");
+    Write(Root() / "shared" / "protected.bin", "shared");
+    Expect(fs::remove(Leaf(key) / ".tbot-hil-sentinel"),
+           "primary sentinel was not removed by exact eviction setup");
+    Expect(fs::remove(Leaf(key)),
+           "primary leaf was not removed by exact eviction setup");
+
+    {
+        auto lease = Lease();
+        const auto result = CleanupLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+               "cleanup rejected missing-primary/complete-sibling eviction state");
+    }
+    Expect(!fs::exists(Leaf(key)) && !fs::exists(Leaf(sibling)),
+           "cleanup left an exact preservation leaf after eviction");
+    Expect(fs::is_directory(Root()) && fs::is_directory(Root() / "hil-evicted"),
+           "cleanup removed the root or preservation slug");
+    Expect(Read(Root() / "current.json") == "current" &&
+               Read(Root() / "pvg" / "protected.bin") == "pvg" &&
+               Read(Root() / "shared" / "protected.bin") == "shared",
+           "post-eviction cleanup mutated protected storage");
+}
+
 void TestPreservationCleanupRejectsUnreachablePartialOrder() {
     const std::string key = Key("hil-order", 1, 'c');
     const std::string sibling = Key("hil-order", 2, 'd');
@@ -529,17 +568,82 @@ void TestPreservationCleanupRejectsUnreachablePartialOrder() {
            "complete-primary/missing-sibling refusal mutated primary");
 
     stage();
-    fs::remove(first);
-    fs::remove(first_leaf);
-    reject("missing-primary/complete-sibling cleanup was accepted");
-    Expect(fs::is_regular_file(second),
-           "missing-primary/complete-sibling refusal mutated sibling");
-
-    stage();
     fs::remove(second);
     reject("complete-primary/empty-sibling cleanup was accepted");
     Expect(fs::is_regular_file(first) && fs::is_directory(second_leaf),
            "complete-primary/empty-sibling refusal mutated pair");
+}
+
+void TestSymlinksAreRefusedWithoutFollowingTargets() {
+    ResetRoot();
+    const fs::path outside = Root().parent_path() / "outside-hil-fixture";
+    std::error_code error;
+    fs::remove_all(outside, error);
+    Expect(!error, "outside fixture reset failed");
+    fs::create_directories(outside);
+
+    const std::string leaf_key = Key("hil-link-file", 1, 'a');
+    fs::create_directories(Leaf(leaf_key).parent_path());
+    Write(outside / "leaf-magic", "TBOT-HIL-LEAF-FIXTURE-V1\n");
+    fs::create_symlink(outside / "leaf-magic", Leaf(leaf_key), error);
+    if (error) {
+        fs::remove_all(outside, error);
+        ResetRoot();
+        return;
+    }
+    {
+        auto lease = Lease();
+        const auto result = CleanupLessonStorageHilFixture(
+            lease, leaf_key, LessonStorageHilFixture::kLeafRegularFile, ""
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                   !result.changed,
+               "regular-file symlink was followed or removed");
+    }
+    Expect(fs::is_symlink(Leaf(leaf_key)) &&
+               Read(outside / "leaf-magic") == "TBOT-HIL-LEAF-FIXTURE-V1\n",
+           "regular-file symlink cleanup mutated the link or target");
+
+    ResetRoot();
+    const std::string nested_key = Key("hil-link-dir", 1, 'b');
+    fs::create_directories(Leaf(nested_key).parent_path());
+    fs::create_directories(outside / "nested-target" / ".tbot-hil-nested");
+    error.clear();
+    fs::create_directory_symlink(outside / "nested-target", Leaf(nested_key), error);
+    Expect(!error, "directory symlink setup failed after symlink support probe");
+    {
+        auto lease = Lease();
+        const auto result = CleanupLessonStorageHilFixture(
+            lease, nested_key, LessonStorageHilFixture::kNestedDirectory, ""
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                   !result.changed,
+               "directory symlink was followed during cleanup");
+    }
+    Expect(fs::is_symlink(Leaf(nested_key)) &&
+               fs::is_directory(outside / "nested-target" / ".tbot-hil-nested"),
+           "directory symlink cleanup mutated the link or target");
+
+    ResetRoot();
+    const std::string root_key = Key("hil-link-root", 1, 'c');
+    error.clear();
+    fs::create_directory_symlink(outside, Root(), error);
+    Expect(!error, "root symlink setup failed after symlink support probe");
+    {
+        auto lease = Lease();
+        const auto result = StageLessonStorageHilFixture(
+            lease, root_key, LessonStorageHilFixture::kLeafRegularFile, ""
+        );
+        Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                   !result.changed,
+               "root symlink was followed during staging");
+    }
+    Expect(!fs::exists(outside / "hil-link-root"),
+           "root symlink staging mutated its external target");
+
+    ResetRoot();
+    fs::remove_all(outside, error);
+    Expect(!error, "outside fixture cleanup failed");
 }
 
 void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
@@ -665,7 +769,9 @@ int main() {
     TestLeafRegularFileFixtureRequiresExactMagic();
     TestPreservationSetUsesTwoPhaseCleanup();
     TestPreservationCleanupResumesOwnedPartialStates();
+    TestPreservationCleanupAcceptsAnExactlyEvictedPrimary();
     TestPreservationCleanupRejectsUnreachablePartialOrder();
+    TestSymlinksAreRefusedWithoutFollowingTargets();
     TestInspectionIsReadOnlyBoundedSortedAndDataSensitive();
     ResetRoot();
     std::cout << "lesson storage HIL fixture host checks: " << g_checks << '\n';

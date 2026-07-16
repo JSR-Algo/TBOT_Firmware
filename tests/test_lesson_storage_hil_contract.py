@@ -191,6 +191,11 @@ def test_fixture_mutation_is_exact_nonrecursive_and_uses_fixed_sentinels():
         "system(",
         '"rm ',
         "glob(",
+        "lstat(",
+        "openat(",
+        "fstatat(",
+        "fdopendir(",
+        "unlinkat(",
     ):
         assert banned not in source
 

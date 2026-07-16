@@ -173,8 +173,19 @@ LessonStorageHilFixtureResult ValidationFailure(
 }
 
 NodeKind ReadNodeKind(const std::string& path, struct stat* metadata = nullptr) {
+#ifndef ESP_PLATFORM
+    // ESP-IDF FAT VFS cannot create symlinks. Native tests can, so reject the
+    // exact component before stat follows it into an external fixture target.
+    char link_probe = '\0';
+    if (readlink(path.c_str(), &link_probe, sizeof(link_probe)) >= 0) {
+        return NodeKind::kUnexpected;
+    }
+    if (errno != EINVAL && errno != ENOENT) {
+        return NodeKind::kIoFailed;
+    }
+#endif
     struct stat local_metadata {};
-    if (lstat(path.c_str(), &local_metadata) != 0) {
+    if (stat(path.c_str(), &local_metadata) != 0) {
         return errno == ENOENT ? NodeKind::kMissing : NodeKind::kIoFailed;
     }
     if (metadata != nullptr) {
@@ -379,6 +390,8 @@ bool IsReachablePreservationCleanupPair(
             second == FixtureState::kComplete) ||
            (first == FixtureState::kEmptyPartial &&
             second == FixtureState::kEmptyPartial) ||
+           (first == FixtureState::kMissing &&
+            second == FixtureState::kComplete) ||
            (first == FixtureState::kMissing &&
             second == FixtureState::kEmptyPartial) ||
            (first == FixtureState::kMissing &&
