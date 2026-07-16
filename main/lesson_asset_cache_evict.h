@@ -40,4 +40,8 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
     bool lesson_session_active
 );
 
+#ifdef TBOT_LESSON_ASSET_CACHE_EVICT_TESTING
+int LessonAssetCacheEvictOpenDirectoryCountForTest();
+#endif
+
 #endif  // LESSON_ASSET_CACHE_EVICT_H

@@ -35,6 +35,9 @@ void ResetRoot() {
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_FINAL_STAT");
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_LEAF_STAT");
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SLUG_RECHECK");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SCAN_ALLOCATION");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_PREDELETE_ALLOCATION");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_ALLOCATION_AFTER_UNLINK");
     LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
     fs::remove_all(kRoot);
     fs::create_directories(kRoot);
@@ -241,6 +244,14 @@ void TestFirstPassHazards() {
     setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SCAN", "1", 1);
     ExpectFirstPassRefusal(LessonAssetCacheEvictCode::kScanFailed,
                            "deterministic scan failure must be refused");
+
+    ResetRoot();
+    WriteFile(Leaf() / "safe.bin");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SCAN_ALLOCATION", "1", 1);
+    ExpectFirstPassRefusal(LessonAssetCacheEvictCode::kScanFailed,
+                           "scan allocation failure must be stable");
+    Expect(LessonAssetCacheEvictOpenDirectoryCountForTest() == 0,
+           "scan allocation failure must close its DIR handle");
 }
 
 void TestDeterministicSecondPassFailures() {
@@ -299,6 +310,35 @@ void TestPartialMutationTruthAndRetry() {
                "retry must remove an empty partial leaf");
     Expect(result.file_count == 0 && !fs::exists(Leaf()),
            "empty-leaf retry must report zero newly deleted files");
+}
+
+void TestAllocationFailureTruth() {
+    ResetRoot();
+    WriteFile(Leaf() / "a.bin", "a");
+    WriteFile(Leaf() / "b.bin", "b");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_PREDELETE_ALLOCATION", "1", 1);
+    auto result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kScanFailed,
+               "pre-delete allocation failure must refuse before mutation");
+    Expect(result.file_count == 0 && !result.evicted && !result.not_found,
+           "pre-delete allocation failure flags must stay cold");
+    Expect(ReadFile(Leaf() / "a.bin") == "a" &&
+               ReadFile(Leaf() / "b.bin") == "b",
+           "pre-delete allocation failure must preserve every file");
+
+    ResetRoot();
+    WriteFile(Leaf() / "a.bin", "a");
+    WriteFile(Leaf() / "b.bin", "b");
+    WriteFile(Leaf() / "c.bin", "c");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_ALLOCATION_AFTER_UNLINK", "1", 1);
+    result = EvictLessonAssetCacheKey(kKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kPartialEvictRecoveryRequired,
+               "post-unlink allocation failure must report partial recovery");
+    Expect(result.file_count == 1 && !result.evicted && !result.not_found,
+           "post-unlink allocation failure must preserve exact deleted count");
+    Expect(!fs::exists(Leaf() / "a.bin") && fs::exists(Leaf() / "b.bin") &&
+               fs::exists(Leaf() / "c.bin"),
+           "post-unlink allocation failure must expose exact remaining files");
 }
 
 void TestFinalAbsenceVerification() {
@@ -372,6 +412,7 @@ int main() {
     TestFirstPassHazards();
     TestDeterministicSecondPassFailures();
     TestPartialMutationTruthAndRetry();
+    TestAllocationFailureTruth();
     TestFinalAbsenceVerification();
     TestAuthoritativeNotFoundOnly();
     TestLeafTypeRefusals();

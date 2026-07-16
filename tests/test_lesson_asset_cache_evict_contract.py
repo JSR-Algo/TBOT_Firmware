@@ -202,3 +202,25 @@ def test_eviction_tool_has_exact_six_field_envelope_and_runtime_bypass():
         "Application::GetInstance().IsLessonRuntimeActive()", immediate_guard + 1
     )
     assert dispatch.rfind("is_lesson_cache_evict", 0, scheduled_guard) != -1
+
+
+def test_eviction_owns_directories_and_preallocates_before_mutation():
+    header = HELPER_HEADER.read_text(encoding="utf-8")
+    source = HELPER_SOURCE.read_text(encoding="utf-8")
+
+    assert "class LessonAssetDirectoryHandle" in source
+    assert "~LessonAssetDirectoryHandle()" in source
+    assert "LessonAssetCacheEvictOpenDirectoryCountForTest" in header + source
+    assert "TBOT_TEST_LESSON_CACHE_EVICT_FAIL_SCAN_ALLOCATION" in source
+    assert "TBOT_TEST_LESSON_CACHE_EVICT_FAIL_PREDELETE_ALLOCATION" in source
+    assert "TBOT_TEST_LESSON_CACHE_EVICT_FAIL_ALLOCATION_AFTER_UNLINK" in source
+    body = source[source.index("LessonAssetCacheEvictResult EvictLessonAssetCacheKey(") :]
+    paths = body.index("validated_paths")
+    first_unlink = body.index("unlink(")
+    assert paths < first_unlink
+    mutation_result = body.index("mutation_result")
+    assert mutation_result < first_unlink
+    mutation_phase = body[first_unlink:]
+    assert "leaf_prefix +" not in mutation_phase
+    assert "MakeResult(" not in mutation_phase
+    assert "std::move(mutation_result)" in mutation_phase
