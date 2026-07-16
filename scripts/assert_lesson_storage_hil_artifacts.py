@@ -37,6 +37,7 @@ HIL_SYMBOLS = (
 BANNED_APIS = ("lstat", "openat", "fstatat", "fdopendir", "unlinkat")
 GIT_HEAD_COMMAND = "git rev-parse HEAD"
 GIT_STATUS_COMMAND = "git status --porcelain"
+GIT_COMMIT_TIME_COMMAND = "git show -s --format=%ct HEAD"
 NM_COMMAND = "nm"
 
 
@@ -154,6 +155,20 @@ def validate_artifact_chronology(artifacts: dict[str, Path]) -> None:
     require(elf_time <= binary_time, "application binary predates the linked ELF")
 
 
+def validate_artifact_freshness(
+    artifacts: dict[str, Path], commit_timestamp_seconds: int
+) -> None:
+    commit_time_ns = commit_timestamp_seconds * 1_000_000_000
+    for label in (
+        "mainArchive", "elf", "map", "bin", "projectDescription",
+        "sdkconfig", "partitionBinary",
+    ):
+        require(
+            artifacts[label].stat().st_mtime_ns >= commit_time_ns,
+            f"build artifact predates source commit: {label}",
+        )
+
+
 def resolve_nm(description: dict) -> str:
     compiler = Path(str(description.get("c_compiler", "")))
     require(compiler.name.endswith("gcc"), "C compiler identity missing")
@@ -241,6 +256,9 @@ def audit(profile: str, build_dir_argument: str) -> dict:
     head = run(["git", "rev-parse", "HEAD"], repo).strip()
     require(re.fullmatch(r"[0-9a-f]{40}", head) is not None, "invalid source commit")
     require(run(["git", "status", "--porcelain"], repo) == "", "source tree is not clean")
+    commit_timestamp = int(
+        run(["git", "show", "-s", "--format=%ct", "HEAD"], repo).strip()
+    )
 
     description_path = build_dir / "project_description.json"
     require(description_path.is_file(), "project_description.json missing")
@@ -254,6 +272,7 @@ def audit(profile: str, build_dir_argument: str) -> dict:
 
     artifacts = resolve_artifacts(build_dir, description)
     validate_artifact_chronology(artifacts)
+    validate_artifact_freshness(artifacts, commit_timestamp)
     sdkconfig = parse_sdkconfig(artifacts["sdkconfig"])
     enabled = sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y"
     require(enabled == (profile == "hil"), "CONFIG_TBOT_HIL_STORAGE_FAULTS profile mismatch")
@@ -268,6 +287,7 @@ def audit(profile: str, build_dir_argument: str) -> dict:
         "status": "PASS",
         "profile": profile,
         "sourceCommit": head,
+        "sourceCommitTimestamp": commit_timestamp,
         "target": description["target"],
         "project": description["project_name"],
         "buildDirectory": build_dir.name,

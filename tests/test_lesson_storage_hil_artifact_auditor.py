@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 
 import pytest
@@ -97,3 +98,24 @@ def test_artifact_chronology_rejects_bin_older_than_linked_elf(tmp_path):
         AUDITOR.validate_artifact_chronology(
             {"mainArchive": archive, "elf": elf, "bin": binary}
         )
+
+
+def test_artifact_freshness_rejects_every_file_older_than_source_commit(tmp_path):
+    commit_time = 2_000_000_000
+    artifacts = {}
+    for name in (
+        "mainArchive", "elf", "map", "bin", "projectDescription",
+        "sdkconfig", "partitionBinary",
+    ):
+        path = tmp_path / name
+        path.write_bytes(b"artifact")
+        os.utime(path, ns=((commit_time + 1) * 1_000_000_000,) * 2)
+        artifacts[name] = path
+
+    AUDITOR.validate_artifact_freshness(artifacts, commit_time)
+    os.utime(
+        artifacts["mainArchive"],
+        ns=((commit_time - 1) * 1_000_000_000,) * 2,
+    )
+    with pytest.raises(AUDITOR.AuditFailure, match="predates source commit"):
+        AUDITOR.validate_artifact_freshness(artifacts, commit_time)
