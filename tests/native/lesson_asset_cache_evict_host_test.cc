@@ -6,10 +6,13 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_storage_coordinator.h"
+#include "lesson_storage_hil_controller.h"
+#include "lesson_storage_hil_hooks.h"
 
 namespace {
 
@@ -18,7 +21,11 @@ namespace fs = std::filesystem;
 constexpr const char* kRoot = "/tmp/tbot-lesson-asset-cache-evict-host";
 const std::string kChecksum(64, 'a');
 const std::string kKey = "pip-farm-3m/v1-" + kChecksum;
+const std::string kHilKey = "hil-task14/v1-" + kChecksum;
+const std::string kForeignHilKey = "hil-foreign/v1-" + kChecksum;
 int checks = 0;
+int pause_callback_calls = 0;
+std::uint32_t pause_callback_seconds = 0;
 
 void Expect(bool condition, const char* message) {
     ++checks;
@@ -39,8 +46,44 @@ void ResetRoot() {
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_PREDELETE_ALLOCATION");
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_ALLOCATION_AFTER_UNLINK");
     LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    LessonStorageHilController::GetInstance().Reset();
+    SetLessonStorageHilPauseCallbackForTest(nullptr);
+    pause_callback_calls = 0;
+    pause_callback_seconds = 0;
     fs::remove_all(kRoot);
     fs::create_directories(kRoot);
+}
+
+void ArmEvict(
+    const std::string& cache_key,
+    LessonStorageHilCheckpoint checkpoint,
+    LessonStorageHilAction action,
+    std::uint32_t threshold = 0,
+    std::uint32_t pause_seconds = 0
+) {
+    const auto result = LessonStorageHilController::GetInstance().Arm({
+        cache_key,
+        LessonStorageHilOperation::kEvict,
+        checkpoint,
+        action,
+        threshold,
+        0,
+        pause_seconds,
+    });
+    Expect(result.code == LessonStorageHilArmCode::kArmed && result.armed,
+           "HIL eviction fixture must arm");
+}
+
+void ExpectMutationLeaseReleased(const char* message) {
+    auto lease =
+        LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("test");
+    Expect(static_cast<bool>(lease), message);
+}
+
+void YieldingPauseCallback(std::uint32_t seconds) noexcept {
+    ++pause_callback_calls;
+    pause_callback_seconds = seconds;
+    std::this_thread::yield();
 }
 
 std::string ReadFile(const fs::path& path) {
@@ -341,6 +384,98 @@ void TestAllocationFailureTruth() {
            "post-unlink allocation failure must expose exact remaining files");
 }
 
+void TestHilBeforeFirstUnlinkFailureIsTruthful() {
+    ResetRoot();
+    WriteFile(Leaf(kHilKey) / "a.bin", "a");
+    WriteFile(Leaf(kHilKey) / "b.bin", "b");
+    ArmEvict(kHilKey, LessonStorageHilCheckpoint::kBeforeFirstUnlink,
+             LessonStorageHilAction::kFail);
+
+    const auto result = EvictLessonAssetCacheKey(kHilKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kUnlinkFailed,
+               "HIL pre-unlink failure must use truthful unlink failure");
+    Expect(result.file_count == 0 && !result.evicted && !result.not_found,
+           "HIL pre-unlink failure must report zero mutation");
+    Expect(ReadFile(Leaf(kHilKey) / "a.bin") == "a" &&
+               ReadFile(Leaf(kHilKey) / "b.bin") == "b",
+           "HIL pre-unlink failure must preserve all files");
+    ExpectMutationLeaseReleased("HIL pre-unlink return must release mutation lease");
+}
+
+void TestHilAfterOneUnlinkFailureIsTruthful() {
+    ResetRoot();
+    WriteFile(Leaf(kHilKey) / "a.bin", "a");
+    WriteFile(Leaf(kHilKey) / "b.bin", "b");
+    WriteFile(Leaf(kHilKey) / "c.bin", "c");
+    ArmEvict(kHilKey, LessonStorageHilCheckpoint::kAfterUnlinks,
+             LessonStorageHilAction::kFail, 1);
+
+    const auto result = EvictLessonAssetCacheKey(kHilKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kPartialEvictRecoveryRequired,
+               "HIL after-one failure must require partial recovery");
+    Expect(result.file_count == 1 && !result.evicted && !result.not_found,
+           "HIL after-one failure must report exactly one deletion");
+    Expect(!fs::exists(Leaf(kHilKey) / "a.bin") &&
+               fs::exists(Leaf(kHilKey) / "b.bin") &&
+               fs::exists(Leaf(kHilKey) / "c.bin"),
+           "HIL after-one failure must expose exact remaining files");
+    ExpectMutationLeaseReleased("HIL after-unlink return must release mutation lease");
+}
+
+void TestHilBeforeRmdirFailureIsTruthful() {
+    ResetRoot();
+    WriteFile(Leaf(kHilKey) / "a.bin", "a");
+    WriteFile(Leaf(kHilKey) / "b.bin", "b");
+    ArmEvict(kHilKey, LessonStorageHilCheckpoint::kBeforeRmdir,
+             LessonStorageHilAction::kFail);
+
+    const auto result = EvictLessonAssetCacheKey(kHilKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kPartialEvictRecoveryRequired,
+               "HIL pre-rmdir failure after deletes must require partial recovery");
+    Expect(result.file_count == 2 && fs::exists(Leaf(kHilKey)) &&
+               fs::is_empty(Leaf(kHilKey)),
+           "HIL pre-rmdir failure must preserve exact count and empty leaf");
+    ExpectMutationLeaseReleased("HIL pre-rmdir return must release mutation lease");
+}
+
+void TestHilForeignKeyDoesNotConsumeArm() {
+    ResetRoot();
+    WriteFile(Leaf(kForeignHilKey) / "foreign.bin", "foreign");
+    WriteFile(Leaf(kHilKey) / "target.bin", "target");
+    ArmEvict(kHilKey, LessonStorageHilCheckpoint::kBeforeFirstUnlink,
+             LessonStorageHilAction::kFail);
+
+    const auto foreign = EvictLessonAssetCacheKey(kForeignHilKey, false);
+    ExpectCode(foreign, LessonAssetCacheEvictCode::kEvicted,
+               "foreign HIL key must continue normally");
+    const auto armed = LessonStorageHilController::GetInstance().Status();
+    Expect(armed.armed && !armed.reached && !armed.consumed,
+           "foreign HIL key must not consume the target arm");
+
+    const auto target = EvictLessonAssetCacheKey(kHilKey, false);
+    ExpectCode(target, LessonAssetCacheEvictCode::kUnlinkFailed,
+               "target key must still consume its retained arm");
+    ExpectMutationLeaseReleased("foreign/target HIL calls must release mutation lease");
+}
+
+void TestHilPauseYieldsExactlyOnceThenContinues() {
+    ResetRoot();
+    WriteFile(Leaf(kHilKey) / "pause.bin", "pause");
+    SetLessonStorageHilPauseCallbackForTest(&YieldingPauseCallback);
+    ArmEvict(kHilKey, LessonStorageHilCheckpoint::kBeforeFirstUnlink,
+             LessonStorageHilAction::kPause, 0, 5);
+
+    const auto result = EvictLessonAssetCacheKey(kHilKey, false);
+    ExpectCode(result, LessonAssetCacheEvictCode::kEvicted,
+               "HIL pause must continue normal eviction after yielding delay");
+    Expect(pause_callback_calls == 1 && pause_callback_seconds == 5,
+           "HIL pause must invoke the yielding callback exactly once");
+    const auto status = LessonStorageHilController::GetInstance().Status();
+    Expect(!status.armed && status.reached && status.consumed,
+           "HIL pause must consume its one-shot arm");
+    ExpectMutationLeaseReleased("HIL pause completion must release mutation lease");
+}
+
 void TestFinalAbsenceVerification() {
     ResetRoot();
     WriteFile(Leaf() / "one.bin");
@@ -413,6 +548,11 @@ int main() {
     TestDeterministicSecondPassFailures();
     TestPartialMutationTruthAndRetry();
     TestAllocationFailureTruth();
+    TestHilBeforeFirstUnlinkFailureIsTruthful();
+    TestHilAfterOneUnlinkFailureIsTruthful();
+    TestHilBeforeRmdirFailureIsTruthful();
+    TestHilForeignKeyDoesNotConsumeArm();
+    TestHilPauseYieldsExactlyOnceThenContinues();
     TestFinalAbsenceVerification();
     TestAuthoritativeNotFoundOnly();
     TestLeafTypeRefusals();

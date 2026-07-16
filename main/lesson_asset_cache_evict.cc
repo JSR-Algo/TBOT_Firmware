@@ -4,6 +4,11 @@
 #include "lesson_asset_storage_coordinator.h"
 #endif
 
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+#include "lesson_storage_hil_hooks.h"
+#endif
+
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -517,6 +522,19 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
                     deleted_count);
             }
 #endif
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+            if (index == 0 &&
+                RunLessonStorageHilCheckpoint(
+                    cache_key.c_str(), LessonStorageHilOperation::kEvict,
+                    LessonStorageHilCheckpoint::kBeforeFirstUnlink, 0, 0) !=
+                    LessonStorageHilHookOutcome::kContinue) {
+                return FinishMutationResult(
+                    std::move(mutation_result),
+                    LessonAssetCacheEvictCode::kUnlinkFailed,
+                    deleted_count);
+            }
+#endif
             if (unlink(child_path.c_str()) != 0) {
                 return FinishMutationResult(
                     std::move(mutation_result),
@@ -524,6 +542,19 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
                     deleted_count);
             }
             ++deleted_count;
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+            if (RunLessonStorageHilCheckpoint(
+                    cache_key.c_str(), LessonStorageHilOperation::kEvict,
+                    LessonStorageHilCheckpoint::kAfterUnlinks,
+                    static_cast<std::uint32_t>(deleted_count), 0) !=
+                LessonStorageHilHookOutcome::kContinue) {
+                return FinishMutationResult(
+                    std::move(mutation_result),
+                    LessonAssetCacheEvictCode::kUnlinkFailed,
+                    deleted_count);
+            }
+#endif
 #ifndef ESP_PLATFORM
             if (ShouldFailAllocationAfterUnlink(deleted_count)) {
                 throw std::bad_alloc();
@@ -531,6 +562,19 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
 #endif
         }
 
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+        if (RunLessonStorageHilCheckpoint(
+                cache_key.c_str(), LessonStorageHilOperation::kEvict,
+                LessonStorageHilCheckpoint::kBeforeRmdir,
+                static_cast<std::uint32_t>(deleted_count), 0) !=
+            LessonStorageHilHookOutcome::kContinue) {
+            return FinishMutationResult(
+                std::move(mutation_result),
+                LessonAssetCacheEvictCode::kRmdirFailed,
+                deleted_count);
+        }
+#endif
 #ifndef ESP_PLATFORM
         if (HasFailureSeam("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR")) {
             return FinishMutationResult(
