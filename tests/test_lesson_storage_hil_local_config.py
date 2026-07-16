@@ -74,6 +74,24 @@ def test_local_config_generator_rejects_unsafe_urls(tmp_path, ota_url, websocket
     assert "token=secret" not in result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("control", ["\u0080", "\u0085", "\u009f"])
+@pytest.mark.parametrize("field", ["ota", "websocket"])
+def test_local_config_generator_rejects_c1_controls_without_leaking_input(tmp_path, field, control):
+    marker = "do-not-print-c1-input"
+    ota_url = "http://192.168.100.209:8003/tbot/ota/"
+    websocket_url = "ws://192.168.100.209:8000/tbot/v1/"
+    if field == "ota":
+        ota_url += control + marker
+    else:
+        websocket_url += control + marker
+
+    result, output = run_generator(tmp_path, ota_url=ota_url, websocket_url=websocket_url)
+
+    assert result.returncode != 0
+    assert not output.exists()
+    assert marker not in result.stdout + result.stderr
+
+
 def test_local_config_generator_rejects_invalid_port_without_traceback(tmp_path):
     result, output = run_generator(
         tmp_path,

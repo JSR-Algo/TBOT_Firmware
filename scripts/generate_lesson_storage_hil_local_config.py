@@ -5,6 +5,7 @@ import argparse
 import ipaddress
 import os
 import tempfile
+import unicodedata
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -22,7 +23,7 @@ class ConfigError(ValueError):
 
 
 def _validate_url(value: str, *, label: str, schemes: tuple[str, ...]) -> str:
-    if not value or any(ord(character) <= 0x20 or ord(character) == 0x7F for character in value):
+    if not value or any(character.isspace() or unicodedata.category(character) == "Cc" for character in value):
         raise ConfigError(f"invalid {label} URL")
     if "\\" in value or not value.startswith(tuple(f"{scheme}://" for scheme in schemes)):
         raise ConfigError(f"invalid {label} URL")
