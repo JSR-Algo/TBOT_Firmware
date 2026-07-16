@@ -13,6 +13,7 @@ else
     trap 'rm -rf "${BUILD_DIR}"' EXIT
 fi
 CXX="${CXX:-clang++}"
+CC="${CC:-clang}"
 LLVM_COV_BIN="${LLVM_COV_BIN:-$(command -v llvm-cov || true)}"
 if [[ -z "${LLVM_COV_BIN}" && -x "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/llvm-cov" ]]; then
     LLVM_COV_BIN="/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/llvm-cov"
@@ -50,6 +51,11 @@ mkdir -p "${BUILD_DIR}/src"
 cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
 cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
 cp main/lesson_layer_state.cc "${BUILD_DIR}/src/lesson_layer_state.cc"
+cp main/lesson_asset_storage_coordinator.cc \
+    "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc"
+
+"${CC}" -std=c11 -O0 -g --coverage -Wno-deprecated-declarations \
+    -I"${CJSON_DIR}" -c "${CJSON_DIR}/cJSON.c" -o "${BUILD_DIR}/cJSON.o"
 
 "${CXX}" -std=c++17 -O0 -g --coverage \
     -Itests/native_stubs_lesson \
@@ -60,17 +66,22 @@ cp main/lesson_layer_state.cc "${BUILD_DIR}/src/lesson_layer_state.cc"
 
 "${BUILD_DIR}/lesson_layer_state_test"
 
-"${CXX}" -std=c++17 -O0 -g --coverage \
+"${CXX}" -std=c++17 -O0 -g --coverage -pthread \
     -DTBOT_HOST_NATIVE_COVERAGE \
+    -DTBOT_LESSON_ASSET_COORDINATOR_TESTING \
+    -Dfopen=HostLessonFopen \
     -Dfread=HostLessonFread \
     -Itests/native_stubs_lesson \
     -I"${CJSON_DIR}" \
     -Imain \
+    -Imain/protocols \
     tests/native/lesson_handler_host_test.cc \
     "${BUILD_DIR}/src/lesson_handler.cc" \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \
     "${BUILD_DIR}/src/lesson_layer_state.cc" \
-    "${CJSON_DIR}/cJSON.c" \
+    "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \
+    main/json_payload_safety.cc \
+    "${BUILD_DIR}/cJSON.o" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 
 "${BUILD_DIR}/lesson_handler_host_test"

@@ -14,6 +14,7 @@
 #include "assets/lang_config.h"
 #include "protocol.h"
 #include "lesson_handler.h"
+#include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
 #include "lesson_layer_state.h"
 #include "system_info.h"
@@ -69,6 +70,11 @@ bool Blank(const char* value) {
         ++value;
     }
     return true;
+}
+bool IsValidLessonIdentity(const char* value) {
+    if (value == nullptr) return false;
+    const size_t length = strlen(value);
+    return length > 0 && length <= kLessonAssetIdentityMaxBytes;
 }
 void TrimAsciiWhitespace(std::string& value) {
     size_t first = 0;
@@ -245,6 +251,7 @@ struct LessonSession {
     static constexpr size_t kAckReplayWindow = 16;
     std::string assignment_id;
     std::string session_id;
+    std::uint64_t lesson_asset_generation = 0;
     double      assignment_version = -1.0;  // staleness guard (plan §7.2)
     int64_t     last_in_sequence   = 0;     // highest processed S->F sequence (0 = none)
     int64_t     fs_sequence        = 0;     // firmware F->S counter, pre-inc on emit
@@ -984,6 +991,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
         std::string frame = BuildFrame(in, frame_type, seq, frame_body);
         if (protocol_) protocol_->SendLessonFrame(frame);
     };
+    auto emit_isolated_prepare_error = [this](const cJSON* in, cJSON* frame_body) {
+        std::string frame = BuildFrame(in, "lesson_error", 1, frame_body);
+        if (protocol_) protocol_->SendLessonFrame(frame);
+    };
     // Canonical lesson_ack (plan §5.3 / P0): body.acks echoes the ACKED sequence;
     // the ack's own envelope.sequence is the firmware F->S counter; there is NO
     // ackFor field. stepId is echoed (null on lifecycle, "s4" on a step).
@@ -1048,6 +1059,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         emit(in, "lesson_ack", b);
     };
+    auto emit_isolated_prepare_ack = [this](const cJSON* in, int64_t acked,
+                                            cJSON* asset_pack_ack) {
+        cJSON* body = cJSON_CreateObject();
+        cJSON_AddNumberToObject(body, "acks", static_cast<double>(acked));
+        cJSON_AddBoolToObject(body, "rendered", false);
+        cJSON_AddBoolToObject(body, "degraded", false);
+        if (asset_pack_ack != nullptr) {
+            cJSON_AddItemToObject(body, "assetPack", asset_pack_ack);
+        }
+        LogLessonAckEvidence(in, body);
+        std::string frame = BuildFrame(in, "lesson_ack", 1, body);
+        if (protocol_) protocol_->SendLessonFrame(frame);
+    };
     auto show_lesson_failure_display = [this]() {
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
@@ -1073,7 +1097,18 @@ void Application::HandleLessonMessage(const cJSON* root) {
             app.AbortSpeaking(kAbortReasonNone);
         }
     };
-    auto end_lesson_after_failure = [this, &show_lesson_failure_display, &abort_speaking_if_needed]() {
+    auto end_lesson_asset_session = []() {
+        if (g_session.lesson_asset_generation == 0) return false;
+        const bool ended = LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+            g_session.assignment_id,
+            g_session.session_id,
+            g_session.lesson_asset_generation);
+        if (ended) g_session.lesson_asset_generation = 0;
+        return ended;
+    };
+    auto end_lesson_after_failure = [this, &show_lesson_failure_display,
+                                     &abort_speaking_if_needed,
+                                     &end_lesson_asset_session](bool release_asset_session = true) {
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);
@@ -1083,6 +1118,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_layer_state.ClearAll();
         ClearTerminalLessonCursor();
         g_layer_state.ClearAll();
+        if (release_asset_session) end_lesson_asset_session();
         show_lesson_failure_display();
     };
     auto clear_stale_lesson_for_fresh_prepare = [this](bool show_waiting_state) {
@@ -1112,9 +1148,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool preload_reset_only =
         is_prepare && cJSON_IsTrue(cJSON_GetObjectItem(body, "preloadResetOnly"));
     double prepare_assignment_version = 0.0;
+    const bool prepare_has_assignment_version =
+        is_prepare && Num(body, "assignmentVersion", prepare_assignment_version);
     const bool prepare_has_newer_assignment_version =
-        is_prepare &&
-        Num(body, "assignmentVersion", prepare_assignment_version) &&
+        prepare_has_assignment_version &&
         prepare_assignment_version > g_session.assignment_version;
     const bool same_session =
         g_session.assignment_id == assignment_id &&
@@ -1132,27 +1169,125 @@ void Application::HandleLessonMessage(const cJSON* root) {
         !restart_prepare &&
         !prepare_has_newer_assignment_version;
 
-    // FW-02: a session-opening lesson_prepare resets the F->S counter + inbound cursor
-    // BEFORE the version/profile gate, so that even a REJECTED fresh prepare sources
-    // its lesson_error at envelope sequence=1 (the frozen per-session "F->S restarts at
-    // 1" contract — fixture sequenceStreams F->S). Without this, a fresh prepare whose
-    // profile/protocolVersion is unsupported would emit lesson_error on the STALE prior
-    // session's advanced counter (e.g. seq=6), violating restart-at-1 and poisoning the
-    // ESP's fresh inbound cursor. Mid-session lesson_step/lesson_start rejects (the case
-    // the gate comment below protects) still ride the live continued counter because
-    // they do NOT reset here.
-    if (is_prepare && !duplicate_prepare) {
-        // lesson_prepare (re)establishes the single active session and resets the
-        // F->S counter + the inbound sequence cursor for this assignment.
-        clear_stale_lesson_for_fresh_prepare(!preload_reset_only);
-        g_session = LessonSession{};
-        g_session.assignment_id = assignment_id;
-        g_session.session_id = session_id;
+    const bool version_ok = (protocol_version != nullptr) &&
+                            strcmp(protocol_version, kLessonProtocolVersion) == 0;
+    const char* profile = Str(body, "profile");
+    const bool profile_ok = (profile == nullptr) ||
+                            strcmp(profile, kLessonProfileEspTft) == 0;
+    const bool valid_prepare_identity =
+        IsValidLessonIdentity(assignment_id) && IsValidLessonIdentity(session_id);
+    const bool valid_prepare_body = body != nullptr;
+    const cJSON* prepare_asset_pack = Obj(body, "assetPack");
+    const cJSON* prepare_manifest_ref = Obj(body, "manifestRef");
+    const char* prepare_manifest_checksum =
+        Str(prepare_manifest_ref, "manifestChecksum");
+    const bool prepare_isolated_stream =
+        g_session.lesson_asset_generation == 0 || !same_session ||
+        prepare_has_newer_assignment_version || restart_prepare;
+
+    auto emit_prepare_error = [&](cJSON* error_body) {
+        if (prepare_isolated_stream) {
+            emit_isolated_prepare_error(root, error_body);
+        } else {
+            emit(root, "lesson_error", error_body);
+        }
+    };
+
+    if (is_prepare && !valid_prepare_identity) {
+        emit_prepare_error(MakeErrorBody(
+            "LESSON_IDENTITY_INVALID", "lesson identity is invalid", false,
+            "invalid_identity"));
+        return;
+    }
+    if (is_prepare && !valid_prepare_body) {
+        emit_prepare_error(MakeErrorBody(
+            "LESSON_ENVELOPE_INVALID", "lesson_prepare body must be an object", false,
+            "body"));
+        return;
+    }
+    if (is_prepare && (!version_ok || !profile_ok)) {
+        emit_prepare_error(MakeErrorBody(
+            "LESSON_VERSION_UNSUPPORTED",
+            version_ok ? "unsupported profile" : "unsupported protocolVersion",
+            false,
+            version_ok ? "profile" : "contract"));
+        ESP_LOGW(TAG, "lesson_prepare rejected: version_ok=%d profile_ok=%d",
+                 version_ok, profile_ok);
+        return;
+    }
+    if (is_prepare && prepare_asset_pack != nullptr && Blank(prepare_manifest_checksum)) {
+        emit_prepare_error(MakeErrorBody(
+            "ASSET_PACK_NOT_READY",
+            "lesson_prepare assetPack requires manifestRef.manifestChecksum",
+            true,
+            "assetPack"));
+        ESP_LOGW(TAG, "lesson_prepare rejected: assetPack missing manifestChecksum");
+        return;
+    }
+    if (is_prepare && sequence == 0) {
+        emit_prepare_error(MakeErrorBody(
+            "LESSON_SEQUENCE_INVALID", "lesson sequence must start at 1", false,
+            "sequence"));
+        ESP_LOGW(TAG, "lesson_prepare rejected: sequence must start at 1");
+        return;
     }
 
+    bool prepare_newly_acquired_asset_session = false;
+    std::uint64_t prepare_asset_generation = 0;
+    if (is_prepare) {
+        const auto reservation =
+            LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+                assignment_id, session_id);
+        if (!reservation.acquired) {
+            const char* error_code = "LESSON_RESERVATION_EXHAUSTED";
+            const char* error_message = "lesson storage reservation unavailable";
+            const char* error_reason = "generation_exhausted";
+            bool retryable = false;
+            switch (reservation.code) {
+            case LessonAssetReservationCode::kMutationActive:
+                error_code = "LESSON_ASSET_MUTATION_ACTIVE";
+                error_message = "lesson assets are being updated";
+                error_reason = "asset_mutation_active";
+                retryable = true;
+                break;
+            case LessonAssetReservationCode::kLessonSessionMismatch:
+            case LessonAssetReservationCode::kLessonSessionActive:
+                error_code = "LESSON_SESSION_CONFLICT";
+                error_message = "another lesson session owns lesson assets";
+                error_reason = "lesson_session_mismatch";
+                retryable = true;
+                break;
+            case LessonAssetReservationCode::kInvalidIdentity:
+                // Pure envelope validation makes this unreachable in the handler;
+                // retain fail-closed mapping if coordinator validation ever tightens.
+                error_code = "LESSON_IDENTITY_INVALID";  // GCOVR_EXCL_LINE
+                error_message = "lesson identity is invalid";  // GCOVR_EXCL_LINE
+                error_reason = "invalid_identity";  // GCOVR_EXCL_LINE
+                break;  // GCOVR_EXCL_LINE
+            case LessonAssetReservationCode::kGenerationExhausted:
+            case LessonAssetReservationCode::kAcquired:
+                break;
+            }
+            emit_isolated_prepare_error(
+                root, MakeErrorBody(error_code, error_message, retryable, error_reason));
+            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s", error_reason);
+            return;
+        }
+        prepare_newly_acquired_asset_session = !reservation.idempotent;
+        prepare_asset_generation = reservation.generation;
+    }
+
+    auto release_new_lesson_asset_session = [&]() {
+        if (!prepare_newly_acquired_asset_session || prepare_asset_generation == 0) return;
+        if (LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                assignment_id, session_id, prepare_asset_generation)) {
+            prepare_newly_acquired_asset_session = false;
+        }
+    };
+
     // --- session context (per (assignmentId,sessionId)) ---
-    // The session reset for a session-opening prepare already ran BEFORE the gate
-    // (FW-02). Here we reject non-prepare frames outside the active
+    // Prepare candidates are still uncommitted here. Reject non-prepare frames outside
+    // the active
     // (assignmentId, sessionId) stream before version/profile errors,
     // staleness/dedup, or render handling can mutate the active F->S stream.
     if (!is_prepare && (g_session.assignment_id != assignment_id ||
@@ -1161,24 +1296,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         return;
     }
 
-    // --- contract-identity + profile gate (plan §7.2 / DO #6) ---
-    // A frame whose contract identity we cannot honor is rejected with
-    // LESSON_VERSION_UNSUPPORTED and is NOT processed/acked/rendered. Negotiation
-    // is EXACT-STRING (never a semver). Profile is checked where it is carried
-    // (prepare/step bodies). For a session-opening prepare the counter was already
-    // reset to 0 immediately above, so a rejected fresh prepare emits at sequence=1.
-    // For a MID-SESSION reject the error emits through the shared F->S counter
-    // (emit()), NOT a hardcoded sequence: a bad profile can ride a mid-session
-    // lesson_step/lesson_start after prepare+start has already advanced fs_sequence, so
-    // a fixed sequence would go BACKWARD and trip PROTOCOL_SEQUENCE_ERROR. lesson_error
-    // is an F->S frame (protocol §4) and MUST participate in the sender stream
-    // monotonically (lesson-robot-protocol.md:116).
-    const bool version_ok = (protocol_version != nullptr) &&
-                            strcmp(protocol_version, kLessonProtocolVersion) == 0;
-    const char* profile = Str(body, "profile");  // present on prepare/step
-    const bool profile_ok = (profile == nullptr) ||
-                            strcmp(profile, kLessonProfileEspTft) == 0;
-    if (!version_ok || !profile_ok) {
+    if (!is_prepare && (!version_ok || !profile_ok)) {
         cJSON* eb = MakeErrorBody(
             "LESSON_VERSION_UNSUPPORTED",
             version_ok ? "unsupported profile" : "unsupported protocolVersion",
@@ -1216,11 +1334,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // Staleness drop (plan §7.2): ignore a frame carrying an older body.assignmentVersion.
     double av = 0.0;
     if (Num(body, "assignmentVersion", av)) {
-        if (av < g_session.assignment_version) {
+        if ((!is_prepare || same_session) && av < g_session.assignment_version) {
+            if (is_prepare) release_new_lesson_asset_session();
             ESP_LOGW(TAG, "lesson_* stale assignmentVersion; dropping");
             return;
         }
-        g_session.assignment_version = av;
+        if (!is_prepare) g_session.assignment_version = av;
     }
 
     // Dedup (plan §5.8 / protocol §6): a sequence <= the last processed value is a
@@ -1231,7 +1350,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // would corrupt the rendered/degraded observability the ack body carries). If the
     // duplicate is older than the single cached entry (slice-01 keeps only the last),
     // fall back to false/false — the conservative non-rendered ack.
-    if (sequence <= g_session.last_in_sequence) {
+    if ((!is_prepare || duplicate_prepare) && sequence <= g_session.last_in_sequence) {
         for (auto it = g_session.ack_history.rbegin(); it != g_session.ack_history.rend(); ++it) {
             if (it->sequence == sequence) {
                 cJSON* replay_body = cJSON_Parse(it->body_json.c_str());
@@ -1239,6 +1358,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                          static_cast<long>(sequence));
                 LogLessonAckEvidence(root, replay_body);
                 emit(root, "lesson_ack", replay_body);
+                if (is_prepare) release_new_lesson_asset_session();
                 return;
             }
         }
@@ -1247,44 +1367,63 @@ void Application::HandleLessonMessage(const cJSON* root) {
         ESP_LOGI(TAG, "lesson_* duplicate seq=%ld; re-acking rendered=%d degraded=%d",
                  static_cast<long>(sequence), re_rendered, re_degraded);
         emit_ack(root, sequence, re_rendered, re_degraded, nullptr, /*cache*/ false);
+        if (is_prepare) release_new_lesson_asset_session();
         return;
     }
     if (is_step && g_session.paused) {
         ESP_LOGW(TAG, "lesson_step while paused; dropping");
         return;
     }
-    g_session.last_in_sequence = sequence;
+    if (!is_prepare) g_session.last_in_sequence = sequence;
 
     // --- slice subset dispatch ---
     if (is_prepare) {
         if (preload_reset_only) {
-            g_session.prepared = false;
+            clear_stale_lesson_for_fresh_prepare(false);
+            g_session = LessonSession{};
+            g_session.assignment_id = assignment_id;
+            g_session.session_id = session_id;
+            g_session.lesson_asset_generation = prepare_asset_generation;
+            g_session.last_in_sequence = sequence;
+            if (prepare_has_assignment_version) {
+                g_session.assignment_version = prepare_assignment_version;
+            }
             emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
+            end_lesson_asset_session();
             return;
         }
-        const cJSON* asset_pack = Obj(body, "assetPack");
-        const cJSON* manifest_ref = Obj(body, "manifestRef");
-        const char* manifest_checksum = Str(manifest_ref, "manifestChecksum");
-        if (asset_pack != nullptr && Blank(manifest_checksum)) {
-            cJSON* eb = MakeErrorBody(
-                "ASSET_PACK_NOT_READY",
-                "lesson_prepare assetPack requires manifestRef.manifestChecksum",
-                true,
-                "assetPack");
-            end_lesson_after_failure();
-            emit(root, "lesson_error", eb);
-            ESP_LOGW(TAG, "lesson_prepare rejected: assetPack missing manifestChecksum");
+        cJSON* asset_pack_ack = BuildAssetPackAck(body);
+        const bool candidate_asset_pack_ready =
+            prepare_asset_pack == nullptr ||
+            (asset_pack_ack != nullptr &&
+             cJSON_IsTrue(cJSON_GetObjectItem(asset_pack_ack, "ready")));
+        if (!candidate_asset_pack_ready) {
+            if (prepare_isolated_stream) {
+                emit_isolated_prepare_ack(root, sequence, asset_pack_ack);
+            } else {
+                emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false,
+                         asset_pack_ack, /*cache*/ false);
+            }
+            release_new_lesson_asset_session();
             return;
         }
         const cJSON* runtime_controls = Obj(body, "runtimeControls");
         const cJSON* motion_enabled = runtime_controls != nullptr
             ? cJSON_GetObjectItem(runtime_controls, "motionPresetsEnabled")
             : nullptr;
+        clear_stale_lesson_for_fresh_prepare(!preload_reset_only);
+        g_session = LessonSession{};
+        g_session.assignment_id = assignment_id;
+        g_session.session_id = session_id;
+        g_session.lesson_asset_generation = prepare_asset_generation;
+        g_session.last_in_sequence = sequence;
+        if (prepare_has_assignment_version) {
+            g_session.assignment_version = prepare_assignment_version;
+        }
         // Defense in depth: every fresh manifest starts disabled. Only the explicit
         // runtime control boolean can arm lesson motion for this session.
         g_session.motion_presets_enabled = cJSON_IsTrue(motion_enabled);
         g_session.prepared = true;
-        cJSON* asset_pack_ack = BuildAssetPackAck(body);
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false, asset_pack_ack);
         return;
     }
@@ -1389,6 +1528,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.prepared = false;
         g_layer_state.ClearAll();
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
+        end_lesson_asset_session();
         ClearTerminalLessonCursor();
         // Return the robot display to its realtime face surface (protocol §4.6):
         // clear persistent lesson layers and make the terminal reason perceivable.
@@ -1765,6 +1905,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
+        end_lesson_asset_session();
         ClearTerminalLessonCursor();
     }
 

@@ -613,7 +613,7 @@ def test_lesson_png_decode_is_no_cache_psram_owned_and_frees_compressed_input():
 def test_lesson_duplicate_ack_replays_cached_full_body_before_reconstructing_fields():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     body = function_body(source, "void Application::HandleLessonMessage")
-    duplicate = body[body.index("if (sequence <= g_session.last_in_sequence)") : body.index("if (is_step && g_session.paused)")]
+    duplicate = body[body.index("sequence <= g_session.last_in_sequence)") : body.index("if (is_step && g_session.paused)")]
 
     full_body = duplicate.index("g_session.ack_history.rbegin()")
     exact_emit = duplicate.index('emit(root, "lesson_ack", replay_body)')

@@ -4,6 +4,7 @@
 #include "application.h"
 #include "settings.h"
 #include "lesson_handler.h"  // US-006 Slice-01: kLessonRendererName (D-CAP-FLAG)
+#include "json_payload_safety.h"
 
 #include <cstring>
 #include <cJSON.h>
@@ -370,6 +371,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
             }
         } else {
             // Parse JSON data
+            if (JsonHasForbiddenDecodedNull(data, len)) {
+                ESP_LOGW(TAG, "Rejected JSON message containing decoded NUL");
+                return;
+            }
             auto root = cJSON_ParseWithLength(data, len);
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {

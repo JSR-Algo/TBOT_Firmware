@@ -324,6 +324,17 @@ def test_lesson_runtime_reset_protocol_ignored_before_scheduling_teardown():
     assert "reset_pending_" not in guard
     assert "DoResetProtocol" not in guard
 
+
+def test_protocol_and_network_resets_do_not_force_release_lesson_asset_session():
+    app_cc = read("main/application.cc")
+    disconnect_start = app_cc.index("void Application::HandleNetworkDisconnectedEvent()")
+    disconnect_end = app_cc.index("void Application::HandleActivationDoneEvent()", disconnect_start)
+    reset_start = app_cc.index("void Application::DoResetProtocol()")
+    reset_end = app_cc.index("void Application::ResetProtocol()", reset_start)
+
+    assert "ForceEndLessonSession" not in app_cc[disconnect_start:disconnect_end]
+    assert "ForceEndLessonSession" not in app_cc[reset_start:reset_end]
+
 def test_lesson_runtime_suppresses_low_battery_popup_and_sound_before_interrupting_scene():
     lvgl_cc = read("main/display/lvgl_display/lvgl_display.cc")
     app_h = read("main/application.h")

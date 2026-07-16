@@ -23,6 +23,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lesson_handler.h"
+#include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
 #include "system_info.h"
 
@@ -41,6 +42,21 @@
 #endif
 #include <stdio.h>
 extern "C" size_t fread(void* ptr, size_t size, size_t count, FILE* stream);
+
+#ifdef fopen
+#undef fopen
+#endif
+extern "C" FILE* fopen(const char* path, const char* mode);
+
+int& HostLessonAssetOpenCount() {
+    static int value = 0;
+    return value;
+}
+
+extern "C" FILE* HostLessonFopen(const char* path, const char* mode) {
+    ++HostLessonAssetOpenCount();
+    return ::fopen(path, mode);
+}
 
 bool& HostLessonFreadShortReadOnce() {
     static bool v = false;
@@ -192,9 +208,17 @@ void Handle(const std::string& json) {
     cJSON_Delete(root);
 }
 
+bool HandleTransportJson(const std::string& json) {
+    if (JsonHasForbiddenDecodedNull(json.data(), json.size())) return false;
+    Handle(json);
+    return true;
+}
+
 void ResetObservable() {
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
     App().HostReset();
     HostEspResetLogs();
+    HostLessonAssetOpenCount() = 0;
 }
 
 bool LogContains(const std::string& needle) {
@@ -227,6 +251,14 @@ std::string PrepareFrame(int seq, const std::string& extra_body = "") {
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"profile\":\"" +
            kLessonProfileEspTft + "\"" + extra_body + "}}";
 }
+std::string PrepareFrameFor(const std::string& assignment_id, const std::string& session_id,
+                            int seq, const std::string& extra_body = "") {
+    return std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + assignment_id +
+           "\",\"sessionId\":\"" + session_id + "\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\"" + extra_body + "}}";
+}
 std::string StartFrame(int seq) {
     return std::string("{\"type\":\"lesson_start\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -236,6 +268,13 @@ std::string StopFrame(int seq, const std::string& body = "") {
     return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{" + body + "}}";
+}
+std::string StopFrameFor(const std::string& assignment_id, const std::string& session_id,
+                         int seq, const std::string& body = "") {
+    return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + assignment_id +
+           "\",\"sessionId\":\"" + session_id + "\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":{" + body + "}}";
 }
 std::string PauseFrame(int seq) {
     return std::string("{\"type\":\"lesson_pause\",\"protocolVersion\":\"") +
@@ -251,6 +290,25 @@ std::string ErrorFrame(int seq) {
     return std::string("{\"type\":\"lesson_error\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"code\":\"STEP_TIMEOUT\"}}";
+}
+std::string ReadyAssetPackExtra(const std::string& cache_key,
+                                const std::string& manifest_checksum,
+                                const std::string& file_name) {
+    const std::string host_path = "/tmp/" + file_name;
+    FILE* file = fopen(host_path.c_str(), "wb");
+    require(file != nullptr, "ready asset fixture opened");
+    require(fwrite("data", 1, 4, file) == 4, "ready asset fixture written");
+    fclose(file);
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", "/tmp", 1);
+    return ",\"manifestRef\":{\"manifestChecksum\":\"" + manifest_checksum +
+           "\"},\"assetPack\":{\"cacheKey\":\"" + cache_key +
+           "\",\"assets\":[{\"key\":\"poster\",\"state\":\"READY\","
+           "\"checksumOk\":true,\"localPath\":\"sd://sdcard/tbot/lesson-assets/" +
+           file_name + "\",\"size\":4}]}";
+}
+void RemoveReadyAssetPackFixture(const std::string& file_name) {
+    remove(("/tmp/" + file_name).c_str());
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 // Full three-layer lesson_step. Caller controls scene srcs + extra body fields.
 std::string StepFrame(int seq, const std::string& step_id,
@@ -733,7 +791,7 @@ void test_prepare_assetpack_requires_manifest_checksum_before_ack() {
     require(!FrameHasAssetPack(0), "whitespace manifest checksum does not emit assetPack ack");
 }
 
-void test_prepare_reject_clears_stale_lesson_scene() {
+void test_prepare_reject_preserves_active_lesson_scene() {
     ResetObservable();
     LvglDisplay disp;
     NetworkInterface net;
@@ -753,7 +811,11 @@ void test_prepare_reject_clears_stale_lesson_scene() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old valid step rendered prompt before rejected prepare");
 
-    FreshSession();
+    const size_t background_calls = disp.background_calls.size();
+    const size_t object_calls = disp.object_calls.size();
+    const size_t overlay_calls = disp.overlay_calls.size();
+    const size_t mode_calls = disp.lesson_mode_calls.size();
+    const int cancel_calls = App().cancel_listen_calls;
     Handle(PrepareFrame(1, ",\"criticalAssets\":[{\"key\":\"k1\"}],"
                           "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef1234567890\",\"assets\":["
                           "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
@@ -761,19 +823,17 @@ void test_prepare_reject_clears_stale_lesson_scene() {
 
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "ASSET_PACK_NOT_READY",
             "rejected prepare emits ASSET_PACK_NOT_READY");
-    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
-            "rejected prepare clears stale background layer");
-    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
-            "rejected prepare clears stale object layer");
-    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
-            "rejected prepare clears stale overlay layer");
-    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
-            "rejected prepare restores idle face instead of stale lesson mode");
-    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
-            "rejected prepare clears stale lesson prompt");
-    require(disp.last_emotion == "sad", "rejected prepare shows sad face");
-    require(App().cancel_listen_calls >= 1, "rejected prepare cancels interactive listening");
-    require(App().lesson_runtime_active == false, "rejected prepare clears active lesson runtime flag");
+    require(disp.background_calls.size() == background_calls &&
+                disp.object_calls.size() == object_calls &&
+                disp.overlay_calls.size() == overlay_calls &&
+                disp.lesson_mode_calls.size() == mode_calls,
+            "rejected replacement does not mutate active lesson layers");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "rejected replacement preserves active lesson prompt");
+    require(App().cancel_listen_calls == cancel_calls,
+            "rejected replacement preserves interactive listening state");
+    require(App().lesson_runtime_active,
+            "rejected replacement preserves active lesson runtime flag");
 }
 
 // ==========================================================================
@@ -823,28 +883,22 @@ void test_fresh_prepare_contract_reject_clears_stale_lesson_scene() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old valid step rendered prompt before rejected fresh prepare");
 
-    FreshSession();
+    // Restart the current owner; a foreign prepare must not replace it.
     Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":1,\"body\":{\"profile\":\"oledTiny\"}}");
 
     require(FrameType(Sent().size()-1) == "lesson_error", "bad fresh prepare profile -> lesson_error");
-    require(FrameSeq(Sent().size()-1) == 1, "bad fresh prepare profile keeps fresh F->S sequence");
+    require(FrameSeq(Sent().size()-1) == 1,
+            "restart-style rejected replacement uses isolated F->S sequence");
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
             "bad fresh prepare profile emits contract error");
-    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
-            "bad fresh prepare clears stale background layer");
-    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
-            "bad fresh prepare clears stale object layer");
-    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
-            "bad fresh prepare clears stale overlay layer");
-    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
-            "bad fresh prepare restores idle face instead of stale lesson mode");
-    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
-            "bad fresh prepare clears stale lesson prompt");
-    require(disp.last_emotion == "sad", "bad fresh prepare shows sad face");
-    require(App().cancel_listen_calls >= 1, "bad fresh prepare cancels interactive listening");
-    require(App().lesson_runtime_active == false, "bad fresh prepare clears active lesson runtime flag");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "bad replacement profile preserves active background layer");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "bad replacement profile preserves active prompt");
+    require(App().lesson_runtime_active,
+            "bad replacement profile preserves active lesson runtime flag");
 }
 
 // ==========================================================================
@@ -884,47 +938,48 @@ void test_dedup_reack() {
     FreshSession();
     Board::GetInstance().display_ = nullptr;
 
-    // prepare with a (not-ready) assetPack so the cached ack carries an assetPack body.
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ckD-abcdef1234567890\",\"assets\":[]}"));
+    const std::string ready_file_name = "tbot-lesson-dedup-ready.bin";
+    const std::string ready_pack = ReadyAssetPackExtra(
+        "ckD-abcdef1234567890", "abcdef1234567890", ready_file_name);
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 1, "prepare ack");
     bool first_ready = FrameAssetPackReady(0);
+    require(first_ready, "dedup fixture establishes a ready prepared owner");
 
     // duplicate prepare (same assignment/session, sequence <= last) -> re-ack path.
     // duplicate_prepare==true so NO session reset; sequence<=last triggers replay.
     HostEspResetLogs();
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ckD-abcdef1234567890\",\"assets\":[]}"));
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 2, "duplicate prepare re-acks");
     require(FrameType(1) == "lesson_ack", "re-ack is an ack");
     // NOTE non-tautology: re-ack must REPLAY the cached assetPack body. Mutation: drop the
     // cached-assetPack replay (re_asset_pack=nullptr) -> the re-ack would carry NO assetPack.
     require(FrameHasAssetPack(1), "duplicate re-ack replays cached assetPack body");
     require(FrameAssetPackReady(1) == first_ready, "re-ack replays cached ready flag");
-    require(LogContains("lesson_ack TX assignmentId=" + std::string(AID()) +
-                        " sessionId=" + SID() +
-                        " stepId=- body.acks=1 rendered=false degraded=false "
-                        "renderElapsedMs=-1 assetPack.ready=false "
-                        "cacheKey=ckD-abcdef1234567890"),
+    require(LogContains("body.acks=1 rendered=false degraded=false") &&
+                LogContains("assetPack.ready=true cacheKey=ckD-abcdef1234567890"),
             "exact duplicate replay emits structured cached ack evidence");
 
-    // a duplicate of an OLDER sequence than the cached one -> conservative false/false,
-    // no assetPack. Advance to seq 3 first via start(2)+a step? Simpler: send seq 0 dup.
+    // Sequence zero is now rejected as a pure envelope error before dedup/reservation.
     Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":0,\"body\":{\"profile\":\"" + kLessonProfileEspTft + "\"}}");
-    require(Sent().size() == 3, "older duplicate also re-acks");
-    require(FrameBodyBool(2, "rendered", true) == false, "older dup re-ack rendered=false");
-    require(!FrameHasAssetPack(2), "older dup carries no cached assetPack");
+    require(Sent().size() == 3, "sequence-zero duplicate emits one refusal");
+    require(FrameType(2) == "lesson_error", "sequence-zero duplicate is not re-acked");
+    require(FrameBodyStr(2, nullptr, "code") == "LESSON_SEQUENCE_INVALID",
+            "sequence-zero duplicate uses stable envelope error");
+    RemoveReadyAssetPackFixture(ready_file_name);
 }
 
 void test_delayed_duplicate_prepare_replays_assetpack_after_start_ack() {
     ResetObservable();
     FreshSession();
     Board::GetInstance().display_ = nullptr;
+    const std::string ready_file_name = "tbot-lesson-delayed-ready.bin";
+    const std::string ready_pack = ReadyAssetPackExtra(
+        "ck-delayed-abcdef1234567890", "abcdef1234567890", ready_file_name);
 
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ck-delayed-abcdef1234567890\",\"assets\":[]}"));
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 1, "initial prepare emits assetPack ack");
     require(FrameHasAssetPack(0), "initial prepare ack carries assetPack");
 
@@ -932,12 +987,12 @@ void test_delayed_duplicate_prepare_replays_assetpack_after_start_ack() {
     require(Sent().size() == 2, "start emits lifecycle ack");
     require(!FrameHasAssetPack(1), "start ack carries no assetPack");
 
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ck-delayed-abcdef1234567890\",\"assets\":[]}"));
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 3, "delayed duplicate prepare re-acks");
     require(FrameHasAssetPack(2), "delayed duplicate prepare replays original assetPack");
     require(FrameBodyStr(2, "assetPack", "cacheKey") == "ck-delayed-abcdef1234567890",
             "delayed duplicate prepare replays original assetPack cacheKey");
+    RemoveReadyAssetPackFixture(ready_file_name);
 }
 
 void test_prepare_new_assignment_version_same_session_resets_stream() {
@@ -987,7 +1042,7 @@ void test_fresh_prepare_clears_stale_active_lesson_before_start() {
             "old active lesson rendered child-turn prompt");
 
     const int cancel_after_old_step = App().cancel_listen_calls;
-    FreshSession();
+    // Restart the existing reservation owner; foreign prepares are refused.
     Handle(PrepareFrame(1, ",\"assignmentVersion\":2"));
 
     require(FrameType(Sent().size() - 1) == "lesson_ack",
@@ -1191,7 +1246,8 @@ void test_start_clears_stale_lesson_scene_before_first_step() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old lesson rendered prompt caption");
 
-    OpenSession();
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "new lesson start clears stale background before first step");
     require(!disp.object_calls.empty() && disp.object_calls.back() == false,
@@ -3403,6 +3459,495 @@ void test_protocol_null_send_skip() {
     App().HostReset();  // restore protocol_ for any later test
 }
 
+void test_lesson_asset_reservation_blocks_prepare_before_asset_io() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    const std::string with_asset =
+        ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"pack-abcdef1234567890\",\"assets\":["
+        "{\"key\":\"poster\",\"state\":\"READY\",\"checksumOk\":true,"
+        "\"localPath\":\"sd://tbot/never-open.jpg\",\"size\":4}]}";
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "test mutation lease acquired");
+
+        Handle(PrepareFrame(1, with_asset));
+
+        require(Sent().size() == 1, "mutation-active prepare emits one stable error");
+        require(FrameType(0) == "lesson_error", "mutation-active prepare is rejected");
+        require(FrameSeq(0) == 1, "mutation-active refusal starts its isolated F->S stream at 1");
+        require(FrameBodyStr(0, nullptr, "code") == "LESSON_ASSET_MUTATION_ACTIVE",
+                "mutation-active prepare uses stable code");
+        require(FrameBodyBool(0, "retryable", false), "mutation-active prepare is retryable");
+        require(FrameBodyStr(0, "context", "reason") == "asset_mutation_active",
+                "mutation-active prepare uses privacy-safe reason");
+        require(HostLessonAssetOpenCount() == 0,
+                "mutation-active prepare performs zero lesson asset fopen calls");
+        require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "refused prepare publishes no lesson reservation");
+    }
+    Handle(PrepareFrame(1));
+    require(FrameType(Sent().size() - 1) == "lesson_ack",
+            "same identity can prepare after mutation refusal");
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "mutation refusal did not contaminate later owned F->S stream");
+}
+
+void test_lesson_asset_reservation_duplicate_and_foreign_prepare() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent && owner.generation != 0,
+            "successful prepare owns a nonzero coordinator generation");
+
+    Handle(PrepareFrame(1));
+    auto duplicate = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(duplicate.acquired && duplicate.idempotent &&
+                duplicate.generation == owner.generation,
+            "duplicate prepare preserves the exact owner generation");
+
+    const size_t before_foreign = Sent().size();
+    Handle(PrepareFrameFor("foreign-assignment", "foreign-session", 1));
+    require(Sent().size() == before_foreign + 1, "foreign prepare emits one refusal");
+    require(FrameType(Sent().size() - 1) == "lesson_error", "foreign prepare is rejected");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_SESSION_CONFLICT",
+            "foreign prepare uses stable conflict code");
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "foreign refusal starts its own isolated F->S stream at 1");
+    auto after_foreign = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(after_foreign.acquired && after_foreign.idempotent &&
+                after_foreign.generation == owner.generation,
+            "foreign prepare cannot replace the reservation owner");
+    Handle(StartFrame(2));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "foreign refusal does not advance owner F->S sequence");
+}
+
+void test_prepare_pure_contract_validation_precedes_storage_reservation() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "mutation held for pure-validation ordering test");
+        std::string wrong_version = PrepareFrame(1);
+        const size_t version_pos = wrong_version.find(kLessonProtocolVersion);
+        require(version_pos != std::string::npos, "wrong-version fixture locates token");
+        wrong_version.replace(version_pos, strlen(kLessonProtocolVersion), "WRONG");
+        Handle(wrong_version);
+        require(FrameBodyStr(0, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
+                "wrong version wins before mutation conflict");
+        require(FrameSeq(0) == 1, "wrong-version fresh refusal uses isolated sequence 1");
+        require(mutation.code() == LessonAssetReservationCode::kAcquired,
+                "pure validation leaves existing mutation lease unchanged");
+    }
+
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    std::string foreign_wrong = PrepareFrameFor("foreign", "foreign", 1);
+    const size_t version_pos = foreign_wrong.find(kLessonProtocolVersion);
+    require(version_pos != std::string::npos, "foreign wrong-version fixture locates token");
+    foreign_wrong.replace(version_pos, strlen(kLessonProtocolVersion), "WRONG");
+    Handle(foreign_wrong);
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
+            "foreign wrong version wins before session conflict");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "foreign pure-validation failure never changes owner reservation");
+}
+
+void test_prepare_sequence_zero_is_pure_rejection_without_generation_burn() {
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    require(coordinator.SetLastGenerationForTest(41),
+            "sequence-zero test seeds generation while idle");
+    FreshSession();
+    const std::string assignment = AID();
+    const std::string session = SID();
+    Handle(PrepareFrame(0));
+    require(Sent().size() == 1, "sequence zero emits exactly one refusal");
+    require(FrameType(0) == "lesson_error", "sequence zero emits protocol error");
+    require(FrameSeq(0) == 1, "sequence-zero refusal uses isolated incoming stream");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_SEQUENCE_INVALID",
+            "sequence zero uses stable envelope error");
+    require(!coordinator.HasLessonSession(), "sequence zero publishes no reservation");
+
+    Handle(PrepareFrame(1));
+    auto valid = coordinator.TryBeginLessonSession(assignment, session);
+    require(valid.acquired && valid.idempotent && valid.generation == 42,
+            "sequence zero does not burn coordinator generation");
+    Handle(StopFrame(2));
+    require(coordinator.SetLastGenerationForTest(0),
+            "sequence-zero generation test restores seam");
+
+    ResetObservable();
+    require(coordinator.SetLastGenerationForTest(73),
+            "mutation isolation test seeds generation while idle");
+    FreshSession();
+    {
+        auto mutation = coordinator.TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "mutation active before sequence-zero frame");
+        Handle(PrepareFrame(0));
+        require(Sent().size() == 1,
+                "sequence zero under mutation emits exactly one refusal");
+        require(FrameBodyStr(0, nullptr, "code") == "LESSON_SEQUENCE_INVALID",
+                "sequence error wins before mutation conflict");
+        require(mutation.code() == LessonAssetReservationCode::kAcquired,
+                "sequence-zero rejection leaves mutation lease unchanged");
+        require(!coordinator.HasLessonSession(),
+                "sequence-zero rejection under mutation creates no session");
+    }
+    Handle(PrepareFrame(1));
+    auto after_mutation = coordinator.TryBeginLessonSession(AID(), SID());
+    require(after_mutation.acquired && after_mutation.idempotent &&
+                after_mutation.generation == 74,
+            "sequence zero under mutation does not burn generation");
+    Handle(StopFrame(2));
+    require(coordinator.SetLastGenerationForTest(0),
+            "mutation generation test restores seam");
+
+    ResetObservable();
+    const int owner_sequence = OpenSession();
+    auto owner = coordinator.TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent, "running owner exists before seq-zero frame");
+    Handle(PrepareFrame(0));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "current same-identity sequence-zero error continues owner stream");
+    require(App().lesson_runtime_active, "sequence-zero frame leaves running owner active");
+    auto retained = coordinator.TryBeginLessonSession(AID(), SID());
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "sequence-zero frame preserves owner generation");
+    Handle(PauseFrame(owner_sequence));
+    require(FrameSeq(Sent().size() - 1) == 4,
+            "owner response remains monotonic after current-version sequence error");
+    Handle(StopFrame(owner_sequence + 1));
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":10"));
+    Handle(StartFrame(2));
+    auto versioned_owner = coordinator.TryBeginLessonSession(AID(), SID());
+    require(versioned_owner.acquired && versioned_owner.idempotent,
+            "versioned owner exists before newer seq-zero candidate");
+    Handle(PrepareFrame(0, ",\"assignmentVersion\":11"));
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "newer-version sequence-zero candidate uses isolated stream");
+    require(App().lesson_runtime_active,
+            "newer-version sequence-zero candidate preserves running owner");
+    auto versioned_retained = coordinator.TryBeginLessonSession(AID(), SID());
+    require(versioned_retained.acquired && versioned_retained.idempotent &&
+                versioned_retained.generation == versioned_owner.generation,
+            "newer-version sequence-zero candidate preserves owner generation");
+    Handle(PauseFrame(3));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "isolated newer-version sequence error does not advance owner counter");
+    Handle(StopFrame(4));
+}
+
+void test_lesson_transport_rejects_decoded_nul_before_cjson_truncation() {
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "ASCII owner reserved before NUL frames");
+
+    const std::vector<std::string> nul_frames = {
+        PrepareFrameFor(owner_assignment + "\\u0000foreign", owner_session, 3),
+        StopFrameFor(owner_assignment, owner_session + "\\u0000foreign", 3),
+        std::string("{\"type\":\"lesson_error\",\"protocolVersion\":\"") +
+            kLessonProtocolVersion + "\",\"assignmentId\":\"" + owner_assignment +
+            "\\u0000foreign\",\"sessionId\":\"" + owner_session +
+            "\",\"sequence\":3,\"body\":{\"code\":\"STEP_TIMEOUT\"}}",
+    };
+    const size_t sent_before = Sent().size();
+    for (const auto& frame : nul_frames) {
+        require(!HandleTransportJson(frame), "decoded-NUL lesson identity is dropped pre-parse");
+        require(Sent().size() == sent_before, "decoded-NUL frame emits no truncated-prefix reply");
+        auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+            owner_assignment, owner_session);
+        require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+                "decoded-NUL frame cannot replace or release ASCII owner");
+    }
+
+    const std::string escaped_literal =
+        "{\"assignmentId\":\"abc\\\\u0000def\",\"note\":\"safe literal slash\"}";
+    require(!JsonHasForbiddenDecodedNull(escaped_literal.data(), escaped_literal.size()),
+            "escaped literal backslash-u0000 is not decoded NUL");
+    const std::string nul_in_key = "{\"assignment\\u0000Id\":\"value\"}";
+    require(JsonHasForbiddenDecodedNull(nul_in_key.data(), nul_in_key.size()),
+            "decoded NUL in a JSON key is rejected lexically");
+    std::string raw_nul = "{\"assignmentId\":\"abc";
+    raw_nul.push_back('\0');
+    raw_nul += "def\"}";
+    require(JsonHasForbiddenDecodedNull(raw_nul.data(), raw_nul.size()),
+            "raw NUL byte is rejected before parsing");
+}
+
+void test_lesson_asset_reservation_invalid_and_exhausted_prepare() {
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrameFor("", "session", 1));
+    require(FrameType(0) == "lesson_error", "empty assignment identity is rejected");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_IDENTITY_INVALID",
+            "invalid identity uses stable validation code");
+    require(!FrameBodyBool(0, "retryable", true), "invalid identity is not retryable");
+
+    ResetObservable();
+    FreshSession();
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() +
+           "\",\"sessionId\":\"" + SID() + "\",\"sequence\":1,\"body\":[]}");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_ENVELOPE_INVALID",
+            "non-object prepare body is rejected before reservation");
+
+    ResetObservable();
+    Handle(PrepareFrameFor(std::string(kLessonAssetIdentityMaxBytes + 1, 'a'), "session", 1));
+    require(FrameType(0) == "lesson_error", "oversized assignment identity is rejected");
+    require(FrameBodyStr(0, "context", "reason") == "invalid_identity",
+            "oversized identity response does not echo identity");
+
+    ResetObservable();
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    require(coordinator.SetLastGenerationForTest(UINT64_MAX),
+            "test seam sets exhausted generation while idle");
+    FreshSession();
+    Handle(PrepareFrame(1));
+    require(FrameType(0) == "lesson_error", "generation exhaustion rejects prepare");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_RESERVATION_EXHAUSTED",
+            "generation exhaustion uses stable code");
+    require(!FrameBodyBool(0, "retryable", true), "generation exhaustion fails closed");
+    require(!coordinator.HasLessonSession(), "generation exhaustion publishes no owner");
+    require(coordinator.SetLastGenerationForTest(0), "test seam restores generation state");
+}
+
+void test_lesson_asset_reservation_prepare_failure_release_ownership() {
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"assetPack\":{\"cacheKey\":\"pack\",\"assets\":[]}"));
+    require(FrameType(0) == "lesson_error", "new prepare can fail after reservation");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "failed newly acquired prepare releases its exact reservation");
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "mutation can acquire after failed new prepare");
+    }
+
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+    Handle(StartFrame(2));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "initial prepare owns reservation");
+    const bool runtime_before_replacement = App().lesson_runtime_active;
+    Handle(PrepareFrame(3, ",\"assignmentVersion\":2,"
+                           "\"assetPack\":{\"cacheKey\":\"pack\",\"assets\":[]}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "idempotent prepare can reject malformed replacement payload");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "failed idempotent prepare does not release the existing owner");
+    require(App().lesson_runtime_active == runtime_before_replacement,
+            "failed idempotent replacement preserves active renderer state");
+    Handle(StopFrame(4));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "old owner remains terminally usable after failed replacement");
+    auto mutation_after_stop =
+        LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation_after_stop),
+            "mutation reacquires after exact old-owner stop");
+}
+
+void test_not_ready_asset_candidate_does_not_commit_lesson_session() {
+    const std::string not_ready_pack =
+        ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"candidate-abcdef1234567890\",\"assets\":[]}";
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, not_ready_pack));
+    require(FrameType(0) == "lesson_ack" && !FrameAssetPackReady(0),
+            "fresh not-ready candidate reports truthful readiness");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "fresh not-ready candidate releases reservation for sync repair");
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation),
+                "sync mutation can run after fresh not-ready candidate");
+    }
+
+    ResetObservable();
+    const int replacement_sequence = OpenSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "running owner exists before candidate");
+    Handle(PrepareFrame(replacement_sequence, not_ready_pack));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                !FrameAssetPackReady(Sent().size() - 1),
+            "same-owner not-ready replacement reports readiness without commit");
+    require(App().lesson_runtime_active,
+            "same-owner not-ready replacement preserves running renderer");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "same-owner not-ready replacement preserves exact reservation generation");
+    Handle(StopFrame(replacement_sequence + 1));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "preserved owner can stop after not-ready replacement");
+}
+
+void test_republished_not_ready_candidate_uses_isolated_stream() {
+    const std::string not_ready_republish =
+        ",\"assignmentVersion\":11,"
+        "\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"republish-abcdef1234567890\",\"assets\":[]}";
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":10"));
+    Handle(StartFrame(2));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent, "version 10 owner is running");
+
+    Handle(PrepareFrame(1, not_ready_republish));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameSeq(Sent().size() - 1) == 1 &&
+                !FrameAssetPackReady(Sent().size() - 1),
+            "newer not-ready republish uses isolated F->S sequence 1");
+    Handle(PrepareFrame(1, not_ready_republish));
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "retry of uncommitted republish remains on isolated sequence 1");
+    require(App().lesson_runtime_active,
+            "not-ready republish leaves old running renderer active");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "not-ready republish preserves old owner generation");
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":10"));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "current-version duplicate resumes unchanged owner F->S stream");
+    require(!FrameHasAssetPack(Sent().size() - 1),
+            "uncommitted candidate did not overwrite owner prepare-ack cache");
+    Handle(PauseFrame(3));
+    require(FrameSeq(Sent().size() - 1) == 4,
+            "owner stream remains monotonic after cached duplicate replay");
+    Handle(StopFrame(4));
+}
+
+void test_lesson_asset_reservation_retained_across_runtime_and_terminal_release() {
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "prepare retains reservation");
+    Handle(StartFrame(2));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "start retains reservation");
+    Handle(PauseFrame(3));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "pause retains reservation");
+    Handle(ResumeFrame(4));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "resume retains reservation");
+    Handle(StopFrame(5));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "completed stop releases reservation");
+
+    for (const std::string reason : {"\"reason\":\"CANCELLED\"", "\"reason\":\"FAILED\""}) {
+        ResetObservable();
+        FreshSession();
+        Handle(PrepareFrame(1));
+        Handle(StopFrame(2, reason));
+        require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "cancelled/failed stop releases reservation");
+    }
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1));
+    Handle(ErrorFrame(2));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "terminal lesson_error releases reservation");
+
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    const int failing_step_sequence = OpenSession();
+    std::string bad_contract_step =
+        StepFrame(failing_step_sequence, "bad-contract", "", "", "");
+    const size_t protocol_pos = bad_contract_step.find(kLessonProtocolVersion);
+    require(protocol_pos != std::string::npos, "bad-contract fixture finds protocol token");
+    bad_contract_step.replace(protocol_pos, strlen(kLessonProtocolVersion), "WRONG");
+    Handle(bad_contract_step);
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "internal contract failure releases reservation");
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"preloadResetOnly\":true,\"assignmentVersion\":7"));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "preload reset-only prepare abandons and releases reservation");
+
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    const int sequence = OpenSession();
+    Handle(StepFrame(sequence, "blank", "", "", "", ",\"prompt\":\"\""));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "terminal no-visible-content step releases reservation");
+}
+
+void test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release() {
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "owner prepare reserved storage");
+
+    Handle(StopFrameFor("foreign-assignment", "foreign-session", 2));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "foreign stop cannot release owner");
+    require(!LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                owner_assignment, owner_session, owner.generation + 1),
+            "wrong generation cannot release owner");
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "wrong generation leaves owner active");
+
+    Handle(StopFrame(2));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "owner terminal releases exact generation");
+    Handle(StopFrame(2));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "duplicate terminal does not double-release or recreate state");
+}
+
 void test_safe_motion_presets_and_auto_rest() {
     ResetObservable();
     HostEspTimerCreateOk() = false;
@@ -3543,12 +4088,14 @@ void test_motion_runtime_control_defaults_disabled_and_resets_per_manifest() {
     require(!FrameBodyBool(Sent().size() - 1, "degraded", true),
             "operator-disabled motion is intentional, not render degradation");
 
+    Handle(StopFrame(seq + 1));
     seq = OpenMotionEnabledSession();
     App().robot_uart_.calls.clear();
     Handle(StepFrame(seq, "motion-on", "http://poster", "http://object", "http://overlay",
                      ",\"motion\":{\"present\":\"celebrate\"}"));
     require(!App().robot_uart_.calls.empty(), "manifest control enables named motion");
 
+    Handle(StopFrame(seq + 1));
     seq = OpenSession();
     App().robot_uart_.calls.clear();
     Handle(StepFrame(seq, "motion-reset", "http://poster", "http://object", "http://overlay",
@@ -3817,7 +4364,18 @@ int main() {
     test_prepare_assetpack_malformed_critical_assets_not_ready();
     test_prepare_assetpack_rejects_unbounded_count_and_total_size();
     test_prepare_assetpack_requires_manifest_checksum_before_ack();
-    test_prepare_reject_clears_stale_lesson_scene();
+    test_lesson_asset_reservation_blocks_prepare_before_asset_io();
+    test_lesson_asset_reservation_duplicate_and_foreign_prepare();
+    test_prepare_pure_contract_validation_precedes_storage_reservation();
+    test_prepare_sequence_zero_is_pure_rejection_without_generation_burn();
+    test_lesson_transport_rejects_decoded_nul_before_cjson_truncation();
+    test_lesson_asset_reservation_invalid_and_exhausted_prepare();
+    test_lesson_asset_reservation_prepare_failure_release_ownership();
+    test_not_ready_asset_candidate_does_not_commit_lesson_session();
+    test_republished_not_ready_candidate_uses_isolated_stream();
+    test_lesson_asset_reservation_retained_across_runtime_and_terminal_release();
+    test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release();
+    test_prepare_reject_preserves_active_lesson_scene();
     test_version_profile_gate();
     test_fresh_prepare_contract_reject_clears_stale_lesson_scene();
     test_unknown_session_and_staleness();
