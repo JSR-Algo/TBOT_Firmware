@@ -9,6 +9,7 @@
 #include <esp_heap_caps.h>
 #include <algorithm>
 #include <cctype>
+#include <cinttypes>
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
@@ -1230,9 +1231,9 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             const auto sequence = LessonStorageHilController::GetInstance()
                                       .NextEvidenceSequence();
             ESP_LOGW(TAG,
-                     "HIL_STORAGE_REFUSAL tool=%s reason=invalid_request sequence=%llu",
+                     "HIL_STORAGE_REFUSAL tool=%s reason=invalid_request sequence=%" PRIu64,
                      tool_name.c_str(),
-                     static_cast<unsigned long long>(sequence));
+                     sequence);
             ReplyError(id, validation_error);
             return;
         }
@@ -1309,8 +1310,8 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
                 const auto sequence = LessonStorageHilController::GetInstance()
                                           .NextEvidenceSequence();
                 ESP_LOGW(TAG,
-                         "HIL_STORAGE_REFUSAL reason=operation_failed sequence=%llu",
-                         static_cast<unsigned long long>(sequence));
+                         "HIL_STORAGE_REFUSAL reason=operation_failed sequence=%" PRIu64,
+                         sequence);
                 ReplyError(id, "lesson storage HIL operation failed");
                 return;
             }

@@ -9,6 +9,7 @@
 #include <esp_log.h>
 
 #include <array>
+#include <cinttypes>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
@@ -462,10 +463,10 @@ std::string CallArmFault(const PropertyList& properties) {
             ? result.arm_sequence
             : LessonStorageHilController::GetInstance().NextEvidenceSequence();
     ESP_LOGW(TAG,
-             "HIL_STORAGE_ARM status=%s arm_sequence=%llu sequence=%llu",
+             "HIL_STORAGE_ARM status=%s arm_sequence=%" PRIu64
+             " sequence=%" PRIu64,
              ArmCodeName(result.code),
-             static_cast<unsigned long long>(result.arm_sequence),
-             static_cast<unsigned long long>(evidence_sequence));
+             result.arm_sequence, evidence_sequence);
     return response.Finish();
 }
 
@@ -522,10 +523,9 @@ std::string CallFixtureMutation(const PropertyList& properties, bool cleanup) {
     [[maybe_unused]] const auto sequence = LessonStorageHilController::GetInstance()
                               .NextEvidenceSequence();
     ESP_LOGW(TAG,
-             "HIL_STORAGE_FIXTURE operation=%s status=%s changed=%d sequence=%llu",
+             "HIL_STORAGE_FIXTURE operation=%s status=%s changed=%d sequence=%" PRIu64,
              cleanup ? "cleanup" : "stage", FixtureCodeName(result.code),
-             result.changed ? 1 : 0,
-             static_cast<unsigned long long>(sequence));
+             result.changed ? 1 : 0, sequence);
     return response.Finish();
 }
 
