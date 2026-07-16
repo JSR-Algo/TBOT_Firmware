@@ -55,6 +55,16 @@ const char* CheckpointName(LessonStorageHilCheckpoint checkpoint) noexcept {
     }
     return "unknown";
 }
+
+const char* ActionName(LessonStorageHilAction action) noexcept {
+    switch (action) {
+        case LessonStorageHilAction::kFail: return "fail";
+        case LessonStorageHilAction::kPause: return "pause";
+        case LessonStorageHilAction::kNoSpace: return "no_space";
+        case LessonStorageHilAction::kCorruptStaging: return "corrupt_staging";
+    }
+    return "unknown";
+}
 #endif
 
 bool YieldingPause(std::uint32_t seconds) noexcept {
@@ -88,19 +98,43 @@ void LogCheckpointReached(
     const char* cache_key,
     LessonStorageHilOperation operation,
     LessonStorageHilCheckpoint checkpoint,
-    std::uint32_t progress
+    std::uint32_t progress,
+    std::uint64_t sequence
 ) noexcept {
 #ifdef ESP_PLATFORM
     ESP_LOGW(kTag,
              "HIL_STORAGE_CHECKPOINT_REACHED operation=%s checkpoint=%s "
-             "cache_key=%s count=%" PRIu32,
+             "cache_key=%s count=%" PRIu32 " reached_sequence=%" PRIu64,
              OperationName(operation), CheckpointName(checkpoint), cache_key,
-             progress);
+             progress, sequence);
 #else
     (void)cache_key;
     (void)operation;
     (void)checkpoint;
     (void)progress;
+    (void)sequence;
+#endif
+}
+
+void LogFaultConsumed(
+    const char* cache_key,
+    LessonStorageHilOperation operation,
+    LessonStorageHilCheckpoint checkpoint,
+    LessonStorageHilAction action,
+    std::uint64_t sequence
+) noexcept {
+#ifdef ESP_PLATFORM
+    ESP_LOGW(kTag,
+             "HIL_STORAGE_FAULT_CONSUMED operation=%s checkpoint=%s action=%s "
+             "cache_key=%s consumed_sequence=%" PRIu64,
+             OperationName(operation), CheckpointName(checkpoint),
+             ActionName(action), cache_key, sequence);
+#else
+    (void)cache_key;
+    (void)operation;
+    (void)checkpoint;
+    (void)action;
+    (void)sequence;
 #endif
 }
 
@@ -135,13 +169,17 @@ LessonStorageHilHookOutcome ExecuteDecision(
         return LessonStorageHilHookOutcome::kContinue;
     }
 
+    LogCheckpointReached(cache_key, operation, checkpoint, progress,
+                         decision.reached_sequence);
+    LogFaultConsumed(cache_key, operation, checkpoint, decision.action,
+                     decision.consumed_sequence);
+
     switch (decision.action) {
         case LessonStorageHilAction::kFail:
             return LessonStorageHilHookOutcome::kFail;
         case LessonStorageHilAction::kNoSpace:
             return LessonStorageHilHookOutcome::kNoSpace;
         case LessonStorageHilAction::kPause:
-            LogCheckpointReached(cache_key, operation, checkpoint, progress);
             if (!YieldingPause(decision.pause_seconds)) {
                 return LessonStorageHilHookOutcome::kFail;
             }
@@ -214,6 +252,10 @@ LessonStorageHilHookOutcome RunLessonStorageHilStagingCheckpoint(
         return LessonStorageHilHookOutcome::kContinue;
     }
     if (decision.action == LessonStorageHilAction::kCorruptStaging) {
+        LogCheckpointReached(cache_key, operation, checkpoint, progress,
+                             decision.reached_sequence);
+        LogFaultConsumed(cache_key, operation, checkpoint, decision.action,
+                         decision.consumed_sequence);
         return CorruptLessonStorageHilStagingFile(staging_path)
                    ? LessonStorageHilHookOutcome::kContinue
                    : LessonStorageHilHookOutcome::kFail;

@@ -313,6 +313,9 @@ bool Application::RollbackWifiConfigEntry(
 }
 
 void Application::Initialize() {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+    ESP_LOGW(TAG, "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image");
+#endif
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
 

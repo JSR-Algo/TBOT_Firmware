@@ -162,6 +162,7 @@ LessonStorageHilArmResult LessonStorageHilController::Arm(
 LessonStorageHilStatus LessonStorageHilController::Status() const {
     LockGuard lock(mutex_);
     return {
+        cache_key_,
         active_,
         reached_,
         consumed_,
@@ -180,6 +181,11 @@ LessonStorageHilStatus LessonStorageHilController::Status() const {
 void LessonStorageHilController::Reset() {
     LockGuard lock(mutex_);
     ClearStatus();
+}
+
+std::uint64_t LessonStorageHilController::NextEvidenceSequence() noexcept {
+    LockGuard lock(mutex_);
+    return next_sequence_ == 0 ? 0 : TakeSequence();
 }
 
 std::size_t LessonStorageHilController::LimitDownloadRead(
@@ -209,7 +215,7 @@ LessonStorageHilDecision LessonStorageHilController::Observe(
 ) noexcept {
     LockGuard lock(mutex_);
     LessonStorageHilDecision decision{
-        false, false, LessonStorageHilAction::kFail, 0, 0};
+        false, false, LessonStorageHilAction::kFail, 0, 0, 0, 0};
     if (!active_ || operation != operation_ || checkpoint != checkpoint_ ||
         !KeyMatches(cache_key)) {
         return decision;
@@ -237,6 +243,8 @@ LessonStorageHilDecision LessonStorageHilController::Observe(
     decision.action = action_;
     decision.sequence = consumed_sequence_;
     decision.pause_seconds = pause_seconds_;
+    decision.reached_sequence = reached_sequence_;
+    decision.consumed_sequence = consumed_sequence_;
     return decision;
 }
 

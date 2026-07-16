@@ -18,3 +18,15 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
   "${BUILD_DIR}/cJSON.o" \
   -o "${BUILD_DIR}/mcp_cjson_oom_host_test"
 "${BUILD_DIR}/mcp_cjson_oom_host_test"
+
+"${CXX:-clang++}" -std=c++17 -Wall -Wextra -Werror \
+  -ffunction-sections -fdata-sections \
+  -I"${ROOT}/tests/native_stubs_mcp" \
+  -I"${ROOT}/main" \
+  -I"${IDF_CJSON}" \
+  "${ROOT}/tests/native/lesson_storage_hil_mcp_validation_host_test.cc" \
+  "${ROOT}/main/lesson_storage_hil_mcp_tools.cc" \
+  "${BUILD_DIR}/cJSON.o" \
+  -Wl,-dead_strip \
+  -o "${BUILD_DIR}/lesson_storage_hil_mcp_validation_host_test"
+"${BUILD_DIR}/lesson_storage_hil_mcp_validation_host_test"

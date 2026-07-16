@@ -98,17 +98,23 @@ def test_hil_pause_uses_yielding_delay_and_stable_markers():
     source = read("main/lesson_storage_hil_hooks.cc")
 
     assert "HIL_STORAGE_CHECKPOINT_REACHED" in source
+    assert "HIL_STORAGE_FAULT_CONSUMED" in source
     assert "HIL_STORAGE_CHECKPOINT_CONTINUED" in source
     assert "kPauseSliceSeconds" in source
     assert "while (remaining_seconds > 0)" in source
     assert "vTaskDelay(pdMS_TO_TICKS(slice_seconds * 1000U))" in source
     assert "esp_task_wdt_reset()" in source
     assert "sleep(" not in source
-    corrupt_start = source.index("case LessonStorageHilAction::kCorruptStaging:")
+    execute_start = source.index("LessonStorageHilHookOutcome ExecuteDecision(")
+    corrupt_start = source.index(
+        "case LessonStorageHilAction::kCorruptStaging:", execute_start
+    )
     corrupt = source[corrupt_start : source.index("\n    }", corrupt_start)]
     assert "return LessonStorageHilHookOutcome::kFail;" in corrupt
-    for forbidden_field in ("sequence=", "action=", "pause_seconds="):
-        assert forbidden_field not in source
+    assert "reached_sequence=" in source
+    assert "consumed_sequence=" in source
+    assert "action=" in source
+    assert "pause_seconds=" not in source
 
 
 def test_sync_staging_corruption_is_typed_bounded_and_fail_closed_elsewhere():
@@ -227,3 +233,138 @@ def test_fixture_inspection_is_bounded_read_only_and_uses_mbedtls_sha256():
     ]
     for forbidden in ("mkdir(", "unlink(", "rmdir(", "WriteExactFile("):
         assert forbidden not in inspect
+
+
+def test_hil_mcp_registers_exact_user_only_tools_once_under_guard():
+    source = read("main/mcp_server.cc")
+    tools = read("main/lesson_storage_hil_mcp_tools.cc")
+    names = (
+        "self.lesson_assets.hil.arm_fault",
+        "self.lesson_assets.hil.status",
+        "self.lesson_assets.hil.stage_fixture",
+        "self.lesson_assets.hil.cleanup_fixture",
+        "self.lesson_assets.hil.inspect",
+    )
+
+    registration = source[source.index("void McpServer::AddUserOnlyTools()") :]
+    guarded_call = registration[registration.index("#if CONFIG_TBOT_HIL_STORAGE_FAULTS") :]
+    guarded_call = guarded_call[: guarded_call.index("#endif")]
+    assert guarded_call.count("RegisterLessonStorageHilMcpTools(*this)") == 1
+    assert "lesson_storage_hil_mcp_tools.h" in source
+    for name in names:
+        assert tools.count(f'"{name}"') == 1
+    for constant in ("kArmTool", "kStatusTool", "kStageTool", "kCleanupTool", "kInspectTool"):
+        assert tools.count(f"AddUserOnlyTool({constant}") == 1
+    assert "byteThreshold" not in tools
+
+
+def test_hil_mcp_raw_validation_precedes_property_conversion_and_mutation():
+    server = read("main/mcp_server.cc")
+    tools = read("main/lesson_storage_hil_mcp_tools.cc")
+    dispatch = server[server.index("void McpServer::DoToolCall(") :]
+
+    validation = dispatch.index("ValidateLessonStorageHilRawArguments(")
+    conversion = dispatch.index("PropertyList arguments")
+    assert validation < conversion
+    assert "IsExactLessonStorageHilToolName(tool_name)" in dispatch[:conversion]
+    assert "cJSON_ArrayForEach" in tools
+    assert "duplicate" in tools.lower()
+    assert "unknown" in tools.lower()
+    assert "valuedouble == static_cast<double>(value->valueint)" in tools
+    assert "TryBeginMutation(" in tools
+    assert tools.index("ValidateFixtureRequest") < tools.index("TryBeginMutation(")
+    assert tools.index("ValidateArmRequest") < tools.index(".Arm(")
+    assert '"lesson storage HIL operation failed"' in server
+    assert "if (is_lesson_storage_hil)" in dispatch
+
+
+def test_hil_mcp_schemas_and_stable_response_fields_are_complete():
+    tools = read("main/lesson_storage_hil_mcp_tools.cc")
+    for required in (
+        'Property("cacheKey", kPropertyTypeString)',
+        'Property("operation", kPropertyTypeString)',
+        'Property("checkpoint", kPropertyTypeString)',
+        'Property("action", kPropertyTypeString)',
+        'Property("threshold", kPropertyTypeInteger, 0, 0, 524288)',
+        'Property("declaredAssetBytes", kPropertyTypeInteger, 0, 0, 524288)',
+        'Property("pauseSeconds", kPropertyTypeInteger, 0, 0, 60)',
+        'Property("fixture", kPropertyTypeString)',
+        'Property("siblingCacheKey", kPropertyTypeString, std::string())',
+    ):
+        assert required in tools
+
+    for field in (
+        '"cacheKey"', '"status"', '"operation"', '"checkpoint"',
+        '"action"', '"threshold"', '"declaredAssetBytes"',
+        '"pauseSeconds"', '"armSequence"', '"armed"', '"reached"',
+        '"consumed"', '"reachedSequence"', '"consumedSequence"',
+        '"siblingCacheKey"', '"fixture"', '"changed"', '"truncated"',
+        '"entries"', '"label"', '"nodeType"', '"bytes"', '"sha256"',
+    ):
+        assert field in tools
+
+
+def test_hil_mutating_mcp_responses_are_prepared_before_side_effects():
+    header = read("main/mcp_server.h")
+    tools = read("main/lesson_storage_hil_mcp_tools.cc")
+
+    assert "class PreparedMcpTextResult" in header
+    assert "cJSON_PrintPreallocated" in header
+    assert "PreparedMcpCall" in header
+    assert "return prepared_callback_(properties);" in header
+    for function, mutation in (
+        ("CallArmFault", ".Arm("),
+        ("CallFixtureMutation", "StageLessonStorageHilFixture("),
+        ("CallFixtureMutation", "CleanupLessonStorageHilFixture("),
+    ):
+        body = tools[tools.index(function) :]
+        body = body[: body.index("\n}")]
+        assert body.index("PreparedMcpTextResult") < body.index(mutation)
+        assert body.index("SealLessonStorageHilResponse") < body.index(mutation)
+    assert "kInspectionPayloadBytes = 49152" in tools
+    assert "kInspectionResultBytes = 65536" in tools
+
+
+def test_hil_status_carries_truthful_fixed_cache_key_without_allocation():
+    header = read("main/lesson_storage_hil_controller.h")
+    source = read("main/lesson_storage_hil_controller.cc")
+
+    status = header[header.index("struct LessonStorageHilStatus") :]
+    status = status[: status.index("};")]
+    assert "std::array<char, kLessonAssetCacheKeyMaxBytes + 1> cache_key" in status
+    status_impl = source[source.index("LessonStorageHilStatus LessonStorageHilController::Status") :]
+    assert "cache_key_" in status_impl[: status_impl.index("void LessonStorageHilController::Reset")]
+    clear = source[source.index("void LessonStorageHilController::ClearStatus") :]
+    assert "cache_key_.fill('\\0')" in clear
+
+
+def test_hil_build_identity_is_guarded_and_emitted_before_board_singleton():
+    app = read("main/application.cc")
+    board = read("main/boards/common/board.cc")
+    initialize = app[app.index("void Application::Initialize()") :]
+    initialize = initialize[: initialize.index("void Application::Run()")]
+
+    assert initialize.index("TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image") < initialize.index("Board::GetInstance()")
+    warning = initialize[initialize.index("#if CONFIG_TBOT_HIL_STORAGE_FAULTS") :]
+    assert "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image" in warning[: warning.index("#endif")]
+    capability = board[board.index("std::string Board::GetSystemInfoJson()") :]
+    assert '#if CONFIG_TBOT_HIL_STORAGE_FAULTS' in capability
+    assert 'R"("lessonStorageHilFaults":true,)"' in capability
+
+
+def test_hil_artifact_auditor_has_fail_closed_profiles_and_atomic_outputs():
+    auditor = read("scripts/assert_lesson_storage_hil_artifacts.py")
+
+    for token in (
+        'choices=("production", "hil")',
+        '"xiaozhi.bin"', '"xiaozhi.elf"', '"xiaozhi.map"',
+        'libmain.a', '"project_description.json"', '"sdkconfig"',
+        'lesson-storage-hil-build.json', 'lesson-storage-hil-build.sha256',
+        'CONFIG_TBOT_HIL_STORAGE_FAULTS', 'sdkconfig.defaults.hil-storage',
+        'git rev-parse HEAD', 'git status --porcelain', 'nm',
+        'partition', 'sha256', 'os.replace',
+    ):
+        assert token in auditor
+    assert "production-lesson-studio" not in auditor
+    for banned in ("lstat", "openat", "fstatat", "fdopendir", "unlinkat"):
+        assert banned in auditor

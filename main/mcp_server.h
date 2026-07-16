@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <cstring>
 #include <mbedtls/base64.h>
 
 #include <cJSON.h>
@@ -46,6 +47,68 @@ public:
 
 // 添加类型别名
 using ReturnValue = std::variant<bool, int, std::string, cJSON*, ImageContent*>;
+
+struct PreparedMcpCall {};
+
+// HIL mutations use this envelope so every cJSON allocation and both print
+// buffers exist before the side effect. Finish only updates preallocated
+// storage and calls cJSON_PrintPreallocated.
+class PreparedMcpTextResult {
+public:
+    PreparedMcpTextResult(
+        CheckedCJsonPtr payload,
+        std::size_t max_payload_bytes,
+        std::size_t max_result_bytes
+    ) : payload_(std::move(payload)),
+        payload_buffer_(max_payload_bytes),
+        result_buffer_(max_result_bytes),
+        text_capacity_(max_payload_bytes) {
+        if (!payload_ || max_payload_bytes < 16 || max_result_bytes < 32) {
+            ThrowCJsonAllocationFailure();
+        }
+
+        wrapper_ = MakeCheckedCJsonObject();
+        auto content = MakeCheckedCJsonArray();
+        auto item = MakeCheckedCJsonObject();
+        CheckedCJsonAddStringToObject(item.get(), "type", "text");
+        const std::string reserved(max_payload_bytes - 1, ' ');
+        CheckedCJsonAddStringToObject(item.get(), "text", reserved.c_str());
+        text_node_ = cJSON_GetObjectItem(item.get(), "text");
+        CheckedCJsonAddItemToArray(content.get(), std::move(item));
+        CheckedCJsonAddItemToObject(wrapper_.get(), "content", std::move(content));
+        CheckedCJsonAddBoolToObject(wrapper_.get(), "isError", false);
+    }
+
+    cJSON* payload() const { return payload_.get(); }
+
+    std::string Finish() {
+        if (!cJSON_PrintPreallocated(
+                payload_.get(), payload_buffer_.data(),
+                static_cast<int>(payload_buffer_.size()), false)) {
+            ThrowCJsonAllocationFailure();
+        }
+        const std::size_t payload_size = std::strlen(payload_buffer_.data());
+        if (text_node_ == nullptr || text_node_->valuestring == nullptr ||
+            payload_size >= text_capacity_) {
+            ThrowCJsonAllocationFailure();
+        }
+        std::memcpy(text_node_->valuestring, payload_buffer_.data(), payload_size + 1);
+        if (!cJSON_PrintPreallocated(
+                wrapper_.get(), result_buffer_.data(),
+                static_cast<int>(result_buffer_.size()), false)) {
+            ThrowCJsonAllocationFailure();
+        }
+        return std::string(result_buffer_.data());
+    }
+
+private:
+    CheckedCJsonPtr payload_;
+    CheckedCJsonPtr wrapper_;
+    std::vector<char> payload_buffer_;
+    std::vector<char> result_buffer_;
+    cJSON* text_node_ = nullptr;
+    std::size_t text_capacity_ = 0;
+};
 
 enum PropertyType {
     kPropertyTypeBoolean,
@@ -205,6 +268,7 @@ private:
     std::string description_;
     PropertyList properties_;
     std::function<ReturnValue(const PropertyList&)> callback_;
+    std::function<std::string(const PropertyList&)> prepared_callback_;
     bool user_only_ = false;
 
 public:
@@ -216,6 +280,15 @@ public:
         description_(description), 
         properties_(properties), 
         callback_(callback) {}
+
+    McpTool(
+        const std::string& name,
+        const std::string& description,
+        const PropertyList& properties,
+        PreparedMcpCall,
+        std::function<std::string(const PropertyList&)> callback
+    ) : name_(name), description_(description), properties_(properties),
+        prepared_callback_(std::move(callback)) {}
 
     void set_user_only(bool user_only) { user_only_ = user_only; }
     inline const std::string& name() const { return name_; }
@@ -265,6 +338,9 @@ public:
     }
 
     std::string Call(const PropertyList& properties) {
+        if (prepared_callback_) {
+            return prepared_callback_(properties);
+        }
         ReturnValue return_value = callback_(properties);
         std::string payload;
         if (std::holds_alternative<ImageContent*>(return_value)) {
@@ -312,6 +388,12 @@ public:
     void AddTool(McpTool* tool);
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
+    void AddUserOnlyTool(
+        const std::string& name,
+        const std::string& description,
+        const PropertyList& properties,
+        PreparedMcpCall mode,
+        std::function<std::string(const PropertyList&)> callback);
     void ParseMessage(const cJSON* json);
     void ParseMessage(const std::string& message);
 

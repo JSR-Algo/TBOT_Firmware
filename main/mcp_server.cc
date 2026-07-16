@@ -34,6 +34,10 @@
 #include "lesson_asset_sample_url_policy.h"
 #include "lesson_asset_sync_path_policy.h"
 #include <lesson_asset_sync_attestation.h>
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+#include "lesson_storage_hil_mcp_tools.h"
+#include "lesson_storage_hil_controller.h"
+#endif
 
 #define TAG "MCP"
 
@@ -560,6 +564,9 @@ void McpServer::AddCommonTools() {
 }
 
 void McpServer::AddUserOnlyTools() {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+    RegisterLessonStorageHilMcpTools(*this);
+#endif
     // System tools
     AddUserOnlyTool("self.get_system_info",
         "Get the system information",
@@ -1001,6 +1008,18 @@ void McpServer::AddUserOnlyTool(const std::string& name, const std::string& desc
     AddTool(tool);
 }
 
+void McpServer::AddUserOnlyTool(
+    const std::string& name,
+    const std::string& description,
+    const PropertyList& properties,
+    PreparedMcpCall mode,
+    std::function<std::string(const PropertyList&)> callback
+) {
+    auto tool = new McpTool(name, description, properties, mode, std::move(callback));
+    tool->set_user_only(true);
+    AddTool(tool);
+}
+
 void McpServer::ParseMessage(const std::string& message) {
     cJSON* json = cJSON_Parse(message.c_str());
     if (json == nullptr) {
@@ -1202,6 +1221,24 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         return;
     }
 
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+    const bool is_lesson_storage_hil = IsExactLessonStorageHilToolName(tool_name);
+    if (is_lesson_storage_hil) {
+        const char* validation_error =
+            ValidateLessonStorageHilRawArguments(tool_name, tool_arguments);
+        if (validation_error != nullptr) {
+            const auto sequence = LessonStorageHilController::GetInstance()
+                                      .NextEvidenceSequence();
+            ESP_LOGW(TAG,
+                     "HIL_STORAGE_REFUSAL tool=%s reason=invalid_request sequence=%llu",
+                     tool_name.c_str(),
+                     static_cast<unsigned long long>(sequence));
+            ReplyError(id, validation_error);
+            return;
+        }
+    }
+#endif
+
     const bool is_lesson_cache_evict =
         tool_name == "self.lesson_assets.evict_cache_key";
     if (!is_lesson_cache_evict &&
@@ -1239,6 +1276,13 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             }
         }
     } catch (const std::exception& e) {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+        if (is_lesson_storage_hil) {
+            ESP_LOGW(TAG, "HIL_STORAGE_REFUSAL reason=argument_conversion");
+            ReplyError(id, "lesson storage HIL operation failed");
+            return;
+        }
+#endif
         ESP_LOGE(TAG, "tools/call: %s", e.what());
         ReplyError(id, e.what());
         return;
@@ -1247,6 +1291,9 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool_iter, tool_name, is_lesson_cache_evict,
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+                  is_lesson_storage_hil,
+#endif
                   arguments = std::move(arguments)]() {
         if (!is_lesson_cache_evict &&
             Application::GetInstance().IsLessonRuntimeActive()) {
@@ -1257,6 +1304,17 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         try {
             ReplyResult(id, (*tool_iter)->Call(arguments));
         } catch (const std::exception& e) {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+            if (is_lesson_storage_hil) {
+                const auto sequence = LessonStorageHilController::GetInstance()
+                                          .NextEvidenceSequence();
+                ESP_LOGW(TAG,
+                         "HIL_STORAGE_REFUSAL reason=operation_failed sequence=%llu",
+                         static_cast<unsigned long long>(sequence));
+                ReplyError(id, "lesson storage HIL operation failed");
+                return;
+            }
+#endif
             ESP_LOGE(TAG, "tools/call: %s", e.what());
             ReplyError(id, e.what());
         }

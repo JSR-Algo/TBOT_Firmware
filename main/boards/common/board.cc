@@ -110,6 +110,9 @@ std::string Board::GetSystemInfoJson() {
         }
     */
     std::string json = R"({"version":2,"language":")" + std::string(Lang::CODE) + R"(",)";
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+    json += R"("lessonStorageHilFaults":true,)";
+#endif
     json += R"("flash_size":)" + std::to_string(SystemInfo::GetFlashSize()) + R"(,)";
     json += R"("minimum_free_heap_size":")" + std::to_string(SystemInfo::GetMinimumFreeHeapSize()) + R"(",)";
     json += R"("mac_address":")" + SystemInfo::GetMacAddress() + R"(",)";

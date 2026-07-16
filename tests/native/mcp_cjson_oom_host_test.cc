@@ -175,6 +175,66 @@ void TestMcpSchemaSerializationUsesTheSameStableOomContract() {
     }
 }
 
+void TestPreparedMcpCallAllocatesAllCJsonBeforeMutation() {
+    HookScope hooks;
+    int mutations = 0;
+    McpTool tool(
+        "test.prepared", "test", PropertyList(), PreparedMcpCall{},
+        [&](const PropertyList&) -> std::string {
+            auto payload = MakeCheckedCJsonObject();
+            CheckedCJsonAddNumberToObject(payload.get(), "sequence", 0);
+            cJSON* sequence = cJSON_GetObjectItem(payload.get(), "sequence");
+            PreparedMcpTextResult response(std::move(payload), 256, 768);
+
+            // Any cJSON allocation after this point would fail and strand the
+            // successful side effect without a response.
+            hooks.state().fail_next = true;
+            ++mutations;
+            cJSON_SetNumberValue(sequence, 7);
+            return response.Finish();
+        });
+
+    const std::string result = tool.Call(PropertyList());
+    Expect(mutations == 1, "prepared call did not execute mutation once");
+    Expect(result.find("\\\"sequence\\\":7") != std::string::npos,
+           "prepared call omitted payload");
+    ExpectStableOom([] { (void)MakeCheckedCJsonObject(); },
+                    "prepared call consumed post-mutation cJSON allocation");
+    Expect(hooks.state().live.empty(), "prepared call leaked");
+}
+
+void TestPreparedMcpCallOomCannotReachMutation() {
+    bool observed_success = false;
+    for (int allocation = 1; allocation <= 24; ++allocation) {
+        HookScope hooks;
+        int mutations = 0;
+        McpTool tool(
+            "test.prepared.oom", "test", PropertyList(), PreparedMcpCall{},
+            [&](const PropertyList&) -> std::string {
+                auto payload = MakeCheckedCJsonObject();
+                CheckedCJsonAddStringToObject(payload.get(), "status", "staged");
+                PreparedMcpTextResult response(std::move(payload), 256, 768);
+                ++mutations;
+                return response.Finish();
+            });
+        hooks.state().fail_countdown = allocation;
+        try {
+            (void)tool.Call(PropertyList());
+            observed_success = true;
+            Expect(mutations == 1, "prepared success skipped mutation");
+        } catch (const std::runtime_error& error) {
+            Expect(std::string(error.what()) == kStableError,
+                   "prepared OOM was not sanitized");
+            Expect(mutations == 0, "prepared OOM reached mutation");
+        }
+        Expect(hooks.state().live.empty(), "prepared OOM leaked");
+        if (observed_success) {
+            break;
+        }
+    }
+    Expect(observed_success, "prepared response never completed");
+}
+
 }  // namespace
 
 int main() {
@@ -182,6 +242,8 @@ int main() {
     TestMcpCallOwnsInnerJsonWhenPrintingFails();
     TestMcpCallWrapperAndFinalPrintFailures();
     TestMcpSchemaSerializationUsesTheSameStableOomContract();
+    TestPreparedMcpCallAllocatesAllCJsonBeforeMutation();
+    TestPreparedMcpCallOomCannotReachMutation();
     std::cout << "MCP cJSON OOM host tests passed\n";
     return 0;
 }

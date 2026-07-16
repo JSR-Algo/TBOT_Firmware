@@ -44,6 +44,8 @@ struct LessonStorageHilDecision {
     LessonStorageHilAction action;
     std::uint64_t sequence;
     std::uint32_t pause_seconds;
+    std::uint64_t reached_sequence;
+    std::uint64_t consumed_sequence;
 };
 
 enum class LessonStorageHilArmCode {
@@ -62,6 +64,7 @@ struct LessonStorageHilArmResult {
 };
 
 struct LessonStorageHilStatus {
+    std::array<char, kLessonAssetCacheKeyMaxBytes + 1> cache_key;
     bool armed;
     bool reached;
     bool consumed;
@@ -83,6 +86,7 @@ public:
     LessonStorageHilArmResult Arm(const LessonStorageHilArmRequest& request);
     LessonStorageHilStatus Status() const;
     void Reset();
+    std::uint64_t NextEvidenceSequence() noexcept;
     std::size_t LimitDownloadRead(
         const char* cache_key,
         std::size_t downloaded,
