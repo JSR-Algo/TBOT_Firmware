@@ -319,7 +319,9 @@ def validate_artifact_freshness(
         )
 
 
-def validate_nm_executable(candidate: Path, trusted_root: Path | None) -> str:
+def validate_nm_executable(
+    candidate: Path, trusted_root: Path
+) -> ArtifactSnapshot:
     try:
         resolved = candidate.expanduser().resolve(strict=True)
     except FileNotFoundError as error:
@@ -328,22 +330,21 @@ def validate_nm_executable(candidate: Path, trusted_root: Path | None) -> str:
             "trusted ESP target nm has unexpected name")
     require(resolved.is_file() and os.access(resolved, os.X_OK),
             "trusted ESP target nm is not executable")
-    if trusted_root is not None:
-        root = trusted_root.expanduser().resolve(strict=True)
-        require(root == resolved.parent or root in resolved.parents,
-                "trusted ESP target nm escapes IDF tools root")
-    return str(resolved)
+    root = trusted_root.expanduser().resolve(strict=True)
+    require(root == resolved.parent or root in resolved.parents,
+            "trusted ESP target nm escapes IDF tools root")
+    return snapshot_artifact(root, resolved, "nmExecutable")
 
 
-def resolve_nm(explicit_nm: str | None = None) -> str:
-    if explicit_nm:
-        return validate_nm_executable(Path(explicit_nm), None)
-
+def resolve_nm(explicit_nm: str | None = None) -> ArtifactSnapshot:
     tools_root = Path(os.environ.get("IDF_TOOLS_PATH", "~/.espressif"))
     try:
         trusted_root = tools_root.expanduser().resolve(strict=True)
     except FileNotFoundError as error:
         raise AuditFailure("trusted ESP target nm tools root missing") from error
+
+    if explicit_nm:
+        return validate_nm_executable(Path(explicit_nm), trusted_root)
 
     path_candidate = None
     for directory in os.environ.get("PATH", "").split(os.pathsep):
@@ -425,15 +426,19 @@ def defaults_manifest(
     return records
 
 
-def run_nm_on_snapshot(nm_path: str, archive: ArtifactSnapshot, repo: Path) -> str:
+def run_nm_on_snapshot(
+    nm: ArtifactSnapshot, archive: ArtifactSnapshot, repo: Path
+) -> str:
     descriptor, temp_name = tempfile.mkstemp(prefix="lesson-hil-main-", suffix=".a")
     try:
         with os.fdopen(descriptor, "wb") as output:
             output.write(archive.data)
             output.flush()
             os.fsync(output.fileno())
-        return run([nm_path, "-C", temp_name], repo)
+        verify_artifact_snapshot(nm)
+        return run([str(nm.path), "-C", temp_name], repo)
     finally:
+        verify_artifact_snapshot(nm)
         try:
             os.unlink(temp_name)
         except FileNotFoundError:
@@ -563,8 +568,9 @@ def audit(
     auxiliary_snapshots: list[ArtifactSnapshot] = []
     defaults = defaults_manifest(
         repo, build_dir, description, profile, auxiliary_snapshots)
-    nm_path = resolve_nm(nm_argument)
-    nm_output = run_nm_on_snapshot(nm_path, artifacts["mainArchive"], repo)
+    nm_snapshot = resolve_nm(nm_argument)
+    auxiliary_snapshots.append(nm_snapshot)
+    nm_output = run_nm_on_snapshot(nm_snapshot, artifacts["mainArchive"], repo)
     audit_symbols(profile, nm_output)
     audit_literals(profile, artifacts)
     partition = app_partition_metrics(

@@ -77,6 +77,67 @@ def test_resolve_nm_rejects_compiler_sibling_from_untrusted_build_metadata(
         AUDITOR.resolve_nm()
 
 
+def test_resolve_nm_rejects_explicit_executable_outside_idf_tools_root(
+    tmp_path, monkeypatch
+):
+    trusted_tools = tmp_path / "trusted-tools"
+    trusted_tools.mkdir()
+    attacker_nm = tmp_path / "attacker" / "xtensa-esp32s3-elf-nm"
+    attacker_nm.parent.mkdir()
+    attacker_nm.write_text("#!/bin/sh\necho forged symbols\n", encoding="utf-8")
+    attacker_nm.chmod(attacker_nm.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("IDF_TOOLS_PATH", str(trusted_tools))
+
+    with pytest.raises(AUDITOR.AuditFailure, match="escapes IDF tools root"):
+        AUDITOR.resolve_nm(str(attacker_nm))
+
+
+def test_resolve_nm_accepts_and_snapshots_explicit_executable_under_idf_tools_root(
+    tmp_path, monkeypatch
+):
+    trusted_tools = tmp_path / "trusted-tools"
+    trusted_nm = (
+        trusted_tools
+        / "tools/xtensa-esp-elf/version/xtensa-esp-elf/bin"
+        / "xtensa-esp32s3-elf-nm"
+    )
+    trusted_nm.parent.mkdir(parents=True)
+    trusted_nm.write_text("#!/bin/sh\necho trusted symbols\n", encoding="utf-8")
+    trusted_nm.chmod(trusted_nm.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("IDF_TOOLS_PATH", str(trusted_tools))
+
+    snapshot = AUDITOR.resolve_nm(str(trusted_nm))
+
+    assert snapshot.path == trusted_nm.resolve()
+    assert snapshot.data == trusted_nm.read_bytes()
+
+
+def test_nm_snapshot_detects_executable_replacement_during_symbol_audit(
+    tmp_path, monkeypatch
+):
+    trusted_tools = tmp_path / "trusted-tools"
+    trusted_nm = trusted_tools / "xtensa-esp32s3-elf-nm"
+    trusted_nm.parent.mkdir()
+    trusted_nm.write_text("#!/bin/sh\necho trusted symbols\n", encoding="utf-8")
+    trusted_nm.chmod(trusted_nm.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("IDF_TOOLS_PATH", str(trusted_tools))
+    snapshot = AUDITOR.resolve_nm(str(trusted_nm))
+    archive = tmp_path / "libmain.a"
+    archive.write_bytes(b"archive")
+    archive_snapshot = AUDITOR.snapshot_artifact(tmp_path, archive, "mainArchive")
+
+    def replace_nm(_command, _cwd):
+        replacement = tmp_path / "replacement-nm"
+        replacement.write_text("#!/bin/sh\necho forged symbols\n", encoding="utf-8")
+        replacement.chmod(replacement.stat().st_mode | stat.S_IXUSR)
+        os.replace(replacement, trusted_nm)
+        return "trusted symbols\n"
+
+    monkeypatch.setattr(AUDITOR, "run", replace_nm)
+    with pytest.raises(AUDITOR.AuditFailure, match="changed during audit: nmExecutable"):
+        AUDITOR.run_nm_on_snapshot(snapshot, archive_snapshot, tmp_path)
+
+
 def test_artifact_snapshot_detects_deterministic_path_replacement(tmp_path):
     build_dir = tmp_path / "build"
     build_dir.mkdir()
@@ -108,7 +169,8 @@ def test_literal_and_nm_checks_use_the_same_pinned_archive_bytes(tmp_path):
     nm = tmp_path / "xtensa-esp32s3-elf-nm"
     nm.write_text("#!/bin/sh\ncat \"$2\"\n", encoding="utf-8")
     nm.chmod(nm.stat().st_mode | stat.S_IXUSR)
-    output = AUDITOR.run_nm_on_snapshot(str(nm), snapshot, tmp_path)
+    nm_snapshot = AUDITOR.snapshot_artifact(tmp_path, nm, "nmExecutable")
+    output = AUDITOR.run_nm_on_snapshot(nm_snapshot, snapshot, tmp_path)
     assert output.encode("ascii") == original
 
 
