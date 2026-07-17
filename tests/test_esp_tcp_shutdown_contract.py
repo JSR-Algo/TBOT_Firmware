@@ -245,19 +245,19 @@ def test_esp_tcp_and_ssl_send_paths_have_absolute_write_deadlines():
 def test_esp_dns_deadline_callback_owns_state_after_caller_timeout():
     resolver = read("components/esp-ml307/src/esp/esp_dns_resolver.h")
 
-    assert "xTaskCreate" in resolver
-    assert "getaddrinfo" in resolver
-    assert "std::shared_ptr<DnsLookupState>" in resolver
-    assert "std::unique_ptr<DnsLookupRequest>" in resolver
-    assert "state->abandoned = true" in resolver
-    assert resolver.index("owned_request.reset();") < resolver.index("vTaskDelete(nullptr);")
-    assert resolver.index("state.reset();") < resolver.index("vTaskDelete(nullptr);")
+    assert "tcpip_try_callback" in resolver
+    assert "dns_gethostbyname_addrtype" in resolver
+    assert "AsyncLookupLifecycle" in resolver
+    assert "kMaxConcurrentDnsLookups = 8" in resolver
+    assert "EncodeDnsCallbackToken" in resolver
+    assert "generation" in resolver
     assert "ETIMEDOUT" in resolver
     assert "gethostbyname(" not in resolver
-    assert "std::atomic<bool> g_dns_lookup_in_flight" in resolver
-    assert "compare_exchange_strong" in resolver
-    assert "inet_pton(AF_INET" in resolver
-    assert resolver.count("g_dns_lookup_in_flight.store(false)") >= 2
+    assert "getaddrinfo" not in resolver
+    assert "xTaskCreate" not in resolver
+    assert "g_dns_lookup_in_flight" not in resolver
+    assert "inet_aton(" in resolver
+    assert "EAGAIN" in resolver
 
 
 def test_esp_ssl_connect_uses_http_timeout_for_tls_handshake():
