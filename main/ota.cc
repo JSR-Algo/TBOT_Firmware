@@ -2,6 +2,7 @@
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
+#include "firmware_version_policy.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -23,7 +24,6 @@
 #include <cstdio>
 #include <cctype>
 #include <vector>
-#include <sstream>
 #include <algorithm>
 
 #define TAG "Ota"
@@ -135,15 +135,25 @@ std::vector<std::string> BuildCheckVersionUrls(const std::string& configured_url
     return urls;
 }
 
-bool IsValidCheckVersionResponse(const cJSON* root) {
+bool IsValidCheckVersionResponse(const cJSON* root,
+                                 const std::string& current_version,
+                                 bool* should_download) {
     if (!cJSON_IsObject(root)) {
         return false;
     }
     const cJSON* firmware = cJSON_GetObjectItem(root, "firmware");
     const cJSON* version = cJSON_GetObjectItem(firmware, "version");
     const cJSON* url = cJSON_GetObjectItem(firmware, "url");
-    return cJSON_IsObject(firmware) && cJSON_IsString(version) &&
-           version->valuestring[0] != '\0' && cJSON_IsString(url);
+    if (!cJSON_IsObject(firmware) || !cJSON_IsString(version) ||
+        !cJSON_IsString(url) || should_download == nullptr) {
+        return false;
+    }
+    const cJSON* force = cJSON_GetObjectItem(firmware, "force");
+    const bool force_install = cJSON_IsNumber(force) && force->valueint == 1;
+    const FirmwareResponseDecision decision = EvaluateFirmwareResponse(
+        current_version, version->valuestring, url->valuestring, force_install);
+    *should_download = decision.should_download;
+    return decision.valid;
 }
 
 void PersistRecoveredOtaUrl(const std::string& url) {
@@ -229,6 +239,7 @@ esp_err_t Ota::CheckVersion() {
     int last_error = ESP_FAIL;
     std::string successful_url;
     cJSON* root = nullptr;
+    bool selected_should_download = false;
     for (const auto& url : urls) {
         if (RemainingCheckTimeoutMs(check_deadline_us) <= 1 &&
             esp_timer_get_time() >= check_deadline_us) {
@@ -259,7 +270,9 @@ esp_err_t Ota::CheckVersion() {
         close_http.Close();
 
         cJSON* candidate_root = cJSON_Parse(response_body.c_str());
-        if (!IsValidCheckVersionResponse(candidate_root)) {
+        bool candidate_should_download = false;
+        if (!IsValidCheckVersionResponse(candidate_root, current_version_,
+                                         &candidate_should_download)) {
             last_error = ESP_ERR_INVALID_RESPONSE;
             ESP_LOGE(TAG, "Invalid OTA check response");
             cJSON_Delete(candidate_root);
@@ -267,6 +280,7 @@ esp_err_t Ota::CheckVersion() {
         }
 
         root = candidate_root;
+        selected_should_download = candidate_should_download;
         successful_url = url;
         break;
     }
@@ -444,17 +458,11 @@ esp_err_t Ota::CheckVersion() {
         }
 
         if (cJSON_IsString(version) && cJSON_IsString(url)) {
-            // Check if the version is newer, for example, 0.1.0 is newer than 0.0.1
-            has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
+            has_new_version_ = selected_should_download;
             if (has_new_version_) {
                 ESP_LOGI(TAG, "New version available: %s", firmware_version_.c_str());
             } else {
                 ESP_LOGI(TAG, "Current is the latest version");
-            }
-            // If the force flag is set to 1, the given version is forced to be installed
-            cJSON *force = cJSON_GetObjectItem(firmware, "force");
-            if (cJSON_IsNumber(force) && force->valueint == 1) {
-                has_new_version_ = true;
             }
         }
     } else {
@@ -637,33 +645,6 @@ bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback)
     return Upgrade(firmware_url_, callback);
 }
 
-
-std::vector<int> Ota::ParseVersion(const std::string& version) {
-    std::vector<int> versionNumbers;
-    std::stringstream ss(version);
-    std::string segment;
-
-    while (std::getline(ss, segment, '.')) {
-        versionNumbers.push_back(std::stoi(segment));
-    }
-
-    return versionNumbers;
-}
-
-bool Ota::IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion) {
-    std::vector<int> current = ParseVersion(currentVersion);
-    std::vector<int> newer = ParseVersion(newVersion);
-
-    for (size_t i = 0; i < std::min(current.size(), newer.size()); ++i) {
-        if (newer[i] > current[i]) {
-            return true;
-        } else if (newer[i] < current[i]) {
-            return false;
-        }
-    }
-
-    return newer.size() > current.size();
-}
 
 std::string Ota::GetActivationPayload() {
     if (!has_serial_number_) {

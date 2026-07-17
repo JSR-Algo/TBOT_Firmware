@@ -144,7 +144,7 @@ def test_ota_check_falls_back_after_any_invalid_attempt_and_persists_only_valid_
     loop_idx = check_body.index("for (const auto& url : urls)")
     persist_idx = check_body.index("PersistRecoveredOtaUrl(successful_url)")
     parse_idx = check_body.index("cJSON_Parse(response_body.c_str())", loop_idx)
-    valid_idx = check_body.index("IsValidCheckVersionResponse(candidate_root)", parse_idx)
+    valid_idx = check_body.index("IsValidCheckVersionResponse(candidate_root", parse_idx)
     success_idx = check_body.index("successful_url = url", valid_idx)
 
     assert check_body.index("ScopedHttpClose close_http(*http)", loop_idx) < parse_idx
@@ -154,6 +154,26 @@ def test_ota_check_falls_back_after_any_invalid_attempt_and_persists_only_valid_
     assert "cJSON_Delete(candidate_root);" in check_body[valid_idx:success_idx]
     assert "if (root == nullptr)" in check_body
     assert persist_idx < check_body.index("has_activation_code_ = false")
+
+
+def test_ota_semantically_validates_firmware_before_selecting_or_persisting_endpoint():
+    source = read("main/ota.cc")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+    validator = function_body(source, "bool IsValidCheckVersionResponse")
+
+    assert '#include "firmware_version_policy.h"' in source
+    assert "EvaluateFirmwareResponse" in validator
+    assert "current_version" in validator
+    assert "should_download" in validator
+    assert "selected_should_download" in check_body
+    assert check_body.index("IsValidCheckVersionResponse") < check_body.index(
+        "successful_url = url"
+    )
+    assert check_body.index("successful_url = url") < check_body.index(
+        "PersistRecoveredOtaUrl(successful_url)"
+    )
+    assert "std::stoi" not in source
+    assert "ParseVersion" not in source
 
 
 def test_ota_check_logs_do_not_expose_endpoint_or_device_identity():

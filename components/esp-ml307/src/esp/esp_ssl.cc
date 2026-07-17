@@ -5,6 +5,7 @@
 #include <esp_crt_bundle.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -69,6 +70,8 @@ bool EspSsl::Connect(const std::string& host, int port) {
 
     esp_tls_cfg_t cfg = {};
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.common_name = host.c_str();
+    cfg.skip_common_name = false;
     cfg.timeout_ms =
         RemainingTransportTimeoutMs(connect_deadline, esp_timer_get_time());
     if (cfg.timeout_ms <= 0) {
@@ -78,7 +81,19 @@ bool EspSsl::Connect(const std::string& host, int port) {
         return false;
     }
 
-    int ret = esp_tls_conn_new_sync(host.c_str(), host.length(), port, &cfg, tls_client_);
+    char resolved_host[INET_ADDRSTRLEN] = {};
+    if (inet_ntop(AF_INET, &resolved_address, resolved_host,
+                  sizeof(resolved_host)) == nullptr) {
+        last_error_ = errno;
+        esp_tls_conn_destroy(tls_client_);
+        tls_client_ = nullptr;
+        return false;
+    }
+
+    // Connect to the bounded pre-resolved address while retaining the original
+    // hostname for certificate verification and TLS SNI via cfg.common_name.
+    int ret = esp_tls_conn_new_sync(resolved_host, strlen(resolved_host),
+                                    port, &cfg, tls_client_);
     if (ret != 1) {
         esp_tls_error_handle_t last_error;
         if (esp_tls_get_error_handle(tls_client_, &last_error) == ESP_OK) {

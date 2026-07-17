@@ -270,6 +270,11 @@ def test_esp_ssl_connect_uses_http_timeout_for_tls_handshake():
     assert "cfg.timeout_ms" in connect
     assert "RemainingTransportTimeoutMs" in connect
     assert "ResolveHostIpv4WithDeadline" in connect
+    assert "inet_ntop(AF_INET" in connect
+    assert "cfg.common_name = host.c_str();" in connect
+    assert "cfg.skip_common_name = false;" in connect
+    assert "esp_tls_conn_new_sync(resolved_host" in connect
+    assert "esp_tls_conn_new_sync(host.c_str()" not in connect
 
 
 def test_esp_ssl_callback_completes_before_exit_publication():
