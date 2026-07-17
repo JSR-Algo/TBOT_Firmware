@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -45,6 +47,37 @@ class AuditFailure(RuntimeError):
     pass
 
 
+class ArtifactSnapshot:
+    __slots__ = (
+        "root", "path", "label", "data", "device", "inode", "size",
+        "mtime_ns", "ctime_ns", "sha256",
+    )
+
+    def __init__(
+        self,
+        root: Path,
+        path: Path,
+        label: str,
+        data: bytes,
+        device: int,
+        inode: int,
+        size: int,
+        mtime_ns: int,
+        ctime_ns: int,
+        digest: str,
+    ) -> None:
+        self.root = root
+        self.path = path
+        self.label = label
+        self.data = data
+        self.device = device
+        self.inode = inode
+        self.size = size
+        self.mtime_ns = mtime_ns
+        self.ctime_ns = ctime_ns
+        self.sha256 = digest
+
+
 def run(command: list[str], cwd: Path) -> str:
     result = subprocess.run(
         command,
@@ -73,14 +106,22 @@ def read_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def hash_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AuditFailure(message)
 
 
 def parse_sdkconfig(path: Path) -> dict[str, str]:
+    return parse_sdkconfig_data(path.read_bytes())
+
+
+def parse_sdkconfig_data(data: bytes) -> dict[str, str]:
     values: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in data.decode("utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -101,13 +142,20 @@ def parse_size(text: str) -> int:
     return int(value, 0) * multiplier
 
 
-def app_partition_metrics(repo: Path, sdkconfig: dict[str, str], app_bin: Path) -> dict:
+def app_partition_metrics(
+    repo: Path,
+    sdkconfig: dict[str, str],
+    app_bin: Path | ArtifactSnapshot,
+    snapshots: list[ArtifactSnapshot] | None = None,
+) -> dict:
     partition_name = sdkconfig.get("CONFIG_PARTITION_TABLE_FILENAME")
     require(bool(partition_name), "partition table filename missing from sdkconfig")
-    partition_path = (repo / partition_name).resolve()
-    require(partition_path.is_file(), "partition table source missing")
+    partition_path = repo / partition_name
+    partition_snapshot = snapshot_artifact(repo, partition_path, "partitionTableSource")
+    if snapshots is not None:
+        snapshots.append(partition_snapshot)
     app_sizes: list[int] = []
-    with partition_path.open(encoding="utf-8", newline="") as source:
+    with io.StringIO(partition_snapshot.data.decode("utf-8"), newline="") as source:
         for row in csv.reader(line for line in source if not line.lstrip().startswith("#")):
             if len(row) < 5:
                 continue
@@ -117,11 +165,11 @@ def app_partition_metrics(repo: Path, sdkconfig: dict[str, str], app_bin: Path) 
                 app_sizes.append(parse_size(row[4]))
     require(bool(app_sizes), "no application partition found")
     partition_bytes = min(app_sizes)
-    image_bytes = app_bin.stat().st_size
+    image_bytes = app_bin.size if isinstance(app_bin, ArtifactSnapshot) else app_bin.stat().st_size
     require(image_bytes <= partition_bytes, "application image exceeds partition")
     free_bytes = partition_bytes - image_bytes
     return {
-        "partitionTable": str(partition_path.relative_to(repo)),
+        "partitionTable": str(partition_snapshot.path.relative_to(repo)),
         "partitionBytes": partition_bytes,
         "imageBytes": image_bytes,
         "freeBytes": free_bytes,
@@ -148,6 +196,58 @@ def confined_regular_file(build_dir: Path, path: Path, label: str) -> Path:
     require(resolved.is_file(), f"required artifact is not a regular file: {label}")
     require(resolved.stat().st_size > 0, f"required artifact empty: {label}")
     return resolved
+
+
+def snapshot_artifact(root: Path, path: Path, label: str) -> ArtifactSnapshot:
+    trusted_root = root.resolve()
+    resolved = confined_regular_file(trusted_root, path, label)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(resolved, flags)
+    try:
+        before = os.fstat(descriptor)
+        require(stat.S_ISREG(before.st_mode), f"required artifact is not regular: {label}")
+        chunks: list[bytes] = []
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity_before = (
+        before.st_dev, before.st_ino, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns,
+    )
+    identity_after = (
+        after.st_dev, after.st_ino, after.st_size,
+        after.st_mtime_ns, after.st_ctime_ns,
+    )
+    require(identity_before == identity_after, f"artifact changed during audit: {label}")
+    data = b"".join(chunks)
+    require(len(data) == before.st_size and bool(data),
+            f"artifact changed during audit: {label}")
+    return ArtifactSnapshot(
+        trusted_root, resolved, label, data,
+        before.st_dev, before.st_ino, before.st_size,
+        before.st_mtime_ns, before.st_ctime_ns, hash_bytes(data),
+    )
+
+
+def verify_artifact_snapshot(snapshot: ArtifactSnapshot) -> None:
+    current = snapshot_artifact(snapshot.root, snapshot.path, snapshot.label)
+    expected = (
+        snapshot.device, snapshot.inode, snapshot.size,
+        snapshot.mtime_ns, snapshot.ctime_ns, snapshot.sha256,
+    )
+    observed = (
+        current.device, current.inode, current.size,
+        current.mtime_ns, current.ctime_ns, current.sha256,
+    )
+    require(observed == expected,
+            f"artifact changed during audit: {snapshot.label}")
 
 
 def declared_artifact(build_dir: Path, value: str, label: str) -> Path:
@@ -179,16 +279,33 @@ def resolve_artifacts(build_dir: Path, description: dict) -> dict[str, Path]:
     }
 
 
-def validate_artifact_chronology(artifacts: dict[str, Path]) -> None:
-    archive_time = artifacts["mainArchive"].stat().st_mtime_ns
-    elf_time = artifacts["elf"].stat().st_mtime_ns
-    binary_time = artifacts["bin"].stat().st_mtime_ns
+def snapshot_artifacts(
+    build_dir: Path, artifacts: dict[str, Path]
+) -> dict[str, ArtifactSnapshot]:
+    return {
+        label: snapshot_artifact(build_dir, path, label)
+        for label, path in artifacts.items()
+    }
+
+
+def artifact_mtime_ns(artifact: Path | ArtifactSnapshot) -> int:
+    if isinstance(artifact, ArtifactSnapshot):
+        return artifact.mtime_ns
+    return artifact.stat().st_mtime_ns
+
+
+def validate_artifact_chronology(
+    artifacts: dict[str, Path | ArtifactSnapshot]
+) -> None:
+    archive_time = artifact_mtime_ns(artifacts["mainArchive"])
+    elf_time = artifact_mtime_ns(artifacts["elf"])
+    binary_time = artifact_mtime_ns(artifacts["bin"])
     require(archive_time <= elf_time, "ELF predates the linked main archive")
     require(elf_time <= binary_time, "application binary predates the linked ELF")
 
 
 def validate_artifact_freshness(
-    artifacts: dict[str, Path], commit_timestamp_seconds: int
+    artifacts: dict[str, Path | ArtifactSnapshot], commit_timestamp_seconds: int
 ) -> None:
     commit_time_ns = commit_timestamp_seconds * 1_000_000_000
     for label in (
@@ -196,17 +313,55 @@ def validate_artifact_freshness(
         "sdkconfig", "partitionBinary",
     ):
         require(
-            artifacts[label].stat().st_mtime_ns >= commit_time_ns,
+            artifact_mtime_ns(artifacts[label]) >= commit_time_ns,
             f"build artifact predates source commit: {label}",
         )
 
 
-def resolve_nm(description: dict) -> str:
-    compiler = Path(str(description.get("c_compiler", "")))
-    require(compiler.name.endswith("gcc"), "C compiler identity missing")
-    candidate = compiler.with_name(compiler.name[:-3] + "nm")
-    require(candidate.is_file(), "target nm executable missing")
-    return str(candidate)
+def validate_nm_executable(candidate: Path, trusted_root: Path | None) -> str:
+    try:
+        resolved = candidate.expanduser().resolve(strict=True)
+    except FileNotFoundError as error:
+        raise AuditFailure("trusted ESP target nm executable missing") from error
+    require(resolved.name == "xtensa-esp32s3-elf-nm",
+            "trusted ESP target nm has unexpected name")
+    require(resolved.is_file() and os.access(resolved, os.X_OK),
+            "trusted ESP target nm is not executable")
+    if trusted_root is not None:
+        root = trusted_root.expanduser().resolve(strict=True)
+        require(root == resolved.parent or root in resolved.parents,
+                "trusted ESP target nm escapes IDF tools root")
+    return str(resolved)
+
+
+def resolve_nm(explicit_nm: str | None = None) -> str:
+    if explicit_nm:
+        return validate_nm_executable(Path(explicit_nm), None)
+
+    tools_root = Path(os.environ.get("IDF_TOOLS_PATH", "~/.espressif"))
+    try:
+        trusted_root = tools_root.expanduser().resolve(strict=True)
+    except FileNotFoundError as error:
+        raise AuditFailure("trusted ESP target nm tools root missing") from error
+
+    path_candidate = None
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        if directory:
+            candidate = Path(directory) / "xtensa-esp32s3-elf-nm"
+            if candidate.exists():
+                path_candidate = candidate
+                break
+    if path_candidate is not None:
+        try:
+            return validate_nm_executable(path_candidate, trusted_root)
+        except AuditFailure:
+            pass
+
+    matches = sorted(trusted_root.glob(
+        "tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32s3-elf-nm"
+    ))
+    require(bool(matches), "trusted ESP target nm executable missing")
+    return validate_nm_executable(matches[-1], trusted_root)
 
 
 def audit_symbols(profile: str, nm_output: str) -> None:
@@ -220,9 +375,13 @@ def audit_symbols(profile: str, nm_output: str) -> None:
                 f"HIL symbol profile mismatch: {symbol}")
 
 
-def audit_literals(profile: str, artifacts: dict[str, Path]) -> None:
+def artifact_bytes(artifact: Path | ArtifactSnapshot) -> bytes:
+    return artifact.data if isinstance(artifact, ArtifactSnapshot) else read_bytes(artifact)
+
+
+def audit_literals(profile: str, artifacts: dict[str, Path | ArtifactSnapshot]) -> None:
     searchable = {
-        name: read_bytes(artifacts[name])
+        name: artifact_bytes(artifacts[name])
         for name in ("bin", "elf", "map", "mainArchive")
     }
     for literal in (*TOOL_NAMES, BANNER):
@@ -236,7 +395,13 @@ def audit_literals(profile: str, artifacts: dict[str, Path]) -> None:
                     f"HIL literal missing from artifacts: {literal}")
 
 
-def defaults_manifest(repo: Path, description: dict, profile: str) -> list[dict]:
+def defaults_manifest(
+    repo: Path,
+    build_dir: Path,
+    description: dict,
+    profile: str,
+    snapshots: list[ArtifactSnapshot],
+) -> list[dict]:
     raw_defaults = str(description.get("config_defaults", ""))
     require(bool(raw_defaults), "config-default chain missing")
     paths = [Path(item).resolve() for item in raw_defaults.split(";") if item]
@@ -245,15 +410,40 @@ def defaults_manifest(repo: Path, description: dict, profile: str) -> list[dict]
     require(has_hil == (profile == "hil"), "HIL defaults profile mismatch")
     records = []
     for path in paths:
-        require(path.is_file(), f"config default missing: {path.name}")
         try:
             display = str(path.relative_to(repo))
+            root = repo
         except ValueError:
-            require(profile == "hil" and path.parent == Path(description["build_dir"]),
+            require(profile == "hil" and path.parent == build_dir,
                     "config default is outside repository/build directory")
-            display = f"{Path(description['build_dir']).name}/{path.name}"
-        records.append({"path": display, "sha256": sha256(path)})
+            display = f"{build_dir.name}/{path.name}"
+            root = build_dir
+        snapshot = snapshot_artifact(root, path, f"configDefault:{path.name}")
+        snapshots.append(snapshot)
+        records.append({"path": display, "sha256": snapshot.sha256})
     return records
+
+
+def run_nm_on_snapshot(nm_path: str, archive: ArtifactSnapshot, repo: Path) -> str:
+    descriptor, temp_name = tempfile.mkstemp(prefix="lesson-hil-main-", suffix=".a")
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(archive.data)
+            output.flush()
+            os.fsync(output.fileno())
+        return run([nm_path, "-C", temp_name], repo)
+    finally:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+
+
+def verify_source_state(repo: Path, expected_head: str) -> None:
+    current_head = run(["git", "rev-parse", "HEAD"], repo).strip()
+    require(current_head == expected_head, "source HEAD changed during audit")
+    require(run(["git", "status", "--porcelain"], repo) == "",
+            "source tree changed during audit")
 
 
 def atomic_write(path: Path, data: bytes) -> None:
@@ -272,7 +462,11 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
-def audit(profile: str, build_dir_argument: str) -> dict:
+def audit(
+    profile: str,
+    build_dir_argument: str,
+    nm_argument: str | None = None,
+) -> dict:
     script = Path(__file__).resolve()
     repo = script.parents[1]
     build_dir = Path(build_dir_argument).expanduser().resolve()
@@ -292,10 +486,10 @@ def audit(profile: str, build_dir_argument: str) -> dict:
         run(["git", "show", "-s", "--format=%ct", "HEAD"], repo).strip()
     )
 
-    description_path = confined_regular_file(
+    description_snapshot = snapshot_artifact(
         build_dir, build_dir / "project_description.json", "projectDescription"
     )
-    description = json.loads(description_path.read_text(encoding="utf-8"))
+    description = json.loads(description_snapshot.data.decode("utf-8"))
     require(description.get("target") == "esp32s3", "unexpected build target")
     require(description.get("project_name") == "xiaozhi", "unexpected project name")
     require(Path(description.get("project_path", "")).resolve() == repo,
@@ -303,18 +497,24 @@ def audit(profile: str, build_dir_argument: str) -> dict:
     require(Path(description.get("build_dir", "")).resolve() == build_dir,
             "project description build directory mismatch")
 
-    artifacts = resolve_artifacts(build_dir, description)
+    artifact_paths = resolve_artifacts(build_dir, description)
+    artifact_paths.pop("projectDescription")
+    artifacts = snapshot_artifacts(build_dir, artifact_paths)
+    artifacts["projectDescription"] = description_snapshot
     validate_artifact_chronology(artifacts)
     validate_artifact_freshness(artifacts, commit_timestamp)
-    sdkconfig = parse_sdkconfig(artifacts["sdkconfig"])
+    sdkconfig = parse_sdkconfig_data(artifacts["sdkconfig"].data)
     enabled = sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y"
     require(enabled == (profile == "hil"), "CONFIG_TBOT_HIL_STORAGE_FAULTS profile mismatch")
-    defaults = defaults_manifest(repo, description, profile)
-    nm_path = resolve_nm(description)
-    nm_output = run([nm_path, "-C", str(artifacts["mainArchive"])], repo)
+    auxiliary_snapshots: list[ArtifactSnapshot] = []
+    defaults = defaults_manifest(
+        repo, build_dir, description, profile, auxiliary_snapshots)
+    nm_path = resolve_nm(nm_argument)
+    nm_output = run_nm_on_snapshot(nm_path, artifacts["mainArchive"], repo)
     audit_symbols(profile, nm_output)
     audit_literals(profile, artifacts)
-    partition = app_partition_metrics(repo, sdkconfig, artifacts["bin"])
+    partition = app_partition_metrics(
+        repo, sdkconfig, artifacts["bin"], auxiliary_snapshots)
 
     manifest = {
         "status": "PASS",
@@ -327,11 +527,11 @@ def audit(profile: str, build_dir_argument: str) -> dict:
         "configDefaults": defaults,
         "artifacts": {
             label: {
-                "path": str(path.relative_to(build_dir)),
-                "bytes": path.stat().st_size,
-                "sha256": sha256(path),
+                "path": str(snapshot.path.relative_to(build_dir)),
+                "bytes": snapshot.size,
+                "sha256": snapshot.sha256,
             }
-            for label, path in artifacts.items()
+            for label, snapshot in artifacts.items()
         },
         "partition": partition,
         "checks": {
@@ -343,6 +543,9 @@ def audit(profile: str, build_dir_argument: str) -> dict:
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     try:
+        for snapshot in (*artifacts.values(), *auxiliary_snapshots):
+            verify_artifact_snapshot(snapshot)
+        verify_source_state(repo, head)
         atomic_write(manifest_path, manifest_bytes)
         manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
         atomic_write(
@@ -362,9 +565,13 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", required=True, choices=("production", "hil"))
     parser.add_argument("--build-dir", required=True)
+    parser.add_argument(
+        "--nm",
+        help="trusted explicit path to xtensa-esp32s3-elf-nm",
+    )
     arguments = parser.parse_args()
     try:
-        manifest = audit(arguments.profile, arguments.build_dir)
+        manifest = audit(arguments.profile, arguments.build_dir, arguments.nm)
     except (AuditFailure, OSError, ValueError, json.JSONDecodeError) as error:
         print(f"lesson storage HIL artifact audit: FAIL: {error}", file=sys.stderr)
         return 1

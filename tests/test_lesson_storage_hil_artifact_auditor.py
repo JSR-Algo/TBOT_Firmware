@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,78 @@ def test_literal_and_symbol_profiles_are_inverse(tmp_path):
         AUDITOR.audit_symbols("production", symbols)
     with pytest.raises(AUDITOR.AuditFailure):
         AUDITOR.audit_symbols("hil", symbols + "\n U openat\n")
+
+
+def test_resolve_nm_rejects_compiler_sibling_from_untrusted_build_metadata(
+    tmp_path, monkeypatch
+):
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    compiler = attacker / "xtensa-esp32s3-elf-gcc"
+    nm = attacker / "xtensa-esp32s3-elf-nm"
+    compiler.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    nm.write_text("#!/bin/sh\necho forged symbols\n", encoding="utf-8")
+    compiler.chmod(compiler.stat().st_mode | stat.S_IXUSR)
+    nm.chmod(nm.stat().st_mode | stat.S_IXUSR)
+    trusted_tools = tmp_path / "trusted-tools"
+    trusted_tools.mkdir()
+    monkeypatch.setenv("IDF_TOOLS_PATH", str(trusted_tools))
+    monkeypatch.setenv("PATH", str(attacker))
+
+    with pytest.raises(AUDITOR.AuditFailure, match="trusted ESP target nm"):
+        AUDITOR.resolve_nm()
+
+
+def test_artifact_snapshot_detects_deterministic_path_replacement(tmp_path):
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    artifact = build_dir / "xiaozhi.bin"
+    artifact.write_bytes(b"audited")
+
+    assert hasattr(AUDITOR, "snapshot_artifact")
+    snapshot = AUDITOR.snapshot_artifact(build_dir, artifact, "bin")
+    replacement = build_dir / "replacement"
+    replacement.write_bytes(b"forged")
+    os.replace(replacement, artifact)
+
+    with pytest.raises(AUDITOR.AuditFailure, match="changed during audit"):
+        AUDITOR.verify_artifact_snapshot(snapshot)
+
+
+def test_literal_and_nm_checks_use_the_same_pinned_archive_bytes(tmp_path):
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    archive = build_dir / "libmain.a"
+    original = "\n".join((*AUDITOR.TOOL_NAMES, AUDITOR.BANNER)).encode("ascii")
+    archive.write_bytes(original)
+    snapshot = AUDITOR.snapshot_artifact(build_dir, archive, "mainArchive")
+    archive.write_bytes(b"forged replacement")
+
+    artifacts = {name: snapshot for name in ("bin", "elf", "map", "mainArchive")}
+    AUDITOR.audit_literals("hil", artifacts)
+
+    nm = tmp_path / "xtensa-esp32s3-elf-nm"
+    nm.write_text("#!/bin/sh\ncat \"$2\"\n", encoding="utf-8")
+    nm.chmod(nm.stat().st_mode | stat.S_IXUSR)
+    output = AUDITOR.run_nm_on_snapshot(str(nm), snapshot, tmp_path)
+    assert output.encode("ascii") == original
+
+
+def test_verify_source_state_rechecks_head_and_cleanliness(monkeypatch, tmp_path):
+    responses = iter(("a" * 40 + "\n", ""))
+    calls = []
+
+    def fake_run(command, cwd):
+        calls.append((command, cwd))
+        return next(responses)
+
+    monkeypatch.setattr(AUDITOR, "run", fake_run)
+    AUDITOR.verify_source_state(tmp_path, "a" * 40)
+
+    assert calls == [
+        (["git", "rev-parse", "HEAD"], tmp_path),
+        (["git", "status", "--porcelain"], tmp_path),
+    ]
 
 
 def test_failed_audit_removes_stale_outputs_before_any_check(tmp_path):
