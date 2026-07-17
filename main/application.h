@@ -148,7 +148,7 @@ public:
      * This includes closing audio channel, resetting protocol and ota objects
      */
     void ResetProtocol();
-    void SchedulePendingTbotClaimRefresh();
+    void SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation);
     void EnsureBleAdvertisingForUnclaimedSavedWifi();
     // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
     // Claimed robots suppress claim polling and keep normal online BLE off;
@@ -192,6 +192,10 @@ private:
     PendingTbotClaim pending_tbot_claim_;
     std::string pending_tbot_claim_api_url_;
     std::string pending_tbot_claim_token_;
+    // A 2xx response with unusable credentials may mean the backend committed
+    // the one-time claim but the firmware cannot recover device_secret. Freeze
+    // this attempt until explicit reset/expiry instead of retrying into 401/409.
+    bool claim_confirmation_ambiguous_ = false;
 
     // TBOT claim runtime FSM sub-state (drives the connect-state mapper).
     // main-task-only (see OQ1 note above).
@@ -215,6 +219,7 @@ private:
     // workers when the flaky backend is slow (leaked tasks/heap). Set true when a
     // worker is spawned, cleared when its continuation runs (or the spawn fails).
     std::atomic<bool> claim_poll_inflight_{false};
+    std::atomic<bool> claim_confirm_inflight_{false};
     // Single-flight guard for the deferred BOOT re-pair cloud-ownership release
     // worker (CloudReleaseTask), mirroring claim_poll_inflight_.
     std::atomic<bool> cloud_release_inflight_{false};
@@ -231,6 +236,8 @@ private:
     // Heartbeat (C5): periodic POST /v1/device/heartbeat while claimed/online,
     // carrying backend DTO fields plus ble_state/ap_state/temp from board status.
     esp_timer_handle_t heartbeat_timer_ = nullptr;        // periodic, ~20s
+    QueueHandle_t heartbeat_queue_ = nullptr;
+    TaskHandle_t heartbeat_task_ = nullptr;
     bool heartbeat_active_ = false;
     std::atomic<int> deferred_heartbeat_auth_failure_status_{0};
     // "Hi ESP needs many tries" fix: single-flight guard for the off-task
@@ -335,6 +342,8 @@ private:
     void CheckNewVersion();
     void InitializeProtocol();
     void RefreshPendingTbotClaim();
+    void DispatchPendingTbotClaimRefreshForSetupGeneration(
+        uint32_t expected_setup_generation);
     // BluFi reported STA-connected success after a (re-)provisioning. The BLE
     // build never leaves kDeviceStateWifiConfiguring on its own (no ConfigModeExit
     // and HandleNetworkConnectedEvent ignores Connected in that state), so the
@@ -346,6 +355,10 @@ private:
     // RefreshPendingTbotClaim are left untouched.
     void PromoteFromWifiConfigAfterProvisioning();
     bool ConfirmPendingTbotClaim(bool trust_backend_expiry = false);
+    bool DispatchPendingTbotClaimConfirmation(uint32_t expected_setup_generation,
+                                              bool enforce_setup_generation);
+    static void ClaimConfirmationTask(void* arg);
+    bool ApplyPendingTbotClaimConfirmationResult(ClaimConfirmationResult result);
     // "Hi ESP needs many tries" fix: the blocking ~3s /device/config HTTP/TLS
     // fetch is split out of RefreshPendingTbotClaim() so it can run on a
     // dedicated low-priority worker instead of the priority-10 Application task
@@ -354,12 +367,17 @@ private:
     // worker (single-flight); ClaimFetchTask() does ONLY the blocking fetch and
     // Schedule()s ApplyPendingTbotClaimFetchResult() back onto the Application
     // task, where all claim_substate_/BLE/SetDeviceState mutation stays serialized.
-    void DispatchPendingTbotClaimFetch(const std::string& api_url, const std::string& token);
+    bool DispatchPendingTbotClaimFetch(const std::string& api_url, const std::string& token,
+                                       bool apply_when_poll_inactive = false,
+                                       uint32_t expected_setup_generation = 0,
+                                       bool enforce_setup_generation = false);
     static void ClaimFetchTask(void* arg);
     void ApplyPendingTbotClaimFetchResult(const std::string& api_url,
                                           const std::string& token,
                                           const PendingTbotClaim& pending_claim,
-                                          bool fetched, int device_config_status);
+                                          bool fetched, int device_config_status,
+                                          bool defer_confirmation = false,
+                                          uint32_t expected_setup_generation = 0);
 
     // Deferred cloud-ownership release for the BOOT re-pair flow.
     // EnterRepairPairingMode() sets backend.release_pending and KEEPS the device

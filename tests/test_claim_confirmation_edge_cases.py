@@ -455,7 +455,7 @@ def test_failure_sinks_log_redacted_response_length_not_body():
     # No log sink emits the verbatim response body anywhere.
     assert [s for s in _sink_statements(src) if "response_body.c_str()" in s] == []
     # The success path persists the body, it does not log it.
-    confirm = function_body(src, "bool ClaimConfirmationReporter::Confirm")
+    confirm = function_body(src, "ClaimConfirmationResult ClaimConfirmationReporter::Confirm")
     success = confirm[confirm.index("status_code >= 200 && status_code < 300"):]
-    success = success[:success.index("return true;") + len("return true;")]
+    success = success[:success.index("ClaimConfirmationResult::Confirmed")]
     assert "response_body.c_str()" not in success

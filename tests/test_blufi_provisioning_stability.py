@@ -51,14 +51,10 @@ def test_fw1_release_wake_word_before_ble_init_in_config_path():
     # The wake-word resource release must run before the BLE stack is brought up,
     # otherwise the AFE detection task contends with BLE during provisioning.
     assert "ReleaseWakeWordResourcesForWifiConfig" in body
-    assert "blufi.init();" in body
+    assert "blufi.RestartForSetup();" in body
     release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
-    init_idx = body.index("blufi.init();")
+    init_idx = body.index("blufi.RestartForSetup();")
     assert release_idx < init_idx
-
-    # It must also precede the GetBleState() read that gates the init decision.
-    ble_state_idx = body.index("blufi.GetBleState();")
-    assert release_idx < ble_state_idx
 
 
 # ---------------------------------------------------------------------------
@@ -69,23 +65,12 @@ def test_fw2_ble_timeout_accepted_for_explicit_setup_reentry():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    # kTimeout must be treated as a re-init trigger alongside kOff.
-    assert "Blufi::BleState::kTimeout" in body
-    assert "Blufi::BleState::kOff" in body
-
-    timeout_idx = body.index("Blufi::BleState::kTimeout")
-    init_idx = body.index("blufi.init();")
+    # Every explicit setup entry now creates a fresh generation, covering off,
+    # timeout, advertising, and connected/stuck GATT states uniformly.
+    assert "blufi.RestartForSetup();" in body
+    init_idx = body.index("blufi.RestartForSetup();")
     rearm_idx = body.index("blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC)")
-
-    # The kTimeout acceptance gates init(), and the hard-timeout is re-armed after.
-    assert timeout_idx < init_idx < rearm_idx
-
-    # The acceptance condition must explicitly include kTimeout in the if-guard.
-    assert re.search(
-        r"if\s*\(\s*ble_state\s*==\s*Blufi::BleState::kOff\s*\|\|\s*"
-        r"ble_state\s*==\s*Blufi::BleState::kTimeout\s*\)",
-        body,
-    )
+    assert init_idx < rearm_idx
 
 
 # ---------------------------------------------------------------------------
@@ -142,16 +127,44 @@ def test_fw3c_wifi_list_sent_over_blufi_is_capped_and_strongest_first():
     assert cap_match is not None, "BluFi Wi-Fi list cap is not declared"
     assert 1 <= int(cap_match.group(1)) <= 4
 
-    assert "std::stable_sort" in send_body
+    assert "strongest" in send_body
     assert ".rssi" in send_body
-    assert "seen_ssids" in send_body
+    assert "already_selected" in send_body
     assert "kMaxBlufiWifiListApRecords" in send_body
-    assert "resize(kMaxBlufiWifiListApRecords)" in send_body
+    assert "blufi_ap_count < blufi_ap_list.size()" in send_body
 
-    sort_idx = send_body.index("std::stable_sort")
-    cap_idx = send_body.index("resize(kMaxBlufiWifiListApRecords)")
+    select_idx = send_body.index("const wifi_ap_record_t* strongest")
+    cap_idx = send_body.index("blufi_ap_count < blufi_ap_list.size()")
     send_idx = send_body.index("esp_blufi_send_wifi_list")
-    assert sort_idx < cap_idx < send_idx
+    assert cap_idx < select_idx < send_idx
+
+
+# ---------------------------------------------------------------------------
+# FW3c-memory: a dense scan must not keep/copy heap-proportional AP containers
+#       while BluFi allocates its BTC and notification buffers. Physical Android
+#       testing with 22 APs left the largest internal block near 1.4 KiB and the
+#       controller logged `BLE_INIT: Malloc failed` exactly at list dispatch.
+# ---------------------------------------------------------------------------
+def test_fw3c_wifi_list_releases_scan_heap_before_blufi_dispatch():
+    blufi = read("main/boards/common/blufi.cpp")
+    send_body = _function_body(blufi, "void Blufi::_send_wifi_list")
+
+    assert "std::array<esp_blufi_ap_record_t, kMaxBlufiWifiListApRecords>" in send_body
+    assert "std::vector<wifi_ap_record_t> sorted_ap_records" not in send_body
+    assert "std::vector<std::string>" not in send_body
+    assert "std::vector<esp_blufi_ap_record_t>" not in send_body
+    assert "std::stable_sort" not in send_body
+
+    release_idx = send_body.index("std::vector<wifi_ap_record_t>().swap(m_ap_records)")
+    send_idx = send_body.index("esp_err_t err = esp_blufi_send_wifi_list")
+    assert release_idx < send_idx
+
+
+def test_fw3c_scan_driver_records_are_released_on_all_exit_paths():
+    blufi = read("main/boards/common/blufi.cpp")
+    scan_body = _function_body(blufi, "void Blufi::_wifi_scan_event_handler")
+
+    assert scan_body.count("esp_wifi_clear_ap_list()") >= 2
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +243,7 @@ def test_fw3g_connect_request_and_password_fallback_share_guarded_helper():
     helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
 
     assert 'StartStationConnectFromCredentials("blufi_connect_request")' in req
-    assert "SsidManager::GetInstance().AddSsid" in helper
+    assert "BeginSsidTransaction" in helper
     assert "m_wifi_connect_task_started" in helper
     assert "blufi_wifi_conn" in helper
     assert "ESP_BLUFI_STA_CONN_SUCCESS" in helper
@@ -275,7 +288,7 @@ def test_fw5_authenticated_report_defers_while_ble_active():
     # re-attempt, then returns early before reaching the xTaskCreate report path.
     guard_idx = body.index("if (ble_state != BleState::kOff)")
     deinit_idx = body.index("self->deinit();")
-    reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(reason);")
+    reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(", deinit_idx)
     early_return_idx = body.index("return;", guard_idx)
     report_task_idx = body.index('xTaskCreate(')
 
@@ -398,14 +411,12 @@ def test_fw9_provisioning_report_does_not_log_token_or_request_body():
 
 # ---------------------------------------------------------------------------
 # FW10: blufi.cpp — the wifi-connect-FAIL lane (ESP_BLUFI_STA_CONN_FAIL /
-#       "wifi_connect_failed") must keep the temporary provisioning secrets when
-#       the backend FAILED-status report did not succeed, so the phone can retry
-#       Wi-Fi over the SAME live BLE session. Per ADR-0018 the firmware only
-#       clears secrets once the report is acknowledged; an unconditional clear
-#       strands the in-session level-triggered retry (provisioning_code_ has no
-#       NVS backup).
+#       "wifi_connect_failed") must keep the temporary provisioning secrets even
+#       when the legacy FAILED-status report succeeds. The bootstrap token is
+#       reserved for /claim/confirm; retryable Wi-Fi failure must not consume the
+#       phone's claim attempt before an in-session retry.
 # ---------------------------------------------------------------------------
-def test_fw10_wifi_connect_fail_lane_clears_secrets_only_on_report_success():
+def test_fw10_wifi_connect_fail_lane_never_clears_claim_secrets():
     blufi = read("main/boards/common/blufi.cpp")
 
     # Scope to the wifi-connect-FAIL region: from the STA_CONN_FAIL report down
@@ -418,36 +429,12 @@ def test_fw10_wifi_connect_fail_lane_clears_secrets_only_on_report_success():
     # reason (sanity: we are anchored on the right region).
     assert '"wifi_connect_failed"' in region
 
-    # The bool return of the FAILED-status Report() must be captured and the
-    # clear must be guarded by a success check — never called unconditionally.
-    assert "ClearProvisioningSecrets" in region
-    clear_idx = region.index("ClearProvisioningSecrets")
-
-    # There must be an `if (ok)` (or `if (reported)`) success gate that precedes
-    # the clear. We look for an `if (<bool>)` immediately governing the clear.
-    guard = re.search(r"if\s*\(\s*ok\s*\)\s*\{[^}]*ClearProvisioningSecrets", region, re.DOTALL)
-    assert guard is not None, (
-        "wifi-connect-FAIL lane must clear secrets only inside an `if (ok)` "
-        "success gate, not unconditionally"
-    )
-
-    # The bool must actually be captured from the Report() call in this region.
-    assert re.search(r"bool\s+ok\s*=\s*ProvisioningStatusReporter::Report", region) is not None, (
-        "the FAILED-status Report() return must be captured into a bool in the "
-        "wifi-connect-FAIL lane"
-    )
-
-    # Negative: the clear must NOT sit directly after Report() with no guard
-    # between them (the old unconditional-clear shape).
-    unconditional = re.search(
-        r'Report\([^;]*"wifi_connect_failed"\s*\)\s*;\s*self->ClearProvisioningSecrets\(\)\s*;',
-        region,
-        re.DOTALL,
-    )
-    assert unconditional is None, (
-        "ClearProvisioningSecrets must not be called unconditionally right after "
-        "the FAILED-status Report() in the wifi-connect-FAIL lane"
-    )
+    # Reporting the retryable failure is best-effort telemetry only. Neither a
+    # successful nor failed report may clear the claim token/code.
+    assert "ProvisioningStatusReporter::Report" in region
+    assert 'websocket_settings.GetString("claim_device_id")' in region
+    assert "ClearProvisioningSecrets" not in region
+    assert "secrets retained for WiFi retry" in region
 
     # This lane must NOT tear BLE down or open a new POST while BLE is active:
     # the phone retries Wi-Fi over the SAME BLE session here. No deinit(), no
@@ -703,23 +690,23 @@ def test_fw15_authenticated_report_is_level_triggered_on_all_inputs():
     #   - code TLV  (tag 0x02)
     #   - Wi-Fi connect success (after BLE teardown)
     custom = _custom_data_body()
-    assert 'TryReportProvisioningAuthenticated("custom_data_token")' in custom, (
+    assert 'TryReportProvisioningAuthenticated(' in custom
+    assert '"custom_data_token", generation' in custom, (
         "token TLV must re-attempt the authenticated report"
     )
-    assert 'TryReportProvisioningAuthenticated("custom_data_code")' in custom, (
+    assert '"custom_data_code", generation' in custom, (
         "code TLV must re-attempt the authenticated report"
     )
     req_connect = _station_connect_helper_body()
     assert (
-        'TryReportProvisioningAuthenticated("wifi_success_after_ble_teardown")'
-        in req_connect
+        '"wifi_success_after_ble_teardown", generation' in req_connect
     ), "Wi-Fi success path must drive the authenticated report"
 
     # The precondition guard returns early when ANY piece is missing — this is
     # exactly what makes an out-of-order arrival harmless (it retries later).
     body = _try_report_body()
     guard_idx = body.index(
-        "if (!wifi_connected || token_empty || code_empty || provisioning_report_in_flight_)"
+        "if (!wifi_connected || token_empty || code_empty || report_in_flight)"
     )
     early_return = body.index("return;", guard_idx)
     # The BLE-active defer block + the report task must come AFTER the guard.
@@ -746,7 +733,7 @@ def test_fw16_authenticated_report_requires_wifi_token_code_and_not_in_flight():
 
     # The single guard combines all four with OR of the negatives.
     assert (
-        "if (!wifi_connected || token_empty || code_empty || provisioning_report_in_flight_)"
+        "if (!wifi_connected || token_empty || code_empty || report_in_flight)"
         in body
     ), "the report must be gated on wifi+token+code+not-in-flight together"
 
@@ -766,28 +753,24 @@ def test_fw16_authenticated_report_requires_wifi_token_code_and_not_in_flight():
 #       the task-create-failure path, so a failed xTaskCreate cannot strand the
 #       flag set and permanently block all future retries.
 # ---------------------------------------------------------------------------
-def test_fw17_in_flight_flag_set_before_task_and_cleared_on_all_exits():
+def test_fw17_generation_owner_set_before_task_and_cleared_on_all_exits():
     body = _try_report_body()
 
-    set_idx = body.index("provisioning_report_in_flight_ = true;")
+    set_idx = body.index("provisioning_report_owner_generation_ = expected_generation;")
     task_idx = body.index("xTaskCreate(", set_idx)
-    assert set_idx < task_idx, "the in-flight flag must be set before the report task is created"
+    assert set_idx < task_idx, "the generation owner must be set before the report task is created"
 
-    # Completion handler resets the flag (runs for both ok and !ok).
-    completion_reset = body.index("self->provisioning_report_in_flight_ = false;")
+    # Completion handler verifies and resets the matching owner for both outcomes.
+    owner_match = body.index("provisioning_report_owner_generation_.value() != expected_generation")
+    completion_reset = body.index("provisioning_report_owner_generation_.reset();", owner_match)
     ok_branch = body.index("if (ok) {", completion_reset)
-    assert completion_reset < ok_branch, (
-        "the in-flight flag must be cleared unconditionally before the ok/else split"
-    )
+    assert owner_match < completion_reset < ok_branch
 
-    # The task-create FAILURE path must also clear the flag (created != pdPASS).
+    # The task-create FAILURE path clears only the still-matching owner.
     fail_idx = body.index("if (created != pdPASS)")
-    fail_reset = body.index("provisioning_report_in_flight_ = false;", fail_idx)
+    fail_reset = body.index("provisioning_report_owner_generation_.reset();", fail_idx)
     fail_return = body.index("return;", fail_idx)
-    assert fail_idx < fail_reset < fail_return, (
-        "a failed xTaskCreate must reset provisioning_report_in_flight_ so future "
-        "retries are not permanently blocked"
-    )
+    assert fail_idx < fail_reset < fail_return
 
 
 # ---------------------------------------------------------------------------
@@ -801,7 +784,7 @@ def test_fw18_report_task_zeroizes_its_secret_copy_on_every_path():
 
     # The heap context carries copies of the secrets (not references).
     assert (
-        "ReportTaskContext{this, bootstrap_token_, provisioning_code_}" in body
+        "this, bootstrap_token_, provisioning_code_, expected_generation" in body
     ), "the report task must take copies of the secrets, not live references"
 
     # The task body zeroizes both copies after the POST completes.
@@ -832,7 +815,7 @@ def test_fw19_device_authenticated_reported_only_after_ble_off():
     ble_guard = body.index("if (ble_state != BleState::kOff)")
     # Inside the BLE-active branch: cancel timeout, deinit, re-attempt, early return.
     deinit_idx = body.index("self->deinit();", ble_guard)
-    reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(reason);", ble_guard)
+    reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(", deinit_idx)
     defer_return = body.index("return;", body.index("ble_state=%s", ble_guard))
 
     # The actual authenticated POST must come AFTER the BLE-active early return.
@@ -857,7 +840,7 @@ def test_fw20_ble_active_defer_skips_reschedule_during_wifi_connect():
 
     ble_guard = body.index("if (ble_state != BleState::kOff)")
     # The reschedule is gated on !m_sta_is_connecting.
-    not_connecting = body.index("if (!m_sta_is_connecting)", ble_guard)
+    not_connecting = body.index("if (!m_sta_is_connecting.load())", ble_guard)
     schedule_idx = body.index("Application::GetInstance().Schedule(", not_connecting)
     assert ble_guard < not_connecting < schedule_idx, (
         "the BLE teardown reschedule must be gated on !m_sta_is_connecting so a "
@@ -880,8 +863,8 @@ def test_fw20_ble_active_defer_skips_reschedule_during_wifi_connect():
 def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect():
     req = _station_connect_helper_body()
 
-    # Anchor on the success branch (wifi.IsConnected()).
-    conn_idx = req.index("if (wifi.IsConnected())")
+    # Anchor on the success branch after credential persistence succeeds.
+    conn_idx = req.index("if (credentials_committed)")
     fail_idx = req.index("} else {", conn_idx)
     success = req[conn_idx:fail_idx]
 
@@ -905,14 +888,649 @@ def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect
     sched_body = success[sched_idx:]
     assert "self->deinit();" in sched_body
     assert (
-        'self->TryReportProvisioningAuthenticated("wifi_success_after_ble_teardown");'
-        in sched_body
+        '"wifi_success_after_ble_teardown", generation' in sched_body
     )
-    assert "SchedulePendingTbotClaimRefresh();" in sched_body
+    assert "SchedulePendingTbotClaimRefresh(generation);" in sched_body
     # Teardown precedes the authenticated report inside the deferred lambda.
     assert sched_body.index("self->deinit();") < sched_body.index(
         "TryReportProvisioningAuthenticated"
     )
+
+
+# ---------------------------------------------------------------------------
+# FW21b: esp_blufi_send_wifi_conn_report() only queues a BTC notification; it
+#        does not provide a delivery-complete callback or indication ACK. Keep
+#        the live GATT link up for one short, explicit grace period after a
+#        successful enqueue before disconnect/deinit. An enqueue error must be
+#        handled separately and must never be described as delivered.
+# ---------------------------------------------------------------------------
+def test_fw21b_conn_success_report_gets_bounded_delivery_grace_before_teardown():
+    blufi = read("main/boards/common/blufi.cpp")
+    req = _station_connect_helper_body()
+
+    grace_match = re.search(
+        r"constexpr\s+int\s+kBlufiSuccessReportDeliveryGraceMs\s*=\s*(\d+)\s*;",
+        blufi,
+    )
+    assert grace_match is not None, "BluFi SUCCESS delivery grace is not declared"
+    assert int(grace_match.group(1)) == 750
+
+    attempts_match = re.search(
+        r"constexpr\s+int\s+kBlufiSuccessReportEnqueueAttempts\s*=\s*(\d+)\s*;",
+        blufi,
+    )
+    backoff_match = re.search(
+        r"constexpr\s+int\s+kBlufiSuccessReportRetryBackoffMs\s*=\s*(\d+)\s*;",
+        blufi,
+    )
+    assert attempts_match is not None
+    assert int(attempts_match.group(1)) == 3
+    assert backoff_match is not None
+    assert int(backoff_match.group(1)) == 100
+
+    conn_idx = req.index("if (credentials_committed)")
+    fail_idx = req.index("} else {", conn_idx)
+    success = req[conn_idx:fail_idx]
+
+    enqueue = "success_report_err ="
+    assert enqueue in success
+    assert (
+        "esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS"
+        in success
+    )
+    assert "if (success_report_err == ESP_OK)" in success
+    assert "if (success_report_err != ESP_OK)" in success
+    assert "for (int report_attempt = 1;" in success
+    assert "report_attempt <= kBlufiSuccessReportEnqueueAttempts" in success
+    assert "report_attempt < kBlufiSuccessReportEnqueueAttempts" in success
+    assert "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportRetryBackoffMs));" in success
+    assert "Failed to queue WiFi success report after %d attempts" in success
+    assert "backend claim" in success
+    assert "polling remains the recovery path for the phone" in success
+
+    report_idx = success.index(enqueue)
+    retry_success_check_idx = success.index(
+        "if (success_report_err == ESP_OK)", report_idx
+    )
+    retry_backoff_idx = success.index(
+        "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportRetryBackoffMs));",
+        retry_success_check_idx,
+    )
+    grace_success_check_idx = success.index(
+        "if (success_report_err == ESP_OK)", retry_backoff_idx
+    )
+    delay_idx = success.index(
+        "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportDeliveryGraceMs));",
+        grace_success_check_idx,
+    )
+    failure_check_idx = success.index("if (success_report_err != ESP_OK)", delay_idx)
+    disconnect_idx = success.index("esp_blufi_disconnect();", failure_check_idx)
+    schedule_idx = success.index("Application::GetInstance().Schedule(", disconnect_idx)
+
+    assert report_idx < retry_success_check_idx < retry_backoff_idx
+    assert retry_backoff_idx < grace_success_check_idx < delay_idx < failure_check_idx
+    assert failure_check_idx < disconnect_idx < schedule_idx
+
+    # No claim/TLS work may start during the grace period.
+    grace_region = success[report_idx:disconnect_idx]
+    assert "TryReportProvisioningAuthenticated" not in grace_region
+    assert "SchedulePendingTbotClaimRefresh" not in grace_region
+
+
+# ---------------------------------------------------------------------------
+# FW21c: m_sta_is_connecting is also the concurrency barrier used by
+#        TryReportProvisioningAuthenticated() while BLE is live. Keep it set
+#        through the delivery grace, then fence on setup generation before the
+#        old worker may clear the barrier or disconnect a potentially newer
+#        GATT session.
+# ---------------------------------------------------------------------------
+def test_fw21c_delivery_grace_keeps_connect_guard_and_fences_stale_worker():
+    blufi = read("main/boards/common/blufi.cpp")
+    req = _station_connect_helper_body()
+    report = _try_report_body()
+
+    conn_idx = req.index("if (credentials_committed)")
+    fail_idx = req.index("} else {", conn_idx)
+    success = req[conn_idx:fail_idx]
+
+    delay_idx = success.index(
+        "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportDeliveryGraceMs));"
+    )
+    generation_check_idx = success.index(
+        "if (generation != self->setup_generation_.load())", delay_idx
+    )
+    clear_guard_idx = success.index("self->m_sta_is_connecting.store(false);", delay_idx)
+    disconnect_idx = success.index("esp_blufi_disconnect();", clear_guard_idx)
+
+    assert delay_idx < generation_check_idx < clear_guard_idx < disconnect_idx
+    stale_exit = success[generation_check_idx:clear_guard_idx]
+    assert "vTaskDelete(nullptr);" in stale_exit
+    assert "return;" in stale_exit
+    assert "esp_blufi_disconnect" not in stale_exit
+    assert "self->deinit" not in stale_exit
+
+    ble_guard_idx = report.index("if (ble_state != BleState::kOff)")
+    connect_guard_idx = report.index("if (!m_sta_is_connecting.load())", ble_guard_idx)
+    deferred_return_idx = report.index("return;", connect_guard_idx)
+    assert ble_guard_idx < connect_guard_idx < deferred_return_idx
+
+    header = read("main/boards/common/blufi.h")
+    assert "std::atomic<bool> m_sta_is_connecting{false};" in header
+    assert not re.search(r"m_sta_is_connecting\s*=\s*(?:true|false)", blufi)
+    assert "m_sta_is_connecting.store(true);" in blufi
+    assert "m_sta_is_connecting.store(false);" in blufi
+    assert "m_sta_is_connecting.load()" in blufi
+    for line in blufi.splitlines():
+        if "m_sta_is_connecting" not in line:
+            continue
+        if "m_sta_is_connecting(false)" in line:
+            continue
+        assert ".load()" in line or ".store(" in line, line
+
+
+# ---------------------------------------------------------------------------
+# FW21d: completion must re-check setup ownership immediately before every
+#        transaction resolve operation, then fence again before mutating shared
+#        station state or reporting. Transaction cleanup uses the opaque id and
+#        CAS so an old worker cannot clear a newer candidate's ownership.
+# ---------------------------------------------------------------------------
+def test_fw21d_transaction_resolution_and_shared_mutation_are_generation_fenced():
+    req = _station_connect_helper_body()
+    worker_start = req.index("while (waited_ms < kConnectTimeoutMs")
+    worker = req[worker_start:]
+
+    commit_marker = worker.index(
+        "Revalidate setup ownership immediately before transaction commit"
+    )
+    pre_commit_fence = worker.index(
+        "if (generation != self->setup_generation_.load())", commit_marker
+    )
+    commit_idx = worker.index("CommitSsidTransaction(ssid_transaction)", pre_commit_fence)
+    assert commit_marker < pre_commit_fence < commit_idx
+    assert "vTaskDelete(nullptr);" in worker[pre_commit_fence:commit_idx]
+    assert "return;" in worker[pre_commit_fence:commit_idx]
+
+    rollback_marker = worker.index(
+        "Revalidate setup ownership immediately before transaction rollback",
+        commit_idx,
+    )
+    pre_rollback_fence = worker.index(
+        "if (generation != self->setup_generation_.load())", rollback_marker
+    )
+    rollback_after_commit = worker.index(
+        "RollbackSsidTransaction(ssid_transaction)", pre_rollback_fence
+    )
+    assert commit_idx < rollback_marker < pre_rollback_fence < rollback_after_commit
+    first_shared_mutation = min(
+        worker.index("self->m_sta_connected = true;"),
+        worker.index("self->m_wifi_connect_task_started.store(false);"),
+    )
+    shared_marker = worker.index(
+        "Fence resolved transaction before shared station or report mutation",
+        rollback_after_commit,
+    )
+    post_resolve_fence = worker.index(
+        "if (generation != self->setup_generation_.load())", shared_marker
+    )
+    rollback_region = worker[pre_rollback_fence:shared_marker]
+    assert rollback_region.count("RollbackSsidTransaction(ssid_transaction)") >= 2
+    assert "ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0)" in rollback_region
+    assert rollback_after_commit < shared_marker < post_resolve_fence < first_shared_mutation
+    assert "vTaskDelete(nullptr);" in worker[post_resolve_fence:first_shared_mutation]
+    assert "return;" in worker[post_resolve_fence:first_shared_mutation]
+
+    ownership = worker[pre_commit_fence:first_shared_mutation]
+    assert ownership.count("uint32_t expected_transaction = ssid_transaction;") >= 2
+    assert ownership.count(
+        "ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0)"
+    ) >= 2
+
+
+# ---------------------------------------------------------------------------
+# FW21e: generation checks alone are TOCTOU. RestartForSetup and the completion
+#        worker must serialize generation/transaction/state/report ownership on
+#        one Blufi mutex. The worker keeps it through SUCCESS grace/disconnect
+#        or FAIL enqueue, then releases it before scheduling claim/TLS work.
+# ---------------------------------------------------------------------------
+def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leaks():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    req = _station_connect_helper_body()
+    worker_start = req.index("while (waited_ms < kConnectTimeoutMs")
+    worker = req[worker_start:]
+
+    assert "#include <mutex>" in header
+    assert "std::mutex provisioning_finalization_mutex_;" in header
+
+    restart_lock = restart.index(
+        "std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);"
+    )
+    generation_advance = restart.index("setup_generation_.fetch_add(1)")
+    transaction_take = restart.index("ssid_transaction_id_.exchange(0)")
+    rollback = restart.index("RollbackSsidTransaction(stale_ssid_transaction)")
+    state_reset = restart.index("m_sta_is_connecting.store(false)")
+    assert restart_lock < generation_advance < transaction_take < rollback < state_reset
+
+    worker_lock = worker.index("std::unique_lock<std::mutex> finalization_lock(")
+    assert "self->provisioning_finalization_mutex_);" in worker[
+        worker_lock:worker_lock + 160
+    ]
+    first_generation_check = worker.index(
+        "if (generation != self->setup_generation_.load())", worker_lock
+    )
+    first_transaction_resolve = min(
+        worker.index("CommitSsidTransaction(ssid_transaction)", worker_lock),
+        worker.index("RollbackSsidTransaction(ssid_transaction)", worker_lock),
+    )
+    assert worker_lock < first_generation_check < first_transaction_resolve
+
+    success_start = worker.index("if (credentials_committed)", worker_lock)
+    failure_start = worker.index("} else {", success_start)
+    success = worker[success_start:failure_start]
+    failure = worker[failure_start:]
+
+    success_disconnect = success.index("esp_blufi_disconnect();")
+    success_unlock = success.index("finalization_lock.unlock();", success_disconnect)
+    claim_schedule = success.index("Application::GetInstance().Schedule(", success_unlock)
+    assert success_disconnect < success_unlock < claim_schedule
+
+    failure_report = failure.index("ESP_BLUFI_STA_CONN_FAIL")
+    failure_unlock = failure.index("finalization_lock.unlock();", failure_report)
+    assert failure_report < failure_unlock
+
+    # Every self-delete reachable while the mutex is owned explicitly unlocks
+    # first; FreeRTOS self-delete does not guarantee C++ stack unwinding.
+    locked_region = worker[worker_lock:success_unlock]
+    for delete_match in re.finditer(r"vTaskDelete\(nullptr\);", locked_region):
+        prefix = locked_region[max(0, delete_match.start() - 120):delete_match.start()]
+        assert "finalization_lock.unlock();" in prefix
+
+
+# ---------------------------------------------------------------------------
+# FW21f: the deferred success continuation re-enters after the worker releases
+#        the mutex, so it must reacquire the same lock before generation check
+#        and BLE teardown. Failure reporting must snapshot secrets by value
+#        under the worker lock and clear them after unlocked HTTP use.
+# ---------------------------------------------------------------------------
+def test_fw21f_deferred_teardown_and_failure_secret_snapshot_are_synchronized():
+    req = _station_connect_helper_body()
+    success_start = req.index("if (credentials_committed)")
+    failure_start = req.index("} else {", success_start)
+    success = req[success_start:failure_start]
+    failure = req[failure_start:]
+
+    schedule_start = success.index("Application::GetInstance().Schedule(")
+    continuation = success[schedule_start:]
+    lock_idx = continuation.index(
+        "std::unique_lock<std::mutex> continuation_lock("
+    )
+    assert "self->provisioning_finalization_mutex_);" in continuation[
+        lock_idx:lock_idx + 170
+    ]
+    generation_idx = continuation.index(
+        "if (generation != self->setup_generation_.load())", lock_idx
+    )
+    stale_unlock_idx = continuation.index("continuation_lock.unlock();", generation_idx)
+    stale_return_idx = continuation.index("return;", stale_unlock_idx)
+    cancel_idx = continuation.index("self->CancelBleSetupTimeout();", stale_return_idx)
+    deinit_idx = continuation.index("self->deinit();", cancel_idx)
+    success_unlock_idx = continuation.index("continuation_lock.unlock();", deinit_idx)
+    report_idx = continuation.index("self->TryReportProvisioningAuthenticated", success_unlock_idx)
+    claim_idx = continuation.index("SchedulePendingTbotClaimRefresh", report_idx)
+    assert lock_idx < generation_idx < stale_unlock_idx < stale_return_idx
+    assert stale_return_idx < cancel_idx < deinit_idx < success_unlock_idx < report_idx < claim_idx
+
+    token_snapshot = failure.index(
+        "std::string failure_token = self->bootstrap_token_;"
+    )
+    code_snapshot = failure.index(
+        "std::string failure_code = self->provisioning_code_;", token_snapshot
+    )
+    unlock_idx = failure.index("finalization_lock.unlock();", code_snapshot)
+    legacy_report = failure.index("ProvisioningStatusReporter::Report(", unlock_idx)
+    token_clear = failure.index("SecureClearLocalString(failure_token);", legacy_report)
+    code_clear = failure.index("SecureClearLocalString(failure_code);", token_clear)
+    assert token_snapshot < code_snapshot < unlock_idx < legacy_report < token_clear < code_clear
+
+    unlocked_failure = failure[unlock_idx:code_clear]
+    assert "self->bootstrap_token_" not in unlocked_failure
+    assert "self->provisioning_code_" not in unlocked_failure
+    assert "const std::string& token = failure_token;" in unlocked_failure
+    assert "const std::string& code = failure_code;" in unlocked_failure
+
+
+# ---------------------------------------------------------------------------
+# FW21g: claim promotion/refresh dispatch carries the setup generation into the
+#        Application task and runs under the same finalization mutex. The lock
+#        covers generation validation + state promotion + refresh dispatch only;
+#        the dispatched RefreshPendingTbotClaim executes after the helper returns
+#        so network/TLS never runs while the Blufi mutex is held.
+# ---------------------------------------------------------------------------
+def test_fw21g_claim_refresh_dispatch_is_generation_bound_without_tls_under_lock():
+    blufi_header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    app_header = read("main/application.h")
+    app = read("main/application.cc")
+    helper = _function_body(blufi, "bool Blufi::RunIfSetupGenerationCurrent")
+    schedule = _function_body(app, "void Application::SchedulePendingTbotClaimRefresh")
+
+    assert "#include <functional>" in blufi_header
+    assert "bool RunIfSetupGenerationCurrent(uint32_t expected_generation," in blufi_header
+    assert "const std::function<void()>& action);" in blufi_header
+    assert "std::lock_guard<std::mutex> finalization_lock(" in helper
+    assert "provisioning_finalization_mutex_" in helper
+    generation_idx = helper.index("expected_generation != setup_generation_.load()")
+    action_idx = helper.index("action();", generation_idx)
+    assert generation_idx < action_idx
+
+    assert "void SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation);" in app_header
+    assert "expected_setup_generation" in schedule
+    run_idx = schedule.index("RunIfSetupGenerationCurrent(")
+    assert "expected_setup_generation" in schedule[run_idx:run_idx + 180]
+    promote_idx = schedule.index("PromoteFromWifiConfigAfterProvisioning();", run_idx)
+    dispatch_idx = schedule.index(
+        "DispatchPendingTbotClaimRefreshForSetupGeneration(", promote_idx
+    )
+    assert "expected_setup_generation" in schedule[dispatch_idx:dispatch_idx + 150]
+    assert run_idx < promote_idx < dispatch_idx
+    guarded_dispatch = schedule[run_idx:dispatch_idx]
+    assert "FetchBackendApiUrlFromBootstrap" not in guarded_dispatch
+    assert "ConfirmPendingTbotClaim" not in guarded_dispatch
+    assert "RefreshPendingTbotClaim" not in schedule
+    assert "Schedule([this]()" not in schedule[promote_idx:dispatch_idx]
+
+    success_start = blufi.index("if (credentials_committed)")
+    success_end = blufi.index("Failed to connect to WiFi via esp-wifi-connect", success_start)
+    success = blufi[success_start:success_end]
+    assert "SchedulePendingTbotClaimRefresh(generation);" in success
+
+
+# ---------------------------------------------------------------------------
+# FW21h: generation-bound refresh is prepare/dispatch-only. API fallback,
+#        device-config fetch, and cached confirmation all carry the setup
+#        generation through worker context; their Application-task result is
+#        discarded unless RunIfSetupGenerationCurrent accepts it.
+# ---------------------------------------------------------------------------
+def test_fw21h_generation_flows_through_claim_network_contexts_and_result_apply():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    prepare = _function_body(
+        app, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+    fetch_dispatch = _function_body(app, "bool Application::DispatchPendingTbotClaimFetch")
+    fetch_task = _function_body(app, "void Application::ClaimFetchTask")
+    confirm_dispatch = _function_body(
+        app, "bool Application::DispatchPendingTbotClaimConfirmation"
+    )
+    confirm_task = _function_body(app, "void Application::ClaimConfirmationTask")
+
+    assert "DispatchPendingTbotClaimRefreshForSetupGeneration" in header
+    assert "DispatchPendingTbotClaimFetch" in prepare
+    assert "DispatchPendingTbotClaimConfirmation" in prepare
+    for blocking in (
+        "FetchBackendApiUrlFromBootstrap",
+        "FetchPendingTbotClaimFromDeviceConfig",
+        "ClaimConfirmationReporter::Confirm",
+        "ConfirmPendingTbotClaim",
+    ):
+        assert blocking not in prepare
+
+    assert "uint32_t expected_setup_generation;" in app
+    assert "bool enforce_setup_generation;" in app
+    assert "expected_setup_generation" in fetch_dispatch
+    assert "enforce_setup_generation" in fetch_dispatch
+    assert "ctx->expected_setup_generation" in fetch_task
+    assert "FetchBackendApiUrlFromBootstrap(token, false)" in fetch_task
+    fetch_apply = fetch_task.index("ApplyPendingTbotClaimFetchResult")
+    fetch_gate = fetch_task.index("RunIfSetupGenerationCurrent(", fetch_apply)
+    assert "expected_setup_generation" in fetch_task[fetch_gate:fetch_gate + 180]
+    assert "apply_result" in fetch_task[fetch_gate:fetch_gate + 220]
+    assert fetch_apply < fetch_gate
+
+    assert "expected_setup_generation" in confirm_dispatch
+    assert "enforce_setup_generation" in confirm_dispatch
+    assert "ctx->expected_setup_generation" in confirm_task
+    assert "ClaimConfirmationReporter::Confirm" in confirm_task
+    assert "success_response" in confirm_task
+    confirm_apply = confirm_task.index("ApplyPendingTbotClaimConfirmationResult")
+    confirm_gate = confirm_task.index("RunIfSetupGenerationCurrent(", confirm_apply)
+    assert "expected_setup_generation" in confirm_task[confirm_gate:confirm_gate + 180]
+    assert "apply_result" in confirm_task[confirm_gate:confirm_gate + 220]
+    assert confirm_apply < confirm_gate
+    persist_idx = confirm_task.index("PersistTbotClaimConfirmationResponse")
+    assert persist_idx < confirm_gate
+    assert "SecureClearString(success_response);" in confirm_task
+
+    assert "claim_confirm_inflight_" in header
+
+
+# ---------------------------------------------------------------------------
+# FW21i: the legacy authenticated-status worker is generation-owned too. Start,
+#        secret snapshot, and result application serialize on the finalization
+#        mutex; only a current generation whose optional owner still matches may
+#        clear in-flight ownership or provisioning secrets.
+# ---------------------------------------------------------------------------
+def test_fw21i_legacy_report_is_generation_owned_and_cannot_clear_new_setup():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    report = _function_body(blufi, "void Blufi::TryReportProvisioningAuthenticated")
+    custom = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:")
+    connect = _station_connect_helper_body()
+
+    assert "#include <optional>" in header
+    assert "std::optional<uint32_t> provisioning_report_owner_generation_;" in header
+    assert "bool provisioning_report_in_flight_" not in header
+    assert (
+        "void TryReportProvisioningAuthenticated(const char* reason, "
+        "uint32_t expected_generation);"
+        in header
+    )
+
+    restart_lock = restart.index("finalization_lock")
+    owner_reset = restart.index("provisioning_report_owner_generation_.reset()")
+    assert restart_lock < owner_reset
+
+    report_lock = report.index("std::unique_lock<std::mutex> report_lock(")
+    generation_check = report.index(
+        "expected_generation != setup_generation_.load()", report_lock
+    )
+    owner_check = report.index("provisioning_report_owner_generation_.has_value()")
+    owner_assign = report.index(
+        "provisioning_report_owner_generation_ = expected_generation", owner_check
+    )
+    context_generation = report.index("uint32_t expected_generation;")
+    assert report_lock < generation_check < owner_check < context_generation < owner_assign
+
+    result_gate = report.index("RunIfSetupGenerationCurrent(")
+    assert "expected_generation" in report[result_gate:result_gate + 180]
+    matching_owner = report.index(
+        "provisioning_report_owner_generation_.value() != expected_generation",
+        result_gate,
+    )
+    result_reset = report.index("provisioning_report_owner_generation_.reset()", matching_owner)
+    clear_secrets = report.index("self->ClearProvisioningSecrets();", result_reset)
+    assert result_gate < matching_owner < result_reset < clear_secrets
+
+    success_start = connect.index("Application::GetInstance().Schedule(")
+    continuation = connect[success_start:]
+    unlock_idx = continuation.index("continuation_lock.unlock();")
+    report_idx = continuation.index("TryReportProvisioningAuthenticated(", unlock_idx)
+    assert '"wifi_success_after_ble_teardown", generation' in continuation[report_idx:report_idx + 180]
+    assert unlock_idx < report_idx
+
+    assert '"custom_data_token", generation' in custom
+    assert '"custom_data_code", generation' in custom
+
+
+# ---------------------------------------------------------------------------
+# FW21j: the BTC custom-data callback must never wait on the finalization mutex.
+#        It only parses bounded TLVs into a generation-tagged snapshot and posts
+#        to the Application task. The Application action applies device_id first,
+#        then token/code under RunIfSetupGenerationCurrent, clears copies on all
+#        exits, and triggers generation-aware reporting only after unlock.
+# ---------------------------------------------------------------------------
+def test_fw21j_custom_data_callback_is_nonblocking_and_application_owned():
+    blufi = read("main/boards/common/blufi.cpp")
+    custom = _custom_data_body()
+    schedule_in_case = custom.index("Application::GetInstance().Schedule(")
+    callback = custom[:schedule_in_case]
+
+    for forbidden in (
+        "Settings ",
+        "bootstrap_token_.assign",
+        "provisioning_code_.assign",
+        "TryReportProvisioningAuthenticated",
+        "provisioning_finalization_mutex_",
+        "RunIfSetupGenerationCurrent",
+    ):
+        assert forbidden not in callback
+
+    assert "BlufiCustomDataSnapshot snapshot" in custom
+    assert "std::array<char, 64> device_id" in blufi
+    assert "std::array<char, 64> token" in blufi
+    assert "std::array<char, 16> code" in blufi
+    assert "std::min<size_t>(len, snapshot.token.size())" in custom
+    assert "std::min<size_t>(len, snapshot.code.size())" in custom
+    assert "std::min<size_t>(len, snapshot.device_id.size())" in custom
+    assert "snapshot.expected_generation = session_generation;" in custom
+    assert "Application::GetInstance().Schedule(" in custom
+    assert "SecureClearCustomDataSnapshot(snapshot);" in custom
+
+    scheduled = blufi[blufi.index("Application::GetInstance().Schedule(", blufi.index("BlufiCustomDataSnapshot snapshot")) :]
+    gate_idx = scheduled.index("RunIfSetupGenerationCurrent(")
+    device_store = scheduled.index('"claim_device_id"', gate_idx)
+    token_assign = scheduled.index("bootstrap_token_.assign", device_store)
+    token_store = scheduled.index('"bootstrap_token"', token_assign)
+    code_assign = scheduled.index("provisioning_code_.assign", token_store)
+    report_idx = scheduled.index("TryReportProvisioningAuthenticated(", code_assign)
+    clear_idx = scheduled.index("secure_context->Clear();", report_idx)
+    assert gate_idx < device_store < token_assign < token_store < code_assign < report_idx < clear_idx
+
+
+# ---------------------------------------------------------------------------
+# FW21k: Application::Schedule stores std::function, whose construction/moves
+#        may copy a lambda. Secret arrays therefore must not be captured by
+#        value. A single heap-owned secure context is referenced through a
+#        copyable pointer handle; every handle copy contains only a pointer,
+#        and the context zeroizes both explicitly after apply and in its
+#        destructor if queued work is discarded.
+# ---------------------------------------------------------------------------
+def test_fw21k_custom_data_schedule_copies_only_secure_context_pointer():
+    blufi = read("main/boards/common/blufi.cpp")
+    custom = _custom_data_body()
+
+    assert "[self, snapshot]" not in custom
+    assert "struct BlufiCustomDataContext" in blufi
+    assert "class BlufiCustomDataContextPtr" in blufi
+    assert "BlufiCustomDataSnapshot snapshot;" in custom
+    assert "new (std::nothrow) BlufiCustomDataContext" in custom
+    assert "BlufiCustomDataContextPtr secure_context" in custom
+    assert "[self, secure_context]" in custom
+
+    allocate_idx = custom.index("new (std::nothrow) BlufiCustomDataContext")
+    allocation_failure_idx = custom.index("if (raw_context == nullptr)", allocate_idx)
+    allocation_failure_end = custom.index("}", allocation_failure_idx)
+    allocation_failure = custom[allocation_failure_idx:allocation_failure_end]
+    assert "SecureClearCustomDataSnapshot(snapshot);" in allocation_failure
+    assert "break;" in allocation_failure
+    for forbidden in (
+        "Settings ",
+        "bootstrap_token_.assign",
+        "provisioning_code_.assign",
+        "Application::GetInstance().Schedule",
+    ):
+        assert forbidden not in allocation_failure
+
+    transfer_idx = custom.index("raw_context->snapshot = snapshot;", allocation_failure_idx)
+    stack_clear_idx = custom.index("SecureClearCustomDataSnapshot(snapshot);", transfer_idx)
+    schedule_idx = custom.index("Application::GetInstance().Schedule(", stack_clear_idx)
+    assert allocate_idx < allocation_failure_idx < transfer_idx < stack_clear_idx < schedule_idx
+
+    context_start = blufi.index("struct BlufiCustomDataContext")
+    context_end = blufi.index("class BlufiCustomDataContextPtr", context_start)
+    context = blufi[context_start:context_end]
+    assert "~BlufiCustomDataContext()" in context
+    assert "SecureClearCustomDataSnapshot(snapshot);" in context
+
+    handle_start = blufi.index("class BlufiCustomDataContextPtr")
+    handle_end = blufi.index("Blufi& Blufi::GetInstance()", handle_start)
+    handle = blufi[handle_start:handle_end]
+    assert "BlufiCustomDataContext* context_" in handle
+    assert "BlufiCustomDataSnapshot" not in handle
+    assert "Retain()" in handle
+    assert "Release()" in handle
+
+    scheduled = custom[schedule_idx:]
+    assert "secure_context->Clear();" in scheduled
+
+
+# ---------------------------------------------------------------------------
+# FW21l: RestartForSetup advances setup_generation_ before the old Bluetooth
+#        host is drained. Custom data from that old connection must therefore
+#        use the generation captured when BLE_CONNECT established the session,
+#        never re-sample the current setup generation while handling data.
+# ---------------------------------------------------------------------------
+def test_fw21l_custom_data_is_bound_to_ble_connection_generation():
+    blufi = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    custom = _custom_data_body()
+
+    assert "std::atomic<uint64_t> ble_session_state_" in header
+    for phase in ("kStopping", "kAccepting", "kConnected", "kDisconnected"):
+        assert phase in blufi
+
+    connect_start = blufi.index("case ESP_BLUFI_EVENT_BLE_CONNECT:")
+    disconnect_start = blufi.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT:", connect_start)
+    connect = blufi[connect_start:disconnect_start]
+    state_load = connect.index("ble_session_state_.load(")
+    accepting_check = connect.index("BleSessionPhase::kAccepting", state_load)
+    generation_decode = connect.index("DecodeBleSessionGeneration(expected_state)")
+    connected_encode = connect.index("BleSessionPhase::kConnected", generation_decode)
+    connect_cas = connect.index("ble_session_state_.compare_exchange_strong(", connected_encode)
+    assert state_load < accepting_check < generation_decode < connected_encode < connect_cas
+    assert "ble_session_state_.store(" not in connect
+
+    disconnect_end = blufi.index("case ESP_BLUFI_EVENT_GET_WIFI_STATUS:", disconnect_start)
+    disconnect = blufi[disconnect_start:disconnect_end]
+    connected_check = disconnect.index("BleSessionPhase::kConnected")
+    disconnected_encode = disconnect.index("BleSessionPhase::kDisconnected", connected_check)
+    disconnect_cas = disconnect.index(
+        "ble_session_state_.compare_exchange_strong(", disconnected_encode
+    )
+    accepting_encode = disconnect.index("BleSessionPhase::kAccepting", disconnect_cas)
+    rearm_cas = disconnect.index(
+        "ble_session_state_.compare_exchange_strong(", accepting_encode
+    )
+    assert connected_check < disconnected_encode < disconnect_cas < accepting_encode < rearm_cas
+    assert "ble_session_state_.store(" not in disconnect
+
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    restart_invalidate = restart.index("ble_session_state_.exchange(")
+    restart_stopping = restart.index("BleSessionPhase::kStopping", restart_invalidate)
+    restart_generation = restart.index("setup_generation_.fetch_add(1)")
+    assert restart_invalidate < restart_stopping < restart_generation
+
+    deinit = _function_body(blufi, "esp_err_t Blufi::deinit")
+    deinit_invalidate = deinit.index("ble_session_state_.exchange(")
+    deinit_host = deinit.index("_host_deinit()")
+    assert "BleSessionPhase::kStopping" in deinit[deinit_invalidate:deinit_host]
+    assert deinit_invalidate < deinit_host
+
+    init = _function_body(blufi, "esp_err_t Blufi::init")
+    host_ready = init.index("_host_and_cb_init()")
+    accepting_publish = init.index("BleSessionPhase::kAccepting", host_ready)
+    assert host_ready < accepting_publish
+
+    assert "snapshot.expected_generation = setup_generation_.load();" not in custom
+    state_idx = custom.index("ble_session_state_.load(")
+    connected_idx = custom.index("BleSessionPhase::kConnected", state_idx)
+    session_generation_idx = custom.index("DecodeBleSessionGeneration(session_state)", connected_idx)
+    snapshot_generation_idx = custom.index(
+        "snapshot.expected_generation = session_generation;", session_generation_idx
+    )
+    assert state_idx < connected_idx < session_generation_idx < snapshot_generation_idx
 
 
 # ---------------------------------------------------------------------------
@@ -926,7 +1544,7 @@ def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect
 # ---------------------------------------------------------------------------
 def test_fw22_no_authenticated_post_or_claim_refresh_inline_while_ble_up():
     req = _station_connect_helper_body()
-    conn_idx = req.index("if (wifi.IsConnected())")
+    conn_idx = req.index("if (credentials_committed)")
     fail_idx = req.index("} else {", conn_idx)
     success = req[conn_idx:fail_idx]
 
@@ -967,12 +1585,13 @@ def test_fw23_custom_data_tlv_is_bounded_and_secrets_are_capped():
     assert "TLV truncated at tag=0x%02x" in custom
     assert "break;" in custom
 
-    # Token cap = 64, code cap = 16; the assign uses the clamped safe_len, never
-    # the raw frame length.
-    assert "uint8_t safe_len = (len > 64) ? 64 : len;" in custom
-    assert "bootstrap_token_.assign(value, safe_len);" in custom
-    assert "uint8_t safe_len = (len > 16) ? 16 : len;" in custom
-    assert "provisioning_code_.assign(value, safe_len);" in custom
+    # Fixed-size snapshot caps token/device id at 64 and code at 16.
+    assert "std::min<size_t>(len, snapshot.token.size())" in custom
+    assert "std::min<size_t>(len, snapshot.code.size())" in custom
+    assert "bootstrap_token_.assign(" in custom
+    assert "snapshot.token.data(), snapshot.token_len" in custom
+    assert "provisioning_code_.assign(" in custom
+    assert "snapshot.code.data(), snapshot.code_len" in custom
 
     # Defense-in-depth: the assign must use safe_len, not the raw len.
     assert "bootstrap_token_.assign(value, len)" not in custom
@@ -989,8 +1608,8 @@ def test_fw24_custom_data_logs_byte_counts_not_secret_values():
     custom = _custom_data_body()
 
     # Byte-count logs only.
-    assert 'ESP_LOGI(BLUFI_TAG, "Received bootstrap token (%u bytes)", safe_len);' in custom
-    assert 'ESP_LOGI(BLUFI_TAG, "Received provisioning code (%u bytes)", safe_len);' in custom
+    assert '"Received bootstrap token (%u bytes)"' in custom
+    assert '"Received provisioning code (%u bytes)"' in custom
 
     # No ESP_LOG line in this handler may format the raw token/code value.
     for line in custom.splitlines():
@@ -1015,7 +1634,7 @@ def test_fw25_token_persisted_to_nvs_but_code_is_ram_only():
 
     # Token is written to the websocket NVS namespace.
     assert 'Settings websocket_settings("websocket", true);' in custom
-    assert 'websocket_settings.SetString("bootstrap_token", bootstrap_token_);' in custom
+    assert '"bootstrap_token", self->bootstrap_token_' in custom
 
     # The provisioning code is NEVER persisted to NVS anywhere in the file.
     blufi = read("main/boards/common/blufi.cpp")
@@ -1048,9 +1667,10 @@ def test_fw26_deinit_is_idempotent_and_host_precedes_controller():
     # Idempotency: only act when inited_, and early-return when already deinited.
     assert "if (inited_) {" in body
     guard_idx = body.index("if (m_deinited) {")
-    return_idx = body.index("return ESP_OK;", guard_idx)
     set_deinited = body.index("m_deinited = true;", guard_idx)
-    assert guard_idx < return_idx < set_deinited, (
+    guard = body[guard_idx:set_deinited]
+    assert "return teardown_failed_.load() ? ESP_ERR_INVALID_STATE : ESP_OK;" in guard
+    assert guard_idx < set_deinited, (
         "deinit() must early-return on the already-deinited path BEFORE setting "
         "m_deinited again / tearing down a second time"
     )
@@ -1105,13 +1725,13 @@ def test_fw27_get_ble_state_priority_timeout_dominates_then_off():
 # ---------------------------------------------------------------------------
 def test_fw28_wifi_connect_fail_lane_resets_flags_and_reports_fail():
     req = _station_connect_helper_body()
-    conn_idx = req.index("if (wifi.IsConnected())")
+    conn_idx = req.index("if (credentials_committed)")
     else_idx = req.index("} else {", conn_idx)
     fail = req[else_idx:]
 
     # State-machine flags are cleared so a later GET_WIFI_STATUS does not report
     # a stale "connecting" / "connected".
-    assert "self->m_sta_is_connecting = false;" in fail
+    assert "self->m_sta_is_connecting.store(false);" in fail
     assert "self->m_sta_connected = false;" in fail
     assert "self->m_sta_got_ip = false;" in fail
 
@@ -1130,8 +1750,8 @@ def test_fw28_wifi_connect_fail_lane_resets_flags_and_reports_fail():
     status_start = handle.index("case ESP_BLUFI_EVENT_GET_WIFI_STATUS:")
     status_end = handle.index("case ESP_BLUFI_EVENT_RECV_STA_BSSID:", status_start)
     status_body = handle[status_start:status_end]
-    assert "else if (m_sta_is_connecting)" in status_body
-    connecting_idx = status_body.index("else if (m_sta_is_connecting)")
+    assert "else if (m_sta_is_connecting.load())" in status_body
+    connecting_idx = status_body.index("else if (m_sta_is_connecting.load())")
     connecting_report = status_body.index("ESP_BLUFI_STA_CONNECTING", connecting_idx)
     assert connecting_idx < connecting_report, (
         "an in-progress connect must surface STA_CONNECTING on status poll"
@@ -1194,7 +1814,7 @@ def test_fw29_clear_provisioning_secrets_erases_nvs_token_and_ram():
 
     # The NVS erase must operate on the same key the custom-data handler writes
     # (FW25), so the at-rest copy that was persisted is the one removed.
-    assert 'websocket_settings.SetString("bootstrap_token", bootstrap_token_);' in blufi, (
+    assert '"bootstrap_token", self->bootstrap_token_' in blufi, (
         "sanity: the bootstrap token is persisted to the websocket NVS key that "
         "ClearProvisioningSecrets() must now erase"
     )
@@ -1231,7 +1851,7 @@ def test_fw30_nvs_token_erase_is_success_only_not_on_retain_path():
     # retention and leave ClearProvisioningSecrets uncalled (FW7/FW10). Re-anchor
     # on the retain logs to prove the erase is not on these lanes.
     auth_fail_log = "Provisioning report failed after BLE teardown; secrets retained for retry"
-    wifi_fail_log = "failed-status report failed; secrets retained for retry"
+    wifi_fail_log = "Provisioning secrets retained for WiFi retry"
     assert auth_fail_log in blufi
     assert wifi_fail_log in blufi
     for log in (auth_fail_log, wifi_fail_log):
@@ -1243,3 +1863,412 @@ def test_fw30_nvs_token_erase_is_success_only_not_on_retain_path():
             "a failed report must RETAIN the at-rest bootstrap token for retry; "
             "the NVS erase must not be reachable on the retain path"
         )
+
+
+# ---------------------------------------------------------------------------
+# FW31: unclaimed provisioning must not reserve the three audio worker stacks.
+#       Real hardware reproduced a silent claim hang after Wi-Fi association:
+#       the 4 KiB claim/connect workers could not be created while idle audio
+#       tasks retained roughly 39 KiB of internal SRAM.
+# ---------------------------------------------------------------------------
+def test_fw31_unclaimed_boot_defers_audio_workers_until_claim_confirmation():
+    application = read("main/application.cc")
+    initialize = _function_body(application, "void Application::Initialize")
+    confirm = _function_body(
+        application, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+
+    assert "if (IsDeviceClaimed())" in initialize
+    claimed_gate = initialize.index("if (IsDeviceClaimed())")
+    audio_start = initialize.index("audio_service_.Start()")
+    assert claimed_gate < audio_start
+
+    assert "audio_service_.Start();" in confirm
+    assert confirm.index("audio_service_.Start();") < confirm.index(
+        "audio_service_.EnableWakeWordDetection(true)"
+    )
+
+
+def test_fw31b_stopped_configuration_audio_cannot_enter_a_fake_audio_test_state():
+    application = read("main/application.cc")
+    audio_header = read("main/audio/audio_service.h")
+    toggle = _function_body(application, "void Application::HandleToggleChatEvent")
+    listen = _function_body(application, "void Application::HandleStartListeningEvent")
+
+    assert "bool IsRunning() const" in audio_header
+    for body in (toggle, listen):
+        wifi_branch = body[body.index("state == kDeviceStateWifiConfiguring") :]
+        running_guard = wifi_branch.index("audio_service_.IsRunning()")
+        enable = wifi_branch.index("audio_service_.EnableAudioTesting(true)")
+        transition = wifi_branch.index("SetDeviceState(kDeviceStateAudioTesting)")
+        assert running_guard < enable < transition
+        guard_body = wifi_branch[running_guard:enable]
+        assert "return;" in guard_body
+
+
+def test_fw31c_stopped_configuration_sounds_drop_before_queueing_stale_audio():
+    audio = read("main/audio/audio_service.cc")
+    play = _function_body(audio, "void AudioService::PlaySound")
+
+    stopped_guard = play.index("if (service_stopped_)")
+    codec_enable = play.index("codec_->EnableOutput(true)")
+    enqueue = play.index("PushPacketToDecodeQueue")
+    assert stopped_guard < codec_enable < enqueue
+    assert "return;" in play[stopped_guard:codec_enable]
+
+
+# ---------------------------------------------------------------------------
+# FW32: allocation failure in the Wi-Fi completion worker must be observable and
+#       must reset the in-progress flags. Never leave Android waiting forever
+#       after the robot has accepted credentials.
+# ---------------------------------------------------------------------------
+def test_fw32_wifi_completion_worker_creation_failure_cannot_silently_hang():
+    blufi = read("main/boards/common/blufi.cpp")
+    helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+
+    assert "BaseType_t created = xTaskCreate(" in helper
+    assert "if (created != pdPASS)" in helper
+    failure = helper[helper.index("if (created != pdPASS)") :]
+    assert "m_wifi_connect_task_started.store(false);" in failure
+    assert "m_sta_is_connecting.store(false);" in failure
+    assert "Failed to create BluFi WiFi completion task" in failure
+
+
+def test_fw33_boot_reentry_starts_a_new_generation_and_clean_ble_session():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    start = _start_wifi_config_body(wifi_board)
+    blufi = read("main/boards/common/blufi.cpp")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+
+    assert "blufi.RestartForSetup()" in start
+    assert "CancelBleSetupTimeout();" in restart
+    assert "setup_generation_.fetch_add" in restart
+    assert "deinit();" in restart
+    assert "init();" in restart
+    assert restart.index("deinit();") < restart.index("init();")
+
+
+def test_fw34_stale_timeout_and_wifi_workers_cannot_mutate_new_boot_generation():
+    blufi = read("main/boards/common/blufi.cpp")
+    arm = _function_body(blufi, "void Blufi::StartBleSetupTimeout")
+    timeout = _function_body(blufi, "void Blufi::_ble_setup_timeout_cb")
+    connect = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+
+    assert "reinterpret_cast<void*>(static_cast<uintptr_t>(generation))" in arm
+    assert "reinterpret_cast<uintptr_t>(arg)" in timeout
+    assert "self->ble_timeout_generation_.load()" not in timeout.split(
+        "Application::GetInstance().Schedule", 1
+    )[0]
+    assert "generation != self->ble_timeout_generation_.load()" in timeout
+    assert "Ignoring stale BLE setup timeout" in timeout
+
+    assert "const uint32_t generation = setup_generation_.load()" in connect
+    assert "generation != self->setup_generation_.load()" in connect
+    assert "Ignoring stale BluFi WiFi completion worker" in connect
+
+
+def test_fw35_receiving_ssid_does_not_reopen_wifi_worker_single_flight():
+    blufi = read("main/boards/common/blufi.cpp")
+    event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_SSID:")
+    assert "m_wifi_connect_task_started = false" not in event
+
+
+def test_fw36_rapid_boot_wifi_config_entries_are_epoch_scoped_and_single_flight():
+    header = read("main/boards/common/wifi_board.h")
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    enter = _function_body(wifi_board, "void WifiBoard::EnterWifiConfigMode")
+
+    assert "std::atomic<uint32_t> wifi_config_entry_generation_" in header
+    assert "std::atomic<bool> wifi_config_entry_inflight_" in header
+    assert "wifi_config_entry_generation_.fetch_add(1)" in enter
+    assert "wifi_config_entry_inflight_.compare_exchange_strong" in enter
+    assert "generation != board->wifi_config_entry_generation_.load()" in enter
+    assert "wifi_config_entry_inflight_.store(false)" in enter
+    assert "if (created != pdPASS)" in enter
+
+
+def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_on_app_task():
+    blufi = read("main/boards/common/blufi.cpp")
+    helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+
+    capture = helper.index("const uint32_t generation = setup_generation_.load();")
+    settle_delay = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
+    start_station = helper.index("wifi_manager.StartStation();")
+    spawn = helper.index("xTaskCreate(", capture)
+    assert capture < settle_delay < start_station < spawn
+    post_delay = helper[settle_delay:start_station]
+    assert "generation != setup_generation_.load()" in post_delay
+    assert "generation != self->setup_generation_.load()" in helper
+    continuation = helper[helper.index("Application::GetInstance().Schedule") :]
+    assert "generation != self->setup_generation_.load()" in continuation
+    assert continuation.index("generation != self->setup_generation_.load()") < continuation.index(
+        "self->CancelBleSetupTimeout()"
+    )
+    assert "delete ctx;" in helper
+
+
+def test_fw38_password_fallback_is_generation_scoped_and_spawn_failure_is_recoverable():
+    blufi = read("main/boards/common/blufi.cpp")
+    fallback = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
+
+    assert "const uint32_t generation = setup_generation_.load();" in fallback
+    assert "generation != self->setup_generation_.load()" in fallback
+    assert "BaseType_t created = xTaskCreate(" in fallback
+    assert "if (created != pdPASS)" in fallback
+    failure = fallback[fallback.index("if (created != pdPASS)") :]
+    assert "Application::GetInstance().Schedule" in failure
+    assert "generation != setup_generation_.load()" in failure
+    assert 'StartStationConnectFromCredentials("password_fallback_task_create_failed")' in failure
+
+
+def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_factory_reset():
+    blufi = read("main/boards/common/blufi.cpp")
+    ssid_header = read("components/esp-wifi-connect/include/ssid_manager.h")
+    ssid_source = read("components/esp-wifi-connect/ssid_manager.cc")
+    helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+
+    assert "BeginSsidTransaction(ssid, password)" in helper
+    assert "CommitSsidTransaction(ssid_transaction)" in helper
+    assert "RollbackSsidTransaction(ssid_transaction)" in helper
+    assert "ssid_transaction_id_.exchange(0)" in restart
+    assert "RollbackSsidTransaction(stale_ssid_transaction)" in restart
+
+    stage_idx = helper.index("BeginSsidTransaction(ssid, password)")
+    station_idx = helper.index("wifi_manager.StartStation()")
+    commit_idx = helper.index("CommitSsidTransaction(ssid_transaction)")
+    success_idx = helper.index("if (credentials_committed)")
+    failure_branch_idx = helper.index("} else {", success_idx)
+    failure_idx = helper.index("ESP_BLUFI_STA_CONN_FAIL", failure_branch_idx)
+    rollback_idx = helper.index("RollbackSsidTransaction(ssid_transaction)", commit_idx)
+    assert stage_idx < station_idx < commit_idx < rollback_idx < success_idx < failure_idx
+
+    # The candidate must not survive reboot after a rejected password, while
+    # the live BLE session remains available for an immediate corrected retry.
+    assert "SsidManager::GetInstance().AddSsid(ssid, password);" not in helper[:success_idx]
+    failure = helper[failure_branch_idx:]
+    assert "m_provisioned = false;" in failure
+    assert "deinit();" not in failure
+    assert "ClearProvisioningSecrets" not in failure
+
+    for method in (
+        "BeginSsidTransaction",
+        "CommitSsidTransaction",
+        "RollbackSsidTransaction",
+    ):
+        assert method in ssid_header
+
+    # A completion worker from an invalidated setup generation carries its own
+    # opaque transaction id; it cannot commit or rollback a newer candidate.
+    assert "uint32_t ssid_transaction;" in helper
+    assert "task_ctx->ssid_transaction" in helper
+    assert "std::atomic<uint32_t> ssid_transaction_id_" in read(
+        "main/boards/common/blufi.h"
+    )
+
+    # The hot provisioning path keeps only compact inverse metadata, not a copy
+    # of every saved SSID/password. This covers overwrite, insert, and full-list
+    # eviction rollback without multiplying credential heap use.
+    assert "std::vector<SsidItem> transaction_backup_" not in ssid_header
+    assert "transaction_old_password_" in ssid_header
+    assert "transaction_evicted_item_" in ssid_header
+    begin = _function_body(ssid_source, "uint32_t SsidManager::BeginSsidTransaction")
+    restore = _function_body(ssid_source, "void SsidManager::RestoreActiveTransaction")
+    assert "transaction_old_password_ = ssid_list_[index].password" in begin
+    assert "transaction_evicted_item_ = std::move(ssid_list_.back())" in begin
+    assert "ssid_list_.erase(ssid_list_.begin())" in restore
+    assert "ssid_list_.push_back(transaction_evicted_item_)" in restore
+
+    # Opaque ids make stale completion workers harmless: both terminal methods
+    # reject a transaction that is no longer the active candidate.
+    for signature in (
+        "bool SsidManager::CommitSsidTransaction",
+        "bool SsidManager::RollbackSsidTransaction",
+    ):
+        body = _function_body(ssid_source, signature)
+        assert "active_transaction_id_ != transaction_id" in body
+        assert "return false;" in body
+
+    # NVS failure is a provisioning failure, never a false SUCCESS. The manager
+    # restores the prior credential and BluFi stops STA so it reaches FAIL.
+    commit = _function_body(ssid_source, "bool SsidManager::CommitSsidTransaction")
+    assert "if (!SaveToNvs())" in commit
+    assert "RestoreActiveTransaction();" in commit
+    persistence_guard = helper[
+        helper.index("if (wifi.IsConnected())") : helper.index(
+            "if (credentials_committed)"
+        )
+    ]
+    assert "CommitSsidTransaction(ssid_transaction)" in persistence_guard
+    assert "wifi.StopStation();" in failure
+    assert failure.index("wifi.StopStation();") < failure.index("ESP_BLUFI_STA_CONN_FAIL")
+    assert "if (credentials_committed)" in helper
+
+
+def test_fw40_only_exact_candidate_wifi_can_commit_and_report_success():
+    helper = _station_connect_helper_body()
+
+    assert "connected_to_candidate" in helper
+    assert "wifi.GetSsid()" in helper
+    assert "std::array<uint8_t" in helper
+    assert "candidate_ssid" in helper
+    assert "candidate_ssid_len" in helper
+    assert "task_ctx->candidate_ssid" in helper
+    assert "memcmp" in helper
+
+    context_idx = helper.index("WifiConnectTaskContext")
+    capture_idx = helper.index("memcpy(ctx->candidate_ssid.data()")
+    delay_idx = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
+    station_idx = helper.index("wifi_manager.StartStation()")
+    assert context_idx < capture_idx < delay_idx < station_idx
+
+    commit_guard = helper[
+        helper.index("connected_to_candidate") : helper.index("if (credentials_committed)")
+    ]
+    assert "candidate_ssid_len" in commit_guard
+    assert "candidate_ssid.data()" in commit_guard
+    assert "self->m_sta_ssid" not in commit_guard
+    assert "CommitSsidTransaction(ssid_transaction)" in commit_guard
+    assert "wifi.StopStation();" not in commit_guard
+
+    failure_start = helper.index("} else {", helper.index("if (credentials_committed)"))
+    failure = helper[failure_start:]
+    report_idx = failure.index("ESP_BLUFI_STA_CONN_FAIL")
+    assert "wifi.StopStation();" in failure
+    assert failure.index("wifi.StopStation();") < report_idx
+    assert "self->deinit();" not in failure
+    assert "ClearProvisioningSecrets" not in failure
+
+
+def test_fw41_early_connect_setup_failures_report_deterministic_sta_fail():
+    helper = _station_connect_helper_body()
+
+    init_failure = helper[
+        helper.index("if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize())") :
+        helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
+    ]
+    allocation_failure = helper[
+        helper.index("if (ctx == nullptr)") : helper.index("BaseType_t created = xTaskCreate(")
+    ]
+
+    for failure in (init_failure, allocation_failure):
+        assert "RollbackSsidTransaction(ssid_transaction)" in failure
+        assert "SendStationConnectFailureReport()" in failure
+        assert failure.index("RollbackSsidTransaction(ssid_transaction)") < failure.index(
+            "SendStationConnectFailureReport()"
+        ) < failure.index("return;")
+
+    blufi = read("main/boards/common/blufi.cpp")
+    report = _function_body(blufi, "void Blufi::SendStationConnectFailureReport")
+    assert "ESP_BLUFI_STA_CONN_FAIL" in report
+
+
+def test_fw42_wifi_connect_single_flight_is_atomic_and_teardown_errors_are_preserved():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    helper = _station_connect_helper_body()
+    deinit = _function_body(blufi, "esp_err_t Blufi::deinit")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+
+    assert "std::atomic<bool> m_wifi_connect_task_started" in header
+    assert "compare_exchange_strong" in helper
+    assert "m_wifi_connect_task_started.store(false)" in blufi
+    assert "m_wifi_connect_task_started = false" not in blufi
+    assert "m_wifi_connect_task_started = true" not in blufi
+
+    assert "first_error" in deinit
+    assert "host_error" in deinit
+    assert "controller_error" in deinit
+    assert "return first_error;" in deinit
+    assert "esp_err_t teardown_error = deinit();" in restart
+    assert "if (teardown_error != ESP_OK)" in restart
+    teardown_guard = restart[
+        restart.index("esp_err_t teardown_error = deinit();") : restart.index("_security_deinit();")
+    ]
+    assert "return teardown_error;" in teardown_guard
+
+
+def test_fw43_ssid_transactions_compensate_persist_failure_and_lock_all_list_access():
+    header = read("components/esp-wifi-connect/include/ssid_manager.h")
+    source = read("components/esp-wifi-connect/ssid_manager.cc")
+    commit = _function_body(source, "bool SsidManager::CommitSsidTransaction")
+    begin = _function_body(source, "uint32_t SsidManager::BeginSsidTransaction")
+    upsert = _function_body(source, "void SsidManager::UpsertSsid")
+
+    failure = commit[commit.index("if (!SaveToNvs())") :]
+    assert failure.count("SaveToNvs()") >= 2
+    assert failure.index("RestoreActiveTransaction();") < failure.rindex("SaveToNvs()")
+    assert "Compensating WiFi credential restore failed" in failure
+
+    assert "std::vector<SsidItem> GetSsidList() const;" in header
+    assert "mutable std::mutex transaction_mutex_" in header
+    get_list = _function_body(source, "std::vector<SsidItem> SsidManager::GetSsidList() const")
+    assert "std::lock_guard<std::mutex>" in get_list
+    for signature in (
+        "void SsidManager::Clear",
+        "void SsidManager::AddSsid",
+        "uint32_t SsidManager::BeginSsidTransaction",
+        "bool SsidManager::CommitSsidTransaction",
+        "bool SsidManager::RollbackSsidTransaction",
+        "void SsidManager::RemoveSsid",
+        "void SsidManager::SetDefaultSsid",
+    ):
+        assert "std::lock_guard<std::mutex>" in _function_body(source, signature)
+
+    for body in (begin, upsert):
+        replace = body[body.index("if (ssid_list_[" if body is begin else "if (item.ssid == ssid)") :]
+        assert "SecureClearString" in replace
+
+
+def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credentials():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    helper = _station_connect_helper_body()
+    ssid_event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_SSID:")
+
+    assert "size_t m_sta_config_ssid_len_" in header
+    assert "sizeof(m_sta_config.sta.ssid) - 1" not in ssid_event
+    assert "sizeof(m_sta_config.sta.ssid)" in ssid_event
+    assert "m_sta_config_ssid_len_ = ssid_n" in ssid_event
+    assert "m_sta_config.sta.ssid[ssid_n] = '\\0'" not in ssid_event
+    assert "memset(m_sta_config.sta.ssid, 0" in ssid_event
+
+    assert "m_sta_config_ssid_len_" in helper
+    assert "reinterpret_cast<const char*>(m_sta_config.sta.ssid)," in helper
+    assert "SecureClearLocalString(ssid);" in helper
+    assert "SecureClearLocalString(password);" in helper
+    begin_idx = helper.index("BeginSsidTransaction(ssid, password)")
+    clear_idx = helper.index("SecureClearLocalString(ssid);")
+    delay_idx = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
+    assert begin_idx < clear_idx < delay_idx
+
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    start_connect = _function_body(station, "void WifiStation::StartConnect")
+    assert "strcpy((char *)wifi_config.sta.ssid" not in start_connect
+    assert "memcpy(wifi_config.sta.ssid" in start_connect
+    assert "sizeof(wifi_config.sta.ssid)" in start_connect
+
+
+def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    init = _function_body(blufi, "esp_err_t Blufi::init")
+    deinit = _function_body(blufi, "esp_err_t Blufi::deinit")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+
+    assert "std::atomic<bool> teardown_failed_" in header
+    assert "teardown_failed_.load()" in init
+    assert "return ESP_ERR_INVALID_STATE;" in init
+
+    assert "teardown_failed_.store(true)" in deinit
+    assert "teardown_failed_.store(false)" in deinit
+    already_deinited = deinit[
+        deinit.index("if (m_deinited)") : deinit.index("m_deinited = true")
+    ]
+    assert "teardown_failed_.load()" in already_deinited
+    assert "ESP_ERR_INVALID_STATE" in already_deinited
+
+    poison_guard = restart[: restart.index("setup_generation_.fetch_add")]
+    assert "teardown_failed_.load()" in poison_guard
+    assert "return ESP_ERR_INVALID_STATE;" in poison_guard
+    assert "init();" not in poison_guard

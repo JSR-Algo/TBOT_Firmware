@@ -206,8 +206,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
     std::string connect_url = url;
     AppendWebsocketQueryParam(connect_url, "device-id", device_id);
     AppendWebsocketQueryParam(connect_url, "client-id", client_id);
-    ESP_LOGI(TAG, "Websocket auth identity: device-id=%s client-id=%s token_empty=%d",
-             device_id.c_str(), client_id.c_str(), token.empty());
+    ESP_LOGI(TAG, "Websocket auth identity: device_id_empty=%d client_id_empty=%d token_empty=%d",
+             device_id.empty(), client_id.empty(), token.empty());
 
     websocket_->OnData([this](const char* data, size_t len, bool binary) {
         if (binary) {
@@ -306,7 +306,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
     });
 
-    ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_);
+    ESP_LOGI(TAG, "Connecting to websocket server with protocol version %d", version_);
     if (!websocket_->Connect(connect_url.c_str())) {
         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);

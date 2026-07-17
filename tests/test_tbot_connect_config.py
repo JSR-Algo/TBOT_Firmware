@@ -4,6 +4,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CURRENT_PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
+CURRENT_PRODUCTION_PROVISIONING_STATUS_URL = (
+    "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
+)
 CURRENT_PRODUCTION_WEBSOCKET_URL = ""
 CURRENT_OTA_BUILD_VERSION = "2.2.75"
 
@@ -75,6 +78,21 @@ def test_local_firmware_build_configs_compile_only_current_production_ota_seed()
         assert "ngrok" not in ota_url, sdkconfig.name
         assert "loca.lt" not in ota_url, sdkconfig.name
         assert "serveo.net" not in ota_url, sdkconfig.name
+
+
+def test_firmware_provisioning_status_targets_the_backend_api():
+    kconfig = read("main/Kconfig.projbuild")
+    local = read("sdkconfig.defaults.local")
+
+    assert (
+        kconfig_default(kconfig, "PROVISIONING_STATUS_URL")
+        == CURRENT_PRODUCTION_PROVISIONING_STATUS_URL
+    )
+    assert (
+        f'CONFIG_PROVISIONING_STATUS_URL="{CURRENT_PRODUCTION_PROVISIONING_STATUS_URL}"'
+        in local
+    )
+    assert 'CONFIG_PROVISIONING_STATUS_URL="https://esp.tjbot.vn/' not in local
 
 def test_prod_flash_script_rejects_tiny_placeholder_artifacts():
     script = read("scripts/flash_prod_new_robot.sh")
@@ -215,5 +233,5 @@ def test_websocket_protocol_adds_identity_query_params_without_auth_query_or_log
     assert 'AppendWebsocketQueryParam(connect_url, "client-id", client_id);' in websocket_cc
     assert 'AppendWebsocketQueryParam(connect_url, "authorization", token);' not in websocket_cc
     assert "websocket_->Connect(connect_url.c_str())" in websocket_cc
-    assert 'ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", url.c_str(), version_)' in websocket_cc
+    assert 'ESP_LOGI(TAG, "Connecting to websocket server with protocol version %d", version_)' in websocket_cc
     assert 'ESP_LOGI(TAG, "Connecting to websocket server: %s with version: %d", connect_url.c_str(), version_)' not in websocket_cc

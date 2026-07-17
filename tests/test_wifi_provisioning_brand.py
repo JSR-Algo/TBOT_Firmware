@@ -99,7 +99,7 @@ def test_blufi_config_mode_is_wired_into_firmware():
 
     assert '#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING' in wifi_board
     assert 'auto &blufi = Blufi::GetInstance();' in wifi_board
-    assert 'blufi.init();' in wifi_board
+    assert 'blufi.RestartForSetup();' in wifi_board
     assert 'if (CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)' in cmake
     assert 'list(APPEND SOURCES "boards/common/blufi.cpp")' in cmake
     assert 'config USE_ESP_BLUFI_WIFI_PROVISIONING' in kconfig
@@ -113,11 +113,10 @@ def test_blufi_config_mode_reopens_robot_scan_after_ble_timeout():
     start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
 
-    assert "Blufi::BleState::kTimeout" in body
-    timeout_idx = body.index("Blufi::BleState::kTimeout")
-    init_idx = body.index("blufi.init();")
+    assert "blufi.RestartForSetup();" in body
+    init_idx = body.index("blufi.RestartForSetup();")
     timer_idx = body.index("blufi.StartBleSetupTimeout")
-    assert timeout_idx < init_idx < timer_idx
+    assert init_idx < timer_idx
 
 
 def test_blufi_only_build_does_not_reference_softap_timeout_without_hotspot_guard():
@@ -140,7 +139,7 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
     release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
-    init_idx = body.index("blufi.init();")
+    init_idx = body.index("blufi.RestartForSetup();")
     assert release_idx < init_idx
 
     assert "void ReleaseWakeWordResourcesForWifiConfig();" in audio_h

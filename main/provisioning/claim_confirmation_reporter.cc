@@ -249,7 +249,7 @@ bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress());
     http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
 
-    ESP_LOGI(TAG, "Fetching device config via %s", url.c_str());
+    ESP_LOGI(TAG, "Fetching device config");
     if (!http->Open("GET", url)) {
         ESP_LOGE(TAG, "Device config HTTP open failed: 0x%x", http->GetLastError());
         http->Close();
@@ -305,7 +305,8 @@ std::string BuildTbotDeviceBootstrapUrl() {
     return status_url.substr(0, pos) + "bootstrap";
 }
 
-std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token) {
+std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token,
+                                            bool persist_result) {
     const std::string url = BuildTbotDeviceBootstrapUrl();
     if (url.empty()) {
         ESP_LOGW(TAG, "Cannot derive bootstrap URL from provisioning-status URL");
@@ -327,7 +328,7 @@ std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token) 
     http->SetHeader("Device-Id", SystemInfo::GetMacAddress());
     http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
 
-    ESP_LOGI(TAG, "Fetching backend api_url fallback via %s", url.c_str());
+    ESP_LOGI(TAG, "Fetching backend api_url fallback");
     if (!http->Open("GET", url)) {
         ESP_LOGW(TAG, "Bootstrap api_url fetch HTTP open failed: 0x%x", http->GetLastError());
         http->Close();
@@ -362,9 +363,11 @@ std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token) 
 
     // Persist so the next RefreshPendingTbotClaim / heartbeat reads it straight
     // from Settings("backend"), exactly like the OTA-provided value.
-    Settings settings("backend", true);
-    if (settings.GetString("api_url") != result) {
-        settings.SetString("api_url", result);
+    if (persist_result) {
+        Settings settings("backend", true);
+        if (settings.GetString("api_url") != result) {
+            settings.SetString("api_url", result);
+        }
     }
     ESP_LOGI(TAG, "Backend api_url recovered from bootstrap fallback");
     return result;
@@ -398,7 +401,7 @@ bool RefreshWebsocketUrlFromConfigFetch() {
     http->SetHeader("X-Device-Token", device_secret);
     http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
 
-    ESP_LOGI(TAG, "Fetching runtime config via %s", url.c_str());
+    ESP_LOGI(TAG, "Fetching runtime config");
     if (!http->Open("GET", url)) {
         ESP_LOGW(TAG, "Config fetch HTTP open failed: 0x%x", http->GetLastError());
         http->Close();
@@ -439,7 +442,7 @@ bool RefreshWebsocketUrlFromConfigFetch() {
     return true;
 }
 
-bool PersistTbotClaimConfirmationResponse(const std::string& json) {
+static bool ProcessTbotClaimConfirmationResponse(const std::string& json, bool persist) {
     cJSON* root = cJSON_Parse(json.c_str());
     if (root == nullptr) {
         return false;
@@ -448,29 +451,37 @@ bool PersistTbotClaimConfirmationResponse(const std::string& json) {
     cJSON* device_id = cJSON_GetObjectItem(root, "device_id");
     cJSON* device_secret = cJSON_GetObjectItem(root, "device_secret");
     cJSON* ws_url = cJSON_GetObjectItem(root, "ws_url");
-    if (!cJSON_IsString(device_id) || !cJSON_IsString(device_secret) || !cJSON_IsString(ws_url)) {
+    const auto is_nonempty_string = [](const cJSON* item) {
+        return cJSON_IsString(item) && item->valuestring != nullptr &&
+               item->valuestring[0] != '\0';
+    };
+    if (!is_nonempty_string(device_id) || !is_nonempty_string(device_secret) ||
+        !is_nonempty_string(ws_url)) {
         cJSON_Delete(root);
         return false;
     }
 
-    Settings websocket_settings("websocket", true);
-    websocket_settings.SetString("url", ws_url->valuestring);
+    if (persist) {
+        Settings websocket_settings("websocket", true);
+        websocket_settings.SetString("url", ws_url->valuestring);
 
-    Settings backend_settings("backend", true);
-    backend_settings.SetString("device_id", device_id->valuestring);
-    backend_settings.SetString("device_secret", device_secret->valuestring);
+        Settings backend_settings("backend", true);
+        backend_settings.SetString("device_id", device_id->valuestring);
+        backend_settings.SetString("device_secret", device_secret->valuestring);
 
-    // Mark the device claimed with a DEDICATED flag. websocket "token" alone is
-    // NOT a reliable claimed-signal: the OTA CheckVersion response also writes
-    // websocket.token (a realtime-WS auth token) on every boot, so an unclaimed-
-    // but-online robot would falsely look claimed. This flag is written ONLY here
-    // — on a successful physical-claim confirm — so it unambiguously gates
-    // claimable standby (BLE advertising + claim poll) in Application.
-    Settings claim_state("tbot_claim", true);
-    claim_state.SetInt("confirmed", 1);
+        // Mark the device claimed with a DEDICATED flag. websocket "token" alone is
+        // NOT a reliable claimed-signal: the OTA CheckVersion response also writes
+        // websocket.token (a realtime-WS auth token) on every boot.
+        Settings claim_state("tbot_claim", true);
+        claim_state.SetInt("confirmed", 1);
+    }
 
     cJSON_Delete(root);
     return true;
+}
+
+bool PersistTbotClaimConfirmationResponse(const std::string& json) {
+    return ProcessTbotClaimConfirmationResponse(json, true);
 }
 
 static std::string ExtractTbotClaimErrorSummary(const std::string& response_body) {
@@ -510,20 +521,22 @@ static std::string ExtractTbotClaimErrorSummary(const std::string& response_body
     return summary;
 }
 
-bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
-                                        const std::string& api_base_url,
-                                        const std::string& bootstrap_token) {
+ClaimConfirmationResult ClaimConfirmationReporter::Confirm(
+    const PendingTbotClaim& claim,
+    const std::string& api_base_url,
+    const std::string& bootstrap_token,
+    std::string* deferred_success_response) {
     if (!claim.active || claim.claim_id.empty() || bootstrap_token.empty()) {
         ESP_LOGW(TAG, "Cannot confirm claim: active=%d claim_empty=%d token_empty=%d",
                  static_cast<int>(claim.active), static_cast<int>(claim.claim_id.empty()),
                  static_cast<int>(bootstrap_token.empty()));
-        return false;
+        return ClaimConfirmationResult::TerminalFailure;
     }
 
     const std::string url = BuildTbotClaimConfirmUrl(api_base_url);
     if (url.empty()) {
         ESP_LOGE(TAG, "Cannot confirm claim: API base URL is empty");
-        return false;
+        return ClaimConfirmationResult::RetryableFailure;
     }
 
     const std::string device_id = GetTbotClaimDeviceId();
@@ -533,7 +546,7 @@ bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
     auto http = network->CreateHttp(2);
     if (!http) {
         ESP_LOGE(TAG, "Failed to create HTTP client for claim confirmation");
-        return false;
+        return ClaimConfirmationResult::RetryableFailure;
     }
 
     // B1: cap the blocking Open() so confirmation cannot freeze the main task.
@@ -544,11 +557,11 @@ bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
     http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
     http->SetContent(std::move(body));
 
-    ESP_LOGI(TAG, "Confirming claim via %s", url.c_str());
+    ESP_LOGI(TAG, "Confirming claim");
     if (!http->Open("POST", url)) {
         ESP_LOGE(TAG, "Claim confirmation HTTP open failed: 0x%x", http->GetLastError());
         http->Close();
-        return false;
+        return ClaimConfirmationResult::RetryableFailure;
     }
 
     const int status_code = http->GetStatusCode();
@@ -556,12 +569,17 @@ bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
     http->Close();
 
     if (status_code >= 200 && status_code < 300) {
-        if (!PersistTbotClaimConfirmationResponse(response_body)) {
-            ESP_LOGE(TAG, "Claim confirmed but response could not be persisted");
-            return false;
+        const bool valid_response = ProcessTbotClaimConfirmationResponse(
+            response_body, deferred_success_response == nullptr);
+        if (!valid_response) {
+            ESP_LOGE(TAG, "Claim returned 2xx but response credentials were invalid");
+            return ClaimConfirmationResult::AmbiguousSuccess;
+        }
+        if (deferred_success_response != nullptr) {
+            *deferred_success_response = response_body;
         }
         ESP_LOGI(TAG, "Claim confirmed successfully (HTTP %d)", status_code);
-        return true;
+        return ClaimConfirmationResult::Confirmed;
     }
 
     // Never log the verbatim response body: the /claim/confirm success response
@@ -570,5 +588,10 @@ bool ClaimConfirmationReporter::Confirm(const PendingTbotClaim& claim,
     const std::string error_summary = ExtractTbotClaimErrorSummary(response_body);
     ESP_LOGW(TAG, "Claim confirmation failed (HTTP %d) resp_len=%u%s",
              status_code, static_cast<unsigned>(response_body.size()), error_summary.c_str());
-    return false;
+
+    if (status_code == 408 || status_code == 425 || status_code == 429 ||
+        status_code >= 500 || status_code < 400) {
+        return ClaimConfirmationResult::RetryableFailure;
+    }
+    return ClaimConfirmationResult::TerminalFailure;
 }

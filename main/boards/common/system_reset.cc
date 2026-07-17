@@ -141,6 +141,59 @@ bool SystemReset::ReleaseCloudOwnership() {
     return true;
 }
 
+bool SystemReset::ReleaseCloudOwnership(const std::string& api_url,
+                                        const std::string& device_id,
+                                        const std::string& device_secret) {
+    if (api_url.empty() || device_secret.empty() || device_id.empty()) {
+        ESP_LOGI(TAG, "No captured cloud ownership credentials present");
+        return true;
+    }
+
+    const std::string url = BuildFactoryResetUrl(api_url, device_id);
+    if (url.empty()) {
+        ESP_LOGW(TAG, "Cannot release cloud ownership: missing captured endpoint data");
+        return false;
+    }
+
+    auto* network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(2);
+    if (!http) {
+        ESP_LOGE(TAG, "Failed to create HTTP client for deferred cloud release");
+        return false;
+    }
+
+    http->SetTimeout(5000);
+    http->SetHeader("X-Device-Token", device_secret);
+    http->SetHeader("X-Device-Id", device_id);
+    http->SetHeader("Content-Type", "application/json");
+    http->SetHeader("Device-Id", SystemInfo::GetMacAddress());
+    http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+    std::string body = "{}";
+    http->SetContent(std::move(body));
+
+    ESP_LOGI(TAG, "Releasing deferred cloud ownership with captured credentials");
+    if (!http->Open("POST", url)) {
+        ESP_LOGW(TAG, "Deferred cloud release HTTP open failed: 0x%x", http->GetLastError());
+        http->Close();
+        return false;
+    }
+
+    const int status_code = http->GetStatusCode();
+    http->Close();
+    if (status_code == 401) {
+        // The caller owns release_pending/current credential reconciliation.
+        ESP_LOGW(TAG, "Deferred cloud release rejected captured stale credentials");
+        return true;
+    }
+    if (status_code < 200 || status_code >= 300) {
+        ESP_LOGW(TAG, "Deferred cloud release failed (HTTP %d)", status_code);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Deferred cloud ownership released (HTTP %d)", status_code);
+    return true;
+}
+
 void SystemReset::ResetNvsFlash() {
     ESP_LOGI(TAG, "Resetting NVS flash");
     esp_err_t ret = nvs_flash_erase();

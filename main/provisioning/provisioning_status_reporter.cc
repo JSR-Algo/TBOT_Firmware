@@ -100,8 +100,8 @@ bool ProvisioningStatusReporter::Report(Status status,
         // device_authenticated body carries the provisioning code, and the token
         // is a credential. Log only non-secret routing fields plus the body
         // length for diagnostics.
-        ESP_LOGI(TAG, "Reporting attempt=%d status=%d url=%s body_len=%u",
-                 attempt + 1, static_cast<int>(status), url.c_str(),
+        ESP_LOGI(TAG, "Reporting attempt=%d status=%d endpoint_configured=%d body_len=%u",
+                 attempt + 1, static_cast<int>(status), static_cast<int>(!url.empty()),
                  static_cast<unsigned>(body.size()));
 
         if (!http->Open("POST", url)) {

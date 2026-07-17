@@ -1,12 +1,11 @@
 CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
 # Stable backend bootstrap seed. The OTA response returns the final websocket.url.
 CONFIG_OTA_URL="https://esp.tjbot.vn/tbot/ota/"
-CONFIG_PROVISIONING_STATUS_URL="https://esp.tjbot.vn/tbot/v1/device/provisioning/status"
+CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
 CONFIG_WEBSOCKET_URL=""
-# BLE setup hard-timeout: spec default 5 min (was 120s); range 60-600 (max 10 min).
-# Keep BluFi discoverable long enough for parent setup (was 300s; phone UI
-# + Wi-Fi password entry often exceeded the window).
-CONFIG_BLE_SETUP_TIMEOUT_SEC=900
+# BLE setup hard-timeout: spec default 5 min. Keep BluFi discoverable long
+# enough for parent setup without exceeding the contract window.
+CONFIG_BLE_SETUP_TIMEOUT_SEC=300
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/v2/16m.csv"
 CONFIG_LANGUAGE_VI_VN=y

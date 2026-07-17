@@ -4,6 +4,8 @@
 #include <nvs_flash.h>
 #include <driver/gpio.h>
 #include <esp_event.h>
+#include <esp_heap_caps.h>
+#include <esp_rom_sys.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -13,6 +15,16 @@
 #endif
 
 #define TAG "main"
+
+#if !TBOT_NATIVE_COVERAGE
+static void AllocationFailureHook(size_t requested_size, uint32_t caps,
+                                  const char* function_name) {
+    esp_rom_printf("heap_alloc_failed size=%u caps=0x%08x function=%s\n",
+                   static_cast<unsigned>(requested_size),
+                   static_cast<unsigned>(caps),
+                   function_name != nullptr ? function_name : "unknown");
+}
+#endif
 
 #if TBOT_NATIVE_COVERAGE
 int TbotAfskDemodHostCoverageMain();
@@ -32,6 +44,20 @@ extern "C" void app_main(void)
 #else
 extern "C" void app_main(void)
 {
+    // ESP-IDF's INFO logs include raw station/BLE identifiers. Keep warnings
+    // while preventing SSIDs, BSSIDs, MACs, and assigned IPs from reaching
+    // production serial logs.
+    esp_log_level_set("wifi", ESP_LOG_WARN);
+    esp_log_level_set("esp_netif_handlers", ESP_LOG_WARN);
+    esp_log_level_set("BLE_INIT", ESP_LOG_WARN);
+
+    esp_err_t heap_hook_err =
+        heap_caps_register_failed_alloc_callback(AllocationFailureHook);
+    if (heap_hook_err != ESP_OK) {
+        ESP_LOGW(TAG, "Unable to register allocation failure diagnostics: %s",
+                 esp_err_to_name(heap_hook_err));
+    }
+
     // Initialize NVS flash for WiFi configuration
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {

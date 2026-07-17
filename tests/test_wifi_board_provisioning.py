@@ -66,73 +66,41 @@ def _connected_event_body(wifi_board: str) -> str:
 
 # ---------------------------------------------------------------------------
 # WB1: StartWifiConfigMode() full setup ordering for the BLE provisioning path:
-#      ReleaseWakeWordResourcesForWifiConfig -> GetBleState() ->
-#      blufi.init() -> StartBleSetupTimeout(). The wake-word release must free
-#      the AFE detection task before BLE comes up; the state read gates the
-#      conditional init; the hard-timeout is armed last so advertising cannot
-#      run forever.
+#      ReleaseWakeWordResourcesForWifiConfig -> RestartForSetup() ->
+#      StartBleSetupTimeout(). The restart tears down any stale controller/host
+#      generation and opens a fresh session before the hard timeout is armed.
 # ---------------------------------------------------------------------------
 def test_wb1_start_config_mode_setup_step_ordering():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
     release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
-    get_state_idx = body.index("blufi.GetBleState();")
-    init_idx = body.index("blufi.init();")
+    restart_idx = body.index("blufi.RestartForSetup();")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
 
-    assert release_idx < get_state_idx < init_idx < timer_idx, (
+    assert release_idx < restart_idx < timer_idx, (
         "StartWifiConfigMode() BLE setup steps must run in order: "
-        "wake-word release -> GetBleState() -> init() -> StartBleSetupTimeout()"
+        "wake-word release -> RestartForSetup() -> StartBleSetupTimeout()"
     )
 
 
 # ---------------------------------------------------------------------------
-# WB2: the kOff||kTimeout re-entry GUARD shape. init() must be CONDITIONAL on
-#      the BLE state being off-or-timed-out — never unconditional. If init()
-#      were called every time, re-entering config mode while BLE is already
-#      advertising (claimable-standby) would double-init and leak the
-#      controller/host. The guard must wrap init(); the timeout re-arm must
-#      stay OUTSIDE the guard (re-armed unconditionally on every entry).
+# WB2: every explicit setup entry must use RestartForSetup(), rather than
+#      inspecting GetBleState() and conditionally reusing an advertising or
+#      connected session. This guarantees a fresh generation for a new phone
+#      provisioning attempt and prevents stale GATT/security state reuse.
 # ---------------------------------------------------------------------------
-def test_wb2_init_is_gated_by_off_or_timeout_guard_not_unconditional():
+def test_wb2_explicit_setup_always_opens_a_fresh_blufi_session():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    # The guard reads the state into a local and tests kOff || kTimeout.
-    assert re.search(
-        r"if\s*\(\s*ble_state\s*==\s*Blufi::BleState::kOff\s*\|\|\s*"
-        r"ble_state\s*==\s*Blufi::BleState::kTimeout\s*\)",
-        body,
-    ), "init() must be gated by an `if (ble_state == kOff || ble_state == kTimeout)` guard"
+    assert body.count("blufi.RestartForSetup();") == 1
+    assert "blufi.GetBleState()" not in body
+    assert "blufi.init();" not in body
 
-    # init() must sit INSIDE that guard block: the `{` opening the guard body
-    # must precede blufi.init(), and the guard's closing `}` must follow it.
-    guard_match = re.search(
-        r"if\s*\(\s*ble_state\s*==\s*Blufi::BleState::kOff\s*\|\|\s*"
-        r"ble_state\s*==\s*Blufi::BleState::kTimeout\s*\)\s*\{",
-        body,
-    )
-    guard_open = guard_match.end()
-    guard_close = body.index("}", guard_open)
-    init_idx = body.index("blufi.init();")
-    assert guard_open < init_idx < guard_close, (
-        "blufi.init() must live inside the kOff||kTimeout guard block, not "
-        "be called unconditionally on every config-mode entry"
-    )
-
-    # Negative: init() must NOT be reachable as a bare unconditional statement.
-    # The only init() call must be the guarded one. (Exactly one init call.)
-    assert body.count("blufi.init();") == 1
-
-    # The hard-timeout re-arm must NOT be trapped inside the guard: it is armed
-    # on EVERY explicit setup entry (even when BLE was already up) so the
-    # timeout window is reset. It must therefore come AFTER the guard closes.
+    restart_idx = body.index("blufi.RestartForSetup();")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
-    assert timer_idx > guard_close, (
-        "StartBleSetupTimeout() must be armed outside the init guard so the "
-        "BLE hard-timeout is reset on every explicit setup entry"
-    )
+    assert restart_idx < timer_idx
 
 
 # ---------------------------------------------------------------------------

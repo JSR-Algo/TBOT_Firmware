@@ -114,9 +114,10 @@ namespace audio_wifi_config
                     if (newline_position != std::string::npos) {
                         wifi_ssid = data_buffer.decoded_text->substr(0, newline_position);
                         wifi_password = data_buffer.decoded_text->substr(newline_position + 1);
-                        // SSID is not a secret; redact the password to its length only.
-                        ESP_LOGI(kLogTag, "WiFi SSID: %s, Password: [redacted len=%u]",
-                                 wifi_ssid.c_str(), (unsigned)wifi_password.length());
+                        ESP_LOGI(kLogTag,
+                                 "WiFi credentials received (ssid_len=%u password_len=%u)",
+                                 (unsigned)wifi_ssid.length(),
+                                 (unsigned)wifi_password.length());
                         // Show only the non-secret SSID on the LCD, never the password.
                         display->SetChatMessage("system", wifi_ssid.c_str());
                     } else {

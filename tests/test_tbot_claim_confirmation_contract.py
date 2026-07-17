@@ -80,7 +80,7 @@ def test_device_config_query_encoder_percent_encodes_reserved_characters():
 
 def test_claim_confirm_reporter_uses_device_identity_and_bootstrap_token():
     source = read("main/provisioning/claim_confirmation_reporter.cc")
-    report_body = function_body(source, "bool ClaimConfirmationReporter::Confirm")
+    report_body = function_body(source, "ClaimConfirmationResult ClaimConfirmationReporter::Confirm")
 
     assert 'GetTbotClaimDeviceId()' in report_body
     assert 'BuildTbotClaimConfirmBody(claim.claim_id, device_id' in report_body
@@ -92,7 +92,7 @@ def test_claim_confirm_reporter_uses_device_identity_and_bootstrap_token():
 def test_claim_confirm_failure_logs_backend_error_code_without_raw_body():
     source = read("main/provisioning/claim_confirmation_reporter.cc")
     helper_body = function_body(source, "static std::string ExtractTbotClaimErrorSummary")
-    report_body = function_body(source, "bool ClaimConfirmationReporter::Confirm")
+    report_body = function_body(source, "ClaimConfirmationResult ClaimConfirmationReporter::Confirm")
 
     assert 'cJSON_GetObjectItem(root, "code")' in helper_body
     assert 'cJSON_GetObjectItem(root, "message")' in helper_body
@@ -104,21 +104,67 @@ def test_claim_confirm_failure_logs_backend_error_code_without_raw_body():
 
 def test_claim_confirm_response_persists_device_secret_and_websocket_url():
     source = read("main/provisioning/claim_confirmation_reporter.cc")
+    header = read("main/provisioning/claim_confirmation_reporter.h")
 
-    persist_body = function_body(source, "bool PersistTbotClaimConfirmationResponse")
-    confirm_body = function_body(source, "bool ClaimConfirmationReporter::Confirm")
+    persist_body = function_body(source, "static bool ProcessTbotClaimConfirmationResponse")
+    wrapper_body = function_body(source, "bool PersistTbotClaimConfirmationResponse")
+    confirm_body = function_body(source, "ClaimConfirmationResult ClaimConfirmationReporter::Confirm")
 
     assert 'cJSON_GetObjectItem(root, "device_id")' in persist_body
     assert 'cJSON_GetObjectItem(root, "device_secret")' in persist_body
     assert 'cJSON_GetObjectItem(root, "ws_url")' in persist_body
-    assert 'cJSON_IsString(device_id)' in persist_body
+    assert 'is_nonempty_string(device_id)' in persist_body
+    assert 'is_nonempty_string(device_secret)' in persist_body
+    assert 'is_nonempty_string(ws_url)' in persist_body
     assert 'Settings websocket_settings("websocket", true);' in persist_body
     assert 'websocket_settings.SetString("url", ws_url->valuestring);' in persist_body
     assert 'Settings backend_settings("backend", true);' in persist_body
     assert 'backend_settings.SetString("device_id", device_id->valuestring);' in persist_body
     assert 'backend_settings.SetString("device_secret", device_secret->valuestring);' in persist_body
     assert 'SetString("token", device_secret->valuestring)' not in persist_body
-    assert 'PersistTbotClaimConfirmationResponse(response_body)' in confirm_body
+    assert 'ProcessTbotClaimConfirmationResponse(' in confirm_body
+    assert 'response_body, deferred_success_response == nullptr' in confirm_body
+    assert 'bool PersistTbotClaimConfirmationResponse(const std::string& json);' in header
+    assert 'ProcessTbotClaimConfirmationResponse(json, true)' in wrapper_body
+
+
+def test_claim_confirm_response_rejects_empty_credentials_before_any_settings_write():
+    source = read("main/provisioning/claim_confirmation_reporter.cc")
+    persist_body = function_body(source, "static bool ProcessTbotClaimConfirmationResponse")
+
+    validation_end = persist_body.index('Settings websocket_settings("websocket", true);')
+    validation = persist_body[:validation_end]
+    assert "valuestring != nullptr" in validation
+    assert "valuestring[0] != '\\0'" in validation
+    assert validation.count("is_nonempty_string(") == 3
+    assert 'Settings backend_settings("backend", true);' not in validation
+    assert 'Settings claim_state("tbot_claim", true);' not in validation
+
+
+def test_claim_confirm_result_distinguishes_retryable_and_terminal_failures():
+    header = read("main/provisioning/claim_confirmation_reporter.h")
+    source = read("main/provisioning/claim_confirmation_reporter.cc")
+    confirm_body = function_body(source, "ClaimConfirmationResult ClaimConfirmationReporter::Confirm")
+
+    assert "enum class ClaimConfirmationResult" in header
+    for result in ("Confirmed", "RetryableFailure", "AmbiguousSuccess", "TerminalFailure"):
+        assert result in header
+    assert "static ClaimConfirmationResult Confirm" in header
+
+    # Client allocation/open failures and malformed 2xx persistence do not prove
+    # rejection of the one-time token, so the same claim attempt remains valid.
+    assert confirm_body.count("ClaimConfirmationResult::RetryableFailure") >= 3
+    persist_failure = confirm_body[confirm_body.index("ProcessTbotClaimConfirmationResponse") :]
+    assert "ClaimConfirmationResult::AmbiguousSuccess" in persist_failure
+
+    # Explicit timeout/throttle and all server failures are retryable. Remaining
+    # 4xx responses cover auth, expiry, mismatch, and already-confirmed classes.
+    assert "status_code == 408" in confirm_body
+    assert "status_code == 425" in confirm_body
+    assert "status_code == 429" in confirm_body
+    assert "status_code >= 500" in confirm_body
+    assert "ClaimConfirmationResult::TerminalFailure" in confirm_body
+    assert "ClaimConfirmationResult::Confirmed" in confirm_body
 
 
 def test_claim_confirmation_reporter_is_in_firmware_build_sources():

@@ -164,12 +164,13 @@ def test_afsk5_decoded_payload_chars_never_extracted():
 
 
 # ---------------------------------------------------------------------------
-# AFSK6: the password IS logged as a redacted length (positive assertion).
+# AFSK6: both credential fields are logged only as lengths.
 # ---------------------------------------------------------------------------
 def test_afsk6_password_is_redacted_to_length_only():
     src = read(AFSK_SRC)
 
-    assert re.search(r"Password:\s*\[redacted len=%u\]", src)
+    assert "WiFi credentials received (ssid_len=%u password_len=%u)" in src
+    assert "(unsigned)wifi_ssid.length()" in src
     assert "(unsigned)wifi_password.length()" in src
 
 

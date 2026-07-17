@@ -12,7 +12,8 @@ via SsidManager. The TBOT security policy is:
     length (e.g. "[redacted len=%u]").
   * The full decoded payload ("SSID\\npassword") is secret-bearing too (it
     contains the password); only its byte count may be logged.
-  * The SSID is NOT a secret and MAY appear (it is shown on the LCD on purpose).
+  * The SSID may be shown locally on the LCD, but production serial logs expose
+    only its length so home network names are not exported in diagnostics.
   * Redaction must not break the real handoff: the unredacted password VALUE
     must still flow into SsidManager::AddSsid so Wi-Fi actually connects.
 
@@ -213,15 +214,15 @@ def test_apr6_decoded_payload_chars_never_extracted():
 
 
 # ===========================================================================
-# APR7: POSITIVE — the password IS logged, but as a redacted length only. This
+# APR7: POSITIVE — credential lengths are logged without either raw value. This
 #       proves the redaction exists (not merely that the leak is absent: a file
 #       that logs nothing would pass APR2 vacuously; this asserts the intended,
 #       safe disclosure shape is actually present).
 # ===========================================================================
 def test_apr7_password_logged_as_redacted_length_only():
     src = read(AFSK_SRC)
-    assert re.search(r"Password:\s*\[redacted len=%u\]", src), \
-        "expected a length-only redaction marker for the password"
+    assert "WiFi credentials received (ssid_len=%u password_len=%u)" in src
+    assert "(unsigned)wifi_ssid.length()" in src
     assert "(unsigned)wifi_password.length()" in src, \
         "the redacted length must be the real password length"
 
@@ -237,18 +238,12 @@ def test_apr8_payload_logged_as_byte_count_only():
 
 
 # ===========================================================================
-# APR9: SSID is NOT a secret and IS allowed at a sink. This asserts the policy
-#       boundary is drawn at the RIGHT place — the LCD shows the SSID on
-#       purpose. (If a future "redact everything" overcorrection blanked the
-#       SSID display, this would catch it; conversely it documents that an
-#       SSID at a sink is intentional, not an oversight.)
+# APR9: the LCD may show the locally entered SSID, while serial logs must not.
 # ===========================================================================
 def test_apr9_ssid_is_allowed_at_a_sink():
     src = read(AFSK_SRC)
-    # The SSID is rendered to the LCD via its c_str() — explicitly allowed.
     assert 'display->SetChatMessage("system", wifi_ssid.c_str())' in src
-    # And the SSID appears in the same log line as the redacted password.
-    assert re.search(r"WiFi SSID:\s*%s.*Password:\s*\[redacted", read(AFSK_SRC))
+    assert 'ESP_LOGI(kLogTag, "WiFi SSID: %s' not in src
 
 
 # ===========================================================================

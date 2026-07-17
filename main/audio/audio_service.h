@@ -129,6 +129,7 @@ public:
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
     const std::string& GetLastWakeWord() const;
     bool IsVoiceDetected() const { return voice_detected_; }
+    bool IsRunning() const { return !service_stopped_; }
     bool IsIdle();
     bool WaitForPlaybackQueueEmpty(uint32_t timeout_ms = 0);
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }

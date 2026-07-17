@@ -61,7 +61,7 @@ def test_heartbeat_http_client_caps_blocking_open_to_5s():
 def test_claim_and_device_config_http_clients_cap_blocking_open_to_5s():
     source = read("main/provisioning/claim_confirmation_reporter.cc")
     fetch_body = function_body(source, "bool FetchPendingTbotClaimFromDeviceConfig")
-    confirm_body = function_body(source, "bool ClaimConfirmationReporter::Confirm")
+    confirm_body = function_body(source, "ClaimConfirmationResult ClaimConfirmationReporter::Confirm")
 
     assert "http->SetTimeout(5000);" in fetch_body
     assert fetch_body.index("http->SetTimeout(5000);") < fetch_body.index('http->Open("GET", url)')
@@ -140,8 +140,8 @@ def test_heartbeat_sender_is_gated_on_a_live_online_device_state():
     assert "kDeviceStateIdle" in dispatch_body
     assert "kDeviceStateListening" in dispatch_body
     assert "kDeviceStateSpeaking" in dispatch_body
-    # The state gate runs before the heartbeat worker can be queued.
-    assert dispatch_body.index("kDeviceStateSpeaking") < dispatch_body.index("xTaskCreate")
+    # The state gate runs before work can be queued to the persistent worker.
+    assert dispatch_body.index("kDeviceStateSpeaking") < dispatch_body.index("xQueueSend")
 
 
 def test_heartbeat_auth_failure_clears_stale_claim_credentials_and_reopens_setup():
@@ -156,7 +156,8 @@ def test_heartbeat_auth_failure_clears_stale_claim_credentials_and_reopens_setup
     assert "void HandleHeartbeatAuthFailure(int status_code);" in header
     assert "status_code == 401 || status_code == 403" in heartbeat_task_body
     assert "HandleHeartbeatAuthFailure(status_code);" in heartbeat_task_body
-    assert heartbeat_task_body.index("status_code == 401 || status_code == 403") < heartbeat_task_body.index("vTaskDelete")
+    assert heartbeat_task_body.index("status_code == 401 || status_code == 403") > heartbeat_task_body.index("Schedule(")
+    assert "vTaskDelete" not in heartbeat_task_body
 
     assert 'Settings backend_settings("backend", true);' in recovery_body
     assert 'backend_settings.SetString("device_secret", "");' in recovery_body

@@ -175,7 +175,7 @@ void WifiConfigurationAp::StartAccessPoint()
     ESP_ERROR_CHECK(esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY));
 #endif
 
-    ESP_LOGI(TAG, "Access Point started with SSID %s", ssid.c_str());
+    ESP_LOGI(TAG, "Configuration access point started");
 
     // 加载高级配置
     nvs_handle_t nvs;
@@ -334,8 +334,9 @@ void WifiConfigurationAp::StartWebServer()
             httpd_resp_sendstr_chunk(req, support_5g ? "true" : "false");
             httpd_resp_sendstr_chunk(req, ",\"aps\":[");
             for (int i = 0; i < this_->ap_records_.size(); i++) {
-                ESP_LOGI(TAG, "SSID: %s, RSSI: %d, Authmode: %d",
-                    (char *)this_->ap_records_[i].ssid, this_->ap_records_[i].rssi, this_->ap_records_[i].authmode);
+                ESP_LOGI(TAG, "Scanned AP: RSSI=%d authmode=%d",
+                         this_->ap_records_[i].rssi,
+                         this_->ap_records_[i].authmode);
                 char buf[128];
                 snprintf(buf, sizeof(buf), "{\"ssid\":\"%s\",\"rssi\":%d,\"authmode\":%d}",
                     (char *)this_->ap_records_[i].ssid, this_->ap_records_[i].rssi, this_->ap_records_[i].authmode);
@@ -660,8 +661,9 @@ void WifiConfigurationAp::StartWebServer()
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
 
-            ESP_LOGI(TAG, "Saved settings: ota_url=%s, max_tx_power=%d, remember_bssid=%d, sleep_mode=%d",
-                this_->ota_url_.c_str(), this_->max_tx_power_, this_->remember_bssid_, this_->sleep_mode_);
+            ESP_LOGI(TAG, "Saved settings: ota_url_present=%d max_tx_power=%d remember_bssid=%d sleep_mode=%d",
+                     static_cast<int>(!this_->ota_url_.empty()), this_->max_tx_power_,
+                     this_->remember_bssid_, this_->sleep_mode_);
             return ESP_OK;
         },
         .user_ctx = this
@@ -706,7 +708,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         is_connecting_ = false;
         return false;
     }
-    ESP_LOGI(TAG, "Connecting to WiFi %s", ssid.c_str());
+    ESP_LOGI(TAG, "Testing WiFi credentials");
 
     // Wait for the connection to complete for 10 or 25 seconds
     EventBits_t bits = xEventGroupWaitBits(
@@ -723,18 +725,19 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     is_connecting_ = false;
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Connected to WiFi %s", ssid.c_str());
+        ESP_LOGI(TAG, "WiFi credential test succeeded");
         esp_wifi_disconnect();
         return true;
     } else {
-        ESP_LOGE(TAG, "Failed to connect to WiFi %s", ssid.c_str());
+        ESP_LOGE(TAG, "WiFi credential test failed");
         return false;
     }
 }
 
 void WifiConfigurationAp::Save(const std::string &ssid, const std::string &password)
 {
-    ESP_LOGI(TAG, "Save SSID %s %d", ssid.c_str(), ssid.length());
+    ESP_LOGI(TAG, "Saving WiFi credentials (ssid_len=%u)",
+             static_cast<unsigned>(ssid.length()));
     SsidManager::GetInstance().AddSsid(ssid, password);
 }
 
@@ -748,10 +751,10 @@ void WifiConfigurationAp::WifiEventHandler(void* arg, esp_event_base_t event_bas
     WifiConfigurationAp* self = static_cast<WifiConfigurationAp*>(arg);
     if (event_id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t* event = (wifi_event_ap_staconnected_t*) event_data;
-        ESP_LOGI(TAG, "Station " MACSTR " joined, AID=%d", MAC2STR(event->mac), event->aid);
+        ESP_LOGI(TAG, "Station joined configuration AP, AID=%d", event->aid);
     } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
-        ESP_LOGI(TAG, "Station " MACSTR " left, AID=%d", MAC2STR(event->mac), event->aid);
+        ESP_LOGI(TAG, "Station left configuration AP, AID=%d", event->aid);
     } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
         xEventGroupSetBits(self->event_group_, WIFI_CONNECTED_BIT);
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -816,7 +819,9 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
             char ssid[32], password[64];
             memcpy(ssid, evt->ssid, sizeof(evt->ssid));
             memcpy(password, evt->password, sizeof(evt->password));
-            ESP_LOGI(TAG, "SmartConfig SSID: %s, Password: %s", ssid, password);
+            ESP_LOGI(TAG, "SmartConfig credentials received (ssid_len=%u password_len=%u)",
+                     static_cast<unsigned>(strnlen(ssid, sizeof(ssid))),
+                     static_cast<unsigned>(strnlen(password, sizeof(password))));
             // 尝试连接WiFi会失败，故不连接
             self->Save(ssid, password);
             // 延迟退出配网模式

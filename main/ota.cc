@@ -53,7 +53,7 @@ void PersistRecoveredOtaUrl(const std::string& url) {
     Settings settings("wifi", true);
     if (settings.GetString("ota_url") != url) {
         settings.SetString("ota_url", url);
-        ESP_LOGW(TAG, "Recovered OTA URL persisted to NVS: %s", url.c_str());
+        ESP_LOGW(TAG, "Recovered OTA URL persisted to NVS");
     }
 }
 
@@ -97,7 +97,7 @@ std::unique_ptr<Http> Ota::SetupHttp() {
     http->SetHeader("Client-Id", board.GetUuid());
     if (has_serial_number_) {
         http->SetHeader("Serial-Number", serial_number_.c_str());
-        ESP_LOGI(TAG, "Setup HTTP, User-Agent: %s, Serial-Number: %s", user_agent.c_str(), serial_number_.c_str());
+        ESP_LOGI(TAG, "Setup activation HTTP (serial_present=1)");
     }
     http->SetHeader("User-Agent", user_agent);
     http->SetHeader("Accept-Language", Lang::CODE);
@@ -139,7 +139,7 @@ esp_err_t Ota::CheckVersion() {
             break;
         }
         last_error = http->GetLastError();
-        ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x, url=%s", last_error, url.c_str());
+        ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x", last_error);
     }
 
     if (opened_url.empty()) {
@@ -377,7 +377,7 @@ void Ota::MarkCurrentVersionValid() {
 }
 
 bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback) {
-    ESP_LOGI(TAG, "Upgrading firmware from %s", firmware_url.c_str());
+    ESP_LOGI(TAG, "Upgrading firmware from authenticated URL");
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
     if (update_partition == NULL) {
@@ -589,7 +589,10 @@ std::string Ota::GetActivationPayload() {
     cJSON_free(json_str);
     cJSON_Delete(payload);
 
-    ESP_LOGI(TAG, "Activation payload: %s", json.c_str());
+    ESP_LOGI(TAG, "Activation payload prepared (serial_len=%u challenge_len=%u hmac_len=%u)",
+             static_cast<unsigned>(serial_number_.size()),
+             static_cast<unsigned>(activation_challenge_.size()),
+             static_cast<unsigned>(hmac_hex.size()));
     return json;
 }
 
@@ -621,7 +624,9 @@ esp_err_t Ota::Activate() {
         return ESP_ERR_TIMEOUT;
     }
     if (status_code != 200) {
-        ESP_LOGE(TAG, "Failed to activate, code: %d, body: %s", status_code, http->ReadAll().c_str());
+        const std::string response_body = http->ReadAll();
+        ESP_LOGE(TAG, "Failed to activate, code=%d body_len=%u", status_code,
+                 static_cast<unsigned>(response_body.size()));
         return ESP_FAIL;
     }
 

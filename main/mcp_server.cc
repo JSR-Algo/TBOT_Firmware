@@ -542,7 +542,7 @@ void McpServer::AddUserOnlyTools() {
         }),
         [this](const PropertyList& properties) -> ReturnValue {
             auto url = properties["url"].value<std::string>();
-            ESP_LOGI(TAG, "User requested firmware upgrade from URL: %s", url.c_str());
+            ESP_LOGI(TAG, "User requested firmware upgrade");
             
             auto& app = Application::GetInstance();
             app.Schedule([url, &app]() {
@@ -591,7 +591,7 @@ void McpServer::AddUserOnlyTools() {
                     throw std::runtime_error("Failed to snapshot screen");
                 }
 
-                ESP_LOGI(TAG, "Upload snapshot %u bytes to %s", jpeg_data.size(), url.c_str());
+                ESP_LOGI(TAG, "Uploading snapshot (%u bytes)", jpeg_data.size());
                 
                 // 构造multipart/form-data请求体
                 std::string boundary = "----ESP32_SCREEN_SNAPSHOT_BOUNDARY";
@@ -599,7 +599,7 @@ void McpServer::AddUserOnlyTools() {
                 auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
                 http->SetHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
                 if (!http->Open("POST", url)) {
-                    throw std::runtime_error("Failed to open URL: " + url);
+                    throw std::runtime_error("Failed to open snapshot upload URL");
                 }
                 {
                     // 文件字段头部

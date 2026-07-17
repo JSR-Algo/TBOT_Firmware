@@ -107,14 +107,58 @@ def test_deferred_release_is_single_flight_and_off_the_app_task():
     assert "tskIDLE_PRIORITY + 1" in body
 
 
+def test_deferred_release_allocation_failures_are_retry_safe_and_zeroize_secrets():
+    body = function_body(app_source(), "void Application::MaybeDispatchDeferredCloudRelease")
+
+    assert "new (std::nothrow) CloudReleaseContext" in body
+    allocation_failure = body[body.index("new (std::nothrow) CloudReleaseContext") :]
+    assert "if (ctx == nullptr)" in allocation_failure
+    null_branch = allocation_failure[
+        allocation_failure.index("if (ctx == nullptr)") :
+        allocation_failure.index("xTaskCreateWithCaps")
+    ]
+    assert "cloud_release_inflight_.store(false);" in null_branch
+    assert 'SetInt("release_pending", 0)' not in null_branch
+    assert "return;" in null_branch
+
+    task_failure = allocation_failure[allocation_failure.index("xTaskCreateWithCaps") :]
+    assert "SecureClearString(ctx->device_secret);" in task_failure
+    assert task_failure.index("SecureClearString(ctx->device_secret);") < task_failure.index(
+        "delete ctx;"
+    )
+    assert 'SetInt("release_pending", 0)' not in task_failure
+
+    assert "SecureStringScope device_secret_scope(device_secret);" in body
+
+
 def test_cloud_release_worker_clears_state_only_on_success():
     body = function_body(app_source(), "void Application::CloudReleaseTask")
 
-    assert "SystemReset::ReleaseCloudOwnership()" in body
+    assert "SystemReset::ReleaseCloudOwnership(ctx->api_url, ctx->device_id, ctx->device_secret)" in body
     # Result handling marshalled back onto the Application task (OQ1).
     assert "self->Schedule(" in body
     # On success: stop deferring + drop the now-released secret so the next claim
     # mints a fresh one. A failed release leaves release_pending set to retry.
     assert 'backend_settings.SetInt("release_pending", 0);' in body
     assert 'backend_settings.SetString("device_secret", "");' in body
+    assert "self->RefreshPendingTbotClaim();" in body
     assert "vTaskDelete(nullptr);" in body
+
+
+def test_deferred_release_uses_captured_credentials_and_cannot_clear_a_later_claim():
+    source = app_source()
+    dispatch = function_body(source, "void Application::MaybeDispatchDeferredCloudRelease")
+    worker = function_body(source, "void Application::CloudReleaseTask")
+    reset_header = read("main/boards/common/system_reset.h")
+
+    assert "struct CloudReleaseContext" in source
+    assert "api_url, device_id, device_secret" in dispatch
+    assert "new (std::nothrow) CloudReleaseContext" in dispatch
+    assert "ReleaseCloudOwnership(ctx->api_url, ctx->device_id, ctx->device_secret)" in worker
+    assert "credentials_unchanged" in worker
+    changed_branch = worker[worker.index("if (!credentials_unchanged)") :]
+    assert 'backend_settings.SetInt("release_pending", 0);' in changed_branch
+    assert 'backend_settings.SetString("device_secret", "");' not in changed_branch[
+        : changed_branch.index("return;")
+    ]
+    assert "ReleaseCloudOwnership(const std::string& api_url" in reset_header

@@ -426,7 +426,7 @@ bool Assets::EmoteStrategy::Apply(Assets* assets, bool refresh_display_theme) {
 }
 
 bool Assets::Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback) {
-    ESP_LOGI(TAG, "Downloading new version of assets from %s", url.c_str());
+    ESP_LOGI(TAG, "Downloading new version of assets");
 
     // 取消当前资源分区的内存映射
     UnApplyPartition();

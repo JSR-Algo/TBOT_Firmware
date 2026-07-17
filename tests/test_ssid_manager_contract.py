@@ -13,13 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def read(path: str) -> str:
-    candidate = ROOT / path
-    if not candidate.exists() and path.startswith("managed_components/78__esp-wifi-connect/"):
-        candidate = ROOT / path.replace(
+    if path.startswith("managed_components/78__esp-wifi-connect/"):
+        canonical = ROOT / path.replace(
             "managed_components/78__esp-wifi-connect",
             "components/esp-wifi-connect",
             1,
         )
+        if canonical.exists():
+            return canonical.read_text(encoding="utf-8")
+    candidate = ROOT / path
     return candidate.read_text(encoding="utf-8")
 
 
@@ -34,7 +36,7 @@ def test_ssid_manager_ignores_empty_persisted_ssids():
     body = _function_body(
         src,
         "void SsidManager::LoadFromNvs()",
-        "void SsidManager::SaveToNvs()",
+        "bool SsidManager::SaveToNvs()",
     )
 
     empty_guard = body.index("ssid[0] == '\\0'")

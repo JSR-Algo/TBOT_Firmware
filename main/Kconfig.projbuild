@@ -1024,7 +1024,7 @@ config TBOT_PROVISIONING_REPORT_ENABLED
 
 config PROVISIONING_STATUS_URL
     string "Provisioning status endpoint URL"
-    default "https://esp.tjbot.vn/tbot/v1/device/provisioning/status"
+    default "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
     depends on TBOT_PROVISIONING_REPORT_ENABLED
     help
         Backend endpoint to POST provisioning status.

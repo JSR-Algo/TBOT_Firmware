@@ -518,6 +518,33 @@ def test_sec15_dh_handler_type00_realloc_is_leak_and_double_free_safe():
     assert "btc_blufi_report_error(ESP_BLUFI_DH_MALLOC_ERROR);" in case0
 
 
+def test_sec15b_repeated_dh_session_releases_previous_crypto_heap_first():
+    body = _dh_handler_body()
+    case0 = _slice(body, "case 0x00:", "case 0x01:")
+
+    reset_dhm = case0.index("mbedtls_dhm_free(m_sec->dhm);")
+    init_dhm = case0.index("mbedtls_dhm_init(m_sec->dhm);", reset_dhm)
+    reset_aes = case0.index("mbedtls_aes_free(m_sec->aes);")
+    init_aes = case0.index("mbedtls_aes_init(m_sec->aes);", reset_aes)
+    malloc_new = case0.index("m_sec->dh_param = (uint8_t*)malloc(m_sec->dh_param_len);")
+
+    assert reset_dhm < init_dhm < malloc_new
+    assert reset_aes < init_aes < malloc_new
+    assert case0.index("m_blufi_security_negotiated = false;") < malloc_new
+    assert case0.index("memset(m_sec->share_key, 0, sizeof(m_sec->share_key));") < malloc_new
+    assert case0.index("memset(m_sec->psk, 0, sizeof(m_sec->psk));") < malloc_new
+
+
+def test_sec15c_dh_param_length_is_bounded_and_malloc_failure_returns():
+    body = _dh_handler_body()
+    case0 = _slice(body, "case 0x00:", "case 0x01:")
+
+    assert "m_sec->dh_param_len <= 0 || m_sec->dh_param_len > 1024" in case0
+    assert "m_sec->dh_param_len = 0;" in case0
+    malloc_error = case0.index("btc_blufi_report_error(ESP_BLUFI_DH_MALLOC_ERROR);")
+    assert case0.index("return;", malloc_error) > malloc_error
+
+
 # ---------------------------------------------------------------------------
 # SEC16: type 0x01 (DH params) must reject a missing dh_param (a 0x01 that
 #        arrives without a preceding successful 0x00 malloc) with DH_PARAM_ERROR
@@ -536,6 +563,15 @@ def test_sec16_dh_handler_type01_requires_allocated_param():
     )
     assert 'ESP_LOGE(BLUFI_TAG, "DH param not allocated");' in case1
     assert case1.index("return;", err_idx) < memcpy_idx
+
+
+def test_sec16b_dh_handler_type01_rejects_truncated_param_data():
+    body = _dh_handler_body()
+    case1 = _slice(body, "case 0x01:", "default:")
+
+    guard = case1.index("if (len < m_sec->dh_param_len + 1)")
+    memcpy_idx = case1.index("memcpy(m_sec->dh_param, &data[1], m_sec->dh_param_len);")
+    assert guard < case1.index("return;", guard) < memcpy_idx
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +605,17 @@ def test_sec17_dh_handler_type01_success_chain_order_and_typed_errors():
     # The PSK is exactly the MD5 of the shared key; the AES key length is PSK_LEN
     # bytes expressed in BITS (* 8) for mbedtls.
     assert "PSK_LEN * 8" in case1
+
+
+def test_sec17b_dh_public_key_output_is_bounded_by_fixed_buffer():
+    body = _dh_handler_body()
+    case1 = _slice(body, "case 0x01:", "default:")
+
+    length = case1.index("const int dhm_len = mbedtls_dhm_get_len(m_sec->dhm);")
+    guard = case1.index("if (dhm_len <= 0 || dhm_len > DH_SELF_PUB_KEY_LEN)")
+    make_public = case1.index("mbedtls_dhm_make_public(m_sec->dhm")
+    assert length < guard < case1.index("return;", guard) < make_public
+    assert "m_sec->self_public_key, DH_SELF_PUB_KEY_LEN," in " ".join(case1.split())
 
 
 # ---------------------------------------------------------------------------
@@ -892,12 +939,12 @@ def test_sec31_custom_data_is_rejected_before_tlv_parse_without_secure_session()
 
     guard_idx = case_body.index("_require_secure_session_for_credentials()")
     data_idx = case_body.index("const uint8_t* data = param->custom_data.data;")
-    prescan_idx = case_body.index("int prescan_offset = 0;")
-    token_persist_idx = case_body.index('websocket_settings.SetString("bootstrap_token", bootstrap_token_);')
-    device_id_persist_idx = case_body.index('websocket_settings.SetString("claim_device_id"')
+    snapshot_idx = case_body.index("BlufiCustomDataSnapshot snapshot;")
+    token_persist_idx = case_body.index('"bootstrap_token", self->bootstrap_token_')
+    device_id_persist_idx = case_body.index('"claim_device_id"')
 
     assert guard_idx < data_idx
-    assert guard_idx < prescan_idx
+    assert guard_idx < snapshot_idx
     assert guard_idx < device_id_persist_idx
     assert guard_idx < token_persist_idx
     assert "break;" in case_body[guard_idx:data_idx]
@@ -918,3 +965,37 @@ def test_sec30_secure_session_flag_set_only_after_dh_aes_success():
     flag_idx = dh_body.index("m_blufi_security_negotiated = true;")
     assert setkey_idx < flag_idx
     assert "bool Blufi::_require_secure_session_for_credentials()" in cpp
+
+
+# ---------------------------------------------------------------------------
+# SEC32: DH negotiation records sanitized allocator evidence at the two points
+#        needed to diagnose controller/mbedTLS INTERNAL|DMA pressure. The
+#        snapshot contains numeric heap data only and never key/session data.
+# ---------------------------------------------------------------------------
+def test_sec32_dh_public_key_path_logs_numeric_heap_snapshots_at_both_boundaries():
+    cpp = read(BLUFI_CPP)
+    dh_body = _dh_handler_body()
+    helper = _slice(cpp, "static void LogBlufiHeapSnapshot", "static std::string GetBlufiDeviceName")
+
+    assert "heap_caps_get_free_size(MALLOC_CAP_INTERNAL)" in helper
+    assert "heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)" in helper
+    assert "heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)" in helper
+    assert "heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)" in helper
+    for forbidden in ("ssid", "password", "token", "serial", "mac", "key"):
+        assert forbidden not in helper.lower()
+
+    make_public_idx = dh_body.index("mbedtls_dhm_make_public(m_sec->dhm")
+    before_make_idx = dh_body.index('LogBlufiHeapSnapshot("dh_before_make_public")')
+    output_idx = dh_body.index("*output_data = m_sec->self_public_key;")
+    before_return_idx = dh_body.index('LogBlufiHeapSnapshot("dh_before_public_key_return")')
+
+    assert before_make_idx < make_public_idx
+    assert re.search(
+        r'LogBlufiHeapSnapshot\("dh_before_make_public"\);\s*ret\s*=\s*'
+        r'mbedtls_dhm_make_public',
+        dh_body,
+    )
+    assert before_return_idx < output_idx
+    assert dh_body[before_return_idx:output_idx].strip().endswith(
+        'LogBlufiHeapSnapshot("dh_before_public_key_return");'
+    )

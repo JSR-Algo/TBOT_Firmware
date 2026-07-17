@@ -10,6 +10,7 @@
 #include <freertos/task.h>
 #include <esp_network.h>
 #include <esp_log.h>
+#include <new>
 #include <utility>
 
 #include <font_awesome.h>
@@ -172,13 +173,13 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             }
 #endif
             in_config_mode_ = false;
-            ESP_LOGI(TAG, "Connected to WiFi: %s", data.c_str());
+            ESP_LOGI(TAG, "WiFi connected");
             break;
         case NetworkEvent::Scanning:
             ESP_LOGI(TAG, "WiFi scanning");
             break;
         case NetworkEvent::Connecting:
-            ESP_LOGI(TAG, "WiFi connecting to %s", data.c_str());
+            ESP_LOGI(TAG, "WiFi connection attempt started");
             break;
         case NetworkEvent::Disconnected:
             ESP_LOGW(TAG, "WiFi disconnected");
@@ -338,10 +339,11 @@ void WifiBoard::StartWifiConfigMode() {
     // advertising; calling init() again would leak the controller/host. A prior
     // hard-timeout is equivalent to off for an explicit BOOT setup entry: the
     // stack was torn down and must be initialized again so the phone can scan it.
-    const auto ble_state = blufi.GetBleState();
-    if (ble_state == Blufi::BleState::kOff ||
-        ble_state == Blufi::BleState::kTimeout) {
-        blufi.init();
+    esp_err_t ble_err = blufi.RestartForSetup();
+    if (ble_err != ESP_OK) {
+        ESP_LOGE(TAG, "Unable to open a fresh BLE setup session: %s",
+                 esp_err_to_name(ble_err));
+        return;
     }
     // Arm the hard-timeout safety gate immediately after init so that BLE
     // advertising cannot run forever if provisioning never completes.
@@ -376,14 +378,24 @@ void WifiBoard::EnterWifiConfigMode() {
         ESP_LOGI(TAG, "EnterWifiConfigMode ignored during lesson");
         return;
     }
+    const uint32_t generation = wifi_config_entry_generation_.fetch_add(1) + 1;
     GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
 
     auto state = app.GetDeviceState();
 
     if (state == kDeviceStateWifiConfiguring) {
+        bool expected = false;
+        if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
+            return;
+        }
+        if (generation != wifi_config_entry_generation_.load()) {
+            wifi_config_entry_inflight_.store(false);
+            return;
+        }
         esp_timer_stop(connect_timer_);
         WifiManager::GetInstance().StopStation();
         StartWifiConfigMode();
+        wifi_config_entry_inflight_.store(false);
         return;
     }
 
@@ -393,13 +405,41 @@ void WifiBoard::EnterWifiConfigMode() {
         // Reset protocol (close audio channel, reset protocol)
         Application::GetInstance().ResetProtocol();
 
-        xTaskCreate([](void* arg) {
-            auto* board = static_cast<WifiBoard*>(arg);
+        bool expected = false;
+        if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
+            return;
+        }
+
+        struct WifiConfigEntryContext {
+            WifiBoard* board;
+            uint32_t generation;
+        };
+        auto* ctx = new (std::nothrow) WifiConfigEntryContext{this, generation};
+        if (ctx == nullptr) {
+            wifi_config_entry_inflight_.store(false);
+            ESP_LOGE(TAG, "wifi_cfg_delay context allocation failed");
+            return;
+        }
+
+        BaseType_t created = xTaskCreate([](void* arg) {
+            auto* ctx = static_cast<WifiConfigEntryContext*>(arg);
+            auto* board = ctx->board;
+            const uint32_t generation = ctx->generation;
+            delete ctx;
 
             // Wait for 1 second to allow speaking to finish gracefully
             vTaskDelay(pdMS_TO_TICKS(1000));
+            if (generation != board->wifi_config_entry_generation_.load()) {
+                board->wifi_config_entry_inflight_.store(false);
+                Application::GetInstance().Schedule([board]() {
+                    board->EnterWifiConfigMode();
+                });
+                vTaskDelete(NULL);
+                return;
+            }
             if (Application::GetInstance().IsLessonRuntimeActive()) {
                 ESP_LOGI(TAG, "Delayed EnterWifiConfigMode ignored during lesson");
+                board->wifi_config_entry_inflight_.store(false);
                 vTaskDelete(NULL);
                 return;
             }
@@ -410,9 +450,28 @@ void WifiBoard::EnterWifiConfigMode() {
 
             // Enter config mode
             board->StartWifiConfigMode();
+            board->wifi_config_entry_inflight_.store(false);
 
             vTaskDelete(NULL);
-        }, "wifi_cfg_delay", 4096, this, 2, NULL);
+        }, "wifi_cfg_delay", 4096, ctx, 2, NULL);
+        if (created != pdPASS) {
+            delete ctx;
+            wifi_config_entry_inflight_.store(false);
+            ESP_LOGE(TAG, "wifi_cfg_delay task create failed; using Application task fallback");
+            Application::GetInstance().Schedule([this, generation]() {
+                if (generation != wifi_config_entry_generation_.load()) {
+                    return;
+                }
+                bool expected = false;
+                if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
+                    return;
+                }
+                esp_timer_stop(connect_timer_);
+                WifiManager::GetInstance().StopStation();
+                StartWifiConfigMode();
+                wifi_config_entry_inflight_.store(false);
+            });
+        }
         return;
     }
 
@@ -422,10 +481,19 @@ void WifiBoard::EnterWifiConfigMode() {
     }
 
     // Stop any ongoing connection attempt
+    bool expected = false;
+    if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    if (generation != wifi_config_entry_generation_.load()) {
+        wifi_config_entry_inflight_.store(false);
+        return;
+    }
     esp_timer_stop(connect_timer_);
     WifiManager::GetInstance().StopStation();
 
     StartWifiConfigMode();
+    wifi_config_entry_inflight_.store(false);
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {

@@ -384,7 +384,8 @@ void WifiConfigUI::LoadSavedWifiList() {
 void WifiConfigUI::SaveWifiCredentials(const std::string& ssid, const std::string& password) {
     auto& ssid_manager = SsidManager::GetInstance();
     ssid_manager.AddSsid(ssid, password);
-    ESP_LOGI(TAG, "Saved WiFi credentials for: %s", ssid.c_str());
+    ESP_LOGI(TAG, "Saved WiFi credentials (ssid_len=%u)",
+             static_cast<unsigned>(ssid.size()));
 }
 
 void WifiConfigUI::DeleteSavedWifi(int index) {

@@ -52,6 +52,11 @@ bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
                                            PendingTbotClaim& pending_claim,
                                            int* http_status_code);
 
+// Persist a claim-confirm response already validated by the network worker.
+// Kept separate so generation-gated Application code performs NVS writes only
+// after confirming the setup session is still current.
+bool PersistTbotClaimConfirmationResponse(const std::string& json);
+
 // Derive the device-bootstrap URL ({origin}/v1/device/bootstrap) from the
 // compiled provisioning-status URL ({origin}/v1/device/provisioning/status).
 // Returns "" if the provisioning URL does not carry the expected suffix.
@@ -62,11 +67,20 @@ std::string BuildTbotDeviceBootstrapUrl();
 // feature goes silently inert. GET /v1/device/bootstrap (which always emits
 // api_url) and, on success, persist it into Settings("backend"). Returns the
 // fetched api_url on success, "" on failure. main-task-only HTTP (blocking).
-std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token);
+std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token,
+                                            bool persist_result = true);
+
+enum class ClaimConfirmationResult {
+    Confirmed,
+    RetryableFailure,
+    AmbiguousSuccess,
+    TerminalFailure,
+};
 
 class ClaimConfirmationReporter {
 public:
-    static bool Confirm(const PendingTbotClaim& claim,
-                        const std::string& api_base_url,
-                        const std::string& bootstrap_token);
+    static ClaimConfirmationResult Confirm(const PendingTbotClaim& claim,
+                                           const std::string& api_base_url,
+                                           const std::string& bootstrap_token,
+                                           std::string* deferred_success_response = nullptr);
 };

@@ -85,6 +85,25 @@ def test_application_has_a_periodic_device_heartbeat_sender():
     assert "StartHeartbeat();" in source
 
 
+def test_heartbeat_uses_one_persistent_worker_allocated_before_heap_fragmentation():
+    source = read("main/application.cc")
+    start_body = function_body(source, "void Application::StartHeartbeat")
+    dispatch_body = function_body(source, "void Application::DispatchDeviceHeartbeat")
+    worker_body = function_body(source, "void Application::HeartbeatTask")
+
+    # Physical ESP32-S3 evidence: repeated transient TLS workers progressively
+    # fragment internal SRAM until even a 6144-byte stack cannot be allocated.
+    # Allocate one worker while claim confirmation still has a large contiguous
+    # block, then feed it heartbeat contexts through a one-slot queue.
+    assert "xQueueCreate(1, sizeof(void*))" in start_body
+    assert '"heartbeat_http", 6144' in start_body
+    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in start_body
+    assert "xTaskCreateWithCaps" not in dispatch_body
+    assert "xQueueSend(heartbeat_queue_" in dispatch_body
+    assert "while (xQueueReceive(self->heartbeat_queue_" in worker_body
+    assert "vTaskDelete(nullptr)" not in worker_body
+
+
 def test_heartbeat_reuses_board_status_radio_fields_so_online_reports_live_radios():
     # GetDeviceStatusJson reports live radio state: BluFi builds expose BLE via
     # GetBleStateString(), while non-BluFi builds fall back to ble_state=off.
@@ -132,23 +151,31 @@ def test_websocket_online_paths_dispatch_first_heartbeat_immediately():
 def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_session():
     source = read("main/application.cc")
     confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
+    result_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
 
     # A fresh claim must make the robot ready for the next explicit wake phrase.
     # Opening the realtime channel here can drive the normal connect path into
     # Listening, where CONFIG_WAKE_WORD_DETECTION_IN_LISTENING is disabled for
     # this board. That leaves the user saying "Hi ESP" while the wake-word path
     # is off.
-    assert "SetDeviceState(kDeviceStateIdle);" in confirm_body
-    assert "audio_service_.EnableWakeWordDetection(true);" in confirm_body
-    assert "protocol_->Start()" not in confirm_body
-    assert "Claim confirmed: warming realtime audio WS" not in confirm_body
+    assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result)" in confirm_body
+    assert "SetDeviceState(kDeviceStateIdle);" in result_body
+    assert "audio_service_.EnableWakeWordDetection(true);" in result_body
+    assert "protocol_->Start()" not in result_body
+    assert "Claim confirmed: warming realtime audio WS" not in result_body
 
 def test_claim_confirm_starts_heartbeat_after_credentials_are_persisted():
     source = read("main/application.cc")
     confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
+    result_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
 
-    success_start = confirm_body.index("CancelClaimExpiryTimer();")
-    success_body = confirm_body[success_start:]
+    assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result)" in confirm_body
+    success_start = result_body.index("CancelClaimExpiryTimer();")
+    success_body = result_body[success_start:]
 
     idle_index = success_body.index("SetDeviceState(kDeviceStateIdle);")
     wake_index = success_body.index("audio_service_.EnableWakeWordDetection(true);")

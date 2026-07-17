@@ -19,8 +19,10 @@
 #include <wifi_manager.h>
 #endif
 
+#include <algorithm>
 #include <ctime>
 #include <cstring>
+#include <new>
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -41,6 +43,29 @@ static constexpr uint32_t kTtsStopPlaybackDrainTimeoutMs = 15000;
 static constexpr uint32_t kListeningNoSpeechTimeoutMs = 15000;
 static constexpr uint32_t kListeningAutoStopMaxTurnMs = 10000;
 static constexpr uint32_t kListeningMaxTurnMs = 60000;
+
+static void SecureClearString(std::string& value) {
+    if (!value.empty()) {
+        volatile char* bytes = &value[0];
+        for (std::size_t i = 0; i < value.size(); ++i) {
+            bytes[i] = '\0';
+        }
+    }
+    value.clear();
+}
+
+class SecureStringScope {
+public:
+    explicit SecureStringScope(std::string& value) : value_(value) {}
+    ~SecureStringScope() { SecureClearString(value_); }
+
+    SecureStringScope(const SecureStringScope&) = delete;
+    SecureStringScope& operator=(const SecureStringScope&) = delete;
+
+private:
+    std::string& value_;
+};
+
 static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
@@ -195,7 +220,14 @@ void Application::Initialize() {
     // Setup the audio service
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
-    audio_service_.Start();
+    if (IsDeviceClaimed()) {
+        audio_service_.Start();
+    } else {
+        // Provisioning and claim workers require contiguous internal SRAM.
+        // Unclaimed robots do not use wake-word, voice, or lesson audio, so do
+        // not reserve the three audio task stacks until claim confirmation.
+        ESP_LOGI(TAG, "Unclaimed boot: deferring audio workers until claim confirmation");
+    }
     robot_uart_.Initialize();
 
     // App manager (Menu/Game overlay) + nhan su kien nut TTP223 tu slave qua UART.
@@ -722,13 +754,55 @@ void Application::RefreshPendingTbotClaim() {
 
     Settings websocket_settings("websocket", false);
     std::string token = websocket_settings.GetString("bootstrap_token");
+    SecureStringScope token_scope(token);
+    bool paused_ble_for_fetch = false;
+
+    if (!token.empty() && websocket_settings.GetInt("claim_ambiguous", 0) != 0) {
+        claim_confirmation_ambiguous_ = true;
+        claim_substate_ = TbotClaimSubstate::WaitingConfirm;
+        StopClaimPoll();
+        StopBleAdvertising();
+        ESP_LOGE(TAG, "Claim confirmation remains ambiguous; automatic backend retry suppressed");
+        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CLAIM_CONFIRM_SUPPORT_REQUIRED,
+              "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+        return;
+    }
 
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     {
         const auto ble_state = Blufi::GetInstance().GetBleState();
-        if (!pending_tbot_claim_.active && !token.empty() &&
-            (ble_state == Blufi::BleState::kAdvertising ||
-             ble_state == Blufi::BleState::kConnected)) {
+        if (!pending_tbot_claim_.active &&
+            ble_state == Blufi::BleState::kConnected && token.empty()) {
+            // A connected phone may still be sending claim custom-data. Do not
+            // tear down its GATT session or start TLS until the handoff finishes.
+            ESP_LOGI(TAG, "BLE connected without bootstrap token; waiting for custom-data handoff");
+            return;
+        }
+        if (!pending_tbot_claim_.active &&
+            ble_state == Blufi::BleState::kAdvertising && token.empty()) {
+            // Physical ESP32-S3 measurements show that Wi-Fi + BluFi advertising
+            // can leave too little internal SRAM for DNS/TLS. Pause advertising
+            // for the unauthenticated setup-liveness fetch; its result handler
+            // reopens BLE whenever the robot remains unclaimed.
+            ESP_LOGI(TAG, "Pausing BLE advertising before no-token claim config fetch");
+            Blufi::GetInstance().CancelBleSetupTimeout();
+            StopBleAdvertising();
+            paused_ble_for_fetch = true;
+        } else if (!pending_tbot_claim_.active && !token.empty() &&
+                   (ble_state == Blufi::BleState::kAdvertising ||
+                    ble_state == Blufi::BleState::kConnected)) {
+            const bool retrying_backend_visibility =
+                !pending_tbot_claim_token_.empty() &&
+                pending_tbot_claim_token_ == token &&
+                claim_substate_ == TbotClaimSubstate::AvailableStandby;
+            if (retrying_backend_visibility) {
+                // A successful prior fetch saw no claim yet. Keep this BluFi
+                // instance stable while polling for delayed backend visibility;
+                // repeated host deinit/init eventually corrupts Bluedroid queue
+                // teardown on ESP32-S3. Audio workers are deferred while
+                // unclaimed, leaving enough SRAM for this BLE + TLS overlap.
+                ESP_LOGI(TAG, "Retrying delayed claim visibility while keeping BLE session stable");
+            } else {
             // We ALREADY hold a bootstrap token but BLE is still active - e.g. a
             // flaky BLE link (MIUI BLE contention) never reached the clean
             // wifi-success deinit path. Do NOT strand behind this gate forever:
@@ -738,6 +812,7 @@ void Application::RefreshPendingTbotClaim() {
             ESP_LOGW(TAG, "Bootstrap token present but BLE still active; stopping BLE to proceed with claim fetch/confirm");
             Blufi::GetInstance().CancelBleSetupTimeout();
             StopBleAdvertising();
+            }
         }
     }
 #endif
@@ -763,7 +838,8 @@ void Application::RefreshPendingTbotClaim() {
         StopBleAdvertising();
         pending_tbot_claim_ = PendingTbotClaim{};
         pending_tbot_claim_api_url_.clear();
-        pending_tbot_claim_token_.clear();
+        SecureClearString(pending_tbot_claim_token_);
+        claim_confirmation_ambiguous_ = false;
         claim_substate_ = TbotClaimSubstate::None;
         return;
     }
@@ -775,32 +851,23 @@ void Application::RefreshPendingTbotClaim() {
         // real ESP32-S3 that BLE+TLS overlap can fail AES allocation. Stop BLE
         // first and confirm the cached claim directly.
         pending_tbot_claim_api_url_ = api_url;
+        SecureClearString(pending_tbot_claim_token_);
         pending_tbot_claim_token_ = token;
-        StopClaimPoll();
         StopBleAdvertising();
         claim_substate_ = TbotClaimSubstate::WaitingConfirm;
         ESP_LOGI(TAG, "Cached pending claim has BLE bootstrap token -> auto-confirming");
         ConfirmPendingTbotClaim(/*trust_backend_expiry=*/true);
-        if (claim_substate_ != TbotClaimSubstate::Confirmed) {
-            ESP_LOGW(TAG, "Auto-confirm POST did not land; clearing stale claim token + reopening BLE");
-            Settings websocket_settings("websocket", true);
-            websocket_settings.SetString("bootstrap_token", "");
-            pending_tbot_claim_token_.clear();
-            claim_substate_ = TbotClaimSubstate::AvailableStandby;
-            EnsureBleAdvertisingForStandby();
-            StartClaimPoll();
-        }
         return;
     }
 
     if (pending_tbot_claim_.active && token.empty()) {
         ESP_LOGW(TAG, "Pending claim cached but no BLE bootstrap token yet; keeping BLE advertising");
         pending_tbot_claim_api_url_ = api_url;
-        pending_tbot_claim_token_.clear();
+        SecureClearString(pending_tbot_claim_token_);
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         RenderClaimSubstate(claim_substate_);
         EnsureBleAdvertisingForStandby();
-        StartClaimPoll();
+        StopClaimPoll();
         return;
     }
 
@@ -815,7 +882,15 @@ void Application::RefreshPendingTbotClaim() {
     // dedicated low-priority, non-core-0-pinned worker; all state mutation stays
     // on the Application task via the Schedule()d ApplyPendingTbotClaimFetchResult
     // continuation, preserving the single-threaded claim FSM invariant (OQ1).
-    DispatchPendingTbotClaimFetch(api_url, token);
+    const bool claim_fetch_dispatched =
+        DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);
+    if (paused_ble_for_fetch && !claim_fetch_dispatched) {
+        ESP_LOGW(TAG, "Claim fetch was not dispatched; restoring BLE claim standby");
+        claim_substate_ = TbotClaimSubstate::AvailableStandby;
+        RenderClaimSubstate(claim_substate_);
+        EnsureBleAdvertisingForStandby();
+        StopClaimPoll();
+    }
 }
 
 // Off-task continuation: runs back on the Application task (Schedule()d from
@@ -826,7 +901,20 @@ void Application::RefreshPendingTbotClaim() {
 void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
                                                    const std::string& token,
                                                    const PendingTbotClaim& pending_claim,
-                                                   bool fetched, int device_config_status) {
+                                                   bool fetched, int device_config_status,
+                                                   bool defer_confirmation,
+                                                   uint32_t expected_setup_generation) {
+    if (!api_url.empty()) {
+        Settings backend_settings("backend", true);
+        if (backend_settings.GetString("api_url") != api_url) {
+            backend_settings.SetString("api_url", api_url);
+        }
+    }
+    if (claim_confirmation_ambiguous_) {
+        ESP_LOGW(TAG, "Ignoring claim fetch result while confirmation outcome is ambiguous");
+        StopClaimPoll();
+        return;
+    }
     if (!fetched && !token.empty() &&
         (device_config_status == 401 || device_config_status == 403)) {
         // The phone/backend claim bootstrap token is single-attempt auth. If the
@@ -838,14 +926,45 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
                  device_config_status);
         Settings websocket_settings("websocket", true);
         websocket_settings.SetString("bootstrap_token", "");
+        websocket_settings.SetInt("claim_ambiguous", 0);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        Blufi::GetInstance().ClearProvisioningSecrets();
+#endif
+        websocket_settings.EraseKey("claim_device_id");
         pending_tbot_claim_ = PendingTbotClaim{};
         pending_tbot_claim_api_url_.clear();
-        pending_tbot_claim_token_.clear();
+        SecureClearString(pending_tbot_claim_token_);
+        claim_confirmation_ambiguous_ = false;
         claim_fetch_failures_ = 0;
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         RenderClaimSubstate(claim_substate_);
         EnsureBleAdvertisingForStandby();
-        StartClaimPoll();
+        StopClaimPoll();
+        return;
+    }
+    if (fetched && !pending_claim.active && !token.empty()) {
+        // requestClaim() commits the pending claim before the phone sends this
+        // token over BluFi. A successful config response with no active claim
+        // therefore means the local token belongs to an abandoned attempt.
+        // Reusing it every poll tick fragments scarce internal SRAM until both
+        // TLS and BLE allocations fail on the ESP32-S3.
+        ESP_LOGW(TAG, "Device config has no active claim; clearing abandoned bootstrap token");
+        Settings websocket_settings("websocket", true);
+        websocket_settings.SetString("bootstrap_token", "");
+        websocket_settings.SetInt("claim_ambiguous", 0);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        Blufi::GetInstance().ClearProvisioningSecrets();
+#endif
+        websocket_settings.EraseKey("claim_device_id");
+        pending_tbot_claim_ = PendingTbotClaim{};
+        pending_tbot_claim_api_url_ = api_url;
+        SecureClearString(pending_tbot_claim_token_);
+        claim_confirmation_ambiguous_ = false;
+        claim_fetch_failures_ = 0;
+        claim_substate_ = TbotClaimSubstate::AvailableStandby;
+        RenderClaimSubstate(claim_substate_);
+        EnsureBleAdvertisingForStandby();
+        StopClaimPoll();
         return;
     }
     if (!fetched || !pending_claim.active) {
@@ -854,6 +973,7 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
         // tight loop. This is the C4 "if unowned -> claimable standby" trigger.
         pending_tbot_claim_ = PendingTbotClaim{};
         pending_tbot_claim_api_url_ = api_url;
+        SecureClearString(pending_tbot_claim_token_);
         pending_tbot_claim_token_ = token;
 
         // Unclaimed + claimable standby is exactly the state the mobile app
@@ -893,17 +1013,16 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
             claim_substate_ = TbotClaimSubstate::AvailableStandby;
             RenderClaimSubstate(claim_substate_);
         }
-        // Give up the poll ONLY when the device is CLAIMED. The give-up exists
-        // because the blocking poll on the main task starved the wake-word/AFE
-        // pipeline — but an UNCLAIMED robot now runs NO audio at all (the realtime
-        // WS + the AFE mic input are deferred until claimed), so there is nothing
-        // to starve, AND it must stay claimable: a transient free-tier backend
-        // hiccup must NOT permanently stop the poll. If it did, BLE is torn down
-        // after the 300s setup timeout and the screen shows "Hết hạn thiết lập"
-        // (Setup expired), leaving the robot un-pairable until a reboot — exactly
-        // the failure observed. So while UNCLAIMED we keep polling + advertising
-        // indefinitely; claim_fetch_failures_ only drives the "Server unavailable,
-        // retrying" copy, never a give-up.
+        // Once the liveness fetch completes without claim auth, BLE custom-data
+        // becomes the wake-up signal for the next claim refresh.
+        if (token.empty()) {
+            // The no-token fetch refreshed setup liveness. Keep one stable BLE
+            // advertising session now; the custom-data token callback schedules
+            // the next refresh directly. Repeated Bluedroid deinit/init cycles
+            // can assert in vQueueDelete on the ESP32-S3.
+            StopClaimPoll();
+            return;
+        }
         if (claim_fetch_failures_ >= 4 && IsDeviceClaimed()) {
             ESP_LOGW(TAG, "claim_poll_giveup failures=%d (claimed; stop hammering backend)", claim_fetch_failures_);
             StopClaimPoll();
@@ -919,6 +1038,7 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
     // A claim is waiting for physical confirmation.
     pending_tbot_claim_ = pending_claim;
     pending_tbot_claim_api_url_ = api_url;
+    SecureClearString(pending_tbot_claim_token_);
     pending_tbot_claim_token_ = token;
 
     if (token.empty()) {
@@ -958,39 +1078,33 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
     // window, not a periodic timer tick, and at this point the device is still
     // UNCLAIMED so the wake-word AFE mic is disabled (see the IsDeviceClaimed()-
     // gated Idle gate) — there is no wake-word pipeline to starve until this very
-    // call succeeds and turns the mic on. Callers also rely on its SYNCHRONOUS
-    // post-condition (they inspect claim_substate_ == Confirmed immediately after,
-    // e.g. just below at the stale-token-clear block and in the cached-token path
-    // of RefreshPendingTbotClaim) to clear a stale bootstrap token + reopen BLE;
-    // making it async would break that. It persists the claimed flag + websocket
-    // credentials, brings audio up, and Alerts CONNECTED on success (or a
-    // localized failure copy on error). The BOOT-button path stays wired as a
-    // manual fallback if a future build wants to re-enable explicit consent.
+    // call succeeds and turns the mic on. It also owns the synchronous result
+    // policy: retryable failures retain this claim/token and re-arm the bounded
+    // poll, while terminal rejection clears the attempt and reopens BLE. Making
+    // it async would split those state transitions across callers. The
+    // BOOT-button path stays wired as a manual fallback if a future build wants
+    // to re-enable explicit consent.
     ESP_LOGI(TAG, "Pending claim detected -> auto-confirming (press-to-allow skipped by product decision)");
-    ConfirmPendingTbotClaim(/*trust_backend_expiry=*/true);
-
-    // Resilience: if the confirm POST did not land (claim_substate_ stays
-    // WaitingConfirm rather than Confirmed) — typically a transient HTTP -1 on a
-    // weak Wi-Fi link / BLE+TLS contention — do NOT strand on a stale pending
-    // claim. Stranding would (a) leave the robot un-confirmed forever and (b) make
-    // a later BOOT press dead-end on "Hết hạn thiết lập" (Setup expired) via the
-    // stale claim's expiry check. Clear the consumed/failed bootstrap token and
-    // re-open BLE so the phone can send a fresh token instead of us retrying a
-    // known-bad Authorization bearer forever.
-    if (claim_substate_ != TbotClaimSubstate::Confirmed) {
-        ESP_LOGW(TAG, "Auto-confirm POST did not land; clearing stale claim token + reopening BLE");
-        Settings websocket_settings("websocket", true);
-        websocket_settings.SetString("bootstrap_token", "");
-        pending_tbot_claim_token_.clear();
-        claim_substate_ = TbotClaimSubstate::AvailableStandby;
-        EnsureBleAdvertisingForStandby();
-        StartClaimPoll();
+    if (defer_confirmation) {
+        if (!DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
+            StartClaimPoll();
+        }
+    } else {
+        ConfirmPendingTbotClaim(/*trust_backend_expiry=*/true);
     }
 }
 
 bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     if (!pending_tbot_claim_.active) {
         return false;
+    }
+
+    if (claim_confirmation_ambiguous_) {
+        ESP_LOGW(TAG, "Claim confirmation outcome ambiguous; automatic retry suppressed");
+        StopClaimPoll();
+        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CLAIM_CONFIRM_SUPPORT_REQUIRED,
+              "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+        return true;
     }
 
     if (pending_tbot_claim_token_.empty()) {
@@ -1013,15 +1127,53 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
         return true;
     }
 
-    const bool confirmed = ClaimConfirmationReporter::Confirm(pending_tbot_claim_,
+    const ClaimConfirmationResult confirmation_result = ClaimConfirmationReporter::Confirm(
+        pending_tbot_claim_,
         pending_tbot_claim_api_url_, pending_tbot_claim_token_);
-    if (!confirmed) {
+    return ApplyPendingTbotClaimConfirmationResult(confirmation_result);
+}
+
+bool Application::ApplyPendingTbotClaimConfirmationResult(
+    ClaimConfirmationResult confirmation_result) {
+    if (confirmation_result == ClaimConfirmationResult::RetryableFailure) {
+        ESP_LOGW(TAG, "Claim confirmation retryable; retaining claim token for bounded retry");
+        claim_substate_ = TbotClaimSubstate::WaitingConfirm;
+        StartClaimPoll();
+        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_UNAVAILABLE_RETRYING,
+              "triangle_exclamation", "");
+        return true;
+    }
+
+    if (confirmation_result == ClaimConfirmationResult::AmbiguousSuccess) {
+        ESP_LOGE(TAG, "Claim confirmation 2xx response unusable; freezing attempt for support/reset");
+        Settings websocket_settings("websocket", true);
+        websocket_settings.SetInt("claim_ambiguous", 1);
+        claim_confirmation_ambiguous_ = true;
+        claim_substate_ = TbotClaimSubstate::WaitingConfirm;
+        StopClaimPoll();
+        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CLAIM_CONFIRM_SUPPORT_REQUIRED,
+              "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+        return true;
+    }
+
+    if (confirmation_result == ClaimConfirmationResult::TerminalFailure) {
+        CancelClaimExpiryTimer();
+        StopClaimPoll();
         Settings websocket_settings("websocket", true);
         websocket_settings.SetString("bootstrap_token", "");
-        pending_tbot_claim_token_.clear();
+        websocket_settings.SetInt("claim_ambiguous", 0);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        // The Application owns the terminal NVS clear; BluFi owns zeroization of
+        // the in-RAM token/code copies received from the phone.
+        Blufi::GetInstance().ClearProvisioningSecrets();
+#endif
+        websocket_settings.EraseKey("claim_device_id");
+        pending_tbot_claim_ = PendingTbotClaim{};
+        pending_tbot_claim_api_url_.clear();
+        SecureClearString(pending_tbot_claim_token_);
+        claim_confirmation_ambiguous_ = false;
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         EnsureBleAdvertisingForStandby();
-        StartClaimPoll();
         Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTION_CONFIRM_FAILED,
               "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
         return true;
@@ -1041,10 +1193,19 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     {
         Settings websocket_settings("websocket", true);
         websocket_settings.SetString("bootstrap_token", "");
+        websocket_settings.SetInt("claim_ambiguous", 0);
+    }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    Blufi::GetInstance().ClearProvisioningSecrets();
+#endif
+    {
+        Settings websocket_settings("websocket", true);
+        websocket_settings.EraseKey("claim_device_id");
     }
     pending_tbot_claim_ = PendingTbotClaim{};
     pending_tbot_claim_api_url_.clear();
-    pending_tbot_claim_token_.clear();
+    SecureClearString(pending_tbot_claim_token_);
+    claim_confirmation_ambiguous_ = false;
     claim_substate_ = TbotClaimSubstate::Confirmed;
 
     // TBOT claim complete -> return to explicit wake standby. Do not warm the
@@ -1054,6 +1215,7 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     // wake worker path instead.
     if (IsDeviceClaimed()) {
         SetDeviceState(kDeviceStateIdle);
+        audio_service_.Start();
         audio_service_.EnableWakeWordDetection(true);
         // On first claim, the realtime session may already have connected while
         // unclaimed, before backend credentials existed. Start and fire one
@@ -1066,22 +1228,129 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     return true;
 }
 
-void Application::SchedulePendingTbotClaimRefresh() {
-    Schedule([this]() {
-        // BluFi-provisioned reconnect: drive the FSM out of kDeviceStateWifiConfiguring
-        // (Activating -> ActivationTask -> Idle) FIRST, otherwise RefreshPendingTbotClaim
-        // would be swallowed by its own WifiConfiguring early-return and the pending
-        // claim would never auto-confirm without an extra manual power-cycle.
-        PromoteFromWifiConfigAfterProvisioning();
-        if (GetDeviceState() != kDeviceStateWifiConfiguring) {
-            // Already out of setup (promoted-and-no-async-activation, or never in
-            // setup) -> run the claim refresh now.
-            RefreshPendingTbotClaim();
+namespace {
+struct ClaimConfirmationContext {
+    Application* app;
+    PendingTbotClaim claim;
+    std::string api_url;
+    std::string token;
+    uint32_t expected_setup_generation;
+    bool enforce_setup_generation;
+};
+}  // namespace
+
+bool Application::DispatchPendingTbotClaimConfirmation(
+    uint32_t expected_setup_generation, bool enforce_setup_generation) {
+    if (!pending_tbot_claim_.active || pending_tbot_claim_token_.empty()) {
+        return false;
+    }
+    bool expected = false;
+    if (!claim_confirm_inflight_.compare_exchange_strong(expected, true)) {
+        return false;
+    }
+    auto* ctx = new (std::nothrow) ClaimConfirmationContext{
+        this, pending_tbot_claim_, pending_tbot_claim_api_url_,
+        pending_tbot_claim_token_, expected_setup_generation,
+        enforce_setup_generation};
+    if (ctx == nullptr) {
+        claim_confirm_inflight_.store(false);
+        return false;
+    }
+    if (xTaskCreateWithCaps(&Application::ClaimConfirmationTask, "claim_confirm", 8192, ctx,
+                            tskIDLE_PRIORITY + 1, nullptr,
+                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+        SecureClearString(ctx->token);
+        delete ctx;
+        claim_confirm_inflight_.store(false);
+        return false;
+    }
+    return true;
+}
+
+void Application::ClaimConfirmationTask(void* arg) {
+    auto* ctx = static_cast<ClaimConfirmationContext*>(arg);
+    Application* self = ctx->app;
+    PendingTbotClaim claim = ctx->claim;
+    std::string api_url = std::move(ctx->api_url);
+    std::string token = std::move(ctx->token);
+    const uint32_t expected_setup_generation = ctx->expected_setup_generation;
+    const bool enforce_setup_generation = ctx->enforce_setup_generation;
+    delete ctx;
+
+    std::string success_response;
+    const ClaimConfirmationResult result = ClaimConfirmationReporter::Confirm(
+        claim, api_url, token, &success_response);
+    self->Schedule([self, result, token = std::move(token),
+                    success_response = std::move(success_response),
+                    expected_setup_generation, enforce_setup_generation]() mutable {
+        self->claim_confirm_inflight_.store(false);
+        auto apply_result = [&]() {
+            ClaimConfirmationResult effective_result = result;
+            if (effective_result == ClaimConfirmationResult::Confirmed &&
+                !PersistTbotClaimConfirmationResponse(success_response)) {
+                effective_result = ClaimConfirmationResult::AmbiguousSuccess;
+            }
+            self->ApplyPendingTbotClaimConfirmationResult(effective_result);
+        };
+        if (enforce_setup_generation) {
+            Blufi::GetInstance().RunIfSetupGenerationCurrent(
+                expected_setup_generation, apply_result);
+        } else {
+            apply_result();
         }
-        // else: still in setup (stale success report / not actually connected) ->
-        // either we left it in WifiConfiguring on purpose, or activation is running
-        // and HandleActivationDoneEvent() will call RefreshPendingTbotClaim() from Idle.
+        SecureClearString(token);
+        SecureClearString(success_response);
     });
+    SecureClearString(token);
+    SecureClearString(success_response);
+    vTaskDelete(nullptr);
+}
+
+void Application::SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation) {
+    Schedule([this, expected_setup_generation]() {
+        Blufi::GetInstance().RunIfSetupGenerationCurrent(
+            expected_setup_generation, [this, expected_setup_generation]() {
+            // Serialize setup promotion and snapshot/dispatch with BOOT re-entry.
+            PromoteFromWifiConfigAfterProvisioning();
+            if (GetDeviceState() != kDeviceStateWifiConfiguring) {
+                DispatchPendingTbotClaimRefreshForSetupGeneration(
+                    expected_setup_generation);
+            }
+            // If activation remains in progress, HandleActivationDoneEvent
+            // performs the normal refresh after reaching Idle.
+            });
+    });
+}
+
+void Application::DispatchPendingTbotClaimRefreshForSetupGeneration(
+    uint32_t expected_setup_generation) {
+    Settings backend_settings("backend", false);
+    const std::string api_url = backend_settings.GetString("api_url");
+    Settings websocket_settings("websocket", false);
+    std::string token = websocket_settings.GetString("bootstrap_token");
+    SecureStringScope token_scope(token);
+
+    if (pending_tbot_claim_.active && !token.empty()) {
+        if (!api_url.empty()) {
+            pending_tbot_claim_api_url_ = api_url;
+        }
+        SecureClearString(pending_tbot_claim_token_);
+        pending_tbot_claim_token_ = token;
+        StopBleAdvertising();
+        claim_substate_ = TbotClaimSubstate::WaitingConfirm;
+        if (!DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
+            StartClaimPoll();
+        }
+        return;
+    }
+
+    const bool dispatched = DispatchPendingTbotClaimFetch(
+        api_url, token, true, expected_setup_generation, true);
+    if (!dispatched) {
+        claim_substate_ = TbotClaimSubstate::AvailableStandby;
+        RenderClaimSubstate(claim_substate_);
+        EnsureBleAdvertisingForStandby();
+    }
 }
 
 void Application::PromoteFromWifiConfigAfterProvisioning() {
@@ -1169,11 +1438,17 @@ struct ClaimFetchContext {
     Application* app;
     std::string api_url;
     std::string token;
+    bool apply_when_poll_inactive;
+    uint32_t expected_setup_generation;
+    bool enforce_setup_generation;
 };
 }  // namespace
 
-void Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
-                                                const std::string& token) {
+bool Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
+                                                const std::string& token,
+                                                bool apply_when_poll_inactive,
+                                                uint32_t expected_setup_generation,
+                                                bool enforce_setup_generation) {
     // Runs on the Application task. Belt-and-suspenders gating (fix 2): never
     // kick off a blocking TLS handshake while live realtime audio is in flight —
     // a wake/connect/listen/speak must always win the radio + CPU. On skip we do
@@ -1186,17 +1461,24 @@ void Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
         state == kDeviceStateSpeaking ||
         connect_in_flight_.load()) {
         ESP_LOGD(TAG, "Skipping claim fetch this tick (runtime audio active)");
-        return;
+        return false;
     }
 
     // Single-flight: a slow backend must never let the 10s timer stack workers.
     bool expected = false;
     if (!claim_poll_inflight_.compare_exchange_strong(expected, true)) {
         ESP_LOGD(TAG, "Claim fetch already in flight; skipping this tick");
-        return;
+        return false;
     }
 
-    auto* ctx = new ClaimFetchContext{this, api_url, token};
+    auto* ctx = new (std::nothrow) ClaimFetchContext{
+        this, api_url, token, apply_when_poll_inactive,
+        expected_setup_generation, enforce_setup_generation};
+    if (ctx == nullptr) {
+        ESP_LOGE(TAG, "claim_fetch context allocation failed; restoring standby");
+        claim_poll_inflight_.store(false);
+        return false;
+    }
     // Low priority (tskIDLE_PRIORITY+1) and NOT pinned to core 0 so the worker
     // simply WAITS on the network at low priority while the wake-word AFE
     // fetch/feed pipeline keeps the CPU. The old design queued this blocking call
@@ -1211,9 +1493,12 @@ void Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
                             tskIDLE_PRIORITY + 1, nullptr,
                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "claim_fetch task create failed; retrying next tick");
+        SecureClearString(ctx->token);
         delete ctx;
         claim_poll_inflight_.store(false);
+        return false;
     }
+    return true;
 }
 
 void Application::ClaimFetchTask(void* arg) {
@@ -1221,20 +1506,30 @@ void Application::ClaimFetchTask(void* arg) {
     Application* self = ctx->app;
     std::string api_url = ctx->api_url;
     std::string token = ctx->token;
+    const bool apply_when_poll_inactive = ctx->apply_when_poll_inactive;
+    const uint32_t expected_setup_generation = ctx->expected_setup_generation;
+    const bool enforce_setup_generation = ctx->enforce_setup_generation;
+    SecureClearString(ctx->token);
     delete ctx;
 
     // The ONLY work on this worker: the blocking ~3s HTTP/TLS fetch. No shared
     // state is touched here.
+    if (api_url.empty()) {
+        api_url = FetchBackendApiUrlFromBootstrap(token, false);
+    }
     PendingTbotClaim pending_claim;
     int device_config_status = 0;
-    const bool fetched = FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim,
-                                                               &device_config_status);
+    const bool fetched = !api_url.empty() &&
+        FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim,
+                                              &device_config_status);
 
     // Marshal result-application back onto the Application task (OQ1): all
     // claim_substate_/pending_tbot_claim_*/BLE/SetDeviceState mutation stays on
     // the one task that owns them. Clear the single-flight guard there so the
     // next tick can dispatch again.
-    self->Schedule([self, api_url, token, pending_claim, fetched, device_config_status]() {
+    self->Schedule([self, api_url, token, pending_claim, fetched, device_config_status,
+                    apply_when_poll_inactive, expected_setup_generation,
+                    enforce_setup_generation]() mutable {
         self->claim_poll_inflight_.store(false);
         // The periodic poll may have been stopped (claimed+online / WiFiConfiguring)
         // while this fetch was outstanding; honor that and drop pure poll ticks
@@ -1248,12 +1543,24 @@ void Application::ClaimFetchTask(void* arg) {
         // "Bootstrap token present; stopping BLE" path and phone scan times out
         // (live E2E 2026-07-11: BLE_SCAN_TIMEOUT after claim_fetch http=200
         // claim_present=0 with no EnsureBleAdvertisingForStandby).
-        if (!self->claim_poll_active_ && token.empty()) {
+        if (!self->claim_poll_active_ && token.empty() && !apply_when_poll_inactive) {
+            SecureClearString(token);
             return;
         }
-        self->ApplyPendingTbotClaimFetchResult(api_url, token, pending_claim,
-                                               fetched, device_config_status);
+        auto apply_result = [&]() {
+            self->ApplyPendingTbotClaimFetchResult(
+                api_url, token, pending_claim, fetched, device_config_status,
+                enforce_setup_generation, expected_setup_generation);
+        };
+        if (enforce_setup_generation) {
+            Blufi::GetInstance().RunIfSetupGenerationCurrent(
+                expected_setup_generation, apply_result);
+        } else {
+            apply_result();
+        }
+        SecureClearString(token);
     });
+    SecureClearString(token);
 
     vTaskDelete(nullptr);
 }
@@ -1409,7 +1716,17 @@ void Application::HandleClaimConfirmTimeout() {
     StopClaimPoll();
     // Leaving claimable standby (window elapsed) -> stop advertising for pairing.
     StopBleAdvertising();
+    Settings websocket_settings("websocket", true);
+    websocket_settings.SetString("bootstrap_token", "");
+    websocket_settings.SetInt("claim_ambiguous", 0);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    Blufi::GetInstance().ClearProvisioningSecrets();
+#endif
+    websocket_settings.EraseKey("claim_device_id");
     pending_tbot_claim_ = PendingTbotClaim{};
+    pending_tbot_claim_api_url_.clear();
+    SecureClearString(pending_tbot_claim_token_);
+    claim_confirmation_ambiguous_ = false;
     claim_substate_ = TbotClaimSubstate::ConfirmTimeout;
     // "Setup expired" (CLAIM_CONFIRM_TIMEOUT) — no silent failure, no spinner.
     Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SETUP_EXPIRED,
@@ -1602,6 +1919,23 @@ void Application::StartHeartbeat() {
     if (heartbeat_active_) {
         return;
     }
+    if (heartbeat_queue_ == nullptr) {
+        heartbeat_queue_ = xQueueCreate(1, sizeof(void*));
+        if (heartbeat_queue_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create heartbeat queue");
+            return;
+        }
+    }
+    if (heartbeat_task_ == nullptr) {
+        if (xTaskCreateWithCaps(&Application::HeartbeatTask, "heartbeat_http", 6144, this,
+                                tskIDLE_PRIORITY + 1, &heartbeat_task_,
+                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create persistent heartbeat worker");
+            vQueueDelete(heartbeat_queue_);
+            heartbeat_queue_ = nullptr;
+            return;
+        }
+    }
     if (heartbeat_timer_ == nullptr) {
         esp_timer_create_args_t args = {
             .callback = [](void* arg) {
@@ -1657,11 +1991,14 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
     {
         Settings websocket_settings("websocket", true);
         websocket_settings.SetString("bootstrap_token", "");
+        websocket_settings.SetInt("claim_ambiguous", 0);
+        websocket_settings.EraseKey("claim_device_id");
     }
 
     pending_tbot_claim_ = PendingTbotClaim{};
     pending_tbot_claim_api_url_.clear();
-    pending_tbot_claim_token_.clear();
+    SecureClearString(pending_tbot_claim_token_);
+    claim_confirmation_ambiguous_ = false;
     claim_substate_ = TbotClaimSubstate::AvailableStandby;
     backend_offline_.store(false);
     EnsureBleAdvertisingForStandby();
@@ -1729,12 +2066,15 @@ void Application::EnterRepairPairingMode() {
         {
             Settings websocket_settings("websocket", true);
             websocket_settings.SetString("bootstrap_token", "");
+            websocket_settings.SetInt("claim_ambiguous", 0);
             websocket_settings.SetString("url", "");
+            websocket_settings.EraseKey("claim_device_id");
         }
 
         pending_tbot_claim_ = PendingTbotClaim{};
         pending_tbot_claim_api_url_.clear();
-        pending_tbot_claim_token_.clear();
+        SecureClearString(pending_tbot_claim_token_);
+        claim_confirmation_ambiguous_ = false;
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         backend_offline_.store(false);
         RenderClaimSubstate(claim_substate_);
@@ -1755,6 +2095,15 @@ void Application::EnterRepairPairingMode() {
     });
 }
 
+namespace {
+struct CloudReleaseContext {
+    Application* app;
+    std::string api_url;
+    std::string device_id;
+    std::string device_secret;
+};
+}  // namespace
+
 void Application::MaybeDispatchDeferredCloudRelease() {
     Settings backend_settings("backend", false);
     if (backend_settings.GetInt("release_pending", 0) == 0) {
@@ -1762,7 +2111,8 @@ void Application::MaybeDispatchDeferredCloudRelease() {
     }
     const std::string api_url = backend_settings.GetString("api_url");
     const std::string device_id = backend_settings.GetString("device_id");
-    const std::string device_secret = backend_settings.GetString("device_secret");
+    std::string device_secret = backend_settings.GetString("device_secret");
+    SecureStringScope device_secret_scope(device_secret);
     if (api_url.empty() || device_id.empty() || device_secret.empty()) {
         // No (remaining) cloud credentials to release -> nothing the backend can
         // act on. Clear the marker so we stop re-checking on every refresh.
@@ -1789,33 +2139,64 @@ void Application::MaybeDispatchDeferredCloudRelease() {
     // Low priority + not pinned to core 0 (same as ClaimFetchTask) so the blocking
     // POST waits on the network without starving the core-0 wake-word AFE pipeline.
     // Internal DRAM stack required: worker + result path touch NVS/flash (cache-off).
-    if (xTaskCreateWithCaps(&Application::CloudReleaseTask, "cloud_release", 6144, this,
+    auto* ctx = new (std::nothrow) CloudReleaseContext{
+        this, api_url, device_id, device_secret};
+    if (ctx == nullptr) {
+        ESP_LOGE(TAG, "cloud_release context allocation failed; retrying next refresh");
+        cloud_release_inflight_.store(false);
+        return;
+    }
+    if (xTaskCreateWithCaps(&Application::CloudReleaseTask, "cloud_release", 6144, ctx,
                             tskIDLE_PRIORITY + 1, nullptr,
                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+        SecureClearString(ctx->device_secret);
+        delete ctx;
         ESP_LOGE(TAG, "cloud_release task create failed; retrying next refresh");
         cloud_release_inflight_.store(false);
     }
 }
 
 void Application::CloudReleaseTask(void* arg) {
-    Application* self = static_cast<Application*>(arg);
+    auto* ctx = static_cast<CloudReleaseContext*>(arg);
+    Application* self = ctx->app;
 
-    // ONLY work on this worker: the blocking ~5s factory-reset POST. It reads NVS
-    // (backend.*) internally and touches no shared Application state.
-    const bool released = SystemReset::ReleaseCloudOwnership();
+    // Use the credentials captured before task creation. Reading NVS here could
+    // release a newer claim that arrived while this worker was waiting to run.
+    const bool released = SystemReset::ReleaseCloudOwnership(ctx->api_url, ctx->device_id, ctx->device_secret);
+    std::string api_url = std::move(ctx->api_url);
+    std::string device_id = std::move(ctx->device_id);
+    std::string device_secret = std::move(ctx->device_secret);
+    delete ctx;
 
     // Marshal the result back onto the Application task (OQ1) and clear the
     // single-flight guard there.
-    self->Schedule([self, released]() {
+    self->Schedule([self, released, api_url = std::move(api_url),
+                    device_id = std::move(device_id),
+                    device_secret = std::move(device_secret)]() mutable {
         self->cloud_release_inflight_.store(false);
+        Settings current_settings("backend", false);
+        const bool credentials_unchanged =
+            current_settings.GetString("api_url") == api_url &&
+            current_settings.GetString("device_id") == device_id &&
+            current_settings.GetString("device_secret") == device_secret;
+        if (!credentials_unchanged) {
+            Settings backend_settings("backend", true);
+            backend_settings.SetInt("release_pending", 0);
+            ESP_LOGI(TAG, "Deferred cloud release completed against superseded credentials");
+            std::fill(device_secret.begin(), device_secret.end(), '\0');
+            return;
+        }
         if (!released) {
             ESP_LOGW(TAG, "Deferred cloud ownership release failed; will retry on next refresh");
+            std::fill(device_secret.begin(), device_secret.end(), '\0');
             return;
         }
         Settings backend_settings("backend", true);
         backend_settings.SetInt("release_pending", 0);
         backend_settings.SetString("device_secret", "");
+        std::fill(device_secret.begin(), device_secret.end(), '\0');
         ESP_LOGI(TAG, "Deferred cloud ownership released; robot is free for a new parent to claim");
+        self->RefreshPendingTbotClaim();
     });
 
     vTaskDelete(nullptr);
@@ -1892,42 +2273,41 @@ void Application::DispatchDeviceHeartbeat() {
 
     auto* ctx = new HeartbeatContext{this, base + "/device/heartbeat", device_secret,
                                      BuildTbotHeartbeatBody(status_json, backend_device_id)};
-    // Low priority (tskIDLE_PRIORITY+1) and NOT pinned to core 0 so the worker
-    // simply WAITS on the network at low priority while the wake-word AFE
-    // fetch/feed pipeline keeps the CPU (same pattern as ClaimFetchTask).
-    // Internal DRAM stack: TLS/HTTP + any Settings/NVS from this path need a
-    // cache-safe stack (SPIRAM stacks panic when flash cache is disabled).
-    if (xTaskCreateWithCaps(&Application::HeartbeatTask, "heartbeat_http", 8192, ctx,
-                            tskIDLE_PRIORITY + 1, nullptr,
-                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
-        ESP_LOGE(TAG, "heartbeat task create failed; retrying next tick");
+    // The persistent worker is allocated once at claim time, before repeated TLS
+    // calls fragment internal SRAM. Queueing avoids requiring a new contiguous
+    // task stack on every 20-second tick.
+    if (heartbeat_queue_ == nullptr || xQueueSend(heartbeat_queue_, &ctx, 0) != pdTRUE) {
+        ESP_LOGE(TAG, "heartbeat worker queue unavailable; retrying next tick");
         delete ctx;
         heartbeat_inflight_.store(false);
     }
 }
 
 void Application::HeartbeatTask(void* arg) {
-    auto* ctx = static_cast<HeartbeatContext*>(arg);
-    Application* self = ctx->app;
-    const std::string url = ctx->url;
-    const std::string device_secret = ctx->device_secret;
-    std::string body = std::move(ctx->body);
-    delete ctx;
-
-    // The ONLY work on this worker: the blocking ~5s HTTP/TLS POST.
-    int status_code = self->SendDeviceHeartbeat(url, device_secret, std::move(body));
-
-    // Clear the single-flight guard and marshal any auth-failure handling back
-    // onto the Application task (OQ1): HandleHeartbeatAuthFailure mutates claim /
-    // BLE / NVS / audio-channel state, which must stay on the owning task.
-    self->Schedule([self, status_code]() {
-        self->heartbeat_inflight_.store(false);
-        if (status_code == 401 || status_code == 403) {
-            self->HandleHeartbeatAuthFailure(status_code);
+    auto* self = static_cast<Application*>(arg);
+    HeartbeatContext* ctx = nullptr;
+    while (xQueueReceive(self->heartbeat_queue_, &ctx, portMAX_DELAY) == pdTRUE) {
+        if (ctx == nullptr) {
+            continue;
         }
-    });
+        const std::string url = ctx->url;
+        const std::string device_secret = ctx->device_secret;
+        std::string body = std::move(ctx->body);
+        delete ctx;
+        ctx = nullptr;
 
-    vTaskDelete(nullptr);
+        // The ONLY work on this worker: the blocking ~5s HTTP/TLS POST.
+        const int status_code = self->SendDeviceHeartbeat(url, device_secret, std::move(body));
+
+        // Clear the single-flight guard and marshal any auth-failure handling
+        // back onto the Application task, which owns claim/BLE/NVS state.
+        self->Schedule([self, status_code]() {
+            self->heartbeat_inflight_.store(false);
+            if (status_code == 401 || status_code == 403) {
+                self->HandleHeartbeatAuthFailure(status_code);
+            }
+        });
+    }
 }
 
 int Application::SendDeviceHeartbeat(const std::string& url, const std::string& device_secret,
@@ -2121,7 +2501,7 @@ void Application::CheckNewVersion() {
             retry_count++;
             if (retry_count >= MAX_RETRY) {
                 char error_message[128];
-                snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err, ota_->GetCheckVersionUrl().c_str());
+                snprintf(error_message, sizeof(error_message), "code=%d", err);
                 char buffer[256];
                 snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
                 Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
@@ -2129,8 +2509,8 @@ void Application::CheckNewVersion() {
                 return;
             }
 
-            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d), code=%d, url=%s",
-                     retry_delay, retry_count, MAX_RETRY, err, ota_->GetCheckVersionUrl().c_str());
+            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d), code=%d",
+                     retry_delay, retry_count, MAX_RETRY, err);
             for (int i = 0; i < retry_delay; i++) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 auto delayed_state = GetDeviceState();
@@ -3018,6 +3398,10 @@ void Application::HandleToggleChatEvent() {
         SetDeviceState(kDeviceStateIdle);
         return;
     } else if (state == kDeviceStateWifiConfiguring) {
+        if (!audio_service_.IsRunning()) {
+            ESP_LOGI(TAG, "Audio test unavailable while provisioning workers are deferred");
+            return;
+        }
         audio_service_.EnableAudioTesting(true);
         SetDeviceState(kDeviceStateAudioTesting);
         return;
@@ -3577,6 +3961,10 @@ void Application::HandleStartListeningEvent() {
         SetDeviceState(kDeviceStateIdle);
         return;
     } else if (state == kDeviceStateWifiConfiguring) {
+        if (!audio_service_.IsRunning()) {
+            ESP_LOGI(TAG, "Audio test unavailable while provisioning workers are deferred");
+            return;
+        }
         audio_service_.EnableAudioTesting(true);
         SetDeviceState(kDeviceStateAudioTesting);
         return;
@@ -4291,7 +4679,7 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         ESP_LOGI(TAG, "Closing audio channel before firmware upgrade");
         CloseAudioChannelByIntent();
     }
-    ESP_LOGI(TAG, "Starting firmware upgrade from URL: %s", upgrade_url.c_str());
+    ESP_LOGI(TAG, "Starting firmware upgrade");
 
     Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download", Lang::Sounds::OGG_UPGRADE);
     vTaskDelay(pdMS_TO_TICKS(3000));

@@ -61,6 +61,7 @@
         "TBOT_CONNECT": "TBot Connect",
         "CONNECTED": "Connected.",
         "CONNECTION_CONFIRM_FAILED": "Connection confirmation failed. Try again.",
+        "CLAIM_CONFIRM_SUPPORT_REQUIRED": "Connection confirmation is incomplete. Reset pairing or contact support.",
         "SETUP_EXPIRED": "Setup expired",
         "SERVER_UNAVAILABLE_RETRYING": "Server unavailable. Retrying...",
         "WIFI_FAILED_CHECK_PASSWORD": "Wi-Fi failed. Check password."

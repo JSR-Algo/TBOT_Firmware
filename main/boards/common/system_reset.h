@@ -2,6 +2,7 @@
 #define _SYSTEM_RESET_H
 
 #include <driver/gpio.h>
+#include <string>
 
 class SystemReset {
 public:
@@ -17,6 +18,9 @@ public:
     // release should be retried later. Uses no instance state (NVS + Board only),
     // so it is static and reusable by the BOOT re-pair flow.
     static bool ReleaseCloudOwnership();
+    static bool ReleaseCloudOwnership(const std::string& api_url,
+                                      const std::string& device_id,
+                                      const std::string& device_secret);
 
 private:
     gpio_num_t reset_nvs_pin_;

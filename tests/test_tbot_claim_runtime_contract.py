@@ -35,7 +35,7 @@ def test_application_polls_pending_claim_after_activation():
     assert "RefreshPendingTbotClaim();" in activation_done
     assert 'Settings backend_settings("backend", false);' in refresh_body
     assert 'backend_settings.GetString("api_url")' in refresh_body
-    assert "DispatchPendingTbotClaimFetch(api_url, token);" in refresh_body
+    assert "DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);" in refresh_body
     assert "FetchPendingTbotClaimFromDeviceConfig" in function_body(
         source, "void Application::ClaimFetchTask"
     )
@@ -55,13 +55,17 @@ def test_application_button_confirms_pending_claim_before_chat_toggle():
     source = read("main/application.cc")
     toggle_body = function_body(source, "void Application::HandleToggleChatEvent")
     confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
+    apply_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
 
     assert "ConfirmPendingTbotClaim()" in toggle_body
-    assert "ClaimConfirmationReporter::Confirm(pending_tbot_claim_" in confirm_body
+    assert "ClaimConfirmationReporter::Confirm(" in confirm_body
+    assert "pending_tbot_claim_" in confirm_body
     assert "pending_tbot_claim_api_url_" in confirm_body
     assert "pending_tbot_claim_token_" in confirm_body
-    assert "CloseAudioChannelByIntent();" in confirm_body
-    assert "pending_tbot_claim_ = PendingTbotClaim{}" in confirm_body
+    assert "CloseAudioChannelByIntent();" in apply_body
+    assert "pending_tbot_claim_ = PendingTbotClaim{}" in apply_body
 
     close_body = function_body(source, "void Application::CloseAudioChannelByIntent")
     assert "online_intent_.store(false)" in close_body
@@ -73,8 +77,8 @@ def test_blufi_persists_claim_bootstrap_token_without_fetching_while_ble_is_acti
     custom_data_body = function_body(source, "case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:")
 
     assert 'Settings websocket_settings("websocket", true);' in custom_data_body
-    assert 'websocket_settings.SetString("bootstrap_token", bootstrap_token_);' in custom_data_body
-    token_branch = custom_data_body[custom_data_body.index("if (tag == 0x01)") : custom_data_body.index("} else if (tag == 0x02)")]
+    assert '"bootstrap_token", self->bootstrap_token_' in custom_data_body
+    token_branch = custom_data_body[custom_data_body.index("if (has_token)") : custom_data_body.index("if (has_code)")]
     assert "WifiManager::GetInstance().IsConnected()" in token_branch
     assert "ScheduleClaimRefreshAfterTokenHandoff();" in token_branch
     assert "self->deinit();" not in token_branch
@@ -105,13 +109,14 @@ def test_claim_custom_data_persists_device_id_before_token_side_effects():
     source = read("main/boards/common/blufi.cpp")
     custom_data_body = function_body(source, "case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:")
 
-    prescan_idx = custom_data_body.index("int prescan_offset = 0;")
-    prescan_store_idx = custom_data_body.index('websocket_settings.SetString("claim_device_id"', prescan_idx)
-    token_branch_idx = custom_data_body.index("if (tag == 0x01)")
-    first_report_idx = custom_data_body.index("TryReportProvisioningAuthenticated", token_branch_idx)
+    gate_idx = custom_data_body.index("RunIfSetupGenerationCurrent(")
+    device_store_idx = custom_data_body.index('"claim_device_id"', gate_idx)
+    token_store_idx = custom_data_body.index('"bootstrap_token"', device_store_idx)
+    first_report_idx = custom_data_body.index("TryReportProvisioningAuthenticated", token_store_idx)
 
-    assert prescan_idx < prescan_store_idx < token_branch_idx < first_report_idx
-    assert "Claim device_id already persisted by custom-data prescan" in custom_data_body
+    assert gate_idx < device_store_idx < token_store_idx < first_report_idx
+    callback_prefix = custom_data_body[:custom_data_body.index("Application::GetInstance().Schedule(")]
+    assert "Settings " not in callback_prefix
 
 def test_claim_flow_preserves_nvs_bootstrap_token_until_confirm():
     source = read("main/boards/common/blufi.cpp")
@@ -135,7 +140,7 @@ def test_blufi_defers_connected_wifi_claim_refresh_until_after_possible_wifi_fra
     assert "return;" in connecting_branch[:connecting_branch.index("CancelBleSetupTimeout();")]
     assert "CancelBleSetupTimeout();" in helper_body
     assert "deinit();" in helper_body
-    assert "SchedulePendingTbotClaimRefresh();" in helper_body
+    assert "SchedulePendingTbotClaimRefresh(generation);" in helper_body
 
 def test_one_shot_claim_fetch_after_wifi_success_applies_even_without_poll_timer():
     source = read("main/application.cc")
@@ -156,6 +161,37 @@ def test_one_shot_claim_fetch_after_wifi_success_applies_even_without_poll_timer
     # Must not require pending_claim.active — claim_present=0 still needs apply.
     assert "pending_claim.active" not in stale_guard
 
+
+def test_successful_no_claim_fetch_clears_stale_token_and_stops_polling():
+    source = read("main/application.cc")
+    apply_body = function_body(source, "void Application::ApplyPendingTbotClaimFetchResult")
+
+    # The mobile receives requestClaim() before it sends the token over BluFi, so
+    # a successful config response with no active claim proves this token belongs
+    # to an abandoned attempt. Retrying it every 10 seconds fragments internal
+    # SRAM until BLE/TLS allocations fail on the physical ESP32-S3.
+    stale_start = apply_body.index(
+        "if (fetched && !pending_claim.active && !token.empty())"
+    )
+    failure_start = apply_body.index(
+        "if (!fetched || !pending_claim.active)", stale_start
+    )
+    stale_branch = apply_body[stale_start:failure_start]
+
+    assert 'websocket_settings.SetString("bootstrap_token", "");' in stale_branch
+    assert "Blufi::GetInstance().ClearProvisioningSecrets();" in stale_branch
+    assert 'websocket_settings.EraseKey("claim_device_id");' in stale_branch
+    assert "EnsureBleAdvertisingForStandby();" in stale_branch
+    assert "StopClaimPoll();" in stale_branch
+    assert "StartClaimPoll();" not in stale_branch
+
+    # The active-claim result path still tears BLE down once immediately before
+    # confirmation.
+    active_claim = apply_body[apply_body.index("// Fetch succeeded with an active claim") :]
+    assert active_claim.index("StopBleAdvertising();") < active_claim.index(
+        "ConfirmPendingTbotClaim"
+    )
+
 def test_blufi_waits_for_full_wifi_board_connect_timeout_before_reporting_failure():
     source = read("main/boards/common/blufi.cpp")
     branch_start = source.index("void Blufi::StartStationConnectFromCredentials")
@@ -169,9 +205,12 @@ def test_application_exposes_scheduled_pending_claim_refresh_for_late_ble_token(
     source = read("main/application.cc")
     schedule_body = function_body(source, "void Application::SchedulePendingTbotClaimRefresh")
 
-    assert "void SchedulePendingTbotClaimRefresh();" in header
-    assert "Schedule([this]()" in schedule_body
-    assert "RefreshPendingTbotClaim();" in schedule_body
+    assert "void SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation);" in header
+    assert "Schedule([this, expected_setup_generation]()" in schedule_body
+    run_idx = schedule_body.index("RunIfSetupGenerationCurrent(")
+    assert "expected_setup_generation" in schedule_body[run_idx:run_idx + 180]
+    assert "DispatchPendingTbotClaimRefreshForSetupGeneration" in schedule_body
+    assert "RefreshPendingTbotClaim();" not in schedule_body
 
 
 def test_application_runs_a_bounded_claim_poll_not_a_single_shot():
@@ -190,30 +229,34 @@ def test_application_runs_a_bounded_claim_poll_not_a_single_shot():
     assert "claim_poll_interval_us_ = desired_interval_us;" in start_body
     assert "esp_timer_start_periodic(claim_poll_timer_, claim_poll_interval_us_)" in start_body
 
-    # Unowned -> claimable standby trigger lives in the refresh path.
+    # Unowned -> claimable standby trigger lives in the refresh/apply path.
     assert "TbotClaimSubstate::AvailableStandby" in refresh_body
-    assert "StartClaimPoll();" in refresh_body
+    assert "StartClaimPoll();" in function_body(
+        source, "void Application::ApplyPendingTbotClaimFetchResult"
+    )
 
     # The window cap stops the poll and surfaces a timeout (no infinite poll).
     assert "claim_poll_started_ms_" in tick_body
     assert "kClaimPollWindowMs" in tick_body
     assert "HandleClaimConfirmTimeout();" in tick_body
 
-def test_unclaimed_standby_poll_window_does_not_expire_ble_advertising():
-    # The 5-minute cap belongs to an active backend claim-confirm window. A robot
-    # that is merely unclaimed/available must keep polling + BLE advertising so a
-    # late phone scan can still find it; otherwise the screen falls to "Setup
-    # expired" and the robot becomes unpairable without a reboot.
+def test_unclaimed_no_token_standby_waits_on_ble_without_periodic_reinit_cycle():
+    # Physical ESP32-S3 evidence: repeatedly deinit/init Bluedroid around a
+    # no-token liveness poll eventually asserts in vQueueDelete. After one fetch
+    # refreshes backend liveness, leave BLE advertising continuously; custom-data
+    # token handoff schedules the next claim refresh directly.
     source = read("main/application.cc")
-    tick_body = function_body(source, "void Application::PollPendingTbotClaimTick")
+    apply_body = function_body(source, "void Application::ApplyPendingTbotClaimFetchResult")
 
-    elapsed_idx = tick_body.index("now_ms - claim_poll_started_ms_ >= kClaimPollWindowMs")
-    timeout_idx = tick_body.index("HandleClaimConfirmTimeout();", elapsed_idx)
-    elapsed_branch = tick_body[elapsed_idx:timeout_idx]
+    no_claim_start = apply_body.index("if (!fetched || !pending_claim.active)")
+    pending_start = apply_body.index("Fetch succeeded with an active claim", no_claim_start)
+    no_claim_branch = apply_body[no_claim_start:pending_start]
+    no_token_start = no_claim_branch.index("if (token.empty())")
+    no_token_branch = no_claim_branch[no_token_start:no_claim_branch.index("return;", no_token_start) + len("return;")]
 
-    assert "pending_tbot_claim_.active" in elapsed_branch
-    assert "claim_poll_started_ms_ = now_ms;" in elapsed_branch
-    assert "RefreshPendingTbotClaim();" in elapsed_branch
+    assert "EnsureBleAdvertisingForStandby();" in no_claim_branch[:no_token_start]
+    assert "StopClaimPoll();" in no_token_branch
+    assert "StartClaimPoll();" not in no_token_branch
 
 def test_claimed_devices_leave_claim_fsm_before_standby_ble_advertising():
     source = read("main/application.cc")
@@ -304,10 +347,31 @@ def test_application_enforces_local_claim_expiry_against_a_clock():
     # Timeout renders the spec copy "Setup expired".
     assert "TbotClaimSubstate::ConfirmTimeout" in timeout_body
     assert "Lang::Strings::SETUP_EXPIRED" in timeout_body
+    assert 'websocket_settings.SetString("bootstrap_token", "");' in timeout_body
+    assert "SecureClearString(pending_tbot_claim_token_);" in timeout_body
+    assert "Blufi::GetInstance().ClearProvisioningSecrets();" in timeout_body
+    assert 'websocket_settings.EraseKey("claim_device_id");' in timeout_body
+
+
+def test_successful_claim_confirm_zeroizes_blufi_ram_secrets():
+    source = read("main/application.cc")
+    confirm_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    success_start = confirm_body.index(
+        "CancelClaimExpiryTimer();",
+        confirm_body.index("ClaimConfirmationResult::TerminalFailure") + 1,
+    )
+    success_body = confirm_body[success_start:]
+
+    nvs_clear = success_body.index('websocket_settings.SetString("bootstrap_token", "");')
+    ram_clear = success_body.index("Blufi::GetInstance().ClearProvisioningSecrets();")
+    assert nvs_clear < ram_clear
+    assert 'websocket_settings.EraseKey("claim_device_id");' in success_body
 
 def test_blufi_token_only_claim_path_does_not_report_device_authenticated_before_button_press():
     source = read("main/boards/common/blufi.cpp")
-    success_start = source.index("if (wifi.IsConnected())")
+    success_start = source.index("if (credentials_committed)")
     success_end = source.index("Failed to connect to WiFi via esp-wifi-connect", success_start)
     success_body = source[success_start:success_end]
     helper_body = function_body(source, "void Blufi::TryReportProvisioningAuthenticated")
@@ -315,7 +379,7 @@ def test_blufi_token_only_claim_path_does_not_report_device_authenticated_before
     report_idx = helper_body.index("ProvisioningStatusReporter::Status::DeviceAuthenticated")
 
     assert "ProvisioningStatusReporter::Status::DeviceAuthenticated" not in success_body
-    assert "TryReportProvisioningAuthenticated(\"wifi_success_after_ble_teardown\");" in success_body
+    assert '"wifi_success_after_ble_teardown", generation' in success_body
     assert skip_idx < report_idx
     assert "Reporting provisioning authenticated skipped" in helper_body
     assert "ClearProvisioningSecrets();" in helper_body
@@ -326,7 +390,7 @@ def test_blufi_wifi_success_tears_down_ble_before_claim_refresh():
     # has received the Wi-Fi success report, tear BLE down before refreshing the
     # pending claim.
     source = read("main/boards/common/blufi.cpp")
-    branch_start = source.index("if (wifi.IsConnected())")
+    branch_start = source.index("if (credentials_committed)")
     report_idx = source.index("esp_blufi_send_wifi_conn_report", branch_start)
     connected_log_idx = source.index('"connected to WiFi"', report_idx)
     failure_log_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", connected_log_idx)
@@ -337,10 +401,10 @@ def test_blufi_wifi_success_tears_down_ble_before_claim_refresh():
     assert "CancelBleSetupTimeout();" in success_body
     assert '"WiFi provisioned; stopping BLE before claim refresh"' in success_body
     assert "self->deinit();" in success_body
-    assert "SchedulePendingTbotClaimRefresh();" in success_body
+    assert "SchedulePendingTbotClaimRefresh(generation);" in success_body
     assert report_idx < connected_log_idx < source.index("self->deinit();", connected_log_idx)
     assert source.index("self->deinit();", connected_log_idx) < source.index(
-        "SchedulePendingTbotClaimRefresh();", connected_log_idx
+        "SchedulePendingTbotClaimRefresh(generation);", connected_log_idx
     )
 
 def test_blufi_reports_device_authenticated_only_after_ble_teardown():
@@ -349,7 +413,7 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
     # polling forever for the robot's device_authenticated callback.
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    success_start = source.index("if (wifi.IsConnected())")
+    success_start = source.index("if (credentials_committed)")
     report_idx = source.index("esp_blufi_send_wifi_conn_report", success_start)
     failure_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", report_idx)
     success_body = source[success_start:failure_idx]
@@ -357,10 +421,10 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
     custom_data_body = function_body(source, "case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:")
     report_rel = success_body.index("esp_blufi_send_wifi_conn_report")
 
-    assert "void TryReportProvisioningAuthenticated(const char* reason);" in header
-    assert "TryReportProvisioningAuthenticated(\"wifi_success_after_ble_teardown\");" in success_body
+    assert "void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);" in header
+    assert '"wifi_success_after_ble_teardown", generation' in success_body
     assert report_rel < success_body.index("self->deinit();") < success_body.index(
-        "TryReportProvisioningAuthenticated(\"wifi_success_after_ble_teardown\");"
+        '"wifi_success_after_ble_teardown", generation'
     )
     assert "ProvisioningStatusReporter::Status::DeviceAuthenticated" in helper_body
     assert "ClearProvisioningSecrets();" in helper_body
@@ -392,16 +456,15 @@ def test_pending_claim_without_bootstrap_token_keeps_ble_open_and_does_not_confi
     assert "StopBleAdvertising();" not in empty_token_branch
     assert "ConfirmPendingTbotClaim" not in empty_token_branch
 
-def test_failed_claim_confirm_clears_bootstrap_token_before_reopening_ble():
+def test_auto_confirm_continuations_delegate_retry_policy_without_clearing_token():
     source = read("main/application.cc")
     refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
-    retry_start = refresh_body.index("Auto-confirm POST did not land")
-    retry_body = refresh_body[retry_start:]
+    apply_body = function_body(source, "void Application::ApplyPendingTbotClaimFetchResult")
 
-    assert 'Settings websocket_settings("websocket", true);' in retry_body
-    assert 'websocket_settings.SetString("bootstrap_token", "");' in retry_body
-    assert "pending_tbot_claim_token_.clear();" in retry_body
-    assert "EnsureBleAdvertisingForStandby();" in retry_body
+    assert "Auto-confirm POST did not land" not in refresh_body
+    assert "Auto-confirm POST did not land" not in apply_body
+    assert "ConfirmPendingTbotClaim(/*trust_backend_expiry=*/true);" in refresh_body
+    assert "ConfirmPendingTbotClaim(/*trust_backend_expiry=*/true);" in apply_body
 
 def test_successful_claim_confirm_clears_consumed_bootstrap_token_before_reboot():
     # The BluFi bootstrap token is attempt-scoped. After /claim/confirm succeeds
@@ -409,7 +472,9 @@ def test_successful_claim_confirm_clears_consumed_bootstrap_token_before_reboot(
     # token in NVS makes the next reboot poll /device/config with stale auth and
     # can show a false backend retry state before WS comes online.
     source = read("main/application.cc")
-    confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
+    confirm_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
 
     success_start = confirm_body.index("CancelClaimExpiryTimer();")
     success_end = confirm_body.index("pending_tbot_claim_ = PendingTbotClaim{}", success_start)
@@ -417,7 +482,7 @@ def test_successful_claim_confirm_clears_consumed_bootstrap_token_before_reboot(
 
     assert 'Settings websocket_settings("websocket", true);' in success_body
     assert 'websocket_settings.SetString("bootstrap_token", "");' in success_body
-    assert "pending_tbot_claim_token_.clear();" in confirm_body[success_start:]
+    assert "SecureClearString(pending_tbot_claim_token_);" in confirm_body[success_start:]
 
 def test_button_confirm_without_bootstrap_token_waits_for_ble_instead_of_failing():
     source = read("main/application.cc")
@@ -432,24 +497,88 @@ def test_button_confirm_without_bootstrap_token_waits_for_ble_instead_of_failing
     assert "RenderClaimSubstate(claim_substate_);" in wait_branch
     assert "Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTION_CONFIRM_FAILED" not in wait_branch
 
-def test_button_confirm_failure_clears_token_and_reopens_ble_for_retry():
-    # Manual BOOT confirm uses ConfirmPendingTbotClaim() directly. If that POST
-    # fails with a stale/consumed bootstrap token, it must recover the same way
-    # as auto-confirm: clear attempt auth, keep the pending claim cached, reopen
-    # BLE, and poll so the phone can send a fresh token.
+def test_retryable_claim_confirm_preserves_token_claim_and_ble_teardown():
     source = read("main/application.cc")
-    confirm_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
-    failure_start = confirm_body.index("if (!confirmed)")
-    failure_end = confirm_body.index("CancelClaimExpiryTimer();", failure_start)
-    failure_body = confirm_body[failure_start:failure_end]
+    confirm_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    retry_start = confirm_body.index("ClaimConfirmationResult::RetryableFailure")
+    terminal_start = confirm_body.index("ClaimConfirmationResult::TerminalFailure", retry_start)
+    retry_body = confirm_body[retry_start:terminal_start]
 
-    assert 'Settings websocket_settings("websocket", true);' in failure_body
-    assert 'websocket_settings.SetString("bootstrap_token", "");' in failure_body
-    assert "pending_tbot_claim_token_.clear();" in failure_body
-    assert "pending_tbot_claim_ = PendingTbotClaim{}" not in failure_body
-    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby;" in failure_body
-    assert "EnsureBleAdvertisingForStandby();" in failure_body
-    assert "StartClaimPoll();" in failure_body
+    assert 'SetString("bootstrap_token", "")' not in retry_body
+    assert "pending_tbot_claim_token_.clear()" not in retry_body
+    assert "pending_tbot_claim_ = PendingTbotClaim{}" not in retry_body
+    assert "EnsureBleAdvertisingForStandby" not in retry_body
+    assert "ClearProvisioningSecrets" not in retry_body
+    assert "StartClaimPoll();" in retry_body
+    assert "claim_substate_ = TbotClaimSubstate::WaitingConfirm;" in retry_body
+
+
+def test_ambiguous_claim_success_stops_retries_without_clearing_or_reopening_ble():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    confirm_guard_body = function_body(source, "bool Application::ConfirmPendingTbotClaim")
+    confirm_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    ambiguous_start = confirm_body.index("ClaimConfirmationResult::AmbiguousSuccess")
+    terminal_start = confirm_body.index("ClaimConfirmationResult::TerminalFailure", ambiguous_start)
+    ambiguous_body = confirm_body[ambiguous_start:terminal_start]
+
+    assert "claim_confirmation_ambiguous_" in header
+    assert "claim_confirmation_ambiguous_ = true;" in ambiguous_body
+    assert 'SetInt("claim_ambiguous", 1);' in ambiguous_body
+    assert "StopClaimPoll();" in ambiguous_body
+    assert "StartClaimPoll();" not in ambiguous_body
+    assert 'SetString("bootstrap_token", "")' not in ambiguous_body
+    assert "SecureClearString(pending_tbot_claim_token_)" not in ambiguous_body
+    assert "ClearProvisioningSecrets" not in ambiguous_body
+    assert "EnsureBleAdvertisingForStandby" not in ambiguous_body
+    assert "TbotClaimSubstate::Confirmed" not in ambiguous_body
+    assert "Lang::Strings::CLAIM_CONFIRM_SUPPORT_REQUIRED" in ambiguous_body
+
+    guard_start = confirm_guard_body.index("if (claim_confirmation_ambiguous_)")
+    report_start = confirm_guard_body.index("ClaimConfirmationReporter::Confirm", guard_start)
+    guard_body = confirm_guard_body[guard_start:report_start]
+    assert "StopClaimPoll();" in guard_body
+    assert "return true;" in guard_body
+
+    refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
+    persisted_guard = refresh_body[refresh_body.index('GetInt("claim_ambiguous", 0)') :]
+    dispatch = persisted_guard.index("DispatchPendingTbotClaimFetch")
+    persisted_guard = persisted_guard[:dispatch]
+    assert "claim_confirmation_ambiguous_ = true;" in persisted_guard
+    assert "StopClaimPoll();" in persisted_guard
+    assert "StopBleAdvertising();" in persisted_guard
+    assert "return;" in persisted_guard
+
+    apply_body = function_body(source, "void Application::ApplyPendingTbotClaimFetchResult")
+    assert apply_body.index("if (claim_confirmation_ambiguous_)") < apply_body.index(
+        "device_config_status == 401"
+    )
+
+    repair_body = function_body(source, "void Application::EnterRepairPairingMode")
+    assert 'SetInt("claim_ambiguous", 0);' in repair_body
+
+
+def test_terminal_claim_confirm_clears_token_and_reopens_ble():
+    source = read("main/application.cc")
+    confirm_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    terminal_start = confirm_body.index("ClaimConfirmationResult::TerminalFailure")
+    terminal_end = confirm_body.index("return true;", terminal_start)
+    terminal_body = confirm_body[terminal_start:terminal_end]
+
+    assert 'Settings websocket_settings("websocket", true);' in terminal_body
+    assert 'websocket_settings.SetString("bootstrap_token", "");' in terminal_body
+    assert "SecureClearString(pending_tbot_claim_token_);" in terminal_body
+    assert "pending_tbot_claim_ = PendingTbotClaim{}" in terminal_body
+    assert "Blufi::GetInstance().ClearProvisioningSecrets();" in terminal_body
+    assert 'websocket_settings.EraseKey("claim_device_id");' in terminal_body
+    assert "EnsureBleAdvertisingForStandby();" in terminal_body
+    assert "StartClaimPoll();" not in terminal_body
 
 def test_cached_pending_claim_with_late_ble_token_confirms_without_refetching_config():
     source = read("main/application.cc")
@@ -458,7 +587,7 @@ def test_cached_pending_claim_with_late_ble_token_confirms_without_refetching_co
 
     assert "pending_tbot_claim_.active && !token.empty()" in refresh_body
     cached_start = refresh_body.index("pending_tbot_claim_.active && !token.empty()")
-    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token);")
+    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);")
     assert cached_start < dispatch_idx
     cached_branch = refresh_body[cached_start:dispatch_idx]
 
@@ -475,7 +604,7 @@ def test_unclaimed_standby_without_bootstrap_token_never_polls_backend_config_ev
     refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
     token_read = refresh_body.index('std::string token = websocket_settings.GetString("bootstrap_token");')
     fallback_idx = refresh_body.index("FetchBackendApiUrlFromBootstrap(token)")
-    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token);")
+    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);")
     pre_network = refresh_body[token_read:min(fallback_idx, dispatch_idx)]
 
     # If BLE init failed or was already off, GetBleState() no longer protects the
@@ -490,7 +619,7 @@ def test_unclaimed_standby_polls_device_config_without_bootstrap_token_to_refres
     source = read("main/application.cc")
     refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
     token_read = refresh_body.index('std::string token = websocket_settings.GetString("bootstrap_token");')
-    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token);")
+    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);")
     pre_fetch = refresh_body[token_read:dispatch_idx]
 
     ble_state_idx = pre_fetch.index("Blufi::GetInstance().GetBleState()")
@@ -502,14 +631,14 @@ def test_unclaimed_standby_polls_device_config_without_bootstrap_token_to_refres
     assert "if (!pending_tbot_claim_.active && token.empty())" not in pre_fetch[:ble_state_idx]
     assert "Skipping claim config fetch until BluFi token handoff" not in pre_fetch
     assert "Blufi::GetInstance().GetBleState()" in pre_fetch
-    assert "DispatchPendingTbotClaimFetch(api_url, token);" in refresh_body
+    assert "DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);" in refresh_body
 
 def test_unclaimed_standby_with_bootstrap_token_stops_ble_before_claim_fetch():
     source = read("main/application.cc")
     refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
     token_read = refresh_body.index('std::string token = websocket_settings.GetString("bootstrap_token");')
     fallback_idx = refresh_body.index("FetchBackendApiUrlFromBootstrap(token)")
-    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token);")
+    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);")
     pre_network = refresh_body[token_read:min(fallback_idx, dispatch_idx)]
 
     # Token present: do not strand mobile on WAITING_PHYSICAL_CONFIRM if BLE did
@@ -527,6 +656,84 @@ def test_unclaimed_standby_with_bootstrap_token_stops_ble_before_claim_fetch():
     assert "CancelBleSetupTimeout();" in token_present_branch
     assert "StopBleAdvertising();" in token_present_branch
     assert "return;" not in token_present_branch[:token_present_branch.index("StopBleAdvertising();")]
+
+
+def test_unclaimed_standby_without_token_pauses_advertising_before_tls_fetch():
+    source = read("main/application.cc")
+    refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
+    dispatch_idx = refresh_body.index("DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);")
+    pre_fetch = refresh_body[:dispatch_idx]
+
+    # Physical ESP32-S3 evidence: Wi-Fi + BluFi advertising leaves too little
+    # internal SRAM for DNS/TLS (getaddrinfo EAI_MEMORY). Preserve a live BLE
+    # connection so custom-data can arrive, but pause advertising before the
+    # no-token setup-liveness fetch. ApplyPendingTbotClaimFetchResult reopens BLE.
+    assert "ble_state == Blufi::BleState::kConnected && token.empty()" in pre_fetch
+    connected_branch = pre_fetch[pre_fetch.index("ble_state == Blufi::BleState::kConnected && token.empty()"):]
+    assert "return;" in connected_branch
+
+    assert "ble_state == Blufi::BleState::kAdvertising && token.empty()" in pre_fetch
+    advertising_branch = refresh_body[refresh_body.index("ble_state == Blufi::BleState::kAdvertising && token.empty()"):]
+    assert "CancelBleSetupTimeout();" in advertising_branch
+    assert "StopBleAdvertising();" in advertising_branch
+    assert advertising_branch.index("StopBleAdvertising();") < advertising_branch.index(
+        "DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);"
+    )
+
+
+def test_no_token_fetch_reopens_ble_even_when_periodic_poll_was_not_active():
+    source = read("main/application.cc")
+    refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
+    dispatch_body = function_body(source, "bool Application::DispatchPendingTbotClaimFetch")
+    worker_body = function_body(source, "void Application::ClaimFetchTask")
+
+    assert "bool apply_when_poll_inactive" in source
+    assert "paused_ble_for_fetch = true;" in refresh_body
+    assert "DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);" in refresh_body
+    assert "apply_when_poll_inactive" in worker_body
+    assert "!self->claim_poll_active_ && token.empty() && !apply_when_poll_inactive" in worker_body
+
+
+def test_paused_no_token_fetch_restores_ble_when_dispatch_is_not_accepted():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
+    dispatch_body = function_body(source, "bool Application::DispatchPendingTbotClaimFetch")
+
+    assert "bool DispatchPendingTbotClaimFetch" in header
+    assert "const bool claim_fetch_dispatched =" in refresh_body
+    assert "if (paused_ble_for_fetch && !claim_fetch_dispatched)" in refresh_body
+    rollback = refresh_body[
+        refresh_body.index("if (paused_ble_for_fetch && !claim_fetch_dispatched)") :
+    ]
+    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby;" in rollback
+    assert "EnsureBleAdvertisingForStandby();" in rollback
+    assert "StopClaimPoll();" in rollback
+
+    assert dispatch_body.count("return false;") >= 3
+    assert "new (std::nothrow) ClaimFetchContext" in dispatch_body
+    allocation_failure = dispatch_body[dispatch_body.index("new (std::nothrow) ClaimFetchContext") :]
+    assert "if (ctx == nullptr)" in allocation_failure
+    assert "claim_poll_inflight_.store(false);" in allocation_failure[
+        : allocation_failure.index("xTaskCreateWithCaps")
+    ]
+    task_failure = dispatch_body[dispatch_body.index("xTaskCreateWithCaps") :]
+    assert "return false;" in task_failure
+    assert task_failure.rfind("return true;") > task_failure.index("return false;")
+
+
+def test_audio_service_start_is_idempotent_while_workers_are_running():
+    source = read("main/audio/audio_service.cc")
+    start_body = function_body(source, "void AudioService::Start")
+
+    guard = start_body.index("if (!service_stopped_)")
+    mark_running = start_body.index("service_stopped_ = false;")
+    timer_start = start_body.index("esp_timer_start_periodic")
+    first_task = start_body.index("xTaskCreate", timer_start)
+
+    assert guard < mark_running < timer_start < first_task
+    guard_body = start_body[guard:mark_running]
+    assert "return;" in guard_body
 
 def test_auth_rejected_device_config_clears_stale_bootstrap_token_without_server_unavailable_copy():
     source = read("main/application.cc")
@@ -549,31 +756,108 @@ def test_auth_rejected_device_config_clears_stale_bootstrap_token_without_server
     assert "device_config_status == 403" in auth_branch
     assert "Device config rejected bootstrap token" in auth_branch
     assert 'websocket_settings.SetString("bootstrap_token", "");' in auth_branch
-    assert "pending_tbot_claim_token_.clear();" in auth_branch
+    assert "SecureClearString(pending_tbot_claim_token_);" in auth_branch
+    assert 'websocket_settings.EraseKey("claim_device_id");' in auth_branch
     assert "pending_tbot_claim_ = PendingTbotClaim{};" in auth_branch
     assert "claim_fetch_failures_ = 0;" in auth_branch
     assert "claim_substate_ = TbotClaimSubstate::AvailableStandby;" in auth_branch
+    nvs_clear = auth_branch.index('websocket_settings.SetString("bootstrap_token", "");')
+    ram_clear = auth_branch.index("Blufi::GetInstance().ClearProvisioningSecrets();")
+    reopen_ble = auth_branch.index("EnsureBleAdvertisingForStandby();")
+    assert nvs_clear < ram_clear < reopen_ble
     assert "EnsureBleAdvertisingForStandby();" in auth_branch
-    assert "StartClaimPoll();" in auth_branch
+    assert "StopClaimPoll();" in auth_branch
+    assert "StartClaimPoll();" not in auth_branch
     assert "return;" in auth_branch
     assert auth_branch_start < failure_copy_idx
 
-def test_failed_auto_confirm_keeps_cached_pending_claim_for_late_ble_token():
+
+def test_retryable_device_config_fetch_failure_retains_blufi_ram_secrets():
+    source = read("main/application.cc")
+    apply_body = function_body(source, "void Application::ApplyPendingTbotClaimFetchResult")
+    retry_start = apply_body.index("if (!fetched || !pending_claim.active)")
+    active_claim_start = apply_body.index("// Fetch succeeded with an active claim", retry_start)
+    retry_body = apply_body[retry_start:active_claim_start]
+
+    assert "claim_fetch_failures_" in retry_body
+    assert "StartClaimPoll();" in retry_body
+    assert "ClearProvisioningSecrets" not in retry_body
+    assert 'EraseKey("claim_device_id")' not in retry_body
+
+
+def test_claim_token_copies_are_zeroized_across_fetch_worker_handoffs():
+    source = read("main/application.cc")
+    dispatch_body = function_body(source, "bool Application::DispatchPendingTbotClaimFetch")
+    worker_body = function_body(source, "void Application::ClaimFetchTask")
+
+    helper = function_body(source, "static void SecureClearString")
+    assert "volatile char*" in helper
+    assert "value.clear();" in helper
+    assert "SecureClearString(ctx->token);" in dispatch_body
+    assert "SecureClearString(ctx->token);" in worker_body
+    assert "mutable" in worker_body
+    assert worker_body.count("SecureClearString(token);") >= 3
+    early_return = worker_body[worker_body.index("if (!self->claim_poll_active_") :]
+    assert early_return.index("SecureClearString(token);") < early_return.index("return;")
+    assert "pending_tbot_claim_token_.clear();" not in source
+    for assignment in (
+        "pending_tbot_claim_token_ = token;",
+    ):
+        search_from = 0
+        while True:
+            assign_at = source.find(assignment, search_from)
+            if assign_at == -1:
+                break
+            prefix = source[max(0, assign_at - 100):assign_at]
+            assert "SecureClearString(pending_tbot_claim_token_);" in prefix
+            search_from = assign_at + len(assignment)
+
+
+def test_refresh_pending_claim_zeroizes_its_local_bootstrap_token_on_every_exit():
     source = read("main/application.cc")
     refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
-    marker = "Auto-confirm POST did not land"
-    retry_starts = []
-    index = refresh_body.find(marker)
-    while index != -1:
-        retry_starts.append(index)
-        index = refresh_body.find(marker, index + len(marker))
 
-    assert retry_starts
-    for retry_start in retry_starts:
-        retry_end = refresh_body.index("StartClaimPoll();", retry_start)
-        retry_body = refresh_body[retry_start:retry_end]
+    assert "class SecureStringScope" in source
+    assert "SecureStringScope token_scope(token);" in refresh_body
+    assert "~SecureStringScope()" in source
+    assert "SecureClearString(value_);" in source
 
-        assert 'websocket_settings.SetString("bootstrap_token", "");' in retry_body
-        assert "pending_tbot_claim_token_.clear();" in retry_body
-        assert "pending_tbot_claim_ = PendingTbotClaim{}" not in retry_body
-        assert "pending_tbot_claim_api_url_.clear();" not in retry_body
+def test_retryable_auto_confirm_keeps_cached_pending_claim_and_token():
+    source = read("main/application.cc")
+    confirm_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    retry_start = confirm_body.index("ClaimConfirmationResult::RetryableFailure")
+    terminal_start = confirm_body.index("ClaimConfirmationResult::TerminalFailure", retry_start)
+    retry_body = confirm_body[retry_start:terminal_start]
+
+    assert "pending_tbot_claim_token_.clear()" not in retry_body
+    assert 'SetString("bootstrap_token", "")' not in retry_body
+    assert "StartClaimPoll();" in retry_body
+
+
+def test_app_startup_registers_allocation_failure_diagnostics_without_allocating_in_hook():
+    source = read("main/main.cc")
+    hook = function_body(source, "static void AllocationFailureHook")
+    normal_main = 'extern "C" void app_main(void)' + source.rsplit(
+        'extern "C" void app_main(void)', 1
+    )[1]
+    app_main = function_body(normal_main, 'extern "C" void app_main(void)')
+
+    assert "#include <esp_heap_caps.h>" in source
+    assert "#include <esp_rom_sys.h>" in source
+    assert "size_t requested_size" in source
+    assert "uint32_t caps" in source
+    assert "const char* function_name" in source
+    assert "esp_rom_printf" in hook
+    assert "requested_size" in hook
+    assert "caps" in hook
+    assert "function_name" in hook
+    for forbidden in ("malloc(", "calloc(", "realloc(", "new ", "std::", "ESP_LOG"):
+        assert forbidden not in hook
+    for secret in ("ssid", "password", "token", "serial", "mac"):
+        assert secret not in hook.lower()
+
+    register_idx = app_main.index("heap_caps_register_failed_alloc_callback(AllocationFailureHook)")
+    nvs_idx = app_main.index("nvs_flash_init()")
+    assert register_idx < nvs_idx

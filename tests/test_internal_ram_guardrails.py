@@ -79,9 +79,9 @@ def test_transient_http_workers_use_internal_dram_stacks():
     source = read("main/application.cc")
 
     for signature, task_name in [
-        ("void Application::DispatchPendingTbotClaimFetch", '"claim_fetch"'),
+        ("bool Application::DispatchPendingTbotClaimFetch", '"claim_fetch"'),
         ("void Application::MaybeDispatchDeferredCloudRelease", '"cloud_release"'),
-        ("void Application::DispatchDeviceHeartbeat", '"heartbeat_http"'),
+        ("void Application::StartHeartbeat", '"heartbeat_http"'),
     ]:
         start = source.index(signature)
         task_index = source.index(task_name, start)

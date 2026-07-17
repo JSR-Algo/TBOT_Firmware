@@ -2,6 +2,8 @@
 #define WIFI_BOARD_H
 
 #include "board.h"
+#include <atomic>
+#include <cstdint>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_timer.h>
@@ -11,6 +13,8 @@ protected:
     esp_timer_handle_t connect_timer_ = nullptr;
     bool in_config_mode_ = false;
     NetworkEventCallback network_event_callback_ = nullptr;
+    std::atomic<uint32_t> wifi_config_entry_generation_{0};
+    std::atomic<bool> wifi_config_entry_inflight_{false};
 
     // AP-setup hard-timeout safety gate (mirrors the BLE gate in blufi.cpp).
     // SoftAP/Hotspot provisioning must NOT run forever: when this one-shot timer

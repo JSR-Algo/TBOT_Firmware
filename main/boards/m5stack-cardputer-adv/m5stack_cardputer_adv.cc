@@ -266,7 +266,8 @@ private:
     }
 
     void AttemptWifiConnection(const std::string& ssid, const std::string& password) {
-        ESP_LOGI(TAG, "Attempting WiFi connection to: %s", ssid.c_str());
+        ESP_LOGI(TAG, "Attempting WiFi connection (ssid_len=%u)",
+                 static_cast<unsigned>(ssid.size()));
 
         // Add to SSID manager (will be saved and used for connection)
         auto& ssid_manager = SsidManager::GetInstance();

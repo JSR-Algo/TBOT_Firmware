@@ -61,6 +61,7 @@
         "TBOT_CONNECT": "TBot Connect",
         "CONNECTED": "Đã kết nối.",
         "CONNECTION_CONFIRM_FAILED": "Xác nhận kết nối thất bại. Thử lại.",
+        "CLAIM_CONFIRM_SUPPORT_REQUIRED": "Xác nhận kết nối chưa hoàn tất. Hãy đặt lại ghép nối hoặc liên hệ hỗ trợ.",
         "SETUP_EXPIRED": "Hết hạn thiết lập",
         "SERVER_UNAVAILABLE_RETRYING": "Máy chủ không khả dụng. Đang thử lại...",
         "WIFI_FAILED_CHECK_PASSWORD": "Wi-Fi thất bại. Kiểm tra mật khẩu."

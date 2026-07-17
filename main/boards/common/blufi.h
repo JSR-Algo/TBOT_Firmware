@@ -1,8 +1,12 @@
 #pragma once
 
 #include <aes/esp_aes.h>
+#include <atomic>
 #include <cassert>
 #include <cstring>
+#include <functional>
+#include <mutex>
+#include <optional>
 #include <vector>
 #include "esp_blufi_api.h"
 #include "esp_err.h"
@@ -52,6 +56,13 @@ public:
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t deinit();
+
+    /** Start a fresh provisioning generation for an explicit BOOT re-entry. */
+    esp_err_t RestartForSetup();
+
+    /** Run a short non-network action while setup generation ownership is stable. */
+    bool RunIfSetupGenerationCurrent(uint32_t expected_generation,
+                                     const std::function<void()>& action);
 
     /**
      * @brief Returns the bootstrap token received via BluFi custom-data (tag=0x01).
@@ -107,6 +118,7 @@ public:
 
 private:
     bool inited_ = false;
+    std::atomic<bool> teardown_failed_{false};
 
     Blufi();
 
@@ -148,8 +160,9 @@ private:
     bool EnsureWifiScanEventHandlerRegistered();
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
-    void TryReportProvisioningAuthenticated(const char* reason);
+    void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
     void StartStationConnectFromCredentials(const char* reason);
+    void SendStationConnectFailureReport();
     void ScheduleStationConnectFallback();
     void _send_wifi_list();
     void _start_dedicated_wifi_scan();
@@ -204,7 +217,7 @@ private:
     std::string bootstrap_token_;
     // Provisioning code received via BluFi custom-data TLV tag=0x02
     std::string provisioning_code_;
-    bool provisioning_report_in_flight_ = false;
+    std::optional<uint32_t> provisioning_report_owner_generation_;
 
     // State variables
     wifi_config_t m_sta_config{};
@@ -216,13 +229,19 @@ private:
     uint8_t m_sta_bssid[6]{};
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;
-    bool m_sta_is_connecting;
-    bool m_wifi_connect_task_started = false;
+    size_t m_sta_config_ssid_len_ = 0;
+    std::atomic<bool> m_sta_is_connecting{false};
+    std::atomic<bool> m_wifi_connect_task_started{false};
+    std::atomic<uint32_t> setup_generation_{0};
+    std::atomic<uint64_t> ble_session_state_{0};
+    std::atomic<uint32_t> ssid_transaction_id_{0};
+    std::mutex provisioning_finalization_mutex_;
     esp_blufi_extra_info_t m_sta_conn_info{};
 
     // BLE hard-timeout safety gate (#1)
     esp_timer_handle_t ble_setup_timer_ = nullptr;  // one-shot timer; nullptr when not armed
     bool ble_timed_out_ = false;                    // set by timer callback; prevents adv restart
+    std::atomic<uint32_t> ble_timeout_generation_{0};
 
     // BLE re-advertise cap (C8): bound how many times advertising is restarted
     // after a peer disconnect so a flapping/aborting central cannot make BLE
