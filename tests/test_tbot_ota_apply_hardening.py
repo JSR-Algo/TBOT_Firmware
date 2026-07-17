@@ -80,6 +80,61 @@ def test_ota_check_version_does_not_retry_stale_ephemeral_nvs_url():
     assert "urls.push_back(configured_url)" in url_builder_body
     assert "CONFIG_OTA_URL" in url_builder_body
 
+
+def test_ota_check_version_tries_canonical_build_url_before_distinct_configured_url():
+    source = read("main/ota.cc")
+    url_builder_body = function_body(source, "std::vector<std::string> BuildCheckVersionUrls")
+
+    canonical_push = url_builder_body.index("urls.push_back(canonical_url)")
+    configured_push = url_builder_body.index("urls.push_back(configured_url)")
+    assert canonical_push < configured_push
+    assert "configured_url != canonical_url" in url_builder_body
+    assert "IsEphemeralEndpoint(configured_url)" in url_builder_body
+
+
+def test_ota_check_version_has_bounded_http_lifetime_and_closes_every_opened_response():
+    source = read("main/ota.cc")
+    setup_body = function_body(source, "std::unique_ptr<Http> Ota::SetupHttp")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+
+    assert "static constexpr int kHttpTimeoutMs = 8000" in read("main/ota.h")
+    assert "http->SetTimeout(timeout_ms);" in setup_body
+    assert "ScopedHttpClose close_http(*http);" in check_body
+    assert check_body.index("ScopedHttpClose close_http(*http);") < check_body.index(
+        "http->GetStatusCode()"
+    )
+    assert "close_http.Close();" in check_body
+    assert "http->Close();" not in check_body
+
+
+def test_ota_check_version_uses_one_deadline_across_fallback_connect_headers_and_body():
+    source = read("main/ota.cc")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+
+    assert "check_deadline_us" in check_body
+    assert "esp_timer_get_time()" in check_body
+    assert "RemainingCheckTimeoutMs(check_deadline_us)" in check_body
+    assert "SetupHttp(RemainingCheckTimeoutMs(check_deadline_us))" in check_body
+    assert check_body.count(
+        "http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));"
+    ) >= 2
+
+
+def test_ota_check_logs_do_not_expose_endpoint_or_device_identity():
+    source = read("main/ota.cc")
+    setup_body = function_body(source, "std::unique_ptr<Http> Ota::SetupHttp")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+    recovered_body = function_body(source, "void PersistRecoveredOtaUrl")
+
+    log_lines = "\n".join(
+        line for body in (setup_body, check_body, recovered_body)
+        for line in body.splitlines()
+        if "ESP_LOG" in line
+    )
+    assert "url.c_str()" not in log_lines
+    assert "configured_url.c_str()" not in log_lines
+    assert "serial_number_.c_str()" not in log_lines
+
 def test_ota_claim_reset_clears_local_ownership_once_per_nonce():
     source = read("main/ota.cc")
     check_body = function_body(source, "esp_err_t Ota::CheckVersion")

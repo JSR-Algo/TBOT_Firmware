@@ -7,6 +7,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #include <cstdlib>
 
 static const char *TAG = "EspTcp";
@@ -22,6 +24,12 @@ EspTcp::~EspTcp() {
     if (event_group_ != nullptr) {
         vEventGroupDelete(event_group_);
         event_group_ = nullptr;
+    }
+}
+
+void EspTcp::SetTimeout(int timeout_ms) {
+    if (timeout_ms > 0) {
+        timeout_ms_ = timeout_ms;
     }
 }
 
@@ -64,10 +72,52 @@ bool EspTcp::Connect(const std::string& host, int port) {
     }
     tcp_fd_.store(fd);
 
-    int ret = connect(fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
-    if (ret < 0) {
+    const int original_flags = fcntl(fd, F_GETFL, 0);
+    if (original_flags < 0 || fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) < 0) {
         last_error_ = errno;
-        ESP_LOGE(TAG, "Failed to connect to %s:%d, code=0x%x", host.c_str(), port, last_error_);
+        ESP_LOGE(TAG, "Failed to configure bounded TCP connect, code=0x%x", last_error_);
+        close(fd);
+        tcp_fd_.store(-1);
+        return false;
+    }
+
+    int ret = connect(fd, (struct sockaddr*)&server_addr, sizeof(server_addr));
+    if (ret < 0 && errno == EINPROGRESS) {
+        fd_set write_fds;
+        FD_ZERO(&write_fds);
+        FD_SET(fd, &write_fds);
+        struct timeval timeout = {};
+        timeout.tv_sec = timeout_ms_ / 1000;
+        timeout.tv_usec = (timeout_ms_ % 1000) * 1000;
+        ret = select(fd + 1, nullptr, &write_fds, nullptr, &timeout);
+        if (ret == 0) {
+            last_error_ = ETIMEDOUT;
+            ret = -1;
+        } else if (ret < 0) {
+            last_error_ = errno;
+        } else {
+            int socket_error = 0;
+            socklen_t error_length = sizeof(socket_error);
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) < 0) {
+                last_error_ = errno;
+                ret = -1;
+            } else if (socket_error != 0) {
+                last_error_ = socket_error;
+                ret = -1;
+            } else {
+                ret = 0;
+            }
+        }
+    } else if (ret < 0) {
+        last_error_ = errno;
+    }
+
+    const bool flags_restored = fcntl(fd, F_SETFL, original_flags) == 0;
+    if (ret < 0 || !flags_restored) {
+        if (!flags_restored) {
+            last_error_ = errno;
+        }
+        ESP_LOGE(TAG, "TCP connect failed, code=0x%x", last_error_);
         close(fd);
         tcp_fd_.store(-1);
         return false;

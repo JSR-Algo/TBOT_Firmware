@@ -191,6 +191,43 @@ def test_production_wss_uses_esp_ssl_with_joined_shutdown():
     )
 
 
+def test_http_timeout_is_propagated_to_each_new_tcp_transport_before_connect():
+    tcp = read("components/esp-ml307/include/tcp.h")
+    http = read("components/esp-ml307/src/http_client.cc")
+    open_body = function_body(http, "bool HttpClient::Open")
+
+    assert "virtual void SetTimeout(int timeout_ms)" in tcp
+    assert "(void)timeout_ms;" in tcp
+    timeout_idx = open_body.index("tcp_->SetTimeout(timeout_ms_);")
+    connect_idx = open_body.index("tcp_->Connect(host_, port_)")
+    assert timeout_idx < connect_idx
+
+
+def test_esp_tcp_connect_uses_nonblocking_deadline_and_restores_socket_flags():
+    source = read("components/esp-ml307/src/esp/esp_tcp.cc")
+    header = read("components/esp-ml307/src/esp/esp_tcp.h")
+    connect = function_body(source, "bool EspTcp::Connect")
+
+    assert "void SetTimeout(int timeout_ms) override;" in header
+    assert "int timeout_ms_" in header
+    assert "fcntl(fd, F_GETFL" in connect
+    assert "fcntl(fd, F_SETFL, original_flags | O_NONBLOCK)" in connect
+    assert "select(fd + 1" in connect
+    assert "getsockopt(fd, SOL_SOCKET, SO_ERROR" in connect
+    assert "last_error_ = ETIMEDOUT" in connect
+    assert "fcntl(fd, F_SETFL, original_flags)" in connect
+
+
+def test_esp_ssl_connect_uses_http_timeout_for_tls_handshake():
+    source = read("components/esp-ml307/src/esp/esp_ssl.cc")
+    header = read("components/esp-ml307/src/esp/esp_ssl.h")
+    connect = function_body(source, "bool EspSsl::Connect")
+
+    assert "void SetTimeout(int timeout_ms) override;" in header
+    assert "int timeout_ms_" in header
+    assert "cfg.timeout_ms = timeout_ms_;" in connect
+
+
 def test_esp_ssl_callback_completes_before_exit_publication():
     source = read("components/esp-ml307/src/esp/esp_ssl.cc")
     connect = function_body(source, "bool EspSsl::Connect")

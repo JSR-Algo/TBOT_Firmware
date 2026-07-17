@@ -18,6 +18,7 @@ public:
     EspTcp();
     ~EspTcp();
 
+    void SetTimeout(int timeout_ms) override;
     bool Connect(const std::string& host, int port) override;
     void Disconnect() override;
     int Send(const std::string& data) override;
@@ -34,6 +35,7 @@ private:
     std::mutex send_mutex_;
     EventGroupHandle_t event_group_ = nullptr;
     std::atomic<TaskHandle_t> receive_task_handle_{nullptr};
+    int timeout_ms_ = 30000;
     int last_error_ = 0;
     EspTcpShutdownState shutdown_state_;
 

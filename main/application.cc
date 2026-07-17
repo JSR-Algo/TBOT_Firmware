@@ -51,6 +51,13 @@ static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 static constexpr UBaseType_t kLessonMessageQueueDepth = 16;
 static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
+static constexpr int kOtaCheckMaxAttempts = 3;
+static constexpr int kOtaRetryDelaysSeconds[] = {2, 4};
+static constexpr int kOtaCheckPhaseBudgetMs =
+    kOtaCheckMaxAttempts * Ota::kHttpTimeoutMs +
+    (kOtaRetryDelaysSeconds[0] + kOtaRetryDelaysSeconds[1]) * 1000;
+static_assert(kOtaCheckPhaseBudgetMs <= 60000,
+              "OTA activation check must remain inside the boot phase budget");
 
 // TBOT claim poll (C4): cadence 10s. The backend's 5-minute cap applies only
 // after a pending claim exists; unclaimed standby must keep polling so a late
@@ -2279,37 +2286,36 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
-    const int MAX_RETRY = 10;
-    int retry_count = 0;
-    int retry_delay = 10; // Initial retry delay in seconds
-
     auto& board = Board::GetInstance();
+    auto display = board.GetDisplay();
     while (true) {
-        auto display = board.GetDisplay();
-        auto current_state = GetDeviceState();
-        if (current_state == kDeviceStateWifiConfiguring ||
-            current_state == kDeviceStateAudioTesting) {
-            ESP_LOGI(TAG, "Skipping OTA version check because WiFi config mode is active");
-            return;
-        }
-        display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+        esp_err_t err = ESP_FAIL;
+        for (int attempt = 0; attempt < kOtaCheckMaxAttempts; ++attempt) {
+            auto current_state = GetDeviceState();
+            if (current_state == kDeviceStateWifiConfiguring ||
+                current_state == kDeviceStateAudioTesting ||
+                current_state == kDeviceStateIdle) {
+                ESP_LOGI(TAG, "Skipping OTA version check because activation ended");
+                return;
+            }
+            display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
 
-        esp_err_t err = ota_->CheckVersion();
-        if (err != ESP_OK) {
-            retry_count++;
-            if (retry_count >= MAX_RETRY) {
-                char error_message[128];
-                snprintf(error_message, sizeof(error_message), "code=%d, url=%s", err, ota_->GetCheckVersionUrl().c_str());
-                char buffer[256];
-                snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
-                Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
-                ESP_LOGE(TAG, "Too many retries, exit version check");
+            err = ota_->CheckVersion();
+            if (err == ESP_OK) {
+                break;
+            }
+            if (attempt + 1 >= kOtaCheckMaxAttempts) {
+                char error_message[32];
+                snprintf(error_message, sizeof(error_message), "code=%d", err);
+                Alert(Lang::Strings::ERROR, error_message, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
+                ESP_LOGE(TAG, "OTA version check exhausted its bounded retry budget, code=%d", err);
                 return;
             }
 
-            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d), code=%d, url=%s",
-                     retry_delay, retry_count, MAX_RETRY, err, ota_->GetCheckVersionUrl().c_str());
-            for (int i = 0; i < retry_delay; i++) {
+            const int retry_delay = kOtaRetryDelaysSeconds[attempt];
+            ESP_LOGW(TAG, "OTA version check failed; retry in %d seconds (%d/%d), code=%d",
+                     retry_delay, attempt + 1, kOtaCheckMaxAttempts, err);
+            for (int elapsed_seconds = 0; elapsed_seconds < retry_delay; ++elapsed_seconds) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 auto delayed_state = GetDeviceState();
                 if (delayed_state == kDeviceStateWifiConfiguring ||
@@ -2318,14 +2324,11 @@ void Application::CheckNewVersion() {
                     return;
                 }
                 if (delayed_state == kDeviceStateIdle) {
-                    break;
+                    ESP_LOGI(TAG, "Aborting OTA retry because activation ended");
+                    return;
                 }
             }
-            retry_delay *= 2; // Double the retry delay
-            continue;
         }
-        retry_count = 0;
-        retry_delay = 10; // Reset retry delay
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
