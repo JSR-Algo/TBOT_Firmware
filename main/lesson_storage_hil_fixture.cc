@@ -5,6 +5,12 @@
 #include <mbedtls/sha256.h>
 #include <mbedtls/version.h>
 
+#ifdef ESP_PLATFORM
+#include <esp_task_wdt.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -13,7 +19,6 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <initializer_list>
-#include <limits>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -22,6 +27,14 @@
 
 #ifndef TBOT_LESSON_STORAGE_HIL_ROOT
 #define TBOT_LESSON_STORAGE_HIL_ROOT "/sdcard/tbot/lesson-assets"
+#endif
+
+#ifndef TBOT_LESSON_STORAGE_HIL_INSPECTION_PER_FILE_BYTES
+#define TBOT_LESSON_STORAGE_HIL_INSPECTION_PER_FILE_BYTES (4U * 1024U * 1024U)
+#endif
+
+#ifndef TBOT_LESSON_STORAGE_HIL_INSPECTION_AGGREGATE_BYTES
+#define TBOT_LESSON_STORAGE_HIL_INSPECTION_AGGREGATE_BYTES (16U * 1024U * 1024U)
 #endif
 
 namespace {
@@ -37,10 +50,18 @@ constexpr std::size_t kInspectionDirectChildCap = 16;
 constexpr std::size_t kInspectionRawNameMaxBytes = 48;
 constexpr std::size_t kInspectionLabelMaxBytes = 384;
 constexpr std::size_t kSha256BufferBytes = 512;
+constexpr std::size_t kInspectionPerFileBytes =
+    TBOT_LESSON_STORAGE_HIL_INSPECTION_PER_FILE_BYTES;
+constexpr std::size_t kInspectionAggregateBytes =
+    TBOT_LESSON_STORAGE_HIL_INSPECTION_AGGREGATE_BYTES;
+static_assert(kInspectionPerFileBytes > 0);
+static_assert(kInspectionAggregateBytes >= kInspectionPerFileBytes);
 
 #ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
 LessonStorageHilFixtureMkdirCallback g_mkdir_callback = nullptr;
 LessonStorageHilFixtureFsyncCallback g_fsync_callback = nullptr;
+LessonStorageHilFixtureWriteCallback g_write_callback = nullptr;
+LessonStorageHilFixtureReadCallback g_read_callback = nullptr;
 LessonStorageHilFixtureInspectFailureCallback g_inspect_failure_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_unlink_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_rmdir_callback = nullptr;
@@ -72,6 +93,21 @@ struct ValidatedKeys {
 struct ParentCreation {
     bool root_created = false;
     bool slug_created = false;
+};
+
+struct CreatedNode {
+    const std::string* path;
+    NodeKind kind;
+    bool created;
+    bool creation_attempt_failed = false;
+};
+
+struct RollbackResult {
+    bool all_created_nodes_removed_and_reverified;
+};
+
+struct InspectionByteBudget {
+    std::size_t remaining = kInspectionAggregateBytes;
 };
 
 std::string JoinPath(const std::string& parent, const std::string& child) {
@@ -139,6 +175,32 @@ int SyncFixtureFile(int descriptor) {
     }
 #endif
     return fsync(descriptor);
+}
+
+ssize_t WriteFixtureBytes(
+    int descriptor,
+    const void* bytes,
+    std::size_t length
+) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_write_callback != nullptr) {
+        return g_write_callback(descriptor, bytes, length);
+    }
+#endif
+    return write(descriptor, bytes, length);
+}
+
+std::size_t ReadFixtureBytes(
+    void* bytes,
+    std::size_t length,
+    FILE* file
+) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_read_callback != nullptr) {
+        return g_read_callback(bytes, length, file);
+    }
+#endif
+    return std::fread(bytes, 1, length, file);
 }
 
 int RemoveFixtureDirectory(const std::string& path) {
@@ -436,15 +498,6 @@ LessonStorageHilFixtureCode ValidateParents(
     return LessonStorageHilFixtureCode::kStaged;
 }
 
-void RollBackParents(const std::string& slug, const ParentCreation& creation) {
-    if (creation.slug_created) {
-        RemoveFixtureDirectory(SlugPath(slug));
-    }
-    if (creation.root_created) {
-        RemoveFixtureDirectory(RootPath());
-    }
-}
-
 bool EnsureParents(
     const std::string& slug,
     bool root_missing,
@@ -459,7 +512,6 @@ bool EnsureParents(
     }
     if (slug_missing) {
         if (CreateFixtureDirectory(SlugPath(slug)) != 0) {
-            RollBackParents(slug, *creation);
             return false;
         }
         creation->slug_created = true;
@@ -467,16 +519,21 @@ bool EnsureParents(
     return true;
 }
 
-bool WriteExactFile(const std::string& path, const char* bytes) {
+bool WriteExactFile(
+    const std::string& path,
+    const char* bytes,
+    bool* created
+) {
     const int descriptor = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (descriptor < 0) {
         return false;
     }
+    *created = true;
     const std::size_t length = std::strlen(bytes);
     std::size_t written = 0;
     bool ok = true;
     while (written < length) {
-        const ssize_t result = write(
+        const ssize_t result = WriteFixtureBytes(
             descriptor, bytes + written, length - written
         );
         if (result <= 0) {
@@ -491,28 +548,45 @@ bool WriteExactFile(const std::string& path, const char* bytes) {
     if (close(descriptor) != 0) {
         ok = false;
     }
-    if (!ok) {
-        RemoveFixtureFile(path);
-    }
     return ok;
 }
 
-bool RollbackChangedStorage(
-    std::initializer_list<const std::string*> owned_paths,
-    const std::string& slug,
-    const ParentCreation& creation
+RollbackResult RollBackCreatedNodes(
+    std::initializer_list<CreatedNode> nodes
 ) {
-    for (const std::string* path : owned_paths) {
-        if (ReadNodeKind(*path) != NodeKind::kMissing) {
-            return true;
+    bool observation_failed = false;
+    for (const CreatedNode& node : nodes) {
+        if (!node.created && !node.creation_attempt_failed) {
+            continue;
+        }
+        if (!node.created) {
+            const NodeKind observed = ReadNodeKind(*node.path);
+            if (observed == NodeKind::kMissing) {
+                continue;
+            }
+            if (observed == NodeKind::kIoFailed) {
+                observation_failed = true;
+                continue;
+            }
+            if (observed != node.kind) {
+                observation_failed = true;
+                continue;
+            }
+        }
+        if (node.kind == NodeKind::kRegularFile) {
+            RemoveFixtureFile(*node.path);
+        } else {
+            RemoveFixtureDirectory(*node.path);
         }
     }
-    if (creation.slug_created &&
-        ReadNodeKind(SlugPath(slug)) != NodeKind::kMissing) {
-        return true;
+    bool all_missing = !observation_failed;
+    for (const CreatedNode& node : nodes) {
+        if ((node.created || node.creation_attempt_failed) &&
+            ReadNodeKind(*node.path) != NodeKind::kMissing) {
+            all_missing = false;
+        }
     }
-    return creation.root_created &&
-           ReadNodeKind(RootPath()) != NodeKind::kMissing;
+    return {all_missing};
 }
 
 LessonStorageHilFixtureResult StageNested(
@@ -537,30 +611,50 @@ LessonStorageHilFixtureResult StageNested(
     }
 
     ParentCreation creation;
+    const std::string slug_path = SlugPath(slug);
+    const std::string root_path = RootPath();
     if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&slug_path,
+             NodeKind::kDirectory,
+             creation.slug_created,
+             slug_missing && !creation.slug_created &&
+                 (!root_missing || creation.root_created)},
+            {&root_path,
+             NodeKind::kDirectory,
+             creation.root_created,
+             root_missing && !creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage({&leaf_path}, slug, creation),
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             ""
         );
     }
     if (CreateFixtureDirectory(leaf_path) != 0) {
-        RollBackParents(slug, creation);
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&leaf_path, NodeKind::kDirectory, false, true},
+            {&slug_path, NodeKind::kDirectory, creation.slug_created},
+            {&root_path, NodeKind::kDirectory, creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage({&leaf_path}, slug, creation),
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             ""
         );
     }
     const std::string sentinel_path = JoinPath(leaf_path, kNestedSentinelName);
     if (CreateFixtureDirectory(sentinel_path) != 0) {
-        RemoveFixtureDirectory(leaf_path);
-        RollBackParents(slug, creation);
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&leaf_path, NodeKind::kDirectory, true},
+            {&slug_path, NodeKind::kDirectory, creation.slug_created},
+            {&root_path, NodeKind::kDirectory, creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage({&leaf_path}, slug, creation),
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             ""
         );
@@ -590,44 +684,42 @@ LessonStorageHilFixtureResult StageLeafFile(
     }
 
     ParentCreation creation;
+    const std::string slug_path = SlugPath(slug);
+    const std::string root_path = RootPath();
     if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&slug_path,
+             NodeKind::kDirectory,
+             creation.slug_created,
+             slug_missing && !creation.slug_created &&
+                 (!root_missing || creation.root_created)},
+            {&root_path,
+             NodeKind::kDirectory,
+             creation.root_created,
+             root_missing && !creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage({&leaf_path}, slug, creation),
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             ""
         );
     }
-    if (!WriteExactFile(leaf_path, kLeafMagic)) {
-        RollBackParents(slug, creation);
+    bool leaf_created = false;
+    if (!WriteExactFile(leaf_path, kLeafMagic, &leaf_created)) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&leaf_path, NodeKind::kRegularFile, leaf_created, !leaf_created},
+            {&slug_path, NodeKind::kDirectory, creation.slug_created},
+            {&root_path, NodeKind::kDirectory, creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage({&leaf_path}, slug, creation),
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             ""
         );
     }
     return Result(LessonStorageHilFixtureCode::kStaged, true, cache_key, "");
-}
-
-bool CreatePreservationLeaf(
-    const std::string& leaf_path,
-    const char* magic
-) {
-    if (CreateFixtureDirectory(leaf_path) != 0) {
-        return false;
-    }
-    const std::string sentinel = JoinPath(leaf_path, kPreservationSentinelName);
-    if (!WriteExactFile(sentinel, magic)) {
-        RemoveFixtureDirectory(leaf_path);
-        return false;
-    }
-    return true;
-}
-
-void RemovePreservationLeaf(const std::string& leaf_path) {
-    RemoveFixtureFile(JoinPath(leaf_path, kPreservationSentinelName));
-    RemoveFixtureDirectory(leaf_path);
 }
 
 LessonStorageHilFixtureResult StagePreservation(
@@ -671,35 +763,101 @@ LessonStorageHilFixtureResult StagePreservation(
     }
 
     ParentCreation creation;
+    const std::string slug_path = SlugPath(slug);
+    const std::string root_path = RootPath();
+    const std::string first_sentinel =
+        JoinPath(first_leaf, kPreservationSentinelName);
+    const std::string second_sentinel =
+        JoinPath(second_leaf, kPreservationSentinelName);
     if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&slug_path,
+             NodeKind::kDirectory,
+             creation.slug_created,
+             slug_missing && !creation.slug_created &&
+                 (!root_missing || creation.root_created)},
+            {&root_path,
+             NodeKind::kDirectory,
+             creation.root_created,
+             root_missing && !creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage(
-                {&first_leaf, &second_leaf}, slug, creation
-            ),
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             sibling_cache_key
         );
     }
-    if (!CreatePreservationLeaf(first_leaf, kPreservationPrimaryMagic)) {
-        RollBackParents(slug, creation);
+    if (CreateFixtureDirectory(first_leaf) != 0) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&first_leaf, NodeKind::kDirectory, false, true},
+            {&slug_path, NodeKind::kDirectory, creation.slug_created},
+            {&root_path, NodeKind::kDirectory, creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage(
-                {&first_leaf, &second_leaf}, slug, creation
-            ),
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             sibling_cache_key
         );
     }
-    if (!CreatePreservationLeaf(second_leaf, kPreservationSiblingMagic)) {
-        RemovePreservationLeaf(first_leaf);
-        RollBackParents(slug, creation);
+    bool first_sentinel_created = false;
+    if (!WriteExactFile(
+            first_sentinel,
+            kPreservationPrimaryMagic,
+            &first_sentinel_created
+        )) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&first_sentinel,
+             NodeKind::kRegularFile,
+             first_sentinel_created,
+             !first_sentinel_created},
+            {&first_leaf, NodeKind::kDirectory, true},
+            {&slug_path, NodeKind::kDirectory, creation.slug_created},
+            {&root_path, NodeKind::kDirectory, creation.root_created},
+        });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
-            RollbackChangedStorage(
-                {&first_leaf, &second_leaf}, slug, creation
-            ),
+            !rollback.all_created_nodes_removed_and_reverified,
+            cache_key,
+            sibling_cache_key
+        );
+    }
+    if (CreateFixtureDirectory(second_leaf) != 0) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&second_leaf, NodeKind::kDirectory, false, true},
+            {&first_sentinel, NodeKind::kRegularFile, true},
+            {&first_leaf, NodeKind::kDirectory, true},
+            {&slug_path, NodeKind::kDirectory, creation.slug_created},
+            {&root_path, NodeKind::kDirectory, creation.root_created},
+        });
+        return Result(
+            LessonStorageHilFixtureCode::kIoFailed,
+            !rollback.all_created_nodes_removed_and_reverified,
+            cache_key,
+            sibling_cache_key
+        );
+    }
+    bool second_sentinel_created = false;
+    if (!WriteExactFile(
+            second_sentinel,
+            kPreservationSiblingMagic,
+            &second_sentinel_created
+        )) {
+        const RollbackResult rollback = RollBackCreatedNodes({
+            {&second_sentinel,
+             NodeKind::kRegularFile,
+             second_sentinel_created,
+             !second_sentinel_created},
+            {&second_leaf, NodeKind::kDirectory, true},
+            {&first_sentinel, NodeKind::kRegularFile, true},
+            {&first_leaf, NodeKind::kDirectory, true},
+            {&slug_path, NodeKind::kDirectory, creation.slug_created},
+            {&root_path, NodeKind::kDirectory, creation.root_created},
+        });
+        return Result(
+            LessonStorageHilFixtureCode::kIoFailed,
+            !rollback.all_created_nodes_removed_and_reverified,
             cache_key,
             sibling_cache_key
         );
@@ -883,6 +1041,7 @@ LessonStorageHilFixtureResult CleanupPreservation(
 
 bool HashFileSha256(
     const std::string& path,
+    std::size_t expected_bytes,
     std::size_t* bytes,
     std::string* sha256
 ) {
@@ -899,13 +1058,15 @@ bool HashFileSha256(
 #endif
     std::array<unsigned char, kSha256BufferBytes> buffer {};
     std::size_t total = 0;
-    while (result == 0) {
-        const std::size_t read = std::fread(buffer.data(), 1, buffer.size(), file);
+    while (result == 0 && total < expected_bytes) {
+        const std::size_t request =
+            std::min(buffer.size(), expected_bytes - total);
+        const std::size_t read = ReadFixtureBytes(buffer.data(), request, file);
+        if (read > request) {
+            result = -1;
+            break;
+        }
         if (read > 0) {
-            if (total > std::numeric_limits<std::size_t>::max() - read) {
-                result = -1;
-                break;
-            }
             total += read;
 #if MBEDTLS_VERSION_MAJOR >= 3
             result = mbedtls_sha256_update(&context, buffer.data(), read);
@@ -913,12 +1074,20 @@ bool HashFileSha256(
             result = mbedtls_sha256_update_ret(&context, buffer.data(), read);
 #endif
         }
-        if (read < buffer.size()) {
-            if (std::ferror(file)) {
-                result = -1;
-            }
-            break;
+#ifdef ESP_PLATFORM
+        esp_task_wdt_reset();
+        taskYIELD();
+#endif
+        if (read != request || std::ferror(file)) {
+            result = -1;
         }
+    }
+    struct stat final_metadata {};
+    if (result == 0 &&
+        (fstat(fileno(file), &final_metadata) != 0 ||
+         !S_ISREG(final_metadata.st_mode) || final_metadata.st_size < 0 ||
+         static_cast<std::size_t>(final_metadata.st_size) != expected_bytes)) {
+        result = -1;
     }
     std::array<unsigned char, 32> digest {};
     if (result == 0) {
@@ -949,7 +1118,9 @@ bool HashFileSha256(
 
 LessonStorageHilInspectionEntry InspectEntry(
     const std::string& path,
-    const std::string& label
+    const std::string& label,
+    InspectionByteBudget* budget,
+    bool* truncated
 ) {
     struct stat metadata {};
     const NodeKind kind = ReadNodeKind(path, &metadata);
@@ -962,9 +1133,22 @@ LessonStorageHilInspectionEntry InspectEntry(
     if (kind != NodeKind::kRegularFile) {
         return {label, "unexpected", 0, ""};
     }
+    if (metadata.st_size < 0) {
+        *truncated = true;
+        return {label, "unexpected", 0, ""};
+    }
+    const std::size_t declared_bytes =
+        static_cast<std::size_t>(metadata.st_size);
+    if (declared_bytes > kInspectionPerFileBytes ||
+        declared_bytes > budget->remaining) {
+        *truncated = true;
+        return {label, "unexpected", 0, ""};
+    }
+    budget->remaining -= declared_bytes;
     std::size_t bytes = 0;
     std::string sha256;
-    if (!HashFileSha256(path, &bytes, &sha256)) {
+    if (!HashFileSha256(path, declared_bytes, &bytes, &sha256)) {
+        *truncated = true;
         return {label, "unexpected", 0, ""};
     }
     return {label, "regular_file", bytes, std::move(sha256)};
@@ -996,9 +1180,12 @@ bool EncodeLabelComponent(const std::string& raw, std::string* encoded) {
 void InspectPathAndDirectChildren(
     const std::string& path,
     const std::string& label,
-    LessonStorageHilInspection* inspection
+    LessonStorageHilInspection* inspection,
+    InspectionByteBudget* budget
 ) {
-    inspection->entries.push_back(InspectEntry(path, label));
+    inspection->entries.push_back(
+        InspectEntry(path, label, budget, &inspection->truncated)
+    );
     if (inspection->entries.back().node_type != "directory") {
         return;
     }
@@ -1020,7 +1207,12 @@ void InspectPathAndDirectChildren(
             continue;
         }
         inspection->entries.push_back(
-            InspectEntry(JoinPath(path, name), JoinPath(label, encoded_name))
+            InspectEntry(
+                JoinPath(path, name),
+                JoinPath(label, encoded_name),
+                budget,
+                &inspection->truncated
+            )
         );
     }
 }
@@ -1038,6 +1230,18 @@ void SetLessonStorageHilFixtureFsyncCallbackForTest(
     LessonStorageHilFixtureFsyncCallback callback
 ) {
     g_fsync_callback = callback;
+}
+
+void SetLessonStorageHilFixtureWriteCallbackForTest(
+    LessonStorageHilFixtureWriteCallback callback
+) {
+    g_write_callback = callback;
+}
+
+void SetLessonStorageHilFixtureReadCallbackForTest(
+    LessonStorageHilFixtureReadCallback callback
+) {
+    g_read_callback = callback;
 }
 
 void SetLessonStorageHilFixtureInspectFailureCallbackForTest(
@@ -1127,24 +1331,35 @@ LessonStorageHilInspection InspectLessonStorageHilStorage(
     }
     inspection.cache_key = cache_key;
     inspection.sibling_cache_key = sibling_cache_key;
+    InspectionByteBudget budget;
     InspectPathAndDirectChildren(
-        LeafPath(cache_key), "lesson-assets/" + cache_key, &inspection
+        LeafPath(cache_key), "lesson-assets/" + cache_key, &inspection, &budget
     );
     if (!sibling_cache_key.empty()) {
         InspectPathAndDirectChildren(
             LeafPath(sibling_cache_key),
             "lesson-assets/" + sibling_cache_key,
-            &inspection
+            &inspection,
+            &budget
         );
     }
     inspection.entries.push_back(InspectEntry(
-        JoinPath(RootPath(), "current.json"), "lesson-assets/current.json"
+        JoinPath(RootPath(), "current.json"),
+        "lesson-assets/current.json",
+        &budget,
+        &inspection.truncated
     ));
     InspectPathAndDirectChildren(
-        JoinPath(RootPath(), "pvg"), "lesson-assets/pvg", &inspection
+        JoinPath(RootPath(), "pvg"),
+        "lesson-assets/pvg",
+        &inspection,
+        &budget
     );
     InspectPathAndDirectChildren(
-        JoinPath(RootPath(), "shared"), "lesson-assets/shared", &inspection
+        JoinPath(RootPath(), "shared"),
+        "lesson-assets/shared",
+        &inspection,
+        &budget
     );
     std::sort(inspection.entries.begin(), inspection.entries.end(), [](const auto& a,
                                                                        const auto& b) {

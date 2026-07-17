@@ -19,15 +19,19 @@ namespace {
 int g_checks = 0;
 int g_mkdir_calls = 0;
 int g_fsync_calls = 0;
+int g_write_calls = 0;
 int g_unlink_calls = 0;
 int g_rmdir_calls = 0;
 int g_fail_mkdir_call = 0;
 int g_fail_fsync_call = 0;
+int g_fail_write_call = 0;
 int g_fail_unlink_call = 0;
 int g_fail_rmdir_call = 0;
 int g_inspect_path_calls = 0;
 int g_fail_inspect_path_call = 0;
 std::string g_inspect_failure_path;
+std::size_t g_read_bytes = 0;
+std::size_t g_largest_read_request = 0;
 
 int InjectedMkdir(const char* path) {
     ++g_mkdir_calls;
@@ -45,6 +49,21 @@ int InjectedFsync(int descriptor) {
         return -1;
     }
     return fsync(descriptor);
+}
+
+ssize_t InjectedWrite(int descriptor, const void* bytes, std::size_t length) {
+    ++g_write_calls;
+    if (g_write_calls == g_fail_write_call) {
+        errno = EIO;
+        return -1;
+    }
+    return write(descriptor, bytes, length);
+}
+
+std::size_t ObservedRead(void* bytes, std::size_t length, FILE* file) {
+    g_read_bytes += length;
+    g_largest_read_request = std::max(g_largest_read_request, length);
+    return std::fread(bytes, 1, length, file);
 }
 
 bool InjectedInspectFailure(const char* path) {
@@ -76,17 +95,23 @@ int InjectedRmdir(const char* path) {
 void ResetMutationInjection() {
     g_mkdir_calls = 0;
     g_fsync_calls = 0;
+    g_write_calls = 0;
     g_unlink_calls = 0;
     g_rmdir_calls = 0;
     g_fail_mkdir_call = 0;
     g_fail_fsync_call = 0;
+    g_fail_write_call = 0;
     g_fail_unlink_call = 0;
     g_fail_rmdir_call = 0;
     g_inspect_path_calls = 0;
     g_fail_inspect_path_call = 0;
     g_inspect_failure_path.clear();
+    g_read_bytes = 0;
+    g_largest_read_request = 0;
     SetLessonStorageHilFixtureMkdirCallbackForTest(nullptr);
     SetLessonStorageHilFixtureFsyncCallbackForTest(nullptr);
+    SetLessonStorageHilFixtureWriteCallbackForTest(nullptr);
+    SetLessonStorageHilFixtureReadCallbackForTest(nullptr);
     SetLessonStorageHilFixtureInspectFailureCallbackForTest(nullptr);
     SetLessonStorageHilFixtureUnlinkCallbackForTest(nullptr);
     SetLessonStorageHilFixtureRmdirCallbackForTest(nullptr);
@@ -521,6 +546,30 @@ void TestLeafStageRollbackReportsEveryResidual() {
            "leaf write parent rollback hid an empty slug");
     Expect(fs::is_directory(leaf.parent_path()) && fs::is_empty(leaf.parent_path()),
            "leaf write parent rollback residual was not exact");
+
+    ResetRoot();
+    ResetMutationInjection();
+    fs::create_directories(leaf.parent_path());
+    g_fail_write_call = 1;
+    SetLessonStorageHilFixtureWriteCallbackForTest(InjectedWrite);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && !result.changed,
+           "clean leaf write rollback reported a residual");
+    Expect(!fs::exists(leaf), "clean leaf write rollback left a file");
+
+    ResetMutationInjection();
+    g_fail_write_call = 1;
+    g_fail_unlink_call = 1;
+    SetLessonStorageHilFixtureWriteCallbackForTest(InjectedWrite);
+    SetLessonStorageHilFixtureUnlinkCallbackForTest(InjectedUnlink);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "failed leaf write rollback hid uncertain created state");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kSentinelMismatch &&
+               !result.changed && fs::exists(leaf),
+           "uncertain leaf write residual did not remain fail-closed");
 }
 
 void TestPreservationSetUsesTwoPhaseCleanup() {
@@ -793,6 +842,22 @@ void TestPreservationStageRollbackReportsResidualTruthAndCleanupConverges() {
                !fs::exists(Leaf(sibling)),
            "failed rmdir did not leave the expected empty primary residual");
     expect_cleanup_converges();
+
+    ResetRoot();
+    ResetMutationInjection();
+    fs::create_directories(first_leaf.parent_path());
+    g_fail_write_call = 1;
+    g_fail_unlink_call = 1;
+    SetLessonStorageHilFixtureWriteCallbackForTest(InjectedWrite);
+    SetLessonStorageHilFixtureUnlinkCallbackForTest(InjectedUnlink);
+    result = stage_with_faults();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "first preservation sentinel rollback hid uncertain created state");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kSentinelMismatch &&
+               !result.changed && fs::exists(first_sentinel),
+           "uncertain first preservation leaf did not remain fail-closed");
 }
 
 void TestPreservationCleanupAcceptsAnExactlyEvictedPrimary() {
@@ -1117,6 +1182,62 @@ void TestInspectionIsReadOnlyBoundedSortedAndDataSensitive() {
            "invalid inspection echoed values");
 }
 
+void TestInspectionNeverReadsPastPerFileOrAggregateBudgets() {
+    ResetRoot();
+    ResetMutationInjection();
+    const std::string key = Key("hil-read-budget", 1, 'a');
+    const std::string sibling = Key("hil-read-budget", 2, 'b');
+    Write(Leaf(key) / "small.bin", std::string(20, 'a'));
+    Write(Leaf(key) / "oversized.bin", std::string(65, 'x'));
+    Write(Leaf(sibling) / "sibling.bin", std::string(20, 's'));
+    Write(Root() / "current.json", std::string(50, 'b'));
+    Write(Root() / "pvg" / "pvg.bin", std::string(50, 'c'));
+    Write(Root() / "shared" / "shared.bin", std::string(50, 'd'));
+    SetLessonStorageHilFixtureReadCallbackForTest(ObservedRead);
+
+    const auto first = InspectLessonStorageHilStorage(key, sibling);
+    Expect(first.truncated, "inspection byte-budget exhaustion was not reported");
+    Expect(g_read_bytes <= 160, "inspection read past aggregate byte budget");
+    Expect(g_largest_read_request <= 64,
+           "inspection read past per-file byte budget");
+    const auto* small = FindEntry(
+        first, "lesson-assets/" + key + "/small.bin"
+    );
+    const auto* oversized = FindEntry(
+        first, "lesson-assets/" + key + "/oversized.bin"
+    );
+    const auto* sibling_file = FindEntry(
+        first, "lesson-assets/" + sibling + "/sibling.bin"
+    );
+    const auto* shared = FindEntry(first, "lesson-assets/shared/shared.bin");
+    Expect(small != nullptr && small->node_type == "regular_file" &&
+               small->bytes == 20 && small->sha256.size() == 64,
+           "within-budget file lost its stable fingerprint");
+    Expect(oversized != nullptr && oversized->node_type == "unexpected" &&
+               oversized->bytes == 0 && oversized->sha256.empty(),
+           "oversized file did not fail closed deterministically");
+    Expect(sibling_file != nullptr &&
+               sibling_file->node_type == "regular_file" &&
+               sibling_file->bytes == 20,
+           "sibling fingerprint did not share the aggregate budget");
+    Expect(shared != nullptr && shared->node_type == "unexpected" &&
+               shared->bytes == 0 && shared->sha256.empty(),
+           "aggregate-exhausted file did not fail closed deterministically");
+
+    const std::size_t first_read_bytes = g_read_bytes;
+    ResetMutationInjection();
+    SetLessonStorageHilFixtureReadCallbackForTest(ObservedRead);
+    const auto repeated = InspectLessonStorageHilStorage(key, sibling);
+    Expect(g_read_bytes == first_read_bytes,
+           "repeated inspection changed deterministic read budget use");
+    const auto* repeated_small = FindEntry(
+        repeated, "lesson-assets/" + key + "/small.bin"
+    );
+    Expect(repeated_small != nullptr && small != nullptr &&
+               repeated_small->sha256 == small->sha256,
+           "within-budget SHA changed across identical inspections");
+}
+
 }  // namespace
 
 int main() {
@@ -1133,6 +1254,7 @@ int main() {
     TestPreservationCleanupRejectsUnownedPartialStates();
     TestSymlinksAreRefusedWithoutFollowingTargets();
     TestInspectionIsReadOnlyBoundedSortedAndDataSensitive();
+    TestInspectionNeverReadsPastPerFileOrAggregateBudgets();
     ResetRoot();
     std::cout << "lesson storage HIL fixture host checks: " << g_checks << '\n';
     return 0;

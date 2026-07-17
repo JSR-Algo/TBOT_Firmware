@@ -219,11 +219,17 @@ def test_fixture_inspection_is_bounded_read_only_and_uses_mbedtls_sha256():
     assert '"/lesson-assets' not in source
     assert "kInspectionRawNameMaxBytes" in source
     assert "kInspectionLabelMaxBytes" in source
+    assert "kInspectionPerFileBytes" in source
+    assert "kInspectionAggregateBytes" in source
+    assert "esp_task_wdt_reset()" in source
+    assert "taskYIELD()" in source
     assert "EncodeLabelComponent(" in source
     assert 'constexpr char kHex[] = "0123456789ABCDEF"' in source
     assert "TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING" in source
     assert "SetLessonStorageHilFixtureMkdirCallbackForTest" in source
     assert "SetLessonStorageHilFixtureFsyncCallbackForTest" in source
+    assert "SetLessonStorageHilFixtureWriteCallbackForTest" in source
+    assert "SetLessonStorageHilFixtureReadCallbackForTest" in source
     assert "SetLessonStorageHilFixtureInspectFailureCallbackForTest" in source
     assert "SetLessonStorageHilFixtureUnlinkCallbackForTest" in source
     assert "SetLessonStorageHilFixtureRmdirCallbackForTest" in source

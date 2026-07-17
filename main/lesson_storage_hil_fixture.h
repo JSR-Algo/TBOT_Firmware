@@ -4,7 +4,9 @@
 #include "lesson_asset_storage_coordinator.h"
 
 #include <cstddef>
+#include <cstdio>
 #include <string>
+#include <sys/types.h>
 #include <vector>
 
 enum class LessonStorageHilFixture {
@@ -69,12 +71,28 @@ LessonStorageHilInspection InspectLessonStorageHilStorage(
 using LessonStorageHilFixtureRemoveCallback = int (*)(const char* path);
 using LessonStorageHilFixtureMkdirCallback = int (*)(const char* path);
 using LessonStorageHilFixtureFsyncCallback = int (*)(int descriptor);
+using LessonStorageHilFixtureWriteCallback = ssize_t (*)(
+    int descriptor,
+    const void* bytes,
+    std::size_t length
+);
+using LessonStorageHilFixtureReadCallback = std::size_t (*)(
+    void* bytes,
+    std::size_t length,
+    FILE* file
+);
 using LessonStorageHilFixtureInspectFailureCallback = bool (*)(const char* path);
 void SetLessonStorageHilFixtureMkdirCallbackForTest(
     LessonStorageHilFixtureMkdirCallback callback
 );
 void SetLessonStorageHilFixtureFsyncCallbackForTest(
     LessonStorageHilFixtureFsyncCallback callback
+);
+void SetLessonStorageHilFixtureWriteCallbackForTest(
+    LessonStorageHilFixtureWriteCallback callback
+);
+void SetLessonStorageHilFixtureReadCallbackForTest(
+    LessonStorageHilFixtureReadCallback callback
 );
 void SetLessonStorageHilFixtureInspectFailureCallbackForTest(
     LessonStorageHilFixtureInspectFailureCallback callback

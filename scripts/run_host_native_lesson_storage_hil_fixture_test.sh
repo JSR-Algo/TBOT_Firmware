@@ -9,6 +9,8 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
 "${CXX:-clang++}" -std=c++17 -pthread -Wall -Wextra -Werror ${CXXFLAGS:-} \
   -DTBOT_LESSON_STORAGE_HIL_ROOT='"'"${STORAGE_ROOT}"'"' \
   -DTBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING \
+  -DTBOT_LESSON_STORAGE_HIL_INSPECTION_PER_FILE_BYTES=64 \
+  -DTBOT_LESSON_STORAGE_HIL_INSPECTION_AGGREGATE_BYTES=160 \
   -I"${ROOT}/tests/native_stubs_staging" \
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_cache_evict.cc" \
