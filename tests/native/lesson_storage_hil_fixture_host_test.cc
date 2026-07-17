@@ -802,9 +802,13 @@ void TestPreservationCleanupResumesOwnedPartialStates() {
            "second unlink failure did not report partial mutation");
     ResetMutationInjection();
     result = cleanup();
-    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
-           "cleanup did not resume empty-primary plus complete-sibling state");
+    Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+               !result.changed && fs::is_directory(Leaf(key)) &&
+               fs::is_regular_file(Leaf(sibling) / ".tbot-hil-sentinel"),
+           "cleanup deleted an unattested empty primary leaf");
 
+    ResetRoot();
+    ResetMutationInjection();
     stage();
     g_fail_rmdir_call = 1;
     SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
@@ -813,9 +817,13 @@ void TestPreservationCleanupResumesOwnedPartialStates() {
            "first rmdir failure did not report deleted sentinels");
     ResetMutationInjection();
     result = cleanup();
-    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
-           "cleanup did not resume two empty fixture leaves");
+    Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+               !result.changed && fs::is_directory(Leaf(key)) &&
+               fs::is_directory(Leaf(sibling)),
+           "cleanup deleted unattested empty preservation leaves");
 
+    ResetRoot();
+    ResetMutationInjection();
     stage();
     g_fail_rmdir_call = 2;
     SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
@@ -824,10 +832,10 @@ void TestPreservationCleanupResumesOwnedPartialStates() {
            "second rmdir failure did not report partial removal");
     ResetMutationInjection();
     result = cleanup();
-    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
-           "cleanup did not resume missing-primary plus empty-sibling state");
-    Expect(!fs::exists(Leaf(key)) && !fs::exists(Leaf(sibling)),
-           "retry cleanup left fixture-owned leaves");
+    Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+               !result.changed && !fs::exists(Leaf(key)) &&
+               fs::is_directory(Leaf(sibling)),
+           "cleanup deleted an unattested empty sibling leaf");
 }
 
 void TestPreservationStageRollbackReportsResidualTruthAndCleanupConverges() {
@@ -932,7 +940,11 @@ void TestPreservationStageRollbackReportsResidualTruthAndCleanupConverges() {
     Expect(fs::is_directory(first_leaf) && fs::is_empty(first_leaf) &&
                !fs::exists(Leaf(sibling)),
            "failed rmdir did not leave the expected empty primary residual");
-    expect_cleanup_converges();
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+               !result.changed && fs::is_directory(first_leaf),
+           "later cleanup deleted an empty rollback leaf without proof");
 
     ResetRoot();
     ResetMutationInjection();
@@ -1043,11 +1055,25 @@ void TestSecondPreservationSentinelRollbackCoversEveryCreatedNode() {
 
         ResetMutationInjection();
         result = cleanup();
+        const bool unattested_empty =
+            fault.residual_node == 1 || fault.residual_node == 3;
+        if (unattested_empty) {
+            Expect(result.code ==
+                           LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                       !result.changed,
+                   "later cleanup deleted an unattested empty rollback leaf");
+            result = stage();
+            Expect(result.code ==
+                           LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                       !result.changed,
+                   "stage accepted an unattested empty rollback leaf");
+            continue;
+        }
         Expect(result.code == LessonStorageHilFixtureCode::kCleaned,
-               "second-sentinel rollback residual was not safely recoverable");
+               "attested rollback residual was not safely recoverable");
         result = stage();
         Expect(result.code == LessonStorageHilFixtureCode::kStaged && result.changed,
-               "staging did not recover after exact rollback residual cleanup");
+               "staging did not recover after attested residual cleanup");
         result = cleanup();
         Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
                "cleanup did not converge after rollback recovery restage");
@@ -1095,7 +1121,7 @@ void TestPreservationCleanupAcceptsAnExactlyEvictedPrimary() {
            "post-eviction cleanup mutated protected storage");
 }
 
-void TestPreservationCleanupAcceptsEveryExactPartialOrder() {
+void TestPreservationCleanupRequiresProofForEveryExistingLeaf() {
     const std::string key = Key("hil-order", 1, 'c');
     const std::string sibling = Key("hil-order", 2, 'd');
     const fs::path first_leaf = Leaf(key);
@@ -1106,6 +1132,19 @@ void TestPreservationCleanupAcceptsEveryExactPartialOrder() {
         } else if (state == 2) {
             Write(leaf / ".tbot-hil-sentinel", magic);
         }
+    };
+    const auto matches_arranged_state = [](
+                                            const fs::path& leaf,
+                                            int state,
+                                            const char* magic
+                                        ) {
+        if (state == 0) {
+            return !fs::exists(leaf);
+        }
+        if (state == 1) {
+            return fs::is_directory(leaf) && fs::is_empty(leaf);
+        }
+        return Read(leaf / ".tbot-hil-sentinel") == magic;
     };
     for (int first_state = 0; first_state < 3; ++first_state) {
         for (int second_state = 0; second_state < 3; ++second_state) {
@@ -1122,18 +1161,43 @@ void TestPreservationCleanupAcceptsEveryExactPartialOrder() {
                 "TBOT-HIL-PRESERVATION-SIBLING-V1\n"
             );
 
-            const bool expected_change = first_state != 0 || second_state != 0;
+            const bool has_unattested_empty =
+                first_state == 1 || second_state == 1;
+            const bool expected_change =
+                !has_unattested_empty && (first_state != 0 || second_state != 0);
             {
                 auto lease = Lease();
                 const auto result = CleanupLessonStorageHilFixture(
                     lease, key, LessonStorageHilFixture::kPreservationSet, sibling
                 );
-                Expect(result.code == LessonStorageHilFixtureCode::kCleaned &&
+                const auto expected_code = has_unattested_empty
+                                               ? LessonStorageHilFixtureCode::
+                                                     kUnexpectedExistingNode
+                                               : LessonStorageHilFixtureCode::kCleaned;
+                Expect(result.code == expected_code &&
                            result.changed == expected_change,
-                       "cleanup rejected an exact bounded preservation partial pair");
+                       "cleanup did not enforce preservation ownership proof");
+            }
+            if (has_unattested_empty) {
+                Expect((first_state == 0 || fs::exists(first_leaf)) &&
+                           (second_state == 0 || fs::exists(second_leaf)),
+                       "cleanup mutated a pair containing an unattested empty leaf");
+                Expect(matches_arranged_state(
+                           first_leaf,
+                           first_state,
+                           "TBOT-HIL-PRESERVATION-PRIMARY-V1\n"
+                       ),
+                       "cleanup changed the primary while refusing empty ownership");
+                Expect(matches_arranged_state(
+                           second_leaf,
+                           second_state,
+                           "TBOT-HIL-PRESERVATION-SIBLING-V1\n"
+                       ),
+                       "cleanup changed the sibling while refusing empty ownership");
+                continue;
             }
             Expect(!fs::exists(first_leaf) && !fs::exists(second_leaf),
-                   "cleanup left an exact bounded preservation partial pair");
+                   "cleanup left an attested preservation partial pair");
             auto retry_lease = Lease();
             const auto retry_result = CleanupLessonStorageHilFixture(
                 retry_lease,
@@ -1143,7 +1207,7 @@ void TestPreservationCleanupAcceptsEveryExactPartialOrder() {
             );
             Expect(retry_result.code == LessonStorageHilFixtureCode::kCleaned &&
                        !retry_result.changed,
-                   "repeated exact partial cleanup did not converge");
+                   "repeated attested partial cleanup did not converge");
         }
     }
 }
@@ -1467,7 +1531,7 @@ int main() {
     TestPreservationStageRollbackReportsResidualTruthAndCleanupConverges();
     TestSecondPreservationSentinelRollbackCoversEveryCreatedNode();
     TestPreservationCleanupAcceptsAnExactlyEvictedPrimary();
-    TestPreservationCleanupAcceptsEveryExactPartialOrder();
+    TestPreservationCleanupRequiresProofForEveryExistingLeaf();
     TestPreservationCleanupRejectsUnownedPartialStates();
     TestSymlinksAreRefusedWithoutFollowingTargets();
     TestInspectionIsReadOnlyBoundedSortedAndDataSensitive();

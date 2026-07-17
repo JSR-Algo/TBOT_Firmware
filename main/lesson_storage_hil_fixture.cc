@@ -996,13 +996,13 @@ LessonStorageHilFixtureResult CleanupPreservation(
             sibling_cache_key
         );
     }
-    const auto is_known_partial = [](FixtureState state) {
+    const auto is_attested_or_missing = [](FixtureState state) {
         return state == FixtureState::kMissing ||
-               state == FixtureState::kEmptyPartial ||
                state == FixtureState::kComplete;
     };
-    if (!is_known_partial(first_state) || !is_known_partial(second_state)) {
-        const FixtureState failure = !is_known_partial(first_state)
+    if (!is_attested_or_missing(first_state) ||
+        !is_attested_or_missing(second_state)) {
+        const FixtureState failure = !is_attested_or_missing(first_state)
                                          ? first_state
                                          : second_state;
         return Result(CodeForState(failure), false, cache_key, sibling_cache_key);
