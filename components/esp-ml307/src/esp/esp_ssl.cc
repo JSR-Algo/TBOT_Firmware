@@ -1,7 +1,10 @@
 #include "esp_ssl.h"
+#include "esp_dns_resolver.h"
+#include "transport_deadline.h"
 
 #include <esp_crt_bundle.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -31,6 +34,8 @@ void EspSsl::SetTimeout(int timeout_ms) {
 }
 
 bool EspSsl::Connect(const std::string& host, int port) {
+    const int64_t connect_deadline =
+        TransportDeadlineUs(timeout_ms_, esp_timer_get_time());
     std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
     auto prior_disconnect_callback = DoDisconnect(true);
     if (prior_disconnect_callback) {
@@ -48,6 +53,13 @@ bool EspSsl::Connect(const std::string& host, int port) {
         return false;
     }
 
+    in_addr resolved_address = {};
+    if (!ResolveHostIpv4WithDeadline(host, connect_deadline,
+                                     &resolved_address, &last_error_)) {
+        ESP_LOGE(TAG, "Failed to resolve TLS host, code=0x%x", last_error_);
+        return false;
+    }
+
     tls_client_ = esp_tls_init();
     if (tls_client_ == nullptr) {
         last_error_ = ENOMEM;
@@ -57,7 +69,14 @@ bool EspSsl::Connect(const std::string& host, int port) {
 
     esp_tls_cfg_t cfg = {};
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    cfg.timeout_ms = timeout_ms_;
+    cfg.timeout_ms =
+        RemainingTransportTimeoutMs(connect_deadline, esp_timer_get_time());
+    if (cfg.timeout_ms <= 0) {
+        last_error_ = ETIMEDOUT;
+        esp_tls_conn_destroy(tls_client_);
+        tls_client_ = nullptr;
+        return false;
+    }
 
     int ret = esp_tls_conn_new_sync(host.c_str(), host.length(), port, &cfg, tls_client_);
     if (ret != 1) {
@@ -170,14 +189,40 @@ int EspSsl::Send(const std::string& data) {
         return -1;
     }
 
+    int sockfd = -1;
+    if (esp_tls_get_conn_sockfd(tls_client_, &sockfd) != ESP_OK || sockfd < 0) {
+        last_error_ = ENOTCONN;
+        return -1;
+    }
+
+    const int64_t send_deadline =
+        TransportDeadlineUs(timeout_ms_, esp_timer_get_time());
     size_t total_sent = 0;
     while (total_sent < data.size()) {
+        const int remaining_ms =
+            RemainingTransportTimeoutMs(send_deadline, esp_timer_get_time());
+        if (remaining_ms <= 0) {
+            last_error_ = ETIMEDOUT;
+            return -1;
+        }
+        struct timeval send_timeout = {};
+        send_timeout.tv_sec = remaining_ms / 1000;
+        send_timeout.tv_usec = (remaining_ms % 1000) * 1000;
+        if (setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO,
+                       &send_timeout, sizeof(send_timeout)) < 0) {
+            last_error_ = errno;
+            return -1;
+        }
         int ret = esp_tls_conn_write(tls_client_, data.data() + total_sent,
                                      data.size() - total_sent);
         if (ret == ESP_TLS_ERR_SSL_WANT_WRITE) {
+            vTaskDelay(1);
             continue;
         }
         if (ret <= 0) {
+            last_error_ = (errno == EAGAIN || errno == EWOULDBLOCK)
+                ? ETIMEDOUT
+                : errno;
             ESP_LOGE(TAG, "SSL send failed: ret=%d, errno=%d", ret, errno);
             return ret;
         }
