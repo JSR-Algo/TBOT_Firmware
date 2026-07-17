@@ -20,6 +20,8 @@
 #endif
 
 #include <cstring>
+#include <cstdio>
+#include <cctype>
 #include <vector>
 #include <sstream>
 #include <algorithm>
@@ -52,6 +54,54 @@ bool IsEphemeralEndpoint(const std::string& url) {
     return url.find(".trycloudflare.com/") != std::string::npos;
 }
 
+std::string ExtractUrlHost(const std::string& url) {
+    const size_t scheme_end = url.find("://");
+    if (scheme_end == std::string::npos) {
+        return {};
+    }
+    const size_t host_start = scheme_end + 3;
+    const size_t host_end = url.find_first_of(":/", host_start);
+    std::string host = url.substr(host_start, host_end - host_start);
+    std::transform(host.begin(), host.end(), host.begin(),
+                   [](unsigned char value) { return std::tolower(value); });
+    return host;
+}
+
+bool IsPrivateOrLocalHost(const std::string& host) {
+    if (host == "localhost" || host.ends_with(".local")) {
+        return true;
+    }
+
+    int first_octet = -1;
+    int second_octet = -1;
+    int third_octet = -1;
+    int fourth_octet = -1;
+    char trailing = '\0';
+    if (std::sscanf(host.c_str(), "%d.%d.%d.%d%c", &first_octet, &second_octet,
+                    &third_octet, &fourth_octet, &trailing) != 4) {
+        return false;
+    }
+    const bool valid_ipv4 =
+        first_octet >= 0 && first_octet <= 255 &&
+        second_octet >= 0 && second_octet <= 255 &&
+        third_octet >= 0 && third_octet <= 255 &&
+        fourth_octet >= 0 && fourth_octet <= 255;
+    if (!valid_ipv4) {
+        return false;
+    }
+    return first_octet == 10 || first_octet == 127 ||
+           (first_octet == 169 && second_octet == 254) ||
+           (first_octet == 172 && second_octet >= 16 && second_octet <= 31) ||
+           (first_octet == 192 && second_octet == 168);
+}
+
+bool IsStaleConfiguredEndpoint(const std::string& configured_url,
+                               const std::string& canonical_url) {
+    return configured_url != canonical_url &&
+           (IsEphemeralEndpoint(configured_url) ||
+            IsPrivateOrLocalHost(ExtractUrlHost(configured_url)));
+}
+
 int RemainingCheckTimeoutMs(int64_t deadline_us) {
     const int64_t remaining_us = deadline_us - esp_timer_get_time();
     if (remaining_us <= 0) {
@@ -64,16 +114,36 @@ int RemainingCheckTimeoutMs(int64_t deadline_us) {
 std::vector<std::string> BuildCheckVersionUrls(const std::string& configured_url) {
     std::vector<std::string> urls;
     const std::string canonical_url = CONFIG_OTA_URL;
-    if (canonical_url.length() >= 10 && !IsEphemeralEndpoint(canonical_url)) {
-        urls.push_back(canonical_url);
-    }
+    auto add_unique = [&urls](const std::string& url) {
+        if (url.length() >= 10 && !IsEphemeralEndpoint(url) &&
+            std::find(urls.begin(), urls.end(), url) == urls.end()) {
+            urls.push_back(url);
+        }
+    };
 
-    if (IsEphemeralEndpoint(configured_url)) {
-        ESP_LOGW(TAG, "Ignoring stale ephemeral OTA URL from NVS");
-    } else if (configured_url.length() >= 10 && configured_url != canonical_url) {
-        urls.push_back(configured_url);
+    if (IsStaleConfiguredEndpoint(configured_url, canonical_url)) {
+        add_unique(canonical_url);
+        if (IsEphemeralEndpoint(configured_url)) {
+            ESP_LOGW(TAG, "Ignoring stale ephemeral OTA URL from NVS");
+        } else {
+            add_unique(configured_url);
+        }
+    } else {
+        add_unique(configured_url);
+        add_unique(canonical_url);
     }
     return urls;
+}
+
+bool IsValidCheckVersionResponse(const cJSON* root) {
+    if (!cJSON_IsObject(root)) {
+        return false;
+    }
+    const cJSON* firmware = cJSON_GetObjectItem(root, "firmware");
+    const cJSON* version = cJSON_GetObjectItem(firmware, "version");
+    const cJSON* url = cJSON_GetObjectItem(firmware, "url");
+    return cJSON_IsObject(firmware) && cJSON_IsString(version) &&
+           version->valuestring[0] != '\0' && cJSON_IsString(url);
 }
 
 void PersistRecoveredOtaUrl(const std::string& url) {
@@ -156,49 +226,56 @@ esp_err_t Ota::CheckVersion() {
     const int64_t check_deadline_us =
         esp_timer_get_time() + static_cast<int64_t>(Ota::kHttpTimeoutMs) * 1000;
 
-    std::unique_ptr<Http> http;
     int last_error = ESP_FAIL;
-    std::string opened_url;
+    std::string successful_url;
+    cJSON* root = nullptr;
     for (const auto& url : urls) {
-        http = SetupHttp(RemainingCheckTimeoutMs(check_deadline_us));
-        std::string body_copy = data;
-        http->SetContent(std::move(body_copy));
-        if (http->Open(method, url)) {
-            opened_url = url;
+        if (RemainingCheckTimeoutMs(check_deadline_us) <= 1 &&
+            esp_timer_get_time() >= check_deadline_us) {
+            last_error = ESP_ERR_TIMEOUT;
             break;
         }
-        last_error = http->GetLastError();
-        ESP_LOGE(TAG, "Failed to open OTA HTTP connection, code=0x%x", last_error);
+
+        auto http = SetupHttp(RemainingCheckTimeoutMs(check_deadline_us));
+        std::string body_copy = data;
+        http->SetContent(std::move(body_copy));
+        if (!http->Open(method, url)) {
+            last_error = http->GetLastError();
+            ESP_LOGE(TAG, "Failed to open OTA HTTP connection, code=0x%x", last_error);
+            continue;
+        }
+        ScopedHttpClose close_http(*http);
+
+        http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));
+        const int status_code = http->GetStatusCode();
+        if (status_code != 200) {
+            last_error = status_code;
+            ESP_LOGE(TAG, "Failed to check version, status code: %d", status_code);
+            continue;
+        }
+
+        http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));
+        std::string response_body = http->ReadAll();
+        close_http.Close();
+
+        cJSON* candidate_root = cJSON_Parse(response_body.c_str());
+        if (!IsValidCheckVersionResponse(candidate_root)) {
+            last_error = ESP_ERR_INVALID_RESPONSE;
+            ESP_LOGE(TAG, "Invalid OTA check response");
+            cJSON_Delete(candidate_root);
+            continue;
+        }
+
+        root = candidate_root;
+        successful_url = url;
+        break;
     }
 
-    if (opened_url.empty()) {
+    if (root == nullptr) {
         return last_error;
     }
-    ScopedHttpClose close_http(*http);
-
-    if (opened_url != configured_url) {
-        PersistRecoveredOtaUrl(opened_url);
-    }
-
-    http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));
-    auto status_code = http->GetStatusCode();
-    if (status_code != 200) {
-        ESP_LOGE(TAG, "Failed to check version, status code: %d", status_code);
-        return status_code;
-    }
-
-    http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));
-    data = http->ReadAll();
-    close_http.Close();
-
-    // Response: { "firmware": { "version": "1.0.0", "url": "http://" } }
-    // Parse the JSON response and check if the version is newer
-    // If it is, set has_new_version_ to true and store the new version and URL
-
-    cJSON *root = cJSON_Parse(data.c_str());
-    if (root == NULL) {
-        ESP_LOGE(TAG, "Failed to parse JSON response");
-        return ESP_ERR_INVALID_RESPONSE;
+    if (successful_url != configured_url) {
+        PersistRecoveredOtaUrl(successful_url);
     }
 
     has_activation_code_ = false;

@@ -198,9 +198,12 @@ def test_http_timeout_is_propagated_to_each_new_tcp_transport_before_connect():
 
     assert "virtual void SetTimeout(int timeout_ms)" in tcp
     assert "(void)timeout_ms;" in tcp
-    timeout_idx = open_body.index("tcp_->SetTimeout(timeout_ms_);")
+    timeout_idx = open_body.index("tcp_->SetTimeout(remaining_ms);")
     connect_idx = open_body.index("tcp_->Connect(host_, port_)")
     assert timeout_idx < connect_idx
+    assert "open_deadline" in open_body
+    assert open_body.count("RemainingTransportTimeoutMs") >= 2
+    assert open_body.index("tcp_->SetTimeout", connect_idx) > connect_idx
 
 
 def test_esp_tcp_connect_uses_nonblocking_deadline_and_restores_socket_flags():
@@ -216,6 +219,45 @@ def test_esp_tcp_connect_uses_nonblocking_deadline_and_restores_socket_flags():
     assert "getsockopt(fd, SOL_SOCKET, SO_ERROR" in connect
     assert "last_error_ = ETIMEDOUT" in connect
     assert "fcntl(fd, F_SETFL, original_flags)" in connect
+    assert "ResolveHostIpv4WithDeadline" in connect
+    assert "gethostbyname(" not in connect
+    assert "RemainingTransportTimeoutMs" in connect
+
+
+def test_esp_tcp_and_ssl_send_paths_have_absolute_write_deadlines():
+    tcp_source = read("components/esp-ml307/src/esp/esp_tcp.cc")
+    ssl_source = read("components/esp-ml307/src/esp/esp_ssl.cc")
+    tcp_send = function_body(tcp_source, "int EspTcp::Send")
+    ssl_send = function_body(ssl_source, "int EspSsl::Send")
+
+    for send_body in (tcp_send, ssl_send):
+        assert "TransportDeadlineUs" in send_body
+        assert "RemainingTransportTimeoutMs" in send_body
+        assert "SO_SNDTIMEO" in send_body
+        assert "last_error_ = ETIMEDOUT" in send_body
+
+    want_write = ssl_send.index("ESP_TLS_ERR_SSL_WANT_WRITE")
+    assert "continue;" in ssl_send[want_write:]
+    assert "vTaskDelay(1);" in ssl_send[want_write:]
+    assert ssl_send.index("RemainingTransportTimeoutMs") < want_write
+
+
+def test_esp_dns_deadline_callback_owns_state_after_caller_timeout():
+    resolver = read("components/esp-ml307/src/esp/esp_dns_resolver.h")
+
+    assert "xTaskCreate" in resolver
+    assert "getaddrinfo" in resolver
+    assert "std::shared_ptr<DnsLookupState>" in resolver
+    assert "std::unique_ptr<DnsLookupRequest>" in resolver
+    assert "state->abandoned = true" in resolver
+    assert resolver.index("owned_request.reset();") < resolver.index("vTaskDelete(nullptr);")
+    assert resolver.index("state.reset();") < resolver.index("vTaskDelete(nullptr);")
+    assert "ETIMEDOUT" in resolver
+    assert "gethostbyname(" not in resolver
+    assert "std::atomic<bool> g_dns_lookup_in_flight" in resolver
+    assert "compare_exchange_strong" in resolver
+    assert "inet_pton(AF_INET" in resolver
+    assert resolver.count("g_dns_lookup_in_flight.store(false)") >= 2
 
 
 def test_esp_ssl_connect_uses_http_timeout_for_tls_handshake():
@@ -225,7 +267,9 @@ def test_esp_ssl_connect_uses_http_timeout_for_tls_handshake():
 
     assert "void SetTimeout(int timeout_ms) override;" in header
     assert "int timeout_ms_" in header
-    assert "cfg.timeout_ms = timeout_ms_;" in connect
+    assert "cfg.timeout_ms" in connect
+    assert "RemainingTransportTimeoutMs" in connect
+    assert "ResolveHostIpv4WithDeadline" in connect
 
 
 def test_esp_ssl_callback_completes_before_exit_publication():

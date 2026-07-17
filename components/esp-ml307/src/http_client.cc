@@ -1,6 +1,8 @@
 #include "http_client.h"
 #include "network_interface.h"
+#include "transport_deadline.h"
 #include <esp_log.h>
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <sstream>
@@ -9,6 +11,15 @@
 #include <cctype>
 
 static const char *TAG = "HttpClient";
+
+namespace {
+
+int64_t SteadyNowUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+}  // namespace
 
 HttpClient::HttpClient(NetworkInterface* network, int connect_id) : network_(network), connect_id_(connect_id) {
     event_group_handle_ = xEventGroupCreate();
@@ -170,6 +181,7 @@ std::string HttpClient::BuildHttpRequest() {
 }
 
 bool HttpClient::Open(const std::string& method, const std::string& url) {
+    const int64_t open_deadline = TransportDeadlineUs(timeout_ms_, SteadyNowUs());
     method_ = method;
     url_ = url;
 
@@ -201,7 +213,12 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
         } else {
             tcp_ = network_->CreateTcp(connect_id_);
         }
-        tcp_->SetTimeout(timeout_ms_);
+        int remaining_ms = RemainingTransportTimeoutMs(open_deadline, SteadyNowUs());
+        if (remaining_ms <= 0) {
+            last_error_ = ETIMEDOUT;
+            return false;
+        }
+        tcp_->SetTimeout(remaining_ms);
 
         // 设置 TCP 数据接收回调
         tcp_->OnStream([this](const std::string& data) {
@@ -223,11 +240,23 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
         ESP_LOGI(TAG, "Established new connection to %s:%d", host_.c_str(), port_);
     }
 
+    int remaining_ms = RemainingTransportTimeoutMs(open_deadline, SteadyNowUs());
+    if (remaining_ms <= 0) {
+        last_error_ = ETIMEDOUT;
+        if (connected_) {
+            tcp_->Disconnect();
+            connected_ = false;
+        }
+        return false;
+    }
+    tcp_->SetTimeout(remaining_ms);
+
     request_chunked_ = (method_ == "POST" || method_ == "PUT") && !content_.has_value();
 
     // 构建并发送 HTTP 请求
     std::string http_request = BuildHttpRequest();
     if (tcp_->Send(http_request) <= 0) {
+        last_error_ = tcp_->GetLastError();
         ESP_LOGE(TAG, "Send HTTP request failed");
         tcp_->Disconnect();
         connected_ = false;

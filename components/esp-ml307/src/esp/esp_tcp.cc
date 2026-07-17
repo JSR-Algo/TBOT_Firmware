@@ -1,6 +1,9 @@
 #include "esp_tcp.h"
+#include "esp_dns_resolver.h"
+#include "transport_deadline.h"
 
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <unistd.h>
 #include <cstring>
 #include <arpa/inet.h>
@@ -34,6 +37,8 @@ void EspTcp::SetTimeout(int timeout_ms) {
 }
 
 bool EspTcp::Connect(const std::string& host, int port) {
+    const int64_t connect_deadline =
+        TransportDeadlineUs(timeout_ms_, esp_timer_get_time());
     std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
     auto prior_disconnect_callback = DoDisconnect(true);
     if (prior_disconnect_callback) {
@@ -55,14 +60,15 @@ bool EspTcp::Connect(const std::string& host, int port) {
     bzero(&server_addr, sizeof(server_addr));
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(port);
-    // host is domain
-    struct hostent *server = gethostbyname(host.c_str());
-    if (server == NULL) {
-        last_error_ = h_errno;
-        ESP_LOGE(TAG, "Failed to get host by name");
+    if (!ResolveHostIpv4WithDeadline(host, connect_deadline,
+                                     &server_addr.sin_addr, &last_error_)) {
+        ESP_LOGE(TAG, "Failed to resolve TCP host, code=0x%x", last_error_);
         return false;
     }
-    memcpy(&server_addr.sin_addr, server->h_addr, server->h_length);
+    if (RemainingTransportTimeoutMs(connect_deadline, esp_timer_get_time()) <= 0) {
+        last_error_ = ETIMEDOUT;
+        return false;
+    }
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -86,26 +92,34 @@ bool EspTcp::Connect(const std::string& host, int port) {
         fd_set write_fds;
         FD_ZERO(&write_fds);
         FD_SET(fd, &write_fds);
-        struct timeval timeout = {};
-        timeout.tv_sec = timeout_ms_ / 1000;
-        timeout.tv_usec = (timeout_ms_ % 1000) * 1000;
-        ret = select(fd + 1, nullptr, &write_fds, nullptr, &timeout);
-        if (ret == 0) {
+        const int remaining_ms =
+            RemainingTransportTimeoutMs(connect_deadline, esp_timer_get_time());
+        if (remaining_ms <= 0) {
             last_error_ = ETIMEDOUT;
             ret = -1;
-        } else if (ret < 0) {
-            last_error_ = errno;
         } else {
-            int socket_error = 0;
-            socklen_t error_length = sizeof(socket_error);
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) < 0) {
+            struct timeval timeout = {};
+            timeout.tv_sec = remaining_ms / 1000;
+            timeout.tv_usec = (remaining_ms % 1000) * 1000;
+            ret = select(fd + 1, nullptr, &write_fds, nullptr, &timeout);
+            if (ret == 0) {
+                last_error_ = ETIMEDOUT;
+                ret = -1;
+            } else if (ret < 0) {
                 last_error_ = errno;
-                ret = -1;
-            } else if (socket_error != 0) {
-                last_error_ = socket_error;
-                ret = -1;
             } else {
-                ret = 0;
+                int socket_error = 0;
+                socklen_t error_length = sizeof(socket_error);
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR,
+                               &socket_error, &error_length) < 0) {
+                    last_error_ = errno;
+                    ret = -1;
+                } else if (socket_error != 0) {
+                    last_error_ = socket_error;
+                    ret = -1;
+                } else {
+                    ret = 0;
+                }
             }
         }
     } else if (ret < 0) {
@@ -217,6 +231,8 @@ int EspTcp::Send(const std::string& data) {
         return -1;
     }
 
+    const int64_t send_deadline =
+        TransportDeadlineUs(timeout_ms_, esp_timer_get_time());
     size_t total_sent = 0;
     size_t data_size = data.size();
     const char* data_ptr = data.data();
@@ -226,9 +242,26 @@ int EspTcp::Send(const std::string& data) {
         if (fd == -1) {
             return -1;
         }
+        const int remaining_ms =
+            RemainingTransportTimeoutMs(send_deadline, esp_timer_get_time());
+        if (remaining_ms <= 0) {
+            last_error_ = ETIMEDOUT;
+            return -1;
+        }
+        struct timeval send_timeout = {};
+        send_timeout.tv_sec = remaining_ms / 1000;
+        send_timeout.tv_usec = (remaining_ms % 1000) * 1000;
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO,
+                       &send_timeout, sizeof(send_timeout)) < 0) {
+            last_error_ = errno;
+            return -1;
+        }
         int ret = send(fd, data_ptr + total_sent, data_size - total_sent, 0);
 
         if (ret <= 0) {
+            last_error_ = (errno == EAGAIN || errno == EWOULDBLOCK)
+                ? ETIMEDOUT
+                : errno;
             ESP_LOGE(TAG, "Send failed: ret=%d, errno=%d", ret, errno);
             return ret;
         }
