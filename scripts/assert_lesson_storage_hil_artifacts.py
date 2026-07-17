@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -462,6 +463,59 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
+def remove_manifest_pair(manifest_path: Path, sha_path: Path) -> None:
+    for path in (manifest_path, sha_path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def verify_published_manifest_pair(
+    manifest_path: Path,
+    sha_path: Path,
+) -> None:
+    root = manifest_path.parent.resolve()
+    require(sha_path.parent.resolve() == root,
+            "published manifest pair is not coherent")
+    manifest = snapshot_artifact(root, manifest_path, "publishedManifest")
+    checksum = snapshot_artifact(root, sha_path, "publishedChecksum")
+    expected_line = f"{manifest.sha256}  {MANIFEST_NAME}\n".encode("ascii")
+    require(checksum.data == expected_line,
+            "published manifest pair is not coherent")
+    try:
+        payload = json.loads(manifest.data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AuditFailure("published manifest pair is not coherent") from error
+    require(payload.get("status") == "PASS",
+            "published manifest pair is not coherent")
+
+
+def publish_manifest_pair(
+    manifest_path: Path,
+    sha_path: Path,
+    manifest_bytes: bytes,
+    post_publish_verify: Callable[[], None],
+    publication_hook: Callable[[str], None] | None = None,
+) -> None:
+    manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    checksum_bytes = f"{manifest_hash}  {MANIFEST_NAME}\n".encode("ascii")
+    try:
+        # A checksum without a manifest is not a PASS result. Publish the PASS
+        # manifest last, then verify the entire bounded audit/publication window.
+        atomic_write(sha_path, checksum_bytes)
+        if publication_hook is not None:
+            publication_hook("after_checksum")
+        atomic_write(manifest_path, manifest_bytes)
+        if publication_hook is not None:
+            publication_hook("after_manifest")
+        post_publish_verify()
+        verify_published_manifest_pair(manifest_path, sha_path)
+    except BaseException:
+        remove_manifest_pair(manifest_path, sha_path)
+        raise
+
+
 def audit(
     profile: str,
     build_dir_argument: str,
@@ -542,21 +596,17 @@ def audit(
         },
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    try:
+    def verify_inputs() -> None:
         for snapshot in (*artifacts.values(), *auxiliary_snapshots):
             verify_artifact_snapshot(snapshot)
         verify_source_state(repo, head)
-        atomic_write(manifest_path, manifest_bytes)
-        manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
-        atomic_write(
-            sha_path, f"{manifest_hash}  {MANIFEST_NAME}\n".encode("ascii")
-        )
+
+    try:
+        verify_inputs()
+        publish_manifest_pair(
+            manifest_path, sha_path, manifest_bytes, verify_inputs)
     except BaseException:
-        for partial in (manifest_path, sha_path):
-            try:
-                partial.unlink()
-            except FileNotFoundError:
-                pass
+        remove_manifest_pair(manifest_path, sha_path)
         raise
     return manifest
 

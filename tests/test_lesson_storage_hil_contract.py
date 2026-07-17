@@ -392,12 +392,16 @@ def test_hil_artifact_auditor_has_fail_closed_profiles_and_atomic_outputs():
         assert token in auditor
     assert "production-lesson-studio" not in auditor
     assert 'description.get("c_compiler"' not in auditor
-    publish = auditor[auditor.index("manifest_bytes =") :]
-    assert publish.index("verify_artifact_snapshot(snapshot)") < publish.index(
+    publish = auditor[auditor.index("def publish_manifest_pair(") :]
+    publish = publish[: publish.index("def audit(")]
+    assert publish.index("atomic_write(sha_path") < publish.index(
         "atomic_write(manifest_path"
     )
-    assert publish.index("verify_source_state(repo, head)") < publish.index(
-        "atomic_write(manifest_path"
+    assert publish.index("atomic_write(manifest_path") < publish.index(
+        "post_publish_verify()"
+    )
+    assert publish.index("post_publish_verify()") < publish.index(
+        "verify_published_manifest_pair(manifest_path, sha_path)"
     )
     for banned in ("lstat", "openat", "fstatat", "fdopendir", "unlinkat"):
         assert banned in auditor

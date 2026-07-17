@@ -129,6 +129,69 @@ def test_verify_source_state_rechecks_head_and_cleanliness(monkeypatch, tmp_path
     ]
 
 
+def test_interrupted_checksum_first_publish_removes_both_outputs(tmp_path):
+    manifest = tmp_path / AUDITOR.MANIFEST_NAME
+    checksum = tmp_path / AUDITOR.SHA_NAME
+
+    def interrupt(phase):
+        if phase == "after_checksum":
+            raise RuntimeError("interrupted")
+
+    with pytest.raises(RuntimeError, match="interrupted"):
+        AUDITOR.publish_manifest_pair(
+            manifest, checksum, b'{"status":"PASS"}\n', lambda: None, interrupt
+        )
+
+    assert not manifest.exists()
+    assert not checksum.exists()
+
+
+@pytest.mark.parametrize("mutation_phase", ("after_checksum", "after_manifest"))
+def test_publication_recheck_rejects_artifact_mutation_and_removes_pair(
+    tmp_path, mutation_phase
+):
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    artifact = build_dir / "xiaozhi.bin"
+    artifact.write_bytes(b"audited")
+    snapshot = AUDITOR.snapshot_artifact(build_dir, artifact, "bin")
+    manifest = build_dir / AUDITOR.MANIFEST_NAME
+    checksum = build_dir / AUDITOR.SHA_NAME
+
+    def mutate(phase):
+        if phase == mutation_phase:
+            replacement = build_dir / "replacement"
+            replacement.write_bytes(b"forged")
+            os.replace(replacement, artifact)
+
+    with pytest.raises(AUDITOR.AuditFailure, match="changed during audit"):
+        AUDITOR.publish_manifest_pair(
+            manifest,
+            checksum,
+            b'{"status":"PASS"}\n',
+            lambda: AUDITOR.verify_artifact_snapshot(snapshot),
+            mutate,
+        )
+
+    assert not manifest.exists()
+    assert not checksum.exists()
+
+
+def test_published_pass_requires_a_coherent_manifest_checksum_pair(tmp_path):
+    manifest = tmp_path / AUDITOR.MANIFEST_NAME
+    checksum = tmp_path / AUDITOR.SHA_NAME
+    manifest_bytes = b'{"status":"PASS"}\n'
+
+    AUDITOR.publish_manifest_pair(
+        manifest, checksum, manifest_bytes, lambda: None
+    )
+    AUDITOR.verify_published_manifest_pair(manifest, checksum)
+
+    checksum.write_text("0" * 64 + f"  {AUDITOR.MANIFEST_NAME}\n", encoding="ascii")
+    with pytest.raises(AUDITOR.AuditFailure, match="coherent"):
+        AUDITOR.verify_published_manifest_pair(manifest, checksum)
+
+
 def test_failed_audit_removes_stale_outputs_before_any_check(tmp_path):
     manifest = tmp_path / AUDITOR.MANIFEST_NAME
     checksum = tmp_path / AUDITOR.SHA_NAME
