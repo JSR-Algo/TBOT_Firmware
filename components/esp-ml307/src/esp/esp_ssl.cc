@@ -24,6 +24,12 @@ EspSsl::~EspSsl() {
     }
 }
 
+void EspSsl::SetTimeout(int timeout_ms) {
+    if (timeout_ms > 0) {
+        timeout_ms_ = timeout_ms;
+    }
+}
+
 bool EspSsl::Connect(const std::string& host, int port) {
     std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
     auto prior_disconnect_callback = DoDisconnect(true);
@@ -51,6 +57,7 @@ bool EspSsl::Connect(const std::string& host, int port) {
 
     esp_tls_cfg_t cfg = {};
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.timeout_ms = timeout_ms_;
 
     int ret = esp_tls_conn_new_sync(host.c_str(), host.length(), port, &cfg, tls_client_);
     if (ret != 1) {

@@ -19,6 +19,7 @@ public:
     EspSsl();
     ~EspSsl();
 
+    void SetTimeout(int timeout_ms) override;
     bool Connect(const std::string& host, int port) override;
     void Disconnect() override;
     int Send(const std::string& data) override;
@@ -35,6 +36,7 @@ private:
     std::atomic<bool> disconnect_notified_{true};
     std::mutex lifecycle_mutex_;
     std::mutex send_mutex_;
+    int timeout_ms_ = 30000;
     int last_error_ = 0;
     EspSslShutdownState shutdown_state_;
 

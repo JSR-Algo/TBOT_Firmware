@@ -201,6 +201,7 @@ bool HttpClient::Open(const std::string& method, const std::string& url) {
         } else {
             tcp_ = network_->CreateTcp(connect_id_);
         }
+        tcp_->SetTimeout(timeout_ms_);
 
         // 设置 TCP 数据接收回调
         tcp_->OnStream([this](const std::string& data) {

@@ -9,6 +9,9 @@
 class Tcp {
 public:
     virtual ~Tcp() = default;
+    virtual void SetTimeout(int timeout_ms) {
+        (void)timeout_ms;
+    }
     virtual bool Connect(const std::string& host, int port) = 0;
     virtual void Disconnect() = 0;
     virtual int Send(const std::string& data) = 0;

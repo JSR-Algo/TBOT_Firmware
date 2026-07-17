@@ -14,6 +14,7 @@
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
 #ifdef SOC_HMAC_SUPPORTED
 #include <esp_hmac.h>
 #endif
@@ -27,24 +28,50 @@
 
 namespace {
 
+class ScopedHttpClose {
+public:
+    explicit ScopedHttpClose(Http& http) : http_(http) {}
+    ~ScopedHttpClose() { Close(); }
+
+    void Close() {
+        if (!closed_) {
+            http_.Close();
+            closed_ = true;
+        }
+    }
+
+    ScopedHttpClose(const ScopedHttpClose&) = delete;
+    ScopedHttpClose& operator=(const ScopedHttpClose&) = delete;
+
+private:
+    Http& http_;
+    bool closed_ = false;
+};
+
 bool IsEphemeralEndpoint(const std::string& url) {
     return url.find(".trycloudflare.com/") != std::string::npos;
 }
 
+int RemainingCheckTimeoutMs(int64_t deadline_us) {
+    const int64_t remaining_us = deadline_us - esp_timer_get_time();
+    if (remaining_us <= 0) {
+        return 1;
+    }
+    return static_cast<int>(std::min<int64_t>(
+        Ota::kHttpTimeoutMs, (remaining_us + 999) / 1000));
+}
+
 std::vector<std::string> BuildCheckVersionUrls(const std::string& configured_url) {
     std::vector<std::string> urls;
-    if (IsEphemeralEndpoint(configured_url)) {
-        ESP_LOGW(TAG, "Ignoring stale ephemeral OTA URL from NVS; using stable fallback");
-    } else if (configured_url.length() >= 10) {
-        if (std::find(urls.begin(), urls.end(), configured_url) == urls.end()) {
-            urls.push_back(configured_url);
-        }
+    const std::string canonical_url = CONFIG_OTA_URL;
+    if (canonical_url.length() >= 10 && !IsEphemeralEndpoint(canonical_url)) {
+        urls.push_back(canonical_url);
     }
 
-    std::string fallback_url = CONFIG_OTA_URL;
-    if (fallback_url.length() >= 10 &&
-            std::find(urls.begin(), urls.end(), fallback_url) == urls.end()) {
-        urls.push_back(fallback_url);
+    if (IsEphemeralEndpoint(configured_url)) {
+        ESP_LOGW(TAG, "Ignoring stale ephemeral OTA URL from NVS");
+    } else if (configured_url.length() >= 10 && configured_url != canonical_url) {
+        urls.push_back(configured_url);
     }
     return urls;
 }
@@ -53,7 +80,7 @@ void PersistRecoveredOtaUrl(const std::string& url) {
     Settings settings("wifi", true);
     if (settings.GetString("ota_url") != url) {
         settings.SetString("ota_url", url);
-        ESP_LOGW(TAG, "Recovered OTA URL persisted to NVS: %s", url.c_str());
+        ESP_LOGW(TAG, "Recovered canonical OTA URL persisted to NVS");
     }
 }
 
@@ -87,7 +114,7 @@ std::string Ota::GetCheckVersionUrl() {
     return url;
 }
 
-std::unique_ptr<Http> Ota::SetupHttp() {
+std::unique_ptr<Http> Ota::SetupHttp(int timeout_ms) {
     auto& board = Board::GetInstance();
     auto network = board.GetNetwork();
     auto http = network->CreateHttp(0);
@@ -97,11 +124,11 @@ std::unique_ptr<Http> Ota::SetupHttp() {
     http->SetHeader("Client-Id", board.GetUuid());
     if (has_serial_number_) {
         http->SetHeader("Serial-Number", serial_number_.c_str());
-        ESP_LOGI(TAG, "Setup HTTP, User-Agent: %s, Serial-Number: %s", user_agent.c_str(), serial_number_.c_str());
     }
     http->SetHeader("User-Agent", user_agent);
     http->SetHeader("Accept-Language", Lang::CODE);
     http->SetHeader("Content-Type", "application/json");
+    http->SetTimeout(timeout_ms);
 
     return http;
 }
@@ -126,12 +153,14 @@ esp_err_t Ota::CheckVersion() {
 
     std::string data = board.GetSystemInfoJson();
     std::string method = data.length() > 0 ? "POST" : "GET";
+    const int64_t check_deadline_us =
+        esp_timer_get_time() + static_cast<int64_t>(Ota::kHttpTimeoutMs) * 1000;
 
     std::unique_ptr<Http> http;
     int last_error = ESP_FAIL;
     std::string opened_url;
     for (const auto& url : urls) {
-        http = SetupHttp();
+        http = SetupHttp(RemainingCheckTimeoutMs(check_deadline_us));
         std::string body_copy = data;
         http->SetContent(std::move(body_copy));
         if (http->Open(method, url)) {
@@ -139,25 +168,28 @@ esp_err_t Ota::CheckVersion() {
             break;
         }
         last_error = http->GetLastError();
-        ESP_LOGE(TAG, "Failed to open HTTP connection, code=0x%x, url=%s", last_error, url.c_str());
+        ESP_LOGE(TAG, "Failed to open OTA HTTP connection, code=0x%x", last_error);
     }
 
     if (opened_url.empty()) {
         return last_error;
     }
+    ScopedHttpClose close_http(*http);
 
     if (opened_url != configured_url) {
         PersistRecoveredOtaUrl(opened_url);
     }
 
+    http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));
     auto status_code = http->GetStatusCode();
     if (status_code != 200) {
         ESP_LOGE(TAG, "Failed to check version, status code: %d", status_code);
         return status_code;
     }
 
+    http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));
     data = http->ReadAll();
-    http->Close();
+    close_http.Close();
 
     // Response: { "firmware": { "version": "1.0.0", "url": "http://" } }
     // Parse the JSON response and check if the version is newer
