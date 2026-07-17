@@ -9,7 +9,6 @@
 #include <esp_heap_caps.h>
 #include <algorithm>
 #include <cctype>
-#include <cinttypes>
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
@@ -38,6 +37,7 @@
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
 #include "lesson_storage_hil_mcp_tools.h"
 #include "lesson_storage_hil_controller.h"
+#include "lesson_storage_hil_u64_format.h"
 #endif
 
 #define TAG "MCP"
@@ -1230,10 +1230,11 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         if (validation_error != nullptr) {
             const auto sequence = LessonStorageHilController::GetInstance()
                                       .NextEvidenceSequence();
+            const auto sequence_text = FormatLessonStorageHilUint64(sequence);
             ESP_LOGW(TAG,
-                     "HIL_STORAGE_REFUSAL tool=%s reason=invalid_request sequence=%" PRIu64,
+                     "HIL_STORAGE_REFUSAL tool=%s reason=invalid_request sequence=%s",
                      tool_name.c_str(),
-                     sequence);
+                     sequence_text.c_str());
             ReplyError(id, validation_error);
             return;
         }
@@ -1309,9 +1310,10 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             if (is_lesson_storage_hil) {
                 const auto sequence = LessonStorageHilController::GetInstance()
                                           .NextEvidenceSequence();
+                const auto sequence_text = FormatLessonStorageHilUint64(sequence);
                 ESP_LOGW(TAG,
-                         "HIL_STORAGE_REFUSAL reason=operation_failed sequence=%" PRIu64,
-                         sequence);
+                         "HIL_STORAGE_REFUSAL reason=operation_failed sequence=%s",
+                         sequence_text.c_str());
                 ReplyError(id, "lesson storage HIL operation failed");
                 return;
             }

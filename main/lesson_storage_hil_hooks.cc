@@ -1,4 +1,5 @@
 #include "lesson_storage_hil_hooks.h"
+#include "lesson_storage_hil_u64_format.h"
 
 #include <cstdio>
 #include <unistd.h>
@@ -102,11 +103,12 @@ void LogCheckpointReached(
     std::uint64_t sequence
 ) noexcept {
 #ifdef ESP_PLATFORM
+    const auto sequence_text = FormatLessonStorageHilUint64(sequence);
     ESP_LOGW(kTag,
              "HIL_STORAGE_CHECKPOINT_REACHED operation=%s checkpoint=%s "
-             "cache_key=%s count=%" PRIu32 " reached_sequence=%" PRIu64,
+             "cache_key=%s count=%" PRIu32 " reached_sequence=%s",
              OperationName(operation), CheckpointName(checkpoint), cache_key,
-             progress, sequence);
+             progress, sequence_text.c_str());
 #else
     (void)cache_key;
     (void)operation;
@@ -124,11 +126,12 @@ void LogFaultConsumed(
     std::uint64_t sequence
 ) noexcept {
 #ifdef ESP_PLATFORM
+    const auto sequence_text = FormatLessonStorageHilUint64(sequence);
     ESP_LOGW(kTag,
              "HIL_STORAGE_FAULT_CONSUMED operation=%s checkpoint=%s action=%s "
-             "cache_key=%s consumed_sequence=%" PRIu64,
+             "cache_key=%s consumed_sequence=%s",
              OperationName(operation), CheckpointName(checkpoint),
-             ActionName(action), cache_key, sequence);
+             ActionName(action), cache_key, sequence_text.c_str());
 #else
     (void)cache_key;
     (void)operation;

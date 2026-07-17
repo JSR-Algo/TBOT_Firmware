@@ -117,6 +117,34 @@ def test_hil_pause_uses_yielding_delay_and_stable_markers():
     assert "pause_seconds=" not in source
 
 
+def test_hil_evidence_sequences_avoid_nano_printf_uint64_formatting():
+    sources = {
+        path: read(path)
+        for path in (
+            "main/lesson_storage_hil_hooks.cc",
+            "main/lesson_storage_hil_mcp_tools.cc",
+            "main/mcp_server.cc",
+        )
+    }
+
+    for source in sources.values():
+        assert "PRIu64" not in source
+    for marker in (
+        "HIL_STORAGE_ARM",
+        "HIL_STORAGE_FIXTURE",
+        "HIL_STORAGE_CHECKPOINT_REACHED",
+        "HIL_STORAGE_FAULT_CONSUMED",
+        "HIL_STORAGE_REFUSAL",
+    ):
+        matching = [source for source in sources.values() if marker in source]
+        assert matching, marker
+        assert all("lesson_storage_hil_u64_format.h" in source for source in matching)
+    assert sources["main/lesson_storage_hil_hooks.cc"].count("reached_sequence=%s") == 1
+    assert sources["main/lesson_storage_hil_hooks.cc"].count("consumed_sequence=%s") == 1
+    assert sources["main/lesson_storage_hil_mcp_tools.cc"].count("sequence=%s") >= 3
+    assert sources["main/mcp_server.cc"].count("sequence=%s") == 2
+
+
 def test_sync_staging_corruption_is_typed_bounded_and_fail_closed_elsewhere():
     header = read("main/lesson_storage_hil_hooks.h")
     source = read("main/lesson_storage_hil_hooks.cc")

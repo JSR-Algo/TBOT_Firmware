@@ -4,12 +4,12 @@
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_storage_hil_controller.h"
 #include "lesson_storage_hil_fixture.h"
+#include "lesson_storage_hil_u64_format.h"
 #include "mcp_server.h"
 
 #include <esp_log.h>
 
 #include <array>
-#include <cinttypes>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
@@ -469,11 +469,14 @@ std::string CallArmFault(const PropertyList& properties) {
         result.code == LessonStorageHilArmCode::kArmed
             ? result.arm_sequence
             : LessonStorageHilController::GetInstance().NextEvidenceSequence();
+    [[maybe_unused]] const auto arm_sequence_text =
+        FormatLessonStorageHilUint64(result.arm_sequence);
+    [[maybe_unused]] const auto evidence_sequence_text =
+        FormatLessonStorageHilUint64(evidence_sequence);
     ESP_LOGW(TAG,
-             "HIL_STORAGE_ARM status=%s arm_sequence=%" PRIu64
-             " sequence=%" PRIu64,
+             "HIL_STORAGE_ARM status=%s arm_sequence=%s sequence=%s",
              ArmCodeName(result.code),
-             result.arm_sequence, evidence_sequence);
+             arm_sequence_text.c_str(), evidence_sequence_text.c_str());
     return response.Finish();
 }
 
@@ -529,10 +532,11 @@ std::string CallFixtureMutation(const PropertyList& properties, bool cleanup) {
     cJSON_SetBoolValue(changed_node, result.changed);
     [[maybe_unused]] const auto sequence = LessonStorageHilController::GetInstance()
                               .NextEvidenceSequence();
+    [[maybe_unused]] const auto sequence_text = FormatLessonStorageHilUint64(sequence);
     ESP_LOGW(TAG,
-             "HIL_STORAGE_FIXTURE operation=%s status=%s changed=%d sequence=%" PRIu64,
+             "HIL_STORAGE_FIXTURE operation=%s status=%s changed=%d sequence=%s",
              cleanup ? "cleanup" : "stage", FixtureCodeName(result.code),
-             result.changed ? 1 : 0, sequence);
+             result.changed ? 1 : 0, sequence_text.c_str());
     return response.Finish();
 }
 

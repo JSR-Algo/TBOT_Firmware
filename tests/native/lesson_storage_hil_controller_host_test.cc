@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "lesson_storage_hil_controller.h"
+#include "lesson_storage_hil_u64_format.h"
 
 struct LessonStorageHilControllerTestPeer {
     static void SetNextSequence(std::uint64_t value) {
@@ -34,6 +35,20 @@ constexpr const char* kOtherHilKey =
     "hil-space/v2-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 constexpr const char* kNormalKey =
     "space/v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+void TestUint64DecimalFormatting() {
+    static_assert(noexcept(FormatLessonStorageHilUint64(0)));
+    const auto zero = FormatLessonStorageHilUint64(0);
+    const auto normal = FormatLessonStorageHilUint64(1234567890123456789ULL);
+    const auto maximum = FormatLessonStorageHilUint64(
+        std::numeric_limits<std::uint64_t>::max());
+
+    Expect(std::string(zero.c_str()) == "0", "zero sequence must format as decimal");
+    Expect(std::string(normal.c_str()) == "1234567890123456789",
+           "normal sequence must format as decimal");
+    Expect(std::string(maximum.c_str()) == "18446744073709551615",
+           "UINT64_MAX sequence must format as decimal");
+}
 
 LessonStorageHilController& Controller() {
     return LessonStorageHilController::GetInstance();
@@ -402,6 +417,7 @@ void TestSequenceExhaustionFailsClosed() {
 }  // namespace
 
 int main() {
+    TestUint64DecimalFormatting();
     TestCacheKeyValidation();
     TestClosedCompatibilityMatrix();
     TestNumericValidation();
