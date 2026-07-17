@@ -37,6 +37,10 @@
 #define TBOT_LESSON_STORAGE_HIL_INSPECTION_AGGREGATE_BYTES (16U * 1024U * 1024U)
 #endif
 
+#ifndef TBOT_LESSON_STORAGE_HIL_DIRECTORY_READ_CALL_CAP
+#define TBOT_LESSON_STORAGE_HIL_DIRECTORY_READ_CALL_CAP 64U
+#endif
+
 namespace {
 
 constexpr char kNestedSentinelName[] = ".tbot-hil-nested";
@@ -54,14 +58,19 @@ constexpr std::size_t kInspectionPerFileBytes =
     TBOT_LESSON_STORAGE_HIL_INSPECTION_PER_FILE_BYTES;
 constexpr std::size_t kInspectionAggregateBytes =
     TBOT_LESSON_STORAGE_HIL_INSPECTION_AGGREGATE_BYTES;
+constexpr std::size_t kDirectoryReadCallCap =
+    TBOT_LESSON_STORAGE_HIL_DIRECTORY_READ_CALL_CAP;
 static_assert(kInspectionPerFileBytes > 0);
 static_assert(kInspectionAggregateBytes >= kInspectionPerFileBytes);
+static_assert(kDirectoryReadCallCap >= kInspectionDirectChildCap + 3);
 
 #ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
 LessonStorageHilFixtureMkdirCallback g_mkdir_callback = nullptr;
 LessonStorageHilFixtureFsyncCallback g_fsync_callback = nullptr;
 LessonStorageHilFixtureWriteCallback g_write_callback = nullptr;
+LessonStorageHilFixtureOpenCallback g_open_callback = nullptr;
 LessonStorageHilFixtureReadCallback g_read_callback = nullptr;
+LessonStorageHilFixtureDirectoryReadCallback g_directory_read_callback = nullptr;
 LessonStorageHilFixtureInspectFailureCallback g_inspect_failure_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_unlink_callback = nullptr;
 LessonStorageHilFixtureRemoveCallback g_rmdir_callback = nullptr;
@@ -190,6 +199,15 @@ ssize_t WriteFixtureBytes(
     return write(descriptor, bytes, length);
 }
 
+int OpenFixtureFile(const std::string& path, int flags, mode_t mode) {
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+    if (g_open_callback != nullptr) {
+        return g_open_callback(path.c_str(), flags, mode);
+    }
+#endif
+    return open(path.c_str(), flags, mode);
+}
+
 std::size_t ReadFixtureBytes(
     void* bytes,
     std::size_t length,
@@ -300,8 +318,27 @@ bool ReadDirectoryNames(
     if (directory == nullptr) {
         return false;
     }
-    errno = 0;
-    while (dirent* entry = readdir(directory)) {
+    std::size_t read_calls = 0;
+    bool reached_end = false;
+    int scan_errno = 0;
+    while (read_calls < kDirectoryReadCallCap) {
+        ++read_calls;
+#ifdef TBOT_LESSON_STORAGE_HIL_FIXTURE_TESTING
+        if (g_directory_read_callback != nullptr) {
+            g_directory_read_callback();
+        }
+#endif
+        errno = 0;
+        dirent* entry = readdir(directory);
+#ifdef ESP_PLATFORM
+        esp_task_wdt_reset();
+        taskYIELD();
+#endif
+        if (entry == nullptr) {
+            scan_errno = errno;
+            reached_end = true;
+            break;
+        }
         if (std::strcmp(entry->d_name, ".") == 0 ||
             std::strcmp(entry->d_name, "..") == 0) {
             continue;
@@ -309,16 +346,18 @@ bool ReadDirectoryNames(
         std::string name(entry->d_name);
         if (names->size() < cap) {
             names->push_back(std::move(name));
-            std::sort(names->begin(), names->end());
             continue;
         }
         *truncated = true;
-        if (name < names->back()) {
-            names->back() = std::move(name);
-            std::sort(names->begin(), names->end());
+        auto largest = std::max_element(names->begin(), names->end());
+        if (largest != names->end() && name < *largest) {
+            *largest = std::move(name);
         }
     }
-    const int scan_errno = errno;
+    if (!reached_end) {
+        *truncated = true;
+    }
+    std::sort(names->begin(), names->end());
     const bool close_ok = closedir(directory) == 0;
     return scan_errno == 0 && close_ok;
 }
@@ -524,7 +563,8 @@ bool WriteExactFile(
     const char* bytes,
     bool* created
 ) {
-    const int descriptor = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    const int descriptor =
+        OpenFixtureFile(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (descriptor < 0) {
         return false;
     }
@@ -554,24 +594,9 @@ bool WriteExactFile(
 RollbackResult RollBackCreatedNodes(
     std::initializer_list<CreatedNode> nodes
 ) {
-    bool observation_failed = false;
     for (const CreatedNode& node : nodes) {
-        if (!node.created && !node.creation_attempt_failed) {
-            continue;
-        }
         if (!node.created) {
-            const NodeKind observed = ReadNodeKind(*node.path);
-            if (observed == NodeKind::kMissing) {
-                continue;
-            }
-            if (observed == NodeKind::kIoFailed) {
-                observation_failed = true;
-                continue;
-            }
-            if (observed != node.kind) {
-                observation_failed = true;
-                continue;
-            }
+            continue;
         }
         if (node.kind == NodeKind::kRegularFile) {
             RemoveFixtureFile(*node.path);
@@ -579,7 +604,7 @@ RollbackResult RollBackCreatedNodes(
             RemoveFixtureDirectory(*node.path);
         }
     }
-    bool all_missing = !observation_failed;
+    bool all_missing = true;
     for (const CreatedNode& node : nodes) {
         if ((node.created || node.creation_attempt_failed) &&
             ReadNodeKind(*node.path) != NodeKind::kMissing) {
@@ -648,6 +673,7 @@ LessonStorageHilFixtureResult StageNested(
     const std::string sentinel_path = JoinPath(leaf_path, kNestedSentinelName);
     if (CreateFixtureDirectory(sentinel_path) != 0) {
         const RollbackResult rollback = RollBackCreatedNodes({
+            {&sentinel_path, NodeKind::kDirectory, false, true},
             {&leaf_path, NodeKind::kDirectory, true},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
@@ -889,11 +915,9 @@ LessonStorageHilFixtureResult CleanupNested(
         return Result(LessonStorageHilFixtureCode::kCleaned, false, cache_key, "");
     }
     if (state == FixtureState::kEmptyPartial) {
-        const bool removed = RemoveFixtureDirectory(leaf_path) == 0;
         return Result(
-            removed ? LessonStorageHilFixtureCode::kCleaned
-                    : LessonStorageHilFixtureCode::kIoFailed,
-            removed,
+            LessonStorageHilFixtureCode::kUnexpectedExistingNode,
+            false,
             cache_key,
             ""
         );
@@ -1238,10 +1262,22 @@ void SetLessonStorageHilFixtureWriteCallbackForTest(
     g_write_callback = callback;
 }
 
+void SetLessonStorageHilFixtureOpenCallbackForTest(
+    LessonStorageHilFixtureOpenCallback callback
+) {
+    g_open_callback = callback;
+}
+
 void SetLessonStorageHilFixtureReadCallbackForTest(
     LessonStorageHilFixtureReadCallback callback
 ) {
     g_read_callback = callback;
+}
+
+void SetLessonStorageHilFixtureDirectoryReadCallbackForTest(
+    LessonStorageHilFixtureDirectoryReadCallback callback
+) {
+    g_directory_read_callback = callback;
 }
 
 void SetLessonStorageHilFixtureInspectFailureCallbackForTest(

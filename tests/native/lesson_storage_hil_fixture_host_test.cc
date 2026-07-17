@@ -4,6 +4,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -20,11 +21,15 @@ int g_checks = 0;
 int g_mkdir_calls = 0;
 int g_fsync_calls = 0;
 int g_write_calls = 0;
+int g_open_calls = 0;
 int g_unlink_calls = 0;
 int g_rmdir_calls = 0;
 int g_fail_mkdir_call = 0;
 int g_fail_fsync_call = 0;
 int g_fail_write_call = 0;
+int g_fail_open_call = 0;
+int g_create_then_fail_mkdir_call = 0;
+int g_create_then_fail_open_call = 0;
 int g_fail_unlink_call = 0;
 int g_fail_rmdir_call = 0;
 int g_inspect_path_calls = 0;
@@ -32,9 +37,18 @@ int g_fail_inspect_path_call = 0;
 std::string g_inspect_failure_path;
 std::size_t g_read_bytes = 0;
 std::size_t g_largest_read_request = 0;
+std::size_t g_directory_read_calls = 0;
 
 int InjectedMkdir(const char* path) {
     ++g_mkdir_calls;
+    if (g_mkdir_calls == g_create_then_fail_mkdir_call) {
+        const int result = mkdir(path, 0755);
+        if (result == 0) {
+            errno = EIO;
+            return -1;
+        }
+        return result;
+    }
     if (g_mkdir_calls == g_fail_mkdir_call) {
         errno = EIO;
         return -1;
@@ -60,11 +74,31 @@ ssize_t InjectedWrite(int descriptor, const void* bytes, std::size_t length) {
     return write(descriptor, bytes, length);
 }
 
+int InjectedOpen(const char* path, int flags, mode_t mode) {
+    ++g_open_calls;
+    if (g_open_calls == g_create_then_fail_open_call) {
+        const int descriptor = open(path, flags, mode);
+        if (descriptor >= 0) {
+            close(descriptor);
+            errno = EIO;
+            return -1;
+        }
+        return descriptor;
+    }
+    if (g_open_calls == g_fail_open_call) {
+        errno = EIO;
+        return -1;
+    }
+    return open(path, flags, mode);
+}
+
 std::size_t ObservedRead(void* bytes, std::size_t length, FILE* file) {
     g_read_bytes += length;
     g_largest_read_request = std::max(g_largest_read_request, length);
     return std::fread(bytes, 1, length, file);
 }
+
+void ObserveDirectoryRead() { ++g_directory_read_calls; }
 
 bool InjectedInspectFailure(const char* path) {
     if (g_inspect_failure_path != path) {
@@ -96,11 +130,15 @@ void ResetMutationInjection() {
     g_mkdir_calls = 0;
     g_fsync_calls = 0;
     g_write_calls = 0;
+    g_open_calls = 0;
     g_unlink_calls = 0;
     g_rmdir_calls = 0;
     g_fail_mkdir_call = 0;
     g_fail_fsync_call = 0;
     g_fail_write_call = 0;
+    g_fail_open_call = 0;
+    g_create_then_fail_mkdir_call = 0;
+    g_create_then_fail_open_call = 0;
     g_fail_unlink_call = 0;
     g_fail_rmdir_call = 0;
     g_inspect_path_calls = 0;
@@ -108,10 +146,13 @@ void ResetMutationInjection() {
     g_inspect_failure_path.clear();
     g_read_bytes = 0;
     g_largest_read_request = 0;
+    g_directory_read_calls = 0;
     SetLessonStorageHilFixtureMkdirCallbackForTest(nullptr);
     SetLessonStorageHilFixtureFsyncCallbackForTest(nullptr);
     SetLessonStorageHilFixtureWriteCallbackForTest(nullptr);
+    SetLessonStorageHilFixtureOpenCallbackForTest(nullptr);
     SetLessonStorageHilFixtureReadCallbackForTest(nullptr);
+    SetLessonStorageHilFixtureDirectoryReadCallbackForTest(nullptr);
     SetLessonStorageHilFixtureInspectFailureCallbackForTest(nullptr);
     SetLessonStorageHilFixtureUnlinkCallbackForTest(nullptr);
     SetLessonStorageHilFixtureRmdirCallbackForTest(nullptr);
@@ -329,8 +370,10 @@ void TestNestedDirectoryFixtureIsExactAndNonRecursive() {
         const auto result = CleanupLessonStorageHilFixture(
             lease, key, LessonStorageHilFixture::kNestedDirectory, ""
         );
-        Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
-               "known empty interrupted cleanup was not recovered");
+        Expect(result.code ==
+                       LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+                   !result.changed && fs::is_directory(Leaf(key)),
+               "unattested empty nested leaf was deleted");
     }
 }
 
@@ -474,11 +517,44 @@ void TestNestedStageRollbackReportsEveryResidual() {
            "nested sentinel rollback residual was not exact");
     ResetMutationInjection();
     result = cleanup();
-    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
-           "nested cleanup did not remove an exact rollback residual");
+    Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+               !result.changed && fs::is_directory(leaf),
+           "nested cleanup deleted an unattested empty rollback residual");
     result = cleanup();
-    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && !result.changed,
-           "repeated nested rollback cleanup did not converge");
+    Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+               !result.changed && fs::is_directory(leaf),
+           "repeated nested cleanup changed unattested storage");
+
+    ResetRoot();
+    ResetMutationInjection();
+    fs::create_directories(leaf.parent_path());
+    g_create_then_fail_mkdir_call = 1;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed &&
+               fs::is_directory(leaf) && fs::is_empty(leaf),
+           "create-then-error leaf was deleted without ownership attestation");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kUnexpectedExistingNode &&
+               !result.changed && fs::is_directory(leaf),
+           "cleanup deleted create-then-error unattested leaf");
+
+    ResetRoot();
+    ResetMutationInjection();
+    fs::create_directories(leaf.parent_path());
+    g_create_then_fail_mkdir_call = 2;
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    result = stage();
+    const fs::path sentinel = leaf / ".tbot-hil-nested";
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed &&
+               fs::is_directory(sentinel),
+           "failed-attempt nested sentinel was removed as transaction-owned");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed &&
+               !fs::exists(leaf),
+           "exact nested sentinel proof was not safely recoverable");
 }
 
 void TestLeafStageRollbackReportsEveryResidual() {
@@ -570,6 +646,21 @@ void TestLeafStageRollbackReportsEveryResidual() {
     Expect(result.code == LessonStorageHilFixtureCode::kSentinelMismatch &&
                !result.changed && fs::exists(leaf),
            "uncertain leaf write residual did not remain fail-closed");
+
+    ResetRoot();
+    ResetMutationInjection();
+    fs::create_directories(leaf.parent_path());
+    g_create_then_fail_open_call = 1;
+    SetLessonStorageHilFixtureOpenCallbackForTest(InjectedOpen);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed &&
+               fs::is_regular_file(leaf) && fs::file_size(leaf) == 0,
+           "create-then-error file was deleted without ownership attestation");
+    ResetMutationInjection();
+    result = cleanup();
+    Expect(result.code == LessonStorageHilFixtureCode::kSentinelMismatch &&
+               !result.changed && fs::is_regular_file(leaf),
+           "cleanup did not preserve unattested create-then-error file");
 }
 
 void TestPreservationSetUsesTwoPhaseCleanup() {
@@ -858,6 +949,111 @@ void TestPreservationStageRollbackReportsResidualTruthAndCleanupConverges() {
     Expect(result.code == LessonStorageHilFixtureCode::kSentinelMismatch &&
                !result.changed && fs::exists(first_sentinel),
            "uncertain first preservation leaf did not remain fail-closed");
+}
+
+void TestSecondPreservationSentinelRollbackCoversEveryCreatedNode() {
+    const std::string key = Key("hil-second-rollback", 1, 'c');
+    const std::string sibling = Key("hil-second-rollback", 2, 'd');
+    const fs::path first_leaf = Leaf(key);
+    const fs::path second_leaf = Leaf(sibling);
+    const fs::path first_sentinel = first_leaf / ".tbot-hil-sentinel";
+    const fs::path second_sentinel = second_leaf / ".tbot-hil-sentinel";
+    const fs::path slug = first_leaf.parent_path();
+    const auto stage = [&]() {
+        auto lease = Lease();
+        return StageLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+    };
+    const auto cleanup = [&]() {
+        auto lease = Lease();
+        return CleanupLessonStorageHilFixture(
+            lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+        );
+    };
+
+    ResetRoot();
+    ResetMutationInjection();
+    g_fail_write_call = 2;
+    SetLessonStorageHilFixtureWriteCallbackForTest(InjectedWrite);
+    auto result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed &&
+               !result.changed && !fs::exists(Root()),
+           "clean second-sentinel write rollback did not restore storage");
+
+    ResetRoot();
+    ResetMutationInjection();
+    g_fail_fsync_call = 2;
+    SetLessonStorageHilFixtureFsyncCallbackForTest(InjectedFsync);
+    result = stage();
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed &&
+               !result.changed && !fs::exists(Root()),
+           "clean second-sentinel fsync rollback did not restore storage");
+
+    struct RollbackFault {
+        int fail_unlink_call;
+        int fail_rmdir_call;
+        int residual_node;
+        const char* label;
+    };
+    const std::vector<RollbackFault> faults = {
+        {1, 0, 0, "second sentinel"},
+        {0, 1, 1, "second leaf"},
+        {2, 0, 2, "first sentinel"},
+        {0, 2, 3, "first leaf"},
+        {0, 3, 4, "slug"},
+        {0, 4, 5, "root"},
+    };
+    for (const auto& fault : faults) {
+        ResetRoot();
+        ResetMutationInjection();
+        g_fail_fsync_call = 2;
+        g_fail_unlink_call = fault.fail_unlink_call;
+        g_fail_rmdir_call = fault.fail_rmdir_call;
+        SetLessonStorageHilFixtureFsyncCallbackForTest(InjectedFsync);
+        SetLessonStorageHilFixtureUnlinkCallbackForTest(InjectedUnlink);
+        SetLessonStorageHilFixtureRmdirCallbackForTest(InjectedRmdir);
+        result = stage();
+        Expect(result.code == LessonStorageHilFixtureCode::kIoFailed &&
+                   result.changed,
+               fault.label);
+        if (fault.residual_node == 0) {
+            Expect(fs::is_regular_file(second_sentinel) &&
+                       !fs::exists(first_leaf),
+                   "second-sentinel unlink failure left the wrong state");
+        } else if (fault.residual_node == 1) {
+            Expect(fs::is_directory(second_leaf) && fs::is_empty(second_leaf) &&
+                       !fs::exists(first_leaf),
+                   "second-leaf rmdir failure left the wrong state");
+        } else if (fault.residual_node == 2) {
+            Expect(fs::is_regular_file(first_sentinel) &&
+                       !fs::exists(second_leaf),
+                   "first-sentinel unlink failure left the wrong state");
+        } else if (fault.residual_node == 3) {
+            Expect(fs::is_directory(first_leaf) && fs::is_empty(first_leaf) &&
+                       !fs::exists(second_leaf),
+                   "first-leaf rmdir failure left the wrong state");
+        } else if (fault.residual_node == 4) {
+            Expect(fs::is_directory(slug) && fs::is_empty(slug),
+                   "slug rmdir failure left the wrong state");
+        } else {
+            Expect(fs::is_directory(Root()) && fs::is_empty(Root()),
+                   "root rmdir failure left the wrong state");
+        }
+
+        ResetMutationInjection();
+        result = cleanup();
+        Expect(result.code == LessonStorageHilFixtureCode::kCleaned,
+               "second-sentinel rollback residual was not safely recoverable");
+        result = stage();
+        Expect(result.code == LessonStorageHilFixtureCode::kStaged && result.changed,
+               "staging did not recover after exact rollback residual cleanup");
+        result = cleanup();
+        Expect(result.code == LessonStorageHilFixtureCode::kCleaned && result.changed,
+               "cleanup did not converge after rollback recovery restage");
+        Expect(!fs::exists(Leaf(key)) && !fs::exists(Leaf(sibling)),
+               "rollback recovery left a fixture leaf");
+    }
 }
 
 void TestPreservationCleanupAcceptsAnExactlyEvictedPrimary() {
@@ -1238,6 +1434,26 @@ void TestInspectionNeverReadsPastPerFileOrAggregateBudgets() {
            "within-budget SHA changed across identical inspections");
 }
 
+void TestInspectionBoundsDirectoryReadCalls() {
+    ResetRoot();
+    ResetMutationInjection();
+    const std::string key = Key("hil-directory-budget", 1, 'e');
+    for (int index = 0; index < 200; ++index) {
+        Write(Leaf(key) / ("entry-" + std::to_string(index)), "x");
+    }
+    SetLessonStorageHilFixtureDirectoryReadCallbackForTest(
+        ObserveDirectoryRead
+    );
+
+    const auto inspection = InspectLessonStorageHilStorage(key, "");
+    Expect(inspection.truncated,
+           "bounded directory inspection did not report truncation");
+    Expect(g_directory_read_calls > 0 && g_directory_read_calls <= 24,
+           "inspection exceeded the compiled directory read-call cap");
+    Expect(inspection.entries.size() <= 21,
+           "bounded directory scan emitted too many inspection entries");
+}
+
 }  // namespace
 
 int main() {
@@ -1249,12 +1465,14 @@ int main() {
     TestPreservationSetUsesTwoPhaseCleanup();
     TestPreservationCleanupResumesOwnedPartialStates();
     TestPreservationStageRollbackReportsResidualTruthAndCleanupConverges();
+    TestSecondPreservationSentinelRollbackCoversEveryCreatedNode();
     TestPreservationCleanupAcceptsAnExactlyEvictedPrimary();
     TestPreservationCleanupAcceptsEveryExactPartialOrder();
     TestPreservationCleanupRejectsUnownedPartialStates();
     TestSymlinksAreRefusedWithoutFollowingTargets();
     TestInspectionIsReadOnlyBoundedSortedAndDataSensitive();
     TestInspectionNeverReadsPastPerFileOrAggregateBudgets();
+    TestInspectionBoundsDirectoryReadCalls();
     ResetRoot();
     std::cout << "lesson storage HIL fixture host checks: " << g_checks << '\n';
     return 0;

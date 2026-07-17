@@ -76,11 +76,17 @@ using LessonStorageHilFixtureWriteCallback = ssize_t (*)(
     const void* bytes,
     std::size_t length
 );
+using LessonStorageHilFixtureOpenCallback = int (*)(
+    const char* path,
+    int flags,
+    mode_t mode
+);
 using LessonStorageHilFixtureReadCallback = std::size_t (*)(
     void* bytes,
     std::size_t length,
     FILE* file
 );
+using LessonStorageHilFixtureDirectoryReadCallback = void (*)();
 using LessonStorageHilFixtureInspectFailureCallback = bool (*)(const char* path);
 void SetLessonStorageHilFixtureMkdirCallbackForTest(
     LessonStorageHilFixtureMkdirCallback callback
@@ -91,8 +97,14 @@ void SetLessonStorageHilFixtureFsyncCallbackForTest(
 void SetLessonStorageHilFixtureWriteCallbackForTest(
     LessonStorageHilFixtureWriteCallback callback
 );
+void SetLessonStorageHilFixtureOpenCallbackForTest(
+    LessonStorageHilFixtureOpenCallback callback
+);
 void SetLessonStorageHilFixtureReadCallbackForTest(
     LessonStorageHilFixtureReadCallback callback
+);
+void SetLessonStorageHilFixtureDirectoryReadCallbackForTest(
+    LessonStorageHilFixtureDirectoryReadCallback callback
 );
 void SetLessonStorageHilFixtureInspectFailureCallbackForTest(
     LessonStorageHilFixtureInspectFailureCallback callback

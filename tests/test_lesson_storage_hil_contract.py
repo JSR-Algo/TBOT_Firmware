@@ -221,6 +221,7 @@ def test_fixture_inspection_is_bounded_read_only_and_uses_mbedtls_sha256():
     assert "kInspectionLabelMaxBytes" in source
     assert "kInspectionPerFileBytes" in source
     assert "kInspectionAggregateBytes" in source
+    assert "kDirectoryReadCallCap" in source
     assert "esp_task_wdt_reset()" in source
     assert "taskYIELD()" in source
     assert "EncodeLabelComponent(" in source
@@ -229,7 +230,9 @@ def test_fixture_inspection_is_bounded_read_only_and_uses_mbedtls_sha256():
     assert "SetLessonStorageHilFixtureMkdirCallbackForTest" in source
     assert "SetLessonStorageHilFixtureFsyncCallbackForTest" in source
     assert "SetLessonStorageHilFixtureWriteCallbackForTest" in source
+    assert "SetLessonStorageHilFixtureOpenCallbackForTest" in source
     assert "SetLessonStorageHilFixtureReadCallbackForTest" in source
+    assert "SetLessonStorageHilFixtureDirectoryReadCallbackForTest" in source
     assert "SetLessonStorageHilFixtureInspectFailureCallbackForTest" in source
     assert "SetLessonStorageHilFixtureUnlinkCallbackForTest" in source
     assert "SetLessonStorageHilFixtureRmdirCallbackForTest" in source
