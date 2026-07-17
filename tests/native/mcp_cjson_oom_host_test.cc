@@ -8,6 +8,8 @@
 #include <unordered_set>
 
 #include "checked_cjson.h"
+#include "lesson_asset_cache_evict.h"
+#include "lesson_storage_hil_mcp_tools.h"
 #include "mcp_server.h"
 
 bool g_fail_cpp_allocations = false;
@@ -30,6 +32,26 @@ void operator delete(void* pointer) noexcept { std::free(pointer); }
 void operator delete[](void* pointer) noexcept { std::free(pointer); }
 void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
 void operator delete[](void* pointer, std::size_t) noexcept { std::free(pointer); }
+
+// The HIL raw-validator link intentionally supplies only the canonical-key
+// boundary needed by lesson_storage_hil_mcp_tools.cc.
+bool IsCanonicalLessonCacheKey(const std::string& value) {
+    const std::size_t slash = value.find("/v");
+    const std::size_t dash = value.find(
+        '-', slash == std::string::npos ? 0 : slash + 2);
+    if (slash == std::string::npos || dash == std::string::npos || slash == 0 ||
+        value.size() > kLessonAssetCacheKeyMaxBytes ||
+        value.size() - dash - 1 != kLessonAssetCacheChecksumHexBytes) {
+        return false;
+    }
+    for (std::size_t index = dash + 1; index < value.size(); ++index) {
+        if (!((value[index] >= '0' && value[index] <= '9') ||
+              (value[index] >= 'a' && value[index] <= 'f'))) {
+            return false;
+        }
+    }
+    return true;
+}
 
 namespace {
 
@@ -106,6 +128,42 @@ void ExpectStableOom(const std::function<void()>& operation, const char* stage) 
         Expect(std::string(error.what()) == kStableError, stage);
     }
     Expect(threw, stage);
+}
+
+std::string HilKey(const char* slug, int version, char checksum) {
+    return std::string(slug) + "/v" + std::to_string(version) + "-" +
+           std::string(kLessonAssetCacheChecksumHexBytes, checksum);
+}
+
+bool ValidHilArguments(const char* tool, const std::string& json) {
+    cJSON* arguments = cJSON_Parse(json.c_str());
+    Expect(arguments != nullptr, "HIL validation JSON did not parse");
+    const bool valid =
+        ValidateLessonStorageHilRawArguments(tool, arguments) == nullptr;
+    cJSON_Delete(arguments);
+    return valid;
+}
+
+void TestHilInspectRejectsInvalidSiblingPairsBeforeFilesystemAccess() {
+    const std::string primary = HilKey("hil-task14", 1, 'a');
+    const std::string sibling = HilKey("hil-task14", 2, 'b');
+    const std::string same_version = HilKey("hil-task14", 1, 'c');
+    const std::string foreign = HilKey("hil-other", 2, 'd');
+    const std::string prefix = "{\"cacheKey\":\"" + primary +
+        "\",\"siblingCacheKey\":\"";
+
+    Expect(ValidHilArguments("self.lesson_assets.hil.inspect",
+                             prefix + sibling + "\"}"),
+           "valid HIL inspection pair rejected");
+    Expect(!ValidHilArguments("self.lesson_assets.hil.inspect",
+                              prefix + primary + "\"}"),
+           "identical HIL inspection pair accepted");
+    Expect(!ValidHilArguments("self.lesson_assets.hil.inspect",
+                              prefix + same_version + "\"}"),
+           "same-version HIL inspection pair accepted");
+    Expect(!ValidHilArguments("self.lesson_assets.hil.inspect",
+                              prefix + foreign + "\"}"),
+           "foreign-slug HIL inspection pair accepted");
 }
 
 void TestCheckedCallbackTreeStages() {
@@ -287,6 +345,7 @@ void TestPreparedMutationResponsesFinishWithoutHeapAllocation() {
 }  // namespace
 
 int main() {
+    TestHilInspectRejectsInvalidSiblingPairsBeforeFilesystemAccess();
     TestCheckedCallbackTreeStages();
     TestMcpCallOwnsInnerJsonWhenPrintingFails();
     TestMcpCallWrapperAndFinalPrintFailures();

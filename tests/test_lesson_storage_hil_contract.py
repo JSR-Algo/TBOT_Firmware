@@ -287,6 +287,22 @@ def test_hil_mcp_raw_validation_precedes_property_conversion_and_mutation():
     assert "if (is_lesson_storage_hil)" in dispatch
 
 
+def test_hil_mcp_inspect_rejects_invalid_sibling_pairs_before_filesystem_access():
+    tools = read("main/lesson_storage_hil_mcp_tools.cc")
+
+    validator = tools[
+        tools.index("bool ValidateFixtureRequest(") :
+        tools.index("const char* OperationName(")
+    ]
+    inspection = validator[
+        validator.index("if (inspection)") :
+        validator.index("std::string fixture_text")
+    ]
+    assert "ValidateSiblingPair(cache_key, sibling)" in inspection
+    assert "sibling == cache_key" in tools
+    assert "cache_key.substr(0, primary_slash)" in tools
+
+
 def test_hil_mcp_schemas_and_stable_response_fields_are_complete():
     tools = read("main/lesson_storage_hil_mcp_tools.cc")
     for required in (

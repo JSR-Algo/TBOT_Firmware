@@ -38,6 +38,29 @@ bool HasHilPrefix(const std::string& cache_key) {
            IsCanonicalLessonCacheKey(cache_key);
 }
 
+bool ValidateSiblingPair(
+    const std::string& cache_key,
+    const std::string& sibling
+) {
+    if (!HasHilPrefix(sibling) || sibling == cache_key) {
+        return false;
+    }
+    const std::size_t primary_slash = cache_key.find('/');
+    const std::size_t sibling_slash = sibling.find('/');
+    if (primary_slash == std::string::npos || sibling_slash == std::string::npos ||
+        cache_key.substr(0, primary_slash) != sibling.substr(0, sibling_slash)) {
+        return false;
+    }
+    const std::size_t primary_version_end = cache_key.find('-', primary_slash + 2);
+    const std::size_t sibling_version_end = sibling.find('-', sibling_slash + 2);
+    return primary_version_end != std::string::npos &&
+           sibling_version_end != std::string::npos &&
+           cache_key.substr(primary_slash + 2,
+                            primary_version_end - primary_slash - 2) !=
+               sibling.substr(sibling_slash + 2,
+                              sibling_version_end - sibling_slash - 2);
+}
+
 const cJSON* UniqueField(const cJSON* object, const char* name) {
     const cJSON* match = nullptr;
     const cJSON* field = nullptr;
@@ -296,7 +319,7 @@ bool ValidateFixtureRequest(const cJSON* arguments, bool inspection) {
     }
     sibling = sibling_field == nullptr ? "" : sibling_field->valuestring;
     if (inspection) {
-        return sibling.empty() || HasHilPrefix(sibling);
+        return sibling.empty() || ValidateSiblingPair(cache_key, sibling);
     }
     std::string fixture_text;
     LessonStorageHilFixture fixture;
@@ -307,23 +330,7 @@ bool ValidateFixtureRequest(const cJSON* arguments, bool inspection) {
     if (fixture != LessonStorageHilFixture::kPreservationSet) {
         return sibling.empty();
     }
-    if (!HasHilPrefix(sibling) || sibling == cache_key) {
-        return false;
-    }
-    const std::size_t primary_slash = cache_key.find('/');
-    const std::size_t sibling_slash = sibling.find('/');
-    if (primary_slash == std::string::npos || sibling_slash == std::string::npos ||
-        cache_key.substr(0, primary_slash) != sibling.substr(0, sibling_slash)) {
-        return false;
-    }
-    const std::size_t primary_version_end = cache_key.find('-', primary_slash + 2);
-    const std::size_t sibling_version_end = sibling.find('-', sibling_slash + 2);
-    return primary_version_end != std::string::npos &&
-           sibling_version_end != std::string::npos &&
-           cache_key.substr(primary_slash + 2,
-                            primary_version_end - primary_slash - 2) !=
-               sibling.substr(sibling_slash + 2,
-                              sibling_version_end - sibling_slash - 2);
+    return ValidateSiblingPair(cache_key, sibling);
 }
 
 const char* OperationName(LessonStorageHilOperation value) {
