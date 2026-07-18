@@ -17,6 +17,11 @@ int main() {
     require(IsSupported("tvideoFlyWalk", 1, "centerRoad", 1), "centerRoad v1 supported");
     require(!IsSupported("tvideoFlyWalk", 2, "centerRoad", 1), "unknown template version rejected");
     require(!IsSupported("tvideoFlyWalk", 1, "freeform", 1), "raw/freeform layout rejected");
+    require(PhaseCount() == 8, "published phase contract has exactly eight phases");
+    require(std::string(PhaseName(0)) == "hidden" && PhaseDurationMs(0) == 100,
+            "published phase contract starts hidden for 100ms");
+    require(std::string(PhaseName(7)) == "revealTeachingContent" && PhaseDurationMs(7) == 100,
+            "published phase contract ends at revealTeachingContent for 100ms");
     uint8_t parsed = 0;
     require(ExactVersion(1.0, &parsed) && parsed == 1, "exact integer version accepted");
     require(!ExactVersion(1.5, &parsed), "fractional version rejected");

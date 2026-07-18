@@ -51,6 +51,9 @@ struct Config {
 
 bool IsSupported(const char* template_id, uint8_t template_version,
                  const char* layout_preset, uint8_t geometry_version);
+uint8_t PhaseCount();
+const char* PhaseName(uint8_t index);
+uint32_t PhaseDurationMs(uint8_t index);
 bool ExactVersion(double value, uint8_t* out);
 bool Overlaps(const Rect& a, const Rect& b);
 const LayoutGeometry* ArrivedGeometry(const char* layout_preset, uint8_t geometry_version);

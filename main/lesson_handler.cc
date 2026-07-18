@@ -23,6 +23,7 @@
 #include "jpeg_to_image.h"
 
 #include <ctime>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
@@ -188,6 +189,131 @@ const cJSON* Obj(const cJSON* o, const char* k) {
     return cJSON_IsObject(v) ? v : nullptr;
 }
 
+bool ExactObjectKeys(const cJSON* object, const std::set<std::string_view>& expected) {
+    if (!cJSON_IsObject(object)) return false;
+    size_t count = 0;
+    for (const cJSON* item = object->child; item != nullptr; item = item->next) {
+        if (item->string == nullptr || expected.find(item->string) == expected.end()) return false;
+        ++count;
+    }
+    return count == expected.size();
+}
+
+bool ExactPositiveInteger(const cJSON* object, const char* key) {
+    double value = 0;
+    return Num(object, key, value) && std::isfinite(value) && value > 0 &&
+           value <= 4294967295.0 && std::floor(value) == value;
+}
+
+bool IsSha256(const char* value) {
+    if (value == nullptr || std::strlen(value) != 64) return false;
+    for (const char* ch = value; *ch != '\0'; ++ch) {
+        if (!((*ch >= '0' && *ch <= '9') || (*ch >= 'a' && *ch <= 'f') ||
+              (*ch >= 'A' && *ch <= 'F'))) return false;
+    }
+    return true;
+}
+
+bool IsStaticImageMediaType(const char* media_type) {
+    if (media_type == nullptr) return false;
+    return std::strcmp(media_type, "image/png") == 0 ||
+           std::strcmp(media_type, "image/jpeg") == 0;
+}
+
+bool ValidPinnedAsset(const cJSON* asset, bool require_png) {
+    static const std::set<std::string_view> kKeys = {
+        "versionId", "sha256", "bytes", "mediaType",
+    };
+    const char* media_type = Str(asset, "mediaType");
+    const bool media_valid = require_png
+        ? (media_type != nullptr && std::strcmp(media_type, "image/png") == 0)
+        : IsStaticImageMediaType(media_type);
+    return ExactObjectKeys(asset, kKeys) && !Blank(Str(asset, "versionId")) &&
+           IsSha256(Str(asset, "sha256")) && ExactPositiveInteger(asset, "bytes") && media_valid;
+}  // GCOVR_EXCL_LINE: closing brace has no executable statement.
+
+bool MatchesPinnedAsset(const cJSON* scene_asset, const cJSON* pinned_asset) {
+    const char* scene_version = Str(scene_asset, "versionId");
+    const char* scene_sha = Str(scene_asset, "sha256");
+    const char* scene_media = Str(scene_asset, "mediaType");
+    return scene_version != nullptr && scene_sha != nullptr && scene_media != nullptr &&
+           std::strcmp(scene_version, Str(pinned_asset, "versionId")) == 0 &&
+           std::strcmp(scene_sha, Str(pinned_asset, "sha256")) == 0 &&
+           std::strcmp(scene_media, Str(pinned_asset, "mediaType")) == 0;
+}
+
+bool HasForbiddenMotionExtension(const char* source) {
+    if (source == nullptr) return false;
+    std::string lower(source);
+    for (char& ch : lower) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    const size_t suffix_end = lower.find_first_of("?#");
+    if (suffix_end != std::string::npos) lower.resize(suffix_end);
+    for (const char* suffix : {".gif", ".webm", ".mov", ".mp4"}) {
+        const size_t length = std::strlen(suffix);
+        if (lower.size() >= length && lower.compare(lower.size() - length, length, suffix) == 0) return true;
+    }
+    return false;
+}
+
+bool HasForbiddenMotionMedia(const cJSON* asset) {
+    if (asset == nullptr) return false;
+    const char* media_type = Str(asset, "mediaType");
+    if (media_type == nullptr) media_type = Str(asset, "mimeType");
+    if (media_type == nullptr) media_type = Str(asset, "contentType");
+    std::string normalized_media = media_type != nullptr ? media_type : "";
+    TrimAsciiWhitespace(normalized_media);
+    for (char& ch : normalized_media) {
+        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
+    }
+    return HasForbiddenMotionExtension(Str(asset, "src")) ||
+           normalized_media.rfind("video/", 0) == 0;
+}
+
+bool ValidTvideoProjection(const cJSON* projection) {
+    static const std::set<std::string_view> kProjectionKeys = {
+        "templateId", "templateVersion", "layoutPreset", "geometryVersion", "phases",
+        "revealPhase", "fallbackPolicy", "background", "arrivedPose",
+    };
+    static const std::set<std::string_view> kProjectionKeysWithAtlas = {
+        "templateId", "templateVersion", "layoutPreset", "geometryVersion", "phases",
+        "revealPhase", "fallbackPolicy", "background", "arrivedPose", "atlas",
+    };
+    const cJSON* atlas = Obj(projection, "atlas");
+    if (!ExactObjectKeys(projection, atlas != nullptr ? kProjectionKeysWithAtlas : kProjectionKeys)) return false;
+    double template_version = 0;
+    double geometry_version = 0;
+    uint8_t template_version_u8 = 0;
+    uint8_t geometry_version_u8 = 0;
+    const char* reveal_phase = Str(projection, "revealPhase");
+    const char* fallback_policy = Str(projection, "fallbackPolicy");
+    if (!Num(projection, "templateVersion", template_version) ||
+        !Num(projection, "geometryVersion", geometry_version) ||
+        !lesson_tvideo::ExactVersion(template_version, &template_version_u8) ||
+        !lesson_tvideo::ExactVersion(geometry_version, &geometry_version_u8) ||
+        !lesson_tvideo::IsSupported(Str(projection, "templateId"), template_version_u8,
+                                    Str(projection, "layoutPreset"), geometry_version_u8) ||
+        reveal_phase == nullptr || std::strcmp(reveal_phase, "revealTeachingContent") != 0 ||
+        fallback_policy == nullptr || std::strcmp(fallback_policy, "snapToArriveNearAndReveal") != 0 ||
+        !ValidPinnedAsset(Obj(projection, "background"), false) ||
+        !ValidPinnedAsset(Obj(projection, "arrivedPose"), true) ||
+        (atlas != nullptr && !ValidPinnedAsset(atlas, true))) return false;
+    const cJSON* phases = cJSON_GetObjectItem(projection, "phases");
+    if (!cJSON_IsArray(phases) || cJSON_GetArraySize(phases) != lesson_tvideo::PhaseCount()) return false;
+    static const std::set<std::string_view> kPhaseKeys = {"name", "durationMs"};
+    for (uint8_t index = 0; index < lesson_tvideo::PhaseCount(); ++index) {
+        const cJSON* phase = cJSON_GetArrayItem(phases, index);
+        double duration = 0;
+        if (!ExactObjectKeys(phase, kPhaseKeys) ||
+            Str(phase, "name") == nullptr ||
+            std::strcmp(Str(phase, "name"), lesson_tvideo::PhaseName(index)) != 0 ||
+            !Num(phase, "durationMs", duration) ||
+            duration != lesson_tvideo::PhaseDurationMs(index)) return false;
+    }
+    return true;
+}
+
 // Copy an identity field from the inbound frame to an outbound frame verbatim,
 // preserving its JSON type (string stays string; number stays number — D-LV keeps
 // lessonVersion a NUMBER on the wire).
@@ -217,7 +343,7 @@ struct LessonSession {
     bool        prepared           = false;
     bool        running            = false;
     bool        paused             = false;
-    bool        tvideo_entrance_consumed = false;
+    bool        first_lesson_step_seen = false;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
     // processed inbound sequence, so a duplicate re-ack can REPLAY the prior ack body
     // idempotently (protocol §6 / lesson-robot-protocol.md:436-438) instead of
@@ -1281,6 +1407,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const cJSON* bg    = Obj(scene, "backgroundScene");
     const cJSON* to    = Obj(scene, "teachingObject");
     const cJSON* ro    = Obj(scene, "robotOverlay");
+    const cJSON* poster_asset = Obj(bg, "poster");
+    const cJSON* object_asset = Obj(to, "asset");
+    const cJSON* overlay_asset = Obj(ro, "asset");
+    const cJSON* raw_template_projection = body != nullptr
+        ? cJSON_GetObjectItem(body, "templateProjection") : nullptr;
+    const cJSON* tvideo_projection = cJSON_IsObject(raw_template_projection)
+        ? raw_template_projection : nullptr;
 
     // espTft forbids a critical background video — poster only (plan §7.4 /
     // DIV-FW-EXPORT). A manifest forcing video -> ASSET_PROFILE_UNAVAILABLE, render
@@ -1299,6 +1432,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
         ESP_LOGW(TAG, "lesson_step rejected: video forced on espTft");
         return;
     }
+    if (HasForbiddenMotionMedia(poster_asset) || HasForbiddenMotionMedia(object_asset) ||
+        HasForbiddenMotionMedia(overlay_asset) ||
+        HasForbiddenMotionMedia(Obj(tvideo_projection, "background")) ||
+        HasForbiddenMotionMedia(Obj(tvideo_projection, "arrivedPose")) ||
+        HasForbiddenMotionMedia(Obj(tvideo_projection, "atlas"))) {
+        cJSON* eb = MakeErrorBody("ASSET_PROFILE_UNAVAILABLE",
+                                  "espTft forbids authored motion-media lesson assets",
+                                  false, "profile");
+        end_lesson_after_failure();
+        emit(root, "lesson_error", eb);
+        ESP_LOGW(TAG, "lesson_step rejected: authored motion-media asset");
+        return;
+    }
 
     // Degraded fallback ladder: poster -> teachingObject PNG -> primitive glyph
     // card -> emoji-face + caption. US-006 image render: instead of only probing the
@@ -1311,54 +1457,48 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // as the foreground object layer via LcdDisplay::SetLessonObject. Every layer draws
     // only through FetchLessonImage(); a poster that is merely flashed-present but never
     // decoded/drawn is treated as not-drawn (see the poster_drew block below).
-    const char* poster_src = Str(Obj(bg, "poster"), "src");
-    const char* object_src = Str(Obj(to, "asset"), "src");
-    const char* overlay_src = Str(Obj(ro, "asset"), "src");
+    const char* poster_src = Str(poster_asset, "src");
+    const char* object_src = Str(object_asset, "src");
+    const char* overlay_src = Str(overlay_asset, "src");
     const bool has_object_src = !Blank(object_src);
-    const bool has_overlay_src = !Blank(overlay_src);
-    const cJSON* tvideo_projection = Obj(body, "templateProjection");
+    bool has_overlay_src = !Blank(overlay_src);
     bool tvideo_degraded = false;
     const char* tvideo_degraded_reason = nullptr;
     lesson_tvideo::Rect tvideo_arrived_bounds{};
     bool tvideo_use_bounds = false;
-    if (tvideo_projection != nullptr && !g_session.tvideo_entrance_consumed) {
-        g_session.tvideo_entrance_consumed = true;
-        double template_version = 0;
-        double geometry_version = 0;
-        const char* template_id = Str(tvideo_projection, "templateId");
+    bool tvideo_arrived_pose_linked = false;
+    const bool is_first_lesson_step = !g_session.first_lesson_step_seen;
+    g_session.first_lesson_step_seen = true;
+    const char* projection_template_id = Str(tvideo_projection, "templateId");
+    const bool malformed_template_projection = raw_template_projection != nullptr &&
+        (tvideo_projection == nullptr || Blank(projection_template_id));
+    const bool is_tvideo_projection = malformed_template_projection ||
+        (projection_template_id != nullptr &&
+         std::strcmp(projection_template_id, "tvideoFlyWalk") == 0);
+    if (is_tvideo_projection) {
+        const bool contract_valid = is_first_lesson_step && ValidTvideoProjection(tvideo_projection);
+        const cJSON* pinned_arrived_pose = Obj(tvideo_projection, "arrivedPose");
+        tvideo_arrived_pose_linked = contract_valid && has_overlay_src &&
+            MatchesPinnedAsset(overlay_asset, pinned_arrived_pose);
+        has_overlay_src = tvideo_arrived_pose_linked;
         const char* layout_preset = Str(tvideo_projection, "layoutPreset");
-        const char* fallback_policy = Str(tvideo_projection, "fallbackPolicy");
-        const bool named_fallback = fallback_policy != nullptr &&
-            strcmp(fallback_policy, "snapToArriveNearAndReveal") == 0;
-        const bool has_template_version = Num(tvideo_projection, "templateVersion", template_version);
-        const bool has_geometry_version = Num(tvideo_projection, "geometryVersion", geometry_version);
-        uint8_t template_version_u8 = 0;
-        uint8_t geometry_version_u8 = 0;
-        const bool versions_valid = has_template_version && has_geometry_version &&
-            lesson_tvideo::ExactVersion(template_version, &template_version_u8) &&
-            lesson_tvideo::ExactVersion(geometry_version, &geometry_version_u8);
-
-        // The current renderer has no atlas blitter. Feed atlas_available=false so
-        // the bounded state machine takes its reviewed static arrived-pose fallback,
-        // reveals teaching content immediately, and never blocks voice/progress.
         lesson_tvideo::StateMachine tvideo({
-            template_id,
-            versions_valid ? template_version_u8 : static_cast<uint8_t>(0),
+            "tvideoFlyWalk",
+            contract_valid ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0),
             layout_preset,
-            versions_valid ? geometry_version_u8 : static_cast<uint8_t>(0),
-            has_overlay_src,
+            contract_valid ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0),
+            tvideo_arrived_pose_linked,
             false,
             false,
         });
-        tvideo_degraded = !named_fallback ||
-            tvideo.degraded_reason() != lesson_tvideo::DegradedReason::kNone;
-        tvideo_degraded_reason = !named_fallback
-            ? "unsupportedFallbackPolicy"
-            : lesson_tvideo::DegradedReasonName(tvideo.degraded_reason());
-        if (const lesson_tvideo::LayoutGeometry* geometry =
-                lesson_tvideo::ArrivedGeometry(layout_preset, versions_valid ? geometry_version_u8 : 0)) {
-            tvideo_arrived_bounds = geometry->robot;
-            tvideo_use_bounds = true;
+        tvideo_degraded = true;
+        tvideo_degraded_reason = lesson_tvideo::DegradedReasonName(tvideo.degraded_reason());
+        if (tvideo_arrived_pose_linked) {
+            if (const lesson_tvideo::LayoutGeometry* geometry =
+                    lesson_tvideo::ArrivedGeometry(layout_preset, 1)) {
+                tvideo_arrived_bounds = geometry->robot;
+                tvideo_use_bounds = true;
+            }
         }
         ESP_LOGI(TAG, "lesson_step tvideo fallback reveal=%d degraded=%d reason=%s",
                  tvideo.content_visible(), tvideo_degraded, tvideo_degraded_reason);
@@ -1461,6 +1601,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
         } else {
             ESP_LOGW(TAG, "lesson_step robot overlay fetch failed; emoji fallback");
         }
+    }
+    if (tvideo_arrived_pose_linked && !overlay_drew) {
+        tvideo_degraded_reason = "missingOverlay";
+        tvideo_use_bounds = false;
     }
 
     const cJSON* card = Obj(to, "primitiveFallbackCard");

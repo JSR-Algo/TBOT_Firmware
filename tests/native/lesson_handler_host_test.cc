@@ -237,6 +237,53 @@ std::string StepFrame(int seq, const std::string& step_id,
            kLessonProfileEspTft + "\"" + extra_body + "," + scene + "}}";
 }
 
+std::string TvideoProjection(const std::string& phase_override = "",
+                             const std::string& arrived_override = "") {
+    const std::string phases = phase_override.empty()
+        ? "[{\"name\":\"hidden\",\"durationMs\":100},"
+          "{\"name\":\"flyIn\",\"durationMs\":1200},"
+          "{\"name\":\"landFar\",\"durationMs\":700},"
+          "{\"name\":\"settle\",\"durationMs\":350},"
+          "{\"name\":\"walkToward\",\"durationMs\":1800},"
+          "{\"name\":\"arriveNear\",\"durationMs\":250},"
+          "{\"name\":\"greetIdle\",\"durationMs\":650},"
+          "{\"name\":\"revealTeachingContent\",\"durationMs\":100}]"
+        : phase_override;
+    const std::string arrived = arrived_override.empty()
+        ? "{\"versionId\":\"pose-v1\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+          "\"bytes\":4096,\"mediaType\":\"image/png\"}"
+        : arrived_override;
+    return "{\"templateId\":\"tvideoFlyWalk\",\"templateVersion\":1,"
+           "\"layoutPreset\":\"centerRoad\",\"geometryVersion\":1,"
+           "\"phases\":" + phases + ",\"revealPhase\":\"revealTeachingContent\","
+           "\"fallbackPolicy\":\"snapToArriveNearAndReveal\","
+           "\"background\":{\"versionId\":\"bg-v1\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+           "\"bytes\":8192,\"mediaType\":\"image/jpeg\"},\"arrivedPose\":" + arrived + "}";
+}
+
+std::string ReplaceOnce(std::string value, const std::string& from, const std::string& to) {
+    const size_t position = value.find(from);
+    require(position != std::string::npos, "projection test replacement target exists");
+    value.replace(position, from.size(), to);
+    return value;
+}
+
+std::string TvideoStepFrame(int seq, const std::string& projection,
+                            const std::string& overlay_metadata =
+                                "\"versionId\":\"pose-v1\","
+                                "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+                                "\"mediaType\":\"image/png\",") {
+    return std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"stepId\":\"tvideo\",\"lessonVersion\":3,\"lessonId\":\"L1\","
+           "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\",\"stepType\":\"greeting\",\"templateProjection\":" + projection +
+           ",\"scene\":{\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
+           "\"robotOverlay\":{\"asset\":{" + overlay_metadata +
+           "\"src\":\"http://x/r.png\"},\"expression\":\"teaching\"}}}}";
+}
+
 // Open a fresh session: bump the per-test ids, then prepare(1)+start(2). Returns next
 // sequence (3). The id bump guarantees the renderer's fresh-session reset fires so F->S
 // restarts at 1 regardless of what a prior test left in the file-static g_session.
@@ -1456,6 +1503,58 @@ void test_invalid_step_clears_stale_lesson_scene() {
             "late step after fatal invalid step leaves sad failure face visible");
 }
 
+void test_step_rejects_authored_motion_media_sources_and_mime_types() {
+    for (const std::string& source : {"http://x/poster.gif", "http://x/poster.WEBM?token=1"}) {
+        ResetObservable();
+        Board::GetInstance().display_ = nullptr;
+        Board::GetInstance().network_ = nullptr;
+        OpenSession();
+        Handle(StepFrame(3, "forbidden-media", source, "http://x/o.png", "http://x/r.png",
+                         ",\"stepType\":\"greeting\"", ""));
+        require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
+                "authored motion-media source is rejected defensively");
+    }
+
+    for (const auto& sources : {
+             std::vector<std::string>{"http://x/p.jpg", "http://x/object.mov#frame", "http://x/r.png"},
+             std::vector<std::string>{"http://x/p.jpg", "http://x/o.png", "http://x/overlay.mp4"},
+         }) {
+        ResetObservable();
+        Board::GetInstance().display_ = nullptr;
+        Board::GetInstance().network_ = nullptr;
+        OpenSession();
+        Handle(StepFrame(3, "forbidden-layer", sources[0], sources[1], sources[2],
+                         ",\"stepType\":\"greeting\"", ""));
+        require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
+                "object and overlay motion-media sources are rejected defensively");
+    }
+
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    Handle(std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() +
+           "\",\"stepId\":\"video-mime\",\"sequence\":3,\"body\":{\"profile\":\"" +
+           kLessonProfileEspTft + "\",\"scene\":{"
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\",\"mediaType\":\"Video/MP4\"}},"
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.png\"}},"
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.png\"}}}}}");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
+            "video MIME type is rejected even when the URL extension looks static");
+
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Board::GetInstance().network_ = nullptr;
+    OpenSession();
+    const std::string video_arrived =
+        "{\"versionId\":\"pose-v1\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"bytes\":4096,\"mediaType\":\"video/mp4\"}";
+    Handle(TvideoStepFrame(3, TvideoProjection("", video_arrived)));
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
+            "template arrived-pose video MIME is rejected before fallback processing");
+}
+
 void test_contract_reject_clears_stale_lesson_scene() {
     ResetObservable();
     LvglDisplay disp;
@@ -1570,12 +1669,8 @@ void test_tvideo_first_step_applies_named_arrived_geometry_and_reports_fallback(
     HostHttp().use_content_length = true;
     HostJpegDecodeMode() = 0;
 
-    const std::string projection =
-        ",\"templateProjection\":{\"templateId\":\"tvideoFlyWalk\","
-        "\"templateVersion\":1,\"layoutPreset\":\"centerRoad\","
-        "\"geometryVersion\":1,\"fallbackPolicy\":\"snapToArriveNearAndReveal\"}";
-    Handle(StepFrame(3, "tvideo-first", "http://x/p.jpg", "http://x/o.jpg",
-                     "http://x/r.jpg", projection + ",\"stepType\":\"greeting\"", ""));
+    const std::string projection = TvideoProjection();
+    Handle(TvideoStepFrame(3, projection));
 
     const size_t first_ack = Sent().size() - 1;
     require(FrameBodyBool(first_ack, "rendered", false),
@@ -1587,8 +1682,7 @@ void test_tvideo_first_step_applies_named_arrived_geometry_and_reports_fallback(
     require(disp.overlay_bounds == std::vector<int>({184, 184, 112, 56}),
             "centerRoad applies the reviewed arrived-pose overlay bounds");
 
-    Handle(StepFrame(3, "tvideo-first", "http://x/p.jpg", "http://x/o.jpg",
-                     "http://x/r.jpg", projection + ",\"stepType\":\"greeting\"", ""));
+    Handle(TvideoStepFrame(3, projection));
     require(FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") == "missingAtlas",
             "duplicate first-step ack replays the same degraded reason");
 
@@ -1600,7 +1694,7 @@ void test_tvideo_first_step_applies_named_arrived_geometry_and_reports_fallback(
             "later steps do not repeat the first-step named entrance geometry");
 }
 
-void test_tvideo_fractional_versions_use_safe_unsupported_contract_fallback() {
+void test_tvideo_malformed_projection_uses_safe_unsupported_contract_fallback() {
     ResetObservable();
     LvglDisplay disp;
     NetworkInterface net;
@@ -1614,12 +1708,16 @@ void test_tvideo_fractional_versions_use_safe_unsupported_contract_fallback() {
     HostHttp().use_content_length = true;
     HostJpegDecodeMode() = 0;
 
-    Handle(StepFrame(3, "tvideo-fractional", "http://x/p.jpg", "http://x/o.jpg",
-                     "http://x/r.jpg",
-                     ",\"templateProjection\":{\"templateId\":\"tvideoFlyWalk\","
-                     "\"templateVersion\":1.5,\"layoutPreset\":\"centerRoad\","
-                     "\"geometryVersion\":1,\"fallbackPolicy\":\"snapToArriveNearAndReveal\"}"
-                     ",\"stepType\":\"greeting\"", ""));
+    const std::string bad_phases =
+        "[{\"name\":\"hidden\",\"durationMs\":101},"
+        "{\"name\":\"flyIn\",\"durationMs\":1200},"
+        "{\"name\":\"landFar\",\"durationMs\":700},"
+        "{\"name\":\"settle\",\"durationMs\":350},"
+        "{\"name\":\"walkToward\",\"durationMs\":1800},"
+        "{\"name\":\"arriveNear\",\"durationMs\":250},"
+        "{\"name\":\"greetIdle\",\"durationMs\":650},"
+        "{\"name\":\"revealTeachingContent\",\"durationMs\":100}]";
+    Handle(TvideoStepFrame(3, TvideoProjection(bad_phases)));
 
     const size_t ack = Sent().size() - 1;
     require(FrameBodyBool(ack, "rendered", false),
@@ -1627,9 +1725,101 @@ void test_tvideo_fractional_versions_use_safe_unsupported_contract_fallback() {
     require(FrameBodyBool(ack, "degraded", false),
             "invalid template version is reported as degraded");
     require(FrameBodyStr(ack, nullptr, "degradedReason") == "unsupportedContract",
-            "fractional version cannot be narrowed into a supported contract");
+            "phase drift cannot be treated as a supported contract");
     require(disp.overlay_bounds == std::vector<int>({0, 0, 0, 0}),
             "unsupported geometry cannot apply authored or raw coordinates");
+
+    for (const std::string& malformed : {
+             std::string("[]"),
+             std::string("{\"templateVersion\":1}"),
+             ReplaceOnce(TvideoProjection(), "\"templateVersion\":1", "\"templateVersion\":1.5"),
+             ReplaceOnce(TvideoProjection(), "\"name\":\"hidden\"", "\"name\":\"flyIn\""),
+             ReplaceOnce(TvideoProjection(), "\"revealPhase\":\"revealTeachingContent\"",
+                          "\"revealPhase\":\"arriveNear\""),
+             ReplaceOnce(TvideoProjection(), "\"fallbackPolicy\":\"snapToArriveNearAndReveal\"",
+                          "\"fallbackPolicy\":\"keepWalking\""),
+             ReplaceOnce(TvideoProjection(),
+                          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                          "gaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+             ReplaceOnce(TvideoProjection(), "\"geometryVersion\":1",
+                          "\"geometryVersion\":1,\"x\":42"),
+         }) {
+        ResetObservable();
+        Board::GetInstance().display_ = &disp;
+        Board::GetInstance().network_ = &net;
+        OpenSession();
+        ResetHostHttp();
+        HostHttp().body = JpegBody();
+        HostJpegDecodeMode() = 0;
+        Handle(TvideoStepFrame(3, malformed));
+        require(FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") == "unsupportedContract",
+                "any drift from the immutable projection shape reveals safely as unsupported");
+    }
+}
+
+void test_tvideo_requires_pinned_arrived_pose_linkage() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    Handle(TvideoStepFrame(3, TvideoProjection(),
+                           "\"versionId\":\"different-pose\","
+                           "\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\","
+                           "\"mediaType\":\"image/png\","));
+
+    const size_t ack = Sent().size() - 1;
+    require(FrameBodyStr(ack, nullptr, "degradedReason") == "missingOverlay",
+            "unlinked ordinary overlay is not accepted as the pinned arrived pose");
+    require(disp.overlay_calls.empty() || !disp.overlay_calls.back(),
+            "unlinked ordinary overlay is not rendered as the template fallback");
+    require(disp.overlay_bounds == std::vector<int>({0, 0, 0, 0}),
+            "missing pinned fallback does not apply named robot bounds to another asset");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().open_ok = false;
+    Handle(TvideoStepFrame(3, TvideoProjection()));
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") == "missingOverlay",
+            "a pinned arrived pose that cannot be loaded reports missingOverlay");
+    require(disp.overlay_bounds == std::vector<int>({0, 0, 0, 0}),
+            "failed arrived-pose load clears named bounds before revealing content");
+}
+
+void test_tvideo_is_restricted_to_the_true_first_lesson_step() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "legacy-first", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"templateProjection\":{\"templateId\":\"otherTemplate\"}"
+                     ",\"stepType\":\"greeting\"", ""));
+    require(!FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "non-tvideo projection on first step leaves legacy rendering unchanged");
+
+    Handle(TvideoStepFrame(4, TvideoProjection()));
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") == "unsupportedContract",
+            "a tvideo entrance arriving after the true first step is rejected safely");
+    require(disp.overlay_bounds == std::vector<int>({0, 0, 0, 0}),
+            "late tvideo projection cannot apply entrance geometry");
 }
 
 void test_step_ignores_story_metadata_while_rendering_layers() {
@@ -3379,11 +3569,14 @@ int main() {
     test_stop_reason_controls_terminal_cue();
     test_lifecycle_display_variants();
     test_step_rejects();
+    test_step_rejects_authored_motion_media_sources_and_mime_types();
     test_invalid_step_clears_stale_lesson_scene();
     test_contract_reject_clears_stale_lesson_scene();
     test_step_full_render_http();
     test_tvideo_first_step_applies_named_arrived_geometry_and_reports_fallback();
-    test_tvideo_fractional_versions_use_safe_unsupported_contract_fallback();
+    test_tvideo_malformed_projection_uses_safe_unsupported_contract_fallback();
+    test_tvideo_requires_pinned_arrived_pose_linkage();
+    test_tvideo_is_restricted_to_the_true_first_lesson_step();
     test_step_ignores_story_metadata_while_rendering_layers();
     test_step_fetches_canonical_layer_urls_in_order();
     test_step_http_fetch_sets_short_timeout_before_open();

@@ -7,6 +7,10 @@ namespace lesson_tvideo {
 namespace {
 
 constexpr uint32_t kPhaseDurationsMs[] = {100, 1200, 700, 350, 1800, 250, 650, 100};
+constexpr const char* kPhaseNames[] = {
+    "hidden", "flyIn", "landFar", "settle", "walkToward", "arriveNear",
+    "greetIdle", "revealTeachingContent",
+};
 
 struct PresetGeometry {
     const char* id;
@@ -42,6 +46,18 @@ bool IsSupported(const char* template_id, uint8_t template_version,
                  const char* layout_preset, uint8_t geometry_version) {
     return template_id != nullptr && std::strcmp(template_id, "tvideoFlyWalk") == 0 &&
            template_version == 1 && geometry_version == 1 && FindPreset(layout_preset) != nullptr;
+}
+
+uint8_t PhaseCount() {
+    return static_cast<uint8_t>(sizeof(kPhaseNames) / sizeof(kPhaseNames[0]));
+}
+
+const char* PhaseName(uint8_t index) {
+    return index < PhaseCount() ? kPhaseNames[index] : nullptr;
+}
+
+uint32_t PhaseDurationMs(uint8_t index) {
+    return index < PhaseCount() ? kPhaseDurationsMs[index] : 0;
 }
 
 bool ExactVersion(double value, uint8_t* out) {
@@ -101,7 +117,7 @@ void StateMachine::Advance(uint32_t elapsed_ms) {
     if (bypass_ || phase_ == Phase::kRevealTeachingContent) return;
     phase_elapsed_ms_ += elapsed_ms;
     while (phase_ != Phase::kRevealTeachingContent) {
-        const uint32_t duration = kPhaseDurationsMs[PhaseIndex(phase_)];
+        const uint32_t duration = PhaseDurationMs(PhaseIndex(phase_));
         if (phase_elapsed_ms_ < duration) break;
         phase_elapsed_ms_ -= duration;
         phase_ = static_cast<Phase>(PhaseIndex(phase_) + 1);

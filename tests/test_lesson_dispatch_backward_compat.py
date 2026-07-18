@@ -176,7 +176,7 @@ def test_named_tvideo_template_is_additive_and_never_dispatches_raw_motion():
     handler = read("main/lesson_handler.cc")
     build = read("main/CMakeLists.txt")
     assert '#include "lesson_tvideo_template.h"' in handler
-    assert 'Obj(body, "templateProjection")' in handler
+    assert 'cJSON_GetObjectItem(body, "templateProjection")' in handler
     assert 'lesson_tvideo::StateMachine' in handler
     assert '"lesson_tvideo_template.cc"' in build
     template_path = read("main/lesson_tvideo_template.cc")
@@ -189,6 +189,12 @@ def test_tvideo_fallback_contributes_to_degraded_ack_without_blocking_content():
     assert "tvideo_degraded" in handler
     assert "snapToArriveNearAndReveal" in handler
     assert "degraded = tvideo_degraded ||" in handler
+
+
+def test_named_tvideo_overlay_uses_an_exact_outer_rectangle():
+    display = read("main/display/lcd_display.cc")
+    assert "lv_obj_set_size(lesson_robot_overlay_, max_width, max_height)" in display
+    assert "lv_image_set_inner_align(lesson_robot_overlay_, LV_IMAGE_ALIGN_CONTAIN)" in display
 
 
 # ── FW-01 / FW-LESSON-01: passive steps get NO lesson_progress step_completed ──────

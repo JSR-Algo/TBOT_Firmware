@@ -977,9 +977,16 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
         const int max_height = lesson_robot_overlay_bounds_set_
             ? lesson_robot_overlay_height_ * height_ / 320
             : height_ * kLessonRobotMaxHeightPercent / 100;
-        lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
-            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
-            max_width, max_height));
+        if (lesson_robot_overlay_bounds_set_) {
+            lv_obj_set_size(lesson_robot_overlay_, max_width, max_height);
+            lv_image_set_scale(lesson_robot_overlay_, 256);
+            lv_image_set_inner_align(lesson_robot_overlay_, LV_IMAGE_ALIGN_CONTAIN);
+        } else {
+            lv_obj_set_size(lesson_robot_overlay_, img_dsc->header.w, img_dsc->header.h);
+            lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
+                static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
+                max_width, max_height));
+        }
     }
     if (lesson_robot_overlay_bounds_set_) {
         lv_obj_align(lesson_robot_overlay_, LV_ALIGN_TOP_LEFT,
@@ -1374,9 +1381,16 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
         const int max_height = lesson_robot_overlay_bounds_set_
             ? lesson_robot_overlay_height_ * height_ / 320
             : height_ * kLessonRobotMaxHeightPercent / 100;
-        lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
-            static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
-            max_width, max_height));
+        if (lesson_robot_overlay_bounds_set_) {
+            lv_obj_set_size(lesson_robot_overlay_, max_width, max_height);
+            lv_image_set_scale(lesson_robot_overlay_, 256);
+            lv_image_set_inner_align(lesson_robot_overlay_, LV_IMAGE_ALIGN_CONTAIN);
+        } else {
+            lv_obj_set_size(lesson_robot_overlay_, img_dsc->header.w, img_dsc->header.h);
+            lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
+                static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
+                max_width, max_height));
+        }
     }
     if (lesson_robot_overlay_bounds_set_) {
         lv_obj_align(lesson_robot_overlay_, LV_ALIGN_TOP_LEFT,
