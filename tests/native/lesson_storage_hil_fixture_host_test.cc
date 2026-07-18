@@ -246,6 +246,71 @@ void TestMountedBlankCardCreatesNamespaceHierarchy() {
            "sibling preservation sentinel missing");
 }
 
+void TestBlankCardNamespaceCreationFailureIsNonMutating() {
+    ResetBlankMountedCard();
+    ResetMutationInjection();
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    g_fail_mkdir_call = 1;
+    const std::string key = Key("hil-blank-fail", 1, 'a');
+    const std::string sibling = Key("hil-blank-fail", 2, 'b');
+    auto lease = Lease();
+    const auto result = StageLessonStorageHilFixture(
+        lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+    );
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed &&
+               !result.changed,
+           "failed blank-card namespace creation reported a mutation");
+    Expect(!fs::exists(NamespaceRoot()),
+           "failed blank-card namespace creation left storage");
+    Expect(g_mkdir_calls == 1,
+           "failed blank-card namespace creation made extra mkdir calls");
+}
+
+void TestBlankCardRootCreationFailureRollsBackNamespace() {
+    ResetBlankMountedCard();
+    ResetMutationInjection();
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    g_fail_mkdir_call = 2;
+    const std::string key = Key("hil-blank-fail", 1, 'a');
+    const std::string sibling = Key("hil-blank-fail", 2, 'b');
+    auto lease = Lease();
+    const auto result = StageLessonStorageHilFixture(
+        lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+    );
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed &&
+               !result.changed,
+           "clean blank-card parent rollback reported a mutation");
+    Expect(!fs::exists(NamespaceRoot()),
+           "blank-card parent rollback left the namespace");
+    Expect(!fs::exists(Root()),
+           "blank-card parent rollback left the lesson-assets root");
+    Expect(g_mkdir_calls == 2,
+           "blank-card parent rollback made the wrong mkdir count");
+}
+
+void TestBlankCardCreateThenFailRootReportsExactResidual() {
+    ResetBlankMountedCard();
+    ResetMutationInjection();
+    SetLessonStorageHilFixtureMkdirCallbackForTest(InjectedMkdir);
+    g_create_then_fail_mkdir_call = 2;
+    const std::string key = Key("hil-blank-fail", 1, 'a');
+    const std::string sibling = Key("hil-blank-fail", 2, 'b');
+    auto lease = Lease();
+    const auto result = StageLessonStorageHilFixture(
+        lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+    );
+    Expect(result.code == LessonStorageHilFixtureCode::kIoFailed && result.changed,
+           "create-then-fail blank-card root hid residual storage");
+    Expect(fs::is_directory(NamespaceRoot()),
+           "create-then-fail blank-card root unexpectedly removed namespace");
+    Expect(fs::is_directory(Root()),
+           "create-then-fail blank-card root residual was missing");
+    Expect(fs::is_empty(Root()),
+           "create-then-fail blank-card root residual was not exact");
+    Expect(g_mkdir_calls == 2,
+           "create-then-fail blank-card root made the wrong mkdir count");
+}
+
 void TestValidationAndLeaseRefusalPrecedeFilesystemAccess() {
     ResetRoot();
     const std::string valid = Key("hil-child", 1, 'a');
@@ -1551,6 +1616,9 @@ void TestInspectionBoundsDirectoryReadCalls() {
 
 int main() {
     TestMountedBlankCardCreatesNamespaceHierarchy();
+    TestBlankCardNamespaceCreationFailureIsNonMutating();
+    TestBlankCardRootCreationFailureRollsBackNamespace();
+    TestBlankCardCreateThenFailRootReportsExactResidual();
     TestValidationAndLeaseRefusalPrecedeFilesystemAccess();
     TestNestedDirectoryFixtureIsExactAndNonRecursive();
     TestLeafRegularFileFixtureRequiresExactMagic();
