@@ -377,56 +377,137 @@ The auditor is source-identity-bound. Do not run it from a later documentation
 or evidence commit because it removes the existing manifest pair before it
 rejects a mismatched source commit.
 
-Require a clean tracked tree, then record the current branch and exact HEAD.
-Verify every commit after manifest `sourceCommit`
-`a9da6ccb06eea9b8d135008e6361e1d9c57d2416` is documentation/evidence-only
-for this feature; stop if any production, test, configuration, or build input
-changed. Use the bounded path check as well as reviewing the log and names:
+Run this exact block from the firmware worktree. It verifies every path touched
+by every post-build commit, restores the original branch and HEAD on all exit
+paths after detaching, and treats every identity comparison as an executable
+assertion. Do not rebuild.
 
 ```bash
+set -euo pipefail
+
 SOURCE_COMMIT=a9da6ccb06eea9b8d135008e6361e1d9c57d2416
+BUILD_DIR=build-task14-hil-blank-parent
+MANIFEST_SHA=73bbbf65c9fbf4c0d90cb37cbcc813add440c4250c43fec131856833f16ebeac
+SIDECAR_SHA=d4d807ad8f0c53e329ef09acec62bca7ed6c8800c29d8928daadc9cecf3d547d
+BIN_BYTES=3652688
+BIN_SHA=6713e2fb0ead658fc61ecb2366bbd54d1caf017a77b38682dca9bbbc5910ee1a
+ELF_BYTES=49813280
+ELF_SHA=128cff2de46bf82ed63955babaee1ff0983ebd5ac1513e463839e3322bac4ee9
+ALLOWED_PATHS='^(docs/evidence/lesson-storage-hil-blank-card-parent.md|docs/superpowers/plans/2026-07-18-lesson-storage-hil-blank-card-parent.md)$'
+
 test -z "$(git status --porcelain)"
-RECORDED_BRANCH="$(git branch --show-current)"
-RECORDED_HEAD="$(git rev-parse HEAD)"
-test -n "${RECORDED_BRANCH}"
-git log --oneline --reverse "${SOURCE_COMMIT}..${RECORDED_HEAD}"
-git diff --name-status "${SOURCE_COMMIT}..${RECORDED_HEAD}"
-test -z "$(
-  git diff --name-only "${SOURCE_COMMIT}..${RECORDED_HEAD}" |
-    rg -v '^(docs/evidence/lesson-storage-hil-blank-card-parent.md|docs/superpowers/plans/2026-07-18-lesson-storage-hil-blank-card-parent.md)$' || true
+ORIGINAL_BRANCH="$(git branch --show-current)"
+ORIGINAL_HEAD="$(git rev-parse HEAD)"
+test -n "${ORIGINAL_BRANCH}"
+
+TOUCHED_PATHS="$(
+  git log --format= --name-only "${SOURCE_COMMIT}..${ORIGINAL_HEAD}" |
+    sed '/^$/d' |
+    sort -u
 )"
-```
+UNEXPECTED_PATHS="$(
+  printf '%s\n' "${TOUCHED_PATHS}" |
+    sed '/^$/d' |
+    rg -v "${ALLOWED_PATHS}" || true
+)"
+test -z "${UNEXPECTED_PATHS}"
 
-Detach this same worktree at the manifest `sourceCommit` and run:
+restore_original() {
+  validation_status=$?
+  trap - EXIT HUP INT TERM
+  if ! git switch "${ORIGINAL_BRANCH}"; then
+    echo "failed to restore original branch" >&2
+    exit 125
+  fi
+  if test "$(git rev-parse HEAD)" != "${ORIGINAL_HEAD}" ||
+     test -n "$(git status --porcelain)"; then
+    echo "restored source identity is not exact and clean" >&2
+    exit 125
+  fi
+  exit "${validation_status}"
+}
+trap restore_original EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-```bash
 git switch --detach "${SOURCE_COMMIT}"
+test "$(git rev-parse HEAD)" = "${SOURCE_COMMIT}"
 test -z "$(git status --porcelain)"
 python3 scripts/assert_lesson_storage_hil_artifacts.py \
-  --build-dir build-task14-hil-blank-parent \
+  --build-dir "${BUILD_DIR}" \
   --profile hil
-cd build-task14-hil-blank-parent
-shasum -a 256 -c lesson-storage-hil-build.sha256
-cd ..
-```
+(
+  cd "${BUILD_DIR}"
+  shasum -a 256 -c lesson-storage-hil-build.sha256
+)
 
-Against the existing build directory, require auditor exit `0`, verify the
-published sidecar, and require the immutable manifest, binary, ELF, profile,
-target, HIL configuration, tool literal, symbol, and partition fields to match
-the recorded candidate. Do not rebuild. Return to the recorded branch and
-exact HEAD, then re-check the clean tracked tree and all immutable hashes. Stop
-on any detach/return failure, source mismatch, dirty state, missing pair, hash
-mismatch, or manifest-field mismatch.
+python3 - "${BUILD_DIR}" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
 
-```bash
-git switch "${RECORDED_BRANCH}"
-test "$(git rev-parse HEAD)" = "${RECORDED_HEAD}"
+build_dir = Path(sys.argv[1])
+manifest_bytes = (build_dir / "lesson-storage-hil-build.json").read_bytes()
+manifest = json.loads(manifest_bytes)
+
+assert hashlib.sha256(manifest_bytes).hexdigest() == (
+    "73bbbf65c9fbf4c0d90cb37cbcc813add440c4250c43fec131856833f16ebeac"
+)
+assert manifest["status"] == "PASS"
+assert manifest["profile"] == "hil"
+assert manifest["sourceCommit"] == (
+    "a9da6ccb06eea9b8d135008e6361e1d9c57d2416"
+)
+assert manifest["target"] == "esp32s3"
+assert manifest["project"] == "xiaozhi"
+assert manifest["checks"] == {
+    "bannedApis": "absent",
+    "hilConfigEnabled": True,
+    "hilSymbols": "present",
+    "toolLiterals": "present",
+}
+
+for label, expected_bytes, expected_sha in (
+    (
+        "bin",
+        3652688,
+        "6713e2fb0ead658fc61ecb2366bbd54d1caf017a77b38682dca9bbbc5910ee1a",
+    ),
+    (
+        "elf",
+        49813280,
+        "128cff2de46bf82ed63955babaee1ff0983ebd5ac1513e463839e3322bac4ee9",
+    ),
+):
+    record = manifest["artifacts"][label]
+    assert record["bytes"] == expected_bytes
+    assert record["sha256"] == expected_sha
+    artifact = build_dir / record["path"]
+    artifact_bytes = artifact.read_bytes()
+    assert len(artifact_bytes) == expected_bytes
+    assert hashlib.sha256(artifact_bytes).hexdigest() == expected_sha
+PY
+
+test "$(shasum -a 256 "${BUILD_DIR}/lesson-storage-hil-build.json" | awk '{print $1}')" = "${MANIFEST_SHA}"
+test "$(shasum -a 256 "${BUILD_DIR}/lesson-storage-hil-build.sha256" | awk '{print $1}')" = "${SIDECAR_SHA}"
+test "$(wc -c < "${BUILD_DIR}/xiaozhi.bin" | tr -d ' ')" = "${BIN_BYTES}"
+test "$(shasum -a 256 "${BUILD_DIR}/xiaozhi.bin" | awk '{print $1}')" = "${BIN_SHA}"
+test "$(wc -c < "${BUILD_DIR}/xiaozhi.elf" | tr -d ' ')" = "${ELF_BYTES}"
+test "$(shasum -a 256 "${BUILD_DIR}/xiaozhi.elf" | awk '{print $1}')" = "${ELF_SHA}"
+
+git switch "${ORIGINAL_BRANCH}"
+test "$(git rev-parse HEAD)" = "${ORIGINAL_HEAD}"
 test -z "$(git status --porcelain)"
-shasum -a 256 \
-  build-task14-hil-blank-parent/lesson-storage-hil-build.json \
-  build-task14-hil-blank-parent/lesson-storage-hil-build.sha256 \
-  build-task14-hil-blank-parent/xiaozhi.bin \
-  build-task14-hil-blank-parent/xiaozhi.elf
+trap - EXIT HUP INT TERM
+
+test "$(shasum -a 256 "${BUILD_DIR}/lesson-storage-hil-build.json" | awk '{print $1}')" = "${MANIFEST_SHA}"
+test "$(shasum -a 256 "${BUILD_DIR}/lesson-storage-hil-build.sha256" | awk '{print $1}')" = "${SIDECAR_SHA}"
+test "$(wc -c < "${BUILD_DIR}/xiaozhi.bin" | tr -d ' ')" = "${BIN_BYTES}"
+test "$(shasum -a 256 "${BUILD_DIR}/xiaozhi.bin" | awk '{print $1}')" = "${BIN_SHA}"
+test "$(wc -c < "${BUILD_DIR}/xiaozhi.elf" | tr -d ' ')" = "${ELF_BYTES}"
+test "$(shasum -a 256 "${BUILD_DIR}/xiaozhi.elf" | awk '{print $1}')" = "${ELF_SHA}"
 ```
 
 Only after that source-correct validation, confirm target `esp32s3`, profile
