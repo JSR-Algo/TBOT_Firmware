@@ -1556,6 +1556,82 @@ void test_step_full_render_http() {
     require(App().prepare_listen_calls == 0, "passive step opens NO listen window");
 }
 
+void test_tvideo_first_step_applies_named_arrived_geometry_and_reports_fallback() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    const std::string projection =
+        ",\"templateProjection\":{\"templateId\":\"tvideoFlyWalk\","
+        "\"templateVersion\":1,\"layoutPreset\":\"centerRoad\","
+        "\"geometryVersion\":1,\"fallbackPolicy\":\"snapToArriveNearAndReveal\"}";
+    Handle(StepFrame(3, "tvideo-first", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", projection + ",\"stepType\":\"greeting\"", ""));
+
+    const size_t first_ack = Sent().size() - 1;
+    require(FrameBodyBool(first_ack, "rendered", false),
+            "tvideo fallback still renders teaching content");
+    require(FrameBodyBool(first_ack, "degraded", false),
+            "missing atlas marks the rendered first step degraded");
+    require(FrameBodyStr(first_ack, nullptr, "degradedReason") == "missingAtlas",
+            "tvideo ack reports a stable missing-atlas reason");
+    require(disp.overlay_bounds == std::vector<int>({184, 184, 112, 56}),
+            "centerRoad applies the reviewed arrived-pose overlay bounds");
+
+    Handle(StepFrame(3, "tvideo-first", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", projection + ",\"stepType\":\"greeting\"", ""));
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") == "missingAtlas",
+            "duplicate first-step ack replays the same degraded reason");
+
+    Handle(StepFrame(4, "ordinary-later", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"stepType\":\"greeting\"", ""));
+    require(!FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "later steps remain on the legacy three-layer render path");
+    require(disp.overlay_bounds == std::vector<int>({0, 0, 0, 0}),
+            "later steps do not repeat the first-step named entrance geometry");
+}
+
+void test_tvideo_fractional_versions_use_safe_unsupported_contract_fallback() {
+    ResetObservable();
+    LvglDisplay disp;
+    NetworkInterface net;
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    Assets::GetInstance().Clear();
+    OpenSession();
+
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    Handle(StepFrame(3, "tvideo-fractional", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"templateProjection\":{\"templateId\":\"tvideoFlyWalk\","
+                     "\"templateVersion\":1.5,\"layoutPreset\":\"centerRoad\","
+                     "\"geometryVersion\":1,\"fallbackPolicy\":\"snapToArriveNearAndReveal\"}"
+                     ",\"stepType\":\"greeting\"", ""));
+
+    const size_t ack = Sent().size() - 1;
+    require(FrameBodyBool(ack, "rendered", false),
+            "invalid template version falls back without blocking content");
+    require(FrameBodyBool(ack, "degraded", false),
+            "invalid template version is reported as degraded");
+    require(FrameBodyStr(ack, nullptr, "degradedReason") == "unsupportedContract",
+            "fractional version cannot be narrowed into a supported contract");
+    require(disp.overlay_bounds == std::vector<int>({0, 0, 0, 0}),
+            "unsupported geometry cannot apply authored or raw coordinates");
+}
+
 void test_step_ignores_story_metadata_while_rendering_layers() {
     ResetObservable();
     LvglDisplay disp;
@@ -3306,6 +3382,8 @@ int main() {
     test_invalid_step_clears_stale_lesson_scene();
     test_contract_reject_clears_stale_lesson_scene();
     test_step_full_render_http();
+    test_tvideo_first_step_applies_named_arrived_geometry_and_reports_fallback();
+    test_tvideo_fractional_versions_use_safe_unsupported_contract_fallback();
     test_step_ignores_story_metadata_while_rendering_layers();
     test_step_fetches_canonical_layer_urls_in_order();
     test_step_http_fetch_sets_short_timeout_before_open();

@@ -19,6 +19,7 @@ public:
     std::vector<bool> background_calls;
     std::vector<bool> object_calls;
     std::vector<bool> overlay_calls;
+    std::vector<int> overlay_bounds;
     // true == hide the realtime emoji face (lesson_start); false == restore it
     // (lesson_stop/lesson_error). Lets a test prove the smiley is suppressed for the
     // whole lesson rather than only occluded by overlapping image layers.
@@ -32,6 +33,9 @@ public:
     }
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
         overlay_calls.push_back(image != nullptr);
+    }
+    virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) {
+        overlay_bounds = {left, top, width, height};
     }
     virtual void SetLessonMode(bool active) {
         lesson_mode_calls.push_back(active);

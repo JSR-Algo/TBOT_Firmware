@@ -57,6 +57,7 @@ cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
     -Imain \
     tests/native/lesson_handler_host_test.cc \
     "${BUILD_DIR}/src/lesson_handler.cc" \
+    main/lesson_tvideo_template.cc \
     "${CJSON_DIR}/cJSON.c" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 
