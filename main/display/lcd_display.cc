@@ -966,6 +966,15 @@ void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
     if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
 }
 
+void LcdDisplay::SetLessonRobotOverlayBounds(int left, int top, int width, int height) {
+    DisplayLockGuard lock(this);
+    lesson_robot_overlay_bounds_set_ = width > 0 && height > 0;
+    lesson_robot_overlay_left_ = left;
+    lesson_robot_overlay_top_ = top;
+    lesson_robot_overlay_width_ = width;
+    lesson_robot_overlay_height_ = height;
+}
+
 void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
     if (lesson_robot_overlay_ == nullptr) {
@@ -983,12 +992,23 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     auto img_dsc = lesson_robot_overlay_cached_->image_dsc();
     lv_image_set_src(lesson_robot_overlay_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
+        const int max_width = lesson_robot_overlay_bounds_set_
+            ? lesson_robot_overlay_width_ * width_ / 480
+            : width_ * kLessonRobotMaxWidthPercent / 100;
+        const int max_height = lesson_robot_overlay_bounds_set_
+            ? lesson_robot_overlay_height_ * height_ / 320
+            : height_ * kLessonRobotMaxHeightPercent / 100;
         lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
             static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
-            width_ * kLessonRobotMaxWidthPercent / 100,
-            height_ * kLessonRobotMaxHeightPercent / 100));
+            max_width, max_height));
     }
-    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / kLessonRobotBottomInsetDivisor);
+    if (lesson_robot_overlay_bounds_set_) {
+        lv_obj_align(lesson_robot_overlay_, LV_ALIGN_TOP_LEFT,
+                     lesson_robot_overlay_left_ * width_ / 480,
+                     lesson_robot_overlay_top_ * height_ / 320);
+    } else {
+        lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / kLessonRobotBottomInsetDivisor);
+    }
     lv_obj_remove_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(lesson_robot_overlay_);
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
@@ -1360,6 +1380,15 @@ void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
     if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
 }
 
+void LcdDisplay::SetLessonRobotOverlayBounds(int left, int top, int width, int height) {
+    DisplayLockGuard lock(this);
+    lesson_robot_overlay_bounds_set_ = width > 0 && height > 0;
+    lesson_robot_overlay_left_ = left;
+    lesson_robot_overlay_top_ = top;
+    lesson_robot_overlay_width_ = width;
+    lesson_robot_overlay_height_ = height;
+}
+
 void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
     if (lesson_robot_overlay_ == nullptr) {
@@ -1377,12 +1406,23 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     auto img_dsc = lesson_robot_overlay_cached_->image_dsc();
     lv_image_set_src(lesson_robot_overlay_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
+        const int max_width = lesson_robot_overlay_bounds_set_
+            ? lesson_robot_overlay_width_ * width_ / 480
+            : width_ * kLessonRobotMaxWidthPercent / 100;
+        const int max_height = lesson_robot_overlay_bounds_set_
+            ? lesson_robot_overlay_height_ * height_ / 320
+            : height_ * kLessonRobotMaxHeightPercent / 100;
         lv_image_set_scale(lesson_robot_overlay_, LessonImageFitScale(
             static_cast<int>(img_dsc->header.w), static_cast<int>(img_dsc->header.h),
-            width_ * kLessonRobotMaxWidthPercent / 100,
-            height_ * kLessonRobotMaxHeightPercent / 100));
+            max_width, max_height));
     }
-    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / kLessonRobotBottomInsetDivisor);
+    if (lesson_robot_overlay_bounds_set_) {
+        lv_obj_align(lesson_robot_overlay_, LV_ALIGN_TOP_LEFT,
+                     lesson_robot_overlay_left_ * width_ / 480,
+                     lesson_robot_overlay_top_ * height_ / 320);
+    } else {
+        lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, width_ / 24, -height_ / kLessonRobotBottomInsetDivisor);
+    }
     lv_obj_remove_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(lesson_robot_overlay_);
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);

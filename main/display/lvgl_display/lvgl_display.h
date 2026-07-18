@@ -36,6 +36,7 @@ public:
     // object and below system/status bars; pass nullptr to clear stale overlays.
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {}
     virtual void SetLessonTeachingWord(const char* text) {}
+    virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) {}
     // Lesson display mode: when active, hide the idle realtime emoji face so ONLY the
     // lesson's three image layers (background/object/overlay) show. Toggled true on
     // lesson_start and false on lesson_stop/lesson_error so the smiley does not bleed

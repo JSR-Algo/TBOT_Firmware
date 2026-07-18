@@ -18,6 +18,7 @@
 #include "lesson_motion_presets.h"
 #include "lesson_layer_state.h"
 #include "system_info.h"
+#include "lesson_tvideo_template.h"
 // US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
 // SetLessonBackground (the new persistent full-screen draw) and LvglAllocatedImage is
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
@@ -259,6 +260,7 @@ struct LessonSession {
     bool        running            = false;
     bool        paused             = false;
     bool        motion_presets_enabled = false;
+    bool        tvideo_entrance_consumed = false;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
     // processed inbound sequence, so a duplicate re-ack can REPLAY the prior ack body
     // idempotently (protocol §6 / lesson-robot-protocol.md:436-438) instead of
@@ -268,6 +270,7 @@ struct LessonSession {
     bool        last_ack_rendered  = false;
     bool        last_ack_degraded  = false;
     std::string last_ack_asset_pack_json;
+    std::string last_ack_degraded_reason;
     int64_t     prepare_ack_sequence = 0;   // prepare assetPack replay survives later lifecycle acks
     std::string prepare_ack_asset_pack_json;
     std::string last_ack_telemetry_json;
@@ -286,6 +289,7 @@ void ClearTerminalLessonCursor() {
     g_session.last_ack_rendered = false;
     g_session.last_ack_degraded = false;
     g_session.last_ack_asset_pack_json.clear();
+    g_session.last_ack_degraded_reason.clear();
     g_session.prepare_ack_sequence = 0;
     g_session.prepare_ack_asset_pack_json.clear();
     g_session.last_ack_telemetry_json.clear();
@@ -1000,7 +1004,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // ackFor field. stepId is echoed (null on lifecycle, "s4" on a step).
     auto emit_ack = [&emit](const cJSON* in, int64_t acked, bool rendered, bool degraded,
                             cJSON* asset_pack_ack = nullptr, bool cache = true,
-                            int64_t render_elapsed_ms = -1, cJSON* telemetry = nullptr) {
+                            int64_t render_elapsed_ms = -1,
+                            cJSON* telemetry = nullptr,
+                            const char* degraded_reason = nullptr) {
         cJSON* b = cJSON_CreateObject();
         cJSON_AddNumberToObject(b, "acks", static_cast<double>(acked));
         cJSON_AddBoolToObject(b, "rendered", rendered);
@@ -1010,6 +1016,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
             Str(Obj(inbound_scene, "robotOverlay"), "robotState"));
         if (robot_state != nullptr) {
             cJSON_AddStringToObject(b, "robotState", robot_state);
+        }
+        if (degraded_reason != nullptr && degraded_reason[0] != '\0') {
+            cJSON_AddStringToObject(b, "degradedReason", degraded_reason);
         }
         if (render_elapsed_ms >= 0) {
             cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));
@@ -1021,6 +1030,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.last_ack_sequence = acked;
             g_session.last_ack_rendered = rendered;
             g_session.last_ack_degraded = degraded;
+            g_session.last_ack_degraded_reason = degraded_reason != nullptr ? degraded_reason : "";
             g_session.last_ack_asset_pack_json.clear();
             g_session.last_ack_telemetry_json.clear();
             if (asset_pack_ack != nullptr) {
@@ -1619,6 +1629,53 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const char* overlay_key = Str(Obj(ro, "asset"), "key");
     const bool has_object_src = !Blank(object_src);
     const bool has_overlay_src = !Blank(overlay_src);
+    const cJSON* tvideo_projection = Obj(body, "templateProjection");
+    bool tvideo_degraded = false;
+    const char* tvideo_degraded_reason = nullptr;
+    lesson_tvideo::Rect tvideo_arrived_bounds{};
+    bool tvideo_use_bounds = false;
+    if (tvideo_projection != nullptr && !g_session.tvideo_entrance_consumed) {
+        g_session.tvideo_entrance_consumed = true;
+        double template_version = 0;
+        double geometry_version = 0;
+        const char* template_id = Str(tvideo_projection, "templateId");
+        const char* layout_preset = Str(tvideo_projection, "layoutPreset");
+        const char* fallback_policy = Str(tvideo_projection, "fallbackPolicy");
+        const bool named_fallback = fallback_policy != nullptr &&
+            strcmp(fallback_policy, "snapToArriveNearAndReveal") == 0;
+        const bool has_template_version = Num(tvideo_projection, "templateVersion", template_version);
+        const bool has_geometry_version = Num(tvideo_projection, "geometryVersion", geometry_version);
+        uint8_t template_version_u8 = 0;
+        uint8_t geometry_version_u8 = 0;
+        const bool versions_valid = has_template_version && has_geometry_version &&
+            lesson_tvideo::ExactVersion(template_version, &template_version_u8) &&
+            lesson_tvideo::ExactVersion(geometry_version, &geometry_version_u8);
+
+        // The current renderer has no atlas blitter. Feed atlas_available=false so
+        // the bounded state machine takes its reviewed static arrived-pose fallback,
+        // reveals teaching content immediately, and never blocks voice/progress.
+        lesson_tvideo::StateMachine tvideo({
+            template_id,
+            versions_valid ? template_version_u8 : static_cast<uint8_t>(0),
+            layout_preset,
+            versions_valid ? geometry_version_u8 : static_cast<uint8_t>(0),
+            has_overlay_src,
+            false,
+            false,
+        });
+        tvideo_degraded = !named_fallback ||
+            tvideo.degraded_reason() != lesson_tvideo::DegradedReason::kNone;
+        tvideo_degraded_reason = !named_fallback
+            ? "unsupportedFallbackPolicy"
+            : lesson_tvideo::DegradedReasonName(tvideo.degraded_reason());
+        if (const lesson_tvideo::LayoutGeometry* geometry =
+                lesson_tvideo::ArrivedGeometry(layout_preset, versions_valid ? geometry_version_u8 : 0)) {
+            tvideo_arrived_bounds = geometry->robot;
+            tvideo_use_bounds = true;
+        }
+        ESP_LOGI(TAG, "lesson_step tvideo fallback reveal=%d degraded=%d reason=%s",
+                 tvideo.content_visible(), tvideo_degraded, tvideo_degraded_reason);
+    }
     const char* prompt = Str(body, "prompt");
     const char* story_ask = Str(Obj(body, "storyBeat"), "ask");
     const char* step_type       = Str(body, "stepType");
@@ -1770,7 +1827,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (overlay_image != nullptr) {
             auto holder = std::make_shared<std::unique_ptr<LvglImage>>(std::move(overlay_image));
             overlay_drew = Application::GetInstance().ScheduleAndWait(
-                [lvgl_display, holder]() mutable {
+                [lvgl_display, holder, tvideo_use_bounds, tvideo_arrived_bounds]() mutable {
+                    if (tvideo_use_bounds) {
+                        lvgl_display->SetLessonRobotOverlayBounds(
+                            tvideo_arrived_bounds.left, tvideo_arrived_bounds.top,
+                            tvideo_arrived_bounds.width, tvideo_arrived_bounds.height);
+                    } else {
+                        lvgl_display->SetLessonRobotOverlayBounds(0, 0, 0, 0);
+                    }
                     lvgl_display->SetLessonRobotOverlay(std::move(*holder));
                     return true;
                 }, kLessonLayerInstallTimeoutMs);  // GCOVR_EXCL_LINE
@@ -1814,7 +1878,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool optional_asset_missing = !has_object_src || !has_overlay_src;
     const bool render_degraded =
         !(poster_drew && has_object_src && object_drew && has_overlay_src && overlay_drew);
-    const bool degraded = motion_degraded || render_degraded;
+    const bool degraded = tvideo_degraded || motion_degraded || render_degraded;
 
     // Marshal the draw onto the LVGL task, exactly like the TTS-display pattern
     // (application.cc SetChatMessage Schedule). Layer-3 emoji-face + the caption are
@@ -1830,11 +1894,24 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool clear_object = !object_drew;
         const bool clear_overlay = !overlay_drew;
         Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
-                  has_visible_content, cap = caption, word = normalized_teaching_word]() {
+                  tvideo_use_bounds, tvideo_arrived_bounds,
+                  has_visible_content, cap = caption,
+                  word = normalized_teaching_word]() {
             if (lvgl_display) lvgl_display->SetLessonMode(has_visible_content);
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
-            if (clear_overlay && lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+            if (lvgl_display) {
+                if (tvideo_use_bounds) {
+                    lvgl_display->SetLessonRobotOverlayBounds(
+                        tvideo_arrived_bounds.left, tvideo_arrived_bounds.top,
+                        tvideo_arrived_bounds.width, tvideo_arrived_bounds.height);
+                } else {
+                    lvgl_display->SetLessonRobotOverlayBounds(0, 0, 0, 0);
+                }
+            }
+            if (clear_overlay && lvgl_display) {
+                lvgl_display->SetLessonRobotOverlay(nullptr);
+            }
             if (lvgl_display) lvgl_display->SetLessonTeachingWord(word.c_str());
             display->ClearChatMessages();
             if (!has_visible_content) {
@@ -1898,7 +1975,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // Canonical step-ack first (body.acks echoes the step's sequence). For a PASSIVE
     // narration step this ack IS the completion signal (the ESP auto-advances on it),
     // so it is the ONLY F->S frame for such a step.
-    emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms, telemetry);
+    emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms,
+             telemetry, tvideo_degraded ? tvideo_degraded_reason : nullptr);
     if (!has_visible_content) {
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);

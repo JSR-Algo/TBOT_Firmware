@@ -176,6 +176,25 @@ def test_lesson_handler_registered_in_build():
     assert '"lesson_handler.cc"' in read("main/CMakeLists.txt")
 
 
+def test_named_tvideo_template_is_additive_and_never_dispatches_raw_motion():
+    handler = read("main/lesson_handler.cc")
+    build = read("main/CMakeLists.txt")
+    assert '#include "lesson_tvideo_template.h"' in handler
+    assert 'Obj(body, "templateProjection")' in handler
+    assert 'lesson_tvideo::StateMachine' in handler
+    assert '"lesson_tvideo_template.cc"' in build
+    template_path = read("main/lesson_tvideo_template.cc")
+    for forbidden in ("servoCommand", "motorCommand", "chassisCommand", "SendRobotAction", "RobotUart"):
+        assert forbidden not in template_path
+
+
+def test_tvideo_fallback_contributes_to_degraded_ack_without_blocking_content():
+    handler = read("main/lesson_handler.cc")
+    assert "tvideo_degraded" in handler
+    assert "snapToArriveNearAndReveal" in handler
+    assert "degraded = tvideo_degraded ||" in handler
+
+
 # ── FW-01 / FW-LESSON-01: passive steps get NO lesson_progress step_completed ──────
 def test_lesson_progress_is_gated_on_interactive_completion_class():
     h = read("main/lesson_handler.cc")

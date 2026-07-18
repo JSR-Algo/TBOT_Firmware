@@ -33,6 +33,11 @@ protected:
     std::unique_ptr<LvglImage> lesson_object_cached_ = nullptr;
     lv_obj_t* lesson_robot_overlay_ = nullptr;  // US-006: robot overlay image layer
     std::unique_ptr<LvglImage> lesson_robot_overlay_cached_ = nullptr;
+    bool lesson_robot_overlay_bounds_set_ = false;
+    int lesson_robot_overlay_left_ = 0;
+    int lesson_robot_overlay_top_ = 0;
+    int lesson_robot_overlay_width_ = 0;
+    int lesson_robot_overlay_height_ = 0;
     lv_obj_t* lesson_caption_bar_ = nullptr;  // Lesson-only bottom caption overlay
     lv_obj_t* lesson_caption_label_ = nullptr;
     lv_obj_t* lesson_word_pill_ = nullptr;
@@ -65,6 +70,7 @@ public:
     virtual void SetLessonObject(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonTeachingWord(const char* text) override;
+    virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) override;
     virtual void SetLessonMode(bool active) override;
     virtual void SetupUI() override;
     // Add theme switching function
