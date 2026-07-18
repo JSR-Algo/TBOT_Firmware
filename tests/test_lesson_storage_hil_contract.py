@@ -234,6 +234,26 @@ def test_fixture_mutation_is_exact_nonrecursive_and_uses_fixed_sentinels():
         assert banned not in source
 
 
+def test_fixture_parent_creation_contract_is_explicit_and_nonrecursive():
+    source = read("main/lesson_storage_hil_fixture.cc")
+
+    for required in (
+        "NamespacePath",
+        "ParentState",
+        "namespace_missing",
+        "namespace_created",
+        "CreateFixtureDirectory",
+    ):
+        assert required in source
+    for banned in (
+        "std::filesystem::create_directories",
+        "mkdir -p",
+        "system(",
+        "format_if_mount_failed",
+    ):
+        assert banned not in source
+
+
 def test_fixture_inspection_is_bounded_read_only_and_uses_mbedtls_sha256():
     source = read("main/lesson_storage_hil_fixture.cc")
 
