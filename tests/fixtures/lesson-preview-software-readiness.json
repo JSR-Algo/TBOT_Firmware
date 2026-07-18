@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "contract": "lessonPreviewSoftwareReadiness",
+  "revisions": {
+    "manager": "c1f10742ea2841bc015f1f54e78679394503a948",
+    "backend": "4f4a8e9fa72734e7cfc3a5dd943782f6b2937048"
+  },
+  "managerComposePath": "deploy/docker-compose.prod.yml",
+  "managerComposeRequiredTokens": [
+    "LESSON_ASSET_ORIGIN_BASE: ${LESSON_ASSET_ORIGIN_BASE:?set LESSON_ASSET_ORIGIN_BASE}",
+    "LESSON_ASSET_PUBLIC_BASE_URL: ${LESSON_ASSET_PUBLIC_BASE_URL:-}",
+    "LESSON_ASSET_PACK_MOUNT_ROOT: ${LESSON_ASSET_PACK_MOUNT_ROOT:-}"
+  ],
+  "backendFixturePath": "scripts/fixtures/production-lesson-studio.fixture.ts",
+  "backendSeederPath": "scripts/seed-production-lesson-studio-fixture.ts",
+  "backendRequiredTokens": [
+    "courseKey: 'production-farm-english-358'",
+    "lessonKey: `pip-farm-${durationMinutes}m`",
+    "--check",
+    "--output",
+    "--asset-origin-root"
+  ],
+  "evidence": {
+    "previewJson": "preview.json",
+    "previewJsonSha256": "1f1a26c5fbb559bc5a0897bd499d2c015731c119cdde57162e8f4e30335f0e14",
+    "screenshot": "preview.png",
+    "screenshotSha256": "f5ab7c5ea2659bc43506876b9d303c4540f5f28115fb48fce9629b3bc372aae5",
+    "manifest": "published-manifest.json",
+    "manifestSha256": "c63df97e93f0e360231d40d60a2d15aec9c38f8c6754475821e503bb71cad414"
+  },
+  "expected": {
+    "courseId": "production-farm-english-358",
+    "lessonId": "pip-farm-3m",
+    "lessonVersion": 2,
+    "manifestChecksum": "6e44a135a457f78806e39ddf77a66c8af353fc508d2c879e0b2aa92dffd22b79",
+    "assetCount": 20,
+    "assetOrigin": "http://192.168.100.209:18102/tvideo-demo",
+    "word": "BARN",
+    "pathOutcome": "correct",
+    "width": 480,
+    "height": 320
+  },
+  "staleAssetOrigins": [
+    "http://192.168.0.111:8102/tvideo-demo"
+  ],
+  "localBootstrap": {
+    "LESSON_SAMPLE_ENABLED": "false",
+    "LESSON_ASSET_ORIGIN_BASE": "http://127.0.0.1:18102/tvideo-demo",
+    "LESSON_ASSET_PUBLIC_BASE_URL": "http://127.0.0.1:18003",
+    "LESSON_ASSET_PACK_MOUNT_ROOT": "/opt/tbot-esp32-server/data/lesson-assets"
+  }
+}

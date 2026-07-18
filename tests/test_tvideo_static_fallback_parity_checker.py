@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -8,9 +9,20 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests/fixtures/tvideo-static-fallback-immediate-reveal.json"
 CHECKER = ROOT / "scripts/check_tvideo_static_fallback_parity.mjs"
-MANAGER_REPO = Path(
-    "/Users/manhhodinh/Documents/TBOT/.worktrees/esp32-server-reusable-tvideo-template"
-)
+
+
+def manager_repo() -> Path:
+    configured = os.environ.get("TBOT_ESP32_SERVER_REPO")
+    if configured:
+        return Path(configured)
+    for parent in ROOT.parents:
+        candidate = parent / "robot/esp32-server"
+        if (candidate / ".git").exists():
+            return candidate
+    raise RuntimeError("set TBOT_ESP32_SERVER_REPO to the canonical manager repository")
+
+
+MANAGER_REPO = manager_repo()
 OLD_MANAGER_COMMIT = "edec89d88e3b81219b5fde40cb7b9d7e1ee13a07"
 CORRECTED_MANAGER_COMMIT = "e13c7eb96761e71705f72afbb13e8154d180e1e4"
 
