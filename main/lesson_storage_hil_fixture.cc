@@ -99,7 +99,14 @@ struct ValidatedKeys {
     std::string slug;
 };
 
+struct ParentState {
+    bool namespace_missing = false;
+    bool root_missing = false;
+    bool slug_missing = false;
+};
+
 struct ParentCreation {
+    bool namespace_created = false;
     bool root_created = false;
     bool slug_created = false;
 };
@@ -125,6 +132,16 @@ std::string JoinPath(const std::string& parent, const std::string& child) {
 
 std::string RootPath() {
     return TBOT_LESSON_STORAGE_HIL_ROOT;
+}
+
+std::string ParentPath(const std::string& path) {
+    const std::size_t separator = path.rfind('/');
+    return separator == std::string::npos ? std::string()
+                                          : path.substr(0, separator);
+}
+
+std::string NamespacePath() {
+    return ParentPath(RootPath());
 }
 
 std::string SlugFromCacheKey(const std::string& cache_key) {
@@ -511,9 +528,20 @@ FixtureState PreservationStageFailure(
 
 LessonStorageHilFixtureCode ValidateParents(
     const std::string& slug,
-    bool* root_missing,
-    bool* slug_missing
+    ParentState* state
 ) {
+    if (NamespacePath().empty()) {
+        return LessonStorageHilFixtureCode::kIoFailed;
+    }
+    const NodeKind namespace_kind = ReadNodeKind(NamespacePath());
+    if (namespace_kind == NodeKind::kIoFailed) {
+        return LessonStorageHilFixtureCode::kIoFailed;
+    }
+    if (namespace_kind != NodeKind::kMissing &&
+        namespace_kind != NodeKind::kDirectory) {
+        return LessonStorageHilFixtureCode::kUnexpectedExistingNode;
+    }
+    state->namespace_missing = namespace_kind == NodeKind::kMissing;
     const NodeKind root_kind = ReadNodeKind(RootPath());
     if (root_kind == NodeKind::kIoFailed) {
         return LessonStorageHilFixtureCode::kIoFailed;
@@ -521,9 +549,9 @@ LessonStorageHilFixtureCode ValidateParents(
     if (root_kind != NodeKind::kMissing && root_kind != NodeKind::kDirectory) {
         return LessonStorageHilFixtureCode::kUnexpectedExistingNode;
     }
-    *root_missing = root_kind == NodeKind::kMissing;
-    if (*root_missing) {
-        *slug_missing = true;
+    state->root_missing = root_kind == NodeKind::kMissing;
+    if (state->root_missing) {
+        state->slug_missing = true;
         return LessonStorageHilFixtureCode::kStaged;
     }
     const NodeKind slug_kind = ReadNodeKind(SlugPath(slug));
@@ -533,23 +561,28 @@ LessonStorageHilFixtureCode ValidateParents(
     if (slug_kind != NodeKind::kMissing && slug_kind != NodeKind::kDirectory) {
         return LessonStorageHilFixtureCode::kUnexpectedExistingNode;
     }
-    *slug_missing = slug_kind == NodeKind::kMissing;
+    state->slug_missing = slug_kind == NodeKind::kMissing;
     return LessonStorageHilFixtureCode::kStaged;
 }
 
 bool EnsureParents(
     const std::string& slug,
-    bool root_missing,
-    bool slug_missing,
+    const ParentState& state,
     ParentCreation* creation
 ) {
-    if (root_missing) {
+    if (state.namespace_missing) {
+        if (CreateFixtureDirectory(NamespacePath()) != 0) {
+            return false;
+        }
+        creation->namespace_created = true;
+    }
+    if (state.root_missing) {
         if (CreateFixtureDirectory(RootPath()) != 0) {
             return false;
         }
         creation->root_created = true;
     }
-    if (slug_missing) {
+    if (state.slug_missing) {
         if (CreateFixtureDirectory(SlugPath(slug)) != 0) {
             return false;
         }
@@ -618,37 +651,43 @@ LessonStorageHilFixtureResult StageNested(
     const std::string& cache_key,
     const std::string& slug
 ) {
-    bool root_missing = false;
-    bool slug_missing = false;
-    const auto parent_code = ValidateParents(slug, &root_missing, &slug_missing);
+    ParentState state;
+    const auto parent_code = ValidateParents(slug, &state);
     if (parent_code != LessonStorageHilFixtureCode::kStaged) {
         return Result(parent_code, false, cache_key, "");
     }
     const std::string leaf_path = LeafPath(cache_key);
-    const FixtureState state = root_missing || slug_missing
-                                   ? FixtureState::kMissing
-                                   : InspectNestedFixture(leaf_path);
-    if (state == FixtureState::kComplete) {
+    const FixtureState fixture_state = state.root_missing || state.slug_missing
+                                           ? FixtureState::kMissing
+                                           : InspectNestedFixture(leaf_path);
+    if (fixture_state == FixtureState::kComplete) {
         return Result(LessonStorageHilFixtureCode::kStaged, false, cache_key, "");
     }
-    if (state != FixtureState::kMissing) {
-        return Result(CodeForState(state), false, cache_key, "");
+    if (fixture_state != FixtureState::kMissing) {
+        return Result(CodeForState(fixture_state), false, cache_key, "");
     }
 
     ParentCreation creation;
     const std::string slug_path = SlugPath(slug);
     const std::string root_path = RootPath();
-    if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
+    const std::string namespace_path = NamespacePath();
+    if (!EnsureParents(slug, state, &creation)) {
         const RollbackResult rollback = RollBackCreatedNodes({
             {&slug_path,
              NodeKind::kDirectory,
              creation.slug_created,
-             slug_missing && !creation.slug_created &&
-                 (!root_missing || creation.root_created)},
+             state.slug_missing && !creation.slug_created &&
+                 (!state.namespace_missing || creation.namespace_created) &&
+                 (!state.root_missing || creation.root_created)},
             {&root_path,
              NodeKind::kDirectory,
              creation.root_created,
-             root_missing && !creation.root_created},
+             state.root_missing && !creation.root_created &&
+                 (!state.namespace_missing || creation.namespace_created)},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created,
+             state.namespace_missing && !creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -662,6 +701,9 @@ LessonStorageHilFixtureResult StageNested(
             {&leaf_path, NodeKind::kDirectory, false, true},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -677,6 +719,9 @@ LessonStorageHilFixtureResult StageNested(
             {&leaf_path, NodeKind::kDirectory, true},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -692,37 +737,43 @@ LessonStorageHilFixtureResult StageLeafFile(
     const std::string& cache_key,
     const std::string& slug
 ) {
-    bool root_missing = false;
-    bool slug_missing = false;
-    const auto parent_code = ValidateParents(slug, &root_missing, &slug_missing);
+    ParentState state;
+    const auto parent_code = ValidateParents(slug, &state);
     if (parent_code != LessonStorageHilFixtureCode::kStaged) {
         return Result(parent_code, false, cache_key, "");
     }
     const std::string leaf_path = LeafPath(cache_key);
-    const FixtureState state = root_missing || slug_missing
-                                   ? FixtureState::kMissing
-                                   : InspectLeafFileFixture(leaf_path);
-    if (state == FixtureState::kComplete) {
+    const FixtureState fixture_state = state.root_missing || state.slug_missing
+                                           ? FixtureState::kMissing
+                                           : InspectLeafFileFixture(leaf_path);
+    if (fixture_state == FixtureState::kComplete) {
         return Result(LessonStorageHilFixtureCode::kStaged, false, cache_key, "");
     }
-    if (state != FixtureState::kMissing) {
-        return Result(CodeForState(state), false, cache_key, "");
+    if (fixture_state != FixtureState::kMissing) {
+        return Result(CodeForState(fixture_state), false, cache_key, "");
     }
 
     ParentCreation creation;
     const std::string slug_path = SlugPath(slug);
     const std::string root_path = RootPath();
-    if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
+    const std::string namespace_path = NamespacePath();
+    if (!EnsureParents(slug, state, &creation)) {
         const RollbackResult rollback = RollBackCreatedNodes({
             {&slug_path,
              NodeKind::kDirectory,
              creation.slug_created,
-             slug_missing && !creation.slug_created &&
-                 (!root_missing || creation.root_created)},
+             state.slug_missing && !creation.slug_created &&
+                 (!state.namespace_missing || creation.namespace_created) &&
+                 (!state.root_missing || creation.root_created)},
             {&root_path,
              NodeKind::kDirectory,
              creation.root_created,
-             root_missing && !creation.root_created},
+             state.root_missing && !creation.root_created &&
+                 (!state.namespace_missing || creation.namespace_created)},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created,
+             state.namespace_missing && !creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -737,6 +788,9 @@ LessonStorageHilFixtureResult StageLeafFile(
             {&leaf_path, NodeKind::kRegularFile, leaf_created, !leaf_created},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -753,20 +807,19 @@ LessonStorageHilFixtureResult StagePreservation(
     const std::string& sibling_cache_key,
     const std::string& slug
 ) {
-    bool root_missing = false;
-    bool slug_missing = false;
-    const auto parent_code = ValidateParents(slug, &root_missing, &slug_missing);
+    ParentState state;
+    const auto parent_code = ValidateParents(slug, &state);
     if (parent_code != LessonStorageHilFixtureCode::kStaged) {
         return Result(parent_code, false, cache_key, sibling_cache_key);
     }
     const std::string first_leaf = LeafPath(cache_key);
     const std::string second_leaf = LeafPath(sibling_cache_key);
-    const FixtureState first_state = root_missing || slug_missing
+    const FixtureState first_state = state.root_missing || state.slug_missing
                                          ? FixtureState::kMissing
                                          : InspectPreservationLeaf(
                                                first_leaf, kPreservationPrimaryMagic
                                            );
-    const FixtureState second_state = root_missing || slug_missing
+    const FixtureState second_state = state.root_missing || state.slug_missing
                                           ? FixtureState::kMissing
                                           : InspectPreservationLeaf(
                                                 second_leaf,
@@ -791,21 +844,28 @@ LessonStorageHilFixtureResult StagePreservation(
     ParentCreation creation;
     const std::string slug_path = SlugPath(slug);
     const std::string root_path = RootPath();
+    const std::string namespace_path = NamespacePath();
     const std::string first_sentinel =
         JoinPath(first_leaf, kPreservationSentinelName);
     const std::string second_sentinel =
         JoinPath(second_leaf, kPreservationSentinelName);
-    if (!EnsureParents(slug, root_missing, slug_missing, &creation)) {
+    if (!EnsureParents(slug, state, &creation)) {
         const RollbackResult rollback = RollBackCreatedNodes({
             {&slug_path,
              NodeKind::kDirectory,
              creation.slug_created,
-             slug_missing && !creation.slug_created &&
-                 (!root_missing || creation.root_created)},
+             state.slug_missing && !creation.slug_created &&
+                 (!state.namespace_missing || creation.namespace_created) &&
+                 (!state.root_missing || creation.root_created)},
             {&root_path,
              NodeKind::kDirectory,
              creation.root_created,
-             root_missing && !creation.root_created},
+             state.root_missing && !creation.root_created &&
+                 (!state.namespace_missing || creation.namespace_created)},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created,
+             state.namespace_missing && !creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -819,6 +879,9 @@ LessonStorageHilFixtureResult StagePreservation(
             {&first_leaf, NodeKind::kDirectory, false, true},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -841,6 +904,9 @@ LessonStorageHilFixtureResult StagePreservation(
             {&first_leaf, NodeKind::kDirectory, true},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -856,6 +922,9 @@ LessonStorageHilFixtureResult StagePreservation(
             {&first_leaf, NodeKind::kDirectory, true},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -880,6 +949,9 @@ LessonStorageHilFixtureResult StagePreservation(
             {&first_leaf, NodeKind::kDirectory, true},
             {&slug_path, NodeKind::kDirectory, creation.slug_created},
             {&root_path, NodeKind::kDirectory, creation.root_created},
+            {&namespace_path,
+             NodeKind::kDirectory,
+             creation.namespace_created},
         });
         return Result(
             LessonStorageHilFixtureCode::kIoFailed,
@@ -900,21 +972,20 @@ LessonStorageHilFixtureResult CleanupNested(
     const std::string& cache_key,
     const std::string& slug
 ) {
-    bool root_missing = false;
-    bool slug_missing = false;
-    const auto parent_code = ValidateParents(slug, &root_missing, &slug_missing);
+    ParentState state;
+    const auto parent_code = ValidateParents(slug, &state);
     if (parent_code != LessonStorageHilFixtureCode::kStaged) {
         return Result(parent_code, false, cache_key, "");
     }
-    if (root_missing || slug_missing) {
+    if (state.root_missing || state.slug_missing) {
         return Result(LessonStorageHilFixtureCode::kCleaned, false, cache_key, "");
     }
     const std::string leaf_path = LeafPath(cache_key);
-    const FixtureState state = InspectNestedFixture(leaf_path);
-    if (state == FixtureState::kMissing) {
+    const FixtureState fixture_state = InspectNestedFixture(leaf_path);
+    if (fixture_state == FixtureState::kMissing) {
         return Result(LessonStorageHilFixtureCode::kCleaned, false, cache_key, "");
     }
-    if (state == FixtureState::kEmptyPartial) {
+    if (fixture_state == FixtureState::kEmptyPartial) {
         return Result(
             LessonStorageHilFixtureCode::kUnexpectedExistingNode,
             false,
@@ -922,8 +993,8 @@ LessonStorageHilFixtureResult CleanupNested(
             ""
         );
     }
-    if (state != FixtureState::kComplete) {
-        return Result(CodeForState(state), false, cache_key, "");
+    if (fixture_state != FixtureState::kComplete) {
+        return Result(CodeForState(fixture_state), false, cache_key, "");
     }
     const std::string sentinel_path = JoinPath(leaf_path, kNestedSentinelName);
     if (RemoveFixtureDirectory(sentinel_path) != 0) {
@@ -939,22 +1010,21 @@ LessonStorageHilFixtureResult CleanupLeafFile(
     const std::string& cache_key,
     const std::string& slug
 ) {
-    bool root_missing = false;
-    bool slug_missing = false;
-    const auto parent_code = ValidateParents(slug, &root_missing, &slug_missing);
+    ParentState state;
+    const auto parent_code = ValidateParents(slug, &state);
     if (parent_code != LessonStorageHilFixtureCode::kStaged) {
         return Result(parent_code, false, cache_key, "");
     }
-    if (root_missing || slug_missing) {
+    if (state.root_missing || state.slug_missing) {
         return Result(LessonStorageHilFixtureCode::kCleaned, false, cache_key, "");
     }
     const std::string leaf_path = LeafPath(cache_key);
-    const FixtureState state = InspectLeafFileFixture(leaf_path);
-    if (state == FixtureState::kMissing) {
+    const FixtureState fixture_state = InspectLeafFileFixture(leaf_path);
+    if (fixture_state == FixtureState::kMissing) {
         return Result(LessonStorageHilFixtureCode::kCleaned, false, cache_key, "");
     }
-    if (state != FixtureState::kComplete) {
-        return Result(CodeForState(state), false, cache_key, "");
+    if (fixture_state != FixtureState::kComplete) {
+        return Result(CodeForState(fixture_state), false, cache_key, "");
     }
     if (RemoveFixtureFile(leaf_path) != 0) {
         return Result(LessonStorageHilFixtureCode::kIoFailed, false, cache_key, "");
@@ -967,13 +1037,12 @@ LessonStorageHilFixtureResult CleanupPreservation(
     const std::string& sibling_cache_key,
     const std::string& slug
 ) {
-    bool root_missing = false;
-    bool slug_missing = false;
-    const auto parent_code = ValidateParents(slug, &root_missing, &slug_missing);
+    ParentState state;
+    const auto parent_code = ValidateParents(slug, &state);
     if (parent_code != LessonStorageHilFixtureCode::kStaged) {
         return Result(parent_code, false, cache_key, sibling_cache_key);
     }
-    if (root_missing || slug_missing) {
+    if (state.root_missing || state.slug_missing) {
         return Result(
             LessonStorageHilFixtureCode::kCleaned,
             false,
