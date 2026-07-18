@@ -171,7 +171,17 @@ std::string Key(const std::string& slug, int version, char digest) {
 }
 
 fs::path Root() { return TBOT_LESSON_STORAGE_HIL_ROOT; }
+fs::path NamespaceRoot() { return Root().parent_path(); }
+fs::path MountPoint() { return NamespaceRoot().parent_path(); }
 fs::path Leaf(const std::string& key) { return Root() / fs::path(key); }
+
+void ResetBlankMountedCard() {
+    std::error_code error;
+    fs::remove_all(NamespaceRoot(), error);
+    Expect(!error, "blank-card namespace reset failed");
+    fs::create_directories(MountPoint(), error);
+    Expect(!error, "blank-card mount point creation failed");
+}
 
 void ResetRoot() {
     std::error_code error;
@@ -215,6 +225,25 @@ void ExpectNoAbsolutePaths(const LessonStorageHilFixtureResult& result) {
            "result leaked fixed root");
     Expect(result.sibling_cache_key.find("/sdcard") == std::string::npos,
            "sibling result leaked fixed root");
+}
+
+void TestMountedBlankCardCreatesNamespaceHierarchy() {
+    ResetBlankMountedCard();
+    ResetMutationInjection();
+    const std::string key = Key("hil-blank", 1, 'a');
+    const std::string sibling = Key("hil-blank", 2, 'b');
+    auto lease = Lease();
+    const auto staged = StageLessonStorageHilFixture(
+        lease, key, LessonStorageHilFixture::kPreservationSet, sibling
+    );
+    Expect(staged.code == LessonStorageHilFixtureCode::kStaged && staged.changed,
+           "mounted blank card did not stage preservation fixture");
+    Expect(fs::is_directory(NamespaceRoot()), "TBOT namespace was not created");
+    Expect(fs::is_directory(Root()), "lesson-assets root was not created");
+    Expect(fs::is_regular_file(Leaf(key) / ".tbot-hil-sentinel"),
+           "primary preservation sentinel missing");
+    Expect(fs::is_regular_file(Leaf(sibling) / ".tbot-hil-sentinel"),
+           "sibling preservation sentinel missing");
 }
 
 void TestValidationAndLeaseRefusalPrecedeFilesystemAccess() {
@@ -1521,6 +1550,7 @@ void TestInspectionBoundsDirectoryReadCalls() {
 }  // namespace
 
 int main() {
+    TestMountedBlankCardCreatesNamespaceHierarchy();
     TestValidationAndLeaseRefusalPrecedeFilesystemAccess();
     TestNestedDirectoryFixtureIsExactAndNonRecursive();
     TestLeafRegularFileFixtureRequiresExactMagic();

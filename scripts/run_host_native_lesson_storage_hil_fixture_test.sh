@@ -2,7 +2,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tbot-lesson-storage-hil-fixture.XXXXXX")"
-STORAGE_ROOT="${BUILD_DIR}/lesson-assets"
+MOUNT_POINT="${BUILD_DIR}/sdcard"
+STORAGE_ROOT="${MOUNT_POINT}/tbot/lesson-assets"
+mkdir -p "${MOUNT_POINT}"
 trap 'rm -rf "${BUILD_DIR}"' EXIT
 # Intentional word splitting lets callers append normal compiler flags.
 # shellcheck disable=SC2086
