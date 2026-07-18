@@ -233,13 +233,11 @@ bool ValidPinnedAsset(const cJSON* asset, bool require_png) {
 }  // GCOVR_EXCL_LINE: closing brace has no executable statement.
 
 bool MatchesPinnedAsset(const cJSON* scene_asset, const cJSON* pinned_asset) {
-    const char* scene_version = Str(scene_asset, "versionId");
+    const char* scene_key = Str(scene_asset, "key");
     const char* scene_sha = Str(scene_asset, "sha256");
-    const char* scene_media = Str(scene_asset, "mediaType");
-    return scene_version != nullptr && scene_sha != nullptr && scene_media != nullptr &&
-           std::strcmp(scene_version, Str(pinned_asset, "versionId")) == 0 &&
-           std::strcmp(scene_sha, Str(pinned_asset, "sha256")) == 0 &&
-           std::strcmp(scene_media, Str(pinned_asset, "mediaType")) == 0;
+    return scene_key != nullptr && scene_sha != nullptr &&
+           std::strcmp(scene_key, Str(pinned_asset, "versionId")) == 0 &&
+           std::strcmp(scene_sha, Str(pinned_asset, "sha256")) == 0;
 }
 
 bool HasForbiddenMotionExtension(const char* source) {
@@ -268,7 +266,7 @@ bool HasForbiddenMotionMedia(const cJSON* asset) {
         if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch - 'A' + 'a');
     }
     return HasForbiddenMotionExtension(Str(asset, "src")) ||
-           normalized_media.rfind("video/", 0) == 0;
+           normalized_media.rfind("video/", 0) == 0 || normalized_media == "image/gif";
 }
 
 bool ValidTvideoProjection(const cJSON* projection) {

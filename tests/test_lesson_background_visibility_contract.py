@@ -99,10 +99,10 @@ def test_lesson_object_and_robot_overlay_use_safe_composition_layout():
     offset = 0
     while True:
         try:
-            start = source.index("void LcdDisplay::SetLessonRobotOverlay", offset)
+            start = source.index("void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)", offset)
         except ValueError:
             break
-        overlay_bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonRobotOverlay"))
+        overlay_bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)"))
         offset = start + 1
 
     assert len(object_bodies) >= 2
@@ -235,10 +235,10 @@ def test_lesson_robot_overlay_layer_exists_and_stacks_above_object():
     offset = 0
     while True:
         try:
-            start = source.index("void LcdDisplay::SetLessonRobotOverlay", offset)
+            start = source.index("void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)", offset)
         except ValueError:
             break
-        bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonRobotOverlay"))
+        bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)"))
         offset = start + 1
 
     assert len(bodies) >= 2, "both LCD UI variants must implement the robot overlay lesson layer"
@@ -255,7 +255,8 @@ def test_lesson_step_fetches_and_draws_teaching_object_foreground_layer():
     body = function_body(source, "void Application::HandleLessonMessage")
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
-    assert 'const char* object_src = Str(Obj(to, "asset"), "src")' in step_branch
+    assert 'const cJSON* object_asset = Obj(to, "asset")' in step_branch
+    assert 'const char* object_src = Str(object_asset, "src")' in step_branch
     assert "FetchLessonImage(object_src)" in step_branch
     assert "SetLessonObject" in step_branch
     assert "object_drew" in step_branch
@@ -266,7 +267,8 @@ def test_lesson_step_fetches_and_draws_robot_overlay_image_layer():
     body = function_body(source, "void Application::HandleLessonMessage")
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
-    assert 'const char* overlay_src = Str(Obj(ro, "asset"), "src")' in step_branch
+    assert 'const cJSON* overlay_asset = Obj(ro, "asset")' in step_branch
+    assert 'const char* overlay_src = Str(overlay_asset, "src")' in step_branch
     assert "FetchLessonImage(overlay_src)" in step_branch
     assert "SetLessonRobotOverlay" in step_branch
     assert "overlay_drew" in step_branch
@@ -288,7 +290,7 @@ def test_lesson_step_rejects_missing_required_scene_or_poster_before_ack():
     assert 'Blank(object_src)' not in fatal_guard
     assert 'Blank(overlay_src)' not in fatal_guard
     assert 'const bool has_object_src = !Blank(object_src)' in step_branch
-    assert 'const bool has_overlay_src = !Blank(overlay_src)' in step_branch
+    assert 'bool has_overlay_src = !Blank(overlay_src)' in step_branch
     assert 'if (lvgl_display != nullptr && has_object_src)' in step_branch
     assert 'if (lvgl_display != nullptr && has_overlay_src)' in step_branch
     assert guard_idx < error_idx < emit_error_idx < fetch_idx < ack_idx
@@ -403,7 +405,7 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     object_idx = step_branch.index("bool object_drew = false")
     overlay_idx = step_branch.index("bool overlay_drew = false")
     degraded_idx = step_branch.index("const bool degraded =")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms,")
 
     assert poster_idx < object_idx < overlay_idx < degraded_idx < ack_idx
     degraded_expr = step_branch[degraded_idx : step_branch.index(";", degraded_idx)]
@@ -411,6 +413,7 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     assert "object_drew" in degraded_expr
     assert "overlay_drew" in degraded_expr
     assert "false" not in step_branch[ack_idx : step_branch.index(";", ack_idx)]
+    assert "tvideo_degraded ? tvideo_degraded_reason : nullptr" in step_branch[ack_idx : step_branch.index(";", ack_idx)]
 
 def test_lesson_step_ack_rendered_requires_display_surface():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
@@ -419,7 +422,7 @@ def test_lesson_step_ack_rendered_requires_display_surface():
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
     display_idx = step_branch.index("Display* display = base_display;")
     rendered_idx = step_branch.index("const bool rendered = display != nullptr && dynamic_cast<NoDisplay*>(display) == nullptr;")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms,")
 
     assert display_idx < rendered_idx < ack_idx
     assert "emit_ack(root, sequence, /*rendered*/ true, degraded)" not in step_branch
@@ -435,7 +438,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     overlay_idx = step_branch.index("FetchLessonImage(overlay_src)")
     schedule_idx = step_branch.index("Schedule([display, lvgl_display")
     elapsed_idx = step_branch.index("const int64_t render_elapsed_ms =")
-    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms)")
+    ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms,")
     log_idx = step_branch.index("renderElapsedMs=%lld")
 
     assert start_idx < poster_idx < object_idx < overlay_idx < schedule_idx < elapsed_idx < ack_idx < log_idx

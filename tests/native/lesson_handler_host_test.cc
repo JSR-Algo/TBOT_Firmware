@@ -270,9 +270,9 @@ std::string ReplaceOnce(std::string value, const std::string& from, const std::s
 
 std::string TvideoStepFrame(int seq, const std::string& projection,
                             const std::string& overlay_metadata =
-                                "\"versionId\":\"pose-v1\","
+                                "\"key\":\"pose-v1\","
                                 "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
-                                "\"mediaType\":\"image/png\",") {
+                                "") {
     return std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\",\"stepId\":\"tvideo\",\"lessonVersion\":3,\"lessonId\":\"L1\","
@@ -1537,7 +1537,7 @@ void test_step_rejects_authored_motion_media_sources_and_mime_types() {
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() +
            "\",\"stepId\":\"video-mime\",\"sequence\":3,\"body\":{\"profile\":\"" +
            kLessonProfileEspTft + "\",\"scene\":{"
-           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\",\"mediaType\":\"Video/MP4\"}},"
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\",\"mediaType\":\"image/gif\"}},"
            "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.png\"}},"
            "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.png\"}}}}}");
     require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "ASSET_PROFILE_UNAVAILABLE",
@@ -1771,9 +1771,9 @@ void test_tvideo_requires_pinned_arrived_pose_linkage() {
     HostJpegDecodeMode() = 0;
 
     Handle(TvideoStepFrame(3, TvideoProjection(),
-                           "\"versionId\":\"different-pose\","
+                           "\"key\":\"different-pose\","
                            "\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\","
-                           "\"mediaType\":\"image/png\","));
+                           ""));
 
     const size_t ack = Sent().size() - 1;
     require(FrameBodyStr(ack, nullptr, "degradedReason") == "missingOverlay",
