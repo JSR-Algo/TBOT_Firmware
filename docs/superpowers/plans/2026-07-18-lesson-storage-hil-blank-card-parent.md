@@ -373,7 +373,65 @@ Atomically create `/tmp/tbot-task14-hardware.lock`, write a mode-`0600` owner re
 
 - [ ] **Step 2: Revalidate the HIL candidate before mutation**
 
-Re-run the artifact auditor, verify the manifest sidecar, confirm target `esp32s3`, profile `hil`, `lessonStorageHilFaults=true`, and record the candidate app offset `0x20000`. Verify `/dev/cu.usbmodem1101` is the expected attended device.
+The auditor is source-identity-bound. Do not run it from a later documentation
+or evidence commit because it removes the existing manifest pair before it
+rejects a mismatched source commit.
+
+Require a clean tracked tree, then record the current branch and exact HEAD.
+Verify every commit after manifest `sourceCommit`
+`a9da6ccb06eea9b8d135008e6361e1d9c57d2416` is documentation/evidence-only
+for this feature; stop if any production, test, configuration, or build input
+changed. Use the bounded path check as well as reviewing the log and names:
+
+```bash
+SOURCE_COMMIT=a9da6ccb06eea9b8d135008e6361e1d9c57d2416
+test -z "$(git status --porcelain)"
+RECORDED_BRANCH="$(git branch --show-current)"
+RECORDED_HEAD="$(git rev-parse HEAD)"
+test -n "${RECORDED_BRANCH}"
+git log --oneline --reverse "${SOURCE_COMMIT}..${RECORDED_HEAD}"
+git diff --name-status "${SOURCE_COMMIT}..${RECORDED_HEAD}"
+test -z "$(
+  git diff --name-only "${SOURCE_COMMIT}..${RECORDED_HEAD}" |
+    rg -v '^(docs/evidence/lesson-storage-hil-blank-card-parent.md|docs/superpowers/plans/2026-07-18-lesson-storage-hil-blank-card-parent.md)$' || true
+)"
+```
+
+Detach this same worktree at the manifest `sourceCommit` and run:
+
+```bash
+git switch --detach "${SOURCE_COMMIT}"
+test -z "$(git status --porcelain)"
+python3 scripts/assert_lesson_storage_hil_artifacts.py \
+  --build-dir build-task14-hil-blank-parent \
+  --profile hil
+cd build-task14-hil-blank-parent
+shasum -a 256 -c lesson-storage-hil-build.sha256
+cd ..
+```
+
+Against the existing build directory, require auditor exit `0`, verify the
+published sidecar, and require the immutable manifest, binary, ELF, profile,
+target, HIL configuration, tool literal, symbol, and partition fields to match
+the recorded candidate. Do not rebuild. Return to the recorded branch and
+exact HEAD, then re-check the clean tracked tree and all immutable hashes. Stop
+on any detach/return failure, source mismatch, dirty state, missing pair, hash
+mismatch, or manifest-field mismatch.
+
+```bash
+git switch "${RECORDED_BRANCH}"
+test "$(git rev-parse HEAD)" = "${RECORDED_HEAD}"
+test -z "$(git status --porcelain)"
+shasum -a 256 \
+  build-task14-hil-blank-parent/lesson-storage-hil-build.json \
+  build-task14-hil-blank-parent/lesson-storage-hil-build.sha256 \
+  build-task14-hil-blank-parent/xiaozhi.bin \
+  build-task14-hil-blank-parent/xiaozhi.elf
+```
+
+Only after that source-correct validation, confirm target `esp32s3`, profile
+`hil`, `lessonStorageHilFaults=true`, and candidate app offset `0x20000`.
+Verify `/dev/cu.usbmodem1101` is the expected attended device.
 
 - [ ] **Step 3: Flash only the HIL application image**
 

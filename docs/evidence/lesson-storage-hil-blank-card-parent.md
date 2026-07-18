@@ -12,7 +12,7 @@
 - Evidence SHA-256: `736a30029c4d01732dd5680cb442aad24b4b748749eefeb03c75c723744d4688`.
 - Live fixture response: `status=io_failed`, `changed=false`.
 - Recovery result: `status=RECOVERY_FAILED`, `errorCode=FIXTURE_STAGE_FAILED`, `coldStarted=false`.
-- Root cause: the replacement card mounted successfully but was blank and did not contain `/sdcard/tbot`. The implementation used direct, non-recursive `mkdir` through `CreateFixtureDirectory` on `/sdcard/tbot/lesson-assets`; because the `/sdcard/tbot` parent was absent, fixture staging returned `io_failed` without reporting a mutation.
+- Failure-mode match: the live JSON proves only `status=io_failed` and `changed=false`; it does not independently prove mount state or the absence of `/sdcard/tbot`. The code at `36d9591` and its native RED prove that a blank mounted namespace, where `/sdcard/tbot` is absent, makes the direct non-recursive `mkdir` of `/sdcard/tbot/lesson-assets` fail with that same response. The blank-parent defect is therefore the evidence-supported explanation for the live failure, not a fact established by the recovery JSON alone.
 
 ## RED And GREEN Software Evidence
 
@@ -106,6 +106,32 @@ exit 0
 - SDK config: `sdkconfig`, `126061` bytes, SHA-256 `49ce8f7fd793bd6df552c73c79f6eb1c9e3c0ae640941e1d3b0384caa98160ef`.
 - Partition: `partitions/v2/16m.csv`, `4128768` bytes; image `3652688` bytes; free `476080` bytes (`11.5308%`).
 
+### Source-Correct Manifest Restoration Review
+
+During review at documentation commit `d466d0285c2654eec566482ae5c42aa1318e22d1`, the generated manifest pair was found absent while the tracked tree was clean. The current branch and HEAD were recorded, and `git diff --name-status a9da6cc..d466d02` showed only the added evidence document; `POST_A9DA_DOCS_ONLY=PASS` confirmed no firmware, tests, configuration, or build inputs changed after the candidate source commit.
+
+The same worktree was detached at `a9da6ccb06eea9b8d135008e6361e1d9c57d2416` and the existing build directory was audited without rebuilding:
+
+```text
+DETACHED_HEAD=a9da6ccb06eea9b8d135008e6361e1d9c57d2416
+DETACHED_STATUS=
+python3 scripts/assert_lesson_storage_hil_artifacts.py --build-dir build-task14-hil-blank-parent --profile hil
+lesson storage HIL artifact audit: PASS profile=hil commit=a9da6ccb06eea9b8d135008e6361e1d9c57d2416
+lesson-storage-hil-build.json: OK
+DETACHED_MANIFEST_FIELDS=PASS
+```
+
+The regenerated publication matched the original immutable identities exactly:
+
+```text
+manifestSha256=73bbbf65c9fbf4c0d90cb37cbcc813add440c4250c43fec131856833f16ebeac
+sidecarFileSha256=d4d807ad8f0c53e329ef09acec62bca7ed6c8800c29d8928daadc9cecf3d547d
+binSha256=6713e2fb0ead658fc61ecb2366bbd54d1caf017a77b38682dca9bbbc5910ee1a
+elfSha256=128cff2de46bf82ed63955babaee1ff0983ebd5ac1513e463839e3322bac4ee9
+```
+
+The worktree then returned to branch `feature/production-lesson-studio-continued` at exact HEAD `d466d0285c2654eec566482ae5c42aa1318e22d1` with a clean tracked status. Candidate durability caveat: this generated publication is deliberately bound to `sourceCommit=a9da6cc`; running the auditor from a later documentation/evidence HEAD can remove the pair before rejecting the source mismatch. Preflash validation must use the source-correct detach/audit/return procedure in Task 6 and must not rebuild the candidate.
+
 Candidate identity is the immutable tuple:
 
 ```text
@@ -130,7 +156,9 @@ The build and manifest pair remain generated, ignored, and uncommitted under `bu
 
 ## Review Gates
 
-- The source tree was clean at `a9da6cc` before build and during the successful artifact audit.
-- `git diff --check` is required to exit `0` for this evidence change.
-- The credential-pattern scan covers the touched firmware sources and this evidence document and is required to return no matches.
+- The source tree was clean at `a9da6cc` before build, during the original successful audit, and during the detached restoration audit.
+- `git diff --check` completed with exit `0` for the original evidence commit.
+- The original credential-pattern scan covered the touched firmware sources and evidence document and completed with `SECRET_SCAN=PASS no matches`.
+- The detached review sidecar check completed with `lesson-storage-hil-build.json: OK`; exact manifest fields completed with `DETACHED_MANIFEST_FIELDS=PASS`.
+- The documentation correction review completed `git diff --check` with exit `0`, scanned the touched firmware sources, plan, and evidence with `SECRET_SCAN=PASS no matches`, reverified the sidecar with `lesson-storage-hil-build.json: OK`, and rechecked the immutable candidate with `MANIFEST_EXACT_FIELDS=PASS`.
 - A live result remains pending an attended HIL reflash and recovery run; this document does not authorize or claim that hardware step.
