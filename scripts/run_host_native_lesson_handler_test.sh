@@ -39,6 +39,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \
     "${BUILD_DIR}/src/lesson_layer_state.cc" \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \
+    main/lesson_tvideo_template.cc \
     main/json_payload_safety.cc \
     "${BUILD_DIR}/cJSON.o" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
