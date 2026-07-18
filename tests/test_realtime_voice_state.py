@@ -208,6 +208,54 @@ def test_screen_snapshot_is_rejected_while_lesson_runtime_active():
     assert snapshot_body.index("IsLessonRuntimeActive()") < snapshot_body.index("SnapshotToJpeg")
 
 
+def test_lesson_snapshot_requires_explicit_opt_in_argument():
+    mcp_cc = read("main/mcp_server.cc")
+
+    snapshot_start = mcp_cc.index('AddUserOnlyTool("self.screen.snapshot"')
+    preview_start = mcp_cc.index('AddUserOnlyTool("self.screen.preview_image"', snapshot_start)
+    snapshot_body = mcp_cc[snapshot_start:preview_start]
+
+    assert 'Property("allowDuringLesson", kPropertyTypeBoolean, false)' in snapshot_body
+    assert 'properties["allowDuringLesson"].value<bool>()' in snapshot_body
+    assert "IsLessonRuntimeActive() && !allow_during_lesson" in snapshot_body
+    assert "screen snapshot disabled during lesson" in snapshot_body
+
+
+def test_lesson_runtime_allows_only_explicit_snapshot_before_scheduling():
+    mcp_cc = read("main/mcp_server.cc")
+
+    assert "bool IsLessonSnapshotEvidenceCall(" in mcp_cc
+    helper_start = mcp_cc.index("bool IsLessonSnapshotEvidenceCall(")
+    helper_end = mcp_cc.index("\n}", helper_start)
+    helper = mcp_cc[helper_start:helper_end]
+    assert 'tool_name != "self.screen.snapshot"' in helper
+    assert 'cJSON_GetObjectItem(tool_arguments, "allowDuringLesson")' in helper
+    assert "cJSON_IsTrue(allow_during_lesson)" in helper
+
+    start = mcp_cc.index("void McpServer::DoToolCall")
+    body = mcp_cc[start:]
+    before_schedule = body[: body.index("app.Schedule(")]
+    assert "const bool lesson_tool_allowed =" in before_schedule
+    assert "IsLessonSnapshotEvidenceCall(tool_name, tool_arguments)" in before_schedule
+    assert "!lesson_tool_allowed &&" in before_schedule
+    assert "Application::GetInstance().IsLessonRuntimeActive()" in before_schedule
+
+
+def test_lesson_snapshot_allowance_is_rechecked_after_scheduling():
+    mcp_cc = read("main/mcp_server.cc")
+
+    start = mcp_cc.index("void McpServer::DoToolCall")
+    body = mcp_cc[start:]
+    scheduled = body[body.index("app.Schedule(") :]
+
+    assert "lesson_tool_allowed" in scheduled.split("]()", 1)[0]
+    assert "if (!lesson_tool_allowed &&" in scheduled
+    assert "scheduled MCP tool call rejected during lesson" in scheduled
+    assert scheduled.index("if (!lesson_tool_allowed &&") < scheduled.index(
+        "(*tool_iter)->Call(arguments)"
+    )
+
+
 def test_lesson_runtime_rejects_mcp_tool_calls_before_scheduling():
     mcp_cc = read("main/mcp_server.cc")
 
