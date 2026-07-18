@@ -369,7 +369,24 @@ git commit -m "docs(firmware): record blank-card HIL candidate evidence"
 
 - [ ] **Step 1: Acquire the hardware lock for HIL app reflash**
 
-Atomically create `/tmp/tbot-task14-hardware.lock`, write a mode-`0600` owner record, and install a trap that releases only the owned lock inode. Stop if the lock exists. Refresh/source the authorized credential files without printing values.
+Atomically create lock directory `/tmp/tbot-task14-hardware.lock`, write its
+mode-`0600` regular-file owner record, and install an outer-shell trap that
+releases only the owned lock-directory inode. Stop if the lock exists.
+Refresh/source the authorized credential files without printing values. Leave
+these exact lease variables set in the outer shell for Step 2:
+
+```bash
+HARDWARE_LOCK_DIR=/tmp/tbot-task14-hardware.lock
+HARDWARE_LOCK_OWNER_FILE="${HARDWARE_LOCK_DIR}/owner"
+HARDWARE_LOCK_DIR_INODE="$(stat -f '%i' "${HARDWARE_LOCK_DIR}")"
+HARDWARE_LOCK_OWNER_INODE="$(stat -f '%i' "${HARDWARE_LOCK_OWNER_FILE}")"
+HARDWARE_LOCK_OWNER_SHA256="$(
+  shasum -a 256 "${HARDWARE_LOCK_OWNER_FILE}" | awk '{print $1}'
+)"
+export HARDWARE_LOCK_DIR HARDWARE_LOCK_OWNER_FILE
+export HARDWARE_LOCK_DIR_INODE HARDWARE_LOCK_OWNER_INODE
+export HARDWARE_LOCK_OWNER_SHA256
+```
 
 - [ ] **Step 2: Revalidate the HIL candidate before mutation**
 
@@ -383,6 +400,34 @@ paths after detaching, and treats every identity comparison as an executable
 assertion. Do not rebuild.
 
 ```bash
+set -euo pipefail
+
+: "${HARDWARE_LOCK_DIR:?Step 1 lock directory is required}"
+: "${HARDWARE_LOCK_OWNER_FILE:?Step 1 owner record is required}"
+: "${HARDWARE_LOCK_DIR_INODE:?Step 1 lock inode is required}"
+: "${HARDWARE_LOCK_OWNER_INODE:?Step 1 owner inode is required}"
+: "${HARDWARE_LOCK_OWNER_SHA256:?Step 1 owner identity is required}"
+OUTER_LOCK_EXIT_TRAP="$(trap -p EXIT)"
+test -n "${OUTER_LOCK_EXIT_TRAP}"
+
+assert_owned_hardware_lock() {
+  test -d "${HARDWARE_LOCK_DIR}"
+  test ! -L "${HARDWARE_LOCK_DIR}"
+  test "$(stat -f '%i' "${HARDWARE_LOCK_DIR}")" = \
+    "${HARDWARE_LOCK_DIR_INODE}"
+  test -f "${HARDWARE_LOCK_OWNER_FILE}"
+  test ! -L "${HARDWARE_LOCK_OWNER_FILE}"
+  test "$(stat -f '%Lp' "${HARDWARE_LOCK_OWNER_FILE}")" = 600
+  test "$(stat -f '%i' "${HARDWARE_LOCK_OWNER_FILE}")" = \
+    "${HARDWARE_LOCK_OWNER_INODE}"
+  test "$(
+    shasum -a 256 "${HARDWARE_LOCK_OWNER_FILE}" | awk '{print $1}'
+  )" = "${HARDWARE_LOCK_OWNER_SHA256}"
+}
+
+assert_owned_hardware_lock
+
+(
 set -euo pipefail
 
 SOURCE_COMMIT=a9da6ccb06eea9b8d135008e6361e1d9c57d2416
@@ -445,6 +490,7 @@ python3 scripts/assert_lesson_storage_hil_artifacts.py \
 python3 - "${BUILD_DIR}" <<'PY'
 import hashlib
 import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -468,6 +514,44 @@ assert manifest["checks"] == {
     "hilSymbols": "present",
     "toolLiterals": "present",
 }
+
+flasher_args = json.loads((build_dir / "flasher_args.json").read_text())
+assert flasher_args["app"] == {
+    "offset": "0x20000",
+    "file": "xiaozhi.bin",
+    "encrypted": "false",
+}
+flash_files = [
+    (int(offset, 0), path)
+    for offset, path in flasher_args["flash_files"].items()
+]
+assert [entry for entry in flash_files if entry[1] == "xiaozhi.bin"] == [
+    (0x20000, "xiaozhi.bin")
+]
+
+tokens = shlex.split((build_dir / "flash_app_args").read_text())
+app_mappings = []
+index = 0
+while index < len(tokens):
+    token = tokens[index]
+    if token.startswith("--"):
+        assert index + 1 < len(tokens)
+        index += 2
+        continue
+    assert index + 1 < len(tokens)
+    app_mappings.append((int(token, 0), tokens[index + 1]))
+    index += 2
+assert app_mappings == [(0x20000, "xiaozhi.bin")]
+
+app_path = Path(flasher_args["app"]["file"])
+assert not app_path.is_absolute()
+assert app_path.parts == ("xiaozhi.bin",)
+build_root = build_dir.resolve(strict=True)
+candidate = build_dir / app_path
+assert not candidate.is_symlink()
+candidate_resolved = candidate.resolve(strict=True)
+assert candidate_resolved == build_root / "xiaozhi.bin"
+assert build_root in candidate_resolved.parents
 
 for label, expected_bytes, expected_sha in (
     (
@@ -508,6 +592,12 @@ test "$(wc -c < "${BUILD_DIR}/xiaozhi.bin" | tr -d ' ')" = "${BIN_BYTES}"
 test "$(shasum -a 256 "${BUILD_DIR}/xiaozhi.bin" | awk '{print $1}')" = "${BIN_SHA}"
 test "$(wc -c < "${BUILD_DIR}/xiaozhi.elf" | tr -d ' ')" = "${ELF_BYTES}"
 test "$(shasum -a 256 "${BUILD_DIR}/xiaozhi.elf" | awk '{print $1}')" = "${ELF_SHA}"
+)
+
+# The Step 1 cleanup trap remains installed in the outer shell. Re-attest the
+# exact owned lease after the source-validation subshell and before any flash.
+test "$(trap -p EXIT)" = "${OUTER_LOCK_EXIT_TRAP}"
+assert_owned_hardware_lock
 ```
 
 Only after that source-correct validation, confirm target `esp32s3`, profile
@@ -516,7 +606,14 @@ Verify `/dev/cu.usbmodem1101` is the expected attended device.
 
 - [ ] **Step 3: Flash only the HIL application image**
 
-Use ESP-IDF's pinned esptool from the current environment to write only the candidate `xiaozhi.bin` at `0x20000`. Preserve bootloader, partition table, NVS, and OTA data. Capture command, start/end UTC, exit code, and redacted esptool log. Release the flash lock on every terminal path.
+Use ESP-IDF's pinned esptool from the current environment to write only the
+confined candidate `xiaozhi.bin` at the exact `0x20000` mapping proven by Step
+2. Do not pass the full `flasher_args.json`/`flash_args` map and do not include
+any other offset or image. Immediately before invoking esptool, run
+`assert_owned_hardware_lock` again in the outer shell. Preserve bootloader,
+partition table, NVS, OTA data, and assets. Capture command, start/end UTC,
+exit code, and redacted esptool log. Release the flash lock on every terminal
+path.
 
 - [ ] **Step 4: Attest the running HIL image**
 
