@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "contract": "staticFallbackImmediateRevealParity",
+  "managerFiles": {
+    "layouts": "main/manager-web/src/components/lesson/tvideo-layout-presets.js",
+    "preview": "main/manager-web/src/components/lesson/TvideoJourneyPreview.vue"
+  },
+  "fallbackPhase": "arriveNear",
+  "revealPhase": "revealTeachingContent",
+  "behaviorCases": [
+    {
+      "phase": "arriveNear",
+      "staticFallback": true,
+      "contentVisible": true
+    },
+    {
+      "phase": "arriveNear",
+      "staticFallback": false,
+      "contentVisible": false
+    },
+    {
+      "phase": "revealTeachingContent",
+      "staticFallback": false,
+      "contentVisible": true
+    }
+  ],
+  "fallbackRequestedPhases": [
+    "hidden",
+    "flyIn",
+    "greetIdle",
+    "revealTeachingContent"
+  ],
+  "componentRequirements": {
+    "visibilityHelper": "isTeachingContentVisible",
+    "effectivePhaseHelper": "effectivePreviewPhaseName",
+    "fallbackPauseExpression": "this.paused = this.fallback;"
+  }
+}
