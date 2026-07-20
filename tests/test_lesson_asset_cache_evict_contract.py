@@ -195,13 +195,15 @@ def test_eviction_tool_has_exact_six_field_envelope_and_runtime_bypass():
 
     dispatch = source[source.index("void McpServer::DoToolCall(") :]
     assert 'tool_name == "self.lesson_assets.evict_cache_key"' in dispatch
-    assert dispatch.count("is_lesson_cache_evict") >= 3
+    assert dispatch.count("is_lesson_cache_evict") >= 2
+    assert "const bool lesson_tool_allowed =" in dispatch
+    assert "is_lesson_cache_evict ||" in dispatch
     immediate_guard = dispatch.index("Application::GetInstance().IsLessonRuntimeActive()")
-    assert dispatch.rfind("is_lesson_cache_evict", 0, immediate_guard) != -1
+    assert dispatch.rfind("lesson_tool_allowed", 0, immediate_guard) != -1
     scheduled_guard = dispatch.index(
         "Application::GetInstance().IsLessonRuntimeActive()", immediate_guard + 1
     )
-    assert dispatch.rfind("is_lesson_cache_evict", 0, scheduled_guard) != -1
+    assert dispatch.rfind("lesson_tool_allowed", 0, scheduled_guard) != -1
 
 
 def test_eviction_owns_directories_and_preallocates_before_mutation():

@@ -19,6 +19,7 @@
 #include "lesson_motion_presets.h"
 #include "lesson_layer_state.h"
 #include "system_info.h"
+#include "lesson_tvideo_template.h"
 // US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
 // SetLessonBackground (the new persistent full-screen draw) and LvglAllocatedImage is
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
@@ -384,6 +385,7 @@ struct LessonSession {
     bool        paused             = false;
     bool        first_lesson_step_seen = false;
     bool        motion_presets_enabled = false;
+    bool        tvideo_entrance_consumed = false;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
     // processed inbound sequence, so a duplicate re-ack can REPLAY the prior ack body
     // idempotently (protocol §6 / lesson-robot-protocol.md:436-438) instead of
@@ -1143,6 +1145,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (robot_state != nullptr) {
             cJSON_AddStringToObject(b, "robotState", robot_state);
         }
+        if (degraded_reason != nullptr && degraded_reason[0] != '\0') {
+            cJSON_AddStringToObject(b, "degradedReason", degraded_reason);
+        }
         if (render_elapsed_ms >= 0) {
             cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));
         }
@@ -1809,6 +1814,46 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 tvideo_arrived_bounds = geometry->robot;
                 tvideo_use_bounds = true;
             }
+=======
+    if (tvideo_projection != nullptr && !g_session.tvideo_entrance_consumed) {
+        g_session.tvideo_entrance_consumed = true;
+        double template_version = 0;
+        double geometry_version = 0;
+        const char* template_id = Str(tvideo_projection, "templateId");
+        const char* layout_preset = Str(tvideo_projection, "layoutPreset");
+        const char* fallback_policy = Str(tvideo_projection, "fallbackPolicy");
+        const bool named_fallback = fallback_policy != nullptr &&
+            strcmp(fallback_policy, "snapToArriveNearAndReveal") == 0;
+        const bool has_template_version = Num(tvideo_projection, "templateVersion", template_version);
+        const bool has_geometry_version = Num(tvideo_projection, "geometryVersion", geometry_version);
+        uint8_t template_version_u8 = 0;
+        uint8_t geometry_version_u8 = 0;
+        const bool versions_valid = has_template_version && has_geometry_version &&
+            lesson_tvideo::ExactVersion(template_version, &template_version_u8) &&
+            lesson_tvideo::ExactVersion(geometry_version, &geometry_version_u8);
+
+        // The current renderer has no atlas blitter. Feed atlas_available=false so
+        // the bounded state machine takes its reviewed static arrived-pose fallback,
+        // reveals teaching content immediately, and never blocks voice/progress.
+        lesson_tvideo::StateMachine tvideo({
+            template_id,
+            versions_valid ? template_version_u8 : static_cast<uint8_t>(0),
+            layout_preset,
+            versions_valid ? geometry_version_u8 : static_cast<uint8_t>(0),
+            has_overlay_src,
+            false,
+            false,
+        });
+        tvideo_degraded = !named_fallback ||
+            tvideo.degraded_reason() != lesson_tvideo::DegradedReason::kNone;
+        tvideo_degraded_reason = !named_fallback
+            ? "unsupportedFallbackPolicy"
+            : lesson_tvideo::DegradedReasonName(tvideo.degraded_reason());
+        if (const lesson_tvideo::LayoutGeometry* geometry =
+                lesson_tvideo::ArrivedGeometry(layout_preset, versions_valid ? geometry_version_u8 : 0)) {
+            tvideo_arrived_bounds = geometry->robot;
+            tvideo_use_bounds = true;
+>>>>>>> goal1/preview-snapshot-tvideo-compat
         }
         ESP_LOGI(TAG, "lesson_step tvideo fallback reveal=%d degraded=%d reason=%s",
                  tvideo.content_visible(), tvideo_degraded, tvideo_degraded_reason);
@@ -2035,13 +2080,22 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool clear_object = !object_drew;
         const bool clear_overlay = !overlay_drew;
         Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
-                  tvideo_use_bounds,
-                  has_visible_content, cap = caption, word = normalized_teaching_word]() {
+                  tvideo_use_bounds, tvideo_arrived_bounds,
+                  has_visible_content, cap = caption,
+                  word = normalized_teaching_word]() {
             if (lvgl_display) lvgl_display->SetLessonMode(has_visible_content);
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
+            if (lvgl_display) {
+                if (tvideo_use_bounds) {
+                    lvgl_display->SetLessonRobotOverlayBounds(
+                        tvideo_arrived_bounds.left, tvideo_arrived_bounds.top,
+                        tvideo_arrived_bounds.width, tvideo_arrived_bounds.height);
+                } else {
+                    lvgl_display->SetLessonRobotOverlayBounds(0, 0, 0, 0);
+                }
+            }
             if (clear_overlay && lvgl_display) {
-                if (!tvideo_use_bounds) lvgl_display->SetLessonRobotOverlayBounds(0, 0, 0, 0);
                 lvgl_display->SetLessonRobotOverlay(nullptr);
             }
             if (lvgl_display) lvgl_display->SetLessonTeachingWord(word.c_str());

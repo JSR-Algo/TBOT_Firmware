@@ -111,6 +111,18 @@ const char* JsonStringField(const cJSON* object, const char* key) {
     return cJSON_IsString(value) ? value->valuestring : nullptr;
 }
 
+bool IsLessonSnapshotEvidenceCall(
+    const std::string& tool_name,
+    const cJSON* tool_arguments
+) {
+    if (tool_name != "self.screen.snapshot" || !cJSON_IsObject(tool_arguments)) {
+        return false;
+    }
+    const cJSON* allow_during_lesson =
+        cJSON_GetObjectItem(tool_arguments, "allowDuringLesson");
+    return cJSON_IsTrue(allow_during_lesson);
+}
+
 struct ValidatedLessonAsset {
     const char* key;
     const char* path;
@@ -632,12 +644,14 @@ void McpServer::AddUserOnlyTools() {
         AddUserOnlyTool("self.screen.snapshot", "Snapshot the screen and upload it to a specific URL",
             PropertyList({
                 Property("url", kPropertyTypeString),
-                Property("quality", kPropertyTypeInteger, 80, 1, 100)
+                Property("quality", kPropertyTypeInteger, 80, 1, 100),
+                Property("allowDuringLesson", kPropertyTypeBoolean, false)
             }),
             [display](const PropertyList& properties) -> ReturnValue {
                 auto url = properties["url"].value<std::string>();
                 auto quality = properties["quality"].value<int>();
-                if (Application::GetInstance().IsLessonRuntimeActive()) {
+                auto allow_during_lesson = properties["allowDuringLesson"].value<bool>();
+                if (Application::GetInstance().IsLessonRuntimeActive() && !allow_during_lesson) {
                     throw std::runtime_error("screen snapshot disabled during lesson");
                 }
 
@@ -1243,7 +1257,10 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
     const bool is_lesson_cache_evict =
         tool_name == "self.lesson_assets.evict_cache_key";
-    if (!is_lesson_cache_evict &&
+    const bool lesson_tool_allowed =
+        is_lesson_cache_evict ||
+        IsLessonSnapshotEvidenceCall(tool_name, tool_arguments);
+    if (!lesson_tool_allowed &&
         Application::GetInstance().IsLessonRuntimeActive()) {
         ESP_LOGI(TAG, "MCP tool call rejected during lesson: %s", tool_name.c_str());
         ReplyError(id, "MCP tools disabled during lesson");
@@ -1292,12 +1309,12 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
     // Use main thread to call the tool
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool_iter, tool_name, is_lesson_cache_evict,
+    app.Schedule([this, id, tool_iter, tool_name, lesson_tool_allowed,
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
                   is_lesson_storage_hil,
 #endif
                   arguments = std::move(arguments)]() {
-        if (!is_lesson_cache_evict &&
+        if (!lesson_tool_allowed &&
             Application::GetInstance().IsLessonRuntimeActive()) {
             ESP_LOGI(TAG, "scheduled MCP tool call rejected during lesson: %s", tool_name.c_str());
             ReplyError(id, "MCP tools disabled during lesson");

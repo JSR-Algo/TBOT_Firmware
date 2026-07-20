@@ -418,8 +418,11 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     degraded_expr = step_branch[degraded_idx : step_branch.index(";", degraded_idx)]
     assert "motion_degraded" in degraded_expr
     assert "render_degraded" in degraded_expr
-    assert "false" not in step_branch[ack_idx : step_branch.index(";", ack_idx)]
-    assert "tvideo_degraded ? tvideo_degraded_reason : nullptr" in step_branch[ack_idx : step_branch.index(";", ack_idx)]
+    assert "tvideo_degraded" in degraded_expr
+    ack_expr = step_branch[ack_idx : step_branch.index(";", ack_idx)]
+    assert "telemetry" in ack_expr
+    assert "tvideo_degraded ? tvideo_degraded_reason : nullptr" in ack_expr
+    assert "false" not in ack_expr
 
 def test_lesson_step_ack_rendered_requires_display_surface():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")

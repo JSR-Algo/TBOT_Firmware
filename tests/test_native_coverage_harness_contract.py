@@ -120,3 +120,9 @@ def test_host_native_lesson_runner_compiles_real_renderer_and_enforces_line_cove
     assert "--coverage" in script
     assert "--filter '.*lesson_handler\\.cc'" in script
     assert "--fail-under-line 100" in script
+
+
+def test_host_native_lesson_handler_runner_links_tvideo_template_implementation():
+    script = read("scripts/run_host_native_lesson_handler_test.sh")
+
+    assert "main/lesson_tvideo_template.cc" in script

@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "status": "SOFTWARE_READY_HARDWARE_DEFERRED",
+  "preparedAt": "2026-07-18T17:49:56Z",
+  "scope": "Goal-1 software-only preview parity",
+  "safety": {
+    "hardwareActionsPerformed": false,
+    "hardwareLockAccessed": false,
+    "robotAccessed": false,
+    "serialAccessed": false,
+    "sdAccessed": false,
+    "goal2EvidenceConsumed": false,
+    "testMatrixEdited": false,
+    "parentGoalEdited": false
+  },
+  "revisions": {
+    "goal1SoftwareCommit": "4537992c4e42bdef4e6741ed7672a8bc8a60410e",
+    "managerCommit": "c1f10742ea2841bc015f1f54e78679394503a948",
+    "backendCommit": "4f4a8e9fa72734e7cfc3a5dd943782f6b2937048"
+  },
+  "softwareBlockers": [
+    {
+      "id": "immutableManagerObjectSource",
+      "status": "PASS",
+      "evidence": "Regression tests discover the canonical manager repository or accept TBOT_ESP32_SERVER_REPO; no archived Template worktree is required."
+    },
+    {
+      "id": "staleComposeAssetOrigin",
+      "status": "PASS",
+      "evidence": "The checker requires fail-closed LESSON_ASSET_ORIGIN_BASE binding, rejects the known stale origin, and requires content-addressed manifest URLs to match the attested preview origin."
+    },
+    {
+      "id": "deterministicLocalProductionFixtureBootstrap",
+      "status": "PASS",
+      "evidence": "Immutable backend source contains production-farm-english-358, pip-farm-${durationMinutes}m, and deterministic --check, --output, and --asset-origin-root hooks. The checker atomically emits a sample-disabled local Compose env with distinct origin and runtime public-cache bases."
+    },
+    {
+      "id": "browserPreviewContract",
+      "status": "PASS",
+      "evidence": "The exact published version-2 manifest and browser preview are attested at 480x320 with BARN, correct outcome, non-empty geometry and motion timeline, 20 content-addressed assets, and zero recorded browser errors."
+    },
+    {
+      "id": "softwareEvidenceTooling",
+      "status": "PASS",
+      "evidence": "A standalone offline checker validates immutable revisions, Compose and fixture contracts, artifact hashes, PNG dimensions, manifest identity, asset origins, geometry, word, outcome, timeline, and deterministic bootstrap output."
+    }
+  ],
+  "readinessCheck": {
+    "check": "lessonPreviewSoftwareReadiness",
+    "status": "PASS",
+    "manifestChecksum": "6e44a135a457f78806e39ddf77a66c8af353fc508d2c879e0b2aa92dffd22b79",
+    "assetCount": 20,
+    "preview": {
+      "width": 480,
+      "height": 320,
+      "word": "BARN"
+    },
+    "composeEnvSha256": "738106b87b2912a39090830af6ad7fe3513b779ae5f495c2244ff0e2be07827d",
+    "knownStaleOriginNegativeProof": {
+      "exitCode": 1,
+      "status": "FAIL",
+      "reason": "expected asset origin is stale"
+    }
+  },
+  "artifactHashes": {
+    "checkerSha256": "849b05b364eb4ad7597f4f83a858281d3f591ed618bf64f18216d5b38c84ab5e",
+    "contractSha256": "deaf800b7928fae84189d69cde60539ab5ef6cfc81cd39a5af28717084991d8a",
+    "checkerTestSha256": "f2d3b089252ff68085788641c069925aa8a7b31dbd5f15ced3ac3cf870ffd974",
+    "previewJsonSha256": "1f1a26c5fbb559bc5a0897bd499d2c015731c119cdde57162e8f4e30335f0e14",
+    "previewPngSha256": "f5ab7c5ea2659bc43506876b9d303c4540f5f28115fb48fce9629b3bc372aae5",
+    "publishedManifestSha256": "c63df97e93f0e360231d40d60a2d15aec9c38f8c6754475821e503bb71cad414"
+  },
+  "verification": [
+    {
+      "command": "python3 -m pytest tests/test_tvideo_static_fallback_parity_checker.py tests/test_tvideo_teaching_word_parity_checker.py tests/test_lesson_preview_software_readiness_checker.py -q",
+      "result": "PASS: 9 passed"
+    },
+    {
+      "command": "bash scripts/run_host_native_lesson_tvideo_template_test.sh",
+      "result": "PASS: 33 checks"
+    },
+    {
+      "command": "python3 -m py_compile scripts/check_lesson_preview_software_readiness.py tests/test_lesson_preview_software_readiness_checker.py",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 scripts/check_lesson_preview_software_readiness.py --contract tests/fixtures/lesson-preview-software-readiness.json --manager-repo <canonical-manager-repo> --backend-repo <canonical-backend-repo> --evidence-dir <exact-preview-directory> --compose-env-out <local-env-path>",
+      "result": "PASS"
+    }
+  ],
+  "deferredLiveParity": [
+    "Receive a direct coordinator handoff proving Goal 2 PASS and hardware authority.",
+    "Promote the exact reviewed manifest to the coordinator-designated hardware stack without changing its projection.",
+    "Acquire the canonical hardware lock atomically before any robot, serial, SD, flash, or device API access.",
+    "Flash and attest the combined firmware only after the explicit Goal 2 handoff.",
+    "Capture a real robot JPEG at exactly 480x320 through the reviewed receiver.",
+    "Export hardware geometry, teaching word, path outcome, and motion timeline from real evidence.",
+    "Run the authoritative preview-parity verifier and require exit 0 with status PASS.",
+    "Update the final lesson-preview-parity evidence only after the real hardware verifier passes."
+  ]
+}

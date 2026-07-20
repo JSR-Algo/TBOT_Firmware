@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "contract": "tvideoTeachingWordParity",
+  "managerFile": "main/manager-web/src/components/lesson/RobotLessonPreview.vue",
+  "cases": [
+    {
+      "body": {
+        "teachingWord": {
+          "text": "BARN",
+          "displayText": "BARN"
+        }
+      },
+      "currentStep": {
+        "subject": "barn"
+      },
+      "expected": "BARN"
+    },
+    {
+      "body": {
+        "teachingWord": {
+          "text": "COW"
+        }
+      },
+      "currentStep": {
+        "subject": "cow"
+      },
+      "expected": "COW"
+    },
+    {
+      "body": {},
+      "currentStep": {
+        "subject": "barn"
+      },
+      "expected": "barn"
+    }
+  ]
+}
