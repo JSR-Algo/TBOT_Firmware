@@ -7,6 +7,7 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
   -DTBOT_LESSON_ASSET_COORDINATOR_TESTING \
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
+  "${ROOT}/main/sd_fat_session_guard.cc" \
   "${ROOT}/tests/native/lesson_asset_storage_coordinator_host_test.cc" \
   -o "${BUILD_DIR}/lesson_asset_storage_coordinator_host_test"
 "${BUILD_DIR}/lesson_asset_storage_coordinator_host_test"

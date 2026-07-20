@@ -3,6 +3,14 @@
 cmake_minimum_required(VERSION 3.16)
 
 option(TBOT_NATIVE_COVERAGE "Instrument firmware sources for ESP-IDF gcov coverage" OFF)
+set(TBOT_HIL_PROFILE "production" CACHE STRING "Non-secret deployed firmware profile attested to HIL inspection")
+if(NOT TBOT_HIL_PROFILE MATCHES "^[A-Za-z0-9._+-]+$")
+    message(FATAL_ERROR "TBOT_HIL_PROFILE must be a non-empty safe token")
+endif()
+string(LENGTH "${TBOT_HIL_PROFILE}" TBOT_HIL_PROFILE_LENGTH)
+if(TBOT_HIL_PROFILE_LENGTH GREATER 64)
+    message(FATAL_ERROR "TBOT_HIL_PROFILE must be at most 64 bytes")
+endif()
 
 # ESP-IDF does not auto-load sdkconfig.defaults.local. Keep the production
 # LCDWiki overlay in the default/CI build path so plain idf.py builds select the

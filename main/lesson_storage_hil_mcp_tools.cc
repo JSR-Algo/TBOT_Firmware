@@ -5,6 +5,8 @@
 #include "lesson_storage_hil_controller.h"
 #include "lesson_storage_hil_fixture.h"
 #include "mcp_server.h"
+#include "physical_sd_identity.h"
+#include "sd_fat_session_guard.h"
 
 #include <esp_log.h>
 
@@ -14,6 +16,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <string>
 
 #define TAG "LessonStorageHilMcp"
@@ -278,7 +281,8 @@ bool ValidateArmRequest(const cJSON* arguments) {
 bool ValidateFixtureRequest(const cJSON* arguments, bool inspection) {
     if (!HasExactFields(
             arguments,
-            inspection ? std::initializer_list<const char*>{"cacheKey", "siblingCacheKey"}
+            inspection ? std::initializer_list<const char*>{
+                             "cacheKey", "siblingCacheKey", "schemaVersion"}
                        : std::initializer_list<const char*>{"cacheKey", "fixture", "siblingCacheKey"},
             inspection ? std::initializer_list<const char*>{"cacheKey"}
                        : std::initializer_list<const char*>{"cacheKey", "fixture"})) {
@@ -286,7 +290,8 @@ bool ValidateFixtureRequest(const cJSON* arguments, bool inspection) {
     }
     std::string cache_key;
     std::string sibling;
-    if (!ExactString(arguments, "cacheKey", &cache_key) || !HasHilPrefix(cache_key)) {
+    if (!ExactString(arguments, "cacheKey", &cache_key) || !HasHilPrefix(cache_key) ||
+        (inspection && !ExactInteger(arguments, "schemaVersion", 1, 2, true))) {
         return false;
     }
     const cJSON* sibling_field = UniqueField(arguments, "siblingCacheKey");
@@ -351,6 +356,71 @@ const char* ActionName(LessonStorageHilAction value) {
         case LessonStorageHilAction::kCorruptStaging: return "corrupt_staging";
     }
     return "fail";
+}
+
+int SchemaVersion(const PropertyList& properties) {
+    return properties["schemaVersion"].value<int>();
+}
+
+void AddPhysicalSdIdentity(
+    cJSON* payload,
+    const tbot::SdFatSessionLease& sd_session
+) {
+    auto& sd_guard = tbot::SdFatSessionGuard::GetInstance();
+    const auto lifecycle = sd_guard.Snapshot(sd_session);
+    const auto snapshot = tbot::PhysicalSdIdentityRegistry::GetInstance()
+                              .RefreshAndSnapshot({
+                                  lifecycle.present,
+                                  lifecycle.mount_generation,
+                                  lifecycle.volume.has_value()
+                                      ? std::optional<tbot::FatVolumeIdentity>{
+                                            {lifecycle.volume->serial,
+                                             lifecycle.volume->label}}
+                                      : std::nullopt,
+                              });
+    CheckedCJsonAddNumberToObject(payload, "schemaVersion", 2);
+    auto storage = MakeCheckedCJsonObject();
+    CheckedCJsonAddStringToObject(
+        storage.get(), "status", tbot::PhysicalSdIdentityStatusName(snapshot.status));
+    CheckedCJsonAddStringToObject(storage.get(), "kind", "sdmmc-fat");
+    if (snapshot.status == tbot::PhysicalSdIdentityStatus::kAvailable &&
+        snapshot.identity.has_value()) {
+        const auto& value = *snapshot.identity;
+        CheckedCJsonAddStringToObject(
+            storage.get(), "cidFingerprint", value.cid_fingerprint.c_str());
+        auto cid = MakeCheckedCJsonObject();
+        CheckedCJsonAddNumberToObject(
+            cid.get(), "manufacturerId", value.cid.manufacturer_id);
+        CheckedCJsonAddNumberToObject(cid.get(), "oemId", value.cid.oem_id);
+        CheckedCJsonAddStringToObject(
+            cid.get(), "productName", value.cid.product_name.c_str());
+        CheckedCJsonAddNumberToObject(cid.get(), "revision", value.cid.revision);
+        CheckedCJsonAddNumberToObject(cid.get(), "serial", value.cid.serial);
+        CheckedCJsonAddNumberToObject(
+            cid.get(), "manufacturingDate", value.cid.manufacturing_date);
+        CheckedCJsonAddItemToObject(storage.get(), "cid", std::move(cid));
+        CheckedCJsonAddNumberToObject(
+            storage.get(), "capacitySectors", value.capacity_sectors);
+        CheckedCJsonAddNumberToObject(
+            storage.get(), "sectorSizeBytes", value.sector_size_bytes);
+        CheckedCJsonAddNumberToObject(
+            storage.get(), "capacityBytes", value.capacity_bytes);
+        CheckedCJsonAddNumberToObject(
+            storage.get(), "mountGeneration", value.mount_generation);
+        CheckedCJsonAddStringToObject(
+            storage.get(), "volumeSerial", value.volume_serial.c_str());
+        CheckedCJsonAddStringToObject(
+            storage.get(), "volumeLabel", value.volume_label.c_str());
+    }
+    CheckedCJsonAddItemToObject(payload, "storageIdentity", std::move(storage));
+}
+
+void AddUnavailablePhysicalSdIdentity(cJSON* payload) {
+    CheckedCJsonAddNumberToObject(payload, "schemaVersion", 2);
+    auto storage = MakeCheckedCJsonObject();
+    CheckedCJsonAddStringToObject(storage.get(), "status", "unavailable");
+    CheckedCJsonAddStringToObject(storage.get(), "kind", "sdmmc-fat");
+    CheckedCJsonAddItemToObject(payload, "storageIdentity", std::move(storage));
 }
 
 const char* FixtureCodeName(LessonStorageHilFixtureCode code) {
@@ -470,7 +540,7 @@ std::string CallArmFault(const PropertyList& properties) {
     return response.Finish();
 }
 
-std::string CallStatus(const PropertyList&) {
+std::string CallStatusForSchema(int schema_version) {
     const LessonStorageHilStatus status =
         LessonStorageHilController::GetInstance().Status();
     auto payload = MakeCheckedCJsonObject();
@@ -490,8 +560,20 @@ std::string CallStatus(const PropertyList&) {
     CheckedCJsonAddNumberToObject(payload.get(), "armSequence", status.arm_sequence);
     CheckedCJsonAddNumberToObject(payload.get(), "reachedSequence", status.reached_sequence);
     CheckedCJsonAddNumberToObject(payload.get(), "consumedSequence", status.consumed_sequence);
+    if (schema_version == 2) {
+        auto sd_session = tbot::SdFatSessionGuard::GetInstance().TryAcquire();
+        if (sd_session) {
+            AddPhysicalSdIdentity(payload.get(), sd_session);
+        } else {
+            AddUnavailablePhysicalSdIdentity(payload.get());
+        }
+    }
     PreparedMcpTextResult response = SealLessonStorageHilResponse(std::move(payload));
     return response.Finish();
+}
+
+std::string CallStatus(const PropertyList& properties) {
+    return CallStatusForSchema(SchemaVersion(properties));
 }
 
 std::string CallFixtureMutation(const PropertyList& properties, bool cleanup) {
@@ -538,6 +620,7 @@ std::string CallFixtureCleanup(const PropertyList& properties) {
 }
 
 std::string CallInspect(const PropertyList& properties) {
+    auto sd_session = tbot::SdFatSessionGuard::GetInstance().Acquire();
     const std::string cache_key = properties["cacheKey"].value<std::string>();
     const std::string sibling = properties["siblingCacheKey"].value<std::string>();
     const LessonStorageHilInspection inspection =
@@ -557,12 +640,21 @@ std::string CallInspect(const PropertyList& properties) {
         CheckedCJsonAddItemToArray(entries.get(), std::move(item));
     }
     CheckedCJsonAddItemToObject(payload.get(), "entries", std::move(entries));
+    if (SchemaVersion(properties) == 2) {
+        AddPhysicalSdIdentity(payload.get(), sd_session);
+    }
     PreparedMcpTextResult response = SealLessonStorageHilResponse(
         std::move(payload), kInspectionPayloadBytes, kInspectionResultBytes);
     return response.Finish();
 }
 
 }  // namespace
+
+#ifdef TBOT_LESSON_STORAGE_HIL_MCP_TOOLS_TESTING
+std::string CallLessonStorageHilStatusForTest(int schema_version) {
+    return CallStatusForSchema(schema_version);
+}
+#endif
 
 bool IsExactLessonStorageHilToolName(const std::string& tool_name) {
     return tool_name == kArmTool || tool_name == kStatusTool ||
@@ -578,7 +670,8 @@ const char* ValidateLessonStorageHilRawArguments(
     if (tool_name == kArmTool) {
         valid = ValidateArmRequest(arguments);
     } else if (tool_name == kStatusTool) {
-        valid = HasExactFields(arguments, {}, {});
+        valid = HasExactFields(arguments, {"schemaVersion"}, {}) &&
+                ExactInteger(arguments, "schemaVersion", 1, 2, true);
     } else if (tool_name == kStageTool || tool_name == kCleanupTool) {
         valid = ValidateFixtureRequest(arguments, false);
     } else if (tool_name == kInspectTool) {
@@ -601,7 +694,9 @@ void RegisterLessonStorageHilMcpTools(McpServer& server) {
         }), PreparedMcpCall{}, CallArmFault);
     server.AddUserOnlyTool(kStatusTool,
         "Read the attended lesson-storage fault state.",
-        PropertyList(), PreparedMcpCall{}, CallStatus);
+        PropertyList({
+            Property("schemaVersion", kPropertyTypeInteger, 1, 1, 2),
+        }), PreparedMcpCall{}, CallStatus);
     server.AddUserOnlyTool(kStageTool,
         "Stage one fixed lesson-storage HIL fixture.",
         PropertyList({
@@ -621,5 +716,6 @@ void RegisterLessonStorageHilMcpTools(McpServer& server) {
         PropertyList({
             Property("cacheKey", kPropertyTypeString),
             Property("siblingCacheKey", kPropertyTypeString, std::string()),
+            Property("schemaVersion", kPropertyTypeInteger, 1, 1, 2),
         }), PreparedMcpCall{}, CallInspect);
 }

@@ -13,6 +13,7 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_cache_evict.cc" \
   "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
+  "${ROOT}/main/sd_fat_session_guard.cc" \
   "${ROOT}/main/lesson_storage_hil_fixture.cc" \
   "${ROOT}/tests/native/lesson_storage_hil_fixture_host_test.cc" \
   -o "${BUILD_DIR}/lesson_storage_hil_fixture_host_test"

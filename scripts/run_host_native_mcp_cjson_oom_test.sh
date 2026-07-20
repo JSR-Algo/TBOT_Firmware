@@ -22,6 +22,7 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
 "${CXX:-clang++}" -std=c++17 -Wall -Wextra -Werror \
   -ffunction-sections -fdata-sections \
   -I"${ROOT}/tests/native_stubs_mcp" \
+  -I"${ROOT}/tests/native_stubs" \
   -I"${ROOT}/main" \
   -I"${IDF_CJSON}" \
   "${ROOT}/tests/native/lesson_storage_hil_mcp_validation_host_test.cc" \

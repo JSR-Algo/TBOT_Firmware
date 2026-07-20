@@ -16,16 +16,19 @@ bool IsValidIdentity(const std::string& identity) {
 LessonAssetMutationLease::LessonAssetMutationLease(
     LessonAssetStorageCoordinator* coordinator,
     LessonAssetReservationCode code,
-    bool owns_reservation
+    bool owns_reservation,
+    tbot::SdFatSessionLease sd_session
 )
-    : coordinator_(coordinator), code_(code), owns_reservation_(owns_reservation) {}
+    : coordinator_(coordinator), code_(code), owns_reservation_(owns_reservation),
+      sd_session_(std::move(sd_session)) {}
 
 LessonAssetMutationLease::LessonAssetMutationLease(
     LessonAssetMutationLease&& other
 ) noexcept
     : coordinator_(other.coordinator_),
       code_(other.code_),
-      owns_reservation_(other.owns_reservation_) {
+      owns_reservation_(other.owns_reservation_),
+      sd_session_(std::move(other.sd_session_)) {
     other.coordinator_ = nullptr;
     other.owns_reservation_ = false;
 }
@@ -40,6 +43,7 @@ LessonAssetMutationLease& LessonAssetMutationLease::operator=(
     coordinator_ = other.coordinator_;
     code_ = other.code_;
     owns_reservation_ = other.owns_reservation_;
+    sd_session_ = std::move(other.sd_session_);
     other.coordinator_ = nullptr;
     other.owns_reservation_ = false;
     return *this;
@@ -61,6 +65,7 @@ void LessonAssetMutationLease::Release() {
     if (!owns_reservation_ || coordinator_ == nullptr) {
         return;
     }
+    sd_session_ = {};
     coordinator_->ReleaseMutation();
     coordinator_ = nullptr;
     owns_reservation_ = false;
@@ -86,10 +91,18 @@ LessonAssetMutationLease LessonAssetStorageCoordinator::TryBeginMutation(
             nullptr, LessonAssetReservationCode::kLessonSessionActive, false
         );
     }
+    auto sd_session = tbot::SdFatSessionGuard::GetInstance().TryAcquire();
+    if (!sd_session) {
+        return LessonAssetMutationLease(
+            nullptr, LessonAssetReservationCode::kMutationActive, false
+        );
+    }
 
     mutation_active_ = true;
     mutation_operation_ = operation_label;
-    return LessonAssetMutationLease(this, LessonAssetReservationCode::kAcquired, true);
+    return LessonAssetMutationLease(
+        this, LessonAssetReservationCode::kAcquired, true, std::move(sd_session)
+    );
 }
 
 LessonAssetSessionResult LessonAssetStorageCoordinator::TryBeginLessonSession(
@@ -110,9 +123,7 @@ LessonAssetSessionResult LessonAssetStorageCoordinator::TryBeginLessonSession(
         if (assignment_id_ == validated_assignment_id &&
             session_id_ == validated_session_id) {
             return {
-                LessonAssetReservationCode::kAcquired,
-                true,
-                true,
+                LessonAssetReservationCode::kAcquired, true, true,
                 lesson_session_generation_,
             };
         }
@@ -126,12 +137,17 @@ LessonAssetSessionResult LessonAssetStorageCoordinator::TryBeginLessonSession(
         };
     }
 
+    auto sd_session = tbot::SdFatSessionGuard::GetInstance().TryAcquire();
+    if (!sd_session) {
+        return {LessonAssetReservationCode::kMutationActive, false, false, 0};
+    }
     const std::uint64_t generation = last_generation_ + 1;
     assignment_id_.swap(validated_assignment_id);
     session_id_.swap(validated_session_id);
     lesson_session_generation_ = generation;
     last_generation_ = generation;
     lesson_session_active_ = true;
+    lesson_sd_session_.emplace(std::move(sd_session));
     return {LessonAssetReservationCode::kAcquired, true, false, generation};
 }
 
@@ -153,6 +169,7 @@ bool LessonAssetStorageCoordinator::EndLessonSession(
     assignment_id_.clear();
     session_id_.clear();
     lesson_session_generation_ = 0;
+    lesson_sd_session_.reset();
     return true;
 }
 
@@ -162,6 +179,7 @@ void LessonAssetStorageCoordinator::ForceEndLessonSession() {
     assignment_id_.clear();
     session_id_.clear();
     lesson_session_generation_ = 0;
+    lesson_sd_session_.reset();
 }
 
 bool LessonAssetStorageCoordinator::HasMutation() const {

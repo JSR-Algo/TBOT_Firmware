@@ -52,13 +52,16 @@ set(SOURCES "audio/audio_codec.cc"
             "lesson_layer_state.cc"
             "ota.cc"
             "settings.cc"
+            "esp_build_identity.cc"
             "device_state_machine.cc"
             "assets.cc"
+            "sd_fat_session_guard.cc"
             "main.cc"
             )
 
 if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
     list(APPEND SOURCES
+        "physical_sd_identity.cc"
         "lesson_storage_hil_controller.cc"
         "lesson_storage_hil_hooks.cc"
         "lesson_storage_hil_fixture.cc"
@@ -1087,6 +1090,7 @@ if(NOT BOARD_NAME)
 endif()
 target_compile_definitions(${COMPONENT_LIB}
                     PRIVATE BOARD_TYPE=\"${BOARD_TYPE}\" BOARD_NAME=\"${BOARD_NAME}\"
+                    PRIVATE TBOT_HIL_PROFILE=\"${TBOT_HIL_PROFILE}\"
                     PRIVATE BUILTIN_TEXT_FONT=${BUILTIN_TEXT_FONT} BUILTIN_ICON_FONT=${BUILTIN_ICON_FONT}
                     )
 

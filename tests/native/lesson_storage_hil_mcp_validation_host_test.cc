@@ -40,6 +40,35 @@ void TestExactNamesAndEmptyStatus() {
            "status accepted unknown field");
 }
 
+void TestStatusAndInspectSchemaVersionIsExact() {
+    const std::string key = Key("hil-task14", 1, 'a');
+    Expect(Valid("self.lesson_assets.hil.status", "{}"),
+           "status omitted schema rejected");
+    Expect(Valid("self.lesson_assets.hil.status", "{\"schemaVersion\":1}"),
+           "status schema 1 rejected");
+    Expect(Valid("self.lesson_assets.hil.status", "{\"schemaVersion\":2}"),
+           "status schema 2 rejected");
+    Expect(!Valid("self.lesson_assets.hil.status", "{\"schemaVersion\":1.5}"),
+           "status fractional schema accepted");
+    Expect(!Valid("self.lesson_assets.hil.status", "{\"schemaVersion\":true}"),
+           "status bool schema accepted");
+    Expect(!Valid("self.lesson_assets.hil.status", "{\"schemaVersion\":3}"),
+           "status unknown schema accepted");
+    Expect(!Valid("self.lesson_assets.hil.status",
+                  "{\"schemaVersion\":1,\"schemaVersion\":2}"),
+           "status duplicate schema accepted");
+
+    const std::string inspect = "{\"cacheKey\":\"" + key + "\"";
+    Expect(Valid("self.lesson_assets.hil.inspect", inspect + "}"),
+           "inspect omitted schema rejected");
+    Expect(Valid("self.lesson_assets.hil.inspect", inspect + ",\"schemaVersion\":1}"),
+           "inspect schema 1 rejected");
+    Expect(Valid("self.lesson_assets.hil.inspect", inspect + ",\"schemaVersion\":2}"),
+           "inspect schema 2 rejected");
+    Expect(!Valid("self.lesson_assets.hil.inspect", inspect + ",\"schemaVersion\":false}"),
+           "inspect bool schema accepted");
+}
+
 void TestArmRejectsAmbiguousJsonBeforeConversion() {
     const std::string key = Key("hil-task14", 1, 'd');
     const std::string prefix = "{\"cacheKey\":\"" + key +
@@ -87,6 +116,12 @@ void TestFixturePairsAreExact() {
                   "\",\"fixture\":\"nested_directory\","
                   "\"siblingCacheKey\":\"" + sibling + "\"}"),
            "single-key fixture accepted sibling");
+    Expect(!Valid("self.lesson_assets.hil.stage_fixture",
+                  base + sibling + "\",\"schemaVersion\":2}"),
+           "stage fixture accepted schema version");
+    Expect(!Valid("self.lesson_assets.hil.cleanup_fixture",
+                  base + sibling + "\",\"schemaVersion\":2}"),
+           "cleanup fixture accepted schema version");
 }
 
 }  // namespace
@@ -112,6 +147,7 @@ bool IsCanonicalLessonCacheKey(const std::string& value) {
 
 int main() {
     TestExactNamesAndEmptyStatus();
+    TestStatusAndInspectSchemaVersionIsExact();
     TestArmRejectsAmbiguousJsonBeforeConversion();
     TestFixturePairsAreExact();
     std::cout << "Lesson storage HIL MCP validation host tests passed\n";

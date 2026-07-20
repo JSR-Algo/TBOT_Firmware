@@ -10,6 +10,7 @@ trap 'rm -rf "${BUILD_DIR}" /tmp/tbot-lesson-asset-cache-evict-host' EXIT
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_cache_evict.cc" \
   "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
+  "${ROOT}/main/sd_fat_session_guard.cc" \
   "${ROOT}/main/lesson_storage_hil_controller.cc" \
   "${ROOT}/main/lesson_storage_hil_hooks.cc" \
   "${ROOT}/tests/native/lesson_asset_cache_evict_host_test.cc" \

@@ -5,6 +5,7 @@
 #include "settings.h"
 #include "lesson_handler.h"  // US-006 Slice-01: kLessonRendererName (D-CAP-FLAG)
 #include "json_payload_safety.h"
+#include "esp_build_identity.h"
 
 #include <cstring>
 #include <cJSON.h>
@@ -285,6 +286,15 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
     }
     replacement_websocket->SetHeader("protocol-version", std::to_string(version_).c_str());
+    EspBuildIdentity build_identity;
+    std::string build_identity_error;
+    if (ReadRunningEspBuildIdentity(&build_identity, &build_identity_error)) {
+        for (const auto& header : EspBuildIdentityHeaders(build_identity)) {
+            replacement_websocket->SetHeader(header.first.c_str(), header.second.c_str());
+        }
+    } else {
+        ESP_LOGW(TAG, "Build identity unavailable reason=%s", build_identity_error.c_str());
+    }
     std::string traceparent = NewTraceParentHeader();
     replacement_websocket->SetHeader("traceparent", traceparent.c_str());
     if (!token.empty()) {
