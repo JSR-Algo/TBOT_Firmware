@@ -123,6 +123,7 @@ static bool configure_uart(uart_port_t port, gpio_num_t tx_pin, gpio_num_t rx_pi
 }
 
 bool RobotUart::Initialize() {
+    std::lock_guard<std::recursive_mutex> lock(uart_mutex_);
     if (initialized_) {
         return true;
     }
@@ -166,12 +167,14 @@ bool RobotUart::SendRightArmLower() {
 }
 
 bool RobotUart::SendBothArmsRaise() {
+    std::lock_guard<std::recursive_mutex> lock(uart_mutex_);
     bool left_ok = SendLeftArmRaise();
     bool right_ok = SendRightArmRaise();
     return left_ok && right_ok;
 }
 
 bool RobotUart::SendBothArmsLower() {
+    std::lock_guard<std::recursive_mutex> lock(uart_mutex_);
     bool left_ok = SendLeftArmLower();
     bool right_ok = SendRightArmLower();
     return left_ok && right_ok;
@@ -188,6 +191,7 @@ bool RobotUart::SendRightArmSetPercent(int percent) {
 }
 
 bool RobotUart::SendBothArmsSetPercent(int percent) {
+    std::lock_guard<std::recursive_mutex> lock(uart_mutex_);
     bool left_ok = SendLeftArmSetPercent(percent);
     bool right_ok = SendRightArmSetPercent(percent);
     return left_ok && right_ok;
@@ -233,6 +237,7 @@ bool RobotUart::SendArmAction(const std::string& part, const std::string& action
 }
 
 bool RobotUart::SendServoSweep(const std::string& part, const std::string& action, int from, int to, int step, int delay_ms) {
+    std::lock_guard<std::recursive_mutex> lock(uart_mutex_);
     if (!Initialize()) {
         return false;
     }
@@ -279,7 +284,6 @@ bool RobotUart::SendPayloadOnProfile(const char* profile_name, uart_port_t port,
         return false;
     }
 
-    uart_flush_input(port);
     int written = uart_write_bytes(port, payload.data(), payload.size());
     if (written != static_cast<int>(payload.size())) {
         ESP_LOGW(TAG, "%s UART write incomplete: %d/%d", profile_name, written, static_cast<int>(payload.size()));
@@ -393,6 +397,7 @@ void RobotUart::AckReaderTask(void* arg) {
 }
 
 bool RobotUart::SendControlLine(const std::string& line) {
+    std::lock_guard<std::recursive_mutex> lock(uart_mutex_);
     if (!Initialize()) {
         return false;
     }

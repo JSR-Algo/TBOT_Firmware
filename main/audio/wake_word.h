@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <cstdint>
 
 #include <model_path.h>
 #include "audio_codec.h"
@@ -21,6 +22,8 @@ public:
     virtual void EncodeWakeWordData() = 0;
     virtual bool GetWakeWordOpus(std::vector<uint8_t>& opus) = 0;
     virtual const std::string& GetLastDetectedWakeWord() const = 0;
+    virtual bool Shutdown(uint32_t timeout_ms) = 0;
+    virtual int32_t GetDetectionTaskStackHighWaterMark() const { return -1; }
 };
 
 #endif

@@ -43,7 +43,7 @@ def test_blufi_wifi_scan_handler_registration_is_single_owner_and_unregistered_o
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
     ensure_body = function_body(source, "bool Blufi::EnsureWifiScanEventHandlerRegistered")
-    deinit_body = function_body(source, "esp_err_t Blufi::deinit")
+    deinit_body = function_body(source, "esp_err_t Blufi::_deinit_impl")
 
     assert "scan_event_instance_" in header
     assert "esp_event_handler_instance_register" in ensure_body
@@ -76,7 +76,7 @@ def test_blufi_wifi_list_requests_refresh_stale_cached_scan_results():
 
 def test_blufi_init_resets_wifi_scan_cache_capture_without_starting_eager_scan():
     source = read("main/boards/common/blufi.cpp")
-    body = function_body(source, "esp_err_t Blufi::init")
+    body = function_body(source, "esp_err_t Blufi::_init_impl")
 
     assert "m_scan_should_save_ssid = true;" in body
     assert body.index("m_scan_should_save_ssid = true;") < body.index("_controller_init()")
@@ -84,7 +84,7 @@ def test_blufi_init_resets_wifi_scan_cache_capture_without_starting_eager_scan()
 
 def test_blufi_init_resets_ble_timeout_latch_for_fresh_setup_window():
     source = read("main/boards/common/blufi.cpp")
-    body = function_body(source, "esp_err_t Blufi::init")
+    body = function_body(source, "esp_err_t Blufi::_init_impl")
 
     assert "ble_timed_out_ = false;" in body
     assert body.index("ble_timed_out_ = false;") < body.index("_controller_init()")

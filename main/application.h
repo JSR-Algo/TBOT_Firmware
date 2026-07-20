@@ -5,6 +5,7 @@
 #include <freertos/event_groups.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <esp_timer.h>
 
 #include <string>
@@ -22,6 +23,7 @@
 #include "robot_uart.h"
 #include "claim_confirmation_reporter.h"
 #include "tbot_connect_mapper.h"
+#include "connect_close_deferral.h"
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -47,6 +49,14 @@ enum AecMode {
 
 class Application {
 public:
+    struct WifiConfigEntryPreparation {
+        DeviceState original_state = kDeviceStateUnknown;
+        ListeningMode resume_mode = kListeningModeAutoStop;
+        bool resume_realtime = false;
+        bool resume_listening = true;
+        bool valid = false;
+    };
+
     static Application& GetInstance() {
         static Application instance;
         return instance;
@@ -77,11 +87,16 @@ public:
      * Returns true if transition was successful
      */
     bool SetDeviceState(DeviceState state);
+    bool PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation);
+    bool PublishWifiConfigEntry(const WifiConfigEntryPreparation& preparation);
+    bool RollbackWifiConfigEntry(const WifiConfigEntryPreparation& preparation);
 
     /**
      * Schedule a callback to be executed in the main task
      */
     void Schedule(std::function<void()>&& callback);
+    void ScheduleDeferredProtocolClose(Protocol* expected, uint32_t connection_epoch);
+    bool ScheduleAndWait(std::function<bool()>&& callback, int timeout_ms);
 
     /**
      * Alert with status, message, emotion and optional sound
@@ -169,6 +184,7 @@ private:
     std::mutex mutex_;
     std::deque<std::function<void()>> main_tasks_;
     std::unique_ptr<Protocol> protocol_;
+    std::atomic<uint64_t> protocol_generation_{0};
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
@@ -253,6 +269,8 @@ private:
     std::atomic<uint32_t> connect_generation_{0};
     std::atomic<bool> connect_in_flight_{false};
     std::atomic<bool> reset_pending_{false};
+    std::atomic<bool> reboot_pending_{false};
+    ConnectCloseDeferral connect_close_deferral_;
     // WSS-8: true from the start of a wake/listen/reconnect connect cycle until it
     // succeeds or the user/system cancels the online intent. While true, a per-attempt SetError is a
     // RECOVERABLE transient (the wake loop / ScheduleReconnect backoff retries),
@@ -331,6 +349,8 @@ private:
     void SchedulePassiveLessonReconnect();             // passive lesson/nudge socket retry
     void HandleReconnectTick();
     void CloseAudioChannelByIntent();                  // intentional close -> clears online_intent_
+    bool IsConnectSuccessPublicationSuppressed() const;
+    void CompleteReboot();
     void ContinueWakeWordInvoke(const std::string& wake_word);
     void FinishWakeWordInvoke(const std::string& wake_word);
 

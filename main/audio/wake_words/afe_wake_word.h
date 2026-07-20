@@ -15,6 +15,8 @@
 #include <functional>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
+#include <chrono>
 
 #include "audio_codec.h"
 #include "wake_word.h"
@@ -33,9 +35,12 @@ public:
     void EncodeWakeWordData();
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
+    bool Shutdown(uint32_t timeout_ms) override;
+    int32_t GetDetectionTaskStackHighWaterMark() const override;
 
 private:
     srmodel_list_t *models_ = nullptr;
+    bool owns_models_ = false;
     const esp_afe_sr_iface_t* afe_iface_ = nullptr;
     esp_afe_sr_data_t* afe_data_ = nullptr;
     char* wakenet_model_ = NULL;
@@ -61,13 +66,13 @@ private:
     std::vector<int16_t> SelectDominantMonoChannel(const std::vector<int16_t>& data, int channels);
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
-    StaticTask_t* wake_word_encode_task_buffer_ = nullptr;
-    StackType_t* wake_word_encode_task_stack_ = nullptr;
     std::deque<std::vector<int16_t>> wake_word_pcm_;
     std::deque<std::vector<uint8_t>> wake_word_opus_;
     std::mutex wake_word_mutex_;
     std::condition_variable wake_word_cv_;
     TaskHandle_t audio_detection_task_handle_ = nullptr;
+    std::atomic<bool> shutting_down_{false};
+    std::atomic<bool> encode_active_{false};
 
     void StoreWakeWordData(const int16_t* data, size_t size);
     void AudioDetectionTask();

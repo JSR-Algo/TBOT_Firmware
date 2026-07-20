@@ -6,6 +6,7 @@
 
 #include <string>
 #include <vector>
+#include "json_payload_safety.h"
 
 enum AbortReason {
     kAbortReasonNone,

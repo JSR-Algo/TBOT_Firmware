@@ -9,6 +9,8 @@
 
 class Ota {
 public:
+    static constexpr int kHttpTimeoutMs = 8000;
+
     Ota();
     ~Ota();
 
@@ -49,10 +51,8 @@ private:
     int activation_timeout_ms_ = 30000;
 
     std::function<void(int progress, size_t speed)> upgrade_callback_;
-    std::vector<int> ParseVersion(const std::string& version);
-    bool IsNewVersionAvailable(const std::string& currentVersion, const std::string& newVersion);
     std::string GetActivationPayload();
-    std::unique_ptr<Http> SetupHttp();
+    std::unique_ptr<Http> SetupHttp(int timeout_ms = kHttpTimeoutMs);
 };
 
 #endif // _OTA_H

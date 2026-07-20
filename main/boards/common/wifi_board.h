@@ -7,11 +7,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_timer.h>
+#include <atomic>
 
 class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
     bool in_config_mode_ = false;
+    std::atomic<bool> wifi_config_entry_pending_{false};
     NetworkEventCallback network_event_callback_ = nullptr;
     std::atomic<uint32_t> wifi_config_entry_generation_{0};
     std::atomic<bool> wifi_config_entry_inflight_{false};
@@ -61,7 +63,8 @@ protected:
     /**
      * Enter WiFi configuration mode
      */
-    void StartWifiConfigMode();
+    void RequestWifiConfigMode(bool show_notification = false);
+    void StartWifiConfigMode(bool show_notification = false);
 
     /**
      * WiFi connection timeout callback

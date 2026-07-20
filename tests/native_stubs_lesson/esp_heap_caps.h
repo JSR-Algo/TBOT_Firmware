@@ -9,8 +9,16 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 #define MALLOC_CAP_8BIT (1 << 2)
+#define MALLOC_CAP_INTERNAL (1 << 3)
+#define MALLOC_CAP_SPIRAM (1 << 4)
+
+inline size_t heap_caps_get_free_size(int caps) {
+    return (caps & MALLOC_CAP_SPIRAM) ? 4 * 1024 * 1024 : 128 * 1024;
+}
+inline size_t heap_caps_get_minimum_free_size(int) { return 96 * 1024; }
 
 // -1 disables the hook (default). Set to N to fail the Nth heap_caps_malloc/
 // heap_caps_realloc call (counting from 0) so OOM guards become reachable.
@@ -22,16 +30,42 @@ inline int& HostHeapCallCount() {
     static int v = 0;
     return v;
 }
+inline std::vector<int>& HostHeapCapsCalls() {
+    static std::vector<int> calls;
+    return calls;
+}
+inline std::vector<size_t>& HostHeapSizeCalls() {
+    static std::vector<size_t> calls;
+    return calls;
+}
+inline std::vector<size_t>& HostHeapAlignmentCalls() {
+    static std::vector<size_t> calls;
+    return calls;
+}
 
-inline void* heap_caps_malloc(size_t size, int /*caps*/) {
+inline void* heap_caps_malloc(size_t size, int caps) {
+    HostHeapCapsCalls().push_back(caps);
+    HostHeapSizeCalls().push_back(size);
+    HostHeapAlignmentCalls().push_back(0);
     int n = HostHeapCallCount()++;
     if (HostHeapFailAfter() >= 0 && n >= HostHeapFailAfter()) return nullptr;
     return std::malloc(size);
 }
-inline void* heap_caps_realloc(void* ptr, size_t size, int /*caps*/) {
+inline void* heap_caps_realloc(void* ptr, size_t size, int caps) {
+    HostHeapCapsCalls().push_back(caps);
+    HostHeapSizeCalls().push_back(size);
+    HostHeapAlignmentCalls().push_back(0);
     int n = HostHeapCallCount()++;
     if (HostHeapFailAfter() >= 0 && n >= HostHeapFailAfter()) return nullptr;
     return std::realloc(ptr, size);
+}
+inline void* heap_caps_aligned_calloc(size_t alignment, size_t n, size_t size, int caps) {
+    HostHeapCapsCalls().push_back(caps);
+    HostHeapSizeCalls().push_back(n * size);
+    HostHeapAlignmentCalls().push_back(alignment);
+    int call = HostHeapCallCount()++;
+    if (HostHeapFailAfter() >= 0 && call >= HostHeapFailAfter()) return nullptr;
+    return std::calloc(n, size);
 }
 inline void heap_caps_free(void* ptr) { std::free(ptr); }
 

@@ -20,10 +20,16 @@
 #include "assets.h"
 #include "jpeg_to_image.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_timer.h"
 #include "lesson_handler.h"
+#include "lesson_asset_storage_coordinator.h"
+#include "lesson_motion_presets.h"
+#include "system_info.h"
 
 #include <cJSON.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -36,6 +42,21 @@
 #endif
 #include <stdio.h>
 extern "C" size_t fread(void* ptr, size_t size, size_t count, FILE* stream);
+
+#ifdef fopen
+#undef fopen
+#endif
+extern "C" FILE* fopen(const char* path, const char* mode);
+
+int& HostLessonAssetOpenCount() {
+    static int value = 0;
+    return value;
+}
+
+extern "C" FILE* HostLessonFopen(const char* path, const char* mode) {
+    ++HostLessonAssetOpenCount();
+    return ::fopen(path, mode);
+}
 
 bool& HostLessonFreadShortReadOnce() {
     static bool v = false;
@@ -102,12 +123,30 @@ bool FrameBodyBool(size_t i, const char* key, bool dflt) {
     cJSON_Delete(f);
     return out;
 }
+bool FrameBodyTelemetryBool(size_t i, const char* key, bool dflt) {
+    cJSON* f = cJSON_Parse(Sent()[i].c_str());
+    cJSON* b = cJSON_GetObjectItem(f, "body");
+    cJSON* telemetry = b ? cJSON_GetObjectItem(b, "telemetry") : nullptr;
+    cJSON* v = telemetry ? cJSON_GetObjectItem(telemetry, key) : nullptr;
+    bool out = v && cJSON_IsBool(v) ? cJSON_IsTrue(v) : dflt;
+    cJSON_Delete(f);
+    return out;
+}
 double FrameBodyNum(size_t i, const char* key) {
     cJSON* f = cJSON_Parse(Sent()[i].c_str());
     cJSON* b = cJSON_GetObjectItem(f, "body");
     cJSON* v = b ? cJSON_GetObjectItem(b, key) : nullptr;
     double out = (v && cJSON_IsNumber(v)) ? v->valuedouble : -999;
     cJSON_Delete(f);
+    return out;
+}
+std::string FrameBodyJson(size_t i) {
+    cJSON* frame = cJSON_Parse(Sent()[i].c_str());
+    cJSON* body = cJSON_GetObjectItem(frame, "body");
+    char* printed = body ? cJSON_PrintUnformatted(body) : nullptr;
+    std::string out = printed ? printed : "";
+    if (printed) cJSON_free(printed);
+    cJSON_Delete(frame);
     return out;
 }
 std::string FrameBodyStr(size_t i, const char* obj, const char* key) {
@@ -169,7 +208,25 @@ void Handle(const std::string& json) {
     cJSON_Delete(root);
 }
 
-void ResetObservable() { App().HostReset(); }
+bool HandleTransportJson(const std::string& json) {
+    if (JsonHasForbiddenDecodedNull(json.data(), json.size())) return false;
+    Handle(json);
+    return true;
+}
+
+void ResetObservable() {
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    App().HostReset();
+    HostEspResetLogs();
+    HostLessonAssetOpenCount() = 0;
+}
+
+bool LogContains(const std::string& needle) {
+    return std::any_of(HostEspLogs().begin(), HostEspLogs().end(),
+                       [&needle](const std::string& log) {
+                           return log.find(needle) != std::string::npos;
+                       });
+}
 
 // Per-test unique session identity. The renderer's g_session is FILE-STATIC and cannot be
 // reset from the test, so each test bumps these ids; a fresh assignmentId makes the
@@ -194,6 +251,14 @@ std::string PrepareFrame(int seq, const std::string& extra_body = "") {
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"profile\":\"" +
            kLessonProfileEspTft + "\"" + extra_body + "}}";
 }
+std::string PrepareFrameFor(const std::string& assignment_id, const std::string& session_id,
+                            int seq, const std::string& extra_body = "") {
+    return std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + assignment_id +
+           "\",\"sessionId\":\"" + session_id + "\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":{\"profile\":\"" + kLessonProfileEspTft +
+           "\"" + extra_body + "}}";
+}
 std::string StartFrame(int seq) {
     return std::string("{\"type\":\"lesson_start\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -203,6 +268,13 @@ std::string StopFrame(int seq, const std::string& body = "") {
     return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{" + body + "}}";
+}
+std::string StopFrameFor(const std::string& assignment_id, const std::string& session_id,
+                         int seq, const std::string& body = "") {
+    return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + assignment_id +
+           "\",\"sessionId\":\"" + session_id + "\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":{" + body + "}}";
 }
 std::string PauseFrame(int seq) {
     return std::string("{\"type\":\"lesson_pause\",\"protocolVersion\":\"") +
@@ -219,16 +291,37 @@ std::string ErrorFrame(int seq) {
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{\"code\":\"STEP_TIMEOUT\"}}";
 }
+std::string ReadyAssetPackExtra(const std::string& cache_key,
+                                const std::string& manifest_checksum,
+                                const std::string& file_name) {
+    const std::string host_path = "/tmp/" + file_name;
+    FILE* file = fopen(host_path.c_str(), "wb");
+    require(file != nullptr, "ready asset fixture opened");
+    require(fwrite("data", 1, 4, file) == 4, "ready asset fixture written");
+    fclose(file);
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", "/tmp", 1);
+    return ",\"manifestRef\":{\"manifestChecksum\":\"" + manifest_checksum +
+           "\"},\"assetPack\":{\"cacheKey\":\"" + cache_key +
+           "\",\"assets\":[{\"key\":\"poster\",\"state\":\"READY\","
+           "\"checksumOk\":true,\"localPath\":\"sd://sdcard/tbot/lesson-assets/" +
+           file_name + "\",\"size\":4}]}";
+}
+void RemoveReadyAssetPackFixture(const std::string& file_name) {
+    remove(("/tmp/" + file_name).c_str());
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
 // Full three-layer lesson_step. Caller controls scene srcs + extra body fields.
 std::string StepFrame(int seq, const std::string& step_id,
                       const std::string& poster_src, const std::string& object_src,
                       const std::string& overlay_src, const std::string& extra_body = "",
-                      const std::string& extra_scene = "") {
+                      const std::string& extra_scene = "",
+                      const std::string& robot_state = "talking") {
     std::string scene =
         "\"scene\":{"
         "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"" + poster_src + "\"}},"
         "\"teachingObject\":{\"asset\":{\"src\":\"" + object_src + "\"}},"
-        "\"robotOverlay\":{\"asset\":{\"src\":\"" + overlay_src + "\"},\"expression\":\"teaching\"}"
+        "\"robotOverlay\":{\"asset\":{\"src\":\"" + overlay_src +
+        "\"},\"expression\":\"teaching\",\"robotState\":\"" + robot_state + "\"}"
         + extra_scene + "}";
     return std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -290,6 +383,13 @@ std::string TvideoStepFrame(int seq, const std::string& projection,
 int OpenSession() {
     FreshSession();
     Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    return 3;
+}
+
+int OpenMotionEnabledSession() {
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"runtimeControls\":{\"motionPresetsEnabled\":true}"));
     Handle(StartFrame(2));
     return 3;
 }
@@ -411,6 +511,31 @@ void test_prepare_assetpack_ready_with_real_file() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_derives_local_path_from_root_and_key() {
+    const char* dir = "/tmp/tbot-host-sd-derived/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-derived && mkdir -p /tmp/tbot-host-sd-derived/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-derived/lesson-assets/ready%40v1";
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "derived local-path fixture opens");
+    const char bytes[10] = {1,2,3,4,5,6,7,8,9,10};
+    fwrite(bytes, 1, 10, fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"ready@v1\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-derived-abcdef1234567890\","
+                          "\"localRoot\":\"sd://sdcard/tbot/lesson-assets/\",\"assets\":["
+                          "{\"key\":\"ready@v1\",\"state\":\"READY\","
+                          "\"checksumOk\":true,\"size\":10}]}"));
+    require(FrameAssetPackReady(0),
+            "prepare derives an encoded local path from assetPack.localRoot and key");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_trims_manifest_checksum_for_cache_key() {
     const char* dir = "/tmp/tbot-host-sd-manifest-checksum/lesson-assets";
     system("rm -rf /tmp/tbot-host-sd-manifest-checksum && mkdir -p /tmp/tbot-host-sd-manifest-checksum/lesson-assets");
@@ -514,6 +639,12 @@ void test_prepare_assetpack_ready_without_critical_asset_list() {
             "no-critical cacheKey echoed");
     require(FrameAssetPackReady(0) == true,
             "verified assetPack without criticalAssets list is ready");
+    require(LogContains("lesson_ack TX assignmentId=" + std::string(AID()) +
+                        " sessionId=" + SID() +
+                        " stepId=- body.acks=1 rendered=false degraded=false "
+                        "renderElapsedMs=-1 assetPack.ready=true "
+                        "cacheKey=ck6-abcdef1234567890"),
+            "prepare ack log exposes the privacy-safe assetPack attestation payload");
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
@@ -707,7 +838,7 @@ void test_prepare_assetpack_requires_manifest_checksum_before_ack() {
     require(!FrameHasAssetPack(0), "whitespace manifest checksum does not emit assetPack ack");
 }
 
-void test_prepare_reject_clears_stale_lesson_scene() {
+void test_prepare_reject_preserves_active_lesson_scene() {
     ResetObservable();
     LvglDisplay disp;
     NetworkInterface net;
@@ -727,7 +858,11 @@ void test_prepare_reject_clears_stale_lesson_scene() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old valid step rendered prompt before rejected prepare");
 
-    FreshSession();
+    const size_t background_calls = disp.background_calls.size();
+    const size_t object_calls = disp.object_calls.size();
+    const size_t overlay_calls = disp.overlay_calls.size();
+    const size_t mode_calls = disp.lesson_mode_calls.size();
+    const int cancel_calls = App().cancel_listen_calls;
     Handle(PrepareFrame(1, ",\"criticalAssets\":[{\"key\":\"k1\"}],"
                           "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef1234567890\",\"assets\":["
                           "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
@@ -735,19 +870,17 @@ void test_prepare_reject_clears_stale_lesson_scene() {
 
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "ASSET_PACK_NOT_READY",
             "rejected prepare emits ASSET_PACK_NOT_READY");
-    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
-            "rejected prepare clears stale background layer");
-    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
-            "rejected prepare clears stale object layer");
-    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
-            "rejected prepare clears stale overlay layer");
-    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
-            "rejected prepare restores idle face instead of stale lesson mode");
-    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
-            "rejected prepare clears stale lesson prompt");
-    require(disp.last_emotion == "sad", "rejected prepare shows sad face");
-    require(App().cancel_listen_calls >= 1, "rejected prepare cancels interactive listening");
-    require(App().lesson_runtime_active == false, "rejected prepare clears active lesson runtime flag");
+    require(disp.background_calls.size() == background_calls &&
+                disp.object_calls.size() == object_calls &&
+                disp.overlay_calls.size() == overlay_calls &&
+                disp.lesson_mode_calls.size() == mode_calls,
+            "rejected replacement does not mutate active lesson layers");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "rejected replacement preserves active lesson prompt");
+    require(App().cancel_listen_calls == cancel_calls,
+            "rejected replacement preserves interactive listening state");
+    require(App().lesson_runtime_active,
+            "rejected replacement preserves active lesson runtime flag");
 }
 
 // ==========================================================================
@@ -797,28 +930,22 @@ void test_fresh_prepare_contract_reject_clears_stale_lesson_scene() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old valid step rendered prompt before rejected fresh prepare");
 
-    FreshSession();
+    // Restart the current owner; a foreign prepare must not replace it.
     Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":1,\"body\":{\"profile\":\"oledTiny\"}}");
 
     require(FrameType(Sent().size()-1) == "lesson_error", "bad fresh prepare profile -> lesson_error");
-    require(FrameSeq(Sent().size()-1) == 1, "bad fresh prepare profile keeps fresh F->S sequence");
+    require(FrameSeq(Sent().size()-1) == 1,
+            "restart-style rejected replacement uses isolated F->S sequence");
     require(FrameBodyStr(Sent().size()-1, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
             "bad fresh prepare profile emits contract error");
-    require(!disp.background_calls.empty() && disp.background_calls.back() == false,
-            "bad fresh prepare clears stale background layer");
-    require(!disp.object_calls.empty() && disp.object_calls.back() == false,
-            "bad fresh prepare clears stale object layer");
-    require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == false,
-            "bad fresh prepare clears stale overlay layer");
-    require(!disp.lesson_mode_calls.empty() && disp.lesson_mode_calls.back() == false,
-            "bad fresh prepare restores idle face instead of stale lesson mode");
-    require(!disp.lesson_captions.empty() && disp.lesson_captions.back().empty(),
-            "bad fresh prepare clears stale lesson prompt");
-    require(disp.last_emotion == "sad", "bad fresh prepare shows sad face");
-    require(App().cancel_listen_calls >= 1, "bad fresh prepare cancels interactive listening");
-    require(App().lesson_runtime_active == false, "bad fresh prepare clears active lesson runtime flag");
+    require(!disp.background_calls.empty() && disp.background_calls.back() == true,
+            "bad replacement profile preserves active background layer");
+    require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
+            "bad replacement profile preserves active prompt");
+    require(App().lesson_runtime_active,
+            "bad replacement profile preserves active lesson runtime flag");
 }
 
 // ==========================================================================
@@ -858,40 +985,48 @@ void test_dedup_reack() {
     FreshSession();
     Board::GetInstance().display_ = nullptr;
 
-    // prepare with a (not-ready) assetPack so the cached ack carries an assetPack body.
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ckD-abcdef1234567890\",\"assets\":[]}"));
+    const std::string ready_file_name = "tbot-lesson-dedup-ready.bin";
+    const std::string ready_pack = ReadyAssetPackExtra(
+        "ckD-abcdef1234567890", "abcdef1234567890", ready_file_name);
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 1, "prepare ack");
     bool first_ready = FrameAssetPackReady(0);
+    require(first_ready, "dedup fixture establishes a ready prepared owner");
 
     // duplicate prepare (same assignment/session, sequence <= last) -> re-ack path.
     // duplicate_prepare==true so NO session reset; sequence<=last triggers replay.
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ckD-abcdef1234567890\",\"assets\":[]}"));
+    HostEspResetLogs();
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 2, "duplicate prepare re-acks");
     require(FrameType(1) == "lesson_ack", "re-ack is an ack");
     // NOTE non-tautology: re-ack must REPLAY the cached assetPack body. Mutation: drop the
     // cached-assetPack replay (re_asset_pack=nullptr) -> the re-ack would carry NO assetPack.
     require(FrameHasAssetPack(1), "duplicate re-ack replays cached assetPack body");
     require(FrameAssetPackReady(1) == first_ready, "re-ack replays cached ready flag");
+    require(LogContains("body.acks=1 rendered=false degraded=false") &&
+                LogContains("assetPack.ready=true cacheKey=ckD-abcdef1234567890"),
+            "exact duplicate replay emits structured cached ack evidence");
 
-    // a duplicate of an OLDER sequence than the cached one -> conservative false/false,
-    // no assetPack. Advance to seq 3 first via start(2)+a step? Simpler: send seq 0 dup.
+    // Sequence zero is now rejected as a pure envelope error before dedup/reservation.
     Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":0,\"body\":{\"profile\":\"" + kLessonProfileEspTft + "\"}}");
-    require(Sent().size() == 3, "older duplicate also re-acks");
-    require(FrameBodyBool(2, "rendered", true) == false, "older dup re-ack rendered=false");
-    require(!FrameHasAssetPack(2), "older dup carries no cached assetPack");
+    require(Sent().size() == 3, "sequence-zero duplicate emits one refusal");
+    require(FrameType(2) == "lesson_error", "sequence-zero duplicate is not re-acked");
+    require(FrameBodyStr(2, nullptr, "code") == "LESSON_SEQUENCE_INVALID",
+            "sequence-zero duplicate uses stable envelope error");
+    RemoveReadyAssetPackFixture(ready_file_name);
 }
 
 void test_delayed_duplicate_prepare_replays_assetpack_after_start_ack() {
     ResetObservable();
     FreshSession();
     Board::GetInstance().display_ = nullptr;
+    const std::string ready_file_name = "tbot-lesson-delayed-ready.bin";
+    const std::string ready_pack = ReadyAssetPackExtra(
+        "ck-delayed-abcdef1234567890", "abcdef1234567890", ready_file_name);
 
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ck-delayed-abcdef1234567890\",\"assets\":[]}"));
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 1, "initial prepare emits assetPack ack");
     require(FrameHasAssetPack(0), "initial prepare ack carries assetPack");
 
@@ -899,12 +1034,12 @@ void test_delayed_duplicate_prepare_replays_assetpack_after_start_ack() {
     require(Sent().size() == 2, "start emits lifecycle ack");
     require(!FrameHasAssetPack(1), "start ack carries no assetPack");
 
-    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
-                          "\"assetPack\":{\"cacheKey\":\"ck-delayed-abcdef1234567890\",\"assets\":[]}"));
+    Handle(PrepareFrame(1, ready_pack));
     require(Sent().size() == 3, "delayed duplicate prepare re-acks");
     require(FrameHasAssetPack(2), "delayed duplicate prepare replays original assetPack");
     require(FrameBodyStr(2, "assetPack", "cacheKey") == "ck-delayed-abcdef1234567890",
             "delayed duplicate prepare replays original assetPack cacheKey");
+    RemoveReadyAssetPackFixture(ready_file_name);
 }
 
 void test_prepare_new_assignment_version_same_session_resets_stream() {
@@ -954,7 +1089,7 @@ void test_fresh_prepare_clears_stale_active_lesson_before_start() {
             "old active lesson rendered child-turn prompt");
 
     const int cancel_after_old_step = App().cancel_listen_calls;
-    FreshSession();
+    // Restart the existing reservation owner; foreign prepares are refused.
     Handle(PrepareFrame(1, ",\"assignmentVersion\":2"));
 
     require(FrameType(Sent().size() - 1) == "lesson_ack",
@@ -977,6 +1112,22 @@ void test_fresh_prepare_clears_stale_active_lesson_before_start() {
             "fresh valid prepare shows a neutral wait state before new start");
     require(disp.last_emotion == "thinking",
             "fresh valid prepare shows a calm thinking face before new start");
+}
+
+void test_preload_reset_prepare_quiesces_without_arming_lesson_start() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    App().lesson_runtime_active = true;
+
+    Handle(PrepareFrame(1, ",\"preloadResetOnly\":true"));
+    require(FrameType(0) == "lesson_ack", "preload reset prepare is acknowledged");
+    require(App().lesson_runtime_active == false,
+            "preload reset clears the stale lesson runtime flag");
+
+    Handle(StartFrame(2));
+    require(App().lesson_runtime_active == false,
+            "preload reset does not arm a normal lesson_start");
 }
 
 void test_prepare_after_stop_same_session_resets_stream() {
@@ -1142,7 +1293,8 @@ void test_start_clears_stale_lesson_scene_before_first_step() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old lesson rendered prompt caption");
 
-    OpenSession();
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "new lesson start clears stale background before first step");
     require(!disp.object_calls.empty() && disp.object_calls.back() == false,
@@ -1616,6 +1768,14 @@ void test_step_full_render_http() {
     HostHttp().body = JpegBody();
     HostHttp().use_content_length = true;
     HostJpegDecodeMode() = 0;
+    HostJpegDecodeWithCapsCalls() = 0;
+    HostLastJpegDecodeCaps() = 0;
+    HostHeapCapsCalls().clear();
+    HostHeapSizeCalls().clear();
+    HostHeapAlignmentCalls().clear();
+    HostHeapPhaseMonitorStarts() = 0;
+    HostHeapPhaseMonitorStops() = 0;
+    HostHeapCheckpointPhases().clear();
 
     int seq = 3;
     disp.chat_messages.emplace_back("assistant", "Old transcript");
@@ -1628,7 +1788,8 @@ void test_step_full_render_http() {
            "\",\"prompt\":\"Xin chào\",\"stepType\":\"greeting\",\"scene\":{"
            "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}},"
            "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}},"
-           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\" Teaching \"}}}}");
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},"
+           "\"expression\":\" Teaching \",\"robotState\":\"talking\"}}}}");
     size_t idx = Sent().size() - 1;
     require(FrameType(idx) == "lesson_ack", "rendered step acks");
     // NOTE non-tautology: all three layers fetched+drew so degraded MUST be false.
@@ -1636,6 +1797,8 @@ void test_step_full_render_http() {
     require(FrameBodyBool(idx, "rendered", false) == true, "step ack rendered=true");
     require(FrameBodyBool(idx, "degraded", true) == false,
             "all three layers drew -> degraded=false");
+    require(FrameBodyStr(idx, nullptr, "robotState") == "talking",
+            "step ack echoes the rendered robotState for strict evidence correlation");
     require(disp.lesson_mode_calls.size() > lesson_mode_calls_before_step &&
             disp.lesson_mode_calls.back() == true,
             "step hides the start loading face before drawing scene layers");
@@ -1645,6 +1808,27 @@ void test_step_full_render_http() {
             "teaching object image drawn");
     require(!disp.overlay_calls.empty() && disp.overlay_calls.back() == true,
             "robot overlay image drawn");
+    require(HostJpegDecodeWithCapsCalls() == 3,
+            "each lesson JPEG decodes directly with the lesson allocation contract");
+    require((HostLastJpegDecodeCaps() & MALLOC_CAP_SPIRAM) != 0,
+            "first decoded JPEG output allocation requires PSRAM");
+    require((HostLastJpegDecodeCaps() & MALLOC_CAP_INTERNAL) == 0,
+            "decoded JPEG output allocation never requests internal SRAM");
+    require(std::count(HostHeapAlignmentCalls().begin(), HostHeapAlignmentCalls().end(), size_t{16}) == 3,
+            "lesson JPEG decoded outputs are allocated with 16-byte alignment");
+    const auto first_decoded = std::find(HostHeapAlignmentCalls().begin(),
+                                         HostHeapAlignmentCalls().end(), size_t{16});
+    const size_t first_decoded_index = first_decoded - HostHeapAlignmentCalls().begin();
+    require(first_decoded_index < HostHeapCapsCalls().size() &&
+                HostHeapSizeCalls()[first_decoded_index] == 8,
+            "first decoded output allocation is directly observable before image ownership");
+    require((HostHeapCapsCalls()[first_decoded_index] & MALLOC_CAP_SPIRAM) != 0 &&
+                (HostHeapCapsCalls()[first_decoded_index] & MALLOC_CAP_INTERNAL) == 0,
+            "first decoded output allocation is directly backed by PSRAM");
+    require(HostHeapPhaseMonitorStarts() == 1 && HostHeapPhaseMonitorStops() == 1,
+            "lesson render brackets one phase-local heap monitor");
+    require(HostHeapCheckpointPhases() == std::vector<std::string>{"lesson_render.complete"},
+            "lesson render emits the phase checkpoint before ack");
     require(!disp.lesson_captions.empty() &&
             disp.lesson_captions.back() == "Xin chào", "authored prompt caption drawn");
     require(disp.last_status == "Đang học...", "rendered step replaces loading status with active lesson status");
@@ -3023,11 +3207,18 @@ void test_step_http_chunked_paths() {
     HostHttp().body[2] = 0x4e;
     HostHttp().max_chunk = 4096;                    // multiple reads -> exercise grow loop
     HostJpegDecodeMode() = 0;
+    HostHeapCapsCalls().clear();
     Handle(StepFrame(3, "s4", "http://x/p.png", "http://x/o.png", "http://x/r.png",
                      ",\"prompt\":\"P\",\"stepType\":\"greeting\"", ""));
     require(FrameBodyBool(Sent().size()-1, "degraded", true) == false,
             "chunked growth fetch draws all layers -> not degraded");
     require(disp.background_calls.back() == true, "chunked poster drew");
+    require(!HostHeapCapsCalls().empty(), "chunked fetch records initial and grown allocations");
+    for (int caps : HostHeapCapsCalls()) {
+        require((caps & MALLOC_CAP_SPIRAM) != 0, "chunked buffers use PSRAM");
+        require((caps & MALLOC_CAP_8BIT) != 0, "chunked buffers remain byte-addressable");
+        require((caps & MALLOC_CAP_INTERNAL) == 0, "chunked buffers never use internal SRAM");
+    }
 
     // chunked empty body -> total_read==0 -> nullptr
     ResetObservable();
@@ -3534,6 +3725,893 @@ void test_protocol_null_send_skip() {
     App().HostReset();  // restore protocol_ for any later test
 }
 
+void test_lesson_asset_reservation_blocks_prepare_before_asset_io() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    const std::string with_asset =
+        ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"pack-abcdef1234567890\",\"assets\":["
+        "{\"key\":\"poster\",\"state\":\"READY\",\"checksumOk\":true,"
+        "\"localPath\":\"sd://tbot/never-open.jpg\",\"size\":4}]}";
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "test mutation lease acquired");
+
+        Handle(PrepareFrame(1, with_asset));
+
+        require(Sent().size() == 1, "mutation-active prepare emits one stable error");
+        require(FrameType(0) == "lesson_error", "mutation-active prepare is rejected");
+        require(FrameSeq(0) == 1, "mutation-active refusal starts its isolated F->S stream at 1");
+        require(FrameBodyStr(0, nullptr, "code") == "LESSON_ASSET_MUTATION_ACTIVE",
+                "mutation-active prepare uses stable code");
+        require(FrameBodyBool(0, "retryable", false), "mutation-active prepare is retryable");
+        require(FrameBodyStr(0, "context", "reason") == "asset_mutation_active",
+                "mutation-active prepare uses privacy-safe reason");
+        require(HostLessonAssetOpenCount() == 0,
+                "mutation-active prepare performs zero lesson asset fopen calls");
+        require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "refused prepare publishes no lesson reservation");
+    }
+    Handle(PrepareFrame(1));
+    require(FrameType(Sent().size() - 1) == "lesson_ack",
+            "same identity can prepare after mutation refusal");
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "mutation refusal did not contaminate later owned F->S stream");
+}
+
+void test_lesson_asset_reservation_duplicate_and_foreign_prepare() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent && owner.generation != 0,
+            "successful prepare owns a nonzero coordinator generation");
+
+    Handle(PrepareFrame(1));
+    auto duplicate = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(duplicate.acquired && duplicate.idempotent &&
+                duplicate.generation == owner.generation,
+            "duplicate prepare preserves the exact owner generation");
+
+    const size_t before_foreign = Sent().size();
+    Handle(PrepareFrameFor("foreign-assignment", "foreign-session", 1));
+    require(Sent().size() == before_foreign + 1, "foreign prepare emits one refusal");
+    require(FrameType(Sent().size() - 1) == "lesson_error", "foreign prepare is rejected");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_SESSION_CONFLICT",
+            "foreign prepare uses stable conflict code");
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "foreign refusal starts its own isolated F->S stream at 1");
+    auto after_foreign = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(after_foreign.acquired && after_foreign.idempotent &&
+                after_foreign.generation == owner.generation,
+            "foreign prepare cannot replace the reservation owner");
+    Handle(StartFrame(2));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "foreign refusal does not advance owner F->S sequence");
+}
+
+void test_prepare_pure_contract_validation_precedes_storage_reservation() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "mutation held for pure-validation ordering test");
+        std::string wrong_version = PrepareFrame(1);
+        const size_t version_pos = wrong_version.find(kLessonProtocolVersion);
+        require(version_pos != std::string::npos, "wrong-version fixture locates token");
+        wrong_version.replace(version_pos, strlen(kLessonProtocolVersion), "WRONG");
+        Handle(wrong_version);
+        require(FrameBodyStr(0, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
+                "wrong version wins before mutation conflict");
+        require(FrameSeq(0) == 1, "wrong-version fresh refusal uses isolated sequence 1");
+        require(mutation.code() == LessonAssetReservationCode::kAcquired,
+                "pure validation leaves existing mutation lease unchanged");
+    }
+
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    std::string foreign_wrong = PrepareFrameFor("foreign", "foreign", 1);
+    const size_t version_pos = foreign_wrong.find(kLessonProtocolVersion);
+    require(version_pos != std::string::npos, "foreign wrong-version fixture locates token");
+    foreign_wrong.replace(version_pos, strlen(kLessonProtocolVersion), "WRONG");
+    Handle(foreign_wrong);
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_VERSION_UNSUPPORTED",
+            "foreign wrong version wins before session conflict");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "foreign pure-validation failure never changes owner reservation");
+}
+
+void test_prepare_sequence_zero_is_pure_rejection_without_generation_burn() {
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    require(coordinator.SetLastGenerationForTest(41),
+            "sequence-zero test seeds generation while idle");
+    FreshSession();
+    const std::string assignment = AID();
+    const std::string session = SID();
+    Handle(PrepareFrame(0));
+    require(Sent().size() == 1, "sequence zero emits exactly one refusal");
+    require(FrameType(0) == "lesson_error", "sequence zero emits protocol error");
+    require(FrameSeq(0) == 1, "sequence-zero refusal uses isolated incoming stream");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_SEQUENCE_INVALID",
+            "sequence zero uses stable envelope error");
+    require(!coordinator.HasLessonSession(), "sequence zero publishes no reservation");
+
+    Handle(PrepareFrame(1));
+    auto valid = coordinator.TryBeginLessonSession(assignment, session);
+    require(valid.acquired && valid.idempotent && valid.generation == 42,
+            "sequence zero does not burn coordinator generation");
+    Handle(StopFrame(2));
+    require(coordinator.SetLastGenerationForTest(0),
+            "sequence-zero generation test restores seam");
+
+    ResetObservable();
+    require(coordinator.SetLastGenerationForTest(73),
+            "mutation isolation test seeds generation while idle");
+    FreshSession();
+    {
+        auto mutation = coordinator.TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "mutation active before sequence-zero frame");
+        Handle(PrepareFrame(0));
+        require(Sent().size() == 1,
+                "sequence zero under mutation emits exactly one refusal");
+        require(FrameBodyStr(0, nullptr, "code") == "LESSON_SEQUENCE_INVALID",
+                "sequence error wins before mutation conflict");
+        require(mutation.code() == LessonAssetReservationCode::kAcquired,
+                "sequence-zero rejection leaves mutation lease unchanged");
+        require(!coordinator.HasLessonSession(),
+                "sequence-zero rejection under mutation creates no session");
+    }
+    Handle(PrepareFrame(1));
+    auto after_mutation = coordinator.TryBeginLessonSession(AID(), SID());
+    require(after_mutation.acquired && after_mutation.idempotent &&
+                after_mutation.generation == 74,
+            "sequence zero under mutation does not burn generation");
+    Handle(StopFrame(2));
+    require(coordinator.SetLastGenerationForTest(0),
+            "mutation generation test restores seam");
+
+    ResetObservable();
+    const int owner_sequence = OpenSession();
+    auto owner = coordinator.TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent, "running owner exists before seq-zero frame");
+    Handle(PrepareFrame(0));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "current same-identity sequence-zero error continues owner stream");
+    require(App().lesson_runtime_active, "sequence-zero frame leaves running owner active");
+    auto retained = coordinator.TryBeginLessonSession(AID(), SID());
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "sequence-zero frame preserves owner generation");
+    Handle(PauseFrame(owner_sequence));
+    require(FrameSeq(Sent().size() - 1) == 4,
+            "owner response remains monotonic after current-version sequence error");
+    Handle(StopFrame(owner_sequence + 1));
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":10"));
+    Handle(StartFrame(2));
+    auto versioned_owner = coordinator.TryBeginLessonSession(AID(), SID());
+    require(versioned_owner.acquired && versioned_owner.idempotent,
+            "versioned owner exists before newer seq-zero candidate");
+    Handle(PrepareFrame(0, ",\"assignmentVersion\":11"));
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "newer-version sequence-zero candidate uses isolated stream");
+    require(App().lesson_runtime_active,
+            "newer-version sequence-zero candidate preserves running owner");
+    auto versioned_retained = coordinator.TryBeginLessonSession(AID(), SID());
+    require(versioned_retained.acquired && versioned_retained.idempotent &&
+                versioned_retained.generation == versioned_owner.generation,
+            "newer-version sequence-zero candidate preserves owner generation");
+    Handle(PauseFrame(3));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "isolated newer-version sequence error does not advance owner counter");
+    Handle(StopFrame(4));
+}
+
+void test_lesson_transport_rejects_decoded_nul_before_cjson_truncation() {
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "ASCII owner reserved before NUL frames");
+
+    const std::vector<std::string> nul_frames = {
+        PrepareFrameFor(owner_assignment + "\\u0000foreign", owner_session, 3),
+        StopFrameFor(owner_assignment, owner_session + "\\u0000foreign", 3),
+        std::string("{\"type\":\"lesson_error\",\"protocolVersion\":\"") +
+            kLessonProtocolVersion + "\",\"assignmentId\":\"" + owner_assignment +
+            "\\u0000foreign\",\"sessionId\":\"" + owner_session +
+            "\",\"sequence\":3,\"body\":{\"code\":\"STEP_TIMEOUT\"}}",
+    };
+    const size_t sent_before = Sent().size();
+    for (const auto& frame : nul_frames) {
+        require(!HandleTransportJson(frame), "decoded-NUL lesson identity is dropped pre-parse");
+        require(Sent().size() == sent_before, "decoded-NUL frame emits no truncated-prefix reply");
+        auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+            owner_assignment, owner_session);
+        require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+                "decoded-NUL frame cannot replace or release ASCII owner");
+    }
+
+    const std::string escaped_literal =
+        "{\"assignmentId\":\"abc\\\\u0000def\",\"note\":\"safe literal slash\"}";
+    require(!JsonHasForbiddenDecodedNull(escaped_literal.data(), escaped_literal.size()),
+            "escaped literal backslash-u0000 is not decoded NUL");
+    const std::string nul_in_key = "{\"assignment\\u0000Id\":\"value\"}";
+    require(JsonHasForbiddenDecodedNull(nul_in_key.data(), nul_in_key.size()),
+            "decoded NUL in a JSON key is rejected lexically");
+    std::string raw_nul = "{\"assignmentId\":\"abc";
+    raw_nul.push_back('\0');
+    raw_nul += "def\"}";
+    require(JsonHasForbiddenDecodedNull(raw_nul.data(), raw_nul.size()),
+            "raw NUL byte is rejected before parsing");
+}
+
+void test_lesson_asset_reservation_invalid_and_exhausted_prepare() {
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrameFor("", "session", 1));
+    require(FrameType(0) == "lesson_error", "empty assignment identity is rejected");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_IDENTITY_INVALID",
+            "invalid identity uses stable validation code");
+    require(!FrameBodyBool(0, "retryable", true), "invalid identity is not retryable");
+
+    ResetObservable();
+    FreshSession();
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() +
+           "\",\"sessionId\":\"" + SID() + "\",\"sequence\":1,\"body\":[]}");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_ENVELOPE_INVALID",
+            "non-object prepare body is rejected before reservation");
+
+    ResetObservable();
+    Handle(PrepareFrameFor(std::string(kLessonAssetIdentityMaxBytes + 1, 'a'), "session", 1));
+    require(FrameType(0) == "lesson_error", "oversized assignment identity is rejected");
+    require(FrameBodyStr(0, "context", "reason") == "invalid_identity",
+            "oversized identity response does not echo identity");
+
+    ResetObservable();
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    require(coordinator.SetLastGenerationForTest(UINT64_MAX),
+            "test seam sets exhausted generation while idle");
+    FreshSession();
+    Handle(PrepareFrame(1));
+    require(FrameType(0) == "lesson_error", "generation exhaustion rejects prepare");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_RESERVATION_EXHAUSTED",
+            "generation exhaustion uses stable code");
+    require(!FrameBodyBool(0, "retryable", true), "generation exhaustion fails closed");
+    require(!coordinator.HasLessonSession(), "generation exhaustion publishes no owner");
+    require(coordinator.SetLastGenerationForTest(0), "test seam restores generation state");
+}
+
+void test_lesson_asset_reservation_prepare_failure_release_ownership() {
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"assetPack\":{\"cacheKey\":\"pack\",\"assets\":[]}"));
+    require(FrameType(0) == "lesson_error", "new prepare can fail after reservation");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "failed newly acquired prepare releases its exact reservation");
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "mutation can acquire after failed new prepare");
+    }
+
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":1"));
+    Handle(StartFrame(2));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "initial prepare owns reservation");
+    const bool runtime_before_replacement = App().lesson_runtime_active;
+    Handle(PrepareFrame(3, ",\"assignmentVersion\":2,"
+                           "\"assetPack\":{\"cacheKey\":\"pack\",\"assets\":[]}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "idempotent prepare can reject malformed replacement payload");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "failed idempotent prepare does not release the existing owner");
+    require(App().lesson_runtime_active == runtime_before_replacement,
+            "failed idempotent replacement preserves active renderer state");
+    Handle(StopFrame(4));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "old owner remains terminally usable after failed replacement");
+    auto mutation_after_stop =
+        LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation_after_stop),
+            "mutation reacquires after exact old-owner stop");
+}
+
+void test_not_ready_asset_candidate_does_not_commit_lesson_session() {
+    const std::string not_ready_pack =
+        ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"candidate-abcdef1234567890\",\"assets\":[]}";
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, not_ready_pack));
+    require(FrameType(0) == "lesson_ack" && !FrameAssetPackReady(0),
+            "fresh not-ready candidate reports truthful readiness");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "fresh not-ready candidate releases reservation for sync repair");
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation),
+                "sync mutation can run after fresh not-ready candidate");
+    }
+
+    ResetObservable();
+    const int replacement_sequence = OpenSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "running owner exists before candidate");
+    Handle(PrepareFrame(replacement_sequence, not_ready_pack));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                !FrameAssetPackReady(Sent().size() - 1),
+            "same-owner not-ready replacement reports readiness without commit");
+    require(App().lesson_runtime_active,
+            "same-owner not-ready replacement preserves running renderer");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "same-owner not-ready replacement preserves exact reservation generation");
+    Handle(StopFrame(replacement_sequence + 1));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "preserved owner can stop after not-ready replacement");
+}
+
+void test_republished_not_ready_candidate_uses_isolated_stream() {
+    const std::string not_ready_republish =
+        ",\"assignmentVersion\":11,"
+        "\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"republish-abcdef1234567890\",\"assets\":[]}";
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":10"));
+    Handle(StartFrame(2));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent, "version 10 owner is running");
+
+    Handle(PrepareFrame(1, not_ready_republish));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameSeq(Sent().size() - 1) == 1 &&
+                !FrameAssetPackReady(Sent().size() - 1),
+            "newer not-ready republish uses isolated F->S sequence 1");
+    Handle(PrepareFrame(1, not_ready_republish));
+    require(FrameSeq(Sent().size() - 1) == 1,
+            "retry of uncommitted republish remains on isolated sequence 1");
+    require(App().lesson_runtime_active,
+            "not-ready republish leaves old running renderer active");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "not-ready republish preserves old owner generation");
+
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":10"));
+    require(FrameSeq(Sent().size() - 1) == 3,
+            "current-version duplicate resumes unchanged owner F->S stream");
+    require(!FrameHasAssetPack(Sent().size() - 1),
+            "uncommitted candidate did not overwrite owner prepare-ack cache");
+    Handle(PauseFrame(3));
+    require(FrameSeq(Sent().size() - 1) == 4,
+            "owner stream remains monotonic after cached duplicate replay");
+    Handle(StopFrame(4));
+}
+
+void test_lesson_asset_reservation_retained_across_runtime_and_terminal_release() {
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "prepare retains reservation");
+    Handle(StartFrame(2));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "start retains reservation");
+    Handle(PauseFrame(3));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "pause retains reservation");
+    Handle(ResumeFrame(4));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "resume retains reservation");
+    Handle(StopFrame(5));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "completed stop releases reservation");
+
+    for (const std::string reason : {"\"reason\":\"CANCELLED\"", "\"reason\":\"FAILED\""}) {
+        ResetObservable();
+        FreshSession();
+        Handle(PrepareFrame(1));
+        Handle(StopFrame(2, reason));
+        require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "cancelled/failed stop releases reservation");
+    }
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1));
+    Handle(ErrorFrame(2));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "terminal lesson_error releases reservation");
+
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    const int failing_step_sequence = OpenSession();
+    std::string bad_contract_step =
+        StepFrame(failing_step_sequence, "bad-contract", "", "", "");
+    const size_t protocol_pos = bad_contract_step.find(kLessonProtocolVersion);
+    require(protocol_pos != std::string::npos, "bad-contract fixture finds protocol token");
+    bad_contract_step.replace(protocol_pos, strlen(kLessonProtocolVersion), "WRONG");
+    Handle(bad_contract_step);
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "internal contract failure releases reservation");
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1, ",\"preloadResetOnly\":true,\"assignmentVersion\":7"));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "preload reset-only prepare abandons and releases reservation");
+
+    ResetObservable();
+    Board::GetInstance().display_ = nullptr;
+    const int sequence = OpenSession();
+    Handle(StepFrame(sequence, "blank", "", "", "", ",\"prompt\":\"\""));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "terminal no-visible-content step releases reservation");
+}
+
+void test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release() {
+    ResetObservable();
+    FreshSession();
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent, "owner prepare reserved storage");
+
+    Handle(StopFrameFor("foreign-assignment", "foreign-session", 2));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "foreign stop cannot release owner");
+    require(!LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                owner_assignment, owner_session, owner.generation + 1),
+            "wrong generation cannot release owner");
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "wrong generation leaves owner active");
+
+    Handle(StopFrame(2));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "owner terminal releases exact generation");
+    Handle(StopFrame(2));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "duplicate terminal does not double-release or recreate state");
+}
+
+void test_safe_motion_presets_and_auto_rest() {
+    ResetObservable();
+    HostEspTimerCreateOk() = false;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "listen") == LessonMotionResult::kDegraded,
+            "timer creation failure degrades");
+    HostEspTimerCreateOk() = true;
+
+    struct Case { const char* preset; std::vector<std::string> calls; };
+    const std::vector<Case> cases = {
+        {"rest", {"both_arms_lower", "head_center"}},
+        {"teach", {"right_arm_raise", "head_center"}},
+        {"presentLeft", {"left_arm_raise", "right_arm_lower", "head_turn_left"}},
+        {"presentRight", {"right_arm_raise", "left_arm_lower", "head_turn_right"}},
+        {"listen", {"both_arms_lower", "head_center"}},
+        {"thinking", {"left_arm_raise", "right_arm_lower", "head_turn_left"}},
+        {"encourage", {"both_arms_raise", "head_center"}},
+        {"tryAgain", {"both_arms_lower", "head_turn_right"}},
+        {"celebrate", {"both_arms_raise", "head_center"}},
+        {"goodbye", {"right_arm_raise", "left_arm_lower", "head_turn_right"}},
+    };
+    for (const auto& tc : cases) {
+        ResetObservable();
+        const auto result = DispatchLessonMotionPreset(App().robot_uart_, tc.preset);
+        require(result == LessonMotionResult::kApplied, "named motion preset applies");
+        require(App().robot_uart_.calls == tc.calls, "named preset exact RobotUart call order");
+        if (std::string(tc.preset) != "rest") {
+            HostEspAdvanceTimeUs(1500LL * 1000LL);
+            HostEspFireTimer();
+            auto expected = tc.calls;
+            expected.push_back("both_arms_lower");
+            expected.push_back("head_center");
+            require(App().robot_uart_.calls == expected, "bounded preset auto-rests");
+        }
+    }
+}
+
+void test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades() {
+    ResetObservable();
+    require(DispatchLessonMotionPreset(App().robot_uart_, nullptr) == LessonMotionResult::kDegraded,
+            "null preset degrades");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "wave") == LessonMotionResult::kDegraded,
+            "unknown preset degrades");
+    require(App().robot_uart_.calls.empty(), "unknown preset sends nothing");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "90") == LessonMotionResult::kDegraded,
+            "raw-looking value degrades");
+
+    App().robot_uart_.calls.clear();
+    require(DispatchLessonMotionPreset(App().robot_uart_, "celebrate") == LessonMotionResult::kApplied,
+            "bounded motion is armed before unknown input");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "rawSweep") == LessonMotionResult::kDegraded,
+            "unknown input remains degraded");
+    HostEspAdvanceTimeUs(1500LL * 1000LL);
+    HostEspFireTimer();
+    const std::vector<std::string> preserved_rest = {
+        "both_arms_raise", "head_center", "both_arms_lower", "head_center"};
+    require(App().robot_uart_.calls == preserved_rest,
+            "unknown input does not cancel the active preset rest");
+
+    App().robot_uart_.send_ok = false;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "teach") == LessonMotionResult::kDegraded,
+            "UART send failure degrades");
+    App().robot_uart_.send_ok = true;
+
+    HostEspTimerStartOk() = false;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "listen") == LessonMotionResult::kDegraded,
+            "timer failure degrades");
+    HostEspTimerStartOk() = true;
+
+    App().robot_uart_.calls.clear();
+    require(DispatchLessonMotionPreset(App().robot_uart_, "celebrate") == LessonMotionResult::kApplied,
+            "first bounded preset applies");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "presentLeft") == LessonMotionResult::kApplied,
+            "new preset cancels stale rest");
+    HostEspAdvanceTimeUs(1500LL * 1000LL);
+    HostEspFireTimer();
+    const std::vector<std::string> expected = {
+        "both_arms_raise", "head_center", "left_arm_raise", "right_arm_lower",
+        "head_turn_left", "both_arms_lower", "head_center"};
+    require(App().robot_uart_.calls == expected, "only newest generation auto-rest runs");
+}
+
+void test_queued_old_timer_callback_cannot_rest_a_new_pose_early() {
+    ResetObservable();
+    HostEspNowUs() = 1000;
+    require(DispatchLessonMotionPreset(App().robot_uart_, "celebrate") == LessonMotionResult::kApplied,
+            "old bounded pose schedules rest");
+    const auto old_callback = HostEspQueueTimerCallback();
+    require(DispatchLessonMotionPreset(App().robot_uart_, "presentLeft") == LessonMotionResult::kApplied,
+            "new pose replaces the old deadline");
+    const auto before_early_callback = App().robot_uart_.calls;
+    HostEspInvokeQueuedCallback(old_callback);
+    require(App().robot_uart_.calls == before_early_callback,
+            "queued old callback does not rest before the new absolute deadline");
+
+    HostEspAdvanceTimeUs(1500LL * 1000LL);
+    HostEspFireTimer();
+    auto expected = before_early_callback;
+    expected.push_back("both_arms_lower");
+    expected.push_back("head_center");
+    require(App().robot_uart_.calls == expected, "new deadline performs exactly one rest");
+    HostEspInvokeQueuedCallback(old_callback);
+    require(App().robot_uart_.calls == expected, "late duplicate callback cannot rest twice");
+}
+
+void test_step_reads_only_body_motion_present_and_motion_degrades_ack() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    App().robot_uart_.send_ok = true;
+    int seq = OpenMotionEnabledSession();
+    const std::string extra =
+        ",\"motion\":{\"present\":\"teach\",\"angle\":90,\"percent\":50,\"step\":2,\"delay\":1},"
+        "\"outcomeMotion\":{\"present\":\"celebrate\"},\"motionPreset\":\"goodbye\"";
+    Handle(StepFrame(seq, "motion", "http://poster", "http://object", "http://overlay", extra));
+    const std::vector<std::string> expected = {"right_arm_raise", "head_center"};
+    require(App().robot_uart_.calls == expected, "step entry reads only motion.present");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    seq = OpenMotionEnabledSession();
+    Handle(StepFrame(seq, "bad-motion", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"rawSweep\",\"angle\":90}"));
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "unknown motion is nonfatal");
+    require(FrameBodyBool(Sent().size() - 1, "degraded", false), "unknown motion marks ack degraded");
+}
+
+void test_motion_runtime_control_defaults_disabled_and_resets_per_manifest() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    App().robot_uart_.send_ok = true;
+    int seq = OpenSession();
+    App().robot_uart_.calls.clear();
+    Handle(StepFrame(seq, "motion-off", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"celebrate\"}"));
+    require(App().robot_uart_.calls.empty(), "motion defaults disabled without runtime control");
+    require(FrameType(Sent().size() - 1) == "lesson_ack", "disabled motion remains nonfatal");
+    require(!FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "operator-disabled motion is intentional, not render degradation");
+
+    Handle(StopFrame(seq + 1));
+    seq = OpenMotionEnabledSession();
+    App().robot_uart_.calls.clear();
+    Handle(StepFrame(seq, "motion-on", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"celebrate\"}"));
+    require(!App().robot_uart_.calls.empty(), "manifest control enables named motion");
+
+    Handle(StopFrame(seq + 1));
+    seq = OpenSession();
+    App().robot_uart_.calls.clear();
+    Handle(StepFrame(seq, "motion-reset", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"celebrate\"}"));
+    require(App().robot_uart_.calls.empty(), "fresh manifest resets motion control to disabled");
+}
+
+void test_step_evidence_telemetry_and_privacy_safe_logs() {
+    LvglDisplay disp;
+    NetworkInterface net;
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    int seq = OpenMotionEnabledSession();
+    Handle(StepFrame(seq, "motion-success", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"teach\"}", "", "modeling"));
+    const size_t success_ack = Sent().size() - 1;
+    require(Sent()[success_ack].find("\"renderDegraded\":false") != std::string::npos,
+            "complete visual render explicitly reports telemetry.renderDegraded=false");
+    require(!FrameBodyTelemetryBool(success_ack, "renderDegraded", true),
+            "complete visual render has visual-only degradation false");
+    require(FrameBodyStr(success_ack, "telemetry", "motionDispatch") == "success",
+            "applied UART preset reports telemetry.motionDispatch=success");
+    require(LogContains("lesson_step_started assignmentId=" + std::string(AID()) +
+                        " sessionId=" + SID() +
+                        " lessonId=L1 lessonVersion=3 stepId=motion-success sequence=3"),
+            "step-start evidence log carries canonical identity fields");
+    require(LogContains("motion_preset outcome=success"),
+            "successful preset emits canonical outcome log");
+    require(LogContains("lesson_ack TX assignmentId=" + std::string(AID()) +
+                        " sessionId=" + SID() +
+                        " stepId=motion-success body.acks=3 rendered=true degraded=false "
+                        "robotState=modeling"),
+            "firmware logs privacy-safe canonical ack payload evidence");
+    require(!LogContains("preset=teach") && !LogContains("angle=") &&
+                !LogContains("transcript="),
+            "evidence logs omit raw motion arguments and transcripts");
+    require(!LogContains("motion_degraded"),
+            "successful preset does not emit motion_degraded marker");
+    require(!LogContains("render_degraded"),
+            "complete visual render does not emit render_degraded marker");
+    require(!LogContains("optional_asset_missing"),
+            "complete visual render does not emit optional_asset_missing marker");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "unsafe-state", "http://poster", "http://object", "http://overlay",
+                     "", "", "modeling\\ntranscript=private-child-text"));
+    const size_t unsafe_state_ack = Sent().size() - 1;
+    require(FrameBodyStr(unsafe_state_ack, nullptr, "robotState").empty(),
+            "noncanonical robotState is not echoed into the ack body");
+    require(!LogContains("private-child-text") && !LogContains("transcript="),
+            "control characters cannot inject child text into ack evidence logs");
+
+    ResetObservable();
+    FreshSession();
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonProtocolVersion +
+           "\",\"assignmentId\":\"unsafe\\ntranscript=private-child-text\","
+           "\"sessionId\":\"safe-session\",\"sequence\":1,"
+           "\"body\":{\"profile\":\"" + kLessonProfileEspTft + "\"}}");
+    require(LogContains("lesson_ack TX assignmentId=invalid sessionId=safe-session"),
+            "invalid identity tokens are replaced instead of logged verbatim");
+    require(!LogContains("private-child-text") && !LogContains("transcript="),
+            "identity log sanitization prevents newline injection and transcript leakage");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenMotionEnabledSession();
+    App().robot_uart_.send_ok = false;
+    Handle(StepFrame(seq, "motion-failed", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"teach\"}"));
+    const size_t failed_ack = Sent().size() - 1;
+    require(Sent()[failed_ack].find("\"renderDegraded\":false") != std::string::npos,
+            "motion-only failure explicitly keeps telemetry.renderDegraded=false");
+    require(!FrameBodyTelemetryBool(failed_ack, "renderDegraded", true),
+            "motion-only failure is not visual degradation");
+    require(FrameBodyStr(failed_ack, "telemetry", "motionDispatch") == "failed",
+            "UART preset failure reports telemetry.motionDispatch=failed");
+    require(FrameBodyBool(failed_ack, "degraded", false),
+            "UART preset failure preserves degraded ack semantics");
+    require(LogContains("motion_preset outcome=failed"),
+            "failed preset emits canonical outcome log");
+    require(LogContains("motion_degraded"),
+            "failed preset emits motion_degraded only-when-true marker");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "motion-skipped", "http://poster", "http://object", "http://overlay",
+                     ",\"motion\":{\"present\":\"teach\"}"));
+    const size_t skipped_ack = Sent().size() - 1;
+    require(FrameBodyStr(skipped_ack, "telemetry", "motionDispatch") == "skipped",
+            "disabled motion control reports telemetry.motionDispatch=skipped");
+    require(LogContains("motion_preset outcome=skipped"),
+            "disabled preset emits canonical skipped outcome log");
+    require(!LogContains("motion_degraded"),
+            "intentional motion skip does not emit motion_degraded");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "no-motion", "http://poster", "http://object", "http://overlay"));
+    require(Sent().back().find("\"motionDispatch\"") == std::string::npos,
+            "step without authored motion omits telemetry.motionDispatch");
+    require(!LogContains("motion_preset"),
+            "step without authored motion does not claim a motion preset outcome");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "optional-missing", "http://poster", "", ""));
+    const size_t optional_missing_ack = Sent().size() - 1;
+    require(Sent()[optional_missing_ack].find("\"renderDegraded\":true") != std::string::npos,
+            "missing visual layers explicitly report telemetry.renderDegraded=true");
+    require(FrameBodyTelemetryBool(optional_missing_ack, "renderDegraded", false),
+            "missing visual layers set visual-only degradation true");
+    require(LogContains("render_degraded"),
+            "visual fallback emits render_degraded only-when-true marker");
+    require(LogContains("optional_asset_missing"),
+            "missing optional layers emit canonical optional_asset_missing marker");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    Board::GetInstance().network_ = &net;
+    ResetHostHttp(); HostHttp().body = JpegBody(); HostJpegDecodeMode() = 0;
+    seq = OpenMotionEnabledSession();
+    App().robot_uart_.send_ok = false;
+    Handle(StepFrame(seq, "motion-and-visual-failed", "http://poster", "", "",
+                     ",\"motion\":{\"present\":\"teach\"}"));
+    const size_t simultaneous_ack = Sent().size() - 1;
+    require(FrameBodyStr(simultaneous_ack, "telemetry", "degradedReason") == "motionPreset",
+            "legacy degradedReason priority remains motionPreset for simultaneous failures");
+    require(Sent()[simultaneous_ack].find("\"renderDegraded\":true") != std::string::npos,
+            "simultaneous motion and visual failure exposes visual-only degradation");
+    require(FrameBodyTelemetryBool(simultaneous_ack, "renderDegraded", false),
+            "simultaneous failure keeps render degradation observable");
+}
+
+void test_teaching_word_telemetry_reuse_and_duplicate_ack_parity() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    int seq = OpenSession();
+    Handle(StepFrame(seq, "word", "http://word-bg", "http://word-object", "http://word-overlay",
+                     ",\"teachingWord\":{\"text\":\"TOO LONG FOR TFT\",\"displayText\":\"BARN\"}"));
+    require(!disp.teaching_word_calls.empty() && disp.teaching_word_calls.back() == "BARN",
+            "displayText renders as teaching word");
+    const size_t first_ack_index = Sent().size() - 1;
+    const std::string first_ack = Sent().back();
+    const std::string first_body = FrameBodyJson(first_ack_index);
+    require(first_ack.find("\"internalFreeBytes\"") != std::string::npos,
+            "step ack reports internal SRAM telemetry");
+    require(first_ack.find("\"psramFreeBytes\"") != std::string::npos,
+            "step ack reports PSRAM telemetry");
+    require(first_ack.find("\"layersReused\"") != std::string::npos,
+            "step ack reports reuse flags");
+
+    Handle(StepFrame(seq, "word", "http://word-bg", "http://word-object", "http://word-overlay",
+                     ",\"teachingWord\":{\"displayText\":\"BARN\"}"));
+    require(Sent().back().find("\"telemetry\"") != std::string::npos,
+            "duplicate ack replays telemetry");
+    require(FrameBodyJson(Sent().size() - 1) == first_body,
+            "duplicate ack body exactly matches original serialized body");
+    Handle(StopFrame(seq + 1));
+    require(!disp.teaching_word_calls.empty() && disp.teaching_word_calls.back().empty(),
+            "lesson stop clears teaching word pill");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    seq = OpenSession();
+    Handle(StepFrame(seq, "bad-word", "http://bad-bg", "http://bad-object", "http://bad-overlay",
+                     ",\"teachingWord\":{\"text\":\"ABCDEFGHIJKLM\"}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error", "overlong teaching word rejected");
+}
+
+void test_ack_replay_window_handles_delayed_and_expired_duplicates() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    int sequence = OpenSession();
+    std::vector<std::string> bodies(21);
+    for (; sequence <= 20; ++sequence) {
+        Handle((sequence % 2) ? PauseFrame(sequence) : ResumeFrame(sequence));
+        bodies[sequence] = FrameBodyJson(Sent().size() - 1);
+    }
+
+    Handle(PauseFrame(5));
+    require(FrameBodyJson(Sent().size() - 1) == bodies[5],
+            "delayed duplicate inside replay window preserves exact body");
+    Handle(ResumeFrame(6));
+    require(FrameBodyJson(Sent().size() - 1) == bodies[6],
+            "multiple older duplicates replay independently by sequence");
+    Handle(PauseFrame(3));
+    require(!FrameBodyBool(Sent().size() - 1, "rendered", true) &&
+            !FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "duplicate outside replay window receives conservative ack");
+}
+
+void test_layer_install_timeout_degrades_without_committing_layer_state() {
+    ResetObservable();
+    LvglDisplay disp;
+    Board::GetInstance().display_ = &disp;
+    int sequence = OpenSession();
+    App().schedule_wait_succeeds = false;
+    Handle(StepFrame(sequence, "install-timeout", "http://timeout-bg", "http://timeout-object",
+                     "http://timeout-overlay", ",\"prompt\":\"Look\""));
+    require(FrameBodyBool(Sent().size() - 1, "degraded", false),
+            "application-task install timeout degrades step");
+    require(disp.background_calls.empty() || !disp.background_calls.back(),
+            "timed-out holder never installs background");
+
+    App().schedule_wait_succeeds = true;
+    Handle(StepFrame(sequence + 1, "install-retry", "http://timeout-bg", "http://timeout-object",
+                     "http://timeout-overlay", ",\"prompt\":\"Look\""));
+    require(!disp.background_calls.empty() && disp.background_calls.back(),
+            "retry reloads and installs layer because timeout did not commit state");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &disp;
+    sequence = OpenSession();
+    const size_t background_calls_before = disp.background_calls.size();
+    App().schedule_wait_succeeds = false;
+    App().schedule_wait_starts_before_timeout = true;
+    Handle(StepFrame(sequence, "install-running", "http://running-bg", "http://running-object",
+                     "http://running-overlay", ",\"prompt\":\"Look\""));
+    require(disp.background_calls.size() == background_calls_before + 1 && disp.background_calls.back(),
+            "callback already running at timeout completes authoritatively");
+    const size_t installed_count = disp.background_calls.size();
+    App().schedule_wait_succeeds = true;
+    App().schedule_wait_starts_before_timeout = false;
+    Handle(StepFrame(sequence + 1, "install-running-reuse", "http://running-bg",
+                     "http://running-object", "http://running-overlay", ",\"prompt\":\"Look\""));
+    require(disp.background_calls.size() == installed_count,
+            "completed running callback commits layer state for reuse");
+}
+
 }  // namespace
 
 int main() {
@@ -3541,6 +4619,7 @@ int main() {
     test_prepare_basic();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
+    test_prepare_assetpack_derives_local_path_from_root_and_key();
     test_prepare_assetpack_trims_manifest_checksum_for_cache_key();
     test_prepare_assetpack_trims_cache_key_before_ack();
     test_prepare_assetpack_fractional_size_not_ready();
@@ -3551,7 +4630,18 @@ int main() {
     test_prepare_assetpack_malformed_critical_assets_not_ready();
     test_prepare_assetpack_rejects_unbounded_count_and_total_size();
     test_prepare_assetpack_requires_manifest_checksum_before_ack();
-    test_prepare_reject_clears_stale_lesson_scene();
+    test_lesson_asset_reservation_blocks_prepare_before_asset_io();
+    test_lesson_asset_reservation_duplicate_and_foreign_prepare();
+    test_prepare_pure_contract_validation_precedes_storage_reservation();
+    test_prepare_sequence_zero_is_pure_rejection_without_generation_burn();
+    test_lesson_transport_rejects_decoded_nul_before_cjson_truncation();
+    test_lesson_asset_reservation_invalid_and_exhausted_prepare();
+    test_lesson_asset_reservation_prepare_failure_release_ownership();
+    test_not_ready_asset_candidate_does_not_commit_lesson_session();
+    test_republished_not_ready_candidate_uses_isolated_stream();
+    test_lesson_asset_reservation_retained_across_runtime_and_terminal_release();
+    test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release();
+    test_prepare_reject_preserves_active_lesson_scene();
     test_version_profile_gate();
     test_fresh_prepare_contract_reject_clears_stale_lesson_scene();
     test_unknown_session_and_staleness();
@@ -3559,6 +4649,7 @@ int main() {
     test_delayed_duplicate_prepare_replays_assetpack_after_start_ack();
     test_prepare_new_assignment_version_same_session_resets_stream();
     test_fresh_prepare_clears_stale_active_lesson_before_start();
+    test_preload_reset_prepare_quiesces_without_arming_lesson_start();
     test_prepare_after_stop_same_session_resets_stream();
     test_prepare_during_running_same_session_resets_stream();
     test_prepare_after_terminal_error_same_session_resets_stream();
@@ -3616,6 +4707,15 @@ int main() {
     test_flashed_poster_without_draw_is_not_drawn();
     test_remaining_reachable_branches();
     test_protocol_null_send_skip();
+    test_safe_motion_presets_and_auto_rest();
+    test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
+    test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
+    test_step_reads_only_body_motion_present_and_motion_degrades_ack();
+    test_motion_runtime_control_defaults_disabled_and_resets_per_manifest();
+    test_step_evidence_telemetry_and_privacy_safe_logs();
+    test_teaching_word_telemetry_reuse_and_duplicate_ack_parity();
+    test_ack_replay_window_handles_delayed_and_expired_duplicates();
+    test_layer_install_timeout_degrades_without_committing_layer_state();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }

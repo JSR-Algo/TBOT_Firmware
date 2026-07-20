@@ -8,6 +8,37 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def test_runtime_logs_use_target_supported_integer_formats():
+    app_cc = read("main/application.cc")
+    lesson_cc = read("main/lesson_handler.cc")
+
+    unsupported_logs = []
+    unsupported_sd_helpers = []
+    for source_path in (ROOT / "main").rglob("*"):
+        if source_path.suffix not in {".c", ".cc", ".cpp", ".h", ".hpp"}:
+            continue
+        contents = source_path.read_text(encoding="utf-8")
+        if "%lld" in contents or "%llu" in contents:
+            unsupported_logs.append(str(source_path.relative_to(ROOT)))
+        if "sdmmc_card_print_info(" in contents:
+            unsupported_sd_helpers.append(str(source_path.relative_to(ROOT)))
+
+    assert unsupported_logs == []
+    assert unsupported_sd_helpers == []
+    assert "tts_stop_received ts=%lu%03lu" in app_cc
+    assert "lesson_* dropped: sequence must be an integer between 0 and INT32_MAX" in lesson_cc
+    assert "sequence_d > static_cast<double>(INT32_MAX)" in lesson_cc
+    assert "token=%lu%09lu%09lu" in read("main/boards/common/blufi.cpp")
+    sd_board_sources = (
+        read("main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc")
+        + read("main/boards/wireless-tag-wtp4c5mp07s/wireless-tag-wtp4c5mp07s.cc")
+    )
+    assert sd_board_sources.count("size_mb=%lu sector_size=%lu") == 3
+    assert sd_board_sources.count("static_cast<uint64_t>(card->csd.capacity)") == 3
+    assert "lesson_step_started assignmentId=%s" in lesson_cc
+    assert "sequence=%ld" in lesson_cc
+
+
 def test_listening_transition_uses_bounded_playback_drain():
     app_cc = read("main/application.cc")
     audio_h = read("main/audio/audio_service.h")
@@ -293,6 +324,17 @@ def test_lesson_runtime_reset_protocol_ignored_before_scheduling_teardown():
     assert "reset_pending_" not in guard
     assert "DoResetProtocol" not in guard
 
+
+def test_protocol_and_network_resets_do_not_force_release_lesson_asset_session():
+    app_cc = read("main/application.cc")
+    disconnect_start = app_cc.index("void Application::HandleNetworkDisconnectedEvent()")
+    disconnect_end = app_cc.index("void Application::HandleActivationDoneEvent()", disconnect_start)
+    reset_start = app_cc.index("void Application::DoResetProtocol()")
+    reset_end = app_cc.index("void Application::ResetProtocol()", reset_start)
+
+    assert "ForceEndLessonSession" not in app_cc[disconnect_start:disconnect_end]
+    assert "ForceEndLessonSession" not in app_cc[reset_start:reset_end]
+
 def test_lesson_runtime_suppresses_low_battery_popup_and_sound_before_interrupting_scene():
     lvgl_cc = read("main/display/lvgl_display/lvgl_display.cc")
     app_h = read("main/application.h")
@@ -577,7 +619,7 @@ def test_websocket_open_resets_idle_timer_before_hello_send():
 
     assert "last_incoming_time_ = std::chrono::steady_clock::now();" in open_body
     reset_idx = open_body.index("last_incoming_time_ = std::chrono::steady_clock::now();")
-    create_idx = open_body.index("websocket_ = network->CreateWebSocket(1);")
+    create_idx = open_body.index("auto replacement_websocket = network->CreateWebSocket(1);")
     hello_idx = open_body.index("if (!SendText(message))")
 
     assert reset_idx < create_idx < hello_idx
@@ -1575,7 +1617,8 @@ def test_lesson_runtime_passive_socket_close_reconnects_before_idle_repaint():
     assert early_body.index("lesson_runtime_active_.load() && passive_ws_intent_.load()") < set_idle
     guard = early_body[early_body.index("lesson_runtime_active_.load() && passive_ws_intent_.load()") :]
     assert "while (audio_service_.PopPacketFromSendQueue() != nullptr) {}" in guard
-    assert "StartPassiveLessonWebsocket();" in guard
+    assert "SchedulePassiveLessonReconnect();" in guard
+    assert "StartPassiveLessonWebsocket();" not in guard
     assert "return;" in guard
 
 
@@ -2066,7 +2109,8 @@ def test_firmware_exposes_generic_lesson_asset_pack_sync_to_sd():
     assert '"url"' in mcp_server
     assert '"sha256"' in mcp_server
     assert "VerifyLessonAssetSha256" in mcp_server
-    assert "NormalizeLessonAssetSdPath" in mcp_server
+    assert "ValidateLessonAssetSyncPath" in mcp_server
+    assert "ValidateLessonAssetSyncPackOrThrow" in mcp_server
     assert '"downloadedCount"' in mcp_server
     assert '"skippedCount"' in mcp_server
     assert '"failedCount"' in mcp_server
@@ -2088,17 +2132,17 @@ def test_lesson_asset_pack_sync_http_download_does_not_starve_main_watchdog():
 def test_sample_lesson_asset_sync_does_not_mkdir_sd_mount_point():
     mcp_server = read("main/mcp_server.cc")
 
-    ensure_start = mcp_server.index("void EnsureSampleLessonAssetDir()")
+    ensure_start = mcp_server.index("void EnsureSampleLessonAssetDir(")
     ensure_end = mcp_server.index("bool DownloadLessonAssetToFile", ensure_start)
     ensure_body = mcp_server[ensure_start:ensure_end]
 
-    assert 'EnsureDirOrThrow("/sdcard/tbot")' in ensure_body
-    assert 'EnsureDirOrThrow("/sdcard/tbot/lesson-assets")' in ensure_body
+    assert 'EnsureDirOrThrow(mutation, "/sdcard/tbot")' in ensure_body
+    assert 'EnsureDirOrThrow(mutation, "/sdcard/tbot/lesson-assets")' in ensure_body
     assert 'DirectoryExists("/sdcard")' not in ensure_body
     assert 'EnsureDir("/sdcard")' not in ensure_body
-    assert "failed to create SD directory" in mcp_server
+    assert "lesson asset storage write failed" in mcp_server
     assert "if (!EnsureSampleLessonAssetDir())" not in mcp_server
-    assert "EnsureSampleLessonAssetDir();" in mcp_server
+    assert "EnsureSampleLessonAssetDir(mutation);" in mcp_server
 
 def test_start_listening_rearms_when_already_listening():
     app_cc = read("main/application.cc")

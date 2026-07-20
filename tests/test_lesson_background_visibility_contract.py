@@ -282,7 +282,7 @@ def test_lesson_step_rejects_missing_required_scene_or_poster_before_ack():
     guard_idx = step_branch.index('if (scene == nullptr || bg == nullptr || to == nullptr || ro == nullptr ||')
     error_idx = step_branch.index('MakeErrorBody("LESSON_FRAME_INVALID"', guard_idx)
     emit_error_idx = step_branch.index('emit(root, "lesson_error", eb)', error_idx)
-    fetch_idx = step_branch.index("std::unique_ptr<LvglImage> bg_image = FetchLessonImage", emit_error_idx)
+    fetch_idx = step_branch.index("FetchLessonImage(poster_src)", emit_error_idx)
     ack_idx = step_branch.index("emit_ack(root, sequence")
     fatal_guard = step_branch[guard_idx:error_idx]
 
@@ -291,8 +291,8 @@ def test_lesson_step_rejects_missing_required_scene_or_poster_before_ack():
     assert 'Blank(overlay_src)' not in fatal_guard
     assert 'const bool has_object_src = !Blank(object_src)' in step_branch
     assert 'bool has_overlay_src = !Blank(overlay_src)' in step_branch
-    assert 'if (lvgl_display != nullptr && has_object_src)' in step_branch
-    assert 'if (lvgl_display != nullptr && has_overlay_src)' in step_branch
+    assert 'if (lvgl_display != nullptr && has_object_src && object_clear_ok)' in step_branch
+    assert 'if (lvgl_display != nullptr && has_overlay_src && overlay_clear_ok)' in step_branch
     assert guard_idx < error_idx < emit_error_idx < fetch_idx < ack_idx
 
 def test_lesson_step_renders_layers_back_to_front_before_ack():
@@ -300,9 +300,9 @@ def test_lesson_step_renders_layers_back_to_front_before_ack():
     body = function_body(source, "void Application::HandleLessonMessage")
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
-    background_idx = step_branch.index("SetLessonBackground(std::unique_ptr<LvglImage>(raw_bg))")
-    object_idx = step_branch.index("SetLessonObject(std::unique_ptr<LvglImage>(raw_object))")
-    overlay_idx = step_branch.index("SetLessonRobotOverlay(std::unique_ptr<LvglImage>(raw_overlay))")
+    background_idx = step_branch.index("SetLessonBackground(std::move(*holder))")
+    object_idx = step_branch.index("SetLessonObject(std::move(*holder))")
+    overlay_idx = step_branch.index("SetLessonRobotOverlay(std::move(*holder))")
     caption_idx = step_branch.index("display->SetLessonCaption(cap.c_str())")
     ack_idx = step_branch.index("emit_ack(root, sequence")
     success_branch = step_branch[step_branch.index('display->SetStatus("Đang học...")') : ack_idx]
@@ -401,17 +401,23 @@ def test_lesson_step_ack_degraded_reflects_all_three_image_layers():
     body = function_body(source, "void Application::HandleLessonMessage")
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
-    poster_idx = step_branch.index("bool poster_drew = false")
-    object_idx = step_branch.index("bool object_drew = false")
-    overlay_idx = step_branch.index("bool overlay_drew = false")
+    poster_idx = step_branch.index("bool poster_drew = background_plan.reused")
+    object_idx = step_branch.index("bool object_drew = object_plan.reused")
+    overlay_idx = step_branch.index("bool overlay_drew = overlay_plan.reused")
+    render_degraded_idx = step_branch.index("const bool render_degraded =")
     degraded_idx = step_branch.index("const bool degraded =")
     ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms,")
 
-    assert poster_idx < object_idx < overlay_idx < degraded_idx < ack_idx
+    assert poster_idx < object_idx < overlay_idx < render_degraded_idx < degraded_idx < ack_idx
+    render_degraded_expr = step_branch[
+        render_degraded_idx : step_branch.index(";", render_degraded_idx)
+    ]
+    assert "poster_drew" in render_degraded_expr
+    assert "object_drew" in render_degraded_expr
+    assert "overlay_drew" in render_degraded_expr
     degraded_expr = step_branch[degraded_idx : step_branch.index(";", degraded_idx)]
-    assert "poster_drew" in degraded_expr
-    assert "object_drew" in degraded_expr
-    assert "overlay_drew" in degraded_expr
+    assert "motion_degraded" in degraded_expr
+    assert "render_degraded" in degraded_expr
     assert "false" not in step_branch[ack_idx : step_branch.index(";", ack_idx)]
     assert "tvideo_degraded ? tvideo_degraded_reason : nullptr" in step_branch[ack_idx : step_branch.index(";", ack_idx)]
 
@@ -439,7 +445,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     schedule_idx = step_branch.index("Schedule([display, lvgl_display")
     elapsed_idx = step_branch.index("const int64_t render_elapsed_ms =")
     ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms,")
-    log_idx = step_branch.index("renderElapsedMs=%lld")
+    log_idx = step_branch.index("renderElapsedMs=%ld")
 
     assert start_idx < poster_idx < object_idx < overlay_idx < schedule_idx < elapsed_idx < ack_idx < log_idx
     raw_elapsed_idx = step_branch.index("const int64_t render_elapsed_us = esp_timer_get_time() - render_start_us;")
@@ -447,6 +453,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     assert "render_elapsed_us < 0 ? 0 : render_elapsed_us / 1000" in step_branch
     assert "kLessonRenderElapsedMaxMs" in step_branch[elapsed_idx : step_branch.index(";", elapsed_idx)]
     assert 'cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));' in body
+    assert "static_cast<long>(render_elapsed_ms)" in step_branch[ack_idx:]
     assert "renderElapsedMs" not in step_branch[:start_idx]
 
 def test_lesson_stop_and_caption_only_steps_clear_foreground_object():
@@ -581,6 +588,50 @@ def test_lesson_image_fetch_rejects_known_content_length_over_memory_cap_before_
     ]
 
     guard = "if (content_length > kMaxLessonImageBytes)"
-    alloc = "heap_caps_malloc(content_length, MALLOC_CAP_8BIT)"
+    alloc = "heap_caps_malloc(content_length, LessonAllocationCaps(content_length))"
     assert guard in known_length_branch
     assert known_length_branch.index(guard) < known_length_branch.index(alloc)
+
+
+def test_lesson_png_decode_is_no_cache_psram_owned_and_frees_compressed_input():
+    handler = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    png = function_body(handler, "std::unique_ptr<LvglImage> DecodeLessonPngBytes")
+
+    assert "args.no_cache = true" in png
+    assert "lv_image_decoder_close(&decoder)" in png
+    assert "heap_caps_free(compressed)" in png
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in png
+    assert "mutable_decoded->data = nullptr" in png
+    assert "mutable_decoded->unaligned_data = nullptr" in png
+    assert "LvglAllocatedImage" in png
+    assert "LessonPngAllocatorScope allocator_scope" in png
+    assert "handlers_->buf_malloc_cb = LessonPngBufferMalloc" in handler
+    assert "g_lesson_png_allocator_active = true" in handler
+    assert "g_lesson_png_allocator_active = false" in handler
+    assert "lv_lock()" in handler and "lv_unlock()" in handler
+    assert "LODEPNG_NO_COMPILE_ALLOCATORS" in (ROOT / "main/CMakeLists.txt").read_text(encoding="utf-8")
+    assert "heap_caps_realloc(pointer, size, LessonAllocationCaps(size))" in handler
+
+
+def test_lesson_duplicate_ack_replays_cached_full_body_before_reconstructing_fields():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+    duplicate = body[body.index("sequence <= g_session.last_in_sequence)") : body.index("if (is_step && g_session.paused)")]
+
+    full_body = duplicate.index("g_session.ack_history.rbegin()")
+    exact_emit = duplicate.index('emit(root, "lesson_ack", replay_body)')
+    reconstructed = duplicate.index("const bool re_rendered")
+    assert full_body < exact_emit < reconstructed
+
+
+def test_schedule_and_wait_cancels_only_pending_callbacks_and_waits_for_running_work():
+    source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
+    body = function_body(source, "bool Application::ScheduleAndWait")
+
+    assert "enum Status { kPending, kRunning, kDone, kCancelled }" in body
+    assert "compare_exchange_strong(expected, WaitState::kRunning)" in body
+    assert "compare_exchange_strong(expected, WaitState::kCancelled)" in body
+    running = body.index("if (expected == WaitState::kRunning)")
+    wait_done = body.index("xSemaphoreTake(state->done, portMAX_DELAY)", running)
+    result = body.index("state->result.load()", wait_done)
+    assert running < wait_done < result

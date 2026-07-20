@@ -1,6 +1,7 @@
 #include "sdkconfig.h"
 #ifndef CONFIG_IDF_TARGET_ESP32
 
+#include <stdint.h>
 #include <esp_err.h>
 
 #ifdef __cplusplus
@@ -54,6 +55,16 @@ extern "C" {
  */
 esp_err_t jpeg_to_image(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
                         size_t* height, size_t* stride);
+
+/**
+ * @brief Decodes JPEG with the software decoder into a 16-byte aligned capability heap buffer.
+ *
+ * This variant intentionally bypasses the hardware JPEG decoder because its DMA buffers are
+ * allocated by the driver. Camera callers should continue using jpeg_to_image(). On success,
+ * the caller owns `*out` and must release it with heap_caps_free().
+ */
+esp_err_t jpeg_to_image_with_caps(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len,
+                                  size_t* width, size_t* height, size_t* stride, uint32_t output_caps);
 
 #ifdef __cplusplus
 }

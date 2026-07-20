@@ -38,14 +38,34 @@ set(SOURCES "audio/audio_codec.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
+            "json_payload_safety.cc"
+            "lesson_asset_cache_evict.cc"
+            "lesson_asset_download_staging.cc"
+            "lesson_asset_http_transfer.cc"
+            "lesson_asset_sample_url_policy.cc"
+            "lesson_asset_storage_coordinator.cc"
+            "lesson_asset_sync_path_policy.cc"
+            "lesson_asset_sync_attestation.cc"
             "lesson_handler.cc"
             "lesson_tvideo_template.cc"
+            "lesson_heap_probe.cc"
+            "lesson_motion_presets.cc"
+            "lesson_layer_state.cc"
             "ota.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
             "main.cc"
             )
+
+if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
+    list(APPEND SOURCES
+        "lesson_storage_hil_controller.cc"
+        "lesson_storage_hil_hooks.cc"
+        "lesson_storage_hil_fixture.cc"
+        "lesson_storage_hil_mcp_tools.cc"
+    )
+endif()
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 
@@ -1041,6 +1061,9 @@ idf_component_register(SRCS ${SOURCES}
                         fatfs
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
+
+idf_component_get_property(TBOT_LVGL_COMPONENT_LIB lvgl__lvgl COMPONENT_LIB)
+target_compile_definitions(${TBOT_LVGL_COMPONENT_LIB} PRIVATE LODEPNG_NO_COMPILE_ALLOCATORS=1)
 
 if(TBOT_NATIVE_COVERAGE)
     set(TBOT_NATIVE_COVERAGE_SOURCES "" CACHE STRING "Semicolon-separated main component sources to instrument; empty instruments all main sources")

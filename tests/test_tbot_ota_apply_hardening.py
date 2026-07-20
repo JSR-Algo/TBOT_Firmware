@@ -77,8 +77,119 @@ def test_ota_check_version_does_not_retry_stale_ephemeral_nvs_url():
     assert "IsEphemeralEndpoint(configured_url)" in url_builder_body
     assert '"http://"' not in url_builder_body
     assert "configured_url.substr" not in url_builder_body
-    assert "urls.push_back(configured_url)" in url_builder_body
+    assert "add_unique(configured_url)" in url_builder_body
     assert "CONFIG_OTA_URL" in url_builder_body
+
+
+def test_ota_check_version_tries_canonical_before_stale_distinct_configured_url():
+    source = read("main/ota.cc")
+    url_builder_body = function_body(source, "std::vector<std::string> BuildCheckVersionUrls")
+
+    stale_start = url_builder_body.index("if (IsStaleConfiguredEndpoint")
+    canonical_push = url_builder_body.index("add_unique(canonical_url)", stale_start)
+    configured_push = url_builder_body.index("add_unique(configured_url)", canonical_push)
+    assert canonical_push < configured_push
+    assert "configured_url != canonical_url" in source
+    assert "IsEphemeralEndpoint(configured_url)" in url_builder_body
+
+
+def test_ota_endpoint_precedence_keeps_public_override_but_recovers_stale_local_urls():
+    source = read("main/ota.cc")
+    url_builder_body = function_body(source, "std::vector<std::string> BuildCheckVersionUrls")
+
+    assert "IsStaleConfiguredEndpoint(configured_url, canonical_url)" in url_builder_body
+    assert "add_unique(configured_url);" in url_builder_body
+    assert "add_unique(canonical_url);" in url_builder_body
+    assert "configured_url != canonical_url" in source
+    assert "IsPrivateOrLocalHost" in source
+    assert 'host == "localhost"' in source
+    assert 'host.ends_with(".local")' in source
+    assert "first_octet == 10" in source
+    assert "first_octet == 172" in source
+    assert "first_octet == 192 && second_octet == 168" in source
+
+
+def test_ota_check_version_has_bounded_http_lifetime_and_closes_every_opened_response():
+    source = read("main/ota.cc")
+    setup_body = function_body(source, "std::unique_ptr<Http> Ota::SetupHttp")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+
+    assert "static constexpr int kHttpTimeoutMs = 8000" in read("main/ota.h")
+    assert "http->SetTimeout(timeout_ms);" in setup_body
+    assert "ScopedHttpClose close_http(*http);" in check_body
+    assert check_body.index("ScopedHttpClose close_http(*http);") < check_body.index(
+        "http->GetStatusCode()"
+    )
+    assert "close_http.Close();" in check_body
+    assert "http->Close();" not in check_body
+
+
+def test_ota_check_version_uses_one_deadline_across_fallback_connect_headers_and_body():
+    source = read("main/ota.cc")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+
+    assert "check_deadline_us" in check_body
+    assert "esp_timer_get_time()" in check_body
+    assert "RemainingCheckTimeoutMs(check_deadline_us)" in check_body
+    assert "SetupHttp(RemainingCheckTimeoutMs(check_deadline_us))" in check_body
+    assert check_body.count(
+        "http->SetTimeout(RemainingCheckTimeoutMs(check_deadline_us));"
+    ) >= 2
+
+
+def test_ota_check_falls_back_after_any_invalid_attempt_and_persists_only_valid_recovery():
+    source = read("main/ota.cc")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+
+    loop_idx = check_body.index("for (const auto& url : urls)")
+    persist_idx = check_body.index("PersistRecoveredOtaUrl(successful_url)")
+    parse_idx = check_body.index("cJSON_Parse(response_body.c_str())", loop_idx)
+    valid_idx = check_body.index("IsValidCheckVersionResponse(candidate_root", parse_idx)
+    success_idx = check_body.index("successful_url = url", valid_idx)
+
+    assert check_body.index("ScopedHttpClose close_http(*http)", loop_idx) < parse_idx
+    assert check_body.index("status_code != 200", loop_idx) < parse_idx
+    assert check_body.count("continue;") >= 3
+    assert parse_idx < valid_idx < success_idx < persist_idx
+    assert "cJSON_Delete(candidate_root);" in check_body[valid_idx:success_idx]
+    assert "if (root == nullptr)" in check_body
+    assert persist_idx < check_body.index("has_activation_code_ = false")
+
+
+def test_ota_semantically_validates_firmware_before_selecting_or_persisting_endpoint():
+    source = read("main/ota.cc")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+    validator = function_body(source, "bool IsValidCheckVersionResponse")
+
+    assert '#include "firmware_version_policy.h"' in source
+    assert "EvaluateFirmwareResponse" in validator
+    assert "current_version" in validator
+    assert "should_download" in validator
+    assert "selected_should_download" in check_body
+    assert check_body.index("IsValidCheckVersionResponse") < check_body.index(
+        "successful_url = url"
+    )
+    assert check_body.index("successful_url = url") < check_body.index(
+        "PersistRecoveredOtaUrl(successful_url)"
+    )
+    assert "std::stoi" not in source
+    assert "ParseVersion" not in source
+
+
+def test_ota_check_logs_do_not_expose_endpoint_or_device_identity():
+    source = read("main/ota.cc")
+    setup_body = function_body(source, "std::unique_ptr<Http> Ota::SetupHttp")
+    check_body = function_body(source, "esp_err_t Ota::CheckVersion")
+    recovered_body = function_body(source, "void PersistRecoveredOtaUrl")
+
+    log_lines = "\n".join(
+        line for body in (setup_body, check_body, recovered_body)
+        for line in body.splitlines()
+        if "ESP_LOG" in line
+    )
+    assert "url.c_str()" not in log_lines
+    assert "configured_url.c_str()" not in log_lines
+    assert "serial_number_.c_str()" not in log_lines
 
 def test_ota_claim_reset_clears_local_ownership_once_per_nonce():
     source = read("main/ota.cc")

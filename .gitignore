@@ -10,6 +10,8 @@ tmp/
 /components/*
 !/components/esp-wifi-connect/
 !/components/esp-wifi-connect/**
+!/components/esp-ml307/
+!/components/esp-ml307/**
 releases/
 dl_temp/
 

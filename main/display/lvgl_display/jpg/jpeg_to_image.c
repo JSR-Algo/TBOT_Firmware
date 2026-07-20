@@ -1,10 +1,10 @@
 #include <esp_check.h>
 #include <esp_err.h>
 #include <esp_heap_caps.h>
+#include <stdbool.h>
 #include <sys/param.h>
 
-#include "esp_jpeg_common.h"
-#include "esp_jpeg_dec.h"
+#include "jpeg_decoder.h"
 
 #include "jpeg_to_image.h"
 
@@ -19,75 +19,210 @@
 #endif
 
 #define TAG "jpeg_to_image"
+#define JPEG_MAX_DIMENSION 4096U
+#define JPEG_MAX_DECODED_BYTES (4U * 1024U * 1024U)
 
-static esp_err_t decode_with_new_jpeg(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
-                                      size_t* height, size_t* stride) {
-    ESP_LOGD(TAG, "Decoding JPEG with software decoder");
-    esp_err_t ret = ESP_OK;
-    jpeg_error_t jpeg_ret = JPEG_ERR_OK;
+// esp_jpeg 1.3.1 uses 3100 bytes unless external TJPG selects FASTDECODE=2.
+// ESP32-S3 must stay on its fixed ROM configuration; fail instead of silently
+// using a work-buffer size that belongs to a different decoder configuration.
+#if defined(CONFIG_IDF_TARGET_ESP32S3) && CONFIG_IDF_TARGET_ESP32S3
+#if !defined(CONFIG_JD_USE_ROM) || !CONFIG_JD_USE_ROM
+#error "ESP32-S3 JPEG decoding requires CONFIG_JD_USE_ROM=y"
+#endif
+#if defined(CONFIG_JD_FASTDECODE) && CONFIG_JD_FASTDECODE == 2
+#error "ESP32-S3 ROM JPEG decoding is incompatible with CONFIG_JD_FASTDECODE=2"
+#endif
+#define JPEG_ROM_WORK_BUFFER_SIZE 3100U
+#elif defined(CONFIG_JD_FASTDECODE) && CONFIG_JD_FASTDECODE == 2
+#define JPEG_ROM_WORK_BUFFER_SIZE 65472U
+#else
+#define JPEG_ROM_WORK_BUFFER_SIZE 3100U
+#endif
+
+typedef struct {
+    size_t width;
+    size_t height;
+    size_t stride;
+    size_t decoded_size;
+} validated_jpeg_info_t;
+
+static uint16_t read_be16(const uint8_t* bytes) {
+    return ((uint16_t)bytes[0] << 8) | bytes[1];
+}
+
+static esp_err_t validate_baseline_jpeg(const uint8_t* src, size_t src_len, validated_jpeg_info_t* info) {
+    if (src == NULL || info == NULL || src_len < 4 || src[0] != 0xff || src[1] != 0xd8) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    size_t offset = 2;
+    bool found_sof = false;
+    uint8_t sof_components = 0;
+    while (offset < src_len) {
+        if (src[offset] != 0xff) {
+            return ESP_FAIL;
+        }
+        while (offset < src_len && src[offset] == 0xff) {
+            ++offset;
+        }
+        if (offset >= src_len) {
+            return ESP_FAIL;
+        }
+
+        const uint8_t marker = src[offset++];
+        if (marker == 0x00 || marker == 0xd8 || marker == 0xd9 || marker == 0x01 ||
+            (marker >= 0xd0 && marker <= 0xd7)) {
+            return ESP_FAIL;
+        }
+        if (src_len - offset < 2) {
+            return ESP_FAIL;
+        }
+
+        const size_t segment_len = read_be16(src + offset);
+        if (segment_len < 2 || segment_len > src_len - offset) {
+            return ESP_FAIL;
+        }
+
+        if (marker == 0xda) {
+            if (!found_sof || segment_len < 6) {
+                return ESP_FAIL;
+            }
+            const uint8_t scan_components = src[offset + 2];
+            if (scan_components == 0 || scan_components > sof_components ||
+                segment_len != 6U + 2U * scan_components) {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            return ESP_OK;
+        }
+
+        const bool is_sof = marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 && marker != 0xc8 && marker != 0xcc;
+        if (is_sof) {
+            if (found_sof || marker != 0xc0 || segment_len < 8) {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+            const uint8_t* sof = src + offset + 2;
+            const uint8_t components = sof[5];
+            if (sof[0] != 8 || (components != 1 && components != 3) || segment_len != 8U + 3U * components) {
+                return ESP_ERR_NOT_SUPPORTED;
+            }
+
+            const size_t height = read_be16(sof + 1);
+            const size_t width = read_be16(sof + 3);
+            if (width == 0 || height == 0 || width > JPEG_MAX_DIMENSION || height > JPEG_MAX_DIMENSION ||
+                width > SIZE_MAX / 2) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+            const size_t stride = width * 2;
+            if (height > SIZE_MAX / stride) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+            const size_t decoded_size = stride * height;
+            if (decoded_size == 0 || decoded_size > JPEG_MAX_DECODED_BYTES || decoded_size > UINT32_MAX) {
+                return ESP_ERR_INVALID_SIZE;
+            }
+
+            info->width = width;
+            info->height = height;
+            info->stride = stride;
+            info->decoded_size = decoded_size;
+            sof_components = components;
+            found_sof = true;
+        }
+
+        offset += segment_len;
+    }
+
+    return ESP_FAIL;
+}
+
+static esp_err_t decode_with_rom_jpeg(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
+                                      size_t* height, size_t* stride, uint32_t output_caps) {
+    ESP_LOGD(TAG, "Decoding JPEG with ROM TJPG decoder");
+    esp_err_t ret = ESP_FAIL;
+    uint8_t* work_buf = NULL;
     uint8_t* out_buf = NULL;
-    jpeg_dec_io_t jpeg_io = {0};
-    jpeg_dec_header_info_t out_info = {0};
+    esp_jpeg_image_output_t out_info = {0};
+    validated_jpeg_info_t validated_info = {0};
 
-    jpeg_dec_config_t config = DEFAULT_JPEG_DEC_CONFIG();
-    config.output_type = JPEG_PIXEL_FORMAT_RGB565_LE;
-    config.rotate = JPEG_ROTATE_0D;
-
-    jpeg_dec_handle_t jpeg_dec = NULL;
-    jpeg_ret = jpeg_dec_open(&config, &jpeg_dec);
-    if (jpeg_ret != JPEG_ERR_OK) {
-        ESP_LOGE(TAG, "Failed to open JPEG decoder");
-        ret = ESP_FAIL;
-        goto jpeg_dec_failed;
+    if (output_caps == 0) {
+        output_caps = MALLOC_CAP_DEFAULT;
+    }
+    if (src_len > UINT32_MAX) {
+        ret = ESP_ERR_INVALID_SIZE;
+        goto jpeg_rom_dec_failed;
+    }
+    ret = validate_baseline_jpeg(src, src_len, &validated_info);
+    if (ret != ESP_OK) {
+        goto jpeg_rom_dec_failed;
     }
 
-    jpeg_io.inbuf = (uint8_t*)src;
-    jpeg_io.inbuf_len = (int)src_len;
+    esp_jpeg_image_cfg_t config = {
+        .indata = (uint8_t*)src,
+        .indata_size = src_len,
+        .out_format = JPEG_IMAGE_FORMAT_RGB565,
+        .out_scale = JPEG_IMAGE_SCALE_0,
+        .flags = {.swap_color_bytes = 0},
+    };
 
-    jpeg_ret = jpeg_dec_parse_header(jpeg_dec, &jpeg_io, &out_info);
-    if (jpeg_ret != JPEG_ERR_OK) {
+    ret = esp_jpeg_get_image_info(&config, &out_info);
+    if (ret != ESP_OK || out_info.width != validated_info.width || out_info.height != validated_info.height ||
+        out_info.output_len != validated_info.decoded_size) {
         ESP_LOGE(TAG, "Failed to parse JPEG header");
-        ret = ESP_ERR_INVALID_ARG;
-        goto jpeg_dec_failed;
+        ret = ESP_FAIL;
+        goto jpeg_rom_dec_failed;
     }
 
-    ESP_LOGD(TAG, "JPEG header info: width=%d, height=%d", out_info.width, out_info.height);
+    ESP_LOGD(TAG, "JPEG header info: width=%u, height=%u", out_info.width, out_info.height);
 
-    out_buf = jpeg_calloc_align(out_info.width * out_info.height * 2, 16);
+    work_buf = heap_caps_malloc(JPEG_ROM_WORK_BUFFER_SIZE, output_caps);
+    if (work_buf == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate JPEG work buffer");
+        ret = ESP_ERR_NO_MEM;
+        goto jpeg_rom_dec_failed;
+    }
+
+    const size_t decoded_size = validated_info.decoded_size;
+    out_buf = heap_caps_aligned_calloc(16, 1, decoded_size, output_caps);
     if (out_buf == NULL) {
         ESP_LOGE(TAG, "Failed to allocate memory for JPEG output buffer");
         ret = ESP_ERR_NO_MEM;
-        goto jpeg_dec_failed;
+        goto jpeg_rom_dec_failed;
     }
 
-    jpeg_io.outbuf = out_buf;
-    jpeg_ret = jpeg_dec_process(jpeg_dec, &jpeg_io);
-    if (jpeg_ret != JPEG_ERR_OK) {
+    config.outbuf = out_buf;
+    config.outbuf_size = decoded_size;
+    config.advanced.working_buffer = work_buf;
+    config.advanced.working_buffer_size = JPEG_ROM_WORK_BUFFER_SIZE;
+
+    esp_jpeg_image_output_t decoded_info = {0};
+    ret = esp_jpeg_decode(&config, &decoded_info);
+    if (ret != ESP_OK || decoded_info.width != out_info.width || decoded_info.height != out_info.height ||
+        decoded_info.output_len != decoded_size) {
         ESP_LOGE(TAG, "Failed to decode JPEG");
-        ret = ESP_FAIL;
-        goto jpeg_dec_failed;
+        ret = ret == ESP_ERR_NO_MEM ? ret : ESP_FAIL;
+        goto jpeg_rom_dec_failed;
     }
 
-    ESP_LOG_BUFFER_HEXDUMP(TAG, out_buf, MIN(out_info.width * out_info.height * 2, 256), ESP_LOG_DEBUG);
+    ESP_LOG_BUFFER_HEXDUMP(TAG, out_buf, MIN(decoded_size, 256), ESP_LOG_DEBUG);
 
     *out = out_buf;
     out_buf = NULL;
-    *out_len = (size_t)(out_info.width * out_info.height * 2);
-    *width = (size_t)out_info.width;
-    *height = (size_t)out_info.height;
-    *stride = (size_t)out_info.width * 2;
-    jpeg_dec_close(jpeg_dec);
-    jpeg_dec = NULL;
+    *out_len = decoded_size;
+    *width = validated_info.width;
+    *height = validated_info.height;
+    *stride = validated_info.stride;
+    heap_caps_free(work_buf);
+    work_buf = NULL;
 
-    return ret;
+    return ESP_OK;
 
-jpeg_dec_failed:
-    if (jpeg_dec) {
-        jpeg_dec_close(jpeg_dec);
-        jpeg_dec = NULL;
+jpeg_rom_dec_failed:
+    if (work_buf) {
+        heap_caps_free(work_buf);
+        work_buf = NULL;
     }
     if (out_buf) {
-        jpeg_free_align(out_buf);
+        heap_caps_free(out_buf);
         out_buf = NULL;
     }
 
@@ -258,7 +393,20 @@ esp_err_t jpeg_to_image(const uint8_t* src, size_t src_len, uint8_t** out, size_
         return ret;
     }
     ESP_LOGW(TAG, "Failed to decode with hardware JPEG, fallback to software decoder");
-    // Fallback to esp_new_jpeg
+    // Fall back to the ROM-backed software decoder.
 #endif
-    return decode_with_new_jpeg(src, src_len, out, out_len, width, height, stride);
+    return decode_with_rom_jpeg(src, src_len, out, out_len, width, height, stride, 0);
+}
+
+esp_err_t jpeg_to_image_with_caps(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len,
+                                  size_t* width, size_t* height, size_t* stride, uint32_t output_caps) {
+    if (src == NULL || src_len == 0 || out == NULL || out_len == NULL || width == NULL || height == NULL ||
+        stride == NULL || output_caps == 0) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Custom-capability output is a software-decoder contract. Hardware JPEG requires
+    // driver-owned DMA buffers, so camera callers retain the hardware-first jpeg_to_image path.
+    return decode_with_rom_jpeg(src, src_len, out, out_len, width, height, stride, output_caps);
 }

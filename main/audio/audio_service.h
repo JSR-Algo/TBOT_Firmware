@@ -23,6 +23,7 @@
 #include "audio_processor.h"
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
+#include "wake_word_lifecycle_controller.h"
 #include "protocol.h"
 #include "ogg_demuxer.h"
 
@@ -117,6 +118,13 @@ struct DebugStatistics {
     uint32_t stale_frame_count = 0;   // decode frames dropped by barge-in gen-gate
 };
 
+struct AudioTaskStackHighWaterMarks {
+    int32_t audio_input = -1;
+    int32_t audio_output = -1;
+    int32_t opus_codec = -1;
+    int32_t afe_detection = -1;
+};
+
 class AudioService {
 public:
     AudioService();
@@ -127,7 +135,7 @@ public:
     void Stop();
     void EncodeWakeWord();
     std::unique_ptr<AudioStreamPacket> PopWakeWordPacket();
-    const std::string& GetLastWakeWord() const;
+    std::string GetLastWakeWord();
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsRunning() const { return !service_stopped_; }
     bool IsIdle();
@@ -139,18 +147,26 @@ public:
     void EnableWakeWordDetection(bool enable);
     // Materialize the AFE wake-word pipeline (create_from_config + spawn the
     // audio_detection fetch task) WITHOUT starting it. Hoisted off the Idle-time
-    // prio-10 state transition onto the prio-2 activation task so the expensive
-    // one-time AFE build overlaps the OTA/protocol network waits before Idle.
+    // prio-10 state transition onto the prio-2 activation task after boot HTTP.
     // After this, the Idle EnableWakeWordDetection(true) only has to Start()
     // (cheap), so the very first "Hi ESP" lands first try instead of racing AFE
     // init. Must NOT Start() / set AS_EVENT_WAKE_WORD_RUNNING — the FEED ring
     // stays empty until the locked Idle gate enables the mic, so the BLE/AFE
     // contention gate is untouched. Caller MUST gate on IsDeviceClaimed().
-    void PrewarmWakeWord();
+    using WakeWordPrewarmToken = WakeWordLifecycleController::PrewarmToken;
+    using WifiProvisioningToken = WakeWordLifecycleController::ProvisioningToken;
+    struct WifiProvisioningBeginResult {
+        WifiProvisioningToken token{};
+        bool rollback_complete = false;
+        explicit operator bool() const { return token.valid(); }
+    };
+    WakeWordPrewarmToken CaptureWakeWordPrewarmToken() const;
+    void PrewarmWakeWord(WakeWordPrewarmToken token);
     void EnableVoiceProcessing(bool enable);
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
-    void ReleaseWakeWordResourcesForWifiConfig();
+    WifiProvisioningBeginResult BeginWifiProvisioning();
+    bool EndWifiProvisioningAndRearm(WifiProvisioningToken token);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
@@ -171,12 +187,16 @@ public:
     // is racy-but-benign (aligned 32-bit reads); queue depths take the lock.
     DebugStatistics GetDebugStatistics() const { return debug_statistics_; }
     void GetQueueDepths(uint32_t& decode, uint32_t& send, uint32_t& playback);
+    AudioTaskStackHighWaterMarks GetTaskStackHighWaterMarks();
 
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
     std::unique_ptr<AudioProcessor> audio_processor_;
     std::unique_ptr<WakeWord> wake_word_;
+    WakeWordLifecycleController wake_word_lifecycle_;
+    std::mutex wake_word_control_mutex_;
+    std::atomic<WakeWord*> wake_word_feed_target_{nullptr};
     std::unique_ptr<AudioDebugger> audio_debugger_;
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;
@@ -202,6 +222,7 @@ private:
     TaskHandle_t audio_input_task_handle_ = nullptr;
     TaskHandle_t audio_output_task_handle_ = nullptr;
     TaskHandle_t opus_codec_task_handle_ = nullptr;
+    std::mutex task_handle_mutex_;
     std::mutex audio_queue_mutex_;
     std::condition_variable audio_queue_cv_;
     std::deque<std::unique_ptr<AudioStreamPacket>> audio_decode_queue_;
@@ -230,6 +251,7 @@ private:
     void AudioOutputTask();
     void OpusCodecTask();
     void CreateWakeWordIfAvailable();
+    void FeedWakeWord(const std::vector<int16_t>& data);
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();

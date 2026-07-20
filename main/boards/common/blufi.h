@@ -17,9 +17,13 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
+#include "blufi_transition_gate.h"
+#include "audio/provisioning_session_binding.h"
 
 class Blufi {
 public:
+    using ProvisioningToken = ProvisioningSessionBinding::Token;
+    using ProvisioningReservation = ProvisioningSessionBinding::ReservationGuard;
     /**
      * @brief BLE setup state for heartbeat / observability.
      */
@@ -63,6 +67,15 @@ public:
     /** Run a short non-network action while setup generation ownership is stable. */
     bool RunIfSetupGenerationCurrent(uint32_t expected_generation,
                                      const std::function<void()>& action);
+
+    bool BindProvisioningSession(ProvisioningToken token);
+    ProvisioningReservation TryReserveProvisioningSession();
+    bool ClearProvisioningSession(ProvisioningToken token);
+    ProvisioningToken CaptureProvisioningSession() const;
+    bool IsBleStackFullyOff() const;
+    bool AbortProvisioningSetup(ProvisioningToken token);
+    bool CompleteSuccessfulProvisioningTeardown(const char* reason,
+                                                ProvisioningToken provisioning_token);
 
     /**
      * @brief Returns the bootstrap token received via BluFi custom-data (tag=0x01).
@@ -117,25 +130,38 @@ public:
     Blufi &operator=(const Blufi &) = delete;
 
 private:
+    BlufiTransitionGate transition_gate_{ESP_ERR_INVALID_STATE};
     bool inited_ = false;
     std::atomic<bool> teardown_failed_{false};
+    bool host_active_ = false;
+    bool controller_active_ = false;
+    bool profile_active_ = false;
+    bool host_enabled_ = false;
+    bool host_initialized_ = false;
+    bool nimble_services_active_ = false;
+    bool controller_enabled_ = false;
+    bool controller_initialized_ = false;
+    ProvisioningSessionBinding provisioning_session_;
 
     Blufi();
 
     ~Blufi();
 
+    esp_err_t _init_impl();
+    esp_err_t _deinit_impl();
+
     // Initialization logic
-    static esp_err_t _controller_init();
+    esp_err_t _controller_init();
 
-    static esp_err_t _controller_deinit();
+    esp_err_t _controller_deinit();
 
-    static esp_err_t _host_init();
+    esp_err_t _host_init();
 
-    static esp_err_t _host_deinit();
+    esp_err_t _host_deinit();
 
-    static esp_err_t _gap_register_callback();
+    esp_err_t _gap_register_callback();
 
-    static esp_err_t _host_and_cb_init();
+    esp_err_t _host_and_cb_init();
 
     void _security_init();
 
@@ -240,6 +266,7 @@ private:
 
     // BLE hard-timeout safety gate (#1)
     esp_timer_handle_t ble_setup_timer_ = nullptr;  // one-shot timer; nullptr when not armed
+    std::mutex ble_setup_timer_mutex_;
     bool ble_timed_out_ = false;                    // set by timer callback; prevents adv restart
     std::atomic<uint32_t> ble_timeout_generation_{0};
 

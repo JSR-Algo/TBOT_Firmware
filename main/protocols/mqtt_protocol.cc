@@ -2,6 +2,7 @@
 #include "board.h"
 #include "application.h"
 #include "settings.h"
+#include "json_payload_safety.h"
 
 #include <esp_log.h>
 #include <cstring>
@@ -98,6 +99,10 @@ bool MqttProtocol::StartMqttClient(bool report_error) {
     });
 
     mqtt_->OnMessage([this](const std::string& topic, const std::string& payload) {
+        if (JsonHasForbiddenDecodedNull(payload.data(), payload.size())) {
+            ESP_LOGW(TAG, "Rejected JSON message containing decoded NUL");
+            return;
+        }
         cJSON* root = cJSON_Parse(payload.c_str());
         if (root == nullptr) {
             ESP_LOGE(TAG, "Failed to parse json message %s", payload.c_str());

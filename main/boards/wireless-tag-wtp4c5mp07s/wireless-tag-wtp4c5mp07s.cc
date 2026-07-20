@@ -23,6 +23,8 @@
 #include <driver/sdspi_host.h>
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 
+#include <cstdint>
+
 #define TAG "WirelessTagEsp32p47b"
 
 class WirelessTagEsp32p47b : public WifiBoard {
@@ -218,8 +220,12 @@ private:
         host.pwr_ctrl_handle = sd_ldo;
         esp_err_t ret = esp_vfs_fat_sdmmc_mount(SDCARD_MOUNT_POINT, &host, &slot_config, &mount_config, &card);
         if (ret == ESP_OK) {
-            sdmmc_card_print_info(stdout, card);
-            ESP_LOGI(TAG, "SD card mounted at %s (SDMMC)", SDCARD_MOUNT_POINT);
+            const uint64_t size_mb =
+                (static_cast<uint64_t>(card->csd.capacity) * card->csd.sector_size) /
+                (1024ULL * 1024ULL);
+            ESP_LOGI(TAG, "SD card mounted at %s (SDMMC) size_mb=%lu sector_size=%lu",
+                     SDCARD_MOUNT_POINT, static_cast<unsigned long>(size_mb),
+                     static_cast<unsigned long>(card->csd.sector_size));
         } else {
             ESP_LOGW(TAG, "Failed to mount SD card (SDMMC): %s", esp_err_to_name(ret));
         }
@@ -255,8 +261,12 @@ private:
         host.pwr_ctrl_handle = sd_ldo;
         esp_err_t ret = esp_vfs_fat_sdspi_mount(SDCARD_MOUNT_POINT, &host, &slot_config, &mount_config, &card);
         if (ret == ESP_OK) {
-            sdmmc_card_print_info(stdout, card);
-            ESP_LOGI(TAG, "SD card mounted at %s (SDSPI)", SDCARD_MOUNT_POINT);
+            const uint64_t size_mb =
+                (static_cast<uint64_t>(card->csd.capacity) * card->csd.sector_size) /
+                (1024ULL * 1024ULL);
+            ESP_LOGI(TAG, "SD card mounted at %s (SDSPI) size_mb=%lu sector_size=%lu",
+                     SDCARD_MOUNT_POINT, static_cast<unsigned long>(size_mb),
+                     static_cast<unsigned long>(card->csd.sector_size));
         } else {
             ESP_LOGW(TAG, "Failed to mount SD card (SDSPI): %s", esp_err_to_name(ret));
         }

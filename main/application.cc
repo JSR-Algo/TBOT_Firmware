@@ -1,4 +1,5 @@
 #include "application.h"
+#include "wifi_config_entry_policy.h"
 #include "board.h"
 #include "display.h"
 #include "system_info.h"
@@ -12,6 +13,9 @@
 #include "robot_uart.h"
 #include "app_manager.h"
 #include "tbot_connect_mapper.h"
+#include "lesson_heap_probe.h"
+#include "passive_reconnect_policy.h"
+#include "protocol_lifetime_token.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
 #include "boards/common/system_reset.h"
@@ -72,6 +76,13 @@ static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 static constexpr UBaseType_t kLessonMessageQueueDepth = 16;
 static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
+static constexpr int kOtaCheckMaxAttempts = 3;
+static constexpr int kOtaRetryDelaysSeconds[] = {2, 4};
+static constexpr int kOtaCheckPhaseBudgetMs =
+    kOtaCheckMaxAttempts * Ota::kHttpTimeoutMs +
+    (kOtaRetryDelaysSeconds[0] + kOtaRetryDelaysSeconds[1]) * 1000;
+static_assert(kOtaCheckPhaseBudgetMs <= 60000,
+              "OTA activation check must remain inside the boot phase budget");
 
 // TBOT claim poll (C4): cadence 10s. The backend's 5-minute cap applies only
 // after a pending claim exists; unclaimed standby must keep polling so a late
@@ -162,7 +173,10 @@ void Application::EnqueueLessonMessage(const cJSON* root) {
         return;
     }
 
+    LogLessonHeapBoundary("enqueue.before_serialize", 0);
     char* payload = cJSON_PrintUnformatted(root);
+    const size_t payload_bytes = payload != nullptr ? strlen(payload) : 0;
+    LogLessonHeapBoundary("enqueue.after_serialize", payload_bytes);
     if (payload == nullptr) {
         ESP_LOGW(TAG, "lesson_* dropped: serialize failed type=%s seq=%d",
                  type_value, sequence_value);
@@ -175,7 +189,7 @@ void Application::EnqueueLessonMessage(const cJSON* root) {
         cJSON_free(payload);
     } else {
         ESP_LOGI(TAG, "lesson_* enqueued type=%s seq=%d bytes=%u",
-                 type_value, sequence_value, (unsigned)strlen(payload));
+                 type_value, sequence_value, (unsigned)payload_bytes);
     }
 }
 
@@ -186,7 +200,10 @@ void Application::LessonMessageTask(void* arg) {
         if (xQueueReceive(self->lesson_message_queue_, &payload, portMAX_DELAY) != pdTRUE) {
             continue;
         }
+        const size_t payload_bytes = strlen(payload);
+        LogLessonHeapBoundary("worker.before_parse", payload_bytes);
         cJSON* root = cJSON_Parse(payload);
+        LogLessonHeapBoundary("worker.after_parse", payload_bytes);
         if (root != nullptr) {
             const cJSON* type = cJSON_GetObjectItem(root, "type");
             const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
@@ -194,12 +211,15 @@ void Application::LessonMessageTask(void* arg) {
                      cJSON_IsString(type) ? type->valuestring : "(missing)",
                      cJSON_IsNumber(sequence) ? sequence->valueint : -1);
             self->HandleLessonMessage(root);
+            LogLessonHeapBoundary("worker.after_handle", payload_bytes);
             cJSON_Delete(root);
+            LogLessonHeapBoundary("worker.after_delete", payload_bytes);
         } else {
             ESP_LOGW(TAG, "lesson_* dropped: worker parse failed");
         }
         cJSON_free(payload);
         payload = nullptr;
+        LogLessonHeapBoundary("worker.after_payload_free", payload_bytes);
     }
 }
 
@@ -207,7 +227,127 @@ bool Application::SetDeviceState(DeviceState state) {
     return state_machine_.TransitionTo(state);
 }
 
+bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation) {
+    preparation = {};
+    const DeviceState state = GetDeviceState();
+    if (!WifiConfigEntryPolicy::CanPrepare(
+            state, lesson_runtime_active_.load(), connect_in_flight_.load(),
+            reset_pending_.load())) {
+        ESP_LOGW(TAG, "WiFi config preparation rejected: state=%d connect=%d reset=%d",
+                 static_cast<int>(state), connect_in_flight_.load() ? 1 : 0,
+                 reset_pending_.load() ? 1 : 0);
+        return false;
+    }
+
+    preparation.original_state = state;
+    preparation.resume_mode = state == kDeviceStateConnecting ? reconnect_mode_ : listening_mode_;
+    preparation.resume_realtime = state == kDeviceStateConnecting ||
+                                  state == kDeviceStateListening ||
+                                  state == kDeviceStateSpeaking;
+    preparation.resume_listening = state != kDeviceStateConnecting ||
+                                   reconnect_resume_listening_.load();
+    preparation.valid = true;
+
+    ++connect_generation_;
+    CancelConnectWatchdog();
+    if (reconnect_timer_ != nullptr) {
+        esp_timer_stop(reconnect_timer_);
+    }
+    connect_attempt_active_.store(false);
+    passive_ws_intent_.store(false);
+    reconnect_passive_.store(false);
+
+    if (state == kDeviceStateSpeaking) {
+        AbortSpeaking(kAbortReasonNone);
+    }
+    if (GetDeviceState() == kDeviceStateListening) {
+        if (protocol_) {
+            protocol_->SendStopListening();
+        }
+        listening_started_ms_.store(0);
+        last_listening_activity_ms_.store(0);
+        audio_service_.EnableVoiceProcessing(false);
+        audio_service_.EnableWakeWordDetection(false);
+    }
+    CloseAudioChannelByIntent();
+    audio_service_.ResetDecoder();
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+
+    const DeviceState settled_state = GetDeviceState();
+    if (settled_state != kDeviceStateStarting &&
+        settled_state != kDeviceStateWifiConfiguring &&
+        settled_state != kDeviceStateIdle) {
+        if (!SetDeviceState(kDeviceStateIdle)) {
+            ESP_LOGE(TAG, "WiFi config preparation could not settle state=%d",
+                     static_cast<int>(settled_state));
+            if (!RollbackWifiConfigEntry(preparation)) {
+                ESP_LOGE(TAG, "WiFi config preparation rollback failed");
+            }
+            preparation.valid = false;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Application::PublishWifiConfigEntry(
+        const WifiConfigEntryPreparation& preparation) {
+    if (!preparation.valid) {
+        return false;
+    }
+    if (!SetDeviceState(kDeviceStateWifiConfiguring)) {
+        ESP_LOGE(TAG, "WiFi config state publication rejected from state=%d",
+                 static_cast<int>(GetDeviceState()));
+        return false;
+    }
+    return true;
+}
+
+bool Application::RollbackWifiConfigEntry(
+        const WifiConfigEntryPreparation& preparation) {
+    if (!preparation.valid) {
+        return false;
+    }
+    if (preparation.original_state == kDeviceStateStarting ||
+        preparation.original_state == kDeviceStateWifiConfiguring) {
+        if (GetDeviceState() != preparation.original_state) {
+            return false;
+        }
+        xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+        return true;
+    }
+    if (preparation.original_state == kDeviceStateActivating) {
+        return SetDeviceState(kDeviceStateActivating);
+    }
+    if (!preparation.resume_realtime) {
+        if (!SetDeviceState(kDeviceStateIdle)) {
+            return false;
+        }
+        xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+        return true;
+    }
+    if (!SetDeviceState(kDeviceStateIdle)) {
+        return false;
+    }
+    if (protocol_ == nullptr) {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+        return true;
+    }
+    reconnect_resume_listening_.store(preparation.resume_listening);
+    if (!SetDeviceState(kDeviceStateConnecting)) {
+        return false;
+    }
+    Schedule([this, mode = preparation.resume_mode]() {
+        ContinueOpenAudioChannel(mode);
+    });
+    return true;
+}
+
 void Application::Initialize() {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+    ESP_LOGW(TAG, "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image");
+#endif
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
 
@@ -541,7 +681,25 @@ void Application::Run() {
             display->UpdateStatusBar();
             HandleListeningWatchdogTick();
 
-            if (clock_ticks_ % 10 == 0 &&
+            bool passive_liveness_failed = false;
+            const DeviceState passive_state = GetDeviceState();
+            if (passive_ws_intent_.load() &&
+                IsDeviceClaimed() &&
+                protocol_ != nullptr &&
+                !connect_in_flight_.load() &&
+                passive_state != kDeviceStateWifiConfiguring &&
+                passive_state != kDeviceStateAudioTesting &&
+                protocol_->IsAudioChannelOpened() &&
+                !protocol_->MaintainPassiveLiveness()) {
+                ESP_LOGW(TAG, "passive_lesson_ws_liveness_failed -> passive backoff");
+                backend_offline_.store(true);
+                SchedulePassiveLessonReconnect();
+                passive_liveness_failed = true;
+            }
+
+            if (!passive_liveness_failed &&
+                !reconnect_passive_.load() &&
+                clock_ticks_ % 10 == 0 &&
                 IsDeviceClaimed() &&
                 !lesson_runtime_active_.load() &&
                 GetDeviceState() == kDeviceStateIdle &&
@@ -572,9 +730,16 @@ void Application::Run() {
                          (unsigned long)audio_stats.stale_frame_count,
                          (unsigned long)interrupt_count_.load(),
                          (unsigned long)reconnect_count_.load());
-                // MEM-1: main-task stack high-water + PSRAM free (SRAM heap printed above).
-                ESP_LOGI(TAG, "sys_metrics stack_main_min=%u psram_free_b=%u",
+                // Stack high-water snapshots are sampled off the audio hot path.
+                auto stack_hwm = audio_service_.GetTaskStackHighWaterMarks();
+                ESP_LOGI(TAG, "sys_metrics stack_main_min=%u stack_audio_input_min=%ld "
+                              "stack_audio_output_min=%ld stack_opus_codec_min=%ld "
+                              "stack_afe_detection_min=%ld psram_free_b=%u",
                          (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+                         (long)stack_hwm.audio_input,
+                         (long)stack_hwm.audio_output,
+                         (long)stack_hwm.opus_codec,
+                         (long)stack_hwm.afe_detection,
                          (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
             }
         }
@@ -1183,7 +1348,12 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
     StopClaimPoll();
     // Claim confirmed -> the device is becoming claimed. Stop advertising for
     // pairing; an owned robot must not be BLE-discoverable for a new claim.
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
+        "claim_confirmed", provisioning_token);
+#else
     StopBleAdvertising();
+#endif
     if (protocol_) {
         CloseAudioChannelByIntent();
     }
@@ -1381,6 +1551,7 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
         return;
     }
+
     if (activation_task_handle_ != nullptr) {
         ESP_LOGW(TAG, "Activation task already running");
         return;  // Activation already running -> it will reach Idle on its own.
@@ -1589,8 +1760,8 @@ void Application::StartClaimPoll() {
         esp_timer_stop(claim_poll_timer_);
         claim_poll_interval_us_ = desired_interval_us;
         esp_timer_start_periodic(claim_poll_timer_, claim_poll_interval_us_);
-        ESP_LOGI(TAG, "Claim poll re-armed (every %llus)",
-                 claim_poll_interval_us_ / 1000000ULL);
+        ESP_LOGI(TAG, "Claim poll re-armed (every %lus)",
+                 static_cast<unsigned long>(claim_poll_interval_us_ / 1000000ULL));
         return;
     }
     if (claim_poll_timer_ == nullptr) {
@@ -1615,8 +1786,9 @@ void Application::StartClaimPoll() {
     claim_poll_active_ = true;
     claim_poll_interval_us_ = desired_interval_us;
     esp_timer_start_periodic(claim_poll_timer_, claim_poll_interval_us_);
-    ESP_LOGI(TAG, "Claim poll started (every %llus, %llds cap)",
-             claim_poll_interval_us_ / 1000000ULL, kClaimPollWindowMs / 1000);
+    ESP_LOGI(TAG, "Claim poll started (every %lus, %lds cap)",
+             static_cast<unsigned long>(claim_poll_interval_us_ / 1000000ULL),
+             static_cast<long>(kClaimPollWindowMs / 1000));
 }
 
 void Application::StopClaimPoll() {
@@ -1700,7 +1872,7 @@ void Application::ArmClaimExpiryTimer() {
         return;
     }
     esp_timer_start_once(claim_expiry_timer_, static_cast<uint64_t>(remaining_s) * 1000000ULL);
-    ESP_LOGI(TAG, "Claim expiry armed in %llds", remaining_s);
+    ESP_LOGI(TAG, "Claim expiry armed in %lds", static_cast<long>(remaining_s));
 }
 
 void Application::CancelClaimExpiryTimer() {
@@ -1959,7 +2131,8 @@ void Application::StartHeartbeat() {
     }
     heartbeat_active_ = true;
     esp_timer_start_periodic(heartbeat_timer_, kHeartbeatIntervalUs);
-    ESP_LOGI(TAG, "Heartbeat started (every %llus)", kHeartbeatIntervalUs / 1000000ULL);
+    ESP_LOGI(TAG, "Heartbeat started (every %lus)",
+             static_cast<unsigned long>(kHeartbeatIntervalUs / 1000000ULL));
 }
 
 void Application::StopHeartbeat() {
@@ -2367,6 +2540,7 @@ TbotBleSubstate Application::GetBleSubstate() const {
 void Application::ActivationTask() {
     // Create OTA object for activation process
     ota_ = std::make_unique<Ota>();
+    SystemInfo::PrintHeapCheckpoint("activation.start");
 
     // Rollback is useful when a new image cannot boot, but waiting until the
     // network OTA check completes makes a healthy image vulnerable to rollback
@@ -2385,25 +2559,50 @@ void Application::ActivationTask() {
                  "Unclaimed device: skip OTA/bootstrap HTTPS while BLE stays up "
                  "(avoids Loading-setup hang; claim path remains via BLE)");
         CheckAssetsVersion();
+        SystemInfo::PrintHeapCheckpoint("activation.complete");
         xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
         return;
     }
+
+    const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
 
     // Check for new assets version
     CheckAssetsVersion();
 
     // Check for new firmware version
+    SystemInfo::StartHeapPhaseMonitor();
     CheckNewVersion();
+    SystemInfo::PrintHeapCheckpoint("ota_check.complete");
+    SystemInfo::StopHeapPhaseMonitor();
 
     // Claimed devices can override the OTA-provided websocket.url from the
     // backend's authenticated runtime config. If this fails, keep the existing
     // OTA/NVS value and compile-time placeholder fallback chain.
+    SystemInfo::StartHeapPhaseMonitor();
     RefreshWebsocketUrlFromConfigFetch();
+    SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
+    SystemInfo::StopHeapPhaseMonitor();
+
+    // Build the AFE only after boot HTTP/TLS transients have released their
+    // internal SRAM, but before protocol startup and the Idle wake-word gate.
+    const auto activation_state = GetDeviceState();
+    if (IsDeviceClaimed() &&
+        activation_state != kDeviceStateWifiConfiguring &&
+        activation_state != kDeviceStateAudioTesting) {
+        SystemInfo::StartHeapPhaseMonitor();
+        audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
+        SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
+        SystemInfo::StopHeapPhaseMonitor();
+    }
 
     // Initialize the protocol
+    SystemInfo::StartHeapPhaseMonitor();
     InitializeProtocol();
+    SystemInfo::PrintHeapCheckpoint("protocol_init.complete");
+    SystemInfo::StopHeapPhaseMonitor();
 
     // Signal completion to main loop
+    SystemInfo::PrintHeapCheckpoint("activation.complete");
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
 
@@ -2462,56 +2661,41 @@ void Application::CheckAssetsVersion() {
     // Apply assets
     assets.Apply();
 
-    // Cold-boot first-wake latency fix: prewarm the AFE wake-word pipeline here,
-    // on the prio-2 activation task, so the expensive one-time AFE create + the
-    // audio_detection fetch-task spawn overlap the OTA/protocol network waits that
-    // still run before Idle. Without this the AFE is built lazily on the FIRST
-    // EnableWakeWordDetection(true) at the prio-10 Idle transition, and the very
-    // first "Hi ESP" spoken right at Idle races AFE init and is dropped (1-2
-    // tries). Strictly gated on IsDeviceClaimed() so an UNCLAIMED robot never
-    // builds/runs the mic (BLE+AFE-FEED contention gate). Prewarm does NOT Start()
-    // the mic — the locked Idle gate still owns enabling it — so the FEED ring
-    // stays empty until then and OQ1 / the contention fix are untouched.
-    if (IsDeviceClaimed()) {
-        audio_service_.PrewarmWakeWord();
-    }
-
     display->SetChatMessage("system", "");
     display->SetEmotion("microchip_ai");
 }
 
 void Application::CheckNewVersion() {
-    const int MAX_RETRY = 10;
-    int retry_count = 0;
-    int retry_delay = 10; // Initial retry delay in seconds
-
     auto& board = Board::GetInstance();
+    auto display = board.GetDisplay();
     while (true) {
-        auto display = board.GetDisplay();
-        auto current_state = GetDeviceState();
-        if (current_state == kDeviceStateWifiConfiguring ||
-            current_state == kDeviceStateAudioTesting) {
-            ESP_LOGI(TAG, "Skipping OTA version check because WiFi config mode is active");
-            return;
-        }
-        display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
+        esp_err_t err = ESP_FAIL;
+        for (int attempt = 0; attempt < kOtaCheckMaxAttempts; ++attempt) {
+            auto current_state = GetDeviceState();
+            if (current_state == kDeviceStateWifiConfiguring ||
+                current_state == kDeviceStateAudioTesting ||
+                current_state == kDeviceStateIdle) {
+                ESP_LOGI(TAG, "Skipping OTA version check because activation ended");
+                return;
+            }
+            display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION);
 
-        esp_err_t err = ota_->CheckVersion();
-        if (err != ESP_OK) {
-            retry_count++;
-            if (retry_count >= MAX_RETRY) {
-                char error_message[128];
+            err = ota_->CheckVersion();
+            if (err == ESP_OK) {
+                break;
+            }
+            if (attempt + 1 >= kOtaCheckMaxAttempts) {
+                char error_message[32];
                 snprintf(error_message, sizeof(error_message), "code=%d", err);
-                char buffer[256];
-                snprintf(buffer, sizeof(buffer), Lang::Strings::CHECK_NEW_VERSION_FAILED, retry_delay, error_message);
-                Alert(Lang::Strings::ERROR, buffer, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
-                ESP_LOGE(TAG, "Too many retries, exit version check");
+                Alert(Lang::Strings::ERROR, error_message, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
+                ESP_LOGE(TAG, "OTA version check exhausted its bounded retry budget, code=%d", err);
                 return;
             }
 
-            ESP_LOGW(TAG, "Check new version failed, retry in %d seconds (%d/%d), code=%d",
-                     retry_delay, retry_count, MAX_RETRY, err);
-            for (int i = 0; i < retry_delay; i++) {
+            const int retry_delay = kOtaRetryDelaysSeconds[attempt];
+            ESP_LOGW(TAG, "OTA version check failed; retry in %d seconds (%d/%d), code=%d",
+                     retry_delay, attempt + 1, kOtaCheckMaxAttempts, err);
+            for (int elapsed_seconds = 0; elapsed_seconds < retry_delay; ++elapsed_seconds) {
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 auto delayed_state = GetDeviceState();
                 if (delayed_state == kDeviceStateWifiConfiguring ||
@@ -2520,14 +2704,11 @@ void Application::CheckNewVersion() {
                     return;
                 }
                 if (delayed_state == kDeviceStateIdle) {
-                    break;
+                    ESP_LOGI(TAG, "Aborting OTA retry because activation ended");
+                    return;
                 }
             }
-            retry_delay *= 2; // Double the retry delay
-            continue;
         }
-        retry_count = 0;
-        retry_delay = 10; // Reset retry delay
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
@@ -2590,6 +2771,7 @@ void Application::InitializeProtocol() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+    protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 
     if (is_websocket_protocol && lesson_message_queue_ == nullptr &&
         lesson_message_task_handle_ == nullptr) {
@@ -2608,6 +2790,12 @@ void Application::InitializeProtocol() {
     }
 
     protocol_->OnConnected([this]() {
+        if (IsConnectSuccessPublicationSuppressed()) {
+            ESP_LOGI(TAG, "connect success publication suppressed");
+            online_intent_.store(false);
+            StopHeartbeat();
+            return;
+        }
         backend_offline_.store(false);  // healthy session -> ONLINE, not retry
         DismissAlert();
         const bool lesson_answer_turn =
@@ -2645,6 +2833,12 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+        if (IsConnectSuccessPublicationSuppressed()) {
+            ESP_LOGI(TAG, "audio channel success publication suppressed");
+            online_intent_.store(false);
+            StopHeartbeat();
+            return;
+        }
         // User-driven listen/wake sessions own reconnect intent. Passive lesson
         // preconnect only makes the device reachable for server lesson pull/nudge;
         // it must not later reconnect into Listening without a wake/button action.
@@ -2699,9 +2893,14 @@ void Application::InitializeProtocol() {
                 return;
             }
             if (lesson_runtime_active_.load() && passive_ws_intent_.load()) {
-                ESP_LOGW(TAG, "lesson passive ws dropped -> passive reconnect");
                 while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
-                StartPassiveLessonWebsocket();
+                if (PassiveReconnectHasOwner(reconnect_passive_.load(),
+                                             connect_in_flight_.load())) {
+                    ESP_LOGI(TAG, "lesson passive_liveness_reconnect_pending");
+                    return;
+                }
+                ESP_LOGW(TAG, "lesson passive ws dropped -> passive reconnect");
+                SchedulePassiveLessonReconnect();
                 return;
             }
             if (connect_in_flight_.load()) {
@@ -2717,8 +2916,12 @@ void Application::InitializeProtocol() {
             // Idle WebSocket timeout is an unexpected drop for that passive path;
             // reopen the same passive channel instead of using voice reconnect.
             if (passive_ws_intent_.load()) {
+                if (reconnect_passive_.load()) {
+                    ESP_LOGI(TAG, "passive_liveness_reconnect_pending");
+                    return;
+                }
                 ESP_LOGW(TAG, "passive_lesson_ws_dropped_unexpected -> passive reconnect");
-                StartPassiveLessonWebsocket();
+                SchedulePassiveLessonReconnect();
                 return;
             }
             // Sustained operation: an UNEXPECTED drop (server/tunnel closed the WS,
@@ -2794,7 +2997,9 @@ void Application::InitializeProtocol() {
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 tts_audio_accepting_.store(false);
                 int64_t t_recv = esp_timer_get_time() / 1000;
-                ESP_LOGI(TAG, "tts_stop_received ts=%lld", t_recv);
+                const auto t_recv_sec = static_cast<unsigned long>(t_recv / 1000);
+                const auto t_recv_ms = static_cast<unsigned long>(t_recv % 1000);
+                ESP_LOGI(TAG, "tts_stop_received ts=%lu%03lu", t_recv_sec, t_recv_ms);
                 // Patch 3.4: the backend tags an interrupt-driven stop with
                 // reason="interrupt" (barge-in) vs a normal end-of-turn stop.
                 auto reason = cJSON_GetObjectItem(root, "reason");
@@ -2816,7 +3021,8 @@ void Application::InitializeProtocol() {
                     // local VAD path already aborted.
                     audio_service_.SetPlaybackGeneration(++speaking_generation_);
                     audio_service_.ResetDecoder();
-                    ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lld", t_recv);
+                    ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lu%03lu",
+                             t_recv_sec, t_recv_ms);
                 }
                 // NOTE: for a NORMAL end-of-turn stop we deliberately do NOT
                 // ResetDecoder — that cut the final 200-500ms of every response
@@ -2864,8 +3070,11 @@ void Application::InitializeProtocol() {
                             protocol_->SendStartListening(kListeningModeRealtime);
                         }
                         audio_service_.EnableVoiceProcessing(true);
-                        ESP_LOGI(TAG, "mic_loop_resumed ts=%lld reason=tts_stop_continue_listening",
-                                 esp_timer_get_time() / 1000);
+                        const uint64_t resumed_ms = esp_timer_get_time() / 1000;
+                        ESP_LOGI(TAG,
+                                 "mic_loop_resumed ts=%lu%03lu reason=tts_stop_continue_listening",
+                                 static_cast<unsigned long>(resumed_ms / 1000),
+                                 static_cast<unsigned long>(resumed_ms % 1000));
                         return;
                     }
                     if (GetDeviceState() == kDeviceStateSpeaking) {
@@ -2892,8 +3101,10 @@ void Application::InitializeProtocol() {
                             SetDeviceState(kDeviceStateIdle);
                         } else {
                             SetDeviceState(kDeviceStateListening);
-                            ESP_LOGI(TAG, "mic_loop_resumed ts=%lld",
-                                     esp_timer_get_time() / 1000);
+                            const uint64_t resumed_ms = esp_timer_get_time() / 1000;
+                            ESP_LOGI(TAG, "mic_loop_resumed ts=%lu%03lu",
+                                     static_cast<unsigned long>(resumed_ms / 1000),
+                                     static_cast<unsigned long>(resumed_ms % 1000));
                         }
                     }
                 });
@@ -3598,10 +3809,23 @@ void Application::OpenChannelTask(void* arg) {
 
     self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
         self->CancelConnectWatchdog();
+        if (self->reboot_pending_.exchange(false)) {
+            self->reset_pending_.store(false);
+            self->connect_close_deferral_.Cancel();
+            self->CompleteReboot();
+            return;
+        }
         // A ResetProtocol arrived while we were mid-connect and deferred the
         // actual reset to us (now safe: the worker no longer touches protocol_).
         if (self->reset_pending_.exchange(false)) {
+            self->connect_close_deferral_.Cancel();
             self->DoResetProtocol();
+            return;
+        }
+        if (self->connect_close_deferral_.TakeAfterWorker()) {
+            if (self->protocol_ != nullptr) {
+                self->protocol_->CloseAudioChannel();
+            }
             return;
         }
         if (gen != self->connect_generation_.load()) {
@@ -3854,6 +4078,10 @@ void Application::ScheduleReconnect(ListeningMode mode, bool resume_listening) {
 }
 
 void Application::SchedulePassiveLessonReconnect() {
+    if (reconnect_passive_.load()) {
+        ESP_LOGD(TAG, "passive_lesson_reconnect_already_pending");
+        return;
+    }
     if (reconnect_timer_ == nullptr) {
         esp_timer_create_args_t args = {};
         args.callback = [](void* arg) {
@@ -3864,6 +4092,7 @@ void Application::SchedulePassiveLessonReconnect() {
         args.name = "reconnect";
         if (esp_timer_create(&args, &reconnect_timer_) != ESP_OK) {
             reconnect_timer_ = nullptr;
+            reconnect_passive_.store(false);
             return;
         }
     }
@@ -4274,10 +4503,10 @@ void Application::HandleListeningWatchdogTick() {
     audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
     auto audio_stats = audio_service_.GetDebugStatistics();
     ESP_LOGW(TAG,
-             "listening_watchdog_timeout mode=%d idle_ms=%lld turn_ms=%lld decode_q=%lu send_q=%lu playback_q=%lu decode_drop=%lu encode_drop=%lu reconnects=%lu",
+             "listening_watchdog_timeout mode=%d idle_ms=%ld turn_ms=%ld decode_q=%lu send_q=%lu playback_q=%lu decode_drop=%lu encode_drop=%lu reconnects=%lu",
              static_cast<int>(listening_mode_),
-             idle_ms,
-             turn_ms,
+             static_cast<long>(idle_ms),
+             static_cast<long>(turn_ms),
              (unsigned long)decode_q,
              (unsigned long)send_q,
              (unsigned long)playback_q,
@@ -4507,6 +4736,47 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
+void Application::ScheduleDeferredProtocolClose(Protocol* expected,
+                                                uint32_t connection_epoch) {
+    const uint64_t expected_generation = protocol_generation_.load(std::memory_order_acquire);
+    Schedule([this, expected, expected_generation, connection_epoch]() {
+        if (ProtocolLifetimeMatches(
+                protocol_.get(), expected,
+                protocol_generation_.load(std::memory_order_acquire),
+                expected_generation)) {
+            protocol_->CompleteDeferredClose(connection_epoch);
+        }
+    });
+}
+
+bool Application::ScheduleAndWait(std::function<bool()>&& callback, int timeout_ms) {
+    struct WaitState {
+        enum Status { kPending, kRunning, kDone, kCancelled };
+        SemaphoreHandle_t done = xSemaphoreCreateBinary();
+        std::atomic<Status> status{kPending};
+        std::atomic<bool> result{false};
+        ~WaitState() { if (done != nullptr) vSemaphoreDelete(done); }
+    };
+    auto state = std::make_shared<WaitState>();
+    if (state->done == nullptr) return false;
+    Schedule([state, callback = std::move(callback)]() mutable {
+        auto expected = WaitState::kPending;
+        if (!state->status.compare_exchange_strong(expected, WaitState::kRunning)) return;
+        state->result.store(callback());
+        state->status.store(WaitState::kDone);
+        xSemaphoreGive(state->done);
+    });
+    if (xSemaphoreTake(state->done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+        return state->result.load();
+    }
+    auto expected = WaitState::kPending;
+    if (state->status.compare_exchange_strong(expected, WaitState::kCancelled)) return false;
+    if (expected == WaitState::kRunning) {
+        xSemaphoreTake(state->done, portMAX_DELAY);
+    }
+    return state->status.load() == WaitState::kDone && state->result.load();
+}
+
 void Application::RunScheduledTasks() {
     std::unique_lock<std::mutex> lock(mutex_);
     auto tasks = std::move(main_tasks_);
@@ -4560,9 +4830,9 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
         return;
     }
 
-    ESP_LOGW(TAG, "speaking_timeout generation=%lu idle_ms=%lld",
+    ESP_LOGW(TAG, "speaking_timeout generation=%lu idle_ms=%ld",
              (unsigned long)generation,
-             last_activity_ms > 0 ? now_ms - last_activity_ms : -1);
+             static_cast<long>(last_activity_ms > 0 ? now_ms - last_activity_ms : -1));
     tts_audio_accepting_.store(false);
     ++speaking_generation_;
     // Publish the new generation (cancel path) so late frames from the timed-out
@@ -4602,8 +4872,10 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
         show_timeout_cue();
     } else {
         SetDeviceState(kDeviceStateListening);
-        ESP_LOGI(TAG, "mic_loop_resumed ts=%lld reason=speaking_timeout",
-                 esp_timer_get_time() / 1000);
+        const uint64_t resumed_ms = esp_timer_get_time() / 1000;
+        ESP_LOGI(TAG, "mic_loop_resumed ts=%lu%03lu reason=speaking_timeout",
+                 static_cast<unsigned long>(resumed_ms / 1000),
+                 static_cast<unsigned long>(resumed_ms % 1000));
     }
 }
 
@@ -4651,16 +4923,33 @@ void Application::Reboot() {
         ESP_LOGI(TAG, "lesson reboot ignored");
         return;
     }
+    if (connect_in_flight_.load()) {
+        reboot_pending_.store(true);
+        CloseAudioChannelByIntent();
+        ESP_LOGI(TAG, "reboot_deferred_until_connect_worker_exit");
+        return;
+    }
+    CompleteReboot();
+}
+
+void Application::CompleteReboot() {
     ESP_LOGI(TAG, "Rebooting...");
     // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         CloseAudioChannelByIntent();
     }
     protocol_.reset();
+    protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
     audio_service_.Stop();
 
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
+}
+
+bool Application::IsConnectSuccessPublicationSuppressed() const {
+    return connect_close_deferral_.Pending() ||
+           reset_pending_.load() ||
+           reboot_pending_.load();
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
@@ -4839,6 +5128,11 @@ void Application::CloseAudioChannelByIntent() {
     if (reconnect_timer_ != nullptr) {
         esp_timer_stop(reconnect_timer_);
     }
+    if (!connect_close_deferral_.Request(connect_in_flight_.load())) {
+        ++connect_generation_;
+        ESP_LOGI(TAG, "channel_close_deferred_until_connect_worker_exit");
+        return;
+    }
     if (protocol_) {
         protocol_->CloseAudioChannel();
     }
@@ -4849,6 +5143,7 @@ void Application::DoResetProtocol() {
         CloseAudioChannelByIntent();
     }
     protocol_.reset();
+    protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void Application::ResetProtocol() {

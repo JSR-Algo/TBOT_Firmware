@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
+#include "lesson_layer_state.h"
 
 #include <vector>
 #include <algorithm>
@@ -343,6 +344,9 @@ LcdDisplay::~LcdDisplay() {
     if (lesson_caption_bar_ != nullptr) {
         lv_obj_del(lesson_caption_bar_);
     }
+    if (lesson_word_pill_ != nullptr) {
+        lv_obj_del(lesson_word_pill_);
+    }
     if (chat_message_label_ != nullptr) {
         lv_obj_del(chat_message_label_);
     }
@@ -446,6 +450,23 @@ void LcdDisplay::SetupUI() {
     lesson_robot_overlay_ = lv_image_create(screen);
     lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
+
+    const auto word_pill = LessonWordPillGeometry(width_, height_);
+    lesson_word_pill_ = lv_obj_create(screen);
+    lv_obj_set_pos(lesson_word_pill_, word_pill.x, word_pill.y);
+    lv_obj_set_size(lesson_word_pill_, word_pill.width, word_pill.height);
+    lv_obj_set_style_radius(lesson_word_pill_, word_pill.height / 2, 0);
+    lv_obj_set_style_bg_color(lesson_word_pill_, lv_color_hex(0xFFF2A8), 0);
+    lv_obj_set_style_bg_opa(lesson_word_pill_, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(lesson_word_pill_, 3, 0);
+    lv_obj_set_style_border_color(lesson_word_pill_, lv_color_hex(0xF2A900), 0);
+    lesson_word_label_ = lv_label_create(lesson_word_pill_);
+    lv_obj_set_width(lesson_word_label_, word_pill.width - 16);
+    lv_obj_set_style_text_align(lesson_word_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(lesson_word_label_, lv_color_hex(0x1E2A38), 0);
+    lv_label_set_text(lesson_word_label_, "");
+    lv_obj_center(lesson_word_label_);
+    lv_obj_add_flag(lesson_word_pill_, LV_OBJ_FLAG_HIDDEN);
 
     /* Lesson-only caption overlay: fixed bottom strip, separate from scrolling chat. */
     lesson_caption_bar_ = lv_obj_create(screen);
@@ -1069,6 +1090,23 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
 
+    const auto word_pill = LessonWordPillGeometry(width_, height_);
+    lesson_word_pill_ = lv_obj_create(screen);
+    lv_obj_set_pos(lesson_word_pill_, word_pill.x, word_pill.y);
+    lv_obj_set_size(lesson_word_pill_, word_pill.width, word_pill.height);
+    lv_obj_set_style_radius(lesson_word_pill_, word_pill.height / 2, 0);
+    lv_obj_set_style_bg_color(lesson_word_pill_, lv_color_hex(0xFFF2A8), 0);
+    lv_obj_set_style_bg_opa(lesson_word_pill_, LV_OPA_90, 0);
+    lv_obj_set_style_border_width(lesson_word_pill_, 3, 0);
+    lv_obj_set_style_border_color(lesson_word_pill_, lv_color_hex(0xF2A900), 0);
+    lesson_word_label_ = lv_label_create(lesson_word_pill_);
+    lv_obj_set_width(lesson_word_label_, word_pill.width - 16);
+    lv_obj_set_style_text_align(lesson_word_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(lesson_word_label_, lv_color_hex(0x1E2A38), 0);
+    lv_label_set_text(lesson_word_label_, "");
+    lv_obj_center(lesson_word_label_);
+    lv_obj_add_flag(lesson_word_pill_, LV_OBJ_FLAG_HIDDEN);
+
     /* Bottom layer: emoji_box_ - centered display */
     emoji_box_ = lv_obj_create(screen);
     lv_obj_set_size(emoji_box_, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
@@ -1478,6 +1516,19 @@ void LcdDisplay::SetLessonCaption(const char* content) {
             lv_obj_move_foreground(bottom_bar_);
         }
     }
+}
+
+void LcdDisplay::SetLessonTeachingWord(const char* text) {
+    DisplayLockGuard lock(this);
+    if (lesson_word_pill_ == nullptr || lesson_word_label_ == nullptr) return;
+    const bool empty = text == nullptr || text[0] == '\0';
+    lv_label_set_text(lesson_word_label_, empty ? "" : text);
+    if (empty) {
+        lv_obj_add_flag(lesson_word_pill_, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_remove_flag(lesson_word_pill_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(lesson_word_pill_);
 }
 
 // US-006 lesson display mode: hide/show the idle realtime emoji face. Some layouts wrap

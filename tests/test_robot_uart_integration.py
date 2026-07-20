@@ -1,4 +1,6 @@
 from pathlib import Path
+
+from repo_paths import resolve_robot_path
 import re
 
 
@@ -55,6 +57,29 @@ def test_main_firmware_declares_robot_uart_bridge():
     assert 'clamp_servo_angle' in source
     assert 'clamp_percent' in source
     assert 'lower' in source
+
+
+def test_robot_uart_serializes_complete_profile_switch_and_write_transactions():
+    header = read("main/robot_uart.h")
+    source = read("main/robot_uart.cc")
+
+    assert "std::recursive_mutex uart_mutex_" in header
+    for signature in (
+        "bool RobotUart::Initialize()",
+        "bool RobotUart::SendBothArmsRaise()",
+        "bool RobotUart::SendBothArmsLower()",
+        "bool RobotUart::SendBothArmsSetPercent(int percent)",
+        "bool RobotUart::SendServoSweep(",
+        "bool RobotUart::SendControlLine(",
+    ):
+        body = source[source.index(signature):]
+        body = body[:body.index("\n}")]
+        assert "std::lock_guard<std::recursive_mutex> lock(uart_mutex_);" in body
+
+    transaction = source[source.index("bool RobotUart::SendPayloadOnProfile"):]
+    transaction = transaction[:transaction.index("\n}")]
+    assert transaction.index("SelectUartProfile") < transaction.index("uart_write_bytes")
+    assert "uart_flush_input" not in transaction
 
 def test_robot_motion_uart_dispatch_does_not_block_on_servant_ack():
     source = read("main/robot_uart.cc")
@@ -229,7 +254,7 @@ def test_lcdwiki_enables_robot_uart_ack_reader_for_slave_events():
 
 
 def test_servant_firmware_has_uart_servo_controller():
-    main_c = read("../TBOT-Servant-Firmware/main/main.c")
+    main_c = resolve_robot_path("TBOT-Servant-Firmware/main/main.c", ROOT).read_text(encoding="utf-8")
 
     assert "LEFT_ARM_SERVO_GPIO GPIO_NUM_12" in main_c
     assert "RIGHT_ARM_SERVO_GPIO GPIO_NUM_13" in main_c

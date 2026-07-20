@@ -2,6 +2,9 @@
 #define CUSTOM_WAKE_WORD_H
 
 #include <esp_attr.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/event_groups.h>
 #include <esp_mn_iface.h>
 #include <esp_mn_models.h>
 #include <model_path.h>
@@ -13,6 +16,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <chrono>
 
 #include "audio_codec.h"
 #include "wake_word.h"
@@ -31,6 +35,7 @@ public:
     void EncodeWakeWordData();
     bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
+    bool Shutdown(uint32_t timeout_ms) override;
 
 private:
     struct Command {
@@ -43,6 +48,7 @@ private:
     esp_mn_iface_t* multinet_ = nullptr;
     model_iface_data_t* multinet_model_data_ = nullptr;
     srmodel_list_t *models_ = nullptr;
+    bool owns_models_ = false;
     char* mn_name_ = nullptr;
     std::string language_ = "cn";
     int duration_ = 3000;
@@ -57,12 +63,13 @@ private:
     std::mutex input_buffer_mutex_;
 
     TaskHandle_t wake_word_encode_task_ = nullptr;
-    StaticTask_t* wake_word_encode_task_buffer_ = nullptr;
-    StackType_t* wake_word_encode_task_stack_ = nullptr;
     std::deque<std::vector<int16_t>> wake_word_pcm_;
     std::deque<std::vector<uint8_t>> wake_word_opus_;
     std::mutex wake_word_mutex_;
     std::condition_variable wake_word_cv_;
+    std::atomic<bool> shutting_down_{false};
+    std::atomic<bool> encode_active_{false};
+    EventGroupHandle_t shutdown_event_group_ = nullptr;
 
     void StoreWakeWordData(const std::vector<int16_t>& data);
     void ParseWakenetModelConfig();

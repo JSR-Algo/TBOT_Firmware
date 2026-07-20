@@ -446,13 +446,44 @@ def test_ota_retry_does_not_steal_wifi_config_screen_or_alert_transient_failures
     status_idx = check_body.index("display->SetStatus(Lang::Strings::CHECKING_NEW_VERSION)")
     assert wifi_idx < status_idx
 
-    max_idx = check_body.index("retry_count >= MAX_RETRY")
-    max_return_idx = check_body.index("return;", max_idx)
-    max_branch = check_body[max_idx:max_return_idx]
-    assert "Alert(" in max_branch
+    final_idx = check_body.index("attempt + 1 >= kOtaCheckMaxAttempts")
+    retry_idx = check_body.index("const int retry_delay", final_idx)
+    assert check_body.count("Alert(") == 1
+    assert final_idx < check_body.index("Alert(") < retry_idx
+    assert "Alert(" not in check_body[retry_idx:]
 
-    retry_tail = check_body[max_return_idx:check_body.index("retry_delay *= 2", max_return_idx)]
-    assert "Alert(" not in retry_tail
+
+def test_ota_retry_phase_has_fixed_attempts_delays_and_budget_then_returns():
+    app = read("main/application.cc")
+    check_body = function_body(app, "void Application::CheckNewVersion")
+
+    assert "kOtaCheckMaxAttempts = 3" in app
+    assert "kOtaRetryDelaysSeconds[] = {2, 4}" in app
+    assert "static constexpr int kHttpTimeoutMs = 8000" in read("main/ota.h")
+    assert "kOtaCheckPhaseBudgetMs" in app
+    assert "kOtaCheckMaxAttempts * Ota::kHttpTimeoutMs" in app
+    assert "static_assert(kOtaCheckPhaseBudgetMs <= 60000" in app
+    assert "attempt < kOtaCheckMaxAttempts" in check_body
+    assert "kOtaRetryDelaysSeconds[attempt]" in check_body
+    assert "retry_delay *= 2" not in check_body
+    assert "MAX_RETRY" not in check_body
+
+    final_failure = check_body[check_body.index("if (attempt + 1 >= kOtaCheckMaxAttempts)") :]
+    assert final_failure.count("Alert(") == 1
+    assert "return;" in final_failure[: final_failure.index("const int retry_delay")]
+
+
+def test_ota_retry_wait_aborts_for_idle_wifi_config_and_audio_test():
+    app = read("main/application.cc")
+    check_body = function_body(app, "void Application::CheckNewVersion")
+    wait_start = check_body.index("for (int elapsed_seconds")
+    wait_end = check_body.index("if (ota_->HasNewVersion())", wait_start)
+    wait_body = check_body[wait_start:wait_end]
+
+    assert "kDeviceStateWifiConfiguring" in wait_body
+    assert "kDeviceStateAudioTesting" in wait_body
+    assert "kDeviceStateIdle" in wait_body
+    assert wait_body.count("return;") >= 2
 
 # ---------------------------------------------------------------------------
 # OQ1 — main-task-only serialization assumption is documented

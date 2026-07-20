@@ -21,17 +21,13 @@ either repo (an added, removed, or renamed type) turns it red.
 import re
 from pathlib import Path
 
+from repo_paths import resolve_robot_path
+
 ROOT = Path(__file__).resolve().parents[1]
 
 FIRMWARE_LESSON_HANDLER = ROOT / "main" / "lesson_handler.cc"
-ESP_LESSON_RUNTIME = (
-    ROOT.parent
-    / "esp32-server"
-    / "main"
-    / "tbot-server"
-    / "core"
-    / "lesson"
-    / "runtime.py"
+ESP_LESSON_RUNTIME = resolve_robot_path(
+    "esp32-server/main/tbot-server/core/lesson/runtime.py", ROOT
 )
 
 # Cross-check sanity floor: the v1 builtin passive narration kinds. This is NOT

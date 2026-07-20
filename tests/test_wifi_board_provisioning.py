@@ -41,7 +41,7 @@ def _start_wifi_config_body(wifi_board: str) -> str:
     """Body of WifiBoard::StartWifiConfigMode() up to EnterWifiConfigMode()."""
     return _func_body(
         wifi_board,
-        "void WifiBoard::StartWifiConfigMode()",
+        "void WifiBoard::StartWifiConfigMode(",
         "void WifiBoard::EnterWifiConfigMode()",
     )
 
@@ -66,36 +66,53 @@ def _connected_event_body(wifi_board: str) -> str:
 
 # ---------------------------------------------------------------------------
 # WB1: StartWifiConfigMode() full setup ordering for the BLE provisioning path:
-#      ReleaseWakeWordResourcesForWifiConfig -> RestartForSetup() ->
-#      StartBleSetupTimeout(). The restart tears down any stale controller/host
-#      generation and opens a fresh session before the hard timeout is armed.
+#      reserve -> BeginWifiProvisioning -> commit -> GetBleState() ->
+#      successful blufi.init() -> visible state mutation -> timeout. The wake-word release must free
+#      the AFE detection task before BLE comes up; the state read gates the
+#      conditional init; the hard-timeout is armed last so advertising cannot
+#      run forever.
 # ---------------------------------------------------------------------------
 def test_wb1_start_config_mode_setup_step_ordering():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
-    restart_idx = body.index("blufi.RestartForSetup();")
+    reserve_idx = body.index("TryReserveProvisioningSession")
+    release_idx = body.index("BeginWifiProvisioning")
+    commit_idx = body.index("provisioning_reservation.Commit(provisioning_token)")
+    get_state_idx = body.index("blufi.GetBleState();")
+    init_idx = body.index("blufi.init();")
+    stop_idx = body.index("WifiManager::GetInstance().StopStation();")
+    config_idx = body.index("in_config_mode_ = true;")
+    state_idx = body.index("PublishWifiConfigEntry(preparation)")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
 
-    assert release_idx < restart_idx < timer_idx, (
+    assert reserve_idx < release_idx < commit_idx < get_state_idx < init_idx
+    assert init_idx < state_idx < stop_idx < config_idx < timer_idx, (
         "StartWifiConfigMode() BLE setup steps must run in order: "
-        "wake-word release -> RestartForSetup() -> StartBleSetupTimeout()"
+        "reservation -> wake-word release -> binding -> init success -> "
+        "checked state publication -> station/config mutation -> StartBleSetupTimeout()"
+    )
+    assert "if (blufi_init_error != ESP_OK)" in body
+    init_failure = body[body.index("if (blufi_init_error != ESP_OK)"):stop_idx]
+    assert "AbortProvisioningSetup(provisioning_token)" in init_failure
+    assert init_failure.index("AbortProvisioningSetup(provisioning_token)") < init_failure.index(
+        "RollbackWifiConfigEntry(preparation)"
     )
 
 
 # ---------------------------------------------------------------------------
-# WB2: every explicit setup entry must use RestartForSetup(), rather than
-#      inspecting GetBleState() and conditionally reusing an advertising or
-#      connected session. This guarantees a fresh generation for a new phone
-#      provisioning attempt and prevents stale GATT/security state reuse.
+# WB2: every explicit setup entry must reserve the provisioning session before
+#      touching the BLE stack, so a prior completion still in flight cannot be
+#      reused for a new phone provisioning attempt. A stale advertising session
+#      is only reused when the state read proves it is genuinely off/timed-out.
 # ---------------------------------------------------------------------------
 def test_wb2_explicit_setup_always_opens_a_fresh_blufi_session():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    assert body.count("blufi.RestartForSetup();") == 1
-    assert "blufi.GetBleState()" not in body
+    assert body.count("blufi.TryReserveProvisioningSession()") == 1
+    assert body.index("TryReserveProvisioningSession") < body.index("blufi.init();")
+    assert "prior provisioning completion still active" in body
     assert "blufi.init();" not in body
 
     restart_idx = body.index("blufi.RestartForSetup();")
@@ -149,7 +166,7 @@ def test_wb4_ap_state_string_active_requires_both_flags_else_off():
     body = _func_body(
         wifi_board,
         "const char* WifiBoard::GetApStateString()",
-        "void WifiBoard::StartWifiConfigMode()",
+        "void WifiBoard::StartWifiConfigMode(",
     )
 
     # "active" is gated on BOTH the board flag AND the manager's IsConfigMode().
@@ -184,17 +201,14 @@ def test_wb5_station_connect_timeout_is_60_seconds():
         "the connect timer must be armed with CONNECT_TIMEOUT_SEC (seconds, in us)"
     )
 
-    # On timeout the station is stopped and config mode is (re)entered.
+    # StartWifiConfigMode owns station mutation after its setup transaction.
     timeout_body = _func_body(
         wifi_board,
         "void WifiBoard::OnWifiConnectTimeout(",
         "// ---",
     )
-    stop_idx = timeout_body.index("WifiManager::GetInstance().StopStation();")
-    reenter_idx = timeout_body.index("StartWifiConfigMode();")
-    assert stop_idx < reenter_idx, (
-        "connect-timeout must stop the station before re-entering config mode"
-    )
+    assert "RequestWifiConfigMode();" in timeout_body
+    assert "StopStation" not in timeout_body
 
 
 def test_wifi_connect_timeout_ignores_active_lesson_before_station_or_setup_side_effects():
@@ -207,35 +221,117 @@ def test_wifi_connect_timeout_ignores_active_lesson_before_station_or_setup_side
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in timeout_body
     guard_idx = timeout_body.index("Application::GetInstance().IsLessonRuntimeActive()")
-    stop_idx = timeout_body.index("WifiManager::GetInstance().StopStation();")
-    setup_idx = timeout_body.index("StartWifiConfigMode();")
-    assert guard_idx < stop_idx < setup_idx
-    guard = timeout_body[guard_idx:stop_idx]
+    setup_idx = timeout_body.index("RequestWifiConfigMode();")
+    assert guard_idx < setup_idx
+    guard = timeout_body[guard_idx:setup_idx]
     assert "return;" in guard
     assert "StopStation" not in guard
     assert "StartWifiConfigMode" not in guard
 
-def test_wifi_config_delayed_entry_rechecks_active_lesson_before_setup_side_effects():
+def test_wifi_config_entry_uses_main_task_request_without_delayed_worker_side_effects():
     wifi_board = read("main/boards/common/wifi_board.cc")
     enter_body = _func_body(
         wifi_board,
         "void WifiBoard::EnterWifiConfigMode()",
         "bool WifiBoard::IsInWifiConfigMode()",
     )
-    delayed_task = enter_body[
-        enter_body.index("xTaskCreate([](void* arg)") :
-        enter_body.index('}, "wifi_cfg_delay"')
-    ]
-
-    assert "Application::GetInstance().IsLessonRuntimeActive()" in delayed_task
-    guard_idx = delayed_task.index("Application::GetInstance().IsLessonRuntimeActive()")
-    stop_idx = delayed_task.index("WifiManager::GetInstance().StopStation();")
-    setup_idx = delayed_task.index("board->StartWifiConfigMode();")
-    assert guard_idx < stop_idx < setup_idx
-    guard = delayed_task[guard_idx:stop_idx]
+    assert "app.IsLessonRuntimeActive()" in enter_body
+    guard_idx = enter_body.index("app.IsLessonRuntimeActive()")
+    setup_idx = enter_body.index("RequestWifiConfigMode(true)")
+    assert guard_idx < setup_idx
+    guard = enter_body[guard_idx:setup_idx]
     assert "return;" in guard
     assert "StopStation" not in guard
-    assert "StartWifiConfigMode" not in guard
+    assert "RequestWifiConfigMode" not in guard
+    assert "xTaskCreate" not in enter_body
+    assert "StopStation" not in enter_body
+    assert "esp_timer_stop" not in enter_body
+
+
+def test_enter_wifi_config_mode_delegates_all_station_and_state_mutation_to_start():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    enter_body = _func_body(
+        wifi_board,
+        "void WifiBoard::EnterWifiConfigMode()",
+        "bool WifiBoard::IsInWifiConfigMode()",
+    )
+
+    assert "RequestWifiConfigMode" in enter_body
+    assert "StopStation" not in enter_body
+    assert "esp_timer_stop" not in enter_body
+    assert "in_config_mode_" not in enter_body
+    assert "SetDeviceState" not in enter_body
+
+
+def test_wifi_config_entry_is_one_idempotent_main_task_transaction():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    wifi_header = read("main/boards/common/wifi_board.h")
+    enter_body = _func_body(
+        wifi_board,
+        "void WifiBoard::EnterWifiConfigMode()",
+        "bool WifiBoard::IsInWifiConfigMode()",
+    )
+    timeout_body = _func_body(wifi_board, "void WifiBoard::OnWifiConnectTimeout(", "// ---")
+
+    assert "std::atomic<bool> wifi_config_entry_pending_" in wifi_header
+    assert "void RequestWifiConfigMode(" in wifi_header
+    assert "RequestWifiConfigMode(" in enter_body
+    assert "RequestWifiConfigMode(" in timeout_body
+    assert "Application::GetInstance().Schedule(" in wifi_board
+    request_body = _func_body(
+        wifi_board,
+        "void WifiBoard::RequestWifiConfigMode(",
+        "void WifiBoard::StartWifiConfigMode(",
+    )
+    assert "compare_exchange_strong" in request_body
+    assert "wifi_config_entry_pending_.store(false)" in request_body
+
+
+def test_application_prepares_realtime_before_blufi_and_checks_publication():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    app_h = read("main/application.h")
+    app_cc = read("main/application.cc")
+    start = _start_wifi_config_body(wifi_board)
+
+    prepare = start.index("PrepareWifiConfigEntry")
+    reserve = start.index("TryReserveProvisioningSession")
+    init = start.index("blufi.init()")
+    publish = start.index("PublishWifiConfigEntry")
+    stop = start.index("StopStation")
+    assert prepare < reserve < init < publish < stop
+    assert "struct WifiConfigEntryPreparation" in app_h
+    assert "bool PrepareWifiConfigEntry(WifiConfigEntryPreparation&" in app_h
+    assert "bool PublishWifiConfigEntry(const WifiConfigEntryPreparation&" in app_h
+    assert "bool RollbackWifiConfigEntry(const WifiConfigEntryPreparation&" in app_h
+
+    prepare_body = _func_body(
+        app_cc,
+        "bool Application::PrepareWifiConfigEntry(",
+        "bool Application::PublishWifiConfigEntry(",
+    )
+    assert prepare_body.index("connect_in_flight_.load()") < prepare_body.index("++connect_generation_")
+    assert prepare_body.index("reset_pending_.load()") < prepare_body.index("++connect_generation_")
+    assert "CloseAudioChannelByIntent();" in prepare_body
+    assert "DoResetProtocol();" not in prepare_body
+    assert "if (!SetDeviceState(kDeviceStateIdle))" in prepare_body
+    rollback_body = _func_body(
+        app_cc,
+        "bool Application::RollbackWifiConfigEntry(",
+        "void Application::Initialize()",
+    )
+    assert "xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED)" in rollback_body
+    assert "SetDeviceState(kDeviceStateConnecting)" in rollback_body
+    assert "ContinueOpenAudioChannel(mode)" in rollback_body
+
+
+def test_failed_bound_entry_aborts_exact_token_before_application_rollback():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    blufi_h = read("main/boards/common/blufi.h")
+    start = _start_wifi_config_body(wifi_board)
+    assert "bool AbortProvisioningSetup(ProvisioningToken token);" in blufi_h
+    abort = start.index("AbortProvisioningSetup(provisioning_token)")
+    rollback = start.index("RollbackWifiConfigEntry", abort)
+    assert abort < rollback
 
 def test_ap_setup_timeout_rechecks_active_lesson_before_deferred_teardown():
     wifi_board = read("main/boards/common/wifi_board.cc")
@@ -266,15 +362,16 @@ def test_start_wifi_config_mode_ignores_active_lesson_before_setup_side_effects(
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in body
     guard_idx = body.index("Application::GetInstance().IsLessonRuntimeActive()")
+    preflight_idx = body.index("TryReserveProvisioningSession()")
     config_flag_idx = body.index("in_config_mode_ = true;")
-    state_idx = body.index("SetDeviceState(kDeviceStateWifiConfiguring);")
-    assert guard_idx < config_flag_idx < state_idx
-    guard = body[guard_idx:config_flag_idx]
+    state_idx = body.index("PublishWifiConfigEntry(preparation)")
+    assert guard_idx < preflight_idx < state_idx < config_flag_idx
+    guard = body[guard_idx:preflight_idx]
     assert "return;" in guard
     assert "in_config_mode_" not in guard
     assert "SetDeviceState" not in guard
     assert "StartConfigAp" not in guard
-    assert "ReleaseWakeWordResourcesForWifiConfig" not in guard
+    assert "BeginWifiProvisioning" not in guard
     assert "StartBleSetupTimeout" not in guard
     assert "ReceiveWifiCredentialsFromAudio" not in guard
 
@@ -290,12 +387,9 @@ def test_wb6_connected_event_does_not_post_report_blufi_owns_it():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _connected_event_body(wifi_board)
 
-    # Explicit comment-of-record that the report is owned elsewhere.
-    assert "report owned by BluFi success branch" in body, (
+    # Explicit comment-of-record that origin-token workers own completion.
+    assert "BluFi success workers carry their originating provisioning token" in body, (
         "the Connected handler must document that the report is owned by BluFi"
-    )
-    assert "Do not call Report() here" in body, (
-        "the Connected handler must document that it does not own the report"
     )
 
     # Hard guard: no ProvisioningStatusReporter::Report( call in this handler.
@@ -323,16 +417,8 @@ def test_wb7_connected_cancels_timeouts_before_ble_teardown():
         "NetworkEvent::Connected must cancel the AP setup hard-timeout"
     )
 
-    # BLE hard-timeout cancelled BEFORE deinit() so the timer cannot re-post a
-    # teardown after BLE resources are released.
-    assert "blufi.CancelBleSetupTimeout();" in body
-    assert "blufi.deinit();" in body
-    cancel_idx = body.index("blufi.CancelBleSetupTimeout();")
-    deinit_idx = body.index("blufi.deinit();")
-    assert cancel_idx < deinit_idx, (
-        "CancelBleSetupTimeout() must precede deinit() so a stale BLE timer "
-        "cannot post a redundant teardown after deinit()"
-    )
+    # Generic Connected cannot identify the originating provisioning session.
+    assert "CompleteSuccessfulProvisioningTeardown" not in body
 
     # Connecting/idle bookkeeping: in_config_mode_ is cleared after teardown.
     assert "in_config_mode_ = false;" in body
@@ -408,14 +494,10 @@ def test_wb9b_ble_advertised_name_is_tbot_prefixed():
 def test_wb10_no_credential_value_logged_in_wifi_board():
     wifi_board = read("main/boards/common/wifi_board.cc")
 
-    # The Connected handler logs presence as a boolean only.
+    # The generic Connected handler no longer reads provisioning secrets.
     body = _connected_event_body(wifi_board)
-    assert "token_empty=%d" in body and "code_empty=%d" in body, (
-        "the Connected handler must log token/code presence as a boolean, not "
-        "the value"
-    )
-    assert "(int)token.empty()" in body
-    assert "(int)code.empty()" in body
+    assert "GetBootstrapToken" not in body
+    assert "GetProvisioningCode" not in body
 
     # No ESP_LOG statement in the whole file may format the raw token/code value
     # (.c_str() of the secret) into the message. Collapse multi-line ESP_LOG
@@ -493,7 +575,7 @@ def test_wb12_try_wifi_connect_branches_on_stored_ssids():
     arm_idx = body.index("esp_timer_start_once(connect_timer_,")
     start_idx = body.index("WifiManager::GetInstance().StartStation();")
     # Fallback lane: enter config mode.
-    cfg_idx = body.index("StartWifiConfigMode();")
+    cfg_idx = body.index("RequestWifiConfigMode();")
     assert have_idx < arm_idx < start_idx < cfg_idx, (
         "TryWifiConnect() must arm the timeout + start station when SSIDs exist, "
         "and fall back to StartWifiConfigMode() when none are stored"
@@ -537,22 +619,10 @@ def test_wb12c_unclaimed_saved_ssid_connect_does_not_teardown_ble_without_claim_
     case_end = fn.index("case NetworkEvent::Scanning:", case_idx)
     body = fn[case_idx:case_end]
 
-    token_idx = body.index('const std::string& token = blufi.GetBootstrapToken();')
-    code_idx = body.index('const std::string& code  = blufi.GetProvisioningCode();')
-    release_idx = body.index("const bool should_release_ble")
-    deinit_idx = body.index("blufi.deinit();", release_idx)
-
-    assert token_idx < release_idx
-    assert code_idx < release_idx
-    assert "Application::GetInstance().IsDeviceClaimed()" in body[release_idx:deinit_idx]
-    assert "!token.empty()" in body[release_idx:deinit_idx]
-    assert "!code.empty()" in body[release_idx:deinit_idx]
-    assert "keeping BLE advertising open" in body[release_idx:case_end]
-    assert body.index("if (should_release_ble)", release_idx) < deinit_idx, (
-        "saved-SSID reconnect on an unclaimed robot must not tear down BLE when "
-        "no BluFi claim/provisioning token has arrived; otherwise the mobile app "
-        "cannot rediscover the robot and send the bootstrap token"
-    )
+    assert "CaptureProvisioningSession" not in body
+    assert "CompleteSuccessfulProvisioningTeardown" not in body
+    assert "blufi.deinit" not in body
+    assert "cannot safely identify which provisioning attempt produced it" in body
 
 
 def test_wb12d_wifi_board_claim_gate_uses_public_application_api():

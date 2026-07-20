@@ -1,0 +1,6 @@
+#ifndef TEST_MBEDTLS_VERSION_H
+#define TEST_MBEDTLS_VERSION_H
+
+#define MBEDTLS_VERSION_MAJOR 3
+
+#endif

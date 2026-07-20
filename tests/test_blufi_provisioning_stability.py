@@ -21,7 +21,7 @@ def read(path: str) -> str:
 
 def _start_wifi_config_body(wifi_board: str) -> str:
     """The body of WifiBoard::StartWifiConfigMode() up to the next function."""
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     end = wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)
     return wifi_board[start:end]
 
@@ -41,7 +41,7 @@ def _function_body(text: str, signature: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# FW1: wifi_board.cc — ReleaseWakeWordResourcesForWifiConfig appears BEFORE
+# FW1: wifi_board.cc — BeginWifiProvisioning appears BEFORE
 #      blufi.init() in the explicit Wi-Fi-config setup path.
 # ---------------------------------------------------------------------------
 def test_fw1_release_wake_word_before_ble_init_in_config_path():
@@ -50,10 +50,10 @@ def test_fw1_release_wake_word_before_ble_init_in_config_path():
 
     # The wake-word resource release must run before the BLE stack is brought up,
     # otherwise the AFE detection task contends with BLE during provisioning.
-    assert "ReleaseWakeWordResourcesForWifiConfig" in body
-    assert "blufi.RestartForSetup();" in body
-    release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
-    init_idx = body.index("blufi.RestartForSetup();")
+    assert "BeginWifiProvisioning" in body
+    assert "blufi.init();" in body
+    release_idx = body.index("BeginWifiProvisioning")
+    init_idx = body.index("blufi.init();")
     assert release_idx < init_idx
 
 
@@ -65,10 +65,11 @@ def test_fw2_ble_timeout_accepted_for_explicit_setup_reentry():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    # Every explicit setup entry now creates a fresh generation, covering off,
-    # timeout, advertising, and connected/stuck GATT states uniformly.
-    assert "blufi.RestartForSetup();" in body
-    init_idx = body.index("blufi.RestartForSetup();")
+    # A prior hard-timeout is equivalent to off for an explicit setup entry: the
+    # state read must accept kTimeout so the stack is re-initialized and the
+    # hard-timeout window is re-armed for the new attempt.
+    assert "Blufi::BleState::kTimeout" in body
+    init_idx = body.index("blufi.init();")
     rearm_idx = body.index("blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC)")
     assert init_idx < rearm_idx
 
@@ -260,16 +261,9 @@ def test_fw4_conn_success_report_precedes_ble_teardown():
     success_idx = blufi.index("ESP_BLUFI_STA_CONN_SUCCESS")
 
     # The conn-success report fires first; BLE teardown is scheduled afterwards.
-    teardown_idx = blufi.index(
-        "WiFi provisioned; stopping BLE before claim refresh"
-    )
-    deinit_after = blufi.index("self->deinit();", success_idx)
+    teardown_idx = blufi.index("CompleteSuccessfulProvisioningTeardown", success_idx)
     assert success_idx < teardown_idx
-    assert success_idx < deinit_after
-
-    # The success report and the deferred CancelBleSetupTimeout ordering holds.
-    cancel_idx = blufi.index("self->CancelBleSetupTimeout();", success_idx)
-    assert success_idx < cancel_idx
+    assert '"wifi_credentials_connected"' in blufi[teardown_idx:teardown_idx + 180]
 
 
 # ---------------------------------------------------------------------------
@@ -886,13 +880,13 @@ def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect
     sched_idx = success.index("Application::GetInstance().Schedule(")
     assert report_idx < sched_idx
     sched_body = success[sched_idx:]
-    assert "self->deinit();" in sched_body
+    assert "self->CompleteSuccessfulProvisioningTeardown" in sched_body
     assert (
         '"wifi_success_after_ble_teardown", generation' in sched_body
     )
     assert "SchedulePendingTbotClaimRefresh(generation);" in sched_body
     # Teardown precedes the authenticated report inside the deferred lambda.
-    assert sched_body.index("self->deinit();") < sched_body.index(
+    assert sched_body.index("self->CompleteSuccessfulProvisioningTeardown") < sched_body.index(
         "TryReportProvisioningAuthenticated"
     )
 
@@ -1564,7 +1558,7 @@ def test_fw22_no_authenticated_post_or_claim_refresh_inline_while_ble_up():
     # Inside the deferred lambda, deinit() precedes both the authenticated report
     # and the claim refresh (so TLS only ever runs after BLE is down).
     sched_body = success[sched_idx:]
-    deinit_pos = sched_body.index("self->deinit();")
+    deinit_pos = sched_body.index("self->CompleteSuccessfulProvisioningTeardown")
     assert deinit_pos < sched_body.index("SchedulePendingTbotClaimRefresh")
 
 
@@ -1653,10 +1647,9 @@ def test_fw25_token_persisted_to_nvs_but_code_is_ram_only():
 
 
 # ---------------------------------------------------------------------------
-# FW26: blufi.cpp — deinit() is ordered (host before controller) and idempotent.
-#       A second deinit() must early-return via m_deinited so we never double
-#       free the BLE stack, and host_deinit must precede controller_deinit so the
-#       profile/host is gone before the controller is pulled out from under it.
+# FW26: blufi.cpp — deinit() is ordered and transactionally idempotent. A
+#       completed transaction returns early, while partial failures leave the
+#       failed layer active for a retry without repeating successful layers.
 # ---------------------------------------------------------------------------
 def test_fw26_deinit_is_idempotent_and_host_precedes_controller():
     blufi = read("main/boards/common/blufi.cpp")
@@ -1664,16 +1657,16 @@ def test_fw26_deinit_is_idempotent_and_host_precedes_controller():
     fn_end = blufi.index("#ifdef CONFIG_BT_BLUEDROID_ENABLED", fn_idx)
     body = blufi[fn_idx:fn_end]
 
-    # Idempotency: only act when inited_, and early-return when already deinited.
-    assert "if (inited_) {" in body
-    guard_idx = body.index("if (m_deinited) {")
-    set_deinited = body.index("m_deinited = true;", guard_idx)
-    guard = body[guard_idx:set_deinited]
-    assert "return teardown_failed_.load() ? ESP_ERR_INVALID_STATE : ESP_OK;" in guard
-    assert guard_idx < set_deinited, (
-        "deinit() must early-return on the already-deinited path BEFORE setting "
-        "m_deinited again / tearing down a second time"
+    # Idempotency: only a fully completed transaction may return stale success,
+    # and a previously failed teardown surfaces ESP_ERR_INVALID_STATE.
+    guard_idx = body.index("if (m_deinited && !host_active_ && !controller_active_) {")
+    return_idx = body.index(
+        "return teardown_failed_.load() ? ESP_ERR_INVALID_STATE : ESP_OK;", guard_idx
     )
+    host_guard_idx = body.index("if (host_active_)", return_idx)
+    controller_guard_idx = body.index("if (controller_active_)", host_guard_idx)
+    set_deinited = body.index("m_deinited = true;", controller_guard_idx)
+    assert guard_idx < return_idx < host_guard_idx < controller_guard_idx < set_deinited
 
     # Ordering: host deinit precedes controller deinit.
     host_idx = body.index("_host_deinit();")

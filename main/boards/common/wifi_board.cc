@@ -115,7 +115,7 @@ void WifiBoard::TryWifiConnect() {
         // No SSID configured, enter config mode
         // Wait for the board version to be shown
         vTaskDelay(pdMS_TO_TICKS(1500));
-        StartWifiConfigMode();
+        RequestWifiConfigMode();
     }
 }
 
@@ -128,50 +128,9 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             // AP hard-timeout so a stale callback cannot post a redundant
             // StopConfigAp after we have already moved on.
             CancelApSetupTimeout();
-#if defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING) && defined(CONFIG_TBOT_PROVISIONING_REPORT_ENABLED)
-            {
-                auto& blufi = Blufi::GetInstance();
-                const std::string& token = blufi.GetBootstrapToken();
-                const std::string& code  = blufi.GetProvisioningCode();
-                // Report() now lives in blufi.cpp success branch (single owner).
-                // Do not call Report() here to avoid duplicate POST + prior-reconnect race.
-                ESP_LOGI(TAG,
-                         "NetworkEvent::Connected token_empty=%d code_empty=%d — report owned by BluFi success branch",
-                         (int)token.empty(), (int)code.empty());
-                const bool should_release_ble =
-                    Application::GetInstance().IsDeviceClaimed() ||
-                    !token.empty() ||
-                    !code.empty();
-                if (should_release_ble) {
-                    // Cancel the BLE hard-timeout before releasing BLE resources so
-                    // the timer cannot post a redundant teardown after deinit().
-                    blufi.CancelBleSetupTimeout();
-                    // Release BLE resources
-                    blufi.deinit();
-                } else {
-                    ESP_LOGI(TAG,
-                             "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
-                }
-            }
-#elif defined(CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING)
-            {
-                auto& blufi = Blufi::GetInstance();
-                const bool should_release_ble =
-                    Application::GetInstance().IsDeviceClaimed() ||
-                    !blufi.GetBootstrapToken().empty() ||
-                    !blufi.GetProvisioningCode().empty();
-                if (should_release_ble) {
-                    // Cancel BLE hard-timeout before deinit to prevent a stale
-                    // timer callback from posting a redundant teardown.
-                    blufi.CancelBleSetupTimeout();
-                    // make sure blufi resources has been released
-                    blufi.deinit();
-                } else {
-                    ESP_LOGI(TAG,
-                             "NetworkEvent::Connected without BluFi claim/provisioning secrets on unclaimed device; keeping BLE advertising open");
-                }
-            }
-#endif
+            // BluFi success workers carry their originating provisioning token
+            // and exclusively own BLE teardown/rearm. A generic Connected event
+            // cannot safely identify which provisioning attempt produced it.
             in_config_mode_ = false;
             ESP_LOGI(TAG, "WiFi connected");
             break;
@@ -219,8 +178,7 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
         return;
     }
 
-    WifiManager::GetInstance().StopStation();
-    board->StartWifiConfigMode();
+    board->RequestWifiConfigMode();
 }
 
 // ---------------------------------------------------------------------------
@@ -301,14 +259,99 @@ const char* WifiBoard::GetApStateString() const {
     return "off";
 }
 
-void WifiBoard::StartWifiConfigMode() {
+void WifiBoard::RequestWifiConfigMode(bool show_notification) {
+    bool expected = false;
+    if (!wifi_config_entry_pending_.compare_exchange_strong(expected, true)) {
+        ESP_LOGI(TAG, "WiFi config request coalesced while entry is pending");
+        return;
+    }
+    Application::GetInstance().Schedule([this, show_notification]() {
+        StartWifiConfigMode(show_notification);
+        wifi_config_entry_pending_.store(false);
+    });
+}
+
+void WifiBoard::StartWifiConfigMode(bool show_notification) {
     if (Application::GetInstance().IsLessonRuntimeActive()) {
         ESP_LOGI(TAG, "StartWifiConfigMode ignored during lesson");
         return;
     }
+    auto& app = Application::GetInstance();
+    Application::WifiConfigEntryPreparation preparation;
+    if (!app.PrepareWifiConfigEntry(preparation)) {
+        ESP_LOGE(TAG, "WiFi config aborted: realtime preparation failed");
+        return;
+    }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    auto &blufi = Blufi::GetInstance();
+    auto& audio_service = app.GetAudioService();
+    auto provisioning_reservation = blufi.TryReserveProvisioningSession();
+    if (!provisioning_reservation) {
+        ESP_LOGE(TAG, "WiFi config aborted: prior provisioning completion still active");
+        app.RollbackWifiConfigEntry(preparation);
+        return;
+    }
+    const auto begin_result = audio_service.BeginWifiProvisioning();
+    if (!begin_result) {
+        ESP_LOGE(TAG, "WiFi config aborted: wake-word shutdown did not quiesce");
+        if (begin_result.rollback_complete) {
+            app.RollbackWifiConfigEntry(preparation);
+        }
+        return;
+    }
+    const auto provisioning_token = begin_result.token;
+    if (!provisioning_reservation.Commit(provisioning_token)) {
+        ESP_LOGE(TAG, "WiFi config aborted: failed to bind provisioning token");
+        if (!audio_service.EndWifiProvisioningAndRearm(provisioning_token)) {
+            ESP_LOGE(TAG, "WiFi config abort could not rearm provisioning generation");
+        } else {
+            app.RollbackWifiConfigEntry(preparation);
+        }
+        return;
+    }
+    // initialize esp-blufi protocol.
+    // Guard against double-init: the Application now also brings BLE up while the
+    // robot is unclaimed in claimable standby (so the app can discover it over
+    // BLE). If we entered config mode from that state the BLE stack is already
+    // advertising; calling init() again would leak the controller/host. A prior
+    // hard-timeout is equivalent to off for an explicit BOOT setup entry: the
+    // stack was torn down and must be initialized again so the phone can scan it.
+    const auto ble_state = blufi.GetBleState();
+    if (ble_state == Blufi::BleState::kOff ||
+        ble_state == Blufi::BleState::kTimeout) {
+        const esp_err_t blufi_init_error = blufi.init();
+        if (blufi_init_error != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi config aborted: BLUFI init failed: %s",
+                     esp_err_to_name(blufi_init_error));
+            if (!blufi.AbortProvisioningSetup(provisioning_token)) {
+                ESP_LOGE(TAG, "BLUFI init rollback incomplete; provisioning remains fail-closed");
+            } else if (!app.RollbackWifiConfigEntry(preparation)) {
+                ESP_LOGE(TAG, "BLUFI init rollback could not restore application state");
+            }
+            return;
+        }
+    }
+#endif
+
+    if (!app.PublishWifiConfigEntry(preparation)) {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        if (!blufi.AbortProvisioningSetup(provisioning_token)) {
+            ESP_LOGE(TAG, "WiFi config publication rollback remains fail-closed");
+            return;
+        }
+#endif
+        if (!app.RollbackWifiConfigEntry(preparation)) {
+            ESP_LOGE(TAG, "WiFi config publication rollback could not restore application state");
+        }
+        return;
+    }
+    esp_timer_stop(connect_timer_);
+    WifiManager::GetInstance().StopStation();
     in_config_mode_ = true;
-    // Transition to wifi configuring state
-    Application::GetInstance().SetDeviceState(kDeviceStateWifiConfiguring);
+    if (show_notification) {
+        GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
+    }
+
 #ifdef CONFIG_USE_HOTSPOT_WIFI_PROVISIONING
     auto& wifi_manager = WifiManager::GetInstance();
 
@@ -330,21 +373,6 @@ void WifiBoard::StartWifiConfigMode() {
         Application::GetInstance().Alert(Lang::Strings::WIFI_CONFIG_MODE, hint.c_str(), "gear", Lang::Sounds::OGG_WIFICONFIG);
     });
 #elif CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    auto &blufi = Blufi::GetInstance();
-    Application::GetInstance().GetAudioService().ReleaseWakeWordResourcesForWifiConfig();
-    // initialize esp-blufi protocol.
-    // Guard against double-init: the Application now also brings BLE up while the
-    // robot is unclaimed in claimable standby (so the app can discover it over
-    // BLE). If we entered config mode from that state the BLE stack is already
-    // advertising; calling init() again would leak the controller/host. A prior
-    // hard-timeout is equivalent to off for an explicit BOOT setup entry: the
-    // stack was torn down and must be initialized again so the phone can scan it.
-    esp_err_t ble_err = blufi.RestartForSetup();
-    if (ble_err != ESP_OK) {
-        ESP_LOGE(TAG, "Unable to open a fresh BLE setup session: %s",
-                 esp_err_to_name(ble_err));
-        return;
-    }
     // Arm the hard-timeout safety gate immediately after init so that BLE
     // advertising cannot run forever if provisioning never completes.
     // Teardown is posted to the Application task inside the timer callback
@@ -378,122 +406,7 @@ void WifiBoard::EnterWifiConfigMode() {
         ESP_LOGI(TAG, "EnterWifiConfigMode ignored during lesson");
         return;
     }
-    const uint32_t generation = wifi_config_entry_generation_.fetch_add(1) + 1;
-    GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
-
-    auto state = app.GetDeviceState();
-
-    if (state == kDeviceStateWifiConfiguring) {
-        bool expected = false;
-        if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
-            return;
-        }
-        if (generation != wifi_config_entry_generation_.load()) {
-            wifi_config_entry_inflight_.store(false);
-            return;
-        }
-        esp_timer_stop(connect_timer_);
-        WifiManager::GetInstance().StopStation();
-        StartWifiConfigMode();
-        wifi_config_entry_inflight_.store(false);
-        return;
-    }
-
-    if (state == kDeviceStateSpeaking || state == kDeviceStateListening ||
-        state == kDeviceStateIdle || state == kDeviceStateActivating ||
-        state == kDeviceStateConnecting) {
-        // Reset protocol (close audio channel, reset protocol)
-        Application::GetInstance().ResetProtocol();
-
-        bool expected = false;
-        if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
-            return;
-        }
-
-        struct WifiConfigEntryContext {
-            WifiBoard* board;
-            uint32_t generation;
-        };
-        auto* ctx = new (std::nothrow) WifiConfigEntryContext{this, generation};
-        if (ctx == nullptr) {
-            wifi_config_entry_inflight_.store(false);
-            ESP_LOGE(TAG, "wifi_cfg_delay context allocation failed");
-            return;
-        }
-
-        BaseType_t created = xTaskCreate([](void* arg) {
-            auto* ctx = static_cast<WifiConfigEntryContext*>(arg);
-            auto* board = ctx->board;
-            const uint32_t generation = ctx->generation;
-            delete ctx;
-
-            // Wait for 1 second to allow speaking to finish gracefully
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            if (generation != board->wifi_config_entry_generation_.load()) {
-                board->wifi_config_entry_inflight_.store(false);
-                Application::GetInstance().Schedule([board]() {
-                    board->EnterWifiConfigMode();
-                });
-                vTaskDelete(NULL);
-                return;
-            }
-            if (Application::GetInstance().IsLessonRuntimeActive()) {
-                ESP_LOGI(TAG, "Delayed EnterWifiConfigMode ignored during lesson");
-                board->wifi_config_entry_inflight_.store(false);
-                vTaskDelete(NULL);
-                return;
-            }
-
-            // Stop any ongoing connection attempt
-            esp_timer_stop(board->connect_timer_);
-            WifiManager::GetInstance().StopStation();
-
-            // Enter config mode
-            board->StartWifiConfigMode();
-            board->wifi_config_entry_inflight_.store(false);
-
-            vTaskDelete(NULL);
-        }, "wifi_cfg_delay", 4096, ctx, 2, NULL);
-        if (created != pdPASS) {
-            delete ctx;
-            wifi_config_entry_inflight_.store(false);
-            ESP_LOGE(TAG, "wifi_cfg_delay task create failed; using Application task fallback");
-            Application::GetInstance().Schedule([this, generation]() {
-                if (generation != wifi_config_entry_generation_.load()) {
-                    return;
-                }
-                bool expected = false;
-                if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
-                    return;
-                }
-                esp_timer_stop(connect_timer_);
-                WifiManager::GetInstance().StopStation();
-                StartWifiConfigMode();
-                wifi_config_entry_inflight_.store(false);
-            });
-        }
-        return;
-    }
-
-    if (state != kDeviceStateStarting) {
-        ESP_LOGE(TAG, "EnterWifiConfigMode called but device state is not allowed for WiFi config: %d", state);
-        return;
-    }
-
-    // Stop any ongoing connection attempt
-    bool expected = false;
-    if (!wifi_config_entry_inflight_.compare_exchange_strong(expected, true)) {
-        return;
-    }
-    if (generation != wifi_config_entry_generation_.load()) {
-        wifi_config_entry_inflight_.store(false);
-        return;
-    }
-    esp_timer_stop(connect_timer_);
-    WifiManager::GetInstance().StopStation();
-
-    StartWifiConfigMode();
-    wifi_config_entry_inflight_.store(false);
+    RequestWifiConfigMode(true);
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {

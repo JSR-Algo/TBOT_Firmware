@@ -101,6 +101,22 @@ static uint32_t DecodeBleSessionGeneration(uint64_t state) {
     return static_cast<uint32_t>(state >> 2);
 }
 
+struct DelayedClaimRefreshContext {
+    Blufi* self;
+    Blufi::ProvisioningToken provisioning_token;
+};
+
+struct WifiConnectTaskContext {
+    Blufi* self;
+    Blufi::ProvisioningToken provisioning_token;
+};
+
+static void CaptureFirstError(esp_err_t& first_error, esp_err_t error) {
+    if (first_error == ESP_OK && error != ESP_OK) {
+        first_error = error;
+    }
+}
+
 static std::string SanitizedSerial(const uint8_t* bytes, size_t max_len) {
     std::string serial;
     for (size_t i = 0; i < max_len && bytes[i] != 0; ++i) {
@@ -391,6 +407,18 @@ Blufi::~Blufi() {
 }
 
 esp_err_t Blufi::init() {
+    auto turn = transition_gate_.Acquire(
+        BlufiTransitionGate::Operation::kInit,
+        reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
+    if (!turn.owner()) {
+        return static_cast<esp_err_t>(turn.result());
+    }
+    const esp_err_t result = _init_impl();
+    transition_gate_.Complete(turn, result);
+    return result;
+}
+
+esp_err_t Blufi::_init_impl() {
     ble_session_state_.exchange(
         EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
         std::memory_order_acq_rel);
@@ -400,9 +428,12 @@ esp_err_t Blufi::init() {
     }
 
     esp_err_t ret = ESP_FAIL;
-    // inited_ is set true only on the success path below. On any early
-    // failure-return we force inited_=false / m_deinited=true so GetBleState()
-    // reports kOff and wifi_board.cc re-runs init() on the next config-mode entry.
+    if (host_active_ || controller_active_) {
+        ESP_LOGE(BLUFI_TAG, "BLUFI init rejected while prior teardown is incomplete");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // inited_ is set true only after both stack layers initialize successfully.
     inited_ = false;
     m_provisioned = false;
     m_deinited = false;
@@ -425,9 +456,13 @@ esp_err_t Blufi::init() {
     ret = _controller_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "BLUFI controller init failed: %s", esp_err_to_name(ret));
-        _controller_deinit();
+        const esp_err_t cleanup_error = _controller_deinit();
+        if (cleanup_error != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "BLUFI controller cleanup failed: %s",
+                     esp_err_to_name(cleanup_error));
+        }
         inited_ = false;
-        m_deinited = true;
+        m_deinited = !host_active_ && !controller_active_;
         return ret;
     }
 #endif
@@ -435,11 +470,25 @@ esp_err_t Blufi::init() {
     ret = _host_and_cb_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "BLUFI host and cb init failed: %s", esp_err_to_name(ret));
+        esp_err_t cleanup_error = ESP_OK;
+        if (host_active_) {
+            cleanup_error = _host_deinit();
+            if (cleanup_error != ESP_OK) {
+                ESP_LOGE(BLUFI_TAG, "BLUFI host cleanup failed: %s",
+                         esp_err_to_name(cleanup_error));
+            }
+        }
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-        _controller_deinit();
+        if (!host_active_) {
+            const esp_err_t controller_error = _controller_deinit();
+            if (controller_error != ESP_OK) {
+                ESP_LOGE(BLUFI_TAG, "BLUFI controller cleanup failed: %s",
+                         esp_err_to_name(controller_error));
+            }
+        }
 #endif
         inited_ = false;
-        m_deinited = true;
+        m_deinited = !host_active_ && !controller_active_;
         return ret;
     }
 
@@ -453,44 +502,66 @@ esp_err_t Blufi::init() {
 }
 
 esp_err_t Blufi::deinit() {
+    auto turn = transition_gate_.Acquire(
+        BlufiTransitionGate::Operation::kDeinit,
+        reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
+    if (!turn.owner()) {
+        return static_cast<esp_err_t>(turn.result());
+    }
+    const esp_err_t result = _deinit_impl();
+    transition_gate_.Complete(turn, result);
+    return result;
+}
+
+esp_err_t Blufi::_deinit_impl() {
     ble_session_state_.exchange(
         EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
         std::memory_order_acq_rel);
     esp_err_t first_error = ESP_OK;
 
-    if (inited_) {
-        if (m_deinited) {
-            return teardown_failed_.load() ? ESP_ERR_INVALID_STATE : ESP_OK;
-        }
-        m_deinited = true;
-        if (scan_event_instance_ != nullptr) {
-            esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
-                                                  scan_event_instance_);
-            scan_event_instance_ = nullptr;
-        }
-        m_scan_in_progress = false;
-        m_send_list_after_scan = false;
-        esp_err_t host_error = _host_deinit();
+    if (m_deinited && !host_active_ && !controller_active_) {
+        return teardown_failed_.load() ? ESP_ERR_INVALID_STATE : ESP_OK;
+    }
+    if (scan_event_instance_ != nullptr) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
+                                              scan_event_instance_);
+        scan_event_instance_ = nullptr;
+    }
+    m_scan_in_progress = false;
+    m_send_list_after_scan = false;
+
+    if (host_active_) {
+        const esp_err_t host_error = _host_deinit();
+        CaptureFirstError(first_error, host_error);
         if (host_error != ESP_OK) {
-            first_error = host_error;
             ESP_LOGE(BLUFI_TAG, "Host deinit failed: %s", esp_err_to_name(host_error));
         }
+        if (host_error == ESP_OK && host_active_) {
+            CaptureFirstError(first_error, ESP_ERR_INVALID_STATE);
+        }
+        if (host_error != ESP_OK || host_active_) {
+            return first_error;
+        }
+    }
 #if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-        esp_err_t controller_error = _controller_deinit();
+    if (controller_active_) {
+        const esp_err_t controller_error = _controller_deinit();
+        CaptureFirstError(first_error, controller_error);
         if (controller_error != ESP_OK) {
-            if (first_error == ESP_OK) {
-                first_error = controller_error;
-            }
             ESP_LOGE(BLUFI_TAG, "Controller deinit failed: %s",
                      esp_err_to_name(controller_error));
         }
+        if (controller_error == ESP_OK && controller_active_) {
+            CaptureFirstError(first_error, ESP_ERR_INVALID_STATE);
+        }
+    }
 #endif
+
+    if (first_error == ESP_OK && !host_active_ && !controller_active_) {
+        m_deinited = true;
+        inited_ = false;
     }
-    if (first_error != ESP_OK) {
-        teardown_failed_.store(true);
-    } else if (inited_) {
-        teardown_failed_.store(false);
-    }
+    teardown_failed_.store(first_error != ESP_OK);
     return first_error;
 }
 
@@ -569,6 +640,79 @@ bool Blufi::RunIfSetupGenerationCurrent(uint32_t expected_generation,
     return true;
 }
 
+bool Blufi::BindProvisioningSession(ProvisioningToken token) {
+    return provisioning_session_.Bind(token);
+}
+
+Blufi::ProvisioningReservation Blufi::TryReserveProvisioningSession() {
+    return provisioning_session_.TryReserve();
+}
+
+bool Blufi::ClearProvisioningSession(ProvisioningToken token) {
+    return provisioning_session_.Clear(token);
+}
+
+Blufi::ProvisioningToken Blufi::CaptureProvisioningSession() const {
+    return provisioning_session_.Capture();
+}
+
+bool Blufi::IsBleStackFullyOff() const {
+    return !transition_gate_.IsTransitionActive() && !inited_ && !host_active_ &&
+           !controller_active_;
+}
+
+bool Blufi::AbortProvisioningSetup(ProvisioningToken token) {
+    return CompleteSuccessfulProvisioningTeardown("setup_abort", token);
+}
+
+bool Blufi::CompleteSuccessfulProvisioningTeardown(
+        const char* reason, ProvisioningToken provisioning_token) {
+    constexpr uint64_t kTokenChunkBase = 1000000000ULL;
+    const uint64_t token_generation = provisioning_token.generation;
+    const auto token_high = static_cast<unsigned long>(
+        token_generation / (kTokenChunkBase * kTokenChunkBase));
+    const auto token_middle = static_cast<unsigned long>(
+        (token_generation / kTokenChunkBase) % kTokenChunkBase);
+    const auto token_low = static_cast<unsigned long>(token_generation % kTokenChunkBase);
+    auto completion = provisioning_session_.Claim(provisioning_token);
+    if (!completion) {
+        ESP_LOGW(BLUFI_TAG,
+                 "Ignoring stale provisioning teardown: reason=%s token=%lu%09lu%09lu",
+                 reason ? reason : "unknown",
+                 token_high, token_middle, token_low);
+        return false;
+    }
+    ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown requested: reason=%s",
+             reason ? reason : "unknown");
+    CancelBleSetupTimeout();
+    const esp_err_t deinit_error = deinit();
+    if (deinit_error != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Successful provisioning teardown failed: reason=%s error=%s",
+                 reason ? reason : "unknown", esp_err_to_name(deinit_error));
+        return false;
+    }
+
+    const bool rearmed = Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm(
+        provisioning_token);
+    if (!rearmed) {
+        ESP_LOGW(BLUFI_TAG,
+                 "Provisioning teardown did not rearm: reason=%s token=%lu%09lu%09lu",
+                 reason ? reason : "unknown",
+                 token_high, token_middle, token_low);
+        return false;
+    }
+    if (!completion.ConsumeSuccess()) {
+        ESP_LOGE(BLUFI_TAG,
+                 "Provisioning completion ownership lost: reason=%s token=%lu%09lu%09lu",
+                 reason ? reason : "unknown",
+                 token_high, token_middle, token_low);
+        return false;
+    }
+    ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
+             reason ? reason : "unknown", static_cast<int>(rearmed));
+    return true;
+}
+
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
 esp_err_t Blufi::_host_init() {
     esp_err_t ret = esp_bluedroid_init();
@@ -576,30 +720,44 @@ esp_err_t Blufi::_host_init() {
         ESP_LOGE(BLUFI_TAG, "%s init bluedroid failed: %s", __func__, esp_err_to_name(ret));
         return ESP_FAIL;
     }
+    host_initialized_ = true;
+    host_active_ = true;
     ret = esp_bluedroid_enable();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s enable bluedroid failed: %s", __func__, esp_err_to_name(ret));
         return ESP_FAIL;
     }
+    host_enabled_ = true;
     ESP_LOGI(BLUFI_TAG, "Bluedroid host enabled");
     return ESP_OK;
 }
 
 esp_err_t Blufi::_host_deinit() {
-    esp_err_t ret = esp_blufi_profile_deinit();
-    if (ret != ESP_OK)
-        return ret;
-
-    ret = esp_bluedroid_disable();
-    if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s disable bluedroid failed: %s", __func__, esp_err_to_name(ret));
-        return ESP_FAIL;
+    if (profile_active_) {
+        const esp_err_t ret = esp_blufi_profile_deinit();
+        if (ret != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "%s deinit profile failed: %s", __func__, esp_err_to_name(ret));
+            return ret;
+        }
+        profile_active_ = false;
     }
-    ret = esp_bluedroid_deinit();
-    if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s deinit bluedroid failed: %s", __func__, esp_err_to_name(ret));
-        return ESP_FAIL;
+    if (host_enabled_) {
+        const esp_err_t ret = esp_bluedroid_disable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "%s disable bluedroid failed: %s", __func__, esp_err_to_name(ret));
+            return ret;
+        }
+        host_enabled_ = false;
     }
+    if (host_initialized_) {
+        const esp_err_t ret = esp_bluedroid_deinit();
+        if (ret != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "%s deinit bluedroid failed: %s", __func__, esp_err_to_name(ret));
+            return ret;
+        }
+        host_initialized_ = false;
+    }
+    host_active_ = profile_active_ || host_enabled_ || host_initialized_;
     return ESP_OK;
 }
 
@@ -635,6 +793,8 @@ esp_err_t Blufi::_host_and_cb_init() {
         ESP_LOGE(BLUFI_TAG, "%s gap register failed, error code = %x", __func__, ret);
         return ret;
     }
+    profile_active_ = true;
+    host_active_ = true;
     return ESP_OK;
 }
 #endif /* CONFIG_BT_BLUEDROID_ENABLED */
@@ -647,7 +807,13 @@ void Blufi::_nimble_on_reset(int reason) {
     ESP_LOGE(BLUFI_TAG, "NimBLE Resetting state; reason=%d", reason);
 }
 
-void Blufi::_nimble_on_sync() { esp_blufi_profile_init(); }
+void Blufi::_nimble_on_sync() {
+    if (esp_blufi_profile_init() == ESP_OK) {
+        auto& blufi = GetInstance();
+        blufi.profile_active_ = true;
+        blufi.host_active_ = true;
+    }
+}
 
 void Blufi::_nimble_host_task(void* param) {
     ESP_LOGI(BLUFI_TAG, "BLE Host Task Started");
@@ -670,24 +836,49 @@ esp_err_t Blufi::_host_init() {
 
     ble_store_config_init();
     esp_blufi_btc_init();
+    nimble_services_active_ = true;
+    host_active_ = true;
 
     esp_err_t err = esp_nimble_enable(_nimble_host_task);
     if (err) {
         ESP_LOGE(BLUFI_TAG, "%s failed: %s", __func__, esp_err_to_name(err));
         return ESP_FAIL;
     }
+    host_enabled_ = true;
+    host_initialized_ = true;
     return ESP_OK;
 }
 
 esp_err_t Blufi::_host_deinit(void) {
-    esp_err_t ret = nimble_port_stop();
-    if (ret == ESP_OK) {
-        esp_nimble_deinit();
+    if (profile_active_) {
+        const esp_err_t ret = esp_blufi_profile_deinit();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        profile_active_ = false;
     }
-    esp_blufi_gatt_svr_deinit();
-    ret = esp_blufi_profile_deinit();
-    esp_blufi_btc_deinit();
-    return ret;
+    if (host_enabled_) {
+        const esp_err_t ret = nimble_port_stop();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        host_enabled_ = false;
+    }
+    if (host_initialized_) {
+        const esp_err_t ret = esp_nimble_deinit();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        host_initialized_ = false;
+    }
+    if (nimble_services_active_) {
+        esp_blufi_gatt_svr_deinit();
+        esp_blufi_btc_deinit();
+        nimble_services_active_ = false;
+    }
+    host_active_ = profile_active_ || host_enabled_ || host_initialized_ ||
+                   nimble_services_active_;
+    return ESP_OK;
 }
 
 esp_err_t Blufi::_gap_register_callback(void) { return ESP_OK; }
@@ -725,11 +916,14 @@ esp_err_t Blufi::_controller_init() {
         ESP_LOGE(BLUFI_TAG, "%s initialize controller failed: %s", __func__, esp_err_to_name(ret));
         return ret;
     }
+    controller_initialized_ = true;
+    controller_active_ = true;
     ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s enable controller failed: %s", __func__, esp_err_to_name(ret));
         return ret;
     }
+    controller_enabled_ = true;
 
 #ifdef CONFIG_BT_NIMBLE_ENABLED
     ret = esp_nimble_init();
@@ -737,20 +931,31 @@ esp_err_t Blufi::_controller_init() {
         ESP_LOGE(BLUFI_TAG, "esp_nimble_init() failed: %s", esp_err_to_name(ret));
         return ret;
     }
+    host_initialized_ = true;
+    host_active_ = true;
 #endif
     return ESP_OK;
 }
 
 esp_err_t Blufi::_controller_deinit() {
-    esp_err_t ret = esp_bt_controller_disable();
-    if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s disable controller failed: %s", __func__, esp_err_to_name(ret));
+    if (controller_enabled_) {
+        const esp_err_t ret = esp_bt_controller_disable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "%s disable controller failed: %s", __func__, esp_err_to_name(ret));
+            return ret;
+        }
+        controller_enabled_ = false;
     }
-    ret = esp_bt_controller_deinit();
-    if (ret) {
-        ESP_LOGE(BLUFI_TAG, "%s deinit controller failed: %s", __func__, esp_err_to_name(ret));
+    if (controller_initialized_) {
+        const esp_err_t ret = esp_bt_controller_deinit();
+        if (ret != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "%s deinit controller failed: %s", __func__, esp_err_to_name(ret));
+            return ret;
+        }
+        controller_initialized_ = false;
     }
-    return ret;
+    controller_active_ = controller_enabled_ || controller_initialized_;
+    return ESP_OK;
 }
 #endif
 
@@ -1218,6 +1423,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         m_sta_is_connecting.store(false);
         return;
     }
+    const auto provisioning_token = CaptureProvisioningSession();
 
     ESP_LOGI(BLUFI_TAG, "Starting WiFi connect from BluFi credentials: %s",
              reason ? reason : "unknown");
@@ -1906,12 +2112,12 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             } else {
                 esp_blufi_adv_stop();
                 if (!m_deinited) {
-                    xTaskCreate(
-                        [](void* ctx) {
-                            static_cast<Blufi*>(ctx)->deinit();
-                            vTaskDelete(nullptr);
-                        },
-                        "blufi_deinit", 4096, this, 5, nullptr);
+                    auto* self = this;
+                    const auto provisioning_token = CaptureProvisioningSession();
+                    Application::GetInstance().Schedule([self, provisioning_token]() {
+                        self->CompleteSuccessfulProvisioningTeardown(
+                            "provisioned_ble_disconnect", provisioning_token);
+                    });
                 }
             }
             break;
@@ -2207,6 +2413,7 @@ void Blufi::_ble_setup_timeout_cb(void* arg) {
 
 void Blufi::StartBleSetupTimeout(int seconds) {
     const uint32_t generation = ble_timeout_generation_.fetch_add(1) + 1;
+    std::lock_guard<std::mutex> lock(ble_setup_timer_mutex_);
     if (ble_setup_timer_ != nullptr) {
         // Already armed — stop and delete so we can re-create cleanly.
         esp_timer_stop(ble_setup_timer_);
@@ -2242,6 +2449,7 @@ void Blufi::CancelBleSetupTimeout() {
     // Also invalidates a callback that already fired and queued its Application
     // continuation before the esp_timer handle was cancelled.
     ble_timeout_generation_.fetch_add(1);
+    std::lock_guard<std::mutex> lock(ble_setup_timer_mutex_);
     if (ble_setup_timer_ == nullptr) {
         return;  // Never armed or already cancelled — no-op.
     }
@@ -2252,6 +2460,9 @@ void Blufi::CancelBleSetupTimeout() {
 }
 
 Blufi::BleState Blufi::GetBleState() const {
+    if (transition_gate_.IsTransitionActive()) {
+        return BleState::kOff;
+    }
     if (ble_timed_out_) {
         return BleState::kTimeout;
     }

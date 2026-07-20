@@ -101,7 +101,11 @@ def test_handle_robot_action_message_untouched_and_mcp_arm_tools_have_no_lesson_
     mcp = read("main/mcp_server.cc")
     assert "HandleLessonMessage" not in mcp
     assert "SendLessonFrame" not in mcp
-    assert '"lesson_' not in mcp
+    robot_tools_start = mcp.index("auto add_robot_arm_tool")
+    robot_tools = mcp[
+        robot_tools_start : mcp.index("auto backlight =", robot_tools_start)
+    ]
+    assert '"lesson_' not in robot_tools
 
 
 def test_hello_features_advertises_lesson_capability_additively():
@@ -249,27 +253,28 @@ def test_interactive_step_opens_listening_instead_of_completing_from_render():
     assert render_tail.index("if (should_listen)") < render_tail.index("Schedule([listen_generation]") < render_tail.index("PrepareLessonInteractiveListening")
 
 
-# ── FW-02: a session-opening prepare resets the F->S counter BEFORE the gate ───────
-def test_prepare_resets_fs_counter_before_version_profile_gate():
+# ── FW-02: prepare validates before either transactional commit path ────────────────
+def test_prepare_validates_version_before_transactional_session_commit():
     h = read("main/lesson_handler.cc")
     reset = h.index("g_session = LessonSession{};")
     gate = h.index("const bool version_ok =")
-    # the session (incl. fs_sequence) is reset for a prepare BEFORE the version/profile
-    # gate, so a rejected fresh prepare emits lesson_error at sequence=1 (restart-at-1).
-    assert reset < gate, "prepare reset must precede the version/profile gate (FW-02)"
-    # and there is no second duplicate reset after the gate.
-    assert h.count("g_session = LessonSession{};") == 1
+    assert gate < reset
+    assert "emit_isolated_prepare_error" in h[gate:reset]
+    reset_positions = [
+        index for index in range(len(h)) if h.startswith("g_session = LessonSession{};", index)
+    ]
+    assert len(reset_positions) == 2
+    assert all(index > gate for index in reset_positions)
 
 
 # ── FW-LESSON-02: duplicate re-ack replays the cached rendered/degraded ────────────
 def test_duplicate_reack_replays_cached_rendered_degraded():
     h = read("main/lesson_handler.cc")
-    assert "last_ack_rendered" in h and "last_ack_degraded" in h
-    assert "last_ack_sequence" in h
-    # the dedup re-ack path replays the cached flags rather than hardcoding false/false.
-    dedup = h.index("if (sequence <= g_session.last_in_sequence) {")
-    replay = h.index("g_session.last_ack_rendered", dedup)
-    reack = h.index("emit_ack(root, sequence, re_rendered, re_degraded", dedup)
+    assert "ack_history" in h and "last_ack_sequence" in h
+    # Exact body replay includes rendered/degraded, elapsed time and telemetry.
+    dedup = h.index("sequence <= g_session.last_in_sequence) {")
+    replay = h.index("cJSON_Parse(it->body_json.c_str())", dedup)
+    reack = h.index('emit(root, "lesson_ack", replay_body)', dedup)
     assert dedup < replay < reack
 
 
@@ -278,7 +283,7 @@ def test_duplicate_prepare_is_deduped_before_session_reset():
     duplicate_prepare = h.index("const bool duplicate_prepare =")
     reset = h.index("g_session = LessonSession{};")
     assert duplicate_prepare < reset
-    assert "if (is_prepare && !duplicate_prepare)" in h
+    assert "(!is_prepare || duplicate_prepare)" in h
     assert "g_session.session_id == session_id" in h
 
 
@@ -288,9 +293,9 @@ def test_duplicate_prepare_reack_replays_cached_asset_pack_metadata():
     assert "cJSON_PrintUnformatted(asset_pack_ack)" in h
     assert "g_session.last_ack_asset_pack_json" in h
 
-    dedup = h.index("if (sequence <= g_session.last_in_sequence) {")
-    replay_parse = h.index("cJSON_Parse(g_session.last_ack_asset_pack_json.c_str())", dedup)
-    reack = h.index("emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack", dedup)
+    dedup = h.index("sequence <= g_session.last_in_sequence) {")
+    replay_parse = h.index("cJSON_Parse(it->body_json.c_str())", dedup)
+    reack = h.index('emit(root, "lesson_ack", replay_body)', dedup)
     assert dedup < replay_parse < reack
 
 
@@ -300,13 +305,13 @@ def test_non_prepare_frames_must_match_active_assignment_and_session_before_dedu
     assert "!is_prepare" in context
     assert "g_session.assignment_id != assignment_id" in context
     assert "g_session.session_id != session_id" in context
-    assert context.index("g_session.session_id != session_id") < h.index("if (sequence <= g_session.last_in_sequence)")
+    assert context.index("g_session.session_id != session_id") < h.index("sequence <= g_session.last_in_sequence)")
 
 
 def test_non_prepare_session_guard_runs_before_version_profile_error_emit():
     h = read("main/lesson_handler.cc")
     session_context = h.index("// --- session context")
-    version_gate = h.index("const bool version_ok =")
+    version_gate = h.index("if (!is_prepare && (!version_ok || !profile_ok))")
     error_emit = h.index('emit(root, "lesson_error", eb);', version_gate)
     assert session_context < version_gate < error_emit
 
@@ -420,3 +425,138 @@ def test_prepare_ack_requires_asset_pack_cache_key_to_include_full_manifest_chec
     assert "!manifest_checksum_required" in helper
     assert "!cache_key_has_manifest_checksum" in helper
     assert 'cJSON_AddStringToObject(out, "cacheKey", cache_key_value.c_str())' in helper
+
+
+def test_prepare_reserves_lesson_asset_session_before_asset_pack_io():
+    h = read("main/lesson_handler.cc")
+    assert '#include "lesson_asset_storage_coordinator.h"' in h
+    prepare_start = h.index("const bool is_prepare =")
+    prepare_end = h.index('if (strcmp(type, "lesson_start") == 0)', prepare_start)
+    prepare = h[prepare_start:prepare_end]
+    assert prepare.index("TryBeginLessonSession(") < prepare.index("BuildAssetPackAck(body)")
+    assert "reservation.generation" in prepare
+    assert "reservation.idempotent" in prepare
+    assert "lesson_asset_generation" in h
+
+
+def test_prepare_handles_every_storage_reservation_refusal_before_io():
+    h = read("main/lesson_handler.cc")
+    prepare_start = h.index("const bool is_prepare =")
+    prepare_end = h.index('if (strcmp(type, "lesson_start") == 0)', prepare_start)
+    prepare = h[prepare_start:prepare_end]
+    refusal = prepare[:prepare.index("BuildAssetPackAck(body)")]
+    for code in (
+        "LessonAssetReservationCode::kMutationActive",
+        "LessonAssetReservationCode::kLessonSessionMismatch",
+        "LessonAssetReservationCode::kInvalidIdentity",
+        "LessonAssetReservationCode::kGenerationExhausted",
+        '"LESSON_ASSET_MUTATION_ACTIVE"',
+        '"LESSON_SESSION_CONFLICT"',
+        '"LESSON_IDENTITY_INVALID"',
+        '"LESSON_RESERVATION_EXHAUSTED"',
+    ):
+        assert code in refusal
+
+
+def test_terminal_lesson_paths_release_exact_storage_generation_without_force():
+    h = read("main/lesson_handler.cc")
+    assert "EndLessonSession(" in h
+    assert "g_session.lesson_asset_generation" in h
+    assert "ForceEndLessonSession" not in h
+
+    stop_start = h.index('if (strcmp(type, "lesson_stop") == 0)')
+    error_start = h.index('if (strcmp(type, "lesson_error") == 0)')
+    stop = h[stop_start:error_start]
+    error = h[error_start:h.index('if (strcmp(type, "lesson_step") != 0)', error_start)]
+    no_visible_start = h.index("if (!has_visible_content) {")
+    no_visible = h[no_visible_start:h.index("// FW-01 / FW-LESSON-01", no_visible_start)]
+    prepare_start = h.index("if (is_prepare) {")
+    prepare = h[prepare_start:h.index('if (strcmp(type, "lesson_start") == 0)', prepare_start)]
+
+    assert "end_lesson_asset_session();" in stop
+    assert "end_lesson_after_failure();" in error
+    assert "end_lesson_asset_session();" in no_visible
+    assert "end_lesson_asset_session();" in prepare
+    assert "release_new_lesson_asset_session();" in prepare
+
+
+def test_lesson_raw_transport_rejects_decoded_nul_before_enqueue_roundtrip():
+    safety_h = read("main/json_payload_safety.h")
+    safety_cc = read("main/json_payload_safety.cc")
+    protocol_cc = read("main/protocols/protocol.cc")
+    protocol_h = read("main/protocols/protocol.h")
+    websocket = read("main/protocols/websocket_protocol.cc")
+    mqtt = read("main/protocols/mqtt_protocol.cc")
+    cmake = read("main/CMakeLists.txt")
+    host_runner = read("scripts/run_host_native_lesson_handler_test.sh")
+    coverage_runner = read("scripts/run_host_native_lesson_coverage.sh")
+
+    assert "JsonHasForbiddenDecodedNull" in safety_h
+    assert safety_cc.count("bool JsonHasForbiddenDecodedNull(") == 1
+    assert "JsonHasForbiddenDecodedNull" not in protocol_h
+    assert "JsonHasForbiddenDecodedNull" not in protocol_cc
+    assert "TBOT_JSON_VALIDATOR_ONLY" not in protocol_cc
+    assert "json_payload_safety.cc" in cmake
+    assert "json_payload_safety.cc" in host_runner
+    assert "json_payload_safety.cc" in coverage_runner
+    assert "TBOT_JSON_VALIDATOR_ONLY" not in host_runner
+    assert "TBOT_JSON_VALIDATOR_ONLY" not in coverage_runner
+    assert '#include "json_payload_safety.h"' in websocket
+    assert '#include "json_payload_safety.h"' in mqtt
+    ws_parse = websocket.index("cJSON_ParseWithLength(data, len)")
+    ws_guard = websocket.rfind("JsonHasForbiddenDecodedNull(data, len)", 0, ws_parse)
+    assert ws_guard != -1 and ws_guard < ws_parse
+    mqtt_parse = mqtt.index("cJSON_Parse(payload.c_str())")
+    mqtt_guard = mqtt.rfind(
+        "JsonHasForbiddenDecodedNull(payload.data(), payload.size())", 0, mqtt_parse
+    )
+    assert mqtt_guard != -1 and mqtt_guard < mqtt_parse
+
+
+def test_prepare_pure_validation_precedes_reservation_and_candidate_io():
+    h = read("main/lesson_handler.cc")
+    prepare_start = h.index("const bool is_prepare =")
+    prepare_end = h.index('if (strcmp(type, "lesson_start") == 0)', prepare_start)
+    prepare = h[prepare_start:prepare_end]
+    version = prepare.index("const bool version_ok =")
+    identity = prepare.index("valid_prepare_identity")
+    body_shape = prepare.index("valid_prepare_body")
+    sequence_guard = prepare.index("if (is_prepare && sequence == 0)")
+    reserve = prepare.index("TryBeginLessonSession(")
+    asset_ack = prepare.index("BuildAssetPackAck(body)")
+    commit = prepare.index("g_session = LessonSession{};", asset_ack)
+    assert version < reserve
+    assert identity < reserve
+    assert body_shape < reserve
+    assert sequence_guard < reserve
+    assert reserve < asset_ack < commit
+
+
+def test_unowned_prepare_refusal_uses_isolated_sequence_without_owner_mutation():
+    h = read("main/lesson_handler.cc")
+    helper_start = h.index("auto emit_isolated_prepare_error")
+    helper_end = h.index("const bool is_prepare =", helper_start)
+    helper = h[helper_start:helper_end]
+    assert "BuildFrame(in, \"lesson_error\", 1, frame_body)" in helper
+    assert "g_session.fs_sequence" not in helper
+    assert "++g_session.fs_sequence" not in helper
+
+
+def test_prepare_candidate_stream_routing_distinguishes_owner_from_republish():
+    h = read("main/lesson_handler.cc")
+    assert "const bool prepare_isolated_stream" in h
+    routing_start = h.index("const bool prepare_isolated_stream")
+    routing = h[routing_start:h.index("auto emit_prepare_error", routing_start)]
+    assert "prepare_has_newer_assignment_version" in routing
+    assert "restart_prepare" in routing
+    assert "g_session.lesson_asset_generation == 0" in routing
+
+    seq_zero = h[h.index("if (is_prepare && sequence == 0)"):
+                 h.index("bool prepare_newly_acquired_asset_session")]
+    assert "emit_prepare_error(" in seq_zero
+
+    readiness = h[h.index("if (!candidate_asset_pack_ready)"):
+                  h.index("const cJSON* runtime_controls")]
+    assert "prepare_isolated_stream" in readiness
+    assert "emit_isolated_prepare_ack" in readiness
+    assert "emit_ack(" in readiness

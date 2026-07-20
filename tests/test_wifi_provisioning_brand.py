@@ -110,7 +110,7 @@ def test_blufi_config_mode_is_wired_into_firmware():
 
 def test_blufi_config_mode_reopens_robot_scan_after_ble_timeout():
     wifi_board = read("main/boards/common/wifi_board.cc")
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
 
     assert "blufi.RestartForSetup();" in body
@@ -136,16 +136,21 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     afe_h = read("main/audio/wake_words/afe_wake_word.h")
     afe_cc = read("main/audio/wake_words/afe_wake_word.cc")
 
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode()")
+    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
-    release_idx = body.index("ReleaseWakeWordResourcesForWifiConfig")
-    init_idx = body.index("blufi.RestartForSetup();")
+    release_idx = body.index("BeginWifiProvisioning")
+    init_idx = body.index("blufi.init();")
     assert release_idx < init_idx
 
-    assert "void ReleaseWakeWordResourcesForWifiConfig();" in audio_h
-    release_start = audio_cc.index("void AudioService::ReleaseWakeWordResourcesForWifiConfig()")
+    assert "WifiProvisioningBeginResult BeginWifiProvisioning();" in audio_h
+    release_start = audio_cc.index("AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning()")
     release_body = audio_cc[release_start:audio_cc.index("void AudioService::EnableVoiceProcessing", release_start)]
-    assert "EnableWakeWordDetection(false);" in release_body
+    prewarm_body = function_body(audio_cc, "void AudioService::PrewarmWakeWord")
+    assert "WakeWordLifecycleController wake_word_lifecycle_;" in audio_h
+    assert "wake_word_lifecycle_.TryAcquirePrewarm" in prewarm_body
+    assert "wake_word_lifecycle_.BeginProvisioningAndQuiesce" in release_body
+    assert "Shutdown(0)" in release_body
+    assert "Shutdown(5000)" in release_body
     assert "wake_word_.reset();" in release_body
     assert "wake_word_initialized_ = false;" in release_body
 
@@ -154,10 +159,10 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     assert "CreateWakeWordIfAvailable();" in enable_body
 
     assert "TaskHandle_t audio_detection_task_handle_" in afe_h
-    dtor_start = afe_cc.index("AfeWakeWord::~AfeWakeWord()")
-    dtor_body = afe_cc[dtor_start:afe_cc.index("bool AfeWakeWord::Initialize", dtor_start)]
-    assert "vTaskDelete(audio_detection_task_handle_)" in dtor_body
-    assert dtor_body.index("vTaskDelete(audio_detection_task_handle_)") < dtor_body.index("afe_iface_->destroy")
+    assert "bool Shutdown(uint32_t timeout_ms) override;" in afe_h
+    shutdown_body = function_body(afe_cc, "bool AfeWakeWord::Shutdown")
+    assert "DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT" in shutdown_body
+    assert "xEventGroupWaitBits" in shutdown_body
 
 def test_assets_model_load_does_not_create_afe_before_claimed_audio_gate():
     audio_cc = read("main/audio/audio_service.cc")
@@ -172,46 +177,35 @@ def test_assets_model_load_does_not_create_afe_before_claimed_audio_gate():
     assert "CreateWakeWordIfAvailable();" in prewarm_body
 
 def test_wifi_config_mode_accepts_startup_activation_window():
-    wifi_board = read("main/boards/common/wifi_board.cc")
-    enter_start = wifi_board.index("void WifiBoard::EnterWifiConfigMode()")
-    enter_body = wifi_board[enter_start : wifi_board.index("bool WifiBoard::IsInWifiConfigMode()", enter_start)]
+    policy = read("main/wifi_config_entry_policy.h")
 
-    assert "state == kDeviceStateActivating" in enter_body
-    assert "state == kDeviceStateConnecting" in enter_body
-    assert enter_body.index("state == kDeviceStateConnecting") < enter_body.index("device state is not allowed for WiFi config")
-    assert "device state is not allowed for WiFi config" in enter_body
+    assert "state == kDeviceStateActivating" in policy
+    assert "state == kDeviceStateConnecting" in policy
 
 def test_wifi_config_mode_can_be_rearmed_while_already_configuring():
-    wifi_board = read("main/boards/common/wifi_board.cc")
-    enter_start = wifi_board.index("void WifiBoard::EnterWifiConfigMode()")
-    enter_body = wifi_board[enter_start : wifi_board.index("bool WifiBoard::IsInWifiConfigMode()", enter_start)]
+    policy = read("main/wifi_config_entry_policy.h")
 
-    assert "state == kDeviceStateWifiConfiguring" in enter_body
-    assert enter_body.index("state == kDeviceStateWifiConfiguring") < enter_body.index(
-        "device state is not allowed for WiFi config"
-    )
-    wifi_config_idx = enter_body.index("state == kDeviceStateWifiConfiguring")
-    allowed_branch = enter_body[wifi_config_idx:enter_body.index("device state is not allowed for WiFi config")]
-    assert "StartWifiConfigMode();" in allowed_branch
+    assert "state == kDeviceStateWifiConfiguring" in policy
 
 def test_wifi_config_entry_ignores_active_lesson_before_setup_side_effects():
     wifi_board = read("main/boards/common/wifi_board.cc")
     enter_body = function_body(wifi_board, "void WifiBoard::EnterWifiConfigMode")
+    start_body = function_body(wifi_board, "void WifiBoard::StartWifiConfigMode")
 
     assert "app.IsLessonRuntimeActive()" in enter_body
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("ShowNotification")
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("ResetProtocol")
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("StopStation")
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("StartWifiConfigMode")
+    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("RequestWifiConfigMode")
     guard = enter_body[
         enter_body.index("app.IsLessonRuntimeActive()") :
-        enter_body.index("GetDisplay()->ShowNotification")
+        enter_body.index("RequestWifiConfigMode(true)")
     ]
     assert "return;" in guard
     assert "ShowNotification" not in guard
     assert "ResetProtocol" not in guard
     assert "StopStation" not in guard
-    assert "StartWifiConfigMode" not in guard
+    assert "RequestWifiConfigMode" not in guard
+    assert "ShowNotification" in start_body
+    assert "PrepareWifiConfigEntry" in start_body
+    assert "StopStation" in start_body
 
 def test_runtime_state_machine_can_interrupt_backend_connect_for_wifi_config():
     state_machine = read("main/device_state_machine.cc")
