@@ -5,6 +5,7 @@
 #include "settings.h"
 #include "lesson_handler.h"  // US-006 Slice-01: kLessonRendererName (D-CAP-FLAG)
 #include "json_payload_safety.h"
+#include "esp_build_identity.h"
 
 #include <cstring>
 #include <cJSON.h>
@@ -270,6 +271,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     const std::string client_id = Board::GetInstance().GetUuid();
 
     last_incoming_time_ = std::chrono::steady_clock::now();
+    const std::uint64_t callback_transport_epoch = IncomingJsonTransportEpoch();
 
     auto network = Board::GetInstance().GetNetwork();
     auto replacement_websocket = network->CreateWebSocket(1);
@@ -285,6 +287,15 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
     }
     replacement_websocket->SetHeader("protocol-version", std::to_string(version_).c_str());
+    EspBuildIdentity build_identity;
+    std::string build_identity_error;
+    if (ReadRunningEspBuildIdentity(&build_identity, &build_identity_error)) {
+        for (const auto& header : EspBuildIdentityHeaders(build_identity)) {
+            replacement_websocket->SetHeader(header.first.c_str(), header.second.c_str());
+        }
+    } else {
+        ESP_LOGW(TAG, "Build identity unavailable reason=%s", build_identity_error.c_str());
+    }
     std::string traceparent = NewTraceParentHeader();
     replacement_websocket->SetHeader("traceparent", traceparent.c_str());
     if (!token.empty()) {
@@ -304,7 +315,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
         close_state_.ResetForConnection();
         websocket_ = std::move(replacement_websocket);
 
-        websocket_->OnData([this, connection_epoch](const char* data, size_t len, bool binary) {
+        websocket_->OnData([this, connection_epoch, callback_transport_epoch](const char* data, size_t len, bool binary) {
         auto inbound_lease = inbound_gate_.Acquire(connection_epoch);
         if (!inbound_lease || error_occurred_) {
             ESP_LOGD(TAG, "ws_stale_inbound_dropped");
@@ -393,7 +404,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
                                  (unsigned)len);
                     }
                     if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root);
+                        on_incoming_json_(root, callback_transport_epoch);
                     }
                 }
             } else {

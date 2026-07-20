@@ -4,8 +4,18 @@
 
 #define TAG "Protocol"
 
-void Protocol::OnIncomingJson(std::function<void(const cJSON* root)> callback) {
+void Protocol::OnIncomingJson(
+    std::function<void(const cJSON* root, std::uint64_t transport_epoch)> callback
+) {
     on_incoming_json_ = callback;
+}
+
+void Protocol::SetIncomingJsonTransportEpoch(std::uint64_t transport_epoch) {
+    incoming_json_transport_epoch_.store(transport_epoch, std::memory_order_release);
+}
+
+std::uint64_t Protocol::IncomingJsonTransportEpoch() const {
+    return incoming_json_transport_epoch_.load(std::memory_order_acquire);
 }
 
 void Protocol::OnIncomingAudio(std::function<void(std::unique_ptr<AudioStreamPacket> packet)> callback) {

@@ -1,9 +1,12 @@
 #ifndef LESSON_ASSET_STORAGE_COORDINATOR_H
 #define LESSON_ASSET_STORAGE_COORDINATOR_H
 
+#include "sd_fat_session_guard.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 
 inline constexpr std::size_t kLessonAssetIdentityMaxBytes = 128;
@@ -37,13 +40,15 @@ private:
     LessonAssetMutationLease(
         LessonAssetStorageCoordinator* coordinator,
         LessonAssetReservationCode code,
-        bool owns_reservation
+        bool owns_reservation,
+        tbot::SdFatSessionLease sd_session = {}
     );
     void Release();
 
     LessonAssetStorageCoordinator* coordinator_;
     LessonAssetReservationCode code_;
     bool owns_reservation_;
+    tbot::SdFatSessionLease sd_session_;
 };
 
 struct LessonAssetSessionResult {
@@ -100,6 +105,7 @@ private:
     std::string session_id_;
     std::uint64_t lesson_session_generation_ = 0;
     std::uint64_t last_generation_ = 0;
+    std::optional<tbot::SdFatSessionLease> lesson_sd_session_;
 };
 
 #endif  // LESSON_ASSET_STORAGE_COORDINATOR_H

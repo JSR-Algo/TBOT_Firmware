@@ -43,7 +43,7 @@ def test_lesson_branch_is_additive_above_the_unknown_type_noop():
     branch = app[lesson:noop]
     # The lesson branch dispatches through the serialized worker instead of doing
     # blocking HTTP/TLS asset fetches on the WebSocket receive callback stack.
-    assert "EnqueueLessonMessage(root);" in branch
+    assert "EnqueueLessonMessage(root, callback_transport_epoch);" in branch
     assert "HandleLessonMessage(root);" not in branch
     # ...sits BELOW the custom branch and ABOVE the unchanged unknown-type no-op,
     # so un-upgraded firmware keeps dropping lesson_* silently (backward compat).
@@ -57,13 +57,15 @@ def test_lesson_frames_are_serialized_off_websocket_receive_stack():
 
     assert "QueueHandle_t lesson_message_queue_" in header
     assert "static void LessonMessageTask(void* arg);" in header
-    assert "void EnqueueLessonMessage(const cJSON* root);" in header
+    assert "void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);" in header
     assert "kLessonMessageWorkerStackBytes = 12288" in app
     assert 'xTaskCreateWithCaps(&Application::LessonMessageTask, "lesson_worker"' in initialize_protocol
     assert "kLessonMessageWorkerStackBytes, this" in initialize_protocol
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in initialize_protocol
     assert "lesson_worker" not in initialize
-    assert "xQueueSend(lesson_message_queue_, &payload" in app
+    assert "xQueueSend(lesson_message_queue_, &item" in app
+    assert "LessonQueueItemKind::kFrame" in app
+    assert "transport_epoch" in app
     worker = app[app.index("void Application::LessonMessageTask") : app.index("bool Application::SetDeviceState")]
     assert "xQueueReceive" in worker
     assert "HandleLessonMessage(root);" in worker
@@ -77,10 +79,11 @@ def test_lesson_worker_queue_full_drop_is_nonblocking_and_frees_payload():
     ]
 
     assert "char* payload = cJSON_PrintUnformatted(root);" in enqueue
-    assert "xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE" in enqueue
+    assert "xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE" in enqueue
+    assert "uxQueueMessagesWaiting(lesson_message_queue_) >= kLessonMessageQueueDepth" in enqueue
     assert 'ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d"' in enqueue
     drop = enqueue[
-        enqueue.index("xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE") :
+        enqueue.index("xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE") :
         enqueue.index("} else {")
     ]
     assert "cJSON_free(payload);" in drop

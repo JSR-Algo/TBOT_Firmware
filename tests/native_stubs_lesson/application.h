@@ -123,4 +123,5 @@ public:
 
     // Defined in lesson_handler.cc (the unit under test).
     void HandleLessonMessage(const cJSON* root);
+    bool AbandonLessonStorageSession();
 };

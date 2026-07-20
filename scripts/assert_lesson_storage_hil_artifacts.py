@@ -381,6 +381,29 @@ def artifact_bytes(artifact: Path | ArtifactSnapshot) -> bytes:
     return artifact.data if isinstance(artifact, ArtifactSnapshot) else read_bytes(artifact)
 
 
+def audit_profile_configuration(profile: str, sdkconfig: dict[str, str]) -> None:
+    require(
+        "CONFIG_TBOT_HIL_PROFILE" not in sdkconfig,
+        "manual profile override forbidden",
+    )
+    enabled = sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y"
+    require(enabled == (profile == "hil"), "CONFIG_TBOT_HIL_STORAGE_FAULTS profile mismatch")
+
+
+def audit_profile_literals(
+    profile: str, artifacts: dict[str, Path | ArtifactSnapshot]
+) -> str:
+    expected = "task14-hil-v1" if profile == "hil" else "production"
+    forbidden = "production" if profile == "hil" else "task14-hil-v1"
+    expected_literal = f"TBOT_EMBEDDED_PROFILE={expected}".encode("ascii")
+    forbidden_literal = f"TBOT_EMBEDDED_PROFILE={forbidden}".encode("ascii")
+    for name in ("bin", "elf", "mainArchive"):
+        content = artifact_bytes(artifacts[name])
+        require(expected_literal in content, "embedded profile literal mismatch")
+        require(forbidden_literal not in content, "embedded profile literal mismatch")
+    return expected
+
+
 def audit_literals(profile: str, artifacts: dict[str, Path | ArtifactSnapshot]) -> None:
     searchable = {
         name: artifact_bytes(artifacts[name])
@@ -564,7 +587,7 @@ def audit(
     validate_artifact_freshness(artifacts, commit_timestamp)
     sdkconfig = parse_sdkconfig_data(artifacts["sdkconfig"].data)
     enabled = sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y"
-    require(enabled == (profile == "hil"), "CONFIG_TBOT_HIL_STORAGE_FAULTS profile mismatch")
+    audit_profile_configuration(profile, sdkconfig)
     auxiliary_snapshots: list[ArtifactSnapshot] = []
     defaults = defaults_manifest(
         repo, build_dir, description, profile, auxiliary_snapshots)
@@ -573,6 +596,7 @@ def audit(
     nm_output = run_nm_on_snapshot(nm_snapshot, artifacts["mainArchive"], repo)
     audit_symbols(profile, nm_output)
     audit_literals(profile, artifacts)
+    embedded_profile = audit_profile_literals(profile, artifacts)
     partition = app_partition_metrics(
         repo, sdkconfig, artifacts["bin"], auxiliary_snapshots)
 
@@ -596,6 +620,7 @@ def audit(
         "partition": partition,
         "checks": {
             "hilConfigEnabled": enabled,
+            "embeddedProfile": embedded_profile,
             "toolLiterals": "present" if profile == "hil" else "absent",
             "hilSymbols": "present" if profile == "hil" else "absent",
             "bannedApis": "absent",

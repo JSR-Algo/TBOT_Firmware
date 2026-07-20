@@ -1086,6 +1086,29 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
 // Sub-dispatch the slice subset (lesson_prepare/start/step/stop) and render ONE
 // espTft lesson_step. Additive: never reached for the 8 legacy types, the voice
 // path, or the MCP arm tools.
+bool Application::AbandonLessonStorageSession() {
+    if (g_session.lesson_asset_generation == 0) return false;
+    const std::string assignment_id = g_session.assignment_id;
+    const std::string session_id = g_session.session_id;
+    const std::uint64_t generation = g_session.lesson_asset_generation;
+    if (!LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+            assignment_id, session_id, generation)) {
+        return false;
+    }
+    if (g_session.assignment_id == assignment_id &&
+        g_session.session_id == session_id &&
+        g_session.lesson_asset_generation == generation) {
+        g_session.lesson_asset_generation = 0;
+        g_session.running = false;
+        g_session.paused = false;
+        g_session.prepared = false;
+        ClearTerminalLessonCursor();
+        CancelLessonInteractiveListening();
+        SetLessonRuntimeActive(false);
+    }
+    return true;
+}
+
 void Application::HandleLessonMessage(const cJSON* root) {
     const char* type = Str(root, "type");
     if (type == nullptr) return;  // defensive (transports pre-guard; see DIV note)
@@ -1250,7 +1273,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
-        g_layer_state.ClearAll();
         ClearTerminalLessonCursor();
         g_layer_state.ClearAll();
         if (release_asset_session) end_lesson_asset_session();
@@ -1443,6 +1465,47 @@ void Application::HandleLessonMessage(const cJSON* root) {
         return;
     }
 
+    if (is_prepare) {
+        const auto reservation =
+            LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+                assignment_id, session_id);
+        if (!reservation.acquired) {
+            const char* error_code = "LESSON_RESERVATION_EXHAUSTED";
+            const char* error_message = "lesson storage reservation unavailable";
+            const char* error_reason = "generation_exhausted";
+            bool retryable = false;
+            switch (reservation.code) {
+            case LessonAssetReservationCode::kMutationActive:
+                error_code = "LESSON_ASSET_MUTATION_ACTIVE";
+                error_message = "lesson assets are being updated";
+                error_reason = "asset_mutation_active";
+                retryable = true;
+                break;
+            case LessonAssetReservationCode::kLessonSessionActive:
+            case LessonAssetReservationCode::kLessonSessionMismatch:
+                error_code = "LESSON_SESSION_CONFLICT";
+                error_message = "another lesson session owns lesson assets";
+                error_reason = "lesson_session_mismatch";
+                retryable = true;
+                break;
+            case LessonAssetReservationCode::kInvalidIdentity:
+                error_code = "LESSON_IDENTITY_INVALID";
+                error_message = "lesson identity is invalid";
+                error_reason = "invalid_identity";
+                break;
+            case LessonAssetReservationCode::kGenerationExhausted:
+            case LessonAssetReservationCode::kAcquired:
+                break;
+            }
+            emit(root, "lesson_error",
+                 MakeErrorBody(error_code, error_message, retryable, error_reason));
+            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s",
+                     error_reason);
+            return;
+        }
+        g_session.lesson_asset_generation = reservation.generation;
+    }
+
     const bool is_start = strcmp(type, "lesson_start") == 0;
     const bool is_step = strcmp(type, "lesson_step") == 0;
     const bool is_pause = strcmp(type, "lesson_pause") == 0;
@@ -1496,6 +1559,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (is_prepare) release_new_lesson_asset_session();
                 return;
             }
+        }
+        const bool re_rendered = (sequence == g_session.last_ack_sequence)
+                                     ? g_session.last_ack_rendered : false;
+        const bool re_degraded = (sequence == g_session.last_ack_sequence)
+                                     ? g_session.last_ack_degraded : false;
+        cJSON* re_asset_pack = nullptr;
+        if (sequence == g_session.last_ack_sequence && !g_session.last_ack_asset_pack_json.empty()) {
+            re_asset_pack = cJSON_Parse(g_session.last_ack_asset_pack_json.c_str());
+        } else if (is_prepare && sequence == g_session.prepare_ack_sequence &&
+                   !g_session.prepare_ack_asset_pack_json.empty()) {
+            re_asset_pack = cJSON_Parse(g_session.prepare_ack_asset_pack_json.c_str());
         }
         ESP_LOGI(TAG, "lesson_* duplicate seq=%ld; re-acking rendered=%d degraded=%d",
                  static_cast<long>(sequence), re_rendered, re_degraded);

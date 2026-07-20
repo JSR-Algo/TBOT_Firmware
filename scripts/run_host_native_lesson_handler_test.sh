@@ -25,7 +25,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     -I"${CJSON_DIR}" -c "${CJSON_DIR}/cJSON.c" -o "${BUILD_DIR}/cJSON.o"
 
 "${CXX}" -std=c++17 -O0 -g -pthread -Wall -Wextra -Werror \
-    -Wno-unused-variable -Wno-unused-lambda-capture \
+    -Wno-unused-variable -Wno-unused-parameter -Wno-unused-lambda-capture \
     -DTBOT_HOST_NATIVE_COVERAGE \
     -DTBOT_LESSON_ASSET_COORDINATOR_TESTING \
     -Dfopen=HostLessonFopen \
@@ -41,6 +41,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \
     main/lesson_tvideo_template.cc \
     main/json_payload_safety.cc \
+    main/sd_fat_session_guard.cc \
     "${BUILD_DIR}/cJSON.o" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 

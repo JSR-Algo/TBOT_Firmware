@@ -26,6 +26,22 @@ def test_hil_profile_is_separate_from_production_defaults():
     assert "sdkconfig.defaults.hil-storage" not in read("CMakeLists.txt")
 
 
+def test_hil_profile_is_derived_from_kconfig_without_cmake_override():
+    root_cmake = read("CMakeLists.txt")
+    main_cmake = read("main/CMakeLists.txt")
+    kconfig = read("main/Kconfig.projbuild")
+
+    assert "set(TBOT_HIL_PROFILE" not in root_cmake
+    assert "TBOT_HIL_PROFILE" not in main_cmake
+    assert "config TBOT_HIL_PROFILE" not in kconfig
+    identity = read("main/esp_build_identity.cc")
+    assert "#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) && CONFIG_TBOT_HIL_STORAGE_FAULTS" in identity
+    assert '"task14-hil-v1"' in identity
+    assert '"production"' in identity
+    assert "#ifdef TBOT_HIL_PROFILE" in identity
+    assert "#error" in identity
+
+
 def test_hil_sources_are_conditionally_compiled():
     cmake = read("main/CMakeLists.txt")
     conditional = cmake[cmake.index("if(CONFIG_TBOT_HIL_STORAGE_FAULTS)") :]

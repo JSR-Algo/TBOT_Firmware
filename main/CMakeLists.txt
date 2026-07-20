@@ -51,16 +51,18 @@ set(SOURCES "audio/audio_codec.cc"
             "lesson_heap_probe.cc"
             "lesson_motion_presets.cc"
             "lesson_layer_state.cc"
-            "lesson_tvideo_template.cc"
+            "esp_build_identity.cc"
             "ota.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
+            "sd_fat_session_guard.cc"
             "main.cc"
             )
 
 if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
     list(APPEND SOURCES
+        "physical_sd_identity.cc"
         "lesson_storage_hil_controller.cc"
         "lesson_storage_hil_hooks.cc"
         "lesson_storage_hil_fixture.cc"

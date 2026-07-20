@@ -66,7 +66,7 @@ cp main/lesson_asset_storage_coordinator.cc \
 
 "${BUILD_DIR}/lesson_layer_state_test"
 
-"${CXX}" -std=c++17 -O0 -g --coverage -pthread \
+"${CXX}" -std=c++17 -O0 -g --coverage -pthread -Wno-unused-parameter \
     -DTBOT_HOST_NATIVE_COVERAGE \
     -DTBOT_LESSON_ASSET_COORDINATOR_TESTING \
     -Dfopen=HostLessonFopen \
@@ -82,6 +82,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     "${BUILD_DIR}/src/lesson_layer_state.cc" \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \
     main/json_payload_safety.cc \
+    main/sd_fat_session_guard.cc \
     "${BUILD_DIR}/cJSON.o" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 

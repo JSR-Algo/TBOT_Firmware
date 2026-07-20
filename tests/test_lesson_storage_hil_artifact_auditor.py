@@ -254,6 +254,30 @@ def test_published_pass_requires_a_coherent_manifest_checksum_pair(tmp_path):
         AUDITOR.verify_published_manifest_pair(manifest, checksum)
 
 
+def test_embedded_profile_is_boolean_derived_and_manual_override_is_rejected(tmp_path):
+    AUDITOR.audit_profile_configuration(
+        "hil", {"CONFIG_TBOT_HIL_STORAGE_FAULTS": "y"}
+    )
+    AUDITOR.audit_profile_configuration("production", {})
+    with pytest.raises(AUDITOR.AuditFailure, match="manual profile override forbidden"):
+        AUDITOR.audit_profile_configuration(
+            "hil",
+            {
+                "CONFIG_TBOT_HIL_STORAGE_FAULTS": "y",
+                "CONFIG_TBOT_HIL_PROFILE": "production",
+            },
+        )
+
+    artifacts = {}
+    for name in ("bin", "elf", "mainArchive"):
+        path = tmp_path / name
+        path.write_bytes(b"TBOT_EMBEDDED_PROFILE=task14-hil-v1")
+        artifacts[name] = path
+    AUDITOR.audit_profile_literals("hil", artifacts)
+    with pytest.raises(AUDITOR.AuditFailure, match="embedded profile literal mismatch"):
+        AUDITOR.audit_profile_literals("production", artifacts)
+
+
 def test_failed_audit_removes_stale_outputs_before_any_check(tmp_path):
     manifest = tmp_path / AUDITOR.MANIFEST_NAME
     checksum = tmp_path / AUDITOR.SHA_NAME

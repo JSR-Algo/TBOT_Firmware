@@ -9,6 +9,7 @@
 #include <esp_heap_caps.h>
 #include <algorithm>
 #include <cctype>
+#include <cinttypes>
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
