@@ -113,7 +113,6 @@ def test_wb2_explicit_setup_always_opens_a_fresh_blufi_session():
     assert body.count("blufi.TryReserveProvisioningSession()") == 1
     assert body.index("TryReserveProvisioningSession") < body.index("blufi.init();")
     assert "prior provisioning completion still active" in body
-    assert "blufi.init();" not in body
 
     restart_idx = body.index("blufi.RestartForSetup();")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")

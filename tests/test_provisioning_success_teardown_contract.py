@@ -175,7 +175,7 @@ def test_timeout_failure_preconfirm_and_manual_teardown_never_rearm():
     assert "CompleteSuccessfulProvisioningTeardown" not in stop
     assert "StopBleAdvertising();" in preconfirm
     assert "CompleteSuccessfulProvisioningTeardown" not in preconfirm
-    confirmed_tail = confirm[confirm.index("if (!confirmed)"):]
+    confirmed_tail = confirm[confirm.index("ClaimConfirmationResult::Confirmed"):]
     assert '"claim_confirmed", provisioning_token' in confirmed_tail
     failed_wifi = blufi[blufi.index("Failed to connect to WiFi via esp-wifi-connect"):]
     failed_wifi = failed_wifi[:failed_wifi.index("vTaskDelete(nullptr)")]

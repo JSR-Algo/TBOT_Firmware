@@ -110,7 +110,7 @@ const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
 constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
 constexpr bool kHoldBootProbePattern = false;
 // Default Live TTS output for this PA; user can still raise/lower via MCP (0-100).
-constexpr int kLcdWikiOutputVolume = 100;
+constexpr int kLcdWikiOutputVolume = 92;
 
 void EnableBacklightForBoot() {
     const gpio_config_t backlight_gpio_config = {

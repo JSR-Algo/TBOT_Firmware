@@ -1145,9 +1145,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (robot_state != nullptr) {
             cJSON_AddStringToObject(b, "robotState", robot_state);
         }
-        if (degraded_reason != nullptr && degraded_reason[0] != '\0') {
-            cJSON_AddStringToObject(b, "degradedReason", degraded_reason);
-        }
         if (render_elapsed_ms >= 0) {
             cJSON_AddNumberToObject(b, "renderElapsedMs", static_cast<double>(render_elapsed_ms));
         }
@@ -1500,8 +1497,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 return;
             }
         }
-        ESP_LOGI(TAG, "lesson_* duplicate seq=%lld; re-acking rendered=%d degraded=%d",
-                 (long long)sequence, re_rendered, re_degraded);
+        ESP_LOGI(TAG, "lesson_* duplicate seq=%ld; re-acking rendered=%d degraded=%d",
+                 static_cast<long>(sequence), re_rendered, re_degraded);
         emit_ack(root, sequence, re_rendered, re_degraded, re_asset_pack, /*cache*/ false,
                  /*render_elapsed_ms*/ -1,
                  g_session.last_ack_degraded_reason.empty() ? nullptr : g_session.last_ack_degraded_reason.c_str());
@@ -1769,12 +1766,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // as the foreground object layer via LcdDisplay::SetLessonObject. Every layer draws
     // only through FetchLessonImage(); a poster that is merely flashed-present but never
     // decoded/drawn is treated as not-drawn (see the poster_drew block below).
-    const char* poster_src = Str(Obj(bg, "poster"), "src");
-    const char* poster_key = Str(Obj(bg, "poster"), "key");
-    const char* object_src = Str(Obj(to, "asset"), "src");
-    const char* object_key = Str(Obj(to, "asset"), "key");
-    const char* overlay_src = Str(Obj(ro, "asset"), "src");
-    const char* overlay_key = Str(Obj(ro, "asset"), "key");
+    const char* poster_src = Str(poster_asset, "src");
+    const char* poster_key = Str(poster_asset, "key");
+    const char* object_src = Str(object_asset, "src");
+    const char* object_key = Str(object_asset, "key");
+    const char* overlay_src = Str(overlay_asset, "src");
+    const char* overlay_key = Str(overlay_asset, "key");
     const bool has_object_src = !Blank(object_src);
     bool has_overlay_src = !Blank(overlay_src);
     bool tvideo_degraded = false;
@@ -1814,46 +1811,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 tvideo_arrived_bounds = geometry->robot;
                 tvideo_use_bounds = true;
             }
-=======
-    if (tvideo_projection != nullptr && !g_session.tvideo_entrance_consumed) {
-        g_session.tvideo_entrance_consumed = true;
-        double template_version = 0;
-        double geometry_version = 0;
-        const char* template_id = Str(tvideo_projection, "templateId");
-        const char* layout_preset = Str(tvideo_projection, "layoutPreset");
-        const char* fallback_policy = Str(tvideo_projection, "fallbackPolicy");
-        const bool named_fallback = fallback_policy != nullptr &&
-            strcmp(fallback_policy, "snapToArriveNearAndReveal") == 0;
-        const bool has_template_version = Num(tvideo_projection, "templateVersion", template_version);
-        const bool has_geometry_version = Num(tvideo_projection, "geometryVersion", geometry_version);
-        uint8_t template_version_u8 = 0;
-        uint8_t geometry_version_u8 = 0;
-        const bool versions_valid = has_template_version && has_geometry_version &&
-            lesson_tvideo::ExactVersion(template_version, &template_version_u8) &&
-            lesson_tvideo::ExactVersion(geometry_version, &geometry_version_u8);
-
-        // The current renderer has no atlas blitter. Feed atlas_available=false so
-        // the bounded state machine takes its reviewed static arrived-pose fallback,
-        // reveals teaching content immediately, and never blocks voice/progress.
-        lesson_tvideo::StateMachine tvideo({
-            template_id,
-            versions_valid ? template_version_u8 : static_cast<uint8_t>(0),
-            layout_preset,
-            versions_valid ? geometry_version_u8 : static_cast<uint8_t>(0),
-            has_overlay_src,
-            false,
-            false,
-        });
-        tvideo_degraded = !named_fallback ||
-            tvideo.degraded_reason() != lesson_tvideo::DegradedReason::kNone;
-        tvideo_degraded_reason = !named_fallback
-            ? "unsupportedFallbackPolicy"
-            : lesson_tvideo::DegradedReasonName(tvideo.degraded_reason());
-        if (const lesson_tvideo::LayoutGeometry* geometry =
-                lesson_tvideo::ArrivedGeometry(layout_preset, versions_valid ? geometry_version_u8 : 0)) {
-            tvideo_arrived_bounds = geometry->robot;
-            tvideo_use_bounds = true;
->>>>>>> goal1/preview-snapshot-tvideo-compat
         }
         ESP_LOGI(TAG, "lesson_step tvideo fallback reveal=%d degraded=%d reason=%s",
                  tvideo.content_visible(), tvideo_degraded, tvideo_degraded_reason);

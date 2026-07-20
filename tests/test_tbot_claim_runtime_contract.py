@@ -137,9 +137,9 @@ def test_blufi_defers_connected_wifi_claim_refresh_until_after_possible_wifi_fra
     assert "vTaskDelay(pdMS_TO_TICKS(kClaimRefreshAfterTokenHandoffDelayMs));" in helper_body
     assert "m_sta_is_connecting" in helper_body
     connecting_branch = helper_body[helper_body.index("m_sta_is_connecting"):]
-    assert "return;" in connecting_branch[:connecting_branch.index("CancelBleSetupTimeout();")]
-    assert "CancelBleSetupTimeout();" in helper_body
-    assert "deinit();" in helper_body
+    teardown_idx = connecting_branch.index("CompleteSuccessfulProvisioningTeardown")
+    assert "return;" in connecting_branch[:teardown_idx]
+    assert '"connected_wifi_token_handoff"' in helper_body
     assert "SchedulePendingTbotClaimRefresh(generation);" in helper_body
 
 def test_one_shot_claim_fetch_after_wifi_success_applies_even_without_poll_timer():
@@ -398,12 +398,13 @@ def test_blufi_wifi_success_tears_down_ble_before_claim_refresh():
 
     assert "esp_blufi_send_wifi_conn_report" in success_body
     assert "esp_blufi_disconnect();" in success_body
-    assert "CancelBleSetupTimeout();" in success_body
     assert '"WiFi provisioned; stopping BLE before claim refresh"' in success_body
-    assert "self->deinit();" in success_body
+    assert "CompleteSuccessfulProvisioningTeardown" in success_body
+    assert '"wifi_credentials_connected"' in success_body
     assert "SchedulePendingTbotClaimRefresh(generation);" in success_body
-    assert report_idx < connected_log_idx < source.index("self->deinit();", connected_log_idx)
-    assert source.index("self->deinit();", connected_log_idx) < source.index(
+    teardown_idx = source.index("CompleteSuccessfulProvisioningTeardown", connected_log_idx)
+    assert report_idx < connected_log_idx < teardown_idx
+    assert teardown_idx < source.index(
         "SchedulePendingTbotClaimRefresh(generation);", connected_log_idx
     )
 
@@ -423,7 +424,7 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
 
     assert "void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);" in header
     assert '"wifi_success_after_ble_teardown", generation' in success_body
-    assert report_rel < success_body.index("self->deinit();") < success_body.index(
+    assert report_rel < success_body.index("CompleteSuccessfulProvisioningTeardown") < success_body.index(
         '"wifi_success_after_ble_teardown", generation'
     )
     assert "ProvisioningStatusReporter::Status::DeviceAuthenticated" in helper_body

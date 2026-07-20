@@ -407,6 +407,10 @@ Blufi::~Blufi() {
 }
 
 esp_err_t Blufi::init() {
+    if (teardown_failed_.load()) {
+        ESP_LOGE(BLUFI_TAG, "BLE teardown previously failed; refusing blind reinitialization");
+        return ESP_ERR_INVALID_STATE;
+    }
     auto turn = transition_gate_.Acquire(
         BlufiTransitionGate::Operation::kInit,
         reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
@@ -561,7 +565,11 @@ esp_err_t Blufi::_deinit_impl() {
         m_deinited = true;
         inited_ = false;
     }
-    teardown_failed_.store(first_error != ESP_OK);
+    if (first_error != ESP_OK) {
+        teardown_failed_.store(true);
+    } else {
+        teardown_failed_.store(false);
+    }
     return first_error;
 }
 
@@ -1224,9 +1232,10 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
     struct ClaimRefreshDelayContext {
         Blufi* self;
         uint32_t generation;
+        Blufi::ProvisioningToken provisioning_token;
     };
     auto* ctx = new (std::nothrow) ClaimRefreshDelayContext{
-        this, setup_generation_.load()};
+        this, setup_generation_.load(), CaptureProvisioningSession()};
     if (ctx == nullptr) {
         ESP_LOGE(BLUFI_TAG, "Failed to allocate claim token delay context");
         return;
@@ -1236,10 +1245,11 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
             auto* task_ctx = static_cast<ClaimRefreshDelayContext*>(ctx);
             auto* self = task_ctx->self;
             const uint32_t generation = task_ctx->generation;
+            const auto provisioning_token = task_ctx->provisioning_token;
             delete task_ctx;
             vTaskDelay(pdMS_TO_TICKS(kClaimRefreshAfterTokenHandoffDelayMs));
-            Application::GetInstance().Schedule([self, generation]() {
-                self->RunIfSetupGenerationCurrent(generation, [self, generation]() {
+            Application::GetInstance().Schedule([self, generation, provisioning_token]() {
+                self->RunIfSetupGenerationCurrent(generation, [self, generation, provisioning_token]() {
                     if (self->m_sta_is_connecting.load()) {
                         ESP_LOGI(BLUFI_TAG,
                                  "Deferring claim refresh: WiFi credential handoff in progress");
@@ -1251,11 +1261,9 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
                         return;
                     }
 
-                    self->CancelBleSetupTimeout();
-                    if (self->GetBleState() != Blufi::BleState::kOff) {
-                        ESP_LOGI(BLUFI_TAG,
-                                 "Received claim token on connected WiFi; stopping BLE before claim refresh");
-                        self->deinit();
+                    if (!self->CompleteSuccessfulProvisioningTeardown(
+                            "connected_wifi_token_handoff", provisioning_token)) {
+                        return;
                     }
                     Application::GetInstance().SchedulePendingTbotClaimRefresh(generation);
                 });
@@ -1311,17 +1319,16 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
         if (!m_sta_is_connecting.load()) {
             auto* self = this;
             const std::string reason_copy = reason ? reason : "unknown";
+            const auto provisioning_token = CaptureProvisioningSession();
             Application::GetInstance().Schedule(
-                [self, reason_copy, expected_generation]() {
+                [self, reason_copy, expected_generation, provisioning_token]() {
                     const bool current = self->RunIfSetupGenerationCurrent(
-                        expected_generation, [self]() {
-                            self->CancelBleSetupTimeout();
-                            if (self->GetBleState() != Blufi::BleState::kOff) {
-                                ESP_LOGI(
-                                    BLUFI_TAG,
-                                    "Provisioning authenticated report requested while BLE active; stopping BLE first");
-                                self->deinit();
-                            }
+                        expected_generation, [self, provisioning_token]() {
+                            ESP_LOGI(
+                                BLUFI_TAG,
+                                "Provisioning authenticated report requested while BLE active; stopping BLE first");
+                            self->CompleteSuccessfulProvisioningTeardown(
+                                "authenticated_report_ble_release", provisioning_token);
                         });
                     if (current) {
                         self->TryReportProvisioningAuthenticated(
@@ -1684,7 +1691,8 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 // above for the phone, then free the BLE stack before the claim
                 // poll performs HTTPS/TLS on ESP32-S3. Real hardware otherwise
                 // fails inside mbedTLS AES allocation while BLE remains active.
-                Application::GetInstance().Schedule([self, generation]() {
+                const auto provisioning_token = self->CaptureProvisioningSession();
+                Application::GetInstance().Schedule([self, generation, provisioning_token]() {
                     std::unique_lock<std::mutex> continuation_lock(
                         self->provisioning_finalization_mutex_);
                     if (generation != self->setup_generation_.load()) {
@@ -1693,12 +1701,12 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                         continuation_lock.unlock();
                         return;
                     }
-                    self->CancelBleSetupTimeout();
-                    if (self->GetBleState() != Blufi::BleState::kOff) {
-                        ESP_LOGI(BLUFI_TAG, "WiFi provisioned; stopping BLE before claim refresh");
-                        self->deinit();
-                    }
                     continuation_lock.unlock();
+                    ESP_LOGI(BLUFI_TAG, "WiFi provisioned; stopping BLE before claim refresh");
+                    if (!self->CompleteSuccessfulProvisioningTeardown(
+                            "wifi_credentials_connected", provisioning_token)) {
+                        return;
+                    }
                     self->TryReportProvisioningAuthenticated(
                         "wifi_success_after_ble_teardown", generation);
                     Application::GetInstance().SchedulePendingTbotClaimRefresh(generation);

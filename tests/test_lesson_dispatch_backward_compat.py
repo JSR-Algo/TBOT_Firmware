@@ -181,7 +181,6 @@ def test_named_tvideo_template_is_additive_and_never_dispatches_raw_motion():
     build = read("main/CMakeLists.txt")
     assert '#include "lesson_tvideo_template.h"' in handler
     assert 'cJSON_GetObjectItem(body, "templateProjection")' in handler
-    assert 'Obj(body, "templateProjection")' in handler
     assert 'lesson_tvideo::StateMachine' in handler
     assert '"lesson_tvideo_template.cc"' in build
     template_path = read("main/lesson_tvideo_template.cc")

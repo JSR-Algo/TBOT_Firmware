@@ -281,7 +281,7 @@ def test_fw5_authenticated_report_defers_while_ble_active():
     # While BLE is active it must NOT post: it schedules a BLE teardown and
     # re-attempt, then returns early before reaching the xTaskCreate report path.
     guard_idx = body.index("if (ble_state != BleState::kOff)")
-    deinit_idx = body.index("self->deinit();")
+    deinit_idx = body.index("self->CompleteSuccessfulProvisioningTeardown")
     reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(", deinit_idx)
     early_return_idx = body.index("return;", guard_idx)
     report_task_idx = body.index('xTaskCreate(')
@@ -808,7 +808,7 @@ def test_fw19_device_authenticated_reported_only_after_ble_off():
 
     ble_guard = body.index("if (ble_state != BleState::kOff)")
     # Inside the BLE-active branch: cancel timeout, deinit, re-attempt, early return.
-    deinit_idx = body.index("self->deinit();", ble_guard)
+    deinit_idx = body.index("self->CompleteSuccessfulProvisioningTeardown", ble_guard)
     reattempt_idx = body.index("self->TryReportProvisioningAuthenticated(", deinit_idx)
     defer_return = body.index("return;", body.index("ble_state=%s", ble_guard))
 
@@ -1933,7 +1933,8 @@ def test_fw33_boot_reentry_starts_a_new_generation_and_clean_ble_session():
     blufi = read("main/boards/common/blufi.cpp")
     restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
 
-    assert "blufi.RestartForSetup()" in start
+    assert "blufi.TryReserveProvisioningSession()" in start
+    assert "blufi.init();" in start
     assert "CancelBleSetupTimeout();" in restart
     assert "setup_generation_.fetch_add" in restart
     assert "deinit();" in restart
@@ -1970,14 +1971,13 @@ def test_fw36_rapid_boot_wifi_config_entries_are_epoch_scoped_and_single_flight(
     header = read("main/boards/common/wifi_board.h")
     wifi_board = read("main/boards/common/wifi_board.cc")
     enter = _function_body(wifi_board, "void WifiBoard::EnterWifiConfigMode")
+    request = _function_body(wifi_board, "void WifiBoard::RequestWifiConfigMode")
 
-    assert "std::atomic<uint32_t> wifi_config_entry_generation_" in header
-    assert "std::atomic<bool> wifi_config_entry_inflight_" in header
-    assert "wifi_config_entry_generation_.fetch_add(1)" in enter
-    assert "wifi_config_entry_inflight_.compare_exchange_strong" in enter
-    assert "generation != board->wifi_config_entry_generation_.load()" in enter
-    assert "wifi_config_entry_inflight_.store(false)" in enter
-    assert "if (created != pdPASS)" in enter
+    assert "wifi_config_entry_pending_" in header
+    assert "RequestWifiConfigMode(true);" in enter
+    assert "wifi_config_entry_pending_.compare_exchange_strong" in request
+    assert "WiFi config request coalesced while entry is pending" in request
+    assert "wifi_config_entry_pending_.store(false)" in request
 
 
 def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_on_app_task():
@@ -1995,7 +1995,7 @@ def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_
     continuation = helper[helper.index("Application::GetInstance().Schedule") :]
     assert "generation != self->setup_generation_.load()" in continuation
     assert continuation.index("generation != self->setup_generation_.load()") < continuation.index(
-        "self->CancelBleSetupTimeout()"
+        "self->CompleteSuccessfulProvisioningTeardown"
     )
     assert "delete ctx;" in helper
 
@@ -2160,7 +2160,7 @@ def test_fw42_wifi_connect_single_flight_is_atomic_and_teardown_errors_are_prese
     header = read("main/boards/common/blufi.h")
     blufi = read("main/boards/common/blufi.cpp")
     helper = _station_connect_helper_body()
-    deinit = _function_body(blufi, "esp_err_t Blufi::deinit")
+    deinit = _function_body(blufi, "esp_err_t Blufi::_deinit_impl")
     restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
 
     assert "std::atomic<bool> m_wifi_connect_task_started" in header
@@ -2246,7 +2246,7 @@ def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():
     header = read("main/boards/common/blufi.h")
     blufi = read("main/boards/common/blufi.cpp")
     init = _function_body(blufi, "esp_err_t Blufi::init")
-    deinit = _function_body(blufi, "esp_err_t Blufi::deinit")
+    deinit = _function_body(blufi, "esp_err_t Blufi::_deinit_impl")
     restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
 
     assert "std::atomic<bool> teardown_failed_" in header

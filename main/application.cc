@@ -1292,9 +1292,20 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
         return true;
     }
 
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    // Capture the provisioning session before the confirm request so a
+    // success-path teardown can only consume this exact originating token.
+    const auto provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
+#endif
     const ClaimConfirmationResult confirmation_result = ClaimConfirmationReporter::Confirm(
         pending_tbot_claim_,
         pending_tbot_claim_api_url_, pending_tbot_claim_token_);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    if (confirmation_result == ClaimConfirmationResult::Confirmed) {
+        Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
+            "claim_confirmed", provisioning_token);
+    }
+#endif
     return ApplyPendingTbotClaimConfirmationResult(confirmation_result);
 }
 
@@ -2099,7 +2110,7 @@ void Application::StartHeartbeat() {
         }
     }
     if (heartbeat_task_ == nullptr) {
-        if (xTaskCreateWithCaps(&Application::HeartbeatTask, "heartbeat_http", 6144, this,
+        if (xTaskCreateWithCaps(&Application::HeartbeatTask, "heartbeat_http", 8192, this,
                                 tskIDLE_PRIORITY + 1, &heartbeat_task_,
                                 MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
             ESP_LOGE(TAG, "Failed to create persistent heartbeat worker");
