@@ -15,6 +15,7 @@
 #include "protocol.h"
 #include "lesson_handler.h"
 #include "lesson_tvideo_template.h"
+#include "lesson_asset_storage_coordinator.h"
 // US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
 // SetLessonBackground (the new persistent full-screen draw) and LvglAllocatedImage is
 // the same decoded-bytes wrapper the proven mcp_server.cc preview path uses.
@@ -335,6 +336,7 @@ int64_t NowMs() { return static_cast<int64_t>(time(nullptr)) * 1000LL; }
 struct LessonSession {
     std::string assignment_id;
     std::string session_id;
+    std::uint64_t lesson_asset_generation = 0;
     double      assignment_version = -1.0;  // staleness guard (plan §7.2)
     int64_t     last_in_sequence   = 0;     // highest processed S->F sequence (0 = none)
     int64_t     fs_sequence        = 0;     // firmware F->S counter, pre-inc on emit
@@ -975,6 +977,29 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
 // Sub-dispatch the slice subset (lesson_prepare/start/step/stop) and render ONE
 // espTft lesson_step. Additive: never reached for the 8 legacy types, the voice
 // path, or the MCP arm tools.
+bool Application::AbandonLessonStorageSession() {
+    if (g_session.lesson_asset_generation == 0) return false;
+    const std::string assignment_id = g_session.assignment_id;
+    const std::string session_id = g_session.session_id;
+    const std::uint64_t generation = g_session.lesson_asset_generation;
+    if (!LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+            assignment_id, session_id, generation)) {
+        return false;
+    }
+    if (g_session.assignment_id == assignment_id &&
+        g_session.session_id == session_id &&
+        g_session.lesson_asset_generation == generation) {
+        g_session.lesson_asset_generation = 0;
+        g_session.running = false;
+        g_session.paused = false;
+        g_session.prepared = false;
+        ClearTerminalLessonCursor();
+        CancelLessonInteractiveListening();
+        SetLessonRuntimeActive(false);
+    }
+    return true;
+}
+
 void Application::HandleLessonMessage(const cJSON* root) {
     const char* type = Str(root, "type");
     if (type == nullptr) return;  // defensive (transports pre-guard; see DIV note)
@@ -1070,19 +1095,33 @@ void Application::HandleLessonMessage(const cJSON* root) {
             app.AbortSpeaking(kAbortReasonNone);
         }
     };
-    auto end_lesson_after_failure = [this, &show_lesson_failure_display, &abort_speaking_if_needed]() {
+    auto end_lesson_asset_session = []() {
+        if (g_session.lesson_asset_generation == 0) return;
+        if (LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                g_session.assignment_id,
+                g_session.session_id,
+                g_session.lesson_asset_generation)) {
+            g_session.lesson_asset_generation = 0;
+        }
+    };
+    auto end_lesson_after_failure = [this, &show_lesson_failure_display,
+                                     &abort_speaking_if_needed,
+                                     &end_lesson_asset_session]() {
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
+        end_lesson_asset_session();
         ClearTerminalLessonCursor();
         show_lesson_failure_display();
     };
-    auto clear_stale_lesson_for_fresh_prepare = [this]() {
+    auto clear_stale_lesson_for_fresh_prepare =
+        [this, &end_lesson_asset_session](bool release_asset_session) {
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);
+        if (release_asset_session) end_lesson_asset_session();
         ClearTerminalLessonCursor();
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
@@ -1122,6 +1161,18 @@ void Application::HandleLessonMessage(const cJSON* root) {
         !restart_prepare &&
         !prepare_has_newer_assignment_version;
 
+    if (is_prepare && !duplicate_prepare &&
+        LessonAssetStorageCoordinator::GetInstance().HasLessonSession() &&
+        !same_session) {
+        emit(root, "lesson_error",
+             MakeErrorBody("LESSON_SESSION_CONFLICT",
+                           "another lesson session owns lesson assets",
+                           true,
+                           "lesson_session_mismatch"));
+        ESP_LOGW(TAG, "foreign lesson_prepare cannot replace storage owner");
+        return;
+    }
+
     // FW-02: a session-opening lesson_prepare resets the F->S counter + inbound cursor
     // BEFORE the version/profile gate, so that even a REJECTED fresh prepare sources
     // its lesson_error at envelope sequence=1 (the frozen per-session "F->S restarts at
@@ -1132,13 +1183,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // the gate comment below protects) still ride the live continued counter because
     // they do NOT reset here.
     if (is_prepare && !duplicate_prepare) {
+        const std::uint64_t preserved_asset_generation =
+            same_session ? g_session.lesson_asset_generation : 0;
         // lesson_prepare (re)establishes the single active session and resets the
         // F->S counter + the inbound sequence cursor for this assignment.
-        clear_stale_lesson_for_fresh_prepare();
+        clear_stale_lesson_for_fresh_prepare(!same_session);
         ClearLessonImageCache();
         g_session = LessonSession{};
         g_session.assignment_id = assignment_id;
         g_session.session_id = session_id;
+        g_session.lesson_asset_generation = preserved_asset_generation;
     }
 
     // --- session context (per (assignmentId,sessionId)) ---
@@ -1179,6 +1233,47 @@ void Application::HandleLessonMessage(const cJSON* root) {
         emit(root, "lesson_error", eb);
         ESP_LOGW(TAG, "lesson_* rejected: version_ok=%d profile_ok=%d", version_ok, profile_ok);
         return;
+    }
+
+    if (is_prepare) {
+        const auto reservation =
+            LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+                assignment_id, session_id);
+        if (!reservation.acquired) {
+            const char* error_code = "LESSON_RESERVATION_EXHAUSTED";
+            const char* error_message = "lesson storage reservation unavailable";
+            const char* error_reason = "generation_exhausted";
+            bool retryable = false;
+            switch (reservation.code) {
+            case LessonAssetReservationCode::kMutationActive:
+                error_code = "LESSON_ASSET_MUTATION_ACTIVE";
+                error_message = "lesson assets are being updated";
+                error_reason = "asset_mutation_active";
+                retryable = true;
+                break;
+            case LessonAssetReservationCode::kLessonSessionActive:
+            case LessonAssetReservationCode::kLessonSessionMismatch:
+                error_code = "LESSON_SESSION_CONFLICT";
+                error_message = "another lesson session owns lesson assets";
+                error_reason = "lesson_session_mismatch";
+                retryable = true;
+                break;
+            case LessonAssetReservationCode::kInvalidIdentity:
+                error_code = "LESSON_IDENTITY_INVALID";
+                error_message = "lesson identity is invalid";
+                error_reason = "invalid_identity";
+                break;
+            case LessonAssetReservationCode::kGenerationExhausted:
+            case LessonAssetReservationCode::kAcquired:
+                break;
+            }
+            emit(root, "lesson_error",
+                 MakeErrorBody(error_code, error_message, retryable, error_reason));
+            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s",
+                     error_reason);
+            return;
+        }
+        g_session.lesson_asset_generation = reservation.generation;
     }
 
     const bool is_start = strcmp(type, "lesson_start") == 0;
@@ -1364,6 +1459,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.paused = false;
         g_session.prepared = false;
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
+        end_lesson_asset_session();
         ClearTerminalLessonCursor();
         // Return the robot display to its realtime face surface (protocol §4.6):
         // clear persistent lesson layers and make the terminal reason perceivable.
@@ -1691,6 +1787,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
+        end_lesson_asset_session();
         ClearTerminalLessonCursor();
     }
 

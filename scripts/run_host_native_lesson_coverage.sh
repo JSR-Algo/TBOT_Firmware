@@ -48,9 +48,12 @@ mkdir -p "${BUILD_DIR}/src"
 # first for quoted includes). The .cc is copied byte-for-byte, never modified, so the
 # coverage we measure is of the REAL source. gcovr maps it back via the original path.
 cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
+cp main/lesson_asset_storage_coordinator.cc \
+    "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc"
 
-"${CXX}" -std=c++17 -O0 -g --coverage \
+"${CXX}" -std=c++17 -O0 -g --coverage -pthread -Wno-unused-parameter \
     -DTBOT_HOST_NATIVE_COVERAGE \
+    -DTBOT_LESSON_ASSET_COORDINATOR_TESTING \
     -Dfread=HostLessonFread \
     -Itests/native_stubs_lesson \
     -I"${CJSON_DIR}" \
@@ -58,6 +61,8 @@ cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
     tests/native/lesson_handler_host_test.cc \
     "${BUILD_DIR}/src/lesson_handler.cc" \
     main/lesson_tvideo_template.cc \
+    "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \
+    main/sd_fat_session_guard.cc \
     "${CJSON_DIR}/cJSON.c" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 

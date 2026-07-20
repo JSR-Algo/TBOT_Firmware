@@ -71,6 +71,17 @@ static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 static constexpr UBaseType_t kLessonMessageQueueDepth = 16;
+
+enum class LessonQueueItemKind : uint8_t {
+    kFrame,
+    kAbandonTransport,
+};
+
+struct LessonQueueItem {
+    LessonQueueItemKind kind = LessonQueueItemKind::kFrame;
+    char* payload = nullptr;
+    std::uint64_t transport_epoch = 0;
+};
 static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
 
 // TBOT claim poll (C4): cadence 10s. The backend's 5-minute cap applies only
@@ -140,9 +151,9 @@ Application::~Application() {
         lesson_message_task_handle_ = nullptr;
     }
     if (lesson_message_queue_ != nullptr) {
-        char* payload = nullptr;
-        while (xQueueReceive(lesson_message_queue_, &payload, 0) == pdTRUE) {
-            if (payload != nullptr) cJSON_free(payload);
+        LessonQueueItem item;
+        while (xQueueReceive(lesson_message_queue_, &item, 0) == pdTRUE) {
+            if (item.payload != nullptr) cJSON_free(item.payload);
         }
         vQueueDelete(lesson_message_queue_);
         lesson_message_queue_ = nullptr;
@@ -150,7 +161,10 @@ Application::~Application() {
     vEventGroupDelete(event_group_);
 }
 
-void Application::EnqueueLessonMessage(const cJSON* root) {
+void Application::EnqueueLessonMessage(
+    const cJSON* root,
+    std::uint64_t transport_epoch
+) {
     const cJSON* type = cJSON_GetObjectItem(root, "type");
     const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
     const char* type_value = cJSON_IsString(type) ? type->valuestring : "(missing)";
@@ -169,7 +183,13 @@ void Application::EnqueueLessonMessage(const cJSON* root) {
         return;
     }
 
-    if (xQueueSend(lesson_message_queue_, &payload, 0) != pdTRUE) {
+    LessonQueueItem item{
+        LessonQueueItemKind::kFrame,
+        payload,
+        transport_epoch,
+    };
+    if (uxQueueMessagesWaiting(lesson_message_queue_) >= kLessonMessageQueueDepth ||
+        xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
         ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d",
                  type_value, sequence_value);
         cJSON_free(payload);
@@ -179,14 +199,41 @@ void Application::EnqueueLessonMessage(const cJSON* root) {
     }
 }
 
+void Application::RequestLessonStorageAbandonment() {
+    if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) return;
+    bool expected = false;
+    if (!lesson_abandonment_pending_.compare_exchange_strong(expected, true)) return;
+    LessonQueueItem item{
+        LessonQueueItemKind::kAbandonTransport,
+        nullptr,
+        lesson_transport_epoch_gate_.PublishTerminalEpoch(),
+    };
+    if (xQueueSendToFront(lesson_message_queue_, &item, 0) != pdTRUE) {
+        lesson_abandonment_pending_.store(false);
+        ESP_LOGE(TAG, "lesson abandonment control enqueue failed");
+    }
+}
+
 void Application::LessonMessageTask(void* arg) {
     auto* self = static_cast<Application*>(arg);
-    char* payload = nullptr;
+    LessonQueueItem item;
     for (;;) {
-        if (xQueueReceive(self->lesson_message_queue_, &payload, portMAX_DELAY) != pdTRUE) {
+        if (xQueueReceive(self->lesson_message_queue_, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        cJSON* root = cJSON_Parse(payload);
+        if (item.kind == LessonQueueItemKind::kAbandonTransport) {
+            if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(item.transport_epoch)) {
+                self->AbandonLessonStorageSession();
+            }
+            self->lesson_abandonment_pending_.store(false);
+            continue;
+        }
+        if (!self->lesson_transport_epoch_gate_.WorkerAcceptFrame(item.transport_epoch)) {
+            cJSON_free(item.payload);
+            item.payload = nullptr;
+            continue;
+        }
+        cJSON* root = cJSON_Parse(item.payload);
         if (root != nullptr) {
             const cJSON* type = cJSON_GetObjectItem(root, "type");
             const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
@@ -198,8 +245,8 @@ void Application::LessonMessageTask(void* arg) {
         } else {
             ESP_LOGW(TAG, "lesson_* dropped: worker parse failed");
         }
-        cJSON_free(payload);
-        payload = nullptr;
+        cJSON_free(item.payload);
+        item.payload = nullptr;
     }
 }
 
@@ -208,6 +255,9 @@ bool Application::SetDeviceState(DeviceState state) {
 }
 
 void Application::Initialize() {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+    ESP_LOGW(TAG, "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image");
+#endif
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
 
@@ -643,6 +693,7 @@ void Application::HandleNetworkConnectedEvent() {
 }
 
 void Application::HandleNetworkDisconnectedEvent() {
+    RequestLessonStorageAbandonment();
     // H2: network is gone -> stop the heartbeat (no live online session to report
     // and no point blocking the main task on an unreachable backend). It restarts
     // only from OnConnected.
@@ -2593,7 +2644,8 @@ void Application::InitializeProtocol() {
 
     if (is_websocket_protocol && lesson_message_queue_ == nullptr &&
         lesson_message_task_handle_ == nullptr) {
-        lesson_message_queue_ = xQueueCreate(kLessonMessageQueueDepth, sizeof(char*));
+        lesson_message_queue_ = xQueueCreate(
+            kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem));
         if (lesson_message_queue_ == nullptr) {
             ESP_LOGE(TAG, "lesson_worker queue create failed");
         } else if (xTaskCreateWithCaps(&Application::LessonMessageTask, "lesson_worker",
@@ -2607,6 +2659,7 @@ void Application::InitializeProtocol() {
         }
     }
 
+    Protocol* callback_protocol = protocol_.get();
     protocol_->OnConnected([this]() {
         backend_offline_.store(false);  // healthy session -> ONLINE, not retry
         DismissAlert();
@@ -2624,7 +2677,8 @@ void Application::InitializeProtocol() {
         DispatchDeviceHeartbeat();
     });
 
-    protocol_->OnNetworkError([this](const std::string& message) {
+    protocol_->OnNetworkError([this, callback_protocol](const std::string& message) {
+        if (protocol_.get() != callback_protocol) return;
         backend_offline_.store(true);   // -> OFFLINE_RETRY copy via the mapper
         // H2: the session is down -> stop the heartbeat so it cannot keep POSTing
         // (and blocking the main task) against a dead backend. It restarts only
@@ -2681,11 +2735,12 @@ void Application::InitializeProtocol() {
         }
     });
     
-    protocol_->OnAudioChannelClosed([this, &board]() {
+    protocol_->OnAudioChannelClosed([this, &board, callback_protocol]() {
         tts_audio_accepting_.store(false);
         StopHeartbeat();
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        Schedule([this]() {
+        Schedule([this, callback_protocol]() {
+            if (protocol_.get() != callback_protocol) return;
             auto display = Board::GetInstance().GetDisplay();
             if (!lesson_runtime_active_.load()) {
                 display->SetChatMessage("system", "");
@@ -2727,6 +2782,7 @@ void Application::InitializeProtocol() {
             if (online_intent_.load()) {
                 if (lesson_runtime_active_.load()) {
                     ESP_LOGW(TAG, "lesson ws dropped unexpected -> suppress generic reconnect");
+                    RequestLessonStorageAbandonment();
                     online_intent_.store(false);
                     lesson_interactive_listen_generation_.fetch_add(1);
                     lesson_interactive_listen_pending_.store(false);
@@ -2743,11 +2799,16 @@ void Application::InitializeProtocol() {
                 display->SetEmotion("thinking");
                 audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
                 ScheduleReconnect(GetDefaultListeningMode(), false);
+                return;
+            }
+            if (lesson_runtime_active_.load()) {
+                RequestLessonStorageAbandonment();
             }
         });
     });
     
-    protocol_->OnIncomingJson([this, display](const cJSON* root) {
+    protocol_->OnIncomingJson(
+        [this, display](const cJSON* root, std::uint64_t callback_transport_epoch) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
         // US-006 Slice-01 (DIV-FW-NULLDEREF): guard the type deref on the path the
@@ -2996,11 +3057,11 @@ void Application::InitializeProtocol() {
             // ABOVE the unknown-type no-op so un-upgraded firmware keeps dropping
             // lesson_* silently (backward-compat). Queue it so HTTP/TLS image fetch
             // and decode never run on the WebSocket receive callback / lwIP stack.
-            EnqueueLessonMessage(root);
+            EnqueueLessonMessage(root, callback_transport_epoch);
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }
-    });
+        });
     
     // WebSocket Start() opens the realtime audio channel. Unclaimed devices keep
     // it closed until wake/button so BLE claim and local wake-word setup own the
@@ -3579,6 +3640,8 @@ void Application::OpenChannelTask(void* arg) {
     for (int attempt = 1;
          self->protocol_ && !self->protocol_->IsAudioChannelOpened() && attempt <= max_attempts;
          ++attempt) {
+        self->protocol_->SetIncomingJsonTransportEpoch(
+            self->lesson_transport_epoch_gate_.PublishedEpoch());
         ok = self->protocol_->OpenAudioChannel();
         if (ok) {
             break;
@@ -3785,6 +3848,7 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
     }
     if (lesson_runtime_active_.load()) {
         ESP_LOGW(TAG, "lesson connect watchdog timeout -> suppress generic reconnect");
+        RequestLessonStorageAbandonment();
         backend_offline_.store(true);
         online_intent_.store(false);
         connect_attempt_active_.store(false);
@@ -4845,6 +4909,7 @@ void Application::CloseAudioChannelByIntent() {
 }
 
 void Application::DoResetProtocol() {
+    RequestLessonStorageAbandonment();
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         CloseAudioChannelByIntent();
     }

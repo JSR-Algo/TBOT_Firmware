@@ -21,6 +21,8 @@
 #include "jpeg_to_image.h"
 #include "esp_heap_caps.h"
 #include "lesson_handler.h"
+#include "lesson_asset_storage_coordinator.h"
+#include "lesson_transport_epoch_gate.h"
 
 #include <cJSON.h>
 
@@ -169,7 +171,10 @@ void Handle(const std::string& json) {
     cJSON_Delete(root);
 }
 
-void ResetObservable() { App().HostReset(); }
+void ResetObservable() {
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    App().HostReset();
+}
 
 // Per-test unique session identity. The renderer's g_session is FILE-STATIC and cannot be
 // reset from the test, so each test bumps these ids; a fresh assignmentId makes the
@@ -727,7 +732,6 @@ void test_prepare_reject_clears_stale_lesson_scene() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old valid step rendered prompt before rejected prepare");
 
-    FreshSession();
     Handle(PrepareFrame(1, ",\"criticalAssets\":[{\"key\":\"k1\"}],"
                           "\"assetPack\":{\"cacheKey\":\"w01-d01/v3-abcdef1234567890\",\"assets\":["
                           "{\"key\":\"k1\",\"state\":\"READY\",\"checksumOk\":true,"
@@ -797,7 +801,6 @@ void test_fresh_prepare_contract_reject_clears_stale_lesson_scene() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old valid step rendered prompt before rejected fresh prepare");
 
-    FreshSession();
     Handle(std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":1,\"body\":{\"profile\":\"oledTiny\"}}");
@@ -954,7 +957,6 @@ void test_fresh_prepare_clears_stale_active_lesson_before_start() {
             "old active lesson rendered child-turn prompt");
 
     const int cancel_after_old_step = App().cancel_listen_calls;
-    FreshSession();
     Handle(PrepareFrame(1, ",\"assignmentVersion\":2"));
 
     require(FrameType(Sent().size() - 1) == "lesson_ack",
@@ -1142,7 +1144,8 @@ void test_start_clears_stale_lesson_scene_before_first_step() {
     require(!disp.lesson_captions.empty() && disp.lesson_captions.back() == "Old prompt",
             "old lesson rendered prompt caption");
 
-    OpenSession();
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":2"));
+    Handle(StartFrame(2));
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "new lesson start clears stale background before first step");
     require(!disp.object_calls.empty() && disp.object_calls.back() == false,
@@ -3534,6 +3537,182 @@ void test_protocol_null_send_skip() {
     App().HostReset();  // restore protocol_ for any later test
 }
 
+void test_storage_mutation_blocks_prepare_before_session_publication() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    auto mutation =
+        LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation), "fixture owns storage mutation");
+
+    Handle(PrepareFrame(1));
+
+    require(Sent().size() == 1 && FrameType(0) == "lesson_error",
+            "mutation-blocked prepare emits one terminal error");
+    require(FrameBodyStr(0, nullptr, "code") == "LESSON_ASSET_MUTATION_ACTIVE",
+            "mutation-blocked prepare reports exact code");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "mutation-blocked prepare publishes no lesson reservation");
+}
+
+void test_storage_reservation_is_retained_until_terminal_frame() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+
+    Handle(PrepareFrame(1));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "prepare retains exact lesson storage reservation");
+    Handle(StartFrame(2));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "start preserves lesson storage reservation");
+    Handle(PauseFrame(3));
+    Handle(ResumeFrame(4));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "pause and resume preserve lesson storage reservation");
+    Handle(StopFrame(5));
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "terminal stop releases exact lesson storage reservation");
+}
+
+void test_foreign_prepare_cannot_replace_active_storage_owner() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    const std::string owner_assignment = AID();
+    const std::string owner_session = SID();
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "owner lesson reservation is active");
+
+    FreshSession();
+    Handle(PrepareFrame(1));
+
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "foreign prepare is rejected");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") ==
+                "LESSON_SESSION_CONFLICT",
+            "foreign prepare reports exact reservation conflict");
+    const auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        owner_assignment, owner_session);
+    require(owner.acquired && owner.idempotent,
+            "foreign prepare preserves exact existing reservation owner");
+}
+
+void RequireSameOwnerFailedReprepareReleasesStorage(
+    int failure_kind,
+    const char* expected_code,
+    const char* label
+) {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    Handle(PauseFrame(3));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "failed-reprepare fixture owns session before retry");
+    std::string failed_prepare;
+    if (failure_kind == 0) {
+        failed_prepare =
+            std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"bad\",") +
+            "\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() +
+            "\",\"sequence\":1,\"body\":{\"profile\":\"" +
+            kLessonProfileEspTft + "\"}}";
+    } else if (failure_kind == 1) {
+        failed_prepare =
+            std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() +
+            "\",\"sessionId\":\"" + SID() +
+            "\",\"sequence\":1,\"body\":{\"profile\":\"oledTiny\"}}";
+    } else {
+        failed_prepare = PrepareFrame(1, ",\"assetPack\":{}");
+    }
+    Handle(failed_prepare);
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "failed reprepare emits terminal error");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == expected_code,
+            "failed reprepare emits exact validation code");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "failed reprepare releases exact owner generation");
+
+    FreshSession();
+    Handle(PrepareFrame(1));
+    require(FrameType(Sent().size() - 1) == "lesson_ack",
+            "foreign prepare proceeds after failed owner reprepare");
+    Handle(StopFrame(2));
+    auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation), "mutation proceeds after replacement stop");
+    (void)label;
+}
+
+void test_same_owner_failed_reprepare_releases_storage_generation() {
+    RequireSameOwnerFailedReprepareReleasesStorage(
+        0, "LESSON_VERSION_UNSUPPORTED", "bad protocol reprepare releases owner");
+    RequireSameOwnerFailedReprepareReleasesStorage(
+        1, "LESSON_VERSION_UNSUPPORTED", "bad profile reprepare releases owner");
+    RequireSameOwnerFailedReprepareReleasesStorage(
+        2,
+        "ASSET_PACK_NOT_READY",
+        "bad asset pack reprepare releases owner");
+}
+
+void test_transport_abandonment_is_exact_idempotent_and_token_safe() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    const std::string stale_terminal = ErrorFrame(3);
+    require(App().AbandonLessonStorageSession(),
+            "first transport abandonment releases exact owner");
+    require(!App().AbandonLessonStorageSession(),
+            "duplicate transport abandonment is idempotent");
+
+    FreshSession();
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "foreign session proceeds after transport abandonment");
+    Handle(stale_terminal);
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "stale terminal frame cannot release replacement owner");
+    Handle(StopFrame(3));
+    auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation),
+            "mutation proceeds after replacement owner terminates");
+}
+
+void test_watchdog_terminal_control_fences_stale_frame_and_releases_owner() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1));
+    Handle(StartFrame(2));
+
+    LessonTransportEpochGate gate;
+    const auto abandoned_epoch = gate.PublishedEpoch();
+    const auto terminal_epoch = gate.PublishTerminalEpoch();
+    require(gate.WorkerApplyTerminal(terminal_epoch),
+            "watchdog terminal control advances worker epoch");
+    require(App().AbandonLessonStorageSession(),
+            "watchdog terminal control releases exact active reservation");
+    require(!gate.WorkerAcceptFrame(abandoned_epoch),
+            "stale pre-watchdog lesson frame remains fenced");
+
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation),
+                "storage mutation proceeds after watchdog abandonment");
+    }
+    FreshSession();
+    Handle(PrepareFrame(1));
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "foreign prepare proceeds after watchdog abandonment");
+    Handle(StopFrame(2));
+}
+
 }  // namespace
 
 int main() {
@@ -3616,6 +3795,12 @@ int main() {
     test_flashed_poster_without_draw_is_not_drawn();
     test_remaining_reachable_branches();
     test_protocol_null_send_skip();
+    test_storage_mutation_blocks_prepare_before_session_publication();
+    test_storage_reservation_is_retained_until_terminal_frame();
+    test_foreign_prepare_cannot_replace_active_storage_owner();
+    test_same_owner_failed_reprepare_releases_storage_generation();
+    test_transport_abandonment_is_exact_idempotent_and_token_safe();
+    test_watchdog_terminal_control_fences_stale_frame_and_releases_owner();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }

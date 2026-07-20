@@ -2,6 +2,8 @@
 #define PROTOCOL_H
 
 #include <cJSON.h>
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <functional>
 #include <chrono>
@@ -75,7 +77,9 @@ public:
     }
 
     void OnIncomingAudio(std::function<void(std::unique_ptr<AudioStreamPacket> packet)> callback);
-    void OnIncomingJson(std::function<void(const cJSON* root)> callback);
+    void OnIncomingJson(
+        std::function<void(const cJSON* root, std::uint64_t transport_epoch)> callback);
+    void SetIncomingJsonTransportEpoch(std::uint64_t transport_epoch);
     void OnAudioChannelOpened(std::function<void()> callback);
     void OnAudioChannelClosed(std::function<void()> callback);
     void OnNetworkError(std::function<void(const std::string& message)> callback);
@@ -98,7 +102,9 @@ public:
     bool SendLessonFrame(const std::string& frame);
 
 protected:
-    std::function<void(const cJSON* root)> on_incoming_json_;
+    std::uint64_t IncomingJsonTransportEpoch() const;
+    std::function<void(const cJSON* root, std::uint64_t transport_epoch)> on_incoming_json_;
+    std::atomic<std::uint64_t> incoming_json_transport_epoch_{1};
     std::function<void(std::unique_ptr<AudioStreamPacket> packet)> on_incoming_audio_;
     std::function<void()> on_audio_channel_opened_;
     std::function<void()> on_audio_channel_closed_;
@@ -118,4 +124,3 @@ protected:
 };
 
 #endif // PROTOCOL_H
-

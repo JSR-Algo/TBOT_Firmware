@@ -4,6 +4,8 @@
 #include "application.h"
 #include "settings.h"
 #include "lesson_handler.h"  // US-006 Slice-01: kLessonRendererName (D-CAP-FLAG)
+#include "json_payload_safety.h"
+#include "esp_build_identity.h"
 
 #include <cstring>
 #include <cJSON.h>
@@ -182,6 +184,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     error_occurred_ = false;
     last_incoming_time_ = std::chrono::steady_clock::now();
+    const std::uint64_t callback_transport_epoch = IncomingJsonTransportEpoch();
 
     auto network = Board::GetInstance().GetNetwork();
     websocket_ = network->CreateWebSocket(1);
@@ -197,6 +200,15 @@ bool WebsocketProtocol::OpenAudioChannel() {
         }
     }
     websocket_->SetHeader("protocol-version", std::to_string(version_).c_str());
+    EspBuildIdentity build_identity;
+    std::string build_identity_error;
+    if (ReadRunningEspBuildIdentity(&build_identity, &build_identity_error)) {
+        for (const auto& header : EspBuildIdentityHeaders(build_identity)) {
+            websocket_->SetHeader(header.first.c_str(), header.second.c_str());
+        }
+    } else {
+        ESP_LOGW(TAG, "Build identity unavailable reason=%s", build_identity_error.c_str());
+    }
     std::string traceparent = NewTraceParentHeader();
     websocket_->SetHeader("traceparent", traceparent.c_str());
     if (!token.empty()) {
@@ -209,7 +221,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     ESP_LOGI(TAG, "Websocket auth identity: device_id_empty=%d client_id_empty=%d token_empty=%d",
              device_id.empty(), client_id.empty(), token.empty());
 
-    websocket_->OnData([this](const char* data, size_t len, bool binary) {
+    websocket_->OnData([this, callback_transport_epoch](const char* data, size_t len, bool binary) {
         if (binary) {
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
@@ -271,6 +283,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
             }
         } else {
             // Parse JSON data
+            if (JsonHasForbiddenDecodedNull(data, len)) {
+                ESP_LOGW(TAG, "Rejected JSON message containing decoded NUL");
+                return;
+            }
             auto root = cJSON_ParseWithLength(data, len);
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
@@ -285,7 +301,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
                                  (unsigned)len);
                     }
                     if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root);
+                        on_incoming_json_(root, callback_transport_epoch);
                     }
                 }
             } else {

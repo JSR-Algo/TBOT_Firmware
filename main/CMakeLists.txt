@@ -38,14 +38,34 @@ set(SOURCES "audio/audio_codec.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
+            "json_payload_safety.cc"
+            "lesson_asset_cache_evict.cc"
+            "lesson_asset_download_staging.cc"
+            "lesson_asset_http_transfer.cc"
+            "lesson_asset_sample_url_policy.cc"
+            "lesson_asset_storage_coordinator.cc"
+            "lesson_asset_sync_path_policy.cc"
+            "lesson_asset_sync_attestation.cc"
             "lesson_handler.cc"
             "lesson_tvideo_template.cc"
+            "esp_build_identity.cc"
             "ota.cc"
             "settings.cc"
             "device_state_machine.cc"
             "assets.cc"
+            "sd_fat_session_guard.cc"
             "main.cc"
             )
+
+if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
+    list(APPEND SOURCES
+        "physical_sd_identity.cc"
+        "lesson_storage_hil_controller.cc"
+        "lesson_storage_hil_hooks.cc"
+        "lesson_storage_hil_fixture.cc"
+        "lesson_storage_hil_mcp_tools.cc"
+    )
+endif()
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 

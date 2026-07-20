@@ -3,6 +3,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include "lesson_transport_epoch_gate.h"
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <esp_timer.h>
@@ -280,6 +281,8 @@ private:
     std::string deferred_wake_word_;
     QueueHandle_t lesson_message_queue_ = nullptr;
     TaskHandle_t lesson_message_task_handle_ = nullptr;
+    LessonTransportEpochGate lesson_transport_epoch_gate_;
+    std::atomic<bool> lesson_abandonment_pending_{false};
 
     // Set on a backend/ws error, cleared on (re)connect. Lets the connect mapper
     // tell ONLINE apart from OFFLINE_RETRY ("Server unavailable. Retrying...").
@@ -431,12 +434,14 @@ private:
     // Current BLE setup sub-state for the connect mapper (Off in AP/other builds).
     TbotBleSubstate GetBleSubstate() const;
     bool HandleRobotActionMessage(const cJSON* root);
-    void EnqueueLessonMessage(const cJSON* root);
+    void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);
+    void RequestLessonStorageAbandonment();
     static void LessonMessageTask(void* arg);
     // US-006 Slice-01 (S10): additive lesson_* renderer entry — see lesson_handler.cc.
     // Reached only via the additive `lesson_` branch in OnIncomingJson, above the
     // unknown-type no-op. Never touches the 8 legacy types / voice / MCP arm tools.
     void HandleLessonMessage(const cJSON* root);
+    bool AbandonLessonStorageSession();
     void HandleEmotionGesture(const char* emotion);
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);

@@ -293,6 +293,21 @@ def test_lesson_runtime_reset_protocol_ignored_before_scheduling_teardown():
     assert "reset_pending_" not in guard
     assert "DoResetProtocol" not in guard
 
+
+def test_protocol_and_network_resets_abandon_exact_lesson_asset_session():
+    app_cc = read("main/application.cc")
+    disconnect_start = app_cc.index("void Application::HandleNetworkDisconnectedEvent()")
+    disconnect_end = app_cc.index("void Application::HandleActivationDoneEvent()", disconnect_start)
+    reset_start = app_cc.index("void Application::DoResetProtocol()")
+    reset_end = app_cc.index("void Application::ResetProtocol()", reset_start)
+
+    assert "RequestLessonStorageAbandonment();" in app_cc[disconnect_start:disconnect_end]
+    assert "RequestLessonStorageAbandonment();" in app_cc[reset_start:reset_end]
+    assert "AbandonLessonStorageSession();" not in app_cc[disconnect_start:disconnect_end]
+    assert "AbandonLessonStorageSession();" not in app_cc[reset_start:reset_end]
+    assert "ForceEndLessonSession" not in app_cc[disconnect_start:disconnect_end]
+    assert "ForceEndLessonSession" not in app_cc[reset_start:reset_end]
+
 def test_lesson_runtime_suppresses_low_battery_popup_and_sound_before_interrupting_scene():
     lvgl_cc = read("main/display/lvgl_display/lvgl_display.cc")
     app_h = read("main/application.h")
@@ -2066,7 +2081,8 @@ def test_firmware_exposes_generic_lesson_asset_pack_sync_to_sd():
     assert '"url"' in mcp_server
     assert '"sha256"' in mcp_server
     assert "VerifyLessonAssetSha256" in mcp_server
-    assert "NormalizeLessonAssetSdPath" in mcp_server
+    assert "ValidateLessonAssetSyncPath" in mcp_server
+    assert "ValidateLessonAssetSyncPackOrThrow" in mcp_server
     assert '"downloadedCount"' in mcp_server
     assert '"skippedCount"' in mcp_server
     assert '"failedCount"' in mcp_server
@@ -2088,17 +2104,17 @@ def test_lesson_asset_pack_sync_http_download_does_not_starve_main_watchdog():
 def test_sample_lesson_asset_sync_does_not_mkdir_sd_mount_point():
     mcp_server = read("main/mcp_server.cc")
 
-    ensure_start = mcp_server.index("void EnsureSampleLessonAssetDir()")
+    ensure_start = mcp_server.index("void EnsureSampleLessonAssetDir(")
     ensure_end = mcp_server.index("bool DownloadLessonAssetToFile", ensure_start)
     ensure_body = mcp_server[ensure_start:ensure_end]
 
-    assert 'EnsureDirOrThrow("/sdcard/tbot")' in ensure_body
-    assert 'EnsureDirOrThrow("/sdcard/tbot/lesson-assets")' in ensure_body
+    assert 'EnsureDirOrThrow(mutation, "/sdcard/tbot")' in ensure_body
+    assert 'EnsureDirOrThrow(mutation, "/sdcard/tbot/lesson-assets")' in ensure_body
     assert 'DirectoryExists("/sdcard")' not in ensure_body
     assert 'EnsureDir("/sdcard")' not in ensure_body
-    assert "failed to create SD directory" in mcp_server
+    assert "lesson asset storage write failed" in mcp_server
     assert "if (!EnsureSampleLessonAssetDir())" not in mcp_server
-    assert "EnsureSampleLessonAssetDir();" in mcp_server
+    assert "EnsureSampleLessonAssetDir(mutation);" in mcp_server
 
 def test_start_listening_rearms_when_already_listening():
     app_cc = read("main/application.cc")

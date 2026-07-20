@@ -5,8 +5,18 @@
 #include "button.h"
 #include "config.h"
 #include "led/single_led.h"
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+#include "physical_sd_identity.h"
+#include "sd_fat_session_guard.h"
+#include <diskio_impl.h>
+#include <diskio_sdmmc.h>
+#include <ff.h>
+#endif
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdint>
+#include <optional>
 #include <vector>
 
 #include <driver/gpio.h>
@@ -661,6 +671,10 @@ private:
     }
 
     void InitializeSdCard() {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+        auto& sd_guard = tbot::SdFatSessionGuard::GetInstance();
+        auto sd_session = sd_guard.Acquire();
+#endif
         sdmmc_host_t host = SDMMC_HOST_DEFAULT();
         sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
         slot_config.width = 4;
@@ -681,10 +695,62 @@ private:
         esp_err_t ret = esp_vfs_fat_sdmmc_mount(SDCARD_MOUNT_POINT, &host, &slot_config,
                                                 &mount_config, &card);
         if (ret != ESP_OK) {
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+            sd_guard.RecordUnmounted(sd_session);
+            tbot::PhysicalSdIdentityRegistry::GetInstance().RecordUnavailable();
+#endif
             ESP_LOGW(TAG, "Failed to mount SD card at %s: %s",
                      SDCARD_MOUNT_POINT, esp_err_to_name(ret));
             return;
         }
+#if CONFIG_TBOT_HIL_STORAGE_FAULTS
+        auto& identity_registry = tbot::PhysicalSdIdentityRegistry::GetInstance();
+        const std::uint64_t mount_generation = sd_guard.RecordMounted(sd_session);
+        bool identity_ready = false;
+        FATFS* fs = nullptr;
+        DWORD free_clusters = 0;
+        const BYTE pdrv = card == nullptr ? FF_DRV_NOT_USED
+                                          : ff_diskio_get_pdrv_card(card);
+        char drive[4]{};
+        if (mount_generation != 0 && pdrv != FF_DRV_NOT_USED && pdrv <= 9 &&
+            card->csd.sector_size >= 512 &&
+            std::snprintf(
+                drive, sizeof(drive), "%u:", static_cast<unsigned>(pdrv)) > 0 &&
+            f_getfree(drive, &free_clusters, &fs) == FR_OK && fs != nullptr &&
+            fs->fs_type != 0) {
+            const LBA_t volume_base = fs->volbase;
+            const auto volume_probe = [card, volume_base]()
+                -> std::optional<tbot::SdFatVolumeMetadata> {
+                std::vector<std::uint8_t> boot_sector(
+                    static_cast<std::size_t>(card->csd.sector_size));
+                if (sdmmc_read_sectors(
+                        card, boot_sector.data(), volume_base, 1) != ESP_OK) {
+                    return std::nullopt;
+                }
+                const auto volume = tbot::ParseFatVolumeIdentity(
+                    boot_sector.data(), boot_sector.size(),
+                    static_cast<std::uint32_t>(card->csd.sector_size));
+                if (!volume.has_value()) {
+                    return std::nullopt;
+                }
+                return tbot::SdFatVolumeMetadata{volume->serial, volume->label};
+            };
+            const bool probes_installed = sd_guard.SetPresenceProbe(
+                    sd_session,
+                    [card]() {
+                        return card != nullptr && sdmmc_get_status(card) == ESP_OK;
+                    }) &&
+                sd_guard.SetVolumeProbe(sd_session, volume_probe);
+            const auto volume = probes_installed ? volume_probe() : std::nullopt;
+            identity_ready = volume.has_value() &&
+                identity_registry.ObserveMountedCard(
+                    card, volume->serial, volume->label, mount_generation);
+        }
+        if (!identity_ready) {
+            sd_guard.RecordUnmounted(sd_session);
+            identity_registry.RecordUnavailable(mount_generation);
+        }
+#endif
         ESP_LOGI(TAG, "SD card mounted at %s", SDCARD_MOUNT_POINT);
         sdmmc_card_print_info(stdout, card);
     }
