@@ -72,7 +72,7 @@ def test_pack_activation_uses_sibling_tmp_fsync_rename_and_small_json_contract()
     assert "fsync(descriptor)" in source
     assert "RenamePath(active_path, backup_path)" in source
     assert "RenamePath(tmp_path, active_path)" in source
-    assert "RemoveFileIfPresent(backup_path" in source
+    assert "RemoveActivePointerBackupAfterEviction(backup_path" in source
     assert 'lessonId' in source
     assert 'cacheKey' in source
     assert 'manifestChecksum' in source
@@ -87,7 +87,7 @@ def test_pack_activation_evicts_only_prior_same_lesson_and_reports_retryable_fai
     assert "previous_evict_retryable" in source
     assert "critical_assets_unverified" in source
     assert "activation.activated = true" in source
-    retryable = source.index("previous_evict_retryable")
+    retryable = source.rindex("previous_evict_retryable")
     rollback_window = source[retryable:]
     assert 'WriteActivePointerAtomically(' not in rollback_window
 

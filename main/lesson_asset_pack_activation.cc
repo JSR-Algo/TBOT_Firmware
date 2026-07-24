@@ -98,6 +98,17 @@ void RemoveFileIfPresent(const std::string& path, const char* error_message) {
     }
 }
 
+bool RemoveActivePointerBackupAfterEviction(const std::string& backup_path) {
+#if defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING) && !defined(ESP_PLATFORM)
+    if (g_activation_fs_failure ==
+        LessonAssetPackActivationFsTestFailure::kBackupCleanupRemove) {
+        errno = EIO;
+        return false;
+    }
+#endif
+    return std::remove(backup_path.c_str()) == 0 || errno == ENOENT;
+}
+
 int RenamePath(const std::string& from, const std::string& to) {
 #if defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING) && !defined(ESP_PLATFORM)
     if (g_activation_fs_failure ==
@@ -180,6 +191,27 @@ std::string ExtractFlatJsonString(
     return body.substr(value_start, end - value_start);
 }
 
+bool PreviousKeyBelongsToLesson(
+    const std::string& previous_cache_key,
+    const std::string& lesson_id
+);
+
+std::string PendingBackupCacheKey(
+    const std::string& lesson_id,
+    const std::string& backup_path
+) {
+    if (!IsRegularFile(backup_path)) {
+        return std::string();
+    }
+    const std::string backup_body = ReadTextFileIfPresent(backup_path);
+    const std::string backup_cache_key =
+        ExtractFlatJsonString(backup_body, "cacheKey");
+    if (!PreviousKeyBelongsToLesson(backup_cache_key, lesson_id)) {
+        return std::string();
+    }
+    return backup_cache_key;
+}
+
 void RecoverInterruptedActivePointerReplacement(const std::string& lesson_id) {
     EnsureActivationDirectories(lesson_id);
     const std::string active_path = ActivePointerPath(lesson_id);
@@ -197,7 +229,6 @@ void RecoverInterruptedActivePointerReplacement(const std::string& lesson_id) {
 
     if (active_exists) {
         RemoveFileIfPresent(tmp_path, "active pointer stale tmp cleanup failed");
-        RemoveFileIfPresent(backup_path, "active pointer stale backup cleanup failed");
         return;
     }
 
@@ -230,7 +261,12 @@ void WriteActivePointerAtomically(
         throw std::runtime_error("active pointer path invalid");
     }
     RemoveFileIfPresent(tmp_path, "active pointer stale tmp cleanup failed");
-    RemoveFileIfPresent(backup_path, "active pointer stale backup cleanup failed");
+    if (IsRegularFile(backup_path)) {
+        throw std::runtime_error("active pointer pending eviction");
+    }
+    if (!PathIsMissing(backup_path)) {
+        throw std::runtime_error("active pointer backup state invalid");
+    }
 
     FILE* file = std::fopen(tmp_path.c_str(), "wb");
     if (file == nullptr) {
@@ -275,7 +311,6 @@ void WriteActivePointerAtomically(
         std::remove(tmp_path.c_str());
         throw std::runtime_error("active pointer rename failed");
     }
-    RemoveFileIfPresent(backup_path, "active pointer backup cleanup failed");
 }
 
 bool PreviousKeyBelongsToLesson(
@@ -342,10 +377,35 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
         return activation;
     }
     const std::string active_path = ActivePointerPath(lesson_id);
+    const std::string backup_path = ActivePointerBackupPath(active_path);
     const std::string previous_body = ReadTextFileIfPresent(active_path);
     std::string previous_cache_key =
         ExtractFlatJsonString(previous_body, "cacheKey");
+    const std::string backup_cache_key =
+        PendingBackupCacheKey(lesson_id, backup_path);
+    if (!backup_cache_key.empty()) {
+        previous_cache_key = backup_cache_key;
+    }
     activation.previous_cache_key = previous_cache_key;
+
+    const std::string active_cache_key =
+        ExtractFlatJsonString(previous_body, "cacheKey");
+    if (active_cache_key == cache_key) {
+        activation.activated = true;
+        return activation;
+    }
+    if (IsRegularFile(backup_path)) {
+        if (backup_cache_key.empty() || backup_cache_key == active_cache_key) {
+            if (!RemoveActivePointerBackupAfterEviction(backup_path)) {
+                activation.error_code = "previous_evict_retryable";
+                return activation;
+            }
+            activation.previous_cache_key = active_cache_key;
+        } else {
+            activation.error_code = "previous_evict_retryable";
+            return activation;
+        }
+    }
 
     try {
         WriteActivePointerAtomically(lesson_id, cache_key, manifest_checksum);
@@ -365,6 +425,8 @@ void EvictPreviousLessonAssetPackAfterActivation(
     if (!activation.activated) {
         return;
     }
+    const std::string backup_path =
+        ActivePointerBackupPath(ActivePointerPath(lesson_id));
     const std::string& previous_cache_key = activation.previous_cache_key;
     if (PreviousKeyBelongsToLesson(previous_cache_key, lesson_id) &&
         previous_cache_key != cache_key) {
@@ -373,7 +435,16 @@ void EvictPreviousLessonAssetPackAfterActivation(
         activation.previous_evicted = evict_result.evicted;
         if (!evict_result.evicted && !evict_result.not_found) {
             activation.error_code = "previous_evict_retryable";
+            return;
         }
+        if (!RemoveActivePointerBackupAfterEviction(backup_path)) {
+            activation.error_code = "previous_evict_retryable";
+        }
+        return;
+    }
+    if (IsRegularFile(backup_path) &&
+        !RemoveActivePointerBackupAfterEviction(backup_path)) {
+        activation.error_code = "previous_evict_retryable";
     }
 }
 

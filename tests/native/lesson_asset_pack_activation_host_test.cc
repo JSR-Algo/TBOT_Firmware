@@ -234,7 +234,7 @@ void TestStaleTmpAndBackupCleanupKeepsTruthfulActivePointer() {
     WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
                                 "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
     WriteFile(ActivePath().string() + ".backup",
-              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kForeignKey +
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
                   "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
     WriteFile(ActivePath().string() + ".tmp",
               "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
@@ -270,6 +270,107 @@ void TestDeletionFailureIsRetryableWithoutRollback() {
     ExpectActivePointer(kKeyV2, kChecksumB,
                         "pointer must update before old-pack deletion");
     Expect(fs::exists(CacheLeaf(kKeyV1)), "failed deletion leaves retry target");
+}
+
+void TestPostPromotionBackupRetryEvictsPreviousAndRemovesMarker() {
+    ResetRoot();
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                                "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+    WriteFile(ActivePath().string() + ".backup",
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                  "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    WriteFile(CacheLeaf(kKeyV2) / "new.bin");
+
+    const auto result =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(result.activated, "post-promotion retry must keep active new pointer");
+    Expect(result.previous_cache_key == kKeyV1,
+           "post-promotion retry must read previous key from backup marker");
+    Expect(result.previous_evicted,
+           "post-promotion retry must evict pending previous pack");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "successful pending eviction must remove backup marker");
+    Expect(!fs::exists(CacheLeaf(kKeyV1)),
+           "post-promotion retry left previous pack");
+    ExpectActivePointer(kKeyV2, kChecksumB,
+                        "post-promotion retry changed active pointer");
+
+    const auto idempotent =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(idempotent.activated, "idempotent retry must remain activated");
+    Expect(idempotent.error_code.empty(), "idempotent retry must be clean");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "idempotent retry recreated backup marker");
+}
+
+void TestPendingEvictionFailureKeepsBackupMarkerForRetry() {
+    ResetRoot();
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                                "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+    WriteFile(ActivePath().string() + ".backup",
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                  "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR", "1", 1);
+
+    const auto result =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(result.activated,
+           "pending eviction failure must not undo active new pointer");
+    Expect(!result.previous_evicted, "failed pending eviction cannot report evicted");
+    Expect(result.error_code == "previous_evict_retryable",
+           "pending eviction failure must be retryable");
+    Expect(fs::exists(ActivePath().string() + ".backup"),
+           "pending eviction failure must keep backup marker");
+    Expect(fs::exists(CacheLeaf(kKeyV1)),
+           "pending eviction failure must keep previous pack for retry");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR");
+
+    const auto retry =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(retry.previous_evicted, "retry must finish pending eviction");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "retry did not remove backup marker");
+}
+
+void TestBackupCleanupFailureKeepsMarkerWithoutWriteFailure() {
+    ResetRoot();
+    SetLessonAssetPackActivationFsTestFailure(
+        LessonAssetPackActivationFsTestFailure::kBackupCleanupRemove);
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                                "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+    WriteFile(ActivePath().string() + ".backup",
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                  "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+
+    const auto result =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(result.activated,
+           "backup cleanup failure must not report activation write failure");
+    Expect(result.error_code == "previous_evict_retryable",
+           "backup cleanup failure must be retryable cleanup state");
+    Expect(fs::exists(ActivePath().string() + ".backup"),
+           "backup cleanup failure must keep marker");
+}
+
+void TestUnrelatedBackupMarkerDoesNotEvictForeignPack() {
+    ResetRoot();
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                                "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+    WriteFile(ActivePath().string() + ".backup",
+              "{\"lessonId\":\"other-lesson\",\"cacheKey\":\"" + kForeignKey +
+                  "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kForeignKey) / "foreign.bin");
+
+    const auto result =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(result.activated, "unrelated backup marker must not block active pointer");
+    Expect(!result.previous_evicted, "unrelated backup marker must not evict");
+    Expect(fs::exists(CacheLeaf(kForeignKey) / "foreign.bin"),
+           "unrelated backup marker evicted foreign pack");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "unrelated backup marker should be cleaned after no-eviction decision");
 }
 
 void TestSyncMutationLeaseCoversActivePointerSwap() {
@@ -321,6 +422,10 @@ int main() {
     TestTmpPromotionFailureRestoresOldPointerAndDefersEviction();
     TestStaleTmpAndBackupCleanupKeepsTruthfulActivePointer();
     TestDeletionFailureIsRetryableWithoutRollback();
+    TestPostPromotionBackupRetryEvictsPreviousAndRemovesMarker();
+    TestPendingEvictionFailureKeepsBackupMarkerForRetry();
+    TestBackupCleanupFailureKeepsMarkerWithoutWriteFailure();
+    TestUnrelatedBackupMarkerDoesNotEvictForeignPack();
     TestSyncMutationLeaseCoversActivePointerSwap();
 
     std::cout << "lesson asset pack activation host test OK (" << checks

@@ -43,6 +43,7 @@ enum class LessonAssetPackActivationFsTestFailure {
     kNone,
     kInterruptAfterActiveBackup,
     kTmpToActiveRename,
+    kBackupCleanupRemove,
 };
 
 void SetLessonAssetPackActivationFsTestMode(
