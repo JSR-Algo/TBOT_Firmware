@@ -17,6 +17,13 @@
 
 namespace {
 
+#if defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING) && !defined(ESP_PLATFORM)
+LessonAssetPackActivationFsTestMode g_activation_fs_mode =
+    LessonAssetPackActivationFsTestMode::kNone;
+LessonAssetPackActivationFsTestFailure g_activation_fs_failure =
+    LessonAssetPackActivationFsTestFailure::kNone;
+#endif
+
 bool IsLowerAlphaNumeric(char ch) {
     return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
 }
@@ -75,6 +82,41 @@ bool EnsureDirTree(const std::string& path) {
     return EnsureDir(path);
 }
 
+bool IsRegularFile(const std::string& path) {
+    struct stat file_stat {};
+    return stat(path.c_str(), &file_stat) == 0 && S_ISREG(file_stat.st_mode);
+}
+
+bool PathIsMissing(const std::string& path) {
+    struct stat file_stat {};
+    return stat(path.c_str(), &file_stat) != 0 && errno == ENOENT;
+}
+
+void RemoveFileIfPresent(const std::string& path, const char* error_message) {
+    if (std::remove(path.c_str()) != 0 && errno != ENOENT) {
+        throw std::runtime_error(error_message);
+    }
+}
+
+int RenamePath(const std::string& from, const std::string& to) {
+#if defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING) && !defined(ESP_PLATFORM)
+    if (g_activation_fs_failure ==
+            LessonAssetPackActivationFsTestFailure::kTmpToActiveRename &&
+        from.size() >= 4 && from.compare(from.size() - 4, 4, ".tmp") == 0 &&
+        to.size() >= 11 && to.compare(to.size() - 11, 11, "active.json") == 0) {
+        errno = EIO;
+        return -1;
+    }
+    if (g_activation_fs_mode ==
+            LessonAssetPackActivationFsTestMode::kFatFsNoOverwriteRename &&
+        !PathIsMissing(to)) {
+        errno = EEXIST;
+        return -1;
+    }
+#endif
+    return std::rename(from.c_str(), to.c_str());
+}
+
 void EnsureActivationDirectories(const std::string& lesson_id) {
     if (!EnsureDirTree(std::string(TBOT_LESSON_ASSET_ROOT)) ||
         !EnsureDir(std::string(TBOT_LESSON_ASSET_ROOT) + "/" + lesson_id)) {
@@ -84,6 +126,14 @@ void EnsureActivationDirectories(const std::string& lesson_id) {
 
 std::string ActivePointerPath(const std::string& lesson_id) {
     return std::string(TBOT_LESSON_ASSET_ROOT) + "/" + lesson_id + "/active.json";
+}
+
+std::string ActivePointerTmpPath(const std::string& active_path) {
+    return active_path + ".tmp";
+}
+
+std::string ActivePointerBackupPath(const std::string& active_path) {
+    return active_path + ".backup";
 }
 
 std::string ActivePointerJson(
@@ -130,6 +180,40 @@ std::string ExtractFlatJsonString(
     return body.substr(value_start, end - value_start);
 }
 
+void RecoverInterruptedActivePointerReplacement(const std::string& lesson_id) {
+    EnsureActivationDirectories(lesson_id);
+    const std::string active_path = ActivePointerPath(lesson_id);
+    const std::string tmp_path = ActivePointerTmpPath(active_path);
+    const std::string backup_path = ActivePointerBackupPath(active_path);
+    const bool active_exists = IsRegularFile(active_path);
+    const bool tmp_exists = IsRegularFile(tmp_path);
+    const bool backup_exists = IsRegularFile(backup_path);
+
+    if ((!active_exists && !PathIsMissing(active_path)) ||
+        (!tmp_exists && !PathIsMissing(tmp_path)) ||
+        (!backup_exists && !PathIsMissing(backup_path))) {
+        throw std::runtime_error("active pointer recovery state invalid");
+    }
+
+    if (active_exists) {
+        RemoveFileIfPresent(tmp_path, "active pointer stale tmp cleanup failed");
+        RemoveFileIfPresent(backup_path, "active pointer stale backup cleanup failed");
+        return;
+    }
+
+    if (backup_exists) {
+        if (RenamePath(backup_path, active_path) != 0) {
+            throw std::runtime_error("active pointer backup recovery failed");
+        }
+        RemoveFileIfPresent(tmp_path, "active pointer stale tmp cleanup failed");
+        return;
+    }
+
+    if (tmp_exists && RenamePath(tmp_path, active_path) != 0) {
+        throw std::runtime_error("active pointer tmp recovery failed");
+    }
+}
+
 void WriteActivePointerAtomically(
     const std::string& lesson_id,
     const std::string& cache_key,
@@ -137,9 +221,16 @@ void WriteActivePointerAtomically(
 ) {
     EnsureActivationDirectories(lesson_id);
     const std::string active_path = ActivePointerPath(lesson_id);
-    const std::string tmp_path = active_path + ".tmp";
+    const std::string tmp_path = ActivePointerTmpPath(active_path);
+    const std::string backup_path = ActivePointerBackupPath(active_path);
     const std::string body =
         ActivePointerJson(lesson_id, cache_key, manifest_checksum);
+    const bool active_exists = IsRegularFile(active_path);
+    if (!active_exists && !PathIsMissing(active_path)) {
+        throw std::runtime_error("active pointer path invalid");
+    }
+    RemoveFileIfPresent(tmp_path, "active pointer stale tmp cleanup failed");
+    RemoveFileIfPresent(backup_path, "active pointer stale backup cleanup failed");
 
     FILE* file = std::fopen(tmp_path.c_str(), "wb");
     if (file == nullptr) {
@@ -165,10 +256,26 @@ void WriteActivePointerAtomically(
         std::remove(tmp_path.c_str());
         throw std::runtime_error("active pointer close failed");
     }
-    if (std::rename(tmp_path.c_str(), active_path.c_str()) != 0) {
+    if (active_exists && RenamePath(active_path, backup_path) != 0) {
         std::remove(tmp_path.c_str());
         throw std::runtime_error("active pointer rename failed");
     }
+#if defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING) && !defined(ESP_PLATFORM)
+    if (g_activation_fs_failure ==
+        LessonAssetPackActivationFsTestFailure::kInterruptAfterActiveBackup) {
+        throw std::runtime_error("active pointer rename failed");
+    }
+#endif
+    if (RenamePath(tmp_path, active_path) != 0) {
+        if (active_exists) {
+            if (RenamePath(backup_path, active_path) != 0) {
+                throw std::runtime_error("active pointer recovery failed");
+            }
+        }
+        std::remove(tmp_path.c_str());
+        throw std::runtime_error("active pointer rename failed");
+    }
+    RemoveFileIfPresent(backup_path, "active pointer backup cleanup failed");
 }
 
 bool PreviousKeyBelongsToLesson(
@@ -228,6 +335,12 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
         return activation;
     }
 
+    try {
+        RecoverInterruptedActivePointerReplacement(lesson_id);
+    } catch (...) {
+        activation.error_code = "activation_write_failed";
+        return activation;
+    }
     const std::string active_path = ActivePointerPath(lesson_id);
     const std::string previous_body = ReadTextFileIfPresent(active_path);
     std::string previous_cache_key =
@@ -263,3 +376,17 @@ void EvictPreviousLessonAssetPackAfterActivation(
         }
     }
 }
+
+#if defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING) && !defined(ESP_PLATFORM)
+void SetLessonAssetPackActivationFsTestMode(
+    LessonAssetPackActivationFsTestMode mode
+) {
+    g_activation_fs_mode = mode;
+}
+
+void SetLessonAssetPackActivationFsTestFailure(
+    LessonAssetPackActivationFsTestFailure failure
+) {
+    g_activation_fs_failure = failure;
+}
+#endif

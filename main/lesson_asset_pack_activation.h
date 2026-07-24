@@ -33,4 +33,24 @@ void EvictPreviousLessonAssetPackAfterActivation(
     const std::string& cache_key
 );
 
+#if defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING) && !defined(ESP_PLATFORM)
+enum class LessonAssetPackActivationFsTestMode {
+    kNone,
+    kFatFsNoOverwriteRename,
+};
+
+enum class LessonAssetPackActivationFsTestFailure {
+    kNone,
+    kInterruptAfterActiveBackup,
+    kTmpToActiveRename,
+};
+
+void SetLessonAssetPackActivationFsTestMode(
+    LessonAssetPackActivationFsTestMode mode
+);
+void SetLessonAssetPackActivationFsTestFailure(
+    LessonAssetPackActivationFsTestFailure failure
+);
+#endif
+
 #endif  // LESSON_ASSET_PACK_ACTIVATION_H

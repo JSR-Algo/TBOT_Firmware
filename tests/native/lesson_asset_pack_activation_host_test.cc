@@ -30,6 +30,10 @@ void Expect(bool condition, const char* message) {
 
 void ResetRoot() {
     unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR");
+    SetLessonAssetPackActivationFsTestMode(
+        LessonAssetPackActivationFsTestMode::kNone);
+    SetLessonAssetPackActivationFsTestFailure(
+        LessonAssetPackActivationFsTestFailure::kNone);
     fs::remove_all(kRoot);
     fs::create_directories(kRoot);
 }
@@ -126,6 +130,29 @@ void TestActivationEvictsOnlyPreviousSameLessonAfterPointerSwap() {
            "foreign lesson leaf must never be evicted");
 }
 
+void TestExistingActiveUpgradeWorksWithFatFsNoOverwriteRename() {
+    ResetRoot();
+    SetLessonAssetPackActivationFsTestMode(
+        LessonAssetPackActivationFsTestMode::kFatFsNoOverwriteRename);
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                                "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    WriteFile(CacheLeaf(kKeyV2) / "new.bin");
+
+    const auto result =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(result.activated,
+           "FatFS no-overwrite active upgrade must still activate");
+    ExpectActivePointer(kKeyV2, kChecksumB,
+                        "FatFS no-overwrite upgrade must promote new active");
+    Expect(result.previous_evicted,
+           "successful FatFS upgrade must evict previous pack after promotion");
+    Expect(!fs::exists(ActivePath().string() + ".tmp"),
+           "successful FatFS upgrade left active tmp");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "successful FatFS upgrade left active backup");
+}
+
 void TestForeignPreviousPointerDoesNotEvict() {
     ResetRoot();
     WriteFile(ActivePath(), "{\"lessonId\":\"other-lesson\",\"cacheKey\":\"" +
@@ -143,6 +170,85 @@ void TestForeignPreviousPointerDoesNotEvict() {
     Expect(fs::exists(CacheLeaf(kForeignKey) / "foreign.bin"),
            "foreign previous cache leaf must remain");
     ExpectActivePointer(kKeyV2, kChecksumB, "pointer must still update");
+}
+
+void TestInterruptedAfterActiveBackupRecoversOldPointerOnRestart() {
+    ResetRoot();
+    SetLessonAssetPackActivationFsTestMode(
+        LessonAssetPackActivationFsTestMode::kFatFsNoOverwriteRename);
+    SetLessonAssetPackActivationFsTestFailure(
+        LessonAssetPackActivationFsTestFailure::kInterruptAfterActiveBackup);
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                                "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    WriteFile(CacheLeaf(kKeyV2) / "new.bin");
+
+    const auto interrupted =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(!interrupted.activated,
+           "interruption before tmp promotion must not report activation");
+    Expect(fs::exists(ActivePath().string() + ".backup"),
+           "interruption after active backup must preserve old active backup");
+    Expect(fs::exists(ActivePath().string() + ".tmp"),
+           "interruption after active backup must preserve verified tmp");
+    Expect(fs::exists(CacheLeaf(kKeyV1) / "old.bin"),
+           "interrupted activation must not evict previous pack");
+
+    SetLessonAssetPackActivationFsTestFailure(
+        LessonAssetPackActivationFsTestFailure::kNone);
+    SetLessonAssetPackActivationFsTestMode(
+        LessonAssetPackActivationFsTestMode::kFatFsNoOverwriteRename);
+    const auto recovered =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(recovered.activated, "restart must recover and activate new pointer");
+    ExpectActivePointer(kKeyV2, kChecksumB,
+                        "restart after backup interruption must activate new pointer");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "restart recovery left backup");
+    Expect(!fs::exists(ActivePath().string() + ".tmp"),
+           "restart recovery left tmp");
+}
+
+void TestTmpPromotionFailureRestoresOldPointerAndDefersEviction() {
+    ResetRoot();
+    SetLessonAssetPackActivationFsTestMode(
+        LessonAssetPackActivationFsTestMode::kFatFsNoOverwriteRename);
+    SetLessonAssetPackActivationFsTestFailure(
+        LessonAssetPackActivationFsTestFailure::kTmpToActiveRename);
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                                "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    WriteFile(CacheLeaf(kKeyV2) / "new.bin");
+
+    const auto result =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(!result.activated, "failed tmp promotion must not report activation");
+    ExpectActivePointer(kKeyV1, kChecksumA,
+                        "failed tmp promotion must restore old active pointer");
+    Expect(fs::exists(CacheLeaf(kKeyV1) / "old.bin"),
+           "failed tmp promotion must not evict previous pack");
+}
+
+void TestStaleTmpAndBackupCleanupKeepsTruthfulActivePointer() {
+    ResetRoot();
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                                "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(ActivePath().string() + ".backup",
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kForeignKey +
+                  "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(ActivePath().string() + ".tmp",
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                  "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+
+    const auto result =
+        ActivateLessonAssetPack(kLessonId, kKeyV2, kChecksumB, true);
+    Expect(result.activated, "stale tmp/backup cleanup must permit activation");
+    ExpectActivePointer(kKeyV2, kChecksumB,
+                        "stale cleanup must leave the new truthful active pointer");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "stale cleanup left backup");
+    Expect(!fs::exists(ActivePath().string() + ".tmp"),
+           "stale cleanup left tmp");
 }
 
 void TestDeletionFailureIsRetryableWithoutRollback() {
@@ -209,7 +315,11 @@ int main() {
     TestFirstActivationWritesPointerWithoutEviction();
     TestCriticalFailureBlocksActivation();
     TestActivationEvictsOnlyPreviousSameLessonAfterPointerSwap();
+    TestExistingActiveUpgradeWorksWithFatFsNoOverwriteRename();
     TestForeignPreviousPointerDoesNotEvict();
+    TestInterruptedAfterActiveBackupRecoversOldPointerOnRestart();
+    TestTmpPromotionFailureRestoresOldPointerAndDefersEviction();
+    TestStaleTmpAndBackupCleanupKeepsTruthfulActivePointer();
     TestDeletionFailureIsRetryableWithoutRollback();
     TestSyncMutationLeaseCoversActivePointerSwap();
 

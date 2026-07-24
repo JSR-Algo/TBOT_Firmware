@@ -48,6 +48,9 @@ def test_pack_activation_pointer_updates_before_exact_previous_eviction():
     assert '"lesson_asset_pack_activation.cc"' in cmake
     assert "lesson_asset_pack_activation_host_test.cc" in runner
     assert 'WriteActivePointerAtomically(' in source
+    assert 'RecoverInterruptedActivePointerReplacement(' in source
+    assert 'active_path + ".backup"' in source
+    assert 'RenamePath(active_path, backup_path)' in source
     assert 'EvictLessonAssetCacheKey(previous_cache_key, false)' in source
     assert source.index('WriteActivePointerAtomically(') < source.index(
         'EvictLessonAssetCacheKey(previous_cache_key, false)'
@@ -64,9 +67,12 @@ def test_pack_activation_uses_sibling_tmp_fsync_rename_and_small_json_contract()
 
     assert '"/sdcard/tbot/lesson-assets"' in source
     assert 'active_path + ".tmp"' in source
+    assert 'active_path + ".backup"' in source
     assert "std::fflush(file)" in source
     assert "fsync(descriptor)" in source
-    assert "std::rename(tmp_path.c_str(), active_path.c_str())" in source
+    assert "RenamePath(active_path, backup_path)" in source
+    assert "RenamePath(tmp_path, active_path)" in source
+    assert "RemoveFileIfPresent(backup_path" in source
     assert 'lessonId' in source
     assert 'cacheKey' in source
     assert 'manifestChecksum' in source
