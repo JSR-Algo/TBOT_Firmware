@@ -28,6 +28,7 @@ sdkconfig.*
 !sdkconfig.defaults.*
 
 # Editor / tooling
+.worktrees/
 .vscode/
 .devcontainer/
 .clangd
