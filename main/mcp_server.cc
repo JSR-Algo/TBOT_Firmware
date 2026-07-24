@@ -28,6 +28,7 @@
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
 #include "lesson_asset_cache_evict.h"
+#include "lesson_asset_pack_activation.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_asset_download_raii.h"
 #include "lesson_asset_download_staging.h"
@@ -130,6 +131,7 @@ struct ValidatedLessonAsset {
     const char* url;
     const char* sha256;
     const char* destination;
+    bool critical;
     bool has_declared_size;
     size_t declared_size;
 };
@@ -196,6 +198,29 @@ bool IsOptionalExactSha256(const cJSON* object, const char* field) {
            (cJSON_IsString(value) && IsExactLowerLessonAssetSha256(value->valuestring));
 }
 
+const char* NormalizedAliasOrThrow(
+    const cJSON* object,
+    const char* preferred_field,
+    const char* fallback_field
+) {
+    const cJSON* preferred = cJSON_GetObjectItem(object, preferred_field);
+    const cJSON* fallback = cJSON_GetObjectItem(object, fallback_field);
+    if ((preferred != nullptr && !cJSON_IsString(preferred)) ||
+        (fallback != nullptr && !cJSON_IsString(fallback))) {
+        throw std::runtime_error("lesson asset sync request invalid");
+    }
+    if (preferred != nullptr && fallback != nullptr &&
+        std::strcmp(preferred->valuestring, fallback->valuestring) != 0) {
+        throw std::runtime_error("lesson asset sync request invalid");
+    }
+    const char* value = preferred != nullptr ? preferred->valuestring :
+                         fallback != nullptr ? fallback->valuestring : nullptr;
+    if (value == nullptr) {
+        throw std::runtime_error("lesson asset sync request invalid");
+    }
+    return value;
+}
+
 bool IsOptionalNonNegativeInteger(const cJSON* object, const char* field) {
     const cJSON* value = cJSON_GetObjectItem(object, field);
     return value == nullptr ||
@@ -221,22 +246,25 @@ bool CacheKeyMatchesManifestChecksum(
 
 std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
     const cJSON* pack,
-    const char*& cache_key_out
+    const char*& cache_key_out,
+    const char*& lesson_id_out
 ) {
     static constexpr const char* kPackFields[] = {
         "assignmentVersion", "lessonId", "lessonVersion", "manifestChecksum",
         "cacheKey", "localRoot", "ready", "assets",
     };
     static constexpr const char* kAssetFields[] = {
-        "key", "path", "url", "sha256", "sourceSha256", "size", "mediaType",
-        "critical", "layer", "role", "state", "checksumOk", "localPath",
+        "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
+        "mediaType", "critical", "layer", "role", "state", "checksumOk",
+        "localPath", "sdPath",
     };
     const char* cache_key = JsonStringField(pack, "cacheKey");
+    const char* lesson_id = JsonStringField(pack, "lessonId");
     const char* manifest_checksum = JsonStringField(pack, "manifestChecksum");
     const char* local_root = JsonStringField(pack, "localRoot");
     const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
     if (!HasOnlyAllowedJsonFields(pack, kPackFields) || cache_key == nullptr ||
-        manifest_checksum == nullptr || local_root == nullptr ||
+        lesson_id == nullptr || manifest_checksum == nullptr || local_root == nullptr ||
         !IsCanonicalLessonAssetSyncCacheKey(cache_key) ||
         !IsExactLowerLessonAssetSha256(manifest_checksum) ||
         !CacheKeyMatchesManifestChecksum(cache_key, manifest_checksum) ||
@@ -245,6 +273,10 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
         !IsOptionalNonNegativeInteger(pack, "lessonVersion") ||
         !IsOptionalBoundedString(pack, "lessonId", kLessonAssetIdentityMaxBytes) ||
         !IsOptionalBoolean(pack, "ready")) {
+        throw std::runtime_error("lesson asset sync request invalid");
+    }
+    const std::string lesson_prefix = std::string(lesson_id) + "/";
+    if (std::strncmp(cache_key, lesson_prefix.c_str(), lesson_prefix.size()) != 0) {
         throw std::runtime_error("lesson asset sync request invalid");
     }
 
@@ -259,15 +291,17 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
     }
 
     cache_key_out = cache_key;
+    lesson_id_out = lesson_id;
     std::vector<ValidatedLessonAsset> validated;
     validated.reserve(static_cast<size_t>(asset_count));
     const cJSON* asset = nullptr;
     cJSON_ArrayForEach(asset, assets) {
         const char* key = JsonStringField(asset, "key");
         const char* path = JsonStringField(asset, "path");
-        const char* url = JsonStringField(asset, "url");
+        const char* local_path = NormalizedAliasOrThrow(asset, "sdPath", "localPath");
+        const char* url = NormalizedAliasOrThrow(asset, "onlineUrl", "url");
         const char* sha256 = JsonStringField(asset, "sha256");
-        const char* local_path = JsonStringField(asset, "localPath");
+        const cJSON* critical = cJSON_GetObjectItem(asset, "critical");
         const cJSON* declared_size = cJSON_GetObjectItem(asset, "size");
         if (!HasOnlyAllowedJsonFields(asset, kAssetFields) ||
             !IsBoundedMetadataString(key, kLessonAssetSyncKeyMaxBytes) ||
@@ -301,6 +335,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             url,
             sha256,
             local_path,
+            cJSON_IsTrue(critical),
             declared_size != nullptr,
             declared_size == nullptr
                 ? 0
@@ -914,14 +949,9 @@ void McpServer::AddUserOnlyTools() {
                 throw std::runtime_error("assetPack object is required");
             }
             const char* cache_key = nullptr;
+            const char* lesson_id = nullptr;
             const auto validated_assets =
-                ValidateLessonAssetSyncPackOrThrow(pack.get(), cache_key);
-            auto mutation =
-                LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
-            if (!mutation) {
-                ThrowLessonAssetMutationRefusal(mutation.code());
-            }
-
+                ValidateLessonAssetSyncPackOrThrow(pack.get(), cache_key, lesson_id);
             auto json = MakeCheckedCJsonObject();
             CheckedCJsonAddStringToObject(json.get(), "cacheKey", cache_key);
             const char* manifest_checksum = JsonStringField(pack.get(), "manifestChecksum");
@@ -929,62 +959,96 @@ void McpServer::AddUserOnlyTools() {
             int downloaded = 0;
             int skipped = 0;
             int failed = 0;
+            int critical_failed = 0;
             int verified = 0;
             size_t total_bytes = 0;
             const int asset_count = static_cast<int>(validated_assets.size());
 
-            for (const auto& asset : validated_assets) {
-                auto item = MakeCheckedCJsonObject();
-                CheckedCJsonAddStringToObject(item.get(), "key", asset.key);
-                CheckedCJsonAddStringToObject(item.get(), "path", asset.path);
-
-                try {
-                    CheckedCJsonAddStringToObject(
-                        item.get(), "localPath", asset.destination);
-                    if (VerifyLessonAssetSha256(asset.destination, asset.sha256)) {
-                        skipped += 1;
-                        CheckedCJsonAddStringToObject(item.get(), "state", "SKIPPED");
-                    } else {
-                        size_t bytes = 0;
-                        DownloadLessonAssetToVerifiedFile(
-                            mutation,
-                            cache_key,
-                            asset.has_declared_size,
-                            asset.declared_size,
-                            asset.url,
-                            asset.destination,
-                            asset.sha256,
-                            bytes);
-                        total_bytes += bytes;
-                        downloaded += 1;
-                        CheckedCJsonAddStringToObject(
-                            item.get(), "state", "DOWNLOADED");
-                        CheckedCJsonAddNumberToObject(
-                            item.get(), "bytes", static_cast<double>(bytes));
-                    }
-                    verified += 1;
-                } catch (const std::runtime_error& error) {
-                    if (std::strcmp(error.what(), kMcpResponseAllocationError) == 0) {
-                        throw;
-                    }
-                    failed += 1;
-                    CheckedCJsonAddStringToObject(item.get(), "state", "FAILED");
-                    CheckedCJsonAddStringToObject(
-                        item.get(), "error", "asset transfer failed");
-                } catch (...) {
-                    failed += 1;
-                    CheckedCJsonAddStringToObject(item.get(), "state", "FAILED");
-                    CheckedCJsonAddStringToObject(
-                        item.get(), "error", "asset transfer failed");
+            {
+                auto mutation =
+                    LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+                if (!mutation) {
+                    ThrowLessonAssetMutationRefusal(mutation.code());
                 }
-                CheckedCJsonAddItemToArray(files.get(), std::move(item));
+
+                for (const auto& asset : validated_assets) {
+                    auto item = MakeCheckedCJsonObject();
+                    CheckedCJsonAddStringToObject(item.get(), "key", asset.key);
+                    CheckedCJsonAddStringToObject(item.get(), "path", asset.path);
+
+                    try {
+                        CheckedCJsonAddStringToObject(
+                            item.get(), "localPath", asset.destination);
+                        struct stat existing_stat {};
+                        const bool existing_size_matches =
+                            !asset.has_declared_size ||
+                            (stat(asset.destination, &existing_stat) == 0 &&
+                             S_ISREG(existing_stat.st_mode) &&
+                             existing_stat.st_size >= 0 &&
+                             static_cast<size_t>(existing_stat.st_size) ==
+                                 asset.declared_size);
+                        if (existing_size_matches &&
+                            VerifyLessonAssetSha256(asset.destination, asset.sha256)) {
+                            skipped += 1;
+                            CheckedCJsonAddStringToObject(item.get(), "state", "SKIPPED");
+                        } else {
+                            size_t bytes = 0;
+                            DownloadLessonAssetToVerifiedFile(
+                                mutation,
+                                cache_key,
+                                asset.has_declared_size,
+                                asset.declared_size,
+                                asset.url,
+                                asset.destination,
+                                asset.sha256,
+                                bytes);
+                            total_bytes += bytes;
+                            downloaded += 1;
+                            CheckedCJsonAddStringToObject(
+                                item.get(), "state", "DOWNLOADED");
+                            CheckedCJsonAddNumberToObject(
+                                item.get(), "bytes", static_cast<double>(bytes));
+                        }
+                        verified += 1;
+                    } catch (const std::runtime_error& error) {
+                        if (std::strcmp(error.what(), kMcpResponseAllocationError) == 0) {
+                            throw;
+                        }
+                        failed += 1;
+                        if (asset.critical) {
+                            critical_failed += 1;
+                        }
+                        CheckedCJsonAddStringToObject(item.get(), "state", "FAILED");
+                        CheckedCJsonAddStringToObject(
+                            item.get(), "error", "asset transfer failed");
+                    } catch (...) {
+                        failed += 1;
+                        if (asset.critical) {
+                            critical_failed += 1;
+                        }
+                        CheckedCJsonAddStringToObject(item.get(), "state", "FAILED");
+                        CheckedCJsonAddStringToObject(
+                            item.get(), "error", "asset transfer failed");
+                    }
+                    CheckedCJsonAddItemToArray(files.get(), std::move(item));
+                }
             }
 
+            const bool all_critical_verified = critical_failed == 0;
+            const auto activation = ActivateLessonAssetPack(
+                lesson_id, cache_key, manifest_checksum, all_critical_verified);
             AddLessonAssetSyncAttestation(
-                json.get(), cache_key, manifest_checksum, asset_count, verified, failed);
+                json.get(), cache_key, manifest_checksum, asset_count,
+                all_critical_verified ? asset_count : verified, critical_failed);
             CheckedCJsonAddNumberToObject(json.get(), "downloadedCount", downloaded);
             CheckedCJsonAddNumberToObject(json.get(), "skippedCount", skipped);
             CheckedCJsonAddNumberToObject(json.get(), "failedCount", failed);
+            CheckedCJsonAddNumberToObject(json.get(), "criticalFailedCount", critical_failed);
+            CheckedCJsonAddBoolToObject(json.get(), "activated", activation.activated);
+            CheckedCJsonAddBoolToObject(
+                json.get(), "previousEvicted", activation.previous_evicted);
+            CheckedCJsonAddStringToObject(
+                json.get(), "errorCode", activation.error_code.c_str());
             CheckedCJsonAddNumberToObject(
                 json.get(), "totalBytes", static_cast<double>(total_bytes));
             CheckedCJsonAddItemToObject(json.get(), "files", std::move(files));

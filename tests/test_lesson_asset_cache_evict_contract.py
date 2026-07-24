@@ -11,6 +11,8 @@ COORDINATOR_HEADER = ROOT / "main" / "lesson_asset_storage_coordinator.h"
 COORDINATOR_SOURCE = ROOT / "main" / "lesson_asset_storage_coordinator.cc"
 SYNC_POLICY_HEADER = ROOT / "main" / "lesson_asset_sync_path_policy.h"
 SYNC_POLICY_SOURCE = ROOT / "main" / "lesson_asset_sync_path_policy.cc"
+ACTIVATION_HEADER = ROOT / "main" / "lesson_asset_pack_activation.h"
+ACTIVATION_SOURCE = ROOT / "main" / "lesson_asset_pack_activation.cc"
 
 
 def test_exact_eviction_helper_is_built_and_exposed_as_user_only_after_task4():
@@ -26,6 +28,54 @@ def test_exact_eviction_helper_is_built_and_exposed_as_user_only_after_task4():
     assert "EvictLessonAssetCacheKey(cache_key, false)" in registration
     assert '"lesson_asset_cache_evict.cc"' in cmake
     assert '"/sdcard/tbot/lesson-assets"' in helper
+
+def test_pack_activation_pointer_updates_before_exact_previous_eviction():
+    header = ACTIVATION_HEADER.read_text(encoding="utf-8")
+    source = ACTIVATION_SOURCE.read_text(encoding="utf-8")
+    cmake = MAIN_CMAKE.read_text(encoding="utf-8")
+    runner = (ROOT / "scripts" / "run_host_native_lesson_asset_pack_activation_test.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "struct LessonAssetPackActivationResult" in header
+    assert "bool activated;" in header
+    assert "bool previous_evicted;" in header
+    assert "std::string previous_cache_key;" in header
+    assert "std::string error_code;" in header
+    assert "LessonAssetPackActivationResult ActivateLessonAssetPack(" in header
+    assert '"lesson_asset_pack_activation.cc"' in cmake
+    assert "lesson_asset_pack_activation_host_test.cc" in runner
+    assert 'WriteActivePointerAtomically(' in source
+    assert 'EvictLessonAssetCacheKey(previous_cache_key, false)' in source
+    assert source.index('WriteActivePointerAtomically(') < source.index(
+        'EvictLessonAssetCacheKey(previous_cache_key, false)'
+    )
+
+def test_pack_activation_uses_sibling_tmp_fsync_rename_and_small_json_contract():
+    source = ACTIVATION_SOURCE.read_text(encoding="utf-8")
+
+    assert '"/sdcard/tbot/lesson-assets"' in source
+    assert 'active_path + ".tmp"' in source
+    assert "std::fflush(file)" in source
+    assert "fsync(descriptor)" in source
+    assert "std::rename(tmp_path.c_str(), active_path.c_str())" in source
+    assert 'lessonId' in source
+    assert 'cacheKey' in source
+    assert 'manifestChecksum' in source
+    assert '"downloadedCount"' not in source
+    assert '"failedCount"' not in source
+
+def test_pack_activation_evicts_only_prior_same_lesson_and_reports_retryable_failure():
+    source = ACTIVATION_SOURCE.read_text(encoding="utf-8")
+
+    assert "PreviousKeyBelongsToLesson(previous_cache_key, lesson_id)" in source
+    assert "previous_cache_key != cache_key" in source
+    assert "previous_evict_retryable" in source
+    assert "critical_assets_unverified" in source
+    assert "activation.activated = true" in source
+    retryable = source.index("previous_evict_retryable")
+    rollback_window = source[retryable:]
+    assert 'WriteActivePointerAtomically(' not in rollback_window
 
 
 def test_sync_path_policy_reuses_the_canonical_key_parser_and_is_built():
