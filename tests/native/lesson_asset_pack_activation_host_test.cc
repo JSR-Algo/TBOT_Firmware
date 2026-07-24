@@ -5,6 +5,7 @@
 #include <string>
 
 #include "lesson_asset_pack_activation.h"
+#include "lesson_asset_storage_coordinator.h"
 
 namespace {
 
@@ -165,6 +166,43 @@ void TestDeletionFailureIsRetryableWithoutRollback() {
     Expect(fs::exists(CacheLeaf(kKeyV1)), "failed deletion leaves retry target");
 }
 
+void TestSyncMutationLeaseCoversActivePointerSwap() {
+    ResetRoot();
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                                "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    WriteFile(CacheLeaf(kKeyV2) / "new.bin");
+
+    LessonAssetPackActivationResult activation{
+        false, false, std::string(), std::string()};
+    {
+        auto mutation =
+            LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        Expect(static_cast<bool>(mutation), "sync mutation fixture must acquire");
+        const auto interleaved =
+            LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+                "assignment-during-sync", "session-during-sync");
+        Expect(interleaved.code == LessonAssetReservationCode::kMutationActive,
+               "lesson session interleaved before active pointer swap");
+
+        activation =
+            ActivateLessonAssetPack(mutation, kLessonId, kKeyV2, kChecksumB, true);
+        Expect(activation.activated, "lease-aware activation must swap active pointer");
+        ExpectActivePointer(kKeyV2, kChecksumB,
+                            "lease-aware activation must write active pointer");
+        Expect(!activation.previous_evicted,
+               "lease-aware activation must not evict while sync lease is held");
+    }
+
+    EvictPreviousLessonAssetPackAfterActivation(activation, kLessonId, kKeyV2);
+    Expect(activation.previous_evicted,
+           "post-activation eviction must run after sync lease release");
+    Expect(!fs::exists(CacheLeaf(kKeyV1)),
+           "post-activation eviction must remove previous pack");
+    Expect(fs::exists(CacheLeaf(kKeyV2) / "new.bin"),
+           "post-activation eviction must preserve active pack");
+}
+
 }  // namespace
 
 int main() {
@@ -173,6 +211,7 @@ int main() {
     TestActivationEvictsOnlyPreviousSameLessonAfterPointerSwap();
     TestForeignPreviousPointerDoesNotEvict();
     TestDeletionFailureIsRetryableWithoutRollback();
+    TestSyncMutationLeaseCoversActivePointerSwap();
 
     std::cout << "lesson asset pack activation host test OK (" << checks
               << " checks)" << std::endl;

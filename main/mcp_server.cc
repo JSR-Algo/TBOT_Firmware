@@ -335,7 +335,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             url,
             sha256,
             local_path,
-            cJSON_IsTrue(critical),
+            cJSON_IsTrue(critical) != 0,
             declared_size != nullptr,
             declared_size == nullptr
                 ? 0
@@ -963,6 +963,8 @@ void McpServer::AddUserOnlyTools() {
             int verified = 0;
             size_t total_bytes = 0;
             const int asset_count = static_cast<int>(validated_assets.size());
+            LessonAssetPackActivationResult activation{
+                false, false, std::string(), std::string()};
 
             {
                 auto mutation =
@@ -1032,14 +1034,21 @@ void McpServer::AddUserOnlyTools() {
                     }
                     CheckedCJsonAddItemToArray(files.get(), std::move(item));
                 }
+
+                const bool all_critical_verified = critical_failed == 0;
+                activation = ActivateLessonAssetPack(
+                    mutation,
+                    lesson_id,
+                    cache_key,
+                    manifest_checksum,
+                    all_critical_verified);
             }
 
-            const bool all_critical_verified = critical_failed == 0;
-            const auto activation = ActivateLessonAssetPack(
-                lesson_id, cache_key, manifest_checksum, all_critical_verified);
+            EvictPreviousLessonAssetPackAfterActivation(
+                activation, lesson_id, cache_key);
             AddLessonAssetSyncAttestation(
                 json.get(), cache_key, manifest_checksum, asset_count,
-                all_critical_verified ? asset_count : verified, critical_failed);
+                verified, failed);
             CheckedCJsonAddNumberToObject(json.get(), "downloadedCount", downloaded);
             CheckedCJsonAddNumberToObject(json.get(), "skippedCount", skipped);
             CheckedCJsonAddNumberToObject(json.get(), "failedCount", failed);

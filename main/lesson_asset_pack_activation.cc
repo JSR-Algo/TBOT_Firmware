@@ -1,9 +1,7 @@
 #include "lesson_asset_pack_activation.h"
 
 #include "lesson_asset_cache_evict.h"
-#if defined(ESP_PLATFORM) || defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING)
 #include "lesson_asset_storage_coordinator.h"
-#endif
 
 #include <cerrno>
 #include <cstdio>
@@ -191,6 +189,29 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
 ) {
     LessonAssetPackActivationResult activation{
         false, false, std::string(), std::string()};
+    {
+        auto mutation =
+            LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("activate");
+        if (!mutation) {
+            activation.error_code = "activation_storage_busy";
+            return activation;
+        }
+        activation = ActivateLessonAssetPack(
+            mutation, lesson_id, cache_key, manifest_checksum, all_critical_verified);
+    }
+    EvictPreviousLessonAssetPackAfterActivation(activation, lesson_id, cache_key);
+    return activation;
+}
+
+LessonAssetPackActivationResult ActivateLessonAssetPack(
+    const LessonAssetMutationLease& mutation,
+    const std::string& lesson_id,
+    const std::string& cache_key,
+    const std::string& manifest_checksum,
+    bool all_critical_verified
+) {
+    LessonAssetPackActivationResult activation{
+        false, false, std::string(), std::string()};
     if (!all_critical_verified) {
         activation.error_code = "critical_assets_unverified";
         return activation;
@@ -202,6 +223,10 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
         activation.error_code = "activation_request_invalid";
         return activation;
     }
+    if (!mutation) {
+        activation.error_code = "activation_storage_busy";
+        return activation;
+    }
 
     const std::string active_path = ActivePointerPath(lesson_id);
     const std::string previous_body = ReadTextFileIfPresent(active_path);
@@ -209,31 +234,25 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
         ExtractFlatJsonString(previous_body, "cacheKey");
     activation.previous_cache_key = previous_cache_key;
 
-#if defined(ESP_PLATFORM) || defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING)
-    {
-        auto mutation =
-            LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("activate");
-        if (!mutation) {
-            activation.error_code = "activation_storage_busy";
-            return activation;
-        }
-        try {
-            WriteActivePointerAtomically(lesson_id, cache_key, manifest_checksum);
-        } catch (...) {
-            activation.error_code = "activation_write_failed";
-            return activation;
-        }
-    }
-#else
     try {
         WriteActivePointerAtomically(lesson_id, cache_key, manifest_checksum);
     } catch (...) {
         activation.error_code = "activation_write_failed";
         return activation;
     }
-#endif
     activation.activated = true;
+    return activation;
+}
 
+void EvictPreviousLessonAssetPackAfterActivation(
+    LessonAssetPackActivationResult& activation,
+    const std::string& lesson_id,
+    const std::string& cache_key
+) {
+    if (!activation.activated) {
+        return;
+    }
+    const std::string& previous_cache_key = activation.previous_cache_key;
     if (PreviousKeyBelongsToLesson(previous_cache_key, lesson_id) &&
         previous_cache_key != cache_key) {
         const auto evict_result =
@@ -243,5 +262,4 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
             activation.error_code = "previous_evict_retryable";
         }
     }
-    return activation;
 }

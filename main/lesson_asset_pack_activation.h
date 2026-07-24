@@ -3,6 +3,8 @@
 
 #include <string>
 
+class LessonAssetMutationLease;
+
 struct LessonAssetPackActivationResult {
     bool activated;
     bool previous_evicted;
@@ -15,6 +17,20 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
     const std::string& cache_key,
     const std::string& manifest_checksum,
     bool all_critical_verified
+);
+
+LessonAssetPackActivationResult ActivateLessonAssetPack(
+    const LessonAssetMutationLease& mutation,
+    const std::string& lesson_id,
+    const std::string& cache_key,
+    const std::string& manifest_checksum,
+    bool all_critical_verified
+);
+
+void EvictPreviousLessonAssetPackAfterActivation(
+    LessonAssetPackActivationResult& activation,
+    const std::string& lesson_id,
+    const std::string& cache_key
 );
 
 #endif  // LESSON_ASSET_PACK_ACTIVATION_H

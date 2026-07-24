@@ -72,6 +72,19 @@ def test_generic_sync_counts_critical_failures_and_activates_only_verified_criti
     assert '"previousEvicted", activation.previous_evicted' in body
     assert '"errorCode", activation.error_code.c_str()' in body
 
+def test_generic_sync_optional_failure_activates_but_attestation_ready_requires_all_assets():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = sync_body()
+
+    assert "cJSON_IsTrue(critical) != 0" in source
+    assert "ActivateLessonAssetPack(\n                    mutation," in body
+    activation = body.index("ActivateLessonAssetPack(\n                    mutation,")
+    lease_start = body.index('TryBeginMutation("sync")')
+    lease_end = body.index("EvictPreviousLessonAssetPackAfterActivation(")
+    assert lease_start < activation < lease_end
+    assert "AddLessonAssetSyncAttestation(\n                json.get(), cache_key, manifest_checksum, asset_count,\n                verified, failed);" in body
+    assert "all_critical_verified ? asset_count : verified" not in body
+
 
 def test_missing_whitespace_or_cache_key_mismatch_cannot_claim_ready_or_checksum():
     attestation = ATTESTATION_SOURCE.read_text(encoding="utf-8")

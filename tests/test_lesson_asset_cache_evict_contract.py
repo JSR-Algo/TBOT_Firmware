@@ -43,6 +43,8 @@ def test_pack_activation_pointer_updates_before_exact_previous_eviction():
     assert "std::string previous_cache_key;" in header
     assert "std::string error_code;" in header
     assert "LessonAssetPackActivationResult ActivateLessonAssetPack(" in header
+    assert "const LessonAssetMutationLease& mutation" in header
+    assert "EvictPreviousLessonAssetPackAfterActivation(" in header
     assert '"lesson_asset_pack_activation.cc"' in cmake
     assert "lesson_asset_pack_activation_host_test.cc" in runner
     assert 'WriteActivePointerAtomically(' in source
@@ -50,6 +52,12 @@ def test_pack_activation_pointer_updates_before_exact_previous_eviction():
     assert source.index('WriteActivePointerAtomically(') < source.index(
         'EvictLessonAssetCacheKey(previous_cache_key, false)'
     )
+    public_helper = source[
+        source.index("LessonAssetPackActivationResult ActivateLessonAssetPack(\n    const std::string& lesson_id") :
+        source.index("void EvictPreviousLessonAssetPackAfterActivation(")
+    ]
+    assert 'TryBeginMutation("activate")' in public_helper
+    assert "ActivateLessonAssetPack(\n            mutation," in public_helper
 
 def test_pack_activation_uses_sibling_tmp_fsync_rename_and_small_json_contract():
     source = ACTIVATION_SOURCE.read_text(encoding="utf-8")
