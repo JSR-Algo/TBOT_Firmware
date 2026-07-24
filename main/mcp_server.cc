@@ -964,7 +964,7 @@ void McpServer::AddUserOnlyTools() {
             size_t total_bytes = 0;
             const int asset_count = static_cast<int>(validated_assets.size());
             LessonAssetPackActivationResult activation{
-                false, false, std::string(), std::string()};
+                false, false, false, std::string(), std::string()};
 
             {
                 auto mutation =

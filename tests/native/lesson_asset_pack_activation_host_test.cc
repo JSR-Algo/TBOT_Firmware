@@ -14,9 +14,11 @@ namespace fs = std::filesystem;
 constexpr const char* kRoot = "/tmp/tbot-lesson-asset-pack-activation-host";
 const std::string kChecksumA(64, 'a');
 const std::string kChecksumB(64, 'b');
+const std::string kChecksumC(64, 'c');
 const std::string kLessonId = "pip-farm";
 const std::string kKeyV1 = kLessonId + "/v1-" + kChecksumA;
 const std::string kKeyV2 = kLessonId + "/v2-" + kChecksumB;
+const std::string kKeyV3 = kLessonId + "/v3-" + kChecksumC;
 const std::string kForeignKey = "other-lesson/v1-" + kChecksumA;
 int checks = 0;
 
@@ -334,6 +336,80 @@ void TestPendingEvictionFailureKeepsBackupMarkerForRetry() {
            "retry did not remove backup marker");
 }
 
+void TestDifferentIncomingPackDrainsPendingBackupBeforeActivatingNextPack() {
+    ResetRoot();
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                                "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+    WriteFile(ActivePath().string() + ".backup",
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                  "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    WriteFile(CacheLeaf(kKeyV2) / "current.bin");
+    WriteFile(CacheLeaf(kKeyV3) / "next.bin");
+
+    const auto cleanup =
+        ActivateLessonAssetPack(kLessonId, kKeyV3, kChecksumC, true);
+    Expect(!cleanup.activated,
+           "cleanup-only phase must not activate different incoming pack");
+    Expect(cleanup.previous_cache_key == kKeyV1,
+           "cleanup-only phase must target pending backup key");
+    Expect(cleanup.previous_evicted,
+           "cleanup-only phase must evict pending previous pack");
+    Expect(cleanup.error_code == "previous_evict_retryable",
+           "cleanup-only phase must ask backend to retry incoming pack");
+    ExpectActivePointer(kKeyV2, kChecksumB,
+                        "cleanup-only phase must keep current active pointer");
+    Expect(!fs::exists(CacheLeaf(kKeyV1)),
+           "cleanup-only phase did not drain previous pack");
+    Expect(fs::exists(CacheLeaf(kKeyV2) / "current.bin"),
+           "cleanup-only phase evicted current active pack");
+    Expect(fs::exists(CacheLeaf(kKeyV3) / "next.bin"),
+           "cleanup-only phase evicted incoming pack");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "cleanup-only phase did not remove drained backup marker");
+
+    const auto activated =
+        ActivateLessonAssetPack(kLessonId, kKeyV3, kChecksumC, true);
+    Expect(activated.activated, "retry must activate incoming pack after cleanup");
+    ExpectActivePointer(kKeyV3, kChecksumC,
+                        "retry did not activate incoming pack");
+}
+
+void TestDifferentIncomingPackCleanupFailureKeepsMarkerAndCurrentActive() {
+    ResetRoot();
+    WriteFile(ActivePath(), "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV2 +
+                                "\",\"manifestChecksum\":\"" + kChecksumB + "\"}");
+    WriteFile(ActivePath().string() + ".backup",
+              "{\"lessonId\":\"pip-farm\",\"cacheKey\":\"" + kKeyV1 +
+                  "\",\"manifestChecksum\":\"" + kChecksumA + "\"}");
+    WriteFile(CacheLeaf(kKeyV1) / "old.bin");
+    WriteFile(CacheLeaf(kKeyV2) / "current.bin");
+    setenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR", "1", 1);
+
+    const auto failed_cleanup =
+        ActivateLessonAssetPack(kLessonId, kKeyV3, kChecksumC, true);
+    Expect(!failed_cleanup.activated,
+           "failed cleanup-only phase must not activate incoming pack");
+    Expect(failed_cleanup.error_code == "previous_evict_retryable",
+           "failed cleanup-only phase must be retryable");
+    Expect(fs::exists(ActivePath().string() + ".backup"),
+           "failed cleanup-only phase must keep backup marker");
+    Expect(fs::exists(CacheLeaf(kKeyV1)),
+           "failed cleanup-only phase must keep previous pack");
+    ExpectActivePointer(kKeyV2, kChecksumB,
+                        "failed cleanup-only phase changed current active pointer");
+    unsetenv("TBOT_TEST_LESSON_CACHE_EVICT_FAIL_RMDIR");
+
+    const auto retry =
+        ActivateLessonAssetPack(kLessonId, kKeyV3, kChecksumC, true);
+    Expect(!retry.activated,
+           "retry cleanup phase still must not activate incoming pack");
+    Expect(retry.previous_evicted,
+           "retry cleanup phase must finish pending eviction");
+    Expect(!fs::exists(ActivePath().string() + ".backup"),
+           "retry cleanup phase did not remove marker");
+}
+
 void TestBackupCleanupFailureKeepsMarkerWithoutWriteFailure() {
     ResetRoot();
     SetLessonAssetPackActivationFsTestFailure(
@@ -381,7 +457,7 @@ void TestSyncMutationLeaseCoversActivePointerSwap() {
     WriteFile(CacheLeaf(kKeyV2) / "new.bin");
 
     LessonAssetPackActivationResult activation{
-        false, false, std::string(), std::string()};
+        false, false, false, std::string(), std::string()};
     {
         auto mutation =
             LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
@@ -424,6 +500,8 @@ int main() {
     TestDeletionFailureIsRetryableWithoutRollback();
     TestPostPromotionBackupRetryEvictsPreviousAndRemovesMarker();
     TestPendingEvictionFailureKeepsBackupMarkerForRetry();
+    TestDifferentIncomingPackDrainsPendingBackupBeforeActivatingNextPack();
+    TestDifferentIncomingPackCleanupFailureKeepsMarkerAndCurrentActive();
     TestBackupCleanupFailureKeepsMarkerWithoutWriteFailure();
     TestUnrelatedBackupMarkerDoesNotEvictForeignPack();
     TestSyncMutationLeaseCoversActivePointerSwap();

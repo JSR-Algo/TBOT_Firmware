@@ -8,6 +8,7 @@ class LessonAssetMutationLease;
 struct LessonAssetPackActivationResult {
     bool activated;
     bool previous_evicted;
+    bool previous_cleanup_pending;
     std::string previous_cache_key;
     std::string error_code;
 };

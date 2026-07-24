@@ -330,7 +330,7 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
     bool all_critical_verified
 ) {
     LessonAssetPackActivationResult activation{
-        false, false, std::string(), std::string()};
+        false, false, false, std::string(), std::string()};
     {
         auto mutation =
             LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("activate");
@@ -353,7 +353,7 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
     bool all_critical_verified
 ) {
     LessonAssetPackActivationResult activation{
-        false, false, std::string(), std::string()};
+        false, false, false, std::string(), std::string()};
     if (!all_critical_verified) {
         activation.error_code = "critical_assets_unverified";
         return activation;
@@ -402,6 +402,7 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
             }
             activation.previous_cache_key = active_cache_key;
         } else {
+            activation.previous_cleanup_pending = true;
             activation.error_code = "previous_evict_retryable";
             return activation;
         }
@@ -422,7 +423,7 @@ void EvictPreviousLessonAssetPackAfterActivation(
     const std::string& lesson_id,
     const std::string& cache_key
 ) {
-    if (!activation.activated) {
+    if (!activation.activated && !activation.previous_cleanup_pending) {
         return;
     }
     const std::string backup_path =

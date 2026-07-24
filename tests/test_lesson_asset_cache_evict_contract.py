@@ -40,6 +40,7 @@ def test_pack_activation_pointer_updates_before_exact_previous_eviction():
     assert "struct LessonAssetPackActivationResult" in header
     assert "bool activated;" in header
     assert "bool previous_evicted;" in header
+    assert "bool previous_cleanup_pending;" in header
     assert "std::string previous_cache_key;" in header
     assert "std::string error_code;" in header
     assert "LessonAssetPackActivationResult ActivateLessonAssetPack(" in header
