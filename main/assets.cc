@@ -233,7 +233,10 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
     }
 
-    Assets::LoadSrmodelsFromIndex(assets, root);
+    if (!Assets::LoadSrmodelsFromIndex(assets, root)) {
+        cJSON_Delete(root);
+        return false;
+    }
 
     auto& theme_manager = LvglThemeManager::GetInstance();
     auto light_theme = theme_manager.GetTheme("light");
@@ -414,7 +417,9 @@ bool Assets::EmoteStrategy::GetAssetData(Assets* assets, const std::string& name
 }
 
 bool Assets::EmoteStrategy::Apply(Assets* assets, bool refresh_display_theme) {
-    Assets::LoadSrmodelsFromIndex(assets);
+    if (!Assets::LoadSrmodelsFromIndex(assets)) {
+        return false;
+    }
 
     auto display = Board::GetInstance().GetDisplay();
     auto* emote_display = dynamic_cast<emote::EmoteDisplay*>(display);
