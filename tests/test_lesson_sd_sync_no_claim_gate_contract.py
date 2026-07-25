@@ -179,12 +179,15 @@ def test_unclaimed_protocol_selection_can_use_persisted_or_compile_time_websocke
     assert "has_configured_websocket_url" in selection
     assert "ota_->HasWebsocketConfig() || has_configured_websocket_url" in selection
     assert "std::make_unique<WebsocketProtocol>()" in selection
+    assert "SetUnclaimedPublicLessonOnly(!IsDeviceClaimed())" in selection
     assert selection.index("has_configured_websocket_url") < selection.index(
         "std::make_unique<WebsocketProtocol>()"
     )
+    assert selection.index("std::make_unique<WebsocketProtocol>()") < selection.index(
+        "SetUnclaimedPublicLessonOnly(!IsDeviceClaimed())"
+    )
 
     for token_gate in (
-        "IsDeviceClaimed",
         "bootstrap_token",
         "device_token",
         "provisioning_token",
@@ -193,6 +196,11 @@ def test_unclaimed_protocol_selection_can_use_persisted_or_compile_time_websocke
         "claim_device_id",
     ):
         assert token_gate not in selection
+    for selection_line in (
+        line for line in selection.splitlines()
+        if line.strip().startswith(("if (", "} else if ("))
+    ):
+        assert "IsDeviceClaimed" not in selection_line
 
 
 def test_sync_to_sd_registration_and_dispatch_are_not_claim_or_token_gated():

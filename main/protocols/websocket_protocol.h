@@ -30,6 +30,7 @@ public:
     bool IsAudioChannelOpened() const override;
     bool MaintainPassiveLiveness() override;
     void CompleteDeferredClose(uint32_t connection_epoch) override;
+    void SetUnclaimedPublicLessonOnly(bool enabled);
 
 private:
     EventGroupHandle_t event_group_handle_;
@@ -40,6 +41,7 @@ private:
     std::string url_;
     std::string token_;
     int version_ = 1;
+    bool unclaimed_public_lesson_only_ = true;
     WebsocketSessionMode session_mode_ = WebsocketSessionMode::kUnclaimedPublicLesson;
     PassiveWebsocketLiveness passive_liveness_;
     ConnectionCloseState close_state_;

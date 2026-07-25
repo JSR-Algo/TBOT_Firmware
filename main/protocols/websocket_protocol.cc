@@ -114,6 +114,10 @@ WebsocketProtocol::WebsocketProtocol() {
     RefreshSettings();
 }
 
+void WebsocketProtocol::SetUnclaimedPublicLessonOnly(bool enabled) {
+    unclaimed_public_lesson_only_ = enabled;
+}
+
 WebsocketProtocol::~WebsocketProtocol() {
     {
         auto failure_mutation = inbound_gate_.BeginFailureMutation();
@@ -294,9 +298,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
     RefreshSettings();
     std::string url = url_;
     std::string token = token_;
-    session_mode_ = token.empty()
+    session_mode_ = unclaimed_public_lesson_only_
         ? WebsocketSessionMode::kUnclaimedPublicLesson
         : WebsocketSessionMode::kAuthenticatedRealtime;
+    if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson) {
+        token.clear();
+    }
     const std::string device_id = SystemInfo::GetMacAddress();
     const std::string client_id = Board::GetInstance().GetUuid();
 
@@ -429,11 +436,13 @@ bool WebsocketProtocol::OpenAudioChannel() {
                     if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson) {
                         if (!IsAllowedUnclaimedPublicLessonMessage(root)) {
                             ESP_LOGW(TAG, "unclaimed_public_ws_frame_rejected");
+                            cJSON_Delete(root);
                             return;
                         }
                         if (on_incoming_json_ != nullptr) {
                             on_incoming_json_(root, callback_transport_epoch);
                         }
+                        cJSON_Delete(root);
                         return;
                     }
                     if (strncmp(type->valuestring, "lesson_", 7) == 0) {

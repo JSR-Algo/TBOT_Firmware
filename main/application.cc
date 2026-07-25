@@ -2904,7 +2904,9 @@ void Application::InitializeProtocol() {
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig() || has_configured_websocket_url) {
-        protocol_ = std::make_unique<WebsocketProtocol>();
+        auto websocket_protocol = std::make_unique<WebsocketProtocol>();
+        websocket_protocol->SetUnclaimedPublicLessonOnly(!IsDeviceClaimed());
+        protocol_ = std::move(websocket_protocol);
         is_websocket_protocol = true;
     } else {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
