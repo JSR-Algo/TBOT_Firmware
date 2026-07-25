@@ -814,13 +814,13 @@ void Application::HandleNetworkConnectedEvent() {
         SetDeviceState(kDeviceStateActivating);
         // Unclaimed + BLE advertising leaves ~7–8KB largest free internal block.
         // The normal activation worker needs 8KB stack and fails to create, so the
-        // UI freezes on "Loading setup..." forever. Unclaimed devices cannot
-        // finish cloud bootstrap without a parent claim — exit Activating now.
+        // UI freezes on "Loading setup..." forever. Run only the protocol setup
+        // needed for public lesson sync and leave claimed bootstrap to BLE.
         if (!IsDeviceClaimed()) {
             ESP_LOGW(TAG,
                      "Unclaimed device on Wi-Fi: run minimal activation transport "
                      "without claimed bootstrap worker");
-            ActivationTask();
+            CompleteUnclaimedProtocolOnlyActivation();
             return;
         }
         if (activation_task_handle_ != nullptr) {
@@ -1595,11 +1595,11 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
     if (!IsDeviceClaimed()) {
         // Same heap constraint as HandleNetworkConnectedEvent: with BLE still
         // advertising for claim standby, the 8KB activation task often cannot be
-        // created. Run the minimal unclaimed activation path inline instead.
+        // created. Run only the protocol setup needed for public lesson sync.
         ESP_LOGW(TAG,
                  "Unclaimed after BluFi Wi-Fi success: run minimal activation "
                  "transport inline");
-        ActivationTask();
+        CompleteUnclaimedProtocolOnlyActivation();
         return;
     }
 
@@ -1625,6 +1625,21 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
         }
         xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
     }
+}
+
+void Application::CompleteUnclaimedProtocolOnlyActivation() {
+    if (!ota_) {
+        ota_ = std::make_unique<Ota>();
+    }
+    ota_->MarkCurrentVersionValid();
+
+    SystemInfo::StartHeapPhaseMonitor();
+    InitializeProtocol();
+    SystemInfo::PrintHeapCheckpoint("protocol_init.complete");
+    SystemInfo::StopHeapPhaseMonitor();
+
+    SystemInfo::PrintHeapCheckpoint("activation.complete");
+    xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
 
 void Application::RenderClaimSubstate(TbotClaimSubstate substate) {
@@ -2897,7 +2912,7 @@ void Application::InitializeProtocol() {
         if (passive_ws_intent_.load()) {
             ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
             StopHeartbeat();
-            if (!lesson_runtime_active_.load()) {
+            if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
                 audio_service_.EnableWakeWordDetection(true);
             }
         } else {
@@ -3920,7 +3935,7 @@ void Application::OpenChannelTask(void* arg) {
                     self->StartHeartbeat();
                     self->DispatchDeviceHeartbeat();
                     self->SetListeningMode(kListeningModeManualStop);
-                } else if (!self->lesson_runtime_active_.load()) {
+                } else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load()) {
                     const std::string deferred_wake_word = self->deferred_wake_word_;
                     self->deferred_wake_word_.clear();
                     if (!deferred_wake_word.empty()) {

@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
 PROVISIONING_STATUS_URL = "https://esp.tjbot.vn/tbot/v1/device/provisioning/status"
+WEBSOCKET_URL = "wss://esp.tjbot.vn/tbot/v1/"
 
 
 def assert_no_ephemeral_endpoint(contents: str, source: str) -> None:
@@ -26,8 +27,10 @@ def test_firmware_defaults_use_stable_ota_seed_and_no_ephemeral_ws_seed():
     assert f'default "{OTA_URL}"' in kconfig
     assert f'CONFIG_OTA_URL="{OTA_URL}"' in local_defaults
     assert f'CONFIG_PROVISIONING_STATUS_URL="{PROVISIONING_STATUS_URL}"' in local_defaults
-    assert 'default ""' in kconfig
-    assert 'CONFIG_WEBSOCKET_URL=""' in local_defaults
+    assert f'default "{WEBSOCKET_URL}"' in kconfig
+    assert f'CONFIG_WEBSOCKET_URL="{WEBSOCKET_URL}"' in local_defaults
+    assert "?" not in WEBSOCKET_URL
+    assert "token" not in WEBSOCKET_URL.lower()
 
 
 def test_local_firmware_configs_do_not_override_stable_seed_with_ephemeral_urls():
@@ -35,7 +38,7 @@ def test_local_firmware_configs_do_not_override_stable_seed_with_ephemeral_urls(
         contents = (ROOT / sdkconfig_name).read_text(encoding="utf-8")
         assert_no_ephemeral_endpoint(contents, sdkconfig_name)
         assert f'CONFIG_OTA_URL="{OTA_URL}"' in contents, sdkconfig_name
-        assert 'CONFIG_WEBSOCKET_URL=""' in contents, sdkconfig_name
+        assert f'CONFIG_WEBSOCKET_URL="{WEBSOCKET_URL}"' in contents, sdkconfig_name
 
 
 def test_websocket_protocol_uses_compile_time_fallback_when_nvs_missing():

@@ -2,7 +2,7 @@ CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
 # Stable backend bootstrap seed. The OTA response returns the final websocket.url.
 CONFIG_OTA_URL="https://esp.tjbot.vn/tbot/ota/"
 CONFIG_PROVISIONING_STATUS_URL="https://esp.tjbot.vn/tbot/v1/device/provisioning/status"
-CONFIG_WEBSOCKET_URL=""
+CONFIG_WEBSOCKET_URL="wss://esp.tjbot.vn/tbot/v1/"
 # Keep BluFi discoverable for the contract maximum; phone setup and Wi-Fi
 # password entry can exceed the five-minute default.
 CONFIG_BLE_SETUP_TIMEOUT_SEC=600

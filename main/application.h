@@ -359,6 +359,7 @@ private:
 
     // Activation task (runs in background)
     void ActivationTask();
+    void CompleteUnclaimedProtocolOnlyActivation();
 
     // Helper methods
     void CheckAssetsVersion();

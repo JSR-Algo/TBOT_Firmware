@@ -50,9 +50,11 @@ def test_unclaimed_saved_wifi_boot_uses_activation_transport_path_not_done_short
     connected = function_body(source, "void Application::HandleNetworkConnectedEvent")
     unclaimed = block_after_marker(connected, "if (!IsDeviceClaimed())")
 
-    assert "ActivationTask();" in unclaimed
-    assert "InitializeProtocol();" not in unclaimed
+    assert "CompleteUnclaimedProtocolOnlyActivation();" in unclaimed
+    assert "ActivationTask();" not in unclaimed
     assert "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE)" not in unclaimed
+    assert "InitializeProtocol();" not in unclaimed
+    assert "CheckAssetsVersion();" not in unclaimed
     assert "CheckNewVersion();" not in unclaimed
     assert "RefreshWebsocketUrlFromConfigFetch();" not in unclaimed
     assert "audio_service_.PrewarmWakeWord" not in unclaimed
@@ -63,12 +65,36 @@ def test_unclaimed_blufi_promotion_uses_activation_transport_path_not_done_short
     promoted = function_body(source, "void Application::PromoteFromWifiConfigAfterProvisioning")
     unclaimed = block_after_marker(promoted, "if (!IsDeviceClaimed())")
 
-    assert "ActivationTask();" in unclaimed
-    assert "InitializeProtocol();" not in unclaimed
+    assert "CompleteUnclaimedProtocolOnlyActivation();" in unclaimed
+    assert "ActivationTask();" not in unclaimed
     assert "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE)" not in unclaimed
+    assert "InitializeProtocol();" not in unclaimed
+    assert "CheckAssetsVersion();" not in unclaimed
     assert "CheckNewVersion();" not in unclaimed
     assert "RefreshWebsocketUrlFromConfigFetch();" not in unclaimed
     assert "audio_service_.PrewarmWakeWord" not in unclaimed
+
+
+def test_unclaimed_protocol_only_activation_helper_excludes_assets_ota_wake_and_heartbeat():
+    helper = function_body(
+        read("main/application.cc"),
+        "void Application::CompleteUnclaimedProtocolOnlyActivation"
+    )
+
+    assert "InitializeProtocol();" in helper
+    assert "MAIN_EVENT_ACTIVATION_DONE" in helper
+    assert "ota_->MarkCurrentVersionValid();" in helper
+    for claimed_only_or_blocking in (
+        "CheckAssetsVersion",
+        "CheckNewVersion",
+        "RefreshWebsocketUrlFromConfigFetch",
+        "PrewarmWakeWord",
+        "StartHeartbeat",
+        "DispatchDeviceHeartbeat",
+        "audio_service_.Start",
+        "EnableWakeWordDetection",
+    ):
+        assert claimed_only_or_blocking not in helper
 
 
 def test_unclaimed_activation_initializes_protocol_before_activation_done():
@@ -116,6 +142,32 @@ def test_websocket_protocol_opens_passive_raw_session_without_claim_heartbeat():
     assert websocket_branch.rindex("if (IsDeviceClaimed())", 0, unclaimed_log) < unclaimed_log
     assert "StartHeartbeat" not in websocket_branch[unclaimed_log:unclaimed_call]
     assert "DispatchDeviceHeartbeat" not in websocket_branch[unclaimed_log:unclaimed_call]
+
+
+def test_unclaimed_passive_websocket_success_does_not_rearm_wake_word_or_deferred_wake():
+    source = read("main/application.cc")
+    opened = source[source.index("protocol_->OnAudioChannelOpened") : source.index("protocol_->OnAudioChannelClosed")]
+    passive_opened = opened[opened.index("if (passive_ws_intent_.load())") : opened.index("} else {")]
+
+    assert "IsDeviceClaimed()" in passive_opened
+    assert "EnableWakeWordDetection(true)" in passive_opened
+    assert passive_opened.index("IsDeviceClaimed()") < passive_opened.index(
+        "EnableWakeWordDetection(true)"
+    )
+
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    passive_success = open_task[
+        open_task.index("if (passive_preconnect)") :
+        open_task.index("} else if (wake_word_invoke)", open_task.index("if (passive_preconnect)"))
+    ]
+
+    assert "self->IsDeviceClaimed()" in passive_success
+    for wake_action in (
+        "self->FinishWakeWordInvoke(deferred_wake_word);",
+        "self->audio_service_.EnableWakeWordDetection(true);",
+    ):
+        assert wake_action in passive_success
+        assert passive_success.index("self->IsDeviceClaimed()") < passive_success.index(wake_action)
 
 
 def test_unclaimed_protocol_selection_can_use_persisted_or_compile_time_websocket_url_without_ota():
