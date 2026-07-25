@@ -1431,7 +1431,6 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
         Settings websocket_settings("websocket", true);
         websocket_settings.EraseKey("claim_device_id");
     }
-    ReloadProtocolAfterClaimCredentials();
     pending_tbot_claim_ = PendingTbotClaim{};
     pending_tbot_claim_api_url_.clear();
     SecureClearString(pending_tbot_claim_token_);
@@ -1659,11 +1658,11 @@ bool Application::FinishClaimActivationAfterLocalAssetsReady() {
         esp_timer_stop(claim_assets_retry_timer_);
     }
 
-    // TBOT claim complete -> return to explicit wake standby. Do not warm the
-    // realtime WebSocket here: opening the channel can route through the normal
-    // connect path and leave the device in Listening, where this board disables
-    // wake-word detection. The first "Hi ESP" opens the channel on the existing
-    // wake worker path instead.
+    ReloadProtocolAfterClaimCredentials();
+
+    // TBOT claim complete -> refresh the protocol with claimed credentials, then
+    // return to explicit wake standby. InitializeProtocol opens only the passive
+    // lesson/nudge WebSocket for claimed idle devices.
     SetDeviceState(kDeviceStateIdle);
     audio_service_.Start();
     audio_service_.EnableWakeWordDetection(true);

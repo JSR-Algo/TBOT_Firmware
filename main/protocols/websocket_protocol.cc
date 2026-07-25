@@ -359,6 +359,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
             return;
         }
         if (binary) {
+            if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson) {
+                ESP_LOGW(TAG, "unclaimed_public_ws_binary_frame_rejected");
+                return;
+            }
             if (on_incoming_audio_ != nullptr) {
                 if (version_ == 2) {
                     // Bounds-check the server-supplied frame before any deref: the

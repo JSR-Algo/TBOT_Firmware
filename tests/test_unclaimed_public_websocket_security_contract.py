@@ -103,6 +103,27 @@ def test_unclaimed_public_websocket_drops_forbidden_realtime_and_mcp_frames_befo
     ]
     assert "on_incoming_json_(root, callback_transport_epoch);" in authenticated
 
+def test_unclaimed_public_websocket_drops_binary_before_audio_dispatch():
+    source = read("main/protocols/websocket_protocol.cc")
+    on_data = source[
+        source.index("websocket_->OnData") :
+        source.index("websocket_->OnDisconnected", source.index("websocket_->OnData"))
+    ]
+    binary_branch = on_data[
+        on_data.index("if (binary)") :
+        on_data.index("} else {", on_data.index("if (binary)"))
+    ]
+
+    public_gate_idx = binary_branch.index(
+        "if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson)"
+    )
+    audio_idx = binary_branch.index("on_incoming_audio_")
+    reject_idx = binary_branch.index("unclaimed_public_ws_binary_frame_rejected", public_gate_idx)
+    return_idx = binary_branch.index("return;", reject_idx)
+
+    assert public_gate_idx < reject_idx < return_idx < audio_idx
+    assert "on_incoming_audio_" in binary_branch[return_idx:]
+
 def test_unclaimed_public_websocket_deletes_json_root_on_allow_and_reject_paths():
     source = read("main/protocols/websocket_protocol.cc")
     on_data = source[

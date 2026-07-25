@@ -39,7 +39,7 @@ def test_lesson_enqueue_probes_bracket_serialization_and_reuse_exact_payload_siz
         'LogLessonHeapBoundary("enqueue.after_serialize", payload_bytes);', size
     )
     null_guard = enqueue.index("if (payload == nullptr)", after)
-    queue = enqueue.index("xQueueSend(lesson_message_queue_, &payload, 0)", null_guard)
+    queue = enqueue.index("xQueueSend(lesson_message_queue_, &item, 0)", null_guard)
 
     assert before < serialize < size < after < null_guard < queue
     assert "strlen(payload)" not in enqueue[queue:]
@@ -49,11 +49,11 @@ def test_lesson_worker_probes_parse_handler_and_delete_in_ownership_order():
     source = read("main/application.cc")
     worker = function_body(source, "void Application::LessonMessageTask")
 
-    size = worker.index("const size_t payload_bytes = strlen(payload);")
+    size = worker.index("const size_t payload_bytes = strlen(item.payload);")
     before_parse = worker.index(
         'LogLessonHeapBoundary("worker.before_parse", payload_bytes);', size
     )
-    parse = worker.index("cJSON* root = cJSON_Parse(payload);", before_parse)
+    parse = worker.index("cJSON* root = cJSON_Parse(item.payload);", before_parse)
     after_parse = worker.index(
         'LogLessonHeapBoundary("worker.after_parse", payload_bytes);', parse
     )
@@ -65,8 +65,8 @@ def test_lesson_worker_probes_parse_handler_and_delete_in_ownership_order():
     after_delete = worker.index(
         'LogLessonHeapBoundary("worker.after_delete", payload_bytes);', delete
     )
-    free_payload = worker.index("cJSON_free(payload);", after_delete)
-    clear_payload = worker.index("payload = nullptr;", free_payload)
+    free_payload = worker.index("cJSON_free(item.payload);", after_delete)
+    clear_payload = worker.index("item.payload = nullptr;", free_payload)
     after_payload_free = worker.index(
         'LogLessonHeapBoundary("worker.after_payload_free", payload_bytes);',
         clear_payload,

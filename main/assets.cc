@@ -14,6 +14,7 @@
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
 #include <cbin_font.h>
+#include <memory>
 
 
 #define TAG "Assets"
@@ -231,13 +232,14 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         return false;
     }
 
-    cJSON* root = cJSON_ParseWithLength(static_cast<char*>(ptr), size);
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root(
+        cJSON_ParseWithLength(static_cast<char*>(ptr), size), cJSON_Delete);
     if (root == nullptr) {
         ESP_LOGE(TAG, "The index.json file is not valid");
         return false;
     }
 
-    cJSON* version = cJSON_GetObjectItem(root, "version");
+    cJSON* version = cJSON_GetObjectItem(root.get(), "version");
     if (cJSON_IsNumber(version)) {
         if (version->valuedouble > 1) {
             ESP_LOGE(TAG, "The assets version %d is not supported, please upgrade the firmware", version->valueint);
@@ -245,8 +247,7 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
     }
 
-    if (!Assets::LoadSrmodelsFromIndex(assets, root)) {
-        cJSON_Delete(root);
+    if (!Assets::LoadSrmodelsFromIndex(assets, root.get())) {
         return false;
     }
 
@@ -254,7 +255,7 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
     auto light_theme = theme_manager.GetTheme("light");
     auto dark_theme = theme_manager.GetTheme("dark");
 
-    cJSON* font = cJSON_GetObjectItem(root, "text_font");
+    cJSON* font = cJSON_GetObjectItem(root.get(), "text_font");
     if (cJSON_IsString(font)) {
         std::string fonts_text_file = font->valuestring;
         if (assets->GetAssetData(fonts_text_file, ptr, size)) {
@@ -274,7 +275,7 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
     }
 
-    cJSON* emoji_collection = cJSON_GetObjectItem(root, "emoji_collection");
+    cJSON* emoji_collection = cJSON_GetObjectItem(root.get(), "emoji_collection");
     if (cJSON_IsArray(emoji_collection)) {
         auto custom_emoji_collection = std::make_shared<EmojiCollection>();
         int emoji_count = cJSON_GetArraySize(emoji_collection);
@@ -301,7 +302,7 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
     }
 
-    cJSON* skin = cJSON_GetObjectItem(root, "skin");
+    cJSON* skin = cJSON_GetObjectItem(root.get(), "skin");
     if (cJSON_IsObject(skin)) {
         cJSON* light_skin = cJSON_GetObjectItem(skin, "light");
         if (cJSON_IsObject(light_skin) && light_theme != nullptr) {
@@ -357,7 +358,7 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
 
         // Parse hide_subtitle configuration
-        cJSON* hide_subtitle = cJSON_GetObjectItem(root, "hide_subtitle");
+        cJSON* hide_subtitle = cJSON_GetObjectItem(root.get(), "hide_subtitle");
         if (cJSON_IsBool(hide_subtitle)) {
             bool hide = cJSON_IsTrue(hide_subtitle);
             auto lcd_display = dynamic_cast<LcdDisplay*>(display);
@@ -368,7 +369,6 @@ bool Assets::LvglStrategy::Apply(Assets* assets, bool refresh_display_theme) {
         }
     }
     
-    cJSON_Delete(root);
     return true;
 }
 #endif // HAVE_LVGL

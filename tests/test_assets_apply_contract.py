@@ -38,12 +38,32 @@ def test_lvgl_apply_fails_when_declared_local_srmodels_do_not_load():
     source = read("main/assets.cc")
     apply_body = function_body(source, "bool Assets::LvglStrategy::Apply")
 
-    load_idx = apply_body.index("if (!Assets::LoadSrmodelsFromIndex(assets, root))")
+    load_idx = apply_body.index("if (!Assets::LoadSrmodelsFromIndex(assets, root.get()))")
     theme_idx = apply_body.index("auto& theme_manager", load_idx)
     failure_branch = apply_body[load_idx:theme_idx]
 
-    assert "cJSON_Delete(root);" in failure_branch
+    assert "std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root" in apply_body
+    assert "Assets::LoadSrmodelsFromIndex(assets, root.get())" in failure_branch
     assert "return false;" in failure_branch
+
+def test_lvgl_apply_uses_raii_for_all_post_parse_early_returns():
+    source = read("main/assets.cc")
+    apply_body = function_body(source, "bool Assets::LvglStrategy::Apply")
+    parse_idx = apply_body.index("cJSON_ParseWithLength(static_cast<char*>(ptr), size)")
+    first_post_parse_return = apply_body.index("return", parse_idx)
+
+    assert "std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root" in apply_body
+    assert "root.get()" in apply_body
+    assert "cJSON_Delete(root);" not in apply_body[parse_idx:]
+    assert apply_body.index("std::unique_ptr<cJSON, decltype(&cJSON_Delete)> root") < first_post_parse_return
+
+    for expected_failure in (
+        "version->valuedouble > 1",
+        "Assets::LoadSrmodelsFromIndex(assets, root.get())",
+        "text_font->font() == nullptr",
+        "The background image file %s is not found",
+    ):
+        assert expected_failure in apply_body
 
 
 def test_emote_apply_fails_when_declared_local_srmodels_do_not_load():
@@ -65,7 +85,7 @@ def test_claim_audio_gate_depends_on_truthful_local_srmodels_apply_result():
     finish = function_body(application, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
 
     assert "return assets.Apply(false);" in helper
-    assert "if (!Assets::LoadSrmodelsFromIndex(assets, root))" in function_body(
+    assert "if (!Assets::LoadSrmodelsFromIndex(assets, root.get()))" in function_body(
         assets, "bool Assets::LvglStrategy::Apply"
     )
     assert "if (!Assets::LoadSrmodelsFromIndex(assets))" in function_body(

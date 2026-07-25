@@ -75,4 +75,5 @@ def test_lesson_worker_queue_is_gated_on_websocket_transport_only():
     assert "is_websocket_protocol = true;" in app
     # And MQTT is selected when HasMqttConfig() -> never flips is_websocket_protocol.
     assert "protocol_ = std::make_unique<MqttProtocol>();" in app
-    assert "protocol_ = std::make_unique<WebsocketProtocol>();" in app
+    assert "auto websocket_protocol = std::make_unique<WebsocketProtocol>();" in app
+    assert "protocol_ = std::move(websocket_protocol);" in app
