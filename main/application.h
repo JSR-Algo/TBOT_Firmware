@@ -360,6 +360,7 @@ private:
     // Activation task (runs in background)
     void ActivationTask();
     void CompleteUnclaimedProtocolOnlyActivation();
+    bool EnsureLocalAssetsAppliedForClaim();
 
     // Helper methods
     void CheckAssetsVersion();

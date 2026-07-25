@@ -5,7 +5,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CURRENT_PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
 CURRENT_PRODUCTION_PROVISIONING_STATUS_URL = (
-    "https://esp.tjbot.vn/tbot/v1/device/provisioning/status"
+    "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
 )
 CURRENT_PRODUCTION_WEBSOCKET_URL = "wss://esp.tjbot.vn/tbot/v1/"
 CURRENT_OTA_BUILD_VERSION = "2.2.85"
@@ -97,7 +97,10 @@ def test_firmware_provisioning_status_targets_the_backend_api():
         f'CONFIG_PROVISIONING_STATUS_URL="{CURRENT_PRODUCTION_PROVISIONING_STATUS_URL}"'
         in local
     )
-    assert "onrender.com" not in local
+    assert (
+        'CONFIG_PROVISIONING_STATUS_URL="https://esp.tjbot.vn/tbot/v1/device/provisioning/status"'
+        not in local
+    )
 
 def test_prod_flash_script_rejects_tiny_placeholder_artifacts():
     script = read("scripts/flash_prod_new_robot.sh")

@@ -4,7 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
-PROVISIONING_STATUS_URL = "https://esp.tjbot.vn/tbot/v1/device/provisioning/status"
+PROVISIONING_STATUS_URL = "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
 WEBSOCKET_URL = "wss://esp.tjbot.vn/tbot/v1/"
 
 

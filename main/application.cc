@@ -1439,9 +1439,14 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
     // wake-word detection. The first "Hi ESP" opens the channel on the existing
     // wake worker path instead.
     if (IsDeviceClaimed()) {
-        SetDeviceState(kDeviceStateIdle);
-        audio_service_.Start();
-        audio_service_.EnableWakeWordDetection(true);
+        const bool local_assets_ready = EnsureLocalAssetsAppliedForClaim();
+        if (local_assets_ready) {
+            SetDeviceState(kDeviceStateIdle);
+            audio_service_.Start();
+            audio_service_.EnableWakeWordDetection(true);
+        } else {
+            ESP_LOGE(TAG, "Claim confirmed but local assets/models are not ready; audio start deferred");
+        }
         // On first claim, the realtime session may already have connected while
         // unclaimed, before backend credentials existed. Start and fire one
         // heartbeat now so the claimed online device reports immediately.
@@ -1640,6 +1645,16 @@ void Application::CompleteUnclaimedProtocolOnlyActivation() {
 
     SystemInfo::PrintHeapCheckpoint("activation.complete");
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+}
+
+bool Application::EnsureLocalAssetsAppliedForClaim() {
+    auto& assets = Assets::GetInstance();
+    if (!assets.partition_valid()) {
+        ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
+        return true;
+    }
+
+    return assets.Apply(false);
 }
 
 void Application::RenderClaimSubstate(TbotClaimSubstate substate) {

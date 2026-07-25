@@ -837,6 +837,48 @@ def test_retryable_auto_confirm_keeps_cached_pending_claim_and_token():
     assert "StartClaimPoll();" in retry_body
 
 
+def test_same_session_claim_applies_local_assets_before_starting_audio_or_wake():
+    header = read("main/application.h")
+    source = read("main/application.cc")
+    result_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    success_body = result_body[result_body.index("CancelClaimExpiryTimer();") :]
+
+    assert "bool EnsureLocalAssetsAppliedForClaim();" in header
+    ready_idx = success_body.index("const bool local_assets_ready = EnsureLocalAssetsAppliedForClaim();")
+    gate_idx = success_body.index("if (local_assets_ready)")
+    idle_idx = success_body.index("SetDeviceState(kDeviceStateIdle);")
+    start_idx = success_body.index("audio_service_.Start();")
+    wake_idx = success_body.index("audio_service_.EnableWakeWordDetection(true);")
+
+    assert ready_idx < gate_idx < idle_idx < start_idx < wake_idx
+
+    gated_body = success_body[gate_idx:success_body.index("StartHeartbeat();", gate_idx)]
+    assert "SetDeviceState(kDeviceStateIdle);" in gated_body
+    assert "audio_service_.Start();" in gated_body
+    assert "audio_service_.EnableWakeWordDetection(true);" in gated_body
+
+def test_same_session_claim_asset_apply_is_local_only_and_does_not_download():
+    source = read("main/application.cc")
+    helper = function_body(source, "bool Application::EnsureLocalAssetsAppliedForClaim")
+
+    assert "Assets::GetInstance()" in helper
+    assert "assets.partition_valid()" in helper
+    assert "assets.Apply(false)" in helper
+
+    for forbidden in (
+        "CheckAssetsVersion",
+        "CheckNewVersion",
+        "Download",
+        "download_url",
+        "StartHeartbeat",
+        "DispatchDeviceHeartbeat",
+        "audio_service_.Start",
+        "EnableWakeWordDetection",
+    ):
+        assert forbidden not in helper
+
 def test_app_startup_registers_allocation_failure_diagnostics_without_allocating_in_hook():
     source = read("main/main.cc")
     hook = function_body(source, "static void AllocationFailureHook")
