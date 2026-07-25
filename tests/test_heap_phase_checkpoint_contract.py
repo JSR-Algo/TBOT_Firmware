@@ -74,7 +74,7 @@ def test_activation_wraps_high_risk_boot_phases_with_local_minimum_monitors():
     )
     assert_monitored_phase(activation, "InitializeProtocol();", "protocol_init.complete")
     assert "PrewarmWakeWord" not in assets
-    assert activation.count('SystemInfo::PrintHeapCheckpoint("activation.complete");') == 2
+    assert activation.count('SystemInfo::PrintHeapCheckpoint("activation.complete");') == 1
 
 
 def test_claimed_activation_finishes_boot_http_before_afe_prewarm_and_protocol():
@@ -93,17 +93,20 @@ def test_claimed_activation_finishes_boot_http_before_afe_prewarm_and_protocol()
     assert assets < ota < config < prewarm < protocol < activation_done
 
 
-def test_unclaimed_activation_returns_before_afe_prewarm_and_protocol():
+def test_unclaimed_activation_skips_claimed_bootstrap_but_reaches_protocol():
     source = APPLICATION_SOURCE.read_text(encoding="utf-8")
     activation = function_body(source, "void Application::ActivationTask")
 
     unclaimed_start = activation.index("if (!IsDeviceClaimed())")
-    unclaimed_return = activation.index("return;", unclaimed_start)
-    unclaimed_branch = activation[unclaimed_start:unclaimed_return]
+    unclaimed_end = activation.index("} else {", unclaimed_start)
+    unclaimed_branch = activation[unclaimed_start:unclaimed_end]
+    protocol = activation.index("InitializeProtocol();", unclaimed_end)
 
     assert "CheckAssetsVersion();" in unclaimed_branch
     assert "PrewarmWakeWord" not in unclaimed_branch
-    assert "InitializeProtocol" not in unclaimed_branch
+    assert "CheckNewVersion();" not in unclaimed_branch
+    assert "RefreshWebsocketUrlFromConfigFetch();" not in unclaimed_branch
+    assert unclaimed_start < unclaimed_end < protocol
 
 
 def test_claimed_activation_interrupted_by_setup_or_audio_test_skips_afe_prewarm():
@@ -117,7 +120,7 @@ def test_claimed_activation_interrupted_by_setup_or_audio_test_skips_afe_prewarm
     prewarm_guard = activation[state:prewarm]
 
     assert state < prewarm < protocol
-    assert "if (IsDeviceClaimed() &&" in prewarm_guard
+    assert activation.index("} else {", activation.index("if (!IsDeviceClaimed())")) < state
     assert "activation_state != kDeviceStateWifiConfiguring" in prewarm_guard
     assert "activation_state != kDeviceStateAudioTesting" in prewarm_guard
 

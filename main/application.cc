@@ -818,13 +818,9 @@ void Application::HandleNetworkConnectedEvent() {
         // finish cloud bootstrap without a parent claim — exit Activating now.
         if (!IsDeviceClaimed()) {
             ESP_LOGW(TAG,
-                     "Unclaimed device on Wi-Fi: skip activation worker "
-                     "(heap too tight with BLE; leave claim-standby)");
-            if (!ota_) {
-                ota_ = std::make_unique<Ota>();
-                ota_->MarkCurrentVersionValid();
-            }
-            xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+                     "Unclaimed device on Wi-Fi: run minimal activation transport "
+                     "without claimed bootstrap worker");
+            ActivationTask();
             return;
         }
         if (activation_task_handle_ != nullptr) {
@@ -1598,16 +1594,12 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
     }
     if (!IsDeviceClaimed()) {
         // Same heap constraint as HandleNetworkConnectedEvent: with BLE still
-        // advertising for claim standby, the 8KB activation task often cannot
-        // be created. Signal done so we reach Idle and keep BLE discoverable.
+        // advertising for claim standby, the 8KB activation task often cannot be
+        // created. Run the minimal unclaimed activation path inline instead.
         ESP_LOGW(TAG,
-                 "Unclaimed after BluFi Wi-Fi success: skip activation worker, "
-                 "finish setup to Idle claim-standby");
-        if (!ota_) {
-            ota_ = std::make_unique<Ota>();
-            ota_->MarkCurrentVersionValid();
-        }
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+                 "Unclaimed after BluFi Wi-Fi success: run minimal activation "
+                 "transport inline");
+        ActivationTask();
         return;
     }
 
@@ -2816,9 +2808,12 @@ void Application::InitializeProtocol() {
     // call below). For MQTT, Start() brings up the control channel (not just an
     // audio preconnect), so we never gate it here.
     bool is_websocket_protocol = false;
+    Settings websocket_settings("websocket", false);
+    const bool has_configured_websocket_url =
+        !websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL).empty();
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota_->HasWebsocketConfig()) {
+    } else if (ota_->HasWebsocketConfig() || has_configured_websocket_url) {
         protocol_ = std::make_unique<WebsocketProtocol>();
         is_websocket_protocol = true;
     } else {

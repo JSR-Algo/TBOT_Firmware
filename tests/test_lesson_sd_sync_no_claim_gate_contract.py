@@ -45,6 +45,32 @@ def block_after_marker(text: str, marker: str) -> str:
     raise AssertionError(f"unterminated block {marker}")
 
 
+def test_unclaimed_saved_wifi_boot_uses_activation_transport_path_not_done_shortcut():
+    source = read("main/application.cc")
+    connected = function_body(source, "void Application::HandleNetworkConnectedEvent")
+    unclaimed = block_after_marker(connected, "if (!IsDeviceClaimed())")
+
+    assert "ActivationTask();" in unclaimed
+    assert "InitializeProtocol();" not in unclaimed
+    assert "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE)" not in unclaimed
+    assert "CheckNewVersion();" not in unclaimed
+    assert "RefreshWebsocketUrlFromConfigFetch();" not in unclaimed
+    assert "audio_service_.PrewarmWakeWord" not in unclaimed
+
+
+def test_unclaimed_blufi_promotion_uses_activation_transport_path_not_done_shortcut():
+    source = read("main/application.cc")
+    promoted = function_body(source, "void Application::PromoteFromWifiConfigAfterProvisioning")
+    unclaimed = block_after_marker(promoted, "if (!IsDeviceClaimed())")
+
+    assert "ActivationTask();" in unclaimed
+    assert "InitializeProtocol();" not in unclaimed
+    assert "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE)" not in unclaimed
+    assert "CheckNewVersion();" not in unclaimed
+    assert "RefreshWebsocketUrlFromConfigFetch();" not in unclaimed
+    assert "audio_service_.PrewarmWakeWord" not in unclaimed
+
+
 def test_unclaimed_activation_initializes_protocol_before_activation_done():
     activation = function_body(read("main/application.cc"), "void Application::ActivationTask")
 
@@ -90,6 +116,31 @@ def test_websocket_protocol_opens_passive_raw_session_without_claim_heartbeat():
     assert websocket_branch.rindex("if (IsDeviceClaimed())", 0, unclaimed_log) < unclaimed_log
     assert "StartHeartbeat" not in websocket_branch[unclaimed_log:unclaimed_call]
     assert "DispatchDeviceHeartbeat" not in websocket_branch[unclaimed_log:unclaimed_call]
+
+
+def test_unclaimed_protocol_selection_can_use_persisted_or_compile_time_websocket_url_without_ota():
+    initialize = function_body(read("main/application.cc"), "void Application::InitializeProtocol")
+    selection = initialize[:initialize.index("protocol_generation_.fetch_add")]
+
+    assert 'Settings websocket_settings("websocket", false);' in selection
+    assert 'websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL)' in selection
+    assert "has_configured_websocket_url" in selection
+    assert "ota_->HasWebsocketConfig() || has_configured_websocket_url" in selection
+    assert "std::make_unique<WebsocketProtocol>()" in selection
+    assert selection.index("has_configured_websocket_url") < selection.index(
+        "std::make_unique<WebsocketProtocol>()"
+    )
+
+    for token_gate in (
+        "IsDeviceClaimed",
+        "bootstrap_token",
+        "device_token",
+        "provisioning_token",
+        "backend_uuid",
+        "claim_token",
+        "claim_device_id",
+    ):
+        assert token_gate not in selection
 
 
 def test_sync_to_sd_registration_and_dispatch_are_not_claim_or_token_gated():
