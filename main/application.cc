@@ -2608,50 +2608,45 @@ void Application::ActivationTask() {
     // any network-bound version or assets work.
     ota_->MarkCurrentVersionValid();
 
-    // Unclaimed + saved Wi-Fi keeps BLE advertising open for phone setup.
-    // Running OTA HTTPS (CheckNewVersion) at the same time exhausts internal
-    // heap (TLS + BluFi) and freezes the UI on "Loading setup..." with no
-    // further logs. Unclaimed robots cannot finish cloud activation without a
-    // parent claim, so skip network bootstrap and exit to Idle claim-standby.
     if (!IsDeviceClaimed()) {
+        // Unclaimed + saved Wi-Fi keeps BLE advertising open for phone setup.
+        // Running OTA HTTPS/config fetch at the same time exhausts internal heap
+        // (TLS + BluFi), so keep claimed-only bootstrap off this path while still
+        // creating the raw WebSocket session used by public lesson asset fanout.
         ESP_LOGW(TAG,
                  "Unclaimed device: skip OTA/bootstrap HTTPS while BLE stays up "
-                 "(avoids Loading-setup hang; claim path remains via BLE)");
+                 "(claim path remains via BLE; public lesson sync uses raw WS)");
         CheckAssetsVersion();
-        SystemInfo::PrintHeapCheckpoint("activation.complete");
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
-        return;
-    }
+    } else {
+        const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
 
-    const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
+        // Check for new assets version
+        CheckAssetsVersion();
 
-    // Check for new assets version
-    CheckAssetsVersion();
-
-    // Check for new firmware version
-    SystemInfo::StartHeapPhaseMonitor();
-    CheckNewVersion();
-    SystemInfo::PrintHeapCheckpoint("ota_check.complete");
-    SystemInfo::StopHeapPhaseMonitor();
-
-    // Claimed devices can override the OTA-provided websocket.url from the
-    // backend's authenticated runtime config. If this fails, keep the existing
-    // OTA/NVS value and compile-time placeholder fallback chain.
-    SystemInfo::StartHeapPhaseMonitor();
-    RefreshWebsocketUrlFromConfigFetch();
-    SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
-    SystemInfo::StopHeapPhaseMonitor();
-
-    // Build the AFE only after boot HTTP/TLS transients have released their
-    // internal SRAM, but before protocol startup and the Idle wake-word gate.
-    const auto activation_state = GetDeviceState();
-    if (IsDeviceClaimed() &&
-        activation_state != kDeviceStateWifiConfiguring &&
-        activation_state != kDeviceStateAudioTesting) {
+        // Check for new firmware version
         SystemInfo::StartHeapPhaseMonitor();
-        audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
-        SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
+        CheckNewVersion();
+        SystemInfo::PrintHeapCheckpoint("ota_check.complete");
         SystemInfo::StopHeapPhaseMonitor();
+
+        // Claimed devices can override the OTA-provided websocket.url from the
+        // backend's authenticated runtime config. If this fails, keep the existing
+        // OTA/NVS value and compile-time placeholder fallback chain.
+        SystemInfo::StartHeapPhaseMonitor();
+        RefreshWebsocketUrlFromConfigFetch();
+        SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
+        SystemInfo::StopHeapPhaseMonitor();
+
+        // Build the AFE only after boot HTTP/TLS transients have released their
+        // internal SRAM, but before protocol startup and the Idle wake-word gate.
+        const auto activation_state = GetDeviceState();
+        if (activation_state != kDeviceStateWifiConfiguring &&
+            activation_state != kDeviceStateAudioTesting) {
+            SystemInfo::StartHeapPhaseMonitor();
+            audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
+            SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
+            SystemInfo::StopHeapPhaseMonitor();
+        }
     }
 
     // Initialize the protocol
@@ -2926,11 +2921,12 @@ void Application::InitializeProtocol() {
         }
         backend_offline_.store(false);
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        // Once the realtime WS is up, STOP the blocking claim-config HTTP/TLS poll.
-        // It runs on the main task and was starving the Opus codec task (growing
-        // encode_drop -> dropped mic uplink -> "I speak but no response"). The
-        // device is functional over the WS; claim re-arms if it ever needs to.
-        Schedule([this]() { StopClaimPoll(); });
+        // Once a claimed realtime WS is up, STOP the blocking claim-config
+        // HTTP/TLS poll. Unclaimed public lesson sync must not change claim
+        // provisioning semantics.
+        if (IsDeviceClaimed()) {
+            Schedule([this]() { StopClaimPoll(); });
+        }
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
@@ -3292,7 +3288,8 @@ void Application::InitializeProtocol() {
             ESP_LOGI(TAG, "Claimed device: opening passive WebSocket for lesson/nudge");
             StartPassiveLessonWebsocket();
         } else {
-            ESP_LOGI(TAG, "WebSocket audio starts on wake word or explicit listen");
+            ESP_LOGI(TAG, "Unclaimed device: opening passive WebSocket for public lesson sync");
+            StartPassiveLessonWebsocket();
         }
     } else {
         protocol_->Start();
