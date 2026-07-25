@@ -13,6 +13,11 @@
 
 #define WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT (1 << 0)
 
+enum class WebsocketSessionMode {
+    kAuthenticatedRealtime,
+    kUnclaimedPublicLesson,
+};
+
 class WebsocketProtocol : public Protocol {
 public:
     WebsocketProtocol();
@@ -35,11 +40,13 @@ private:
     std::string url_;
     std::string token_;
     int version_ = 1;
+    WebsocketSessionMode session_mode_ = WebsocketSessionMode::kUnclaimedPublicLesson;
     PassiveWebsocketLiveness passive_liveness_;
     ConnectionCloseState close_state_;
 
     void RefreshSettings();
     void ParseServerHello(const cJSON* root);
+    bool IsAllowedUnclaimedPublicLessonMessage(const cJSON* root) const;
     bool SendText(const std::string& text) override;
     void SetError(const std::string& message) override;
     void DetachAndResetWebsocket();

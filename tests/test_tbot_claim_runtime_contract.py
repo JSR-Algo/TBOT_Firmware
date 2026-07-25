@@ -843,21 +843,73 @@ def test_same_session_claim_applies_local_assets_before_starting_audio_or_wake()
     result_body = function_body(
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
-    success_body = result_body[result_body.index("CancelClaimExpiryTimer();") :]
+    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
 
     assert "bool EnsureLocalAssetsAppliedForClaim();" in header
-    ready_idx = success_body.index("const bool local_assets_ready = EnsureLocalAssetsAppliedForClaim();")
-    gate_idx = success_body.index("if (local_assets_ready)")
-    idle_idx = success_body.index("SetDeviceState(kDeviceStateIdle);")
-    start_idx = success_body.index("audio_service_.Start();")
-    wake_idx = success_body.index("audio_service_.EnableWakeWordDetection(true);")
+    assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
+    ready_idx = finish_body.index("if (!EnsureLocalAssetsAppliedForClaim())")
+    idle_idx = finish_body.index("SetDeviceState(kDeviceStateIdle);")
+    start_idx = finish_body.index("audio_service_.Start();")
+    wake_idx = finish_body.index("audio_service_.EnableWakeWordDetection(true);")
 
-    assert ready_idx < gate_idx < idle_idx < start_idx < wake_idx
+    assert ready_idx < idle_idx < start_idx < wake_idx
 
-    gated_body = success_body[gate_idx:success_body.index("StartHeartbeat();", gate_idx)]
+    gated_body = finish_body[idle_idx:finish_body.index("StartHeartbeat();", idle_idx)]
     assert "SetDeviceState(kDeviceStateIdle);" in gated_body
     assert "audio_service_.Start();" in gated_body
     assert "audio_service_.EnableWakeWordDetection(true);" in gated_body
+
+def test_same_session_claim_asset_failure_is_recoverable_and_does_not_show_success():
+    header = read("main/application.h")
+    source = read("main/application.cc")
+    result_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
+    retry_body = function_body(source, "void Application::ScheduleClaimLocalAssetsRetry")
+    retry_tick = function_body(source, "void Application::HandleClaimLocalAssetsRetry")
+
+    assert "esp_timer_handle_t claim_assets_retry_timer_" in header
+    assert "void ScheduleClaimLocalAssetsRetry();" in header
+    assert "bool FinishClaimActivationAfterLocalAssetsReady();" in header
+    assert "void HandleClaimLocalAssetsRetry();" in header
+    assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
+    failure_start = result_body.index("if (!FinishClaimActivationAfterLocalAssetsReady())")
+    failure_body = result_body[failure_start:result_body.index("return true;", failure_start)]
+    assert "ScheduleClaimLocalAssetsRetry();" in failure_body
+    assert "Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_UNAVAILABLE_RETRYING" in failure_body
+    assert "Lang::Strings::CONNECTED" not in failure_body
+    assert "ConfirmPendingTbotClaim" not in retry_body + retry_tick
+    assert "ClaimConfirmationReporter::Confirm" not in retry_body + retry_tick
+    assert "FinishClaimActivationAfterLocalAssetsReady()" in retry_tick
+    assert "ScheduleClaimLocalAssetsRetry();" in retry_tick
+    assert "Lang::Strings::CONNECTED" in finish_body
+    assert finish_body.index("SetDeviceState(kDeviceStateIdle);") < finish_body.index(
+        "audio_service_.EnableWakeWordDetection(true);"
+    )
+
+def test_claim_confirm_reloads_protocol_after_credentials_before_next_open():
+    header = read("main/application.h")
+    source = read("main/application.cc")
+    websocket = read("main/protocols/websocket_protocol.cc")
+    result_body = function_body(
+        source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    reload_body = function_body(source, "void Application::ReloadProtocolAfterClaimCredentials")
+    open_body = function_body(websocket, "bool WebsocketProtocol::OpenAudioChannel")
+
+    assert "void ReloadProtocolAfterClaimCredentials();" in header
+    assert "ReloadProtocolAfterClaimCredentials();" in result_body
+    clear_idx = result_body.index('websocket_settings.SetString("bootstrap_token", "")')
+    reload_idx = result_body.index("ReloadProtocolAfterClaimCredentials();")
+    finish_idx = result_body.index("if (!FinishClaimActivationAfterLocalAssetsReady())")
+    assert clear_idx < reload_idx < finish_idx
+    assert "CloseAudioChannelByIntent();" in reload_body
+    assert "DoResetProtocol();" in reload_body
+    assert "InitializeProtocol();" in reload_body
+    assert "reset_pending_.store(true);" in reload_body
+    assert "RefreshSettings();" in open_body
+    assert open_body.index("RefreshSettings();") < open_body.index("std::string url = url_;")
 
 def test_same_session_claim_asset_apply_is_local_only_and_does_not_download():
     source = read("main/application.cc")

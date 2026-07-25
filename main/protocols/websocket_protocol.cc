@@ -83,6 +83,32 @@ void WebsocketProtocol::RefreshSettings() {
     }
 }
 
+bool WebsocketProtocol::IsAllowedUnclaimedPublicLessonMessage(const cJSON* root) const {
+    const cJSON* type = cJSON_GetObjectItem(root, "type");
+    if (!cJSON_IsString(type) || strcmp(type->valuestring, "mcp") != 0) {
+        return false;
+    }
+    const cJSON* payload = cJSON_GetObjectItem(root, "payload");
+    if (!cJSON_IsObject(payload)) {
+        return false;
+    }
+    const cJSON* jsonrpc = cJSON_GetObjectItem(payload, "jsonrpc");
+    const cJSON* id = cJSON_GetObjectItem(payload, "id");
+    const cJSON* method = cJSON_GetObjectItem(payload, "method");
+    const cJSON* params = cJSON_GetObjectItem(payload, "params");
+    if (!cJSON_IsString(jsonrpc) || strcmp(jsonrpc->valuestring, "2.0") != 0 ||
+        !cJSON_IsNumber(id) ||
+        !cJSON_IsString(method) || strcmp(method->valuestring, "tools/call") != 0 ||
+        !cJSON_IsObject(params)) {
+        return false;
+    }
+    const cJSON* name = cJSON_GetObjectItem(params, "name");
+    const cJSON* arguments = cJSON_GetObjectItem(params, "arguments");
+    return cJSON_IsString(name) &&
+           strcmp(name->valuestring, "self.lesson_assets.sync_to_sd") == 0 &&
+           cJSON_IsObject(arguments);
+}
+
 WebsocketProtocol::WebsocketProtocol() {
     event_group_handle_ = xEventGroupCreate();
     RefreshSettings();
@@ -265,8 +291,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
         ESP_LOGE(TAG, "websocket replacement rejected from callback context");
         return false;
     }
+    RefreshSettings();
     std::string url = url_;
     std::string token = token_;
+    session_mode_ = token.empty()
+        ? WebsocketSessionMode::kUnclaimedPublicLesson
+        : WebsocketSessionMode::kAuthenticatedRealtime;
     const std::string device_id = SystemInfo::GetMacAddress();
     const std::string client_id = Board::GetInstance().GetUuid();
 
@@ -396,6 +426,16 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         static_cast<uint32_t>(esp_timer_get_time() / 1000));
                     ESP_LOGD(TAG, "passive_ws_pong_received");
                 } else {
+                    if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson) {
+                        if (!IsAllowedUnclaimedPublicLessonMessage(root)) {
+                            ESP_LOGW(TAG, "unclaimed_public_ws_frame_rejected");
+                            return;
+                        }
+                        if (on_incoming_json_ != nullptr) {
+                            on_incoming_json_(root, callback_transport_epoch);
+                        }
+                        return;
+                    }
                     if (strncmp(type->valuestring, "lesson_", 7) == 0) {
                         auto sequence = cJSON_GetObjectItem(root, "sequence");
                         ESP_LOGI(TAG, "ws text lesson frame type=%s seq=%d bytes=%u",

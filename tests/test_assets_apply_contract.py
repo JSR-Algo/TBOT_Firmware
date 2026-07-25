@@ -22,7 +22,19 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
-def test_lvgl_apply_fails_when_local_srmodels_do_not_load():
+def test_load_srmodels_treats_absent_key_as_optional_but_declared_bad_models_as_fatal():
+    source = read("main/assets.cc")
+    loader = function_body(source, "bool Assets::LoadSrmodelsFromIndex")
+
+    absent_idx = loader.index("if (srmodels == nullptr)")
+    type_idx = loader.index("if (!cJSON_IsString(srmodels))", absent_idx)
+    load_idx = loader.index("std::string srmodels_file = srmodels->valuestring", type_idx)
+
+    assert "return true;" in loader[absent_idx:type_idx]
+    assert "return false;" in loader[type_idx:load_idx]
+    assert "return false;" in loader[load_idx:]
+
+def test_lvgl_apply_fails_when_declared_local_srmodels_do_not_load():
     source = read("main/assets.cc")
     apply_body = function_body(source, "bool Assets::LvglStrategy::Apply")
 
@@ -34,7 +46,7 @@ def test_lvgl_apply_fails_when_local_srmodels_do_not_load():
     assert "return false;" in failure_branch
 
 
-def test_emote_apply_fails_when_local_srmodels_do_not_load():
+def test_emote_apply_fails_when_declared_local_srmodels_do_not_load():
     source = read("main/assets.cc")
     apply_body = function_body(source, "bool Assets::EmoteStrategy::Apply")
 
@@ -50,10 +62,7 @@ def test_claim_audio_gate_depends_on_truthful_local_srmodels_apply_result():
     assets = read("main/assets.cc")
     application = read("main/application.cc")
     helper = function_body(application, "bool Application::EnsureLocalAssetsAppliedForClaim")
-    claim = function_body(
-        application, "bool Application::ApplyPendingTbotClaimConfirmationResult"
-    )
-    success = claim[claim.index("CancelClaimExpiryTimer();") :]
+    finish = function_body(application, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
 
     assert "return assets.Apply(false);" in helper
     assert "if (!Assets::LoadSrmodelsFromIndex(assets, root))" in function_body(
@@ -63,12 +72,12 @@ def test_claim_audio_gate_depends_on_truthful_local_srmodels_apply_result():
         assets, "bool Assets::EmoteStrategy::Apply"
     )
 
-    ready_idx = success.index("const bool local_assets_ready = EnsureLocalAssetsAppliedForClaim();")
-    gate_idx = success.index("if (local_assets_ready)", ready_idx)
-    heartbeat_idx = success.index("StartHeartbeat();", gate_idx)
-    gated_branch = success[gate_idx:heartbeat_idx]
+    ready_idx = finish.index("if (!EnsureLocalAssetsAppliedForClaim())")
+    gate_idx = finish.index("SetDeviceState(kDeviceStateIdle);", ready_idx)
+    heartbeat_idx = finish.index("StartHeartbeat();", gate_idx)
+    gated_branch = finish[gate_idx:heartbeat_idx]
 
     assert "audio_service_.Start();" in gated_branch
     assert "audio_service_.EnableWakeWordDetection(true);" in gated_branch
-    assert "audio_service_.Start();" not in success[ready_idx:gate_idx]
-    assert "audio_service_.EnableWakeWordDetection(true);" not in success[ready_idx:gate_idx]
+    assert "audio_service_.Start();" not in finish[ready_idx:gate_idx]
+    assert "audio_service_.EnableWakeWordDetection(true);" not in finish[ready_idx:gate_idx]

@@ -89,27 +89,39 @@ bool Assets::LoadSrmodelsFromIndex(Assets* assets, cJSON* root) {
     }
 
     cJSON* srmodels = cJSON_GetObjectItem(root, "srmodels");
-    if (cJSON_IsString(srmodels)) {
-        std::string srmodels_file = srmodels->valuestring;
-        if (assets->GetAssetData(srmodels_file, ptr, size)) {
-            if (assets->models_list_ != nullptr) {
-                esp_srmodel_deinit(assets->models_list_);
-                assets->models_list_ = nullptr;
-            }
-            assets->models_list_ = srmodel_load(static_cast<uint8_t*>(ptr));
-            if (assets->models_list_ != nullptr) {
-                auto& app = Application::GetInstance();
-                app.GetAudioService().SetModelsList(assets->models_list_);
-                if (need_delete_root) {
-                    cJSON_Delete(root);
-                }
-                return true;
-            } else {
-                ESP_LOGE(TAG, "Failed to load srmodels.bin");
-            }
-        } else {
-            ESP_LOGE(TAG, "The srmodels file %s is not found", srmodels_file.c_str());
+    if (srmodels == nullptr) {
+        if (need_delete_root) {
+            cJSON_Delete(root);
         }
+        return true;
+    }
+    if (!cJSON_IsString(srmodels)) {
+        ESP_LOGE(TAG, "The srmodels index value is not valid");
+        if (need_delete_root) {
+            cJSON_Delete(root);
+        }
+        return false;
+    }
+
+    std::string srmodels_file = srmodels->valuestring;
+    if (assets->GetAssetData(srmodels_file, ptr, size)) {
+        if (assets->models_list_ != nullptr) {
+            esp_srmodel_deinit(assets->models_list_);
+            assets->models_list_ = nullptr;
+        }
+        assets->models_list_ = srmodel_load(static_cast<uint8_t*>(ptr));
+        if (assets->models_list_ != nullptr) {
+            auto& app = Application::GetInstance();
+            app.GetAudioService().SetModelsList(assets->models_list_);
+            if (need_delete_root) {
+                cJSON_Delete(root);
+            }
+            return true;
+        } else {
+            ESP_LOGE(TAG, "Failed to load srmodels.bin");
+        }
+    } else {
+        ESP_LOGE(TAG, "The srmodels file %s is not found", srmodels_file.c_str());
     }
 
     if (need_delete_root) {

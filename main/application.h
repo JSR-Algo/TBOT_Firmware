@@ -249,6 +249,7 @@ private:
     // (or the poll window cap is reached) -> CLAIM_CONFIRM_TIMEOUT / "Setup
     // expired". Separate one-shot so the deadline is enforced even between polls.
     esp_timer_handle_t claim_expiry_timer_ = nullptr;     // one-shot
+    esp_timer_handle_t claim_assets_retry_timer_ = nullptr; // one-shot, local only
 
     // Heartbeat (C5): periodic POST /v1/device/heartbeat while claimed/online,
     // carrying backend DTO fields plus ble_state/ap_state/temp from board status.
@@ -270,6 +271,7 @@ private:
     std::atomic<uint32_t> connect_generation_{0};
     std::atomic<bool> connect_in_flight_{false};
     std::atomic<bool> reset_pending_{false};
+    std::atomic<bool> protocol_reinit_pending_{false};
     std::atomic<bool> reboot_pending_{false};
     ConnectCloseDeferral connect_close_deferral_;
     // WSS-8: true from the start of a wake/listen/reconnect connect cycle until it
@@ -361,6 +363,10 @@ private:
     void ActivationTask();
     void CompleteUnclaimedProtocolOnlyActivation();
     bool EnsureLocalAssetsAppliedForClaim();
+    bool FinishClaimActivationAfterLocalAssetsReady();
+    void ScheduleClaimLocalAssetsRetry();
+    void HandleClaimLocalAssetsRetry();
+    void ReloadProtocolAfterClaimCredentials();
 
     // Helper methods
     void CheckAssetsVersion();

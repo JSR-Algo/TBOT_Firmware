@@ -149,6 +149,10 @@ Application::~Application() {
         esp_timer_stop(claim_expiry_timer_);
         esp_timer_delete(claim_expiry_timer_);
     }
+    if (claim_assets_retry_timer_ != nullptr) {
+        esp_timer_stop(claim_assets_retry_timer_);
+        esp_timer_delete(claim_assets_retry_timer_);
+    }
     if (heartbeat_timer_ != nullptr) {
         esp_timer_stop(heartbeat_timer_);
         esp_timer_delete(heartbeat_timer_);
@@ -1427,34 +1431,20 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
         Settings websocket_settings("websocket", true);
         websocket_settings.EraseKey("claim_device_id");
     }
+    ReloadProtocolAfterClaimCredentials();
     pending_tbot_claim_ = PendingTbotClaim{};
     pending_tbot_claim_api_url_.clear();
     SecureClearString(pending_tbot_claim_token_);
     claim_confirmation_ambiguous_ = false;
     claim_substate_ = TbotClaimSubstate::Confirmed;
 
-    // TBOT claim complete -> return to explicit wake standby. Do not warm the
-    // realtime WebSocket here: opening the channel can route through the normal
-    // connect path and leave the device in Listening, where this board disables
-    // wake-word detection. The first "Hi ESP" opens the channel on the existing
-    // wake worker path instead.
-    if (IsDeviceClaimed()) {
-        const bool local_assets_ready = EnsureLocalAssetsAppliedForClaim();
-        if (local_assets_ready) {
-            SetDeviceState(kDeviceStateIdle);
-            audio_service_.Start();
-            audio_service_.EnableWakeWordDetection(true);
-        } else {
-            ESP_LOGE(TAG, "Claim confirmed but local assets/models are not ready; audio start deferred");
-        }
-        // On first claim, the realtime session may already have connected while
-        // unclaimed, before backend credentials existed. Start and fire one
-        // heartbeat now so the claimed online device reports immediately.
-        StartHeartbeat();
-        DispatchDeviceHeartbeat();
+    if (!FinishClaimActivationAfterLocalAssetsReady()) {
+        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_UNAVAILABLE_RETRYING,
+              "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+        ScheduleClaimLocalAssetsRetry();
+        return true;
     }
 
-    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTED, "link", Lang::Sounds::OGG_SUCCESS);
     return true;
 }
 
@@ -1655,6 +1645,76 @@ bool Application::EnsureLocalAssetsAppliedForClaim() {
     }
 
     return assets.Apply(false);
+}
+
+bool Application::FinishClaimActivationAfterLocalAssetsReady() {
+    if (!IsDeviceClaimed()) {
+        return false;
+    }
+    if (!EnsureLocalAssetsAppliedForClaim()) {
+        ESP_LOGE(TAG, "Claim confirmed but local assets/models are not ready; retrying locally");
+        return false;
+    }
+    if (claim_assets_retry_timer_ != nullptr) {
+        esp_timer_stop(claim_assets_retry_timer_);
+    }
+
+    // TBOT claim complete -> return to explicit wake standby. Do not warm the
+    // realtime WebSocket here: opening the channel can route through the normal
+    // connect path and leave the device in Listening, where this board disables
+    // wake-word detection. The first "Hi ESP" opens the channel on the existing
+    // wake worker path instead.
+    SetDeviceState(kDeviceStateIdle);
+    audio_service_.Start();
+    audio_service_.EnableWakeWordDetection(true);
+    StartHeartbeat();
+    DispatchDeviceHeartbeat();
+    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTED, "link", Lang::Sounds::OGG_SUCCESS);
+    return true;
+}
+
+void Application::ScheduleClaimLocalAssetsRetry() {
+    if (claim_assets_retry_timer_ == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = [](void* arg) {
+            auto* self = static_cast<Application*>(arg);
+            self->Schedule([self]() { self->HandleClaimLocalAssetsRetry(); });
+        };
+        args.arg = this;
+        args.name = "claim_assets_retry";
+        if (esp_timer_create(&args, &claim_assets_retry_timer_) != ESP_OK) {
+            claim_assets_retry_timer_ = nullptr;
+            return;
+        }
+    }
+    esp_timer_stop(claim_assets_retry_timer_);
+    esp_timer_start_once(claim_assets_retry_timer_, 2000ULL * 1000ULL);
+}
+
+void Application::HandleClaimLocalAssetsRetry() {
+    if (!IsDeviceClaimed()) {
+        return;
+    }
+    if (FinishClaimActivationAfterLocalAssetsReady()) {
+        return;
+    }
+    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_UNAVAILABLE_RETRYING,
+          "triangle_exclamation", "");
+    ScheduleClaimLocalAssetsRetry();
+}
+
+void Application::ReloadProtocolAfterClaimCredentials() {
+    if (protocol_ == nullptr) {
+        return;
+    }
+    CloseAudioChannelByIntent();
+    if (connect_in_flight_.load()) {
+        reset_pending_.store(true);
+        protocol_reinit_pending_.store(true);
+        return;
+    }
+    DoResetProtocol();
+    InitializeProtocol();
 }
 
 void Application::RenderClaimSubstate(TbotClaimSubstate substate) {
@@ -3911,8 +3971,12 @@ void Application::OpenChannelTask(void* arg) {
         // A ResetProtocol arrived while we were mid-connect and deferred the
         // actual reset to us (now safe: the worker no longer touches protocol_).
         if (self->reset_pending_.exchange(false)) {
+            const bool reinit_protocol = self->protocol_reinit_pending_.exchange(false);
             self->connect_close_deferral_.Cancel();
             self->DoResetProtocol();
+            if (reinit_protocol) {
+                self->InitializeProtocol();
+            }
             return;
         }
         if (self->connect_close_deferral_.TakeAfterWorker()) {

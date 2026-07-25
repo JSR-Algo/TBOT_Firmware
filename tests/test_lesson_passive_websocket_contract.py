@@ -86,8 +86,10 @@ def test_passive_lesson_socket_success_rearms_wake_word_after_connect_worker_fin
     ]
 
     assert "self->connect_in_flight_.store(false);" in open_task
-    assert "if (!self->lesson_runtime_active_.load())" in passive_success
-    rearm = passive_success[passive_success.index("if (!self->lesson_runtime_active_.load())") :]
+    assert "else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load())" in passive_success
+    rearm = passive_success[
+        passive_success.index("else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load())") :
+    ]
     assert "self->audio_service_.EnableWakeWordDetection(true);" in rearm
     assert "passive_lesson_wake_word_rearmed" in rearm
     assert "self->audio_service_.IsWakeWordRunning()" in rearm
