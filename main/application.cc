@@ -3881,9 +3881,8 @@ void Application::StartPassiveLessonWebsocket() {
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
     auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
-    auto created = xTaskCreateWithCaps(&Application::OpenChannelTask, "lesson_ws", 8192, ctx,
-                                       tskIDLE_PRIORITY + 3, nullptr,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    auto created = xTaskCreate(&Application::OpenChannelTask, "lesson_ws", 8192, ctx,
+                               tskIDLE_PRIORITY + 3, nullptr);
     if (created != pdPASS) {
         delete ctx;
         connect_in_flight_.store(false);
@@ -3933,9 +3932,8 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     ArmConnectWatchdog();
     passive_ws_intent_.store(false);
     auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
-    if (xTaskCreateWithCaps(&Application::OpenChannelTask, "ws_open", 8192, ctx,
-                            tskIDLE_PRIORITY + 3, nullptr,
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+    if (xTaskCreate(&Application::OpenChannelTask, "ws_open", 8192, ctx,
+                    tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
         delete ctx;
         connect_in_flight_.store(false);
         connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
@@ -4551,9 +4549,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         ArmConnectWatchdog();
         passive_ws_intent_.store(false);
         auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
-        if (xTaskCreateWithCaps(&Application::OpenChannelTask, "wake_ws_open", 8192, ctx,
-                                tskIDLE_PRIORITY + 3, nullptr,
-                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        if (xTaskCreate(&Application::OpenChannelTask, "wake_ws_open", 8192, ctx,
+                        tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
             delete ctx;
             connect_in_flight_.store(false);
             connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended

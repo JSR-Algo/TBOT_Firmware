@@ -838,7 +838,7 @@ def test_lesson_runtime_blocks_stale_wake_word_continuations():
     assert "lesson_runtime_active_.load()" in continue_body
     assert "lesson wake continue ignored" in continue_body
     assert continue_body.index("lesson_runtime_active_.load()") < continue_body.index(
-        "xTaskCreateWithCaps(&Application::OpenChannelTask"
+        "xTaskCreate(&Application::OpenChannelTask"
     )
 
     finish_end = app_cc.index("// H3: localized screen copy", finish_start)
@@ -870,7 +870,7 @@ def test_lesson_runtime_blocks_stale_generic_open_continuations():
     ) < continue_body.index("if (protocol_->IsAudioChannelOpened())")
     assert continue_body.index(
         "if (lesson_runtime_active_.load() && !lesson_answer_turn)"
-    ) < continue_body.index("xTaskCreateWithCaps(&Application::OpenChannelTask")
+    ) < continue_body.index("xTaskCreate(&Application::OpenChannelTask")
 
     task_end = app_cc.index("void Application::ArmConnectWatchdog", task_start)
     task_body = app_cc[task_start:task_end]
@@ -1515,7 +1515,7 @@ def test_cold_wake_word_open_uses_worker_instead_of_blocking_app_task():
     assert "void FinishWakeWordInvoke(const std::string& wake_word);" in app_h
     assert "connect_in_flight_.load()" in continue_body
     assert "ArmConnectWatchdog();" in continue_body
-    assert "xTaskCreateWithCaps(&Application::OpenChannelTask" in continue_body
+    assert "xTaskCreate(&Application::OpenChannelTask" in continue_body
     assert "protocol_->OpenAudioChannel()" not in continue_body
 
     open_start = app_cc.index("void Application::OpenChannelTask")

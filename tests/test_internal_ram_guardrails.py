@@ -28,34 +28,76 @@ def test_esp32s3_malloc_prefers_psram_for_allocations_over_512_bytes():
     assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=2048" not in sdkconfig
 
 
-def test_websocket_open_workers_use_psram_stacks():
+def test_websocket_open_workers_use_standard_internal_dram_stacks():
     source = read("main/application.cc")
 
-    for task_name in ['"lesson_ws"', '"ws_open"', '"wake_ws_open"']:
-        task_index = source.index(task_name)
-        create_start = source.rfind("xTaskCreateWithCaps", 0, task_index)
-        create_end = source.index(") != pdPASS", task_index)
-        create_call = source[create_start:create_end]
+    for signature, next_signature, task_name in [
+        (
+            "void Application::StartPassiveLessonWebsocket",
+            "void Application::ContinueOpenAudioChannel",
+            '"lesson_ws"',
+        ),
+        (
+            "void Application::ContinueOpenAudioChannel",
+            "void Application::OpenChannelTask",
+            '"ws_open"',
+        ),
+        (
+            "void Application::ContinueWakeWordInvoke",
+            "void Application::FinishWakeWordInvoke",
+            '"wake_ws_open"',
+        ),
+    ]:
+        body = function_body(source, signature, next_signature)
+        task_index = body.index(task_name)
+        create_start = body.rfind("xTaskCreate", 0, task_index)
+        create_call = body[create_start:body.index(";", task_index)]
 
         assert create_start != -1, task_name
-        assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in create_call
-        assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" not in create_call
+        assert "xTaskCreate(&Application::OpenChannelTask" in create_call, task_name
+        assert "xTaskCreateWithCaps" not in create_call, task_name
+        assert "MALLOC_CAP_" not in create_call, task_name
 
 
-def test_websocket_open_worker_does_not_read_nvs_settings():
-    source = read("main/protocols/websocket_protocol.cc")
+def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
+    application = read("main/application.cc")
+    websocket = read("main/protocols/websocket_protocol.cc")
+    worker_body = function_body(
+        application,
+        "void Application::OpenChannelTask",
+        "void Application::SetListeningMode",
+    )
     open_body = function_body(
-        source,
+        websocket,
         "bool WebsocketProtocol::OpenAudioChannel",
         "void WebsocketProtocol::ParseServerHello",
     )
+    refresh_body = function_body(
+        websocket,
+        "void WebsocketProtocol::RefreshSettings",
+        "bool WebsocketProtocol::IsAllowedUnclaimedPublicLessonMessage",
+    )
 
-    assert "Settings settings" not in open_body
-    assert "GetString(" not in open_body
-    assert "GetInt(" not in open_body
+    assert "protocol_->OpenAudioChannel()" in worker_body
+    assert "RefreshSettings();" in open_body
+    assert 'Settings settings("websocket", false);' in refresh_body
+    assert "settings.GetString(" in refresh_body
+    assert "settings.GetInt(" in refresh_body
 
 
-def test_passive_lesson_websocket_does_not_fallback_to_internal_stack():
+def test_websocket_open_worker_uses_standard_task_self_delete():
+    source = read("main/application.cc")
+    worker_body = function_body(
+        source,
+        "void Application::OpenChannelTask",
+        "void Application::ArmConnectWatchdog",
+    )
+
+    assert "vTaskDelete(nullptr);" in worker_body
+    assert "vTaskDeleteWithCaps(nullptr);" not in worker_body
+
+
+def test_passive_lesson_websocket_keeps_full_standard_internal_stack_size():
     source = read("main/application.cc")
     passive = function_body(
         source,
@@ -66,7 +108,9 @@ def test_passive_lesson_websocket_does_not_fallback_to_internal_stack():
     assert '"lesson_ws", 8192' in passive
     assert '"lesson_ws", 6144' not in passive
     assert '"lesson_ws", 4096' not in passive
-    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" not in passive
+    assert "xTaskCreate(&Application::OpenChannelTask" in passive
+    assert "xTaskCreateWithCaps(&Application::OpenChannelTask" not in passive
+    assert "MALLOC_CAP_" not in passive[passive.index('"lesson_ws", 8192') :]
 
 
 def test_transient_http_workers_use_internal_dram_stacks():
