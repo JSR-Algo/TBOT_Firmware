@@ -63,8 +63,6 @@ void DownloadLessonAssetHttpBodyToFile(
     bool first_write = true;
 #else
     (void)cache_key;
-    (void)has_declared_size;
-    (void)declared_size;
 #endif
     std::string error;
     while (true) {
@@ -171,6 +169,10 @@ void DownloadLessonAssetHttpBodyToFile(
     if (!failed && content_length > 0 && bytes_out != content_length) {
         failed = true;
         error = "short read for " + url;
+    }
+    if (!failed && has_declared_size && bytes_out != declared_size) {
+        failed = true;
+        error = "asset declared size mismatch for " + url;
     }
     if (!failed && bytes_out == 0) {
         failed = true;

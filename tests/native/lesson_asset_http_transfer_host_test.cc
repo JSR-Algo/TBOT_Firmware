@@ -191,13 +191,43 @@ void TestMissingAndMismatchedDeclaredSizeCannotConsumeAfterBytesArm() {
         size_t bytes = 0;
         {
             LessonAssetDownloadStagingFile staging(destination);
-            Expect(Transfer(http, staging, kHilKey, declared != 0, declared, bytes),
-                   "nonmatching declared size affected real transfer");
+            const bool transferred =
+                Transfer(http, staging, kHilKey, declared != 0, declared, bytes);
+            Expect(transferred == (declared == 0),
+                   "nonmatching declared size did not fail closed");
         }
         const auto status = LessonStorageHilController::GetInstance().Status();
         Expect(status.armed && !status.reached && !status.consumed,
                "nonmatching declared size consumed arm");
         LessonStorageHilController::GetInstance().Reset();
+    }
+}
+
+void TestDeclaredSizeMustMatchDownloadedBytesBeforeCommit() {
+    {
+        const std::string destination = std::string(kRoot) + "/declared-match.bin";
+        size_t bytes = 0;
+        LessonAssetDownloadStagingFile staging(destination);
+        FakeHttp http("replacement");
+        Expect(Transfer(http, staging, nullptr, true, 11, bytes),
+               "matching declared size rejected transfer");
+        Expect(bytes == 11, "matching declared size reported wrong bytes");
+        Expect(Read(staging.path()) == "replacement",
+               "matching declared size did not commit temp transfer");
+    }
+
+    {
+        const std::string destination = std::string(kRoot) + "/declared-mismatch.bin";
+        size_t bytes = 0;
+        LessonAssetDownloadStagingFile staging(destination);
+        FakeHttp http("replacement");
+        Expect(!Transfer(http, staging, nullptr, true, 12, bytes),
+               "mismatched declared size accepted transfer");
+        Expect(bytes == 11, "mismatched declared size hid actual bytes");
+        Expect(!fs::exists(staging.path()),
+               "mismatched declared size left staged download");
+        Expect(!fs::exists(staging.path() + ".tmp"),
+               "mismatched declared size left temp file");
     }
 }
 
@@ -262,6 +292,7 @@ int main() {
     TestBeforeFirstWriteFailAndNoSpaceCleanAllTemporaryState();
     TestAfterBytesCapsTheActualHttpReadAndCleansNoSpaceFailure();
     TestMissingAndMismatchedDeclaredSizeCannotConsumeAfterBytesArm();
+    TestDeclaredSizeMustMatchDownloadedBytesBeforeCommit();
     TestSampleEmptyContextCannotConsumeCanonicalArm();
     TestOversizedHttpReadFailsBeforeWriting();
     TestZeroLimitContinueFailsClosedInsteadOfSpinning();

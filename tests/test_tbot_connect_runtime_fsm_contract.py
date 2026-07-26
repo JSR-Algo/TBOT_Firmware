@@ -92,7 +92,7 @@ def test_heartbeat_uses_one_persistent_worker_allocated_before_heap_fragmentatio
     worker_body = function_body(source, "void Application::HeartbeatTask")
 
     # Physical ESP32-S3 evidence: repeated transient TLS workers progressively
-    # fragment internal SRAM until even a 6144-byte stack cannot be allocated.
+    # fragment internal SRAM until even a fixed internal stack cannot be allocated.
     # Allocate one worker while claim confirmation still has a large contiguous
     # block, then feed it heartbeat contexts through a one-slot queue.
     assert "xQueueCreate(1, sizeof(void*))" in start_body
@@ -154,6 +154,7 @@ def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_s
     result_body = function_body(
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
+    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
 
     # A fresh claim must make the robot ready for the next explicit wake phrase.
     # Opening the realtime channel here can drive the normal connect path into
@@ -161,9 +162,11 @@ def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_s
     # this board. That leaves the user saying "Hi ESP" while the wake-word path
     # is off.
     assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm_body
-    assert "SetDeviceState(kDeviceStateIdle);" in result_body
-    assert "audio_service_.EnableWakeWordDetection(true);" in result_body
+    assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
+    assert "SetDeviceState(kDeviceStateIdle);" in finish_body
+    assert "audio_service_.EnableWakeWordDetection(true);" in finish_body
     assert "protocol_->Start()" not in result_body
+    assert "protocol_->Start()" not in finish_body
     assert "Claim confirmed: warming realtime audio WS" not in result_body
 
 def test_claim_confirm_starts_heartbeat_after_credentials_are_persisted():
@@ -172,10 +175,11 @@ def test_claim_confirm_starts_heartbeat_after_credentials_are_persisted():
     result_body = function_body(
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
+    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
 
     assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm_body
-    success_start = result_body.index("CancelClaimExpiryTimer();")
-    success_body = result_body[success_start:]
+    assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
+    success_body = finish_body[finish_body.index("ReloadProtocolAfterClaimCredentials();"):]
 
     idle_index = success_body.index("SetDeviceState(kDeviceStateIdle);")
     wake_index = success_body.index("audio_service_.EnableWakeWordDetection(true);")
@@ -189,12 +193,16 @@ def test_websocket_protocol_does_not_auto_start_until_wake_or_explicit_click():
     source = read("main/application.cc")
     initialize_body = function_body(source, "void Application::InitializeProtocol")
 
-    # WebSocket Start() opens an audio channel. If boot preconnect owns
-    # online_intent_, a later idle websocket drop schedules reconnect and can
-    # drive the robot into Listening without a wake phrase. Keep WebSocket idle
-    # until wake-word or an explicit button/chat action opens it.
+    # WebSocket Start() opens an audio channel. Boot initialization may open only
+    # the passive lesson socket; the normal realtime path stays behind wake-word
+    # or an explicit button/chat action.
     assert "if (is_websocket_protocol)" in initialize_body
-    assert "WebSocket audio starts on wake word or explicit listen" in initialize_body
+    websocket_branch = initialize_body[
+        initialize_body.index("if (is_websocket_protocol)") :
+        initialize_body.index("} else {\n        protocol_->Start();\n    }")
+    ]
+    assert "StartPassiveLessonWebsocket();" in websocket_branch
+    assert "protocol_->Start();" not in websocket_branch
     assert "else {\n        protocol_->Start();\n    }" in initialize_body
     assert "is_websocket_protocol && !IsDeviceClaimed()" not in initialize_body
 

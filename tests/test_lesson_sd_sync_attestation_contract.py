@@ -26,6 +26,65 @@ def test_ready_attestation_echoes_exact_verified_manifest_checksum():
     assert "cache_key_value.find(manifest_checksum_value)" in attestation
     assert 'CheckedCJsonAddStringToObject(response, "manifestChecksum", manifest_checksum)' in attestation
 
+def test_generic_sync_normalizes_alias_pairs_and_rejects_mismatches():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = sync_body()
+    validation = source[
+        source.index("ValidateLessonAssetSyncPackOrThrow(") :
+        source.index("void DownloadLessonAssetToVerifiedFile(")
+    ]
+
+    assert 'const char* local_path = NormalizedAliasOrThrow(asset, "sdPath", "localPath");' in validation
+    assert 'const char* url = NormalizedAliasOrThrow(asset, "onlineUrl", "url");' in validation
+    assert 'throw std::runtime_error("lesson asset sync request invalid")' in validation
+    assert '"sdPath"' in validation
+    assert '"onlineUrl"' in validation
+    assert '"localPath", asset.destination' in body
+
+def test_generic_sync_aliases_must_be_strings_when_present():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = source[
+        source.index("NormalizedAliasOrThrow(") :
+        source.index("bool IsOptionalNonNegativeInteger(")
+    ]
+
+    assert "cJSON_GetObjectItem(object, preferred_field)" in validation
+    assert "cJSON_GetObjectItem(object, fallback_field)" in validation
+    assert "!cJSON_IsString(preferred)" in validation
+    assert "!cJSON_IsString(fallback)" in validation
+
+def test_generic_sync_counts_critical_failures_and_activates_only_verified_critical_pack():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = sync_body()
+    cmake = MAIN_CMAKE.read_text(encoding="utf-8")
+
+    assert '#include "lesson_asset_pack_activation.h"' in source
+    assert '"lesson_asset_pack_activation.cc"' in cmake
+    assert "bool critical;" in source
+    assert "critical_failed += 1" in body
+    assert "asset.critical" in body
+    assert "const bool all_critical_verified = critical_failed == 0" in body
+    assert "ActivateLessonAssetPack(" in body
+    activation = body.index("ActivateLessonAssetPack(")
+    counts = body.index('CheckedCJsonAddNumberToObject(json.get(), "criticalFailedCount", critical_failed)')
+    assert activation < counts
+    assert 'CheckedCJsonAddBoolToObject(json.get(), "activated", activation.activated)' in body
+    assert '"previousEvicted", activation.previous_evicted' in body
+    assert '"errorCode", activation.error_code.c_str()' in body
+
+def test_generic_sync_optional_failure_activates_but_attestation_ready_requires_all_assets():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = sync_body()
+
+    assert "cJSON_IsTrue(critical) != 0" in source
+    assert "ActivateLessonAssetPack(\n                    mutation," in body
+    activation = body.index("ActivateLessonAssetPack(\n                    mutation,")
+    lease_start = body.index('TryBeginMutation("sync")')
+    lease_end = body.index("EvictPreviousLessonAssetPackAfterActivation(")
+    assert lease_start < activation < lease_end
+    assert "AddLessonAssetSyncAttestation(\n                json.get(), cache_key, manifest_checksum, asset_count,\n                verified, failed);" in body
+    assert "all_critical_verified ? asset_count : verified" not in body
+
 
 def test_missing_whitespace_or_cache_key_mismatch_cannot_claim_ready_or_checksum():
     attestation = ATTESTATION_SOURCE.read_text(encoding="utf-8")
@@ -49,7 +108,8 @@ def test_failed_or_empty_asset_pack_cannot_claim_ready_checksum():
     assert "verified_count == asset_count" in attestation
     assert "failed_count == 0" in attestation
     assert "pack_verified" in attestation
-    assert "asset_count, verified, failed" in body
+    assert "asset_count" in body
+    assert "critical_failed" in body
 
 
 def test_generic_sync_validates_the_whole_pack_before_mutation_or_filesystem_access():
@@ -213,6 +273,25 @@ def test_generic_sync_propagates_exact_declared_size_without_making_size_require
     assert "bool has_declared_size" in helper
     assert "size_t declared_size" in helper
     assert "IsOptionalNonNegativeInteger(asset, \"size\")" in validation
+
+def test_sync_response_has_task10_activation_envelope():
+    body = sync_body()
+    expected_fields = (
+        "ready",
+        "cacheKey",
+        "manifestChecksum",
+        "downloadedCount",
+        "skippedCount",
+        "failedCount",
+        "criticalFailedCount",
+        "activated",
+        "previousEvicted",
+        "errorCode",
+    )
+    attestation = ATTESTATION_SOURCE.read_text(encoding="utf-8")
+    response_source = body + attestation
+    for field in expected_fields:
+        assert f'"{field}"' in response_source
 
 
 def test_sync_hil_read_and_write_checkpoints_are_exact_and_cleanup_owned():

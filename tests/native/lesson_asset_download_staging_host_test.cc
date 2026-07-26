@@ -225,10 +225,10 @@ void TestInterruptedReplacementRecoversOnNextAttempt() {
     } catch (const std::runtime_error&) {
     }
     SetLessonAssetStagingFsTestFailure(LessonAssetStagingFsTestFailure::kNone);
-    Expect(!fs::exists(destination), "interruption seam unexpectedly restored destination");
-    Expect(fs::exists(staging_path), "interruption seam did not preserve staged file");
-    Expect(Read(backup_path) == "known-good",
-           "interruption seam did not preserve last-known-good backup");
+    Expect(Read(destination) == "known-good",
+           "interruption seam made destination unreadable");
+    Expect(!fs::exists(staging_path), "interruption seam left staged file");
+    Expect(!fs::exists(backup_path), "interruption seam created backup");
 
     {
         LessonAssetDownloadStagingFile next_attempt(destination);
@@ -255,9 +255,10 @@ void TestFailedRestoreLeavesTruthfulRecoverableState() {
     }
     SetLessonAssetStagingFsTestFailure(LessonAssetStagingFsTestFailure::kNone);
     Expect(threw, "failed restore did not throw");
-    Expect(!fs::exists(destination), "failed restore reported a false destination");
-    Expect(Read(destination + ".backup") == "known-good",
-           "failed restore lost recoverable last-known-good backup");
+    Expect(Read(destination) == "known-good",
+           "failed restore made destination unreadable");
+    Expect(!fs::exists(destination + ".backup"),
+           "failed restore left backup state");
     Expect(!fs::exists(destination + ".download"),
            "failed restore left unverified staging state");
 

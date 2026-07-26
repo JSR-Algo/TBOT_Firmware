@@ -184,19 +184,24 @@ def test_sync_staging_corruption_is_typed_bounded_and_fail_closed_elsewhere():
     assert "RunLessonStorageHilStagingCheckpoint(" in staging
 
 
-def test_sync_commit_checkpoints_are_guarded_and_use_existing_restore_branch():
+def test_sync_commit_checkpoints_are_guarded_and_use_direct_atomic_replacement():
     source = read("main/lesson_asset_download_staging.cc")
     checksum = source.index("kBeforeChecksumVerify")
     verify = source.index("VerifyLessonAssetSha256(staging.path()")
-    backup = source.index("std::rename(destination.c_str(), backup.c_str())")
-    commit_checkpoint = source.index("kBeforeCommitRename", backup)
+    sync = source.index("FlushAndSyncFile(staging.path())", verify)
+    commit_checkpoint = source.index("kBeforeCommitRename", sync)
     replacement = source.index("std::rename(staging.path().c_str(), destination.c_str())")
-    restore = source.index("std::rename(backup.c_str(), destination.c_str())", replacement)
+    commit_body = source[
+        source.index("void CommitVerifiedLessonAssetDownload(") :
+        source.index("#if defined(TBOT_LESSON_ASSET_STAGING_TESTING)", replacement)
+    ]
 
-    assert checksum < verify < backup < commit_checkpoint < replacement < restore
+    assert checksum < verify < sync < commit_checkpoint < replacement
     assert "CONFIG_TBOT_HIL_STORAGE_FAULTS" in source
     assert "TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING" in source
     assert "replace_failed = true" in source[commit_checkpoint:replacement]
+    assert "std::rename(destination.c_str(), backup.c_str())" not in commit_body
+    assert "std::rename(backup.c_str(), destination.c_str())" not in commit_body
 
 
 def test_fixture_surface_has_fixed_root_and_checked_mutation_lease():

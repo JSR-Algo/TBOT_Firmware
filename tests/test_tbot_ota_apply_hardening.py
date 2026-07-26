@@ -34,11 +34,12 @@ def test_new_ota_app_marks_valid_before_network_version_check():
     assert activation_body.index("if (!IsDeviceClaimed())") < activation_body.index("CheckNewVersion();")
     assert "skip OTA/bootstrap HTTPS" in activation_body
 
-    # Also short-circuit BEFORE xTaskCreate: with BLE+Wi-Fi the largest free
-    # internal block is often ~7KB, so an 8KB activation task never starts and
-    # the robot freezes on Activating / "Loading setup...".
+    # Also avoid xTaskCreate on the unclaimed path: with BLE+Wi-Fi the largest
+    # free internal block is often ~7KB, so an 8KB activation task may not start.
+    # The inline activation path is now minimal: no OTA/config/prewarm, but it
+    # still initializes the raw WebSocket transport for public lesson sync.
     source_full = source
-    assert "skip activation worker" in source_full
+    assert "run minimal activation transport" in source_full
     assert "Failed to create activation task" in source_full
 
 

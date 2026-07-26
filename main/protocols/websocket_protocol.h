@@ -13,6 +13,11 @@
 
 #define WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT (1 << 0)
 
+enum class WebsocketSessionMode {
+    kAuthenticatedRealtime,
+    kUnclaimedPublicLesson,
+};
+
 class WebsocketProtocol : public Protocol {
 public:
     WebsocketProtocol();
@@ -25,6 +30,7 @@ public:
     bool IsAudioChannelOpened() const override;
     bool MaintainPassiveLiveness() override;
     void CompleteDeferredClose(uint32_t connection_epoch) override;
+    void SetUnclaimedPublicLessonOnly(bool enabled);
 
 private:
     EventGroupHandle_t event_group_handle_;
@@ -35,11 +41,14 @@ private:
     std::string url_;
     std::string token_;
     int version_ = 1;
+    bool unclaimed_public_lesson_only_ = true;
+    WebsocketSessionMode session_mode_ = WebsocketSessionMode::kUnclaimedPublicLesson;
     PassiveWebsocketLiveness passive_liveness_;
     ConnectionCloseState close_state_;
 
     void RefreshSettings();
     void ParseServerHello(const cJSON* root);
+    bool IsAllowedUnclaimedPublicLessonMessage(const cJSON* root) const;
     bool SendText(const std::string& text) override;
     void SetError(const std::string& message) override;
     void DetachAndResetWebsocket();

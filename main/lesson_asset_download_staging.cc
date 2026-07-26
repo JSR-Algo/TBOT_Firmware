@@ -256,25 +256,16 @@ void CommitVerifiedLessonAssetDownload(
     }
     FlushAndSyncFile(staging.path());
 
-    const std::string backup = destination + ".backup";
     const bool destination_exists = IsRegularFile(destination);
     if (!destination_exists && !PathIsMissing(destination)) {
         throw std::runtime_error("lesson asset destination is not a regular file");
     }
-    RemoveFileIfPresent(backup, "failed to clean lesson asset backup");
-    if (destination_exists && std::rename(destination.c_str(), backup.c_str()) != 0) {
-        throw std::runtime_error("failed to preserve existing lesson asset");
-    }
 
 #if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
-    if (destination_exists &&
-        ShouldInject(LessonAssetStagingFsTestFailure::kInterruptAfterBackupRename)) {
-        staging.Disarm();
-        throw std::runtime_error("interrupted lesson asset replacement");
-    }
     bool replace_failed =
         ShouldInject(LessonAssetStagingFsTestFailure::kReplaceRename) ||
-        ShouldInject(LessonAssetStagingFsTestFailure::kRestoreRename);
+        ShouldInject(LessonAssetStagingFsTestFailure::kRestoreRename) ||
+        ShouldInject(LessonAssetStagingFsTestFailure::kInterruptAfterBackupRename);
 #else
     bool replace_failed = false;
 #endif
@@ -290,24 +281,9 @@ void CommitVerifiedLessonAssetDownload(
     }
 #endif
     if (replace_failed || std::rename(staging.path().c_str(), destination.c_str()) != 0) {
-        if (destination_exists) {
-#if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
-            const bool restore_failed =
-                ShouldInject(LessonAssetStagingFsTestFailure::kRestoreRename);
-#else
-            const bool restore_failed = false;
-#endif
-            if (restore_failed || std::rename(backup.c_str(), destination.c_str()) != 0) {
-                throw std::runtime_error(
-                    "lesson asset commit failed; previous asset remains in backup");
-            }
-        }
         throw std::runtime_error("lesson asset commit failed");
     }
     staging.Disarm();
-    if (destination_exists) {
-        RemoveFileIfPresent(backup, "lesson asset committed but backup cleanup failed");
-    }
 }
 
 #if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)

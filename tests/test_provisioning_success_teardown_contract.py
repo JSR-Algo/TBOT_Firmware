@@ -119,6 +119,59 @@ def test_each_other_delayed_owner_captures_before_scheduling_or_http():
         "ClaimConfirmationReporter::Confirm"
     )
 
+    dispatch = function_body(app, "bool Application::DispatchPendingTbotClaimConfirmation")
+    assert dispatch.index("CaptureProvisioningSession()") < dispatch.index(
+        "xTaskCreateWithCaps"
+    )
+
+    task = function_body(app, "void Application::ClaimConfirmationTask")
+    apply = task[task.index("auto apply_result") :]
+    persist = apply.index("PersistTbotClaimConfirmationResponse")
+    result_apply = apply.index("ApplyPendingTbotClaimConfirmationResult")
+    assert "effective_result == ClaimConfirmationResult::Confirmed" in apply[:result_apply]
+    assert persist < result_apply
+    assert "provisioning_token" in apply[result_apply:]
+
+    result_handler = function_body(
+        app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    teardown = result_handler.index('"claim_confirmed", provisioning_token')
+    activation = result_handler.index("FinishClaimActivationAfterLocalAssetsReady")
+    assert teardown < activation
+
+
+def test_async_claim_provisioning_token_is_blufi_guarded_with_non_blufi_fallback():
+    app = read("main/application.cc")
+    context_start = app.index("struct ClaimConfirmationContext")
+    context_end = app.index("};", context_start)
+    context = app[context_start:context_end]
+    assert "WakeWordLifecycleController::ProvisioningToken provisioning_token;" in context
+
+    dispatch = function_body(app, "bool Application::DispatchPendingTbotClaimConfirmation")
+    token_default = dispatch.index(
+        "WakeWordLifecycleController::ProvisioningToken provisioning_token{};"
+    )
+    capture = dispatch.index(
+        "provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();"
+    )
+    guard = dispatch.rindex("#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING", 0, capture)
+    assert token_default < guard < capture < dispatch.index("#endif", capture)
+
+    task = function_body(app, "void Application::ClaimConfirmationTask")
+    assert "const auto provisioning_token = ctx->provisioning_token;" in task
+    assert "ApplyPendingTbotClaimConfirmationResult(effective_result, provisioning_token)" in task
+
+    result_handler = function_body(
+        app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    assert (
+        "#else\n"
+        "    StopBleAdvertising();\n"
+        "#endif"
+    ) in result_handler
+
+    assert app.count('"claim_confirmed", provisioning_token') == 1
+
 
 def test_claim_confirmation_passes_the_originating_token_into_result_application():
     app = read("main/application.cc")
@@ -188,7 +241,10 @@ def test_timeout_failure_preconfirm_and_manual_teardown_never_rearm():
     assert "CompleteSuccessfulProvisioningTeardown" not in stop
     assert "StopBleAdvertising();" in preconfirm
     assert "CompleteSuccessfulProvisioningTeardown" not in preconfirm
-    confirmed_tail = confirm[confirm.index("ClaimConfirmationResult::Confirmed"):]
+    result_handler = function_body(
+        app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    confirmed_tail = result_handler[result_handler.index("CancelClaimExpiryTimer();"):]
     assert '"claim_confirmed", provisioning_token' in confirmed_tail
     failed_wifi = blufi[blufi.index("Failed to connect to WiFi via esp-wifi-connect"):]
     failed_wifi = failed_wifi[:failed_wifi.index("vTaskDelete(nullptr)")]

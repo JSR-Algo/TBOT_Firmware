@@ -150,6 +150,10 @@ Application::~Application() {
         esp_timer_stop(claim_expiry_timer_);
         esp_timer_delete(claim_expiry_timer_);
     }
+    if (claim_assets_retry_timer_ != nullptr) {
+        esp_timer_stop(claim_assets_retry_timer_);
+        esp_timer_delete(claim_assets_retry_timer_);
+    }
     if (heartbeat_timer_ != nullptr) {
         esp_timer_stop(heartbeat_timer_);
         esp_timer_delete(heartbeat_timer_);
@@ -820,17 +824,13 @@ void Application::HandleNetworkConnectedEvent() {
         SetDeviceState(kDeviceStateActivating);
         // Unclaimed + BLE advertising leaves ~7–8KB largest free internal block.
         // The normal activation worker needs 8KB stack and fails to create, so the
-        // UI freezes on "Loading setup..." forever. Unclaimed devices cannot
-        // finish cloud bootstrap without a parent claim — exit Activating now.
+        // UI freezes on "Loading setup..." forever. Run only the protocol setup
+        // needed for public lesson sync and leave claimed bootstrap to BLE.
         if (!IsDeviceClaimed()) {
             ESP_LOGW(TAG,
-                     "Unclaimed device on Wi-Fi: skip activation worker "
-                     "(heap too tight with BLE; leave claim-standby)");
-            if (!ota_) {
-                ota_ = std::make_unique<Ota>();
-                ota_->MarkCurrentVersionValid();
-            }
-            xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+                     "Unclaimed device on Wi-Fi: run minimal activation transport "
+                     "without claimed bootstrap worker");
+            CompleteUnclaimedProtocolOnlyActivation();
             return;
         }
         if (activation_task_handle_ != nullptr) {
@@ -1355,12 +1355,6 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     const ClaimConfirmationResult confirmation_result = ClaimConfirmationReporter::Confirm(
         pending_tbot_claim_,
         pending_tbot_claim_api_url_, pending_tbot_claim_token_);
-#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    if (confirmation_result == ClaimConfirmationResult::Confirmed) {
-        Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
-            "claim_confirmed", provisioning_token);
-    }
-#endif
     return ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token);
 }
 
@@ -1445,23 +1439,13 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
     claim_confirmation_ambiguous_ = false;
     claim_substate_ = TbotClaimSubstate::Confirmed;
 
-    // TBOT claim complete -> return to explicit wake standby. Do not warm the
-    // realtime WebSocket here: opening the channel can route through the normal
-    // connect path and leave the device in Listening, where this board disables
-    // wake-word detection. The first "Hi ESP" opens the channel on the existing
-    // wake worker path instead.
-    if (IsDeviceClaimed()) {
-        SetDeviceState(kDeviceStateIdle);
-        audio_service_.Start();
-        audio_service_.EnableWakeWordDetection(true);
-        // On first claim, the realtime session may already have connected while
-        // unclaimed, before backend credentials existed. Start and fire one
-        // heartbeat now so the claimed online device reports immediately.
-        StartHeartbeat();
-        DispatchDeviceHeartbeat();
+    if (!FinishClaimActivationAfterLocalAssetsReady()) {
+        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_UNAVAILABLE_RETRYING,
+              "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+        ScheduleClaimLocalAssetsRetry();
+        return true;
     }
 
-    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTED, "link", Lang::Sounds::OGG_SUCCESS);
     return true;
 }
 
@@ -1523,7 +1507,7 @@ void Application::ClaimConfirmationTask(void* arg) {
     std::string success_response;
     const ClaimConfirmationResult result = ClaimConfirmationReporter::Confirm(
         claim, api_url, token, &success_response);
-        self->Schedule([self, result, token = std::move(token), provisioning_token,
+    self->Schedule([self, result, token = std::move(token), provisioning_token,
                     success_response = std::move(success_response),
                     expected_setup_generation, enforce_setup_generation]() mutable {
         self->claim_confirm_inflight_.store(false);
@@ -1612,16 +1596,12 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
     }
     if (!IsDeviceClaimed()) {
         // Same heap constraint as HandleNetworkConnectedEvent: with BLE still
-        // advertising for claim standby, the 8KB activation task often cannot
-        // be created. Signal done so we reach Idle and keep BLE discoverable.
+        // advertising for claim standby, the 8KB activation task often cannot be
+        // created. Run only the protocol setup needed for public lesson sync.
         ESP_LOGW(TAG,
-                 "Unclaimed after BluFi Wi-Fi success: skip activation worker, "
-                 "finish setup to Idle claim-standby");
-        if (!ota_) {
-            ota_ = std::make_unique<Ota>();
-            ota_->MarkCurrentVersionValid();
-        }
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+                 "Unclaimed after BluFi Wi-Fi success: run minimal activation "
+                 "transport inline");
+        CompleteUnclaimedProtocolOnlyActivation();
         return;
     }
 
@@ -1647,6 +1627,101 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
         }
         xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
     }
+}
+
+void Application::CompleteUnclaimedProtocolOnlyActivation() {
+    if (!ota_) {
+        ota_ = std::make_unique<Ota>();
+    }
+    ota_->MarkCurrentVersionValid();
+
+    SystemInfo::StartHeapPhaseMonitor();
+    InitializeProtocol();
+    SystemInfo::PrintHeapCheckpoint("protocol_init.complete");
+    SystemInfo::StopHeapPhaseMonitor();
+
+    SystemInfo::PrintHeapCheckpoint("activation.complete");
+    xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+}
+
+bool Application::EnsureLocalAssetsAppliedForClaim() {
+    auto& assets = Assets::GetInstance();
+    if (!assets.partition_valid()) {
+        ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
+        return true;
+    }
+
+    return assets.Apply(false);
+}
+
+bool Application::FinishClaimActivationAfterLocalAssetsReady() {
+    if (!IsDeviceClaimed()) {
+        return false;
+    }
+    if (!EnsureLocalAssetsAppliedForClaim()) {
+        ESP_LOGE(TAG, "Claim confirmed but local assets/models are not ready; retrying locally");
+        return false;
+    }
+    if (claim_assets_retry_timer_ != nullptr) {
+        esp_timer_stop(claim_assets_retry_timer_);
+    }
+
+    ReloadProtocolAfterClaimCredentials();
+
+    // TBOT claim complete -> refresh the protocol with claimed credentials, then
+    // return to explicit wake standby. InitializeProtocol opens only the passive
+    // lesson/nudge WebSocket for claimed idle devices.
+    SetDeviceState(kDeviceStateIdle);
+    audio_service_.Start();
+    audio_service_.EnableWakeWordDetection(true);
+    StartHeartbeat();
+    DispatchDeviceHeartbeat();
+    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTED, "link", Lang::Sounds::OGG_SUCCESS);
+    return true;
+}
+
+void Application::ScheduleClaimLocalAssetsRetry() {
+    if (claim_assets_retry_timer_ == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = [](void* arg) {
+            auto* self = static_cast<Application*>(arg);
+            self->Schedule([self]() { self->HandleClaimLocalAssetsRetry(); });
+        };
+        args.arg = this;
+        args.name = "claim_assets_retry";
+        if (esp_timer_create(&args, &claim_assets_retry_timer_) != ESP_OK) {
+            claim_assets_retry_timer_ = nullptr;
+            return;
+        }
+    }
+    esp_timer_stop(claim_assets_retry_timer_);
+    esp_timer_start_once(claim_assets_retry_timer_, 2000ULL * 1000ULL);
+}
+
+void Application::HandleClaimLocalAssetsRetry() {
+    if (!IsDeviceClaimed()) {
+        return;
+    }
+    if (FinishClaimActivationAfterLocalAssetsReady()) {
+        return;
+    }
+    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_UNAVAILABLE_RETRYING,
+          "triangle_exclamation", "");
+    ScheduleClaimLocalAssetsRetry();
+}
+
+void Application::ReloadProtocolAfterClaimCredentials() {
+    if (protocol_ == nullptr) {
+        return;
+    }
+    CloseAudioChannelByIntent();
+    if (connect_in_flight_.load()) {
+        reset_pending_.store(true);
+        protocol_reinit_pending_.store(true);
+        return;
+    }
+    DoResetProtocol();
+    InitializeProtocol();
 }
 
 void Application::RenderClaimSubstate(TbotClaimSubstate substate) {
@@ -2622,50 +2697,45 @@ void Application::ActivationTask() {
     // any network-bound version or assets work.
     ota_->MarkCurrentVersionValid();
 
-    // Unclaimed + saved Wi-Fi keeps BLE advertising open for phone setup.
-    // Running OTA HTTPS (CheckNewVersion) at the same time exhausts internal
-    // heap (TLS + BluFi) and freezes the UI on "Loading setup..." with no
-    // further logs. Unclaimed robots cannot finish cloud activation without a
-    // parent claim, so skip network bootstrap and exit to Idle claim-standby.
     if (!IsDeviceClaimed()) {
+        // Unclaimed + saved Wi-Fi keeps BLE advertising open for phone setup.
+        // Running OTA HTTPS/config fetch at the same time exhausts internal heap
+        // (TLS + BluFi), so keep claimed-only bootstrap off this path while still
+        // creating the raw WebSocket session used by public lesson asset fanout.
         ESP_LOGW(TAG,
                  "Unclaimed device: skip OTA/bootstrap HTTPS while BLE stays up "
-                 "(avoids Loading-setup hang; claim path remains via BLE)");
+                 "(claim path remains via BLE; public lesson sync uses raw WS)");
         CheckAssetsVersion();
-        SystemInfo::PrintHeapCheckpoint("activation.complete");
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
-        return;
-    }
+    } else {
+        const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
 
-    const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
+        // Check for new assets version
+        CheckAssetsVersion();
 
-    // Check for new assets version
-    CheckAssetsVersion();
-
-    // Check for new firmware version
-    SystemInfo::StartHeapPhaseMonitor();
-    CheckNewVersion();
-    SystemInfo::PrintHeapCheckpoint("ota_check.complete");
-    SystemInfo::StopHeapPhaseMonitor();
-
-    // Claimed devices can override the OTA-provided websocket.url from the
-    // backend's authenticated runtime config. If this fails, keep the existing
-    // OTA/NVS value and compile-time placeholder fallback chain.
-    SystemInfo::StartHeapPhaseMonitor();
-    RefreshWebsocketUrlFromConfigFetch();
-    SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
-    SystemInfo::StopHeapPhaseMonitor();
-
-    // Build the AFE only after boot HTTP/TLS transients have released their
-    // internal SRAM, but before protocol startup and the Idle wake-word gate.
-    const auto activation_state = GetDeviceState();
-    if (IsDeviceClaimed() &&
-        activation_state != kDeviceStateWifiConfiguring &&
-        activation_state != kDeviceStateAudioTesting) {
+        // Check for new firmware version
         SystemInfo::StartHeapPhaseMonitor();
-        audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
-        SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
+        CheckNewVersion();
+        SystemInfo::PrintHeapCheckpoint("ota_check.complete");
         SystemInfo::StopHeapPhaseMonitor();
+
+        // Claimed devices can override the OTA-provided websocket.url from the
+        // backend's authenticated runtime config. If this fails, keep the existing
+        // OTA/NVS value and compile-time placeholder fallback chain.
+        SystemInfo::StartHeapPhaseMonitor();
+        RefreshWebsocketUrlFromConfigFetch();
+        SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
+        SystemInfo::StopHeapPhaseMonitor();
+
+        // Build the AFE only after boot HTTP/TLS transients have released their
+        // internal SRAM, but before protocol startup and the Idle wake-word gate.
+        const auto activation_state = GetDeviceState();
+        if (activation_state != kDeviceStateWifiConfiguring &&
+            activation_state != kDeviceStateAudioTesting) {
+            SystemInfo::StartHeapPhaseMonitor();
+            audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
+            SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
+            SystemInfo::StopHeapPhaseMonitor();
+        }
     }
 
     // Initialize the protocol
@@ -2835,10 +2905,15 @@ void Application::InitializeProtocol() {
     // call below). For MQTT, Start() brings up the control channel (not just an
     // audio preconnect), so we never gate it here.
     bool is_websocket_protocol = false;
+    Settings websocket_settings("websocket", false);
+    const bool has_configured_websocket_url =
+        !websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL).empty();
     if (ota_->HasMqttConfig()) {
         protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota_->HasWebsocketConfig()) {
-        protocol_ = std::make_unique<WebsocketProtocol>();
+    } else if (ota_->HasWebsocketConfig() || has_configured_websocket_url) {
+        auto websocket_protocol = std::make_unique<WebsocketProtocol>();
+        websocket_protocol->SetUnclaimedPublicLessonOnly(!IsDeviceClaimed());
+        protocol_ = std::move(websocket_protocol);
         is_websocket_protocol = true;
     } else {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
@@ -2921,7 +2996,7 @@ void Application::InitializeProtocol() {
         if (passive_ws_intent_.load()) {
             ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
             StopHeartbeat();
-            if (!lesson_runtime_active_.load()) {
+            if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
                 audio_service_.EnableWakeWordDetection(true);
             }
         } else {
@@ -2940,11 +3015,12 @@ void Application::InitializeProtocol() {
         }
         backend_offline_.store(false);
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        // Once the realtime WS is up, STOP the blocking claim-config HTTP/TLS poll.
-        // It runs on the main task and was starving the Opus codec task (growing
-        // encode_drop -> dropped mic uplink -> "I speak but no response"). The
-        // device is functional over the WS; claim re-arms if it ever needs to.
-        Schedule([this]() { StopClaimPoll(); });
+        // Once a claimed realtime WS is up, STOP the blocking claim-config
+        // HTTP/TLS poll. Unclaimed public lesson sync must not change claim
+        // provisioning semantics.
+        if (IsDeviceClaimed()) {
+            Schedule([this]() { StopClaimPoll(); });
+        }
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
@@ -3306,7 +3382,8 @@ void Application::InitializeProtocol() {
             ESP_LOGI(TAG, "Claimed device: opening passive WebSocket for lesson/nudge");
             StartPassiveLessonWebsocket();
         } else {
-            ESP_LOGI(TAG, "WebSocket audio starts on wake word or explicit listen");
+            ESP_LOGI(TAG, "Unclaimed device: opening passive WebSocket for public lesson sync");
+            StartPassiveLessonWebsocket();
         }
     } else {
         protocol_->Start();
@@ -3793,9 +3870,8 @@ void Application::StartPassiveLessonWebsocket() {
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
     auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
-    auto created = xTaskCreateWithCaps(&Application::OpenChannelTask, "lesson_ws", 8192, ctx,
-                                       tskIDLE_PRIORITY + 3, nullptr,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    auto created = xTaskCreate(&Application::OpenChannelTask, "lesson_ws", 8192, ctx,
+                               tskIDLE_PRIORITY + 3, nullptr);
     if (created != pdPASS) {
         delete ctx;
         connect_in_flight_.store(false);
@@ -3845,9 +3921,8 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     ArmConnectWatchdog();
     passive_ws_intent_.store(false);
     auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
-    if (xTaskCreateWithCaps(&Application::OpenChannelTask, "ws_open", 8192, ctx,
-                            tskIDLE_PRIORITY + 3, nullptr,
-                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+    if (xTaskCreate(&Application::OpenChannelTask, "ws_open", 8192, ctx,
+                    tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
         delete ctx;
         connect_in_flight_.store(false);
         connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
@@ -3903,8 +3978,12 @@ void Application::OpenChannelTask(void* arg) {
         // A ResetProtocol arrived while we were mid-connect and deferred the
         // actual reset to us (now safe: the worker no longer touches protocol_).
         if (self->reset_pending_.exchange(false)) {
+            const bool reinit_protocol = self->protocol_reinit_pending_.exchange(false);
             self->connect_close_deferral_.Cancel();
             self->DoResetProtocol();
+            if (reinit_protocol) {
+                self->InitializeProtocol();
+            }
             return;
         }
         if (self->connect_close_deferral_.TakeAfterWorker()) {
@@ -3942,7 +4021,7 @@ void Application::OpenChannelTask(void* arg) {
                     self->StartHeartbeat();
                     self->DispatchDeviceHeartbeat();
                     self->SetListeningMode(kListeningModeManualStop);
-                } else if (!self->lesson_runtime_active_.load()) {
+                } else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load()) {
                     const std::string deferred_wake_word = self->deferred_wake_word_;
                     self->deferred_wake_word_.clear();
                     if (!deferred_wake_word.empty()) {
@@ -4459,9 +4538,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         ArmConnectWatchdog();
         passive_ws_intent_.store(false);
         auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
-        if (xTaskCreateWithCaps(&Application::OpenChannelTask, "wake_ws_open", 8192, ctx,
-                                tskIDLE_PRIORITY + 3, nullptr,
-                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        if (xTaskCreate(&Application::OpenChannelTask, "wake_ws_open", 8192, ctx,
+                        tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
             delete ctx;
             connect_in_flight_.store(false);
             connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended

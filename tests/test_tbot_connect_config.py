@@ -7,7 +7,7 @@ CURRENT_PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
 CURRENT_PRODUCTION_PROVISIONING_STATUS_URL = (
     "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
 )
-CURRENT_PRODUCTION_WEBSOCKET_URL = ""
+CURRENT_PRODUCTION_WEBSOCKET_URL = "wss://esp.tjbot.vn/tbot/v1/"
 CURRENT_OTA_BUILD_VERSION = "2.2.85"
 
 
@@ -33,6 +33,11 @@ def test_firmware_compiles_no_ephemeral_websocket_endpoint_fallback():
     websocket_default = kconfig_default(kconfig, "WEBSOCKET_URL")
 
     assert websocket_default == CURRENT_PRODUCTION_WEBSOCKET_URL
+    assert websocket_default == "wss://esp.tjbot.vn/tbot/v1/"
+    assert websocket_default.startswith("wss://")
+    assert websocket_default.endswith("/tbot/v1/")
+    assert "?" not in websocket_default
+    assert "token" not in websocket_default.lower()
     assert "trycloudflare.com" not in websocket_default
     assert "ngrok" not in websocket_default.lower()
 
@@ -92,7 +97,10 @@ def test_firmware_provisioning_status_targets_the_backend_api():
         f'CONFIG_PROVISIONING_STATUS_URL="{CURRENT_PRODUCTION_PROVISIONING_STATUS_URL}"'
         in local
     )
-    assert 'CONFIG_PROVISIONING_STATUS_URL="https://esp.tjbot.vn/' not in local
+    assert (
+        'CONFIG_PROVISIONING_STATUS_URL="https://esp.tjbot.vn/tbot/v1/device/provisioning/status"'
+        not in local
+    )
 
 def test_prod_flash_script_rejects_tiny_placeholder_artifacts():
     script = read("scripts/flash_prod_new_robot.sh")
