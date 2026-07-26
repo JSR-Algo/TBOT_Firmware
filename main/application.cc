@@ -1407,10 +1407,7 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
     StopClaimPoll();
     // Claim confirmed -> the device is becoming claimed. Stop advertising for
     // pairing; an owned robot must not be BLE-discoverable for a new claim.
-#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
-        "claim_confirmed", provisioning_token);
-#else
+#ifndef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     StopBleAdvertising();
 #endif
     if (protocol_) {
@@ -1453,6 +1450,9 @@ struct ClaimConfirmationContext {
     PendingTbotClaim claim;
     std::string api_url;
     std::string token;
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    Blufi::ProvisioningToken provisioning_token;
+#endif
     uint32_t expected_setup_generation;
     bool enforce_setup_generation;
 };
@@ -1467,9 +1467,16 @@ bool Application::DispatchPendingTbotClaimConfirmation(
     if (!claim_confirm_inflight_.compare_exchange_strong(expected, true)) {
         return false;
     }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    const auto provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
+#endif
     auto* ctx = new (std::nothrow) ClaimConfirmationContext{
         this, pending_tbot_claim_, pending_tbot_claim_api_url_,
-        pending_tbot_claim_token_, expected_setup_generation,
+        pending_tbot_claim_token_,
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        provisioning_token,
+#endif
+        expected_setup_generation,
         enforce_setup_generation};
     if (ctx == nullptr) {
         claim_confirm_inflight_.store(false);
@@ -1492,6 +1499,9 @@ void Application::ClaimConfirmationTask(void* arg) {
     PendingTbotClaim claim = ctx->claim;
     std::string api_url = std::move(ctx->api_url);
     std::string token = std::move(ctx->token);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    const auto provisioning_token = ctx->provisioning_token;
+#endif
     const uint32_t expected_setup_generation = ctx->expected_setup_generation;
     const bool enforce_setup_generation = ctx->enforce_setup_generation;
     delete ctx;
@@ -1500,6 +1510,9 @@ void Application::ClaimConfirmationTask(void* arg) {
     const ClaimConfirmationResult result = ClaimConfirmationReporter::Confirm(
         claim, api_url, token, &success_response);
     self->Schedule([self, result, token = std::move(token),
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+                    provisioning_token,
+#endif
                     success_response = std::move(success_response),
                     expected_setup_generation, enforce_setup_generation]() mutable {
         self->claim_confirm_inflight_.store(false);
@@ -1509,6 +1522,12 @@ void Application::ClaimConfirmationTask(void* arg) {
                 !PersistTbotClaimConfirmationResponse(success_response)) {
                 effective_result = ClaimConfirmationResult::AmbiguousSuccess;
             }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+            if (effective_result == ClaimConfirmationResult::Confirmed) {
+                Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
+                    "claim_confirmed", provisioning_token);
+            }
+#endif
             self->ApplyPendingTbotClaimConfirmationResult(effective_result);
         };
         if (enforce_setup_generation) {

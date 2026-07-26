@@ -119,6 +119,67 @@ def test_each_other_delayed_owner_captures_before_scheduling_or_http():
         "ClaimConfirmationReporter::Confirm"
     )
 
+    dispatch = function_body(app, "bool Application::DispatchPendingTbotClaimConfirmation")
+    assert dispatch.index("CaptureProvisioningSession()") < dispatch.index(
+        "xTaskCreateWithCaps"
+    )
+
+    task = function_body(app, "void Application::ClaimConfirmationTask")
+    apply = task[task.index("auto apply_result") :]
+    persist = apply.index("PersistTbotClaimConfirmationResponse")
+    teardown = apply.index('"claim_confirmed", provisioning_token')
+    result_apply = apply.index("ApplyPendingTbotClaimConfirmationResult")
+    assert "effective_result == ClaimConfirmationResult::Confirmed" in apply[:teardown]
+    assert persist < teardown < result_apply
+
+    result_handler = function_body(
+        app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    assert "provisioning_token" not in result_handler
+
+
+def test_async_claim_provisioning_token_is_blufi_guarded_with_non_blufi_fallback():
+    app = read("main/application.cc")
+    context_start = app.index("struct ClaimConfirmationContext")
+    context_end = app.index("};", context_start)
+    context = app[context_start:context_end]
+    assert (
+        "#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\n"
+        "    Blufi::ProvisioningToken provisioning_token;\n"
+        "#endif"
+    ) in context
+
+    dispatch = function_body(app, "bool Application::DispatchPendingTbotClaimConfirmation")
+    assert (
+        "#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\n"
+        "    const auto provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();\n"
+        "#endif"
+    ) in dispatch
+
+    task = function_body(app, "void Application::ClaimConfirmationTask")
+    assert (
+        "#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\n"
+        "    const auto provisioning_token = ctx->provisioning_token;\n"
+        "#endif"
+    ) in task
+    teardown = task.index('"claim_confirmed", provisioning_token')
+    guard = task.rindex("#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING", 0, teardown)
+    assert guard > task.index("auto apply_result")
+    assert task.index("#endif", teardown) < task.index(
+        "ApplyPendingTbotClaimConfirmationResult", teardown
+    )
+
+    result_handler = function_body(
+        app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    assert (
+        "#ifndef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\n"
+        "    StopBleAdvertising();\n"
+        "#endif"
+    ) in result_handler
+
+    assert app.count('"claim_confirmed", provisioning_token') == 2
+
 
 def test_network_connected_is_not_a_teardown_or_rearm_owner():
     wifi = read("main/boards/common/wifi_board.cc")
