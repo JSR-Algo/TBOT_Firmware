@@ -22,4 +22,5 @@ std::string EspBuildId(const EspBuildIdentity& identity);
 bool ValidateEspBuildIdentity(const EspBuildIdentity& identity, std::string* error = nullptr);
 std::vector<std::pair<std::string, std::string>> EspBuildIdentityHeaders(
     const EspBuildIdentity& identity);
+bool PreloadRunningEspBuildIdentity(std::string* error = nullptr);
 bool ReadRunningEspBuildIdentity(EspBuildIdentity* identity, std::string* error = nullptr);

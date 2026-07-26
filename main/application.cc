@@ -16,6 +16,7 @@
 #include "lesson_heap_probe.h"
 #include "passive_reconnect_policy.h"
 #include "protocol_lifetime_token.h"
+#include "esp_build_identity.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
 #include "boards/common/system_reset.h"
@@ -397,6 +398,11 @@ void Application::Initialize() {
 #endif
     auto& board = Board::GetInstance();
     SetDeviceState(kDeviceStateStarting);
+
+    std::string build_identity_error;
+    if (!PreloadRunningEspBuildIdentity(&build_identity_error)) {
+        ESP_LOGW(TAG, "Build identity preload failed reason=%s", build_identity_error.c_str());
+    }
 
     // Setup the display
     auto display = board.GetDisplay();
@@ -1340,10 +1346,11 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
         return true;
     }
 
+    WakeWordLifecycleController::ProvisioningToken provisioning_token{};
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     // Capture the provisioning session before the confirm request so a
     // success-path teardown can only consume this exact originating token.
-    const auto provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
+    provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
 #endif
     const ClaimConfirmationResult confirmation_result = ClaimConfirmationReporter::Confirm(
         pending_tbot_claim_,
@@ -1354,11 +1361,12 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
             "claim_confirmed", provisioning_token);
     }
 #endif
-    return ApplyPendingTbotClaimConfirmationResult(confirmation_result);
+    return ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token);
 }
 
 bool Application::ApplyPendingTbotClaimConfirmationResult(
-    ClaimConfirmationResult confirmation_result) {
+    ClaimConfirmationResult confirmation_result,
+    WakeWordLifecycleController::ProvisioningToken provisioning_token) {
     if (confirmation_result == ClaimConfirmationResult::RetryableFailure) {
         ESP_LOGW(TAG, "Claim confirmation retryable; retaining claim token for bounded retry");
         claim_substate_ = TbotClaimSubstate::WaitingConfirm;
@@ -1463,6 +1471,7 @@ struct ClaimConfirmationContext {
     PendingTbotClaim claim;
     std::string api_url;
     std::string token;
+    WakeWordLifecycleController::ProvisioningToken provisioning_token;
     uint32_t expected_setup_generation;
     bool enforce_setup_generation;
 };
@@ -1477,9 +1486,13 @@ bool Application::DispatchPendingTbotClaimConfirmation(
     if (!claim_confirm_inflight_.compare_exchange_strong(expected, true)) {
         return false;
     }
+    WakeWordLifecycleController::ProvisioningToken provisioning_token{};
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
+#endif
     auto* ctx = new (std::nothrow) ClaimConfirmationContext{
         this, pending_tbot_claim_, pending_tbot_claim_api_url_,
-        pending_tbot_claim_token_, expected_setup_generation,
+        pending_tbot_claim_token_, provisioning_token, expected_setup_generation,
         enforce_setup_generation};
     if (ctx == nullptr) {
         claim_confirm_inflight_.store(false);
@@ -1502,6 +1515,7 @@ void Application::ClaimConfirmationTask(void* arg) {
     PendingTbotClaim claim = ctx->claim;
     std::string api_url = std::move(ctx->api_url);
     std::string token = std::move(ctx->token);
+    const auto provisioning_token = ctx->provisioning_token;
     const uint32_t expected_setup_generation = ctx->expected_setup_generation;
     const bool enforce_setup_generation = ctx->enforce_setup_generation;
     delete ctx;
@@ -1509,7 +1523,7 @@ void Application::ClaimConfirmationTask(void* arg) {
     std::string success_response;
     const ClaimConfirmationResult result = ClaimConfirmationReporter::Confirm(
         claim, api_url, token, &success_response);
-    self->Schedule([self, result, token = std::move(token),
+        self->Schedule([self, result, token = std::move(token), provisioning_token,
                     success_response = std::move(success_response),
                     expected_setup_generation, enforce_setup_generation]() mutable {
         self->claim_confirm_inflight_.store(false);
@@ -1519,7 +1533,7 @@ void Application::ClaimConfirmationTask(void* arg) {
                 !PersistTbotClaimConfirmationResponse(success_response)) {
                 effective_result = ClaimConfirmationResult::AmbiguousSuccess;
             }
-            self->ApplyPendingTbotClaimConfirmationResult(effective_result);
+            self->ApplyPendingTbotClaimConfirmationResult(effective_result, provisioning_token);
         };
         if (enforce_setup_generation) {
             Blufi::GetInstance().RunIfSetupGenerationCurrent(

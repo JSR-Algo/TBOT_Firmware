@@ -120,6 +120,19 @@ def test_each_other_delayed_owner_captures_before_scheduling_or_http():
     )
 
 
+def test_claim_confirmation_passes_the_originating_token_into_result_application():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    confirm = function_body(app, "bool Application::ConfirmPendingTbotClaim")
+    dispatch = function_body(app, "bool Application::DispatchPendingTbotClaimConfirmation")
+    task = function_body(app, "void Application::ClaimConfirmationTask")
+
+    assert "WakeWordLifecycleController::ProvisioningToken provisioning_token" in header
+    assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm
+    assert "CaptureProvisioningSession()" in dispatch
+    assert "ApplyPendingTbotClaimConfirmationResult(effective_result, provisioning_token)" in task
+
+
 def test_network_connected_is_not_a_teardown_or_rearm_owner():
     wifi = read("main/boards/common/wifi_board.cc")
     connected = wifi[wifi.index("case NetworkEvent::Connected:"):]

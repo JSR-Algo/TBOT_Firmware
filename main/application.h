@@ -381,7 +381,9 @@ private:
     bool DispatchPendingTbotClaimConfirmation(uint32_t expected_setup_generation,
                                               bool enforce_setup_generation);
     static void ClaimConfirmationTask(void* arg);
-    bool ApplyPendingTbotClaimConfirmationResult(ClaimConfirmationResult result);
+    bool ApplyPendingTbotClaimConfirmationResult(
+        ClaimConfirmationResult result,
+        WakeWordLifecycleController::ProvisioningToken provisioning_token);
     // "Hi ESP needs many tries" fix: the blocking ~3s /device/config HTTP/TLS
     // fetch is split out of RefreshPendingTbotClaim() so it can run on a
     // dedicated low-priority worker instead of the priority-10 Application task

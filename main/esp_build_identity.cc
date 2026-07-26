@@ -1,5 +1,6 @@
 #include "esp_build_identity.h"
 
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 
@@ -56,6 +57,33 @@ std::string Hex(const uint8_t* bytes, size_t size) {
     }
     return rendered;
 }
+
+EspBuildIdentity cached_running_identity;
+std::string cached_running_identity_error;
+std::atomic<bool> running_identity_preloaded{false};
+bool running_identity_valid = false;
+
+bool LoadRunningEspBuildIdentity(EspBuildIdentity* identity, std::string* error) {
+    const esp_app_desc_t* descriptor = esp_app_get_description();
+    const esp_partition_t* partition = esp_ota_get_running_partition();
+    if (descriptor == nullptr || partition == nullptr) return SetError(error, "running_image_unavailable");
+    uint8_t app_sha256[32];
+    if (esp_partition_get_sha256(partition, app_sha256) != ESP_OK) {
+        return SetError(error, "app_sha256_unavailable");
+    }
+    EspBuildIdentity value;
+    value.hil_profile = TBOT_EMBEDDED_PROFILE;
+    value.project_name = descriptor->project_name;
+    value.project_version = descriptor->version;
+    value.idf_version = descriptor->idf_ver;
+    value.secure_version = descriptor->secure_version;
+    value.elf_sha256 = Hex(descriptor->app_elf_sha256, sizeof(descriptor->app_elf_sha256));
+    value.app_sha256 = Hex(app_sha256, sizeof(app_sha256));
+    value.build_id = EspBuildId(value);
+    if (!ValidateEspBuildIdentity(value, error)) return false;
+    *identity = std::move(value);
+    return true;
+}
 #endif
 
 }  // namespace
@@ -92,30 +120,39 @@ std::vector<std::pair<std::string, std::string>> EspBuildIdentityHeaders(
     };
 }
 
+bool PreloadRunningEspBuildIdentity(std::string* error) {
+#ifdef TBOT_BUILD_IDENTITY_HOST_TEST
+    return SetError(error, "host_test_has_no_running_partition");
+#else
+    if (running_identity_preloaded.load(std::memory_order_acquire)) {
+        if (!running_identity_valid) {
+            return SetError(error, cached_running_identity_error.c_str());
+        }
+        return true;
+    }
+    running_identity_valid = LoadRunningEspBuildIdentity(
+        &cached_running_identity, &cached_running_identity_error);
+    running_identity_preloaded.store(true, std::memory_order_release);
+    if (!running_identity_valid) {
+        return SetError(error, cached_running_identity_error.c_str());
+    }
+    return true;
+#endif
+}
+
 bool ReadRunningEspBuildIdentity(EspBuildIdentity* identity, std::string* error) {
 #ifdef TBOT_BUILD_IDENTITY_HOST_TEST
     (void)identity;
     return SetError(error, "host_test_has_no_running_partition");
 #else
     if (identity == nullptr) return SetError(error, "null_output");
-    const esp_app_desc_t* descriptor = esp_app_get_description();
-    const esp_partition_t* partition = esp_ota_get_running_partition();
-    if (descriptor == nullptr || partition == nullptr) return SetError(error, "running_image_unavailable");
-    uint8_t app_sha256[32];
-    if (esp_partition_get_sha256(partition, app_sha256) != ESP_OK) {
-        return SetError(error, "app_sha256_unavailable");
+    if (!running_identity_preloaded.load(std::memory_order_acquire)) {
+        return SetError(error, "build_identity_not_preloaded");
     }
-    EspBuildIdentity value;
-    value.hil_profile = TBOT_EMBEDDED_PROFILE;
-    value.project_name = descriptor->project_name;
-    value.project_version = descriptor->version;
-    value.idf_version = descriptor->idf_ver;
-    value.secure_version = descriptor->secure_version;
-    value.elf_sha256 = Hex(descriptor->app_elf_sha256, sizeof(descriptor->app_elf_sha256));
-    value.app_sha256 = Hex(app_sha256, sizeof(app_sha256));
-    value.build_id = EspBuildId(value);
-    if (!ValidateEspBuildIdentity(value, error)) return false;
-    *identity = std::move(value);
+    if (!running_identity_valid) {
+        return SetError(error, cached_running_identity_error.c_str());
+    }
+    *identity = cached_running_identity;
     return true;
 #endif
 }

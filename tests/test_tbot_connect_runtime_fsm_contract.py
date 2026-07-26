@@ -96,7 +96,7 @@ def test_heartbeat_uses_one_persistent_worker_allocated_before_heap_fragmentatio
     # Allocate one worker while claim confirmation still has a large contiguous
     # block, then feed it heartbeat contexts through a one-slot queue.
     assert "xQueueCreate(1, sizeof(void*))" in start_body
-    assert '"heartbeat_http", 6144' in start_body
+    assert '"heartbeat_http", 8192' in start_body
     assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in start_body
     assert "xTaskCreateWithCaps" not in dispatch_body
     assert "xQueueSend(heartbeat_queue_" in dispatch_body
@@ -160,7 +160,7 @@ def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_s
     # Listening, where CONFIG_WAKE_WORD_DETECTION_IN_LISTENING is disabled for
     # this board. That leaves the user saying "Hi ESP" while the wake-word path
     # is off.
-    assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result)" in confirm_body
+    assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm_body
     assert "SetDeviceState(kDeviceStateIdle);" in result_body
     assert "audio_service_.EnableWakeWordDetection(true);" in result_body
     assert "protocol_->Start()" not in result_body
@@ -173,7 +173,7 @@ def test_claim_confirm_starts_heartbeat_after_credentials_are_persisted():
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
 
-    assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result)" in confirm_body
+    assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm_body
     success_start = result_body.index("CancelClaimExpiryTimer();")
     success_body = result_body[success_start:]
 
