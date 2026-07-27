@@ -10,6 +10,7 @@
 // is ESP32-S3 hardware (CP-7) and is out of host scope.
 #include "protocol.h"
 #include "robot_uart.h"
+#include "lesson_handler.h"
 
 #include <cJSON.h>
 
@@ -47,6 +48,7 @@ public:
         schedule_wait_succeeds = true;
         schedule_wait_starts_before_timeout = false;
         deferred_callbacks.clear();
+        lesson_visual_queue.clear();
         lesson_interactive_listen_generation = 0;
         play_sound_calls = 0;
         last_sound = "";
@@ -70,6 +72,7 @@ public:
     bool schedule_wait_succeeds = true;
     bool schedule_wait_starts_before_timeout = false;
     std::vector<std::function<void()>> deferred_callbacks;
+    std::vector<LessonQueueItem> lesson_visual_queue;
     uint32_t lesson_interactive_listen_generation = 0;
     int play_sound_calls = 0;
     std::string last_sound;
@@ -93,6 +96,27 @@ public:
         deferred_callbacks.clear();
         for (auto& cb : callbacks) {
             if (cb) cb();
+        }
+    }
+    void EnqueueLessonVisualCompletion(
+        LessonQueueItemKind kind,
+        std::uint64_t transport_epoch,
+        std::uint64_t visual_generation,
+        std::int64_t server_sequence,
+        const char* assignment_id,
+        const char* session_id,
+        const char* step_id,
+        LessonVisualCompletionResult result,
+        const char* degraded_reason = nullptr) {
+        lesson_visual_queue.push_back(MakeLessonVisualQueueItem(
+            kind, transport_epoch, visual_generation, server_sequence,
+            assignment_id, session_id, step_id, result, degraded_reason));
+    }
+    void DrainLessonVisualQueue() {
+        auto items = std::move(lesson_visual_queue);
+        lesson_visual_queue.clear();
+        for (const auto& item : items) {
+            DispatchLessonVisualCompletion(item, protocol_.get());
         }
     }
     uint32_t BeginLessonInteractiveListeningRequest() { return ++lesson_interactive_listen_generation; }

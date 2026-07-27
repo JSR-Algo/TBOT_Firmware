@@ -137,7 +137,11 @@ public:
         bool enqueue_control = false;
     };
 
-    PublishResult Publish(std::uint64_t) {
+    PublishResult Publish(std::uint64_t epoch) {
+        std::uint64_t observed = latest_epoch_.load(std::memory_order_relaxed);
+        while (observed < epoch &&
+               !latest_epoch_.compare_exchange_weak(
+                   observed, epoch, std::memory_order_release, std::memory_order_relaxed)) {}
         return {!pending_.exchange(true, std::memory_order_acq_rel)};
     }
 
@@ -145,8 +149,9 @@ public:
         const LessonTransportEpochGate& gate,
         std::uint64_t applied_epoch
     ) {
-        pending_.store(false, std::memory_order_release);
-        if (gate.PublishedEpoch() <= applied_epoch) return false;
+        pending_.exchange(false, std::memory_order_acq_rel);
+        const std::uint64_t latest_epoch = latest_epoch_.load(std::memory_order_acquire);
+        if (latest_epoch <= applied_epoch && gate.PublishedEpoch() <= applied_epoch) return false;
         return !pending_.exchange(true, std::memory_order_acq_rel);
     }
 
@@ -156,6 +161,7 @@ public:
 
 private:
     std::atomic<bool> pending_{false};
+    std::atomic<std::uint64_t> latest_epoch_{0};
 };
 
 void SetLessonTransportEpoch(std::uint64_t transport_epoch);

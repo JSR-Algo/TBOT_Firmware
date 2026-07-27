@@ -295,6 +295,12 @@ std::string V2VisualFrame(int seq, const char* state, std::uint64_t generation) 
            "\"motionPreset\":\"encourage\",\"visualGeneration\":" +
            std::to_string(generation) + "}}";
 }
+
+std::string V2PauseFrame(int seq) {
+    return std::string("{\"type\":\"lesson_pause\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
+}
 std::string StopFrame(int seq, const std::string& body = "") {
     return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -608,6 +614,77 @@ void test_renderer_v2_worker_dispatch_emits_exactly_one_ack() {
     require(!DispatchLessonVisualCompletion(completion, App().protocol_.get()) &&
                 Sent().size() == before_completion + 1,
             "duplicate production callback emits no second ACK");
+}
+
+void test_renderer_v2_production_render_callback_reaches_worker_ack() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(31);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(!display.lesson_mode_calls.empty() && display.lesson_mode_calls.back(),
+            "production v2 start callback installs lesson display mode before completion");
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().kind == LessonQueueItemKind::kVisualCompleted,
+            "production display callback enqueues typed completion after install");
+    const LessonQueueItem completed_callback = App().lesson_visual_queue.front();
+    const size_t before_drain = Sent().size();
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == before_drain + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyBool(Sent().size() - 1, "accepted", false),
+            "production callback crosses worker dispatch and emits the v2 ACK");
+
+    App().lesson_visual_queue.push_back(completed_callback);
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == before_drain + 1,
+            "duplicate production callback remains an idempotent no-op");
+
+    Handle(V2VisualFrame(3, "thinking", 17));
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kRejected,
+            "unsupported synchronous visual state enqueues a production rejection");
+    App().DrainLessonVisualQueue();
+    require(!FrameBodyBool(Sent().size() - 1, "accepted", true) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "unsupportedContract",
+            "unsupported visual state rejection crosses the production worker path");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(32);
+    App().defer_scheduled_callbacks = true;
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(App().lesson_visual_queue.empty(),
+            "deferred display install cannot complete before its Application callback runs");
+    Handle(V2PauseFrame(3));
+    const size_t after_pause = Sent().size();
+    App().FlushScheduledCallbacks();
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == after_pause,
+            "late display callback after pause is generation-gated and emits no ACK");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(33);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kRejected,
+            "missing production display enqueues a typed rejection");
+    App().DrainLessonVisualQueue();
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                !FrameBodyBool(Sent().size() - 1, "accepted", true) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "unsupportedContract",
+            "production rejection crosses the worker and emits frozen negative ACK semantics");
 }
 
 void test_prepare_assetpack_not_ready_branches() {
@@ -4786,6 +4863,7 @@ int main() {
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
+    test_renderer_v2_production_render_callback_reaches_worker_ack();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
     test_prepare_assetpack_derives_local_path_from_root_and_key();

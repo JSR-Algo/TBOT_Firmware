@@ -1888,23 +1888,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         g_layer_state.ClearAll();
-        // Clear stale layers, enter lesson mode, then show a short child-visible loading
-        // cue until the first real lesson_step redraws the authored scene.
-        Display* start_display = Board::GetInstance().GetDisplay();
-        LvglDisplay* start_lvgl = dynamic_cast<LvglDisplay*>(start_display);
-        if (start_display) {
-            Schedule([start_display, start_lvgl]() {
-                if (start_lvgl) start_lvgl->SetLessonBackground(nullptr);
-                if (start_lvgl) start_lvgl->SetLessonObject(nullptr);
-                if (start_lvgl) start_lvgl->SetLessonRobotOverlay(nullptr);
-                if (start_lvgl) start_lvgl->SetLessonTeachingWord("");
-                start_display->SetLessonCaption("");
-                start_display->ClearChatMessages();
-                if (start_lvgl) start_lvgl->SetLessonMode(true);
-                start_display->SetStatus(Lang::Strings::PLEASE_WAIT);
-                Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
-            });
-        }
         if (g_session.renderer_v2) {
             g_session.opening_entrance_consumed = true;
             g_session.entrance_active = true;
@@ -1917,6 +1900,55 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 Num(root, "lessonVersion", g_session.pending_lesson_version);
             g_session.pending_step_id.clear();
             g_session.pending_ack = true;
+        }
+        // Clear stale layers, enter lesson mode, then show a short child-visible loading
+        // cue until the first real lesson_step redraws the authored scene.
+        Display* start_display = Board::GetInstance().GetDisplay();
+        LvglDisplay* start_lvgl = dynamic_cast<LvglDisplay*>(start_display);
+        if (start_display) {
+            const bool renderer_v2_callback = g_session.renderer_v2;
+            const std::uint64_t callback_transport_epoch = g_session.current_transport_epoch;
+            const std::uint64_t callback_visual_generation = g_session.visual_generation;
+            const std::string callback_assignment_id = g_session.assignment_id;
+            const std::string callback_session_id = g_session.session_id;
+            Schedule([start_display, start_lvgl, renderer_v2_callback,
+                      callback_transport_epoch, callback_visual_generation, sequence,
+                      callback_assignment_id, callback_session_id]() {
+                if (start_lvgl) start_lvgl->SetLessonBackground(nullptr);
+                if (start_lvgl) start_lvgl->SetLessonObject(nullptr);
+                if (start_lvgl) start_lvgl->SetLessonRobotOverlay(nullptr);
+                if (start_lvgl) start_lvgl->SetLessonTeachingWord("");
+                start_display->SetLessonCaption("");
+                start_display->ClearChatMessages();
+                if (start_lvgl) start_lvgl->SetLessonMode(true);
+                start_display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
+                if (renderer_v2_callback) {
+                    Application::GetInstance().EnqueueLessonVisualCompletion(
+                        LessonQueueItemKind::kVisualCompleted,
+                        callback_transport_epoch,
+                        callback_visual_generation,
+                        sequence,
+                        callback_assignment_id.c_str(),
+                        callback_session_id.c_str(),
+                        nullptr,
+                        LessonVisualCompletionResult::kApplied);
+                }
+            });
+        }
+        if (g_session.renderer_v2) {
+            if (start_display == nullptr) {
+                Application::GetInstance().EnqueueLessonVisualCompletion(
+                    LessonQueueItemKind::kVisualCompleted,
+                    g_session.current_transport_epoch,
+                    g_session.visual_generation,
+                    sequence,
+                    g_session.assignment_id.c_str(),
+                    g_session.session_id.c_str(),
+                    nullptr,
+                    LessonVisualCompletionResult::kRejected,
+                    "unsupportedContract");
+            }
             return;
         }
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
@@ -2050,6 +2082,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
             Num(root, "lessonVersion", g_session.pending_lesson_version);
         g_session.pending_step_id = Str(root, "stepId");
         g_session.pending_ack = true;
+        Application::GetInstance().EnqueueLessonVisualCompletion(
+            LessonQueueItemKind::kVisualCompleted,
+            g_session.current_transport_epoch,
+            g_session.visual_generation,
+            sequence,
+            g_session.assignment_id.c_str(),
+            g_session.session_id.c_str(),
+            g_session.pending_step_id.c_str(),
+            LessonVisualCompletionResult::kRejected,
+            "unsupportedContract");
         return;
     }
     if (strcmp(type, "lesson_step") != 0) {

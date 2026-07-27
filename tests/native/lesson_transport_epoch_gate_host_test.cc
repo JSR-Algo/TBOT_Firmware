@@ -118,8 +118,10 @@ int main() {
         race_gate.WorkerApplyTerminal(applied);
         const bool worker_continues = race_control.FinishWorkerDrain(race_gate, applied);
         requester.join();
-        expect(worker_continues != successor.enqueue_control,
-               "pending-clear race leaves exactly one successor owner");
+        const bool already_coalesced = !worker_continues && !successor.enqueue_control &&
+                                       applied == race_gate.PublishedEpoch();
+        expect(worker_continues != successor.enqueue_control || already_coalesced,
+               "pending-clear race has one successor owner or already applied the newest epoch");
         if (worker_continues || successor.enqueue_control) {
             const auto latest = race_gate.PublishedEpoch();
             race_gate.WorkerApplyTerminal(latest);
