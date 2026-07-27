@@ -351,7 +351,7 @@ const char* StableVisualDegradedReason(const char* value) {
     if (value == nullptr) return nullptr;
     for (const char* allowed : {
              "missingOverlay", "animationStartFailed", "phaseTimeout", "reducedMotion",
-             "unsupportedContract", "assetIdentityMismatch", "insufficientHeap"}) {
+             "unsupportedContract", "assetIdentityMismatch", "insufficientHeap", "superseded"}) {
         if (std::strcmp(value, allowed) == 0) return allowed;
     }
     return nullptr;
@@ -1896,6 +1896,25 @@ void Application::HandleLessonMessage(const cJSON* root) {
         ESP_LOGW(TAG, "lesson_step while paused; dropping");
         return;
     }
+    if (g_session.pending_ack && sequence > g_session.pending_server_sequence &&
+        (is_step || is_visual)) {
+        g_visual_callback_token.fetch_add(1, std::memory_order_acq_rel);
+        LessonQueueItem superseded = MakeLessonVisualQueueItem(
+            LessonQueueItemKind::kVisualCompleted,
+            g_session.current_transport_epoch,
+            g_session.visual_generation,
+            g_session.pending_server_sequence,
+            g_session.assignment_id.c_str(),
+            g_session.session_id.c_str(),
+            g_session.pending_step_id.empty() ? nullptr : g_session.pending_step_id.c_str(),
+            LessonVisualCompletionResult::kRejected,
+            "superseded",
+            g_session.pending_visual_nonce);
+        std::string superseded_ack;
+        if (AcceptLessonVisualCompletion(superseded, &superseded_ack) && protocol_) {
+            protocol_->SendLessonFrame(superseded_ack);
+        }
+    }
     if (!is_prepare) g_session.last_in_sequence = sequence;
 
     // --- slice subset dispatch ---
@@ -2087,7 +2106,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             });
         }
         if (g_session.renderer_v2) {
-            if (start_display == nullptr) {
+            if (start_lvgl == nullptr) {
                 Application::GetInstance().EnqueueLessonVisualCompletion(
                     LessonQueueItemKind::kVisualCompleted,
                     g_session.current_transport_epoch,

@@ -122,6 +122,22 @@ def test_lesson_object_and_robot_overlay_use_safe_composition_layout():
         assert "width_ / 3" not in body
         assert "-height_ / 12" not in body
 
+
+def test_renderer_v2_animation_state_and_timers_are_display_locked_without_callback_reentrancy():
+    source = SOURCE.read_text(encoding="utf-8")
+    entrance = function_body(source, "bool LcdDisplay::StartLessonRobotEntrance")
+    visual = function_body(source, "bool LcdDisplay::ApplyLessonVisualState")
+
+    for body in (entrance, visual):
+        assert "DisplayLockGuard lock(this);" in body
+        assert "deferred_completion" in body
+        assert body.index("DisplayLockGuard lock(this);") < body.index("deferred_completion(")
+
+    timer = entrance[entrance.index("lv_timer_create") :]
+    assert "DisplayLockGuard lock(animation->owner);" in timer
+    assert timer.index("DisplayLockGuard lock(animation->owner);") < timer.index("lv_timer_delete")
+    assert timer.index("lv_timer_delete") < timer.index("if (timer_completion)")
+
 def test_lesson_stop_clears_layers_and_uses_terminal_reason_cue():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     body = function_body(source, "void Application::HandleLessonMessage")

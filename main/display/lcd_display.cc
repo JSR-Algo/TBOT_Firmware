@@ -1569,99 +1569,129 @@ void LcdDisplay::SetLessonTeachingWord(const char* text) {
 
 bool LcdDisplay::StartLessonRobotEntrance(
     const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) {
-    CancelLessonRobotEntrance();
-    const lesson_tvideo::LayoutGeometry* arrived =
-        lesson_tvideo::ArrivedGeometry(plan.layout_preset, 1);
-    if (arrived == nullptr) {
-        if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");
-        return false;
-    }
+    LessonVisualCompletion deferred_completion = std::move(completion);
+    LessonVisualApplyResult deferred_result = LessonVisualApplyResult::kApplied;
+    const char* deferred_reason = nullptr;
+    bool complete_now = false;
+    bool started = true;
+    {
+        DisplayLockGuard lock(this);
+        CancelLessonRobotEntranceLocked();
+        do {
+            const lesson_tvideo::LayoutGeometry* arrived =
+                lesson_tvideo::ArrivedGeometry(plan.layout_preset, 1);
+            if (arrived == nullptr) {
+                deferred_result = LessonVisualApplyResult::kRejected;
+                deferred_reason = "unsupportedContract";
+                complete_now = true;
+                started = false;
+                break;
+            }
 
-    lesson_robot_arrived_left_ = arrived->robot.left;
-    lesson_robot_arrived_top_ = arrived->robot.top;
-    lesson_robot_arrived_width_ = arrived->robot.width;
-    lesson_robot_arrived_height_ = arrived->robot.height;
+            lesson_robot_arrived_left_ = arrived->robot.left;
+            lesson_robot_arrived_top_ = arrived->robot.top;
+            lesson_robot_arrived_width_ = arrived->robot.width;
+            lesson_robot_arrived_height_ = arrived->robot.height;
 
-    if (lesson_robot_overlay_cached_ == nullptr) {
-        SetLessonRobotOverlayBounds(0, 0, 0, 0);
-        if (completion) completion(LessonVisualApplyResult::kDegraded, "missingOverlay");
-        return true;
-    }
-    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) <
-        kLessonRobotAnimationMinInternalHeapBytes) {
-        SetLessonRobotOverlayBounds(0, 0, 0, 0);
-        if (completion) completion(LessonVisualApplyResult::kDegraded, "insufficientHeap");
-        return true;
-    }
-    if (plan.reduced_motion) {
-        SetLessonRobotOverlayBounds(
-            arrived->robot.left, arrived->robot.top, arrived->robot.width, arrived->robot.height);
-        if (completion) completion(LessonVisualApplyResult::kDegraded, "reducedMotion");
-        return true;
-    }
+            if (lesson_robot_overlay_cached_ == nullptr) {
+                SetLessonRobotOverlayBounds(0, 0, 0, 0);
+                deferred_result = LessonVisualApplyResult::kDegraded;
+                deferred_reason = "missingOverlay";
+                complete_now = true;
+                break;
+            }
+            if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) <
+                kLessonRobotAnimationMinInternalHeapBytes) {
+                SetLessonRobotOverlayBounds(0, 0, 0, 0);
+                deferred_result = LessonVisualApplyResult::kDegraded;
+                deferred_reason = "insufficientHeap";
+                complete_now = true;
+                break;
+            }
+            if (plan.reduced_motion) {
+                SetLessonRobotOverlayBounds(arrived->robot.left, arrived->robot.top,
+                                            arrived->robot.width, arrived->robot.height);
+                deferred_result = LessonVisualApplyResult::kDegraded;
+                deferred_reason = "reducedMotion";
+                complete_now = true;
+                break;
+            }
 
-    auto* context = new (std::nothrow) LessonRobotAnimationContext{
-        this,
-        lesson_tvideo::StateMachine({
-            "tvideoFlyWalk", 1, plan.layout_preset, 1, true, true, false}),
-        std::move(completion),
-    };
-    if (context == nullptr) {
-        SetLessonRobotOverlayBounds(
-            arrived->robot.left, arrived->robot.top, arrived->robot.width, arrived->robot.height);
-        if (completion) completion(LessonVisualApplyResult::kDegraded, "insufficientHeap");
-        return true;
-    }
-    lesson_robot_animation_context_ = context;
-    context->timer = lv_timer_create([](lv_timer_t* timer) {
-        auto* animation = static_cast<LessonRobotAnimationContext*>(lv_timer_get_user_data(timer));
-        if (animation == nullptr ||
-            animation->owner->lesson_robot_animation_context_ != animation) {
-            return;
-        }
-        animation->elapsed_ms += kLessonRobotAnimationTickMs;
-        if (animation->elapsed_ms > kLessonRobotAnimationTimeoutMs) {
-            animation->machine.Timeout();
-        } else {
-            animation->machine.Advance(kLessonRobotAnimationTickMs);
-        }
-        const auto& robot = animation->machine.geometry().robot;
-        if (animation->machine.phase() == lesson_tvideo::Phase::kHidden) {
-            animation->owner->SetLessonRobotOverlayBounds(0, 0, 0, 0);
-        } else {
-            animation->owner->SetLessonRobotOverlayBounds(
-                robot.left, robot.top, robot.width, robot.height);
-        }
-        if (animation->machine.phase() != lesson_tvideo::Phase::kRevealTeachingContent) return;
+            auto* context = new (std::nothrow) LessonRobotAnimationContext{
+                this,
+                lesson_tvideo::StateMachine({
+                    "tvideoFlyWalk", 1, plan.layout_preset, 1, true, true, false}),
+                std::move(deferred_completion),
+            };
+            if (context == nullptr) {
+                SetLessonRobotOverlayBounds(arrived->robot.left, arrived->robot.top,
+                                            arrived->robot.width, arrived->robot.height);
+                deferred_result = LessonVisualApplyResult::kDegraded;
+                deferred_reason = "insufficientHeap";
+                complete_now = true;
+                break;
+            }
+            lesson_robot_animation_context_ = context;
+            context->timer = lv_timer_create([](lv_timer_t* timer) {
+                auto* animation = static_cast<LessonRobotAnimationContext*>(
+                    lv_timer_get_user_data(timer));
+                if (animation == nullptr) return;
+                LessonVisualCompletion timer_completion;
+                LessonVisualApplyResult timer_result = LessonVisualApplyResult::kApplied;
+                const char* timer_reason = nullptr;
+                {
+                    DisplayLockGuard lock(animation->owner);
+                    if (animation->owner->lesson_robot_animation_context_ != animation) return;
+                    animation->elapsed_ms += kLessonRobotAnimationTickMs;
+                    if (animation->elapsed_ms > kLessonRobotAnimationTimeoutMs) {
+                        animation->machine.Timeout();
+                    } else {
+                        animation->machine.Advance(kLessonRobotAnimationTickMs);
+                    }
+                    const auto& robot = animation->machine.geometry().robot;
+                    if (animation->machine.phase() == lesson_tvideo::Phase::kHidden) {
+                        animation->owner->SetLessonRobotOverlayBounds(0, 0, 0, 0);
+                    } else {
+                        animation->owner->SetLessonRobotOverlayBounds(
+                            robot.left, robot.top, robot.width, robot.height);
+                    }
+                    if (animation->machine.phase() !=
+                        lesson_tvideo::Phase::kRevealTeachingContent) {
+                        return;
+                    }
 
-        const bool timed_out =
-            animation->machine.degraded_reason() == lesson_tvideo::DegradedReason::kPhaseTimeout;
-        auto completion = std::move(animation->completion);
-        animation->owner->lesson_robot_animation_context_ = nullptr;
-        lv_timer_delete(animation->timer);
-        delete animation;
-        if (completion) {
-            completion(timed_out ? LessonVisualApplyResult::kPhaseTimeout
-                                 : LessonVisualApplyResult::kApplied,
-                       timed_out ? "phaseTimeout" : nullptr);
-        }
-    }, kLessonRobotAnimationTickMs, context);
-    if (context->timer == nullptr) {
-        lesson_robot_animation_context_ = nullptr;
-        auto failed_completion = std::move(context->completion);
-        delete context;
-        SetLessonRobotOverlayBounds(
-            arrived->robot.left, arrived->robot.top, arrived->robot.width, arrived->robot.height);
-        if (failed_completion) {
-            failed_completion(LessonVisualApplyResult::kDegraded, "animationStartFailed");
-        }
-        return false;
+                    const bool timed_out = animation->machine.degraded_reason() ==
+                                           lesson_tvideo::DegradedReason::kPhaseTimeout;
+                    timer_completion = std::move(animation->completion);
+                    timer_result = timed_out ? LessonVisualApplyResult::kPhaseTimeout
+                                             : LessonVisualApplyResult::kApplied;
+                    timer_reason = timed_out ? "phaseTimeout" : nullptr;
+                    animation->owner->lesson_robot_animation_context_ = nullptr;
+                    lv_timer_delete(animation->timer);
+                    delete animation;
+                }
+                if (timer_completion) timer_completion(timer_result, timer_reason);
+            }, kLessonRobotAnimationTickMs, context);
+            if (context->timer == nullptr) {
+                lesson_robot_animation_context_ = nullptr;
+                deferred_completion = std::move(context->completion);
+                delete context;
+                SetLessonRobotOverlayBounds(arrived->robot.left, arrived->robot.top,
+                                            arrived->robot.width, arrived->robot.height);
+                deferred_result = LessonVisualApplyResult::kDegraded;
+                deferred_reason = "animationStartFailed";
+                complete_now = true;
+                started = false;
+            }
+        } while (false);
     }
-    return true;
+    if (complete_now && deferred_completion) {
+        deferred_completion(deferred_result, deferred_reason);
+    }
+    return started;
 }
 
-void LcdDisplay::CancelLessonRobotEntrance() {
-    DisplayLockGuard lock(this);
+void LcdDisplay::CancelLessonRobotEntranceLocked() {
     auto* context = static_cast<LessonRobotAnimationContext*>(lesson_robot_animation_context_);
     lesson_robot_animation_context_ = nullptr;
     if (context == nullptr) return;
@@ -1670,25 +1700,37 @@ void LcdDisplay::CancelLessonRobotEntrance() {
     delete context;
 }
 
+void LcdDisplay::CancelLessonRobotEntrance() {
+    DisplayLockGuard lock(this);
+    CancelLessonRobotEntranceLocked();
+}
+
 bool LcdDisplay::ApplyLessonVisualState(
     const LessonVisualState& state, LessonVisualCompletion completion) {
-    CancelLessonRobotEntrance();
-    if (!state.overlay_available || lesson_robot_overlay_cached_ == nullptr) {
-        SetLessonRobotOverlayBounds(0, 0, 0, 0);
-        if (completion) completion(LessonVisualApplyResult::kDegraded, "missingOverlay");
-        return true;
+    LessonVisualCompletion deferred_completion = std::move(completion);
+    LessonVisualApplyResult deferred_result = LessonVisualApplyResult::kApplied;
+    const char* deferred_reason = nullptr;
+    {
+        DisplayLockGuard lock(this);
+        CancelLessonRobotEntranceLocked();
+        if (!state.overlay_available || lesson_robot_overlay_cached_ == nullptr) {
+            SetLessonRobotOverlayBounds(0, 0, 0, 0);
+            deferred_result = LessonVisualApplyResult::kDegraded;
+            deferred_reason = "missingOverlay";
+        } else {
+            int top = lesson_robot_arrived_top_;
+            int width = lesson_robot_arrived_width_;
+            int height = lesson_robot_arrived_height_;
+            if (state.kind == LessonVisualStateKind::kCelebrate) top -= 8;
+            if (state.kind == LessonVisualStateKind::kCompletion) {
+                width += 4;
+                height += 4;
+            }
+            SetLessonRobotOverlayBounds(
+                lesson_robot_arrived_left_, top, width, height);
+        }
     }
-    int top = lesson_robot_arrived_top_;
-    int width = lesson_robot_arrived_width_;
-    int height = lesson_robot_arrived_height_;
-    if (state.kind == LessonVisualStateKind::kCelebrate) top -= 8;
-    if (state.kind == LessonVisualStateKind::kCompletion) {
-        width += 4;
-        height += 4;
-    }
-    SetLessonRobotOverlayBounds(
-        lesson_robot_arrived_left_, top, width, height);
-    if (completion) completion(LessonVisualApplyResult::kApplied, nullptr);
+    if (deferred_completion) deferred_completion(deferred_result, deferred_reason);
     return true;
 }
 

@@ -57,6 +57,7 @@ protected:
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
 
     void InitializeLcdThemes();
+    void CancelLessonRobotEntranceLocked();
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 

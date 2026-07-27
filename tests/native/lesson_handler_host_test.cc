@@ -297,6 +297,18 @@ std::string V2VisualFrame(int seq, const char* state, std::uint64_t generation) 
            std::to_string(generation) + "}}";
 }
 
+std::string V2StepFrame(int seq, const std::string& step_id) {
+    return std::string("{\"type\":\"lesson_step\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"stepId\":\"" + step_id + "\",\"lessonVersion\":3,\"lessonId\":\"L1\"," +
+           "\"sequence\":" + std::to_string(seq) +
+           ",\"body\":{\"profile\":\"espTft\",\"stepType\":\"model\"," +
+           "\"completionClass\":\"passive\",\"prompt\":\"Ready\",\"scene\":{" +
+           "\"backgroundScene\":{\"mode\":\"poster\",\"poster\":{\"src\":\"http://x/p.jpg\"}}," +
+           "\"teachingObject\":{\"asset\":{\"src\":\"http://x/o.jpg\"}}," +
+           "\"robotOverlay\":{\"asset\":{\"src\":\"http://x/r.jpg\"},\"expression\":\"teaching\"}}}}";
+}
+
 std::string V2PauseFrame(int seq) {
     return std::string("{\"type\":\"lesson_pause\",\"protocolVersion\":\"") +
            kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -732,6 +744,72 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
                 FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
                     "unsupportedContract",
             "production rejection crosses the worker and emits frozen negative ACK semantics");
+}
+
+void test_renderer_v2_non_lvgl_display_rejects_start_completion() {
+    ResetObservable();
+    FreshSession();
+    NoDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(34);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kRejected,
+            "non-LVGL display enqueues a renderer-v2 start rejection");
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == 2 && FrameBodyNum(1, "acks") == 2 &&
+                !FrameBodyBool(1, "accepted", true) &&
+                FrameBodyStr(1, nullptr, "degradedReason") == "unsupportedContract",
+            "non-LVGL display emits a correlated unsupportedContract ACK");
+}
+
+void test_renderer_v2_start_ack_is_serialized_before_early_step_ack() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(35);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    const auto stale_entrance = display.pending_entrance_completion;
+
+    Handle(V2StepFrame(3, "early-step"));
+    require(Sent().size() == 3 && FrameBodyNum(1, "acks") == 2 &&
+                !FrameBodyBool(1, "accepted", true) &&
+                FrameBodyStr(1, nullptr, "degradedReason") == "superseded" &&
+                FrameBodyNum(2, "acks") == 3,
+            "early step receives ACK only after the pending start cancellation ACK");
+    if (stale_entrance) stale_entrance(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == 3,
+            "superseded entrance completion cannot emit a late duplicate ACK");
+}
+
+void test_renderer_v2_start_ack_is_serialized_before_early_visual_ack() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(36);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    const auto stale_entrance = display.pending_entrance_completion;
+
+    Handle(V2VisualFrame(3, "thinking", 17));
+    require(Sent().size() == 2 && FrameBodyNum(1, "acks") == 2 &&
+                FrameBodyStr(1, nullptr, "degradedReason") == "superseded" &&
+                App().lesson_visual_queue.empty(),
+            "early visual waits behind an explicit start cancellation ACK");
+    display.CompleteVisualState();
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == 3 && FrameBodyNum(2, "acks") == 3,
+            "early visual completion emits the next ACK in inbound order");
+    if (stale_entrance) stale_entrance(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == 3,
+            "superseded entrance callback remains fenced after the visual ACK");
 }
 
 void test_renderer_v2_old_completion_cannot_claim_reused_identity() {
@@ -4944,6 +5022,9 @@ int main() {
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();
+    test_renderer_v2_non_lvgl_display_rejects_start_completion();
+    test_renderer_v2_start_ack_is_serialized_before_early_step_ack();
+    test_renderer_v2_start_ack_is_serialized_before_early_visual_ack();
     test_renderer_v2_old_completion_cannot_claim_reused_identity();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
