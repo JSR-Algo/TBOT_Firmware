@@ -286,6 +286,15 @@ const char* ValidV2OpeningEntrance() {
            "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
            "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"staticGreet\"}";
 }
+
+std::string V2VisualFrame(int seq, const char* state, std::uint64_t generation) {
+    return std::string("{\"type\":\"lesson_visual_state\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"stepId\":\"s2\",\"sequence\":" + std::to_string(seq) +
+           ",\"body\":{\"state\":\"" + state + "\",\"overlayKey\":\"thinking\","
+           "\"motionPreset\":\"encourage\",\"visualGeneration\":" +
+           std::to_string(generation) + "}}";
+}
 std::string StopFrame(int seq, const std::string& body = "") {
     return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -511,32 +520,94 @@ void test_renderer_v2_start_and_visual_contracts_fail_closed() {
     Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
     require(Sent().size() == 1,
             "valid v2 opening entrance does not ACK before asynchronous completion");
-    LessonQueueItem completion{};
-    completion.kind = LessonQueueItemKind::kVisualCompleted;
-    completion.transport_epoch = 6;
-    completion.visual_generation = 1;
-    completion.server_sequence = 2;
-    completion.completion_result = LessonVisualCompletionResult::kApplied;
-    std::snprintf(completion.assignment_id, sizeof(completion.assignment_id), "%s", AID());
-    std::snprintf(completion.session_id, sizeof(completion.session_id), "%s", SID());
-    require(!AcceptLessonVisualCompletion(completion),
+    LessonQueueItem completion = MakeLessonVisualQueueItem(
+        LessonQueueItemKind::kVisualCompleted, 6, 1, 2, AID(), SID(), nullptr,
+        LessonVisualCompletionResult::kApplied, nullptr);
+    std::string completion_ack;
+    require(!AcceptLessonVisualCompletion(completion, &completion_ack) && completion_ack.empty(),
             "completion from a stale transport epoch is rejected");
     completion.transport_epoch = 7;
     completion.visual_generation = 2;
-    require(!AcceptLessonVisualCompletion(completion),
+    require(!AcceptLessonVisualCompletion(completion, &completion_ack) && completion_ack.empty(),
             "completion from a stale visual generation is rejected");
     completion.visual_generation = 1;
-    require(AcceptLessonVisualCompletion(completion),
-            "matching epoch, generation, sequence, and session identity is accepted");
-    Handle(std::string("{\"type\":\"lesson_visual_state\",\"protocolVersion\":\"") +
-           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
-           SID() + "\",\"stepId\":\"s2\",\"sequence\":3,\"body\":{"
-           "\"state\":\"guessedLocally\",\"overlayKey\":\"thinking\","
-           "\"motionPreset\":\"encourage\",\"visualGeneration\":17}}}");
+    require(AcceptLessonVisualCompletion(completion, &completion_ack),
+            "matching epoch, generation, sequence, and session identity emits an ACK");
+    cJSON* ack = cJSON_Parse(completion_ack.c_str());
+    require(ack != nullptr, "visual completion ACK parses");
+    cJSON* ack_body = cJSON_GetObjectItem(ack, "body");
+    require(std::string(cJSON_GetObjectItem(ack, "protocolVersion")->valuestring) == kLessonRendererV2 &&
+                std::string(cJSON_GetObjectItem(ack, "assignmentId")->valuestring) == AID() &&
+                std::string(cJSON_GetObjectItem(ack, "sessionId")->valuestring) == SID(),
+            "visual completion ACK preserves frozen session identity");
+    require(cJSON_GetObjectItem(ack_body, "acks")->valueint == 2 &&
+                cJSON_IsTrue(cJSON_GetObjectItem(ack_body, "accepted")) &&
+                cJSON_IsFalse(cJSON_GetObjectItem(ack_body, "degraded")) &&
+                cJSON_IsNull(cJSON_GetObjectItem(ack_body, "degradedReason")) &&
+                cJSON_GetObjectItem(ack_body, "visualGeneration")->valueint == 1,
+            "applied visual emits the frozen positive ACK body");
+    cJSON_Delete(ack);
+    std::string duplicate_ack;
+    require(!AcceptLessonVisualCompletion(completion, &duplicate_ack) && duplicate_ack.empty(),
+            "duplicate completion emits no second ACK");
+
+    Handle(V2VisualFrame(3, "thinking", 17));
+    LessonQueueItem timeout = MakeLessonVisualQueueItem(
+        LessonQueueItemKind::kVisualTimedOut, 7, 17, 3, AID(), SID(), "s2",
+        LessonVisualCompletionResult::kPhaseTimeout, nullptr);
+    require(DispatchLessonVisualCompletion(timeout, App().protocol_.get()),
+            "worker dispatch sends the matching timeout ACK");
+    ack = cJSON_Parse(Sent().back().c_str());
+    ack_body = cJSON_GetObjectItem(ack, "body");
+    require(cJSON_IsTrue(cJSON_GetObjectItem(ack_body, "accepted")) &&
+                cJSON_IsTrue(cJSON_GetObjectItem(ack_body, "degraded")) &&
+                std::string(cJSON_GetObjectItem(ack_body, "degradedReason")->valuestring) == "phaseTimeout",
+            "timeout ACK reports accepted degraded fallback semantics");
+    cJSON_Delete(ack);
+
+    Handle(V2VisualFrame(4, "incorrect", 18));
+    LessonQueueItem rejected = MakeLessonVisualQueueItem(
+        LessonQueueItemKind::kVisualCompleted, 7, 18, 4, AID(), SID(), "s2",
+        LessonVisualCompletionResult::kRejected, "randomReason");
+    require(DispatchLessonVisualCompletion(rejected, App().protocol_.get()),
+            "worker dispatch sends the matching negative visual ACK");
+    ack = cJSON_Parse(Sent().back().c_str());
+    ack_body = cJSON_GetObjectItem(ack, "body");
+    require(cJSON_IsFalse(cJSON_GetObjectItem(ack_body, "accepted")) &&
+                cJSON_IsFalse(cJSON_GetObjectItem(ack_body, "degraded")) &&
+                std::string(cJSON_GetObjectItem(ack_body, "degradedReason")->valuestring) ==
+                    "unsupportedContract",
+            "rejected visual emits frozen negative ACK semantics");
+    cJSON_Delete(ack);
+
+    Handle(V2VisualFrame(5, "guessedLocally", 19));
     require(FrameType(Sent().size() - 1) == "lesson_error",
             "malformed v2 visual state fails closed");
     require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
             "malformed v2 visual state reports a stable contract error");
+}
+
+void test_renderer_v2_worker_dispatch_emits_exactly_one_ack() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(23);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    const size_t before_completion = Sent().size();
+    LessonQueueItem completion = MakeLessonVisualQueueItem(
+        LessonQueueItemKind::kVisualCompleted, 23, 1, 2, AID(), SID(), nullptr,
+        LessonVisualCompletionResult::kApplied, nullptr);
+    require(DispatchLessonVisualCompletion(completion, App().protocol_.get()),
+            "production worker dispatch accepts current callback identity");
+    require(Sent().size() == before_completion + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 2 &&
+                FrameBodyBool(Sent().size() - 1, "accepted", false),
+            "production worker dispatch sends the correlated v2 ACK");
+    require(!DispatchLessonVisualCompletion(completion, App().protocol_.get()) &&
+                Sent().size() == before_completion + 1,
+            "duplicate production callback emits no second ACK");
 }
 
 void test_prepare_assetpack_not_ready_branches() {
@@ -4714,6 +4785,7 @@ int main() {
     test_prepare_basic();
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
+    test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
     test_prepare_assetpack_derives_local_path_from_root_and_key();

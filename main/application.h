@@ -179,6 +179,19 @@ public:
     // deferred via backend.release_pending (see MaybeDispatchDeferredCloudRelease).
     void EnterRepairPairingMode();
 
+    // Renderer callbacks may run after the inbound cJSON frame is gone. This bridge
+    // copies all correlation data into the lesson worker queue by value.
+    void EnqueueLessonVisualCompletion(
+        LessonQueueItemKind kind,
+        std::uint64_t transport_epoch,
+        std::uint64_t visual_generation,
+        std::int64_t server_sequence,
+        const char* assignment_id,
+        const char* session_id,
+        const char* step_id,
+        LessonVisualCompletionResult result,
+        const char* degraded_reason = nullptr);
+
 private:
     Application();
     ~Application();
@@ -303,7 +316,7 @@ private:
     QueueHandle_t lesson_message_queue_ = nullptr;
     TaskHandle_t lesson_message_task_handle_ = nullptr;
     LessonTransportEpochGate lesson_transport_epoch_gate_;
-    std::atomic<bool> lesson_abandonment_pending_{false};
+    LessonTransportTerminalControl lesson_terminal_control_;
 
     // Set on a backend/ws error, cleared on (re)connect. Lets the connect mapper
     // tell ONLINE apart from OFFLINE_RETRY ("Server unavailable. Retrying...").
@@ -466,15 +479,6 @@ private:
     TbotBleSubstate GetBleSubstate() const;
     bool HandleRobotActionMessage(const cJSON* root);
     void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);
-    void EnqueueLessonVisualCompletion(
-        LessonQueueItemKind kind,
-        std::uint64_t transport_epoch,
-        std::uint64_t visual_generation,
-        std::int64_t server_sequence,
-        const char* assignment_id,
-        const char* session_id,
-        const char* step_id,
-        LessonVisualCompletionResult result);
     void RequestLessonStorageAbandonment();
     static void LessonMessageTask(void* arg);
     // US-006 Slice-01 (S10): additive lesson_* renderer entry — see lesson_handler.cc.

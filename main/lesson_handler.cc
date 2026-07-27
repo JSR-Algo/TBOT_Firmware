@@ -306,6 +306,16 @@ bool ValidVisualStateContract(const cJSON* root, std::uint64_t* visual_generatio
            IsValidLessonIdentity(Str(root, "stepId"));
 }
 
+const char* StableVisualDegradedReason(const char* value) {
+    if (value == nullptr) return nullptr;
+    for (const char* allowed : {
+             "missingOverlay", "animationStartFailed", "phaseTimeout", "reducedMotion",
+             "unsupportedContract", "assetIdentityMismatch", "insufficientHeap"}) {
+        if (std::strcmp(value, allowed) == 0) return allowed;
+    }
+    return nullptr;
+}
+
 bool IsSha256(const char* value) {
     if (value == nullptr || std::strlen(value) != 64) return false;
     for (const char* ch = value; *ch != '\0'; ++ch) {
@@ -457,6 +467,10 @@ struct LessonSession {
     std::uint64_t visual_generation = 0;
     std::uint64_t current_transport_epoch = 0;
     int64_t     pending_server_sequence = 0;
+    std::string pending_protocol_version;
+    std::string pending_lesson_id;
+    double      pending_lesson_version = 0;
+    bool        pending_has_lesson_version = false;
     std::string pending_step_id;
     bool        pending_ack = false;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
@@ -1165,12 +1179,20 @@ void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch) {
     ++g_session.visual_generation;
     g_session.entrance_active = false;
     g_session.pending_server_sequence = 0;
+    g_session.pending_protocol_version.clear();
+    g_session.pending_lesson_id.clear();
+    g_session.pending_lesson_version = 0;
+    g_session.pending_has_lesson_version = false;
     g_session.pending_step_id.clear();
     g_session.pending_ack = false;
 }
 
-bool AcceptLessonVisualCompletion(const LessonQueueItem& item) {
-    if (!g_session.pending_ack ||
+bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_frame) {
+    if (ack_frame == nullptr) return false;
+    ack_frame->clear();
+    if ((item.kind != LessonQueueItemKind::kVisualCompleted &&
+         item.kind != LessonQueueItemKind::kVisualTimedOut) ||
+        !g_session.pending_ack ||
         item.transport_epoch != g_session.current_transport_epoch ||
         item.visual_generation != g_session.visual_generation ||
         item.server_sequence != g_session.pending_server_sequence ||
@@ -1179,11 +1201,96 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item) {
         g_session.pending_step_id != item.step_id) {
         return false;
     }
+
+    bool accepted = false;
+    bool degraded = false;
+    const char* degraded_reason = nullptr;
+    switch (item.kind == LessonQueueItemKind::kVisualTimedOut
+                ? LessonVisualCompletionResult::kPhaseTimeout
+                : item.completion_result) {
+    case LessonVisualCompletionResult::kApplied:
+        accepted = true;
+        break;
+    case LessonVisualCompletionResult::kDegraded:
+        accepted = true;
+        degraded = true;
+        degraded_reason = StableVisualDegradedReason(item.degraded_reason);
+        if (degraded_reason == nullptr) degraded_reason = "missingOverlay";
+        break;
+    case LessonVisualCompletionResult::kPhaseTimeout:
+        accepted = true;
+        degraded = true;
+        degraded_reason = "phaseTimeout";
+        break;
+    case LessonVisualCompletionResult::kRejected:
+        degraded_reason = StableVisualDegradedReason(item.degraded_reason);
+        if (degraded_reason == nullptr) degraded_reason = "unsupportedContract";
+        break;
+    }
+
+    cJSON* root = cJSON_CreateObject();
+    cJSON* body = cJSON_CreateObject();
+    if (root == nullptr || body == nullptr) {
+        cJSON_Delete(root);
+        cJSON_Delete(body);
+        return false;
+    }
+    cJSON_AddStringToObject(root, "type", "lesson_ack");
+    cJSON_AddStringToObject(root, "protocolVersion", g_session.pending_protocol_version.c_str());
+    cJSON_AddStringToObject(root, "assignmentId", g_session.assignment_id.c_str());
+    cJSON_AddStringToObject(root, "sessionId", g_session.session_id.c_str());
+    if (!g_session.pending_lesson_id.empty()) {
+        cJSON_AddStringToObject(root, "lessonId", g_session.pending_lesson_id.c_str());
+    }
+    if (g_session.pending_has_lesson_version) {
+        cJSON_AddNumberToObject(root, "lessonVersion", g_session.pending_lesson_version);
+    }
+    if (g_session.pending_step_id.empty()) cJSON_AddNullToObject(root, "stepId");
+    else cJSON_AddStringToObject(root, "stepId", g_session.pending_step_id.c_str());
+    cJSON_AddNumberToObject(root, "sequence", static_cast<double>(++g_session.fs_sequence));
+    cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(NowMs()));
+    cJSON_AddNumberToObject(body, "acks", static_cast<double>(item.server_sequence));
+    cJSON_AddBoolToObject(body, "accepted", accepted);
+    cJSON_AddBoolToObject(body, "degraded", degraded);
+    if (degraded_reason == nullptr) cJSON_AddNullToObject(body, "degradedReason");
+    else cJSON_AddStringToObject(body, "degradedReason", degraded_reason);
+    cJSON_AddNumberToObject(body, "visualGeneration", static_cast<double>(item.visual_generation));
+
+    char* body_json = cJSON_PrintUnformatted(body);
+    cJSON_AddItemToObject(root, "body", body);
+    char* serialized = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (serialized == nullptr) {
+        if (body_json != nullptr) cJSON_free(body_json);
+        return false;
+    }
+    *ack_frame = serialized;
+    cJSON_free(serialized);
+    if (body_json != nullptr) {
+        g_session.last_ack_sequence = item.server_sequence;
+        g_session.last_ack_body_json = body_json;
+        g_session.ack_history.push_back({item.server_sequence, body_json});
+        while (g_session.ack_history.size() > LessonSession::kAckReplayWindow) {
+            g_session.ack_history.pop_front();
+        }
+        cJSON_free(body_json);
+    }
     g_session.entrance_active = false;
     g_session.pending_ack = false;
     g_session.pending_server_sequence = 0;
+    g_session.pending_protocol_version.clear();
+    g_session.pending_lesson_id.clear();
+    g_session.pending_lesson_version = 0;
+    g_session.pending_has_lesson_version = false;
     g_session.pending_step_id.clear();
     return true;
+}
+
+bool DispatchLessonVisualCompletion(const LessonQueueItem& item, Protocol* protocol) {
+    if (protocol == nullptr) return false;
+    std::string ack_frame;
+    if (!AcceptLessonVisualCompletion(item, &ack_frame)) return false;
+    return protocol->SendLessonFrame(ack_frame);
 }
 
 // Sub-dispatch the slice subset (lesson_prepare/start/step/stop) and render ONE
@@ -1803,6 +1910,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.entrance_active = true;
             ++g_session.visual_generation;
             g_session.pending_server_sequence = sequence;
+            g_session.pending_protocol_version = protocol_version;
+            const char* lesson_id = Str(root, "lessonId");
+            g_session.pending_lesson_id = lesson_id != nullptr ? lesson_id : "";
+            g_session.pending_has_lesson_version =
+                Num(root, "lessonVersion", g_session.pending_lesson_version);
             g_session.pending_step_id.clear();
             g_session.pending_ack = true;
             return;
@@ -1931,6 +2043,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.entrance_active = false;
         g_session.visual_generation = requested_generation;
         g_session.pending_server_sequence = sequence;
+        g_session.pending_protocol_version = protocol_version;
+        const char* lesson_id = Str(root, "lessonId");
+        g_session.pending_lesson_id = lesson_id != nullptr ? lesson_id : "";
+        g_session.pending_has_lesson_version =
+            Num(root, "lessonVersion", g_session.pending_lesson_version);
         g_session.pending_step_id = Str(root, "stepId");
         g_session.pending_ack = true;
         return;

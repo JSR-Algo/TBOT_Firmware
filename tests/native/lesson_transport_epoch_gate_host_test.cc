@@ -64,15 +64,16 @@ int main() {
 
     static_assert(std::is_trivially_copyable<LessonQueueItem>::value,
                   "FreeRTOS queue items must carry completion identity by value");
-    LessonQueueItem completed{};
-    completed.kind = LessonQueueItemKind::kVisualCompleted;
-    completed.transport_epoch = terminal;
-    completed.visual_generation = 17;
-    completed.server_sequence = 12;
-    completed.completion_result = LessonVisualCompletionResult::kApplied;
-    std::strcpy(completed.assignment_id, "assignment-id");
-    std::strcpy(completed.session_id, "session-id");
-    std::strcpy(completed.step_id, "step-id");
+    LessonQueueItem completed = MakeLessonVisualQueueItem(
+        LessonQueueItemKind::kVisualCompleted,
+        terminal,
+        17,
+        12,
+        "assignment-id",
+        "session-id",
+        "step-id",
+        LessonVisualCompletionResult::kApplied,
+        nullptr);
     expect(completed.payload == nullptr, "completion item owns no serialized frame payload");
     expect(completed.transport_epoch == terminal && completed.visual_generation == 17,
            "completion item carries transport epoch and visual generation");
@@ -83,6 +84,51 @@ int main() {
            "completion item carries server sequence and session identity by value");
     expect(completed.completion_result == LessonVisualCompletionResult::kApplied,
            "completion item carries its result by value");
+
+    LessonTransportTerminalControl terminal_control;
+    LessonTransportEpochGate coalesced_gate;
+    const auto first_terminal = coalesced_gate.PublishTerminalEpoch();
+    expect(terminal_control.Publish(first_terminal).enqueue_control,
+           "first terminal request owns the queued front control");
+    const auto second_terminal = coalesced_gate.PublishTerminalEpoch();
+    expect(!terminal_control.Publish(second_terminal).enqueue_control,
+           "newer terminal coalesces while the front control is pending");
+    const auto coalesced_epoch = coalesced_gate.PublishedEpoch();
+    expect(coalesced_epoch == second_terminal &&
+               coalesced_gate.WorkerApplyTerminal(coalesced_epoch),
+           "worker applies the newest coalesced epoch");
+    expect(!terminal_control.FinishWorkerDrain(coalesced_gate, coalesced_epoch),
+           "coalesced drain ends when no successor terminal exists");
+
+    for (int iteration = 0; iteration < 1000; ++iteration) {
+        LessonTransportEpochGate race_gate;
+        LessonTransportTerminalControl race_control;
+        const auto initial_terminal = race_gate.PublishTerminalEpoch();
+        expect(race_control.Publish(initial_terminal).enqueue_control,
+               "race setup owns the initial control");
+        std::atomic<bool> release{false};
+        LessonTransportTerminalControl::PublishResult successor{};
+        std::thread requester([&]() {
+            while (!release.load(std::memory_order_acquire)) {}
+            const auto next_terminal = race_gate.PublishTerminalEpoch();
+            successor = race_control.Publish(next_terminal);
+        });
+        release.store(true, std::memory_order_release);
+        const auto applied = race_gate.PublishedEpoch();
+        race_gate.WorkerApplyTerminal(applied);
+        const bool worker_continues = race_control.FinishWorkerDrain(race_gate, applied);
+        requester.join();
+        expect(worker_continues != successor.enqueue_control,
+               "pending-clear race leaves exactly one successor owner");
+        if (worker_continues || successor.enqueue_control) {
+            const auto latest = race_gate.PublishedEpoch();
+            race_gate.WorkerApplyTerminal(latest);
+            expect(!race_control.FinishWorkerDrain(race_gate, latest),
+                   "successor owner drains to the newest terminal epoch");
+        }
+        expect(race_gate.WorkerAcceptFrame(race_gate.PublishedEpoch()),
+               "pending-clear race converges on the newest epoch");
+    }
 
     LessonQueueItem timed_out = completed;
     timed_out.kind = LessonQueueItemKind::kVisualTimedOut;

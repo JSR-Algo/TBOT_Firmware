@@ -177,25 +177,17 @@ void Application::EnqueueLessonVisualCompletion(
     const char* assignment_id,
     const char* session_id,
     const char* step_id,
-    LessonVisualCompletionResult result
+    LessonVisualCompletionResult result,
+    const char* degraded_reason
 ) {
     if ((kind != LessonQueueItemKind::kVisualCompleted &&
          kind != LessonQueueItemKind::kVisualTimedOut) ||
         lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
         return;
     }
-    LessonQueueItem item{};
-    item.kind = kind;
-    item.transport_epoch = transport_epoch;
-    item.visual_generation = visual_generation;
-    item.server_sequence = server_sequence;
-    item.completion_result = result;
-    std::snprintf(item.assignment_id, sizeof(item.assignment_id), "%s",
-                  assignment_id != nullptr ? assignment_id : "");
-    std::snprintf(item.session_id, sizeof(item.session_id), "%s",
-                  session_id != nullptr ? session_id : "");
-    std::snprintf(item.step_id, sizeof(item.step_id), "%s",
-                  step_id != nullptr ? step_id : "");
+    LessonQueueItem item = MakeLessonVisualQueueItem(
+        kind, transport_epoch, visual_generation, server_sequence,
+        assignment_id, session_id, step_id, result, degraded_reason);
     if (xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
         ESP_LOGW(TAG, "lesson visual completion dropped: worker queue full seq=%ld",
                  static_cast<long>(server_sequence));
@@ -245,15 +237,17 @@ void Application::EnqueueLessonMessage(
 
 void Application::RequestLessonStorageAbandonment() {
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) return;
-    bool expected = false;
-    if (!lesson_abandonment_pending_.compare_exchange_strong(expected, true)) return;
+    const std::uint64_t terminal_epoch =
+        lesson_transport_epoch_gate_.PublishTerminalEpoch();
+    const auto terminal_request = lesson_terminal_control_.Publish(terminal_epoch);
+    if (!terminal_request.enqueue_control) return;
     LessonQueueItem item{
         LessonQueueItemKind::kAbandonTransport,
         nullptr,
-        lesson_transport_epoch_gate_.PublishTerminalEpoch(),
+        terminal_epoch,
     };
     if (xQueueSendToFront(lesson_message_queue_, &item, 0) != pdTRUE) {
-        lesson_abandonment_pending_.store(false);
+        lesson_terminal_control_.CancelQueuedControl();
         ESP_LOGE(TAG, "lesson abandonment control enqueue failed");
     }
 }
@@ -266,11 +260,18 @@ void Application::LessonMessageTask(void* arg) {
             continue;
         }
         if (item.kind == LessonQueueItemKind::kAbandonTransport) {
-            if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(item.transport_epoch)) {
-                InvalidateLessonVisualCompletionState(item.transport_epoch);
-                self->AbandonLessonStorageSession();
+            for (;;) {
+                const std::uint64_t latest_epoch =
+                    self->lesson_transport_epoch_gate_.PublishedEpoch();
+                if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(latest_epoch)) {
+                    InvalidateLessonVisualCompletionState(latest_epoch);
+                }
+                if (!self->lesson_terminal_control_.FinishWorkerDrain(
+                        self->lesson_transport_epoch_gate_, latest_epoch)) {
+                    break;
+                }
             }
-            self->lesson_abandonment_pending_.store(false);
+            self->AbandonLessonStorageSession();
             continue;
         }
         if (!self->lesson_transport_epoch_gate_.WorkerAcceptFrame(item.transport_epoch)) {
@@ -282,7 +283,7 @@ void Application::LessonMessageTask(void* arg) {
         }
         if (item.kind == LessonQueueItemKind::kVisualCompleted ||
             item.kind == LessonQueueItemKind::kVisualTimedOut) {
-            AcceptLessonVisualCompletion(item);
+            DispatchLessonVisualCompletion(item, self->protocol_.get());
             continue;
         }
         if (item.kind != LessonQueueItemKind::kFrame || item.payload == nullptr) continue;

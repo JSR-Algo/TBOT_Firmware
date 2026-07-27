@@ -3,8 +3,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <string>
+
+#include "lesson_transport_epoch_gate.h"
 
 struct cJSON;
+class Protocol;
 
 // US-006 Slice-01 — additive lesson_* renderer (LANE-FIRMWARE / S10 / CP-6).
 //
@@ -84,6 +89,7 @@ enum class LessonVisualCompletionResult : std::uint8_t {
 // buffers and never borrows a parsed frame or cJSON node.
 struct LessonQueueItem {
     static constexpr std::size_t kIdentityBytes = 129;
+    static constexpr std::size_t kReasonBytes = 32;
 
     LessonQueueItemKind kind = LessonQueueItemKind::kFrame;
     char* payload = nullptr;
@@ -93,12 +99,69 @@ struct LessonQueueItem {
     char assignment_id[kIdentityBytes] = {};
     char session_id[kIdentityBytes] = {};
     char step_id[kIdentityBytes] = {};
+    char degraded_reason[kReasonBytes] = {};
     LessonVisualCompletionResult completion_result = LessonVisualCompletionResult::kRejected;
+};
+
+inline LessonQueueItem MakeLessonVisualQueueItem(
+    LessonQueueItemKind kind,
+    std::uint64_t transport_epoch,
+    std::uint64_t visual_generation,
+    std::int64_t server_sequence,
+    const char* assignment_id,
+    const char* session_id,
+    const char* step_id,
+    LessonVisualCompletionResult result,
+    const char* degraded_reason
+) {
+    LessonQueueItem item{};
+    item.kind = kind;
+    item.transport_epoch = transport_epoch;
+    item.visual_generation = visual_generation;
+    item.server_sequence = server_sequence;
+    item.completion_result = result;
+    std::snprintf(item.assignment_id, sizeof(item.assignment_id), "%s",
+                  assignment_id != nullptr ? assignment_id : "");
+    std::snprintf(item.session_id, sizeof(item.session_id), "%s",
+                  session_id != nullptr ? session_id : "");
+    std::snprintf(item.step_id, sizeof(item.step_id), "%s",
+                  step_id != nullptr ? step_id : "");
+    std::snprintf(item.degraded_reason, sizeof(item.degraded_reason), "%s",
+                  degraded_reason != nullptr ? degraded_reason : "");
+    return item;
+}
+
+class LessonTransportTerminalControl {
+public:
+    struct PublishResult {
+        bool enqueue_control = false;
+    };
+
+    PublishResult Publish(std::uint64_t) {
+        return {!pending_.exchange(true, std::memory_order_acq_rel)};
+    }
+
+    bool FinishWorkerDrain(
+        const LessonTransportEpochGate& gate,
+        std::uint64_t applied_epoch
+    ) {
+        pending_.store(false, std::memory_order_release);
+        if (gate.PublishedEpoch() <= applied_epoch) return false;
+        return !pending_.exchange(true, std::memory_order_acq_rel);
+    }
+
+    void CancelQueuedControl() {
+        pending_.store(false, std::memory_order_release);
+    }
+
+private:
+    std::atomic<bool> pending_{false};
 };
 
 void SetLessonTransportEpoch(std::uint64_t transport_epoch);
 void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch);
-bool AcceptLessonVisualCompletion(const LessonQueueItem& item);
+bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_frame);
+bool DispatchLessonVisualCompletion(const LessonQueueItem& item, Protocol* protocol);
 
 // The only render profile this firmware (lcdwiki-es3c35p) implements (plan §7).
 constexpr char kLessonProfileEspTft[]   = "espTft";
