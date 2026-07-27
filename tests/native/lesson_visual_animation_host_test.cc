@@ -101,10 +101,12 @@ void RunMemoryGate() {
         accounting_probe.BeginFrameAllocationMeasurement();
     inside_animation_frame = true;
     volatile char* diagnostic_allocation = new char[8];
+    volatile char* second_diagnostic_allocation = new char[8];
     inside_animation_frame = false;
     delete[] diagnostic_allocation;
+    delete[] second_diagnostic_allocation;
     require(accounting_probe.EndFrameAllocationMeasurement(accounting_token) == 1,
-            "diagnostic ESP heap hook counts an allocation in the frame window");
+            "diagnostic ESP heap hook saturates after observing a frame allocation");
     frame_allocations.store(0, std::memory_order_relaxed);
 
     LessonRendererMemoryProbe probe(ReadHostMemory, &state);
@@ -146,7 +148,8 @@ void RunMemoryGate() {
                                   100 + (cycle % 5) * 400, &bounds);
         animation.Timeout();
         SettleEntrance(&state, false);
-        probe.Capture(LessonRendererMemoryPhase::kCancel, 500);
+        probe.Capture(LessonRendererMemoryPhase::kCancel);
+        probe.CaptureSettled(LessonRendererMemoryPhase::kCancel, 500);
     }
 
     for (int cycle = 0; cycle < 100; ++cycle) {
@@ -163,7 +166,8 @@ void RunMemoryGate() {
         require(animation.phase() == lesson_tvideo::Phase::kRevealTeachingContent,
                 "completed memory cycle reaches reveal");
         SettleEntrance(&state, true);
-        probe.Capture(LessonRendererMemoryPhase::kComplete, 500);
+        probe.Capture(LessonRendererMemoryPhase::kComplete);
+        probe.CaptureSettled(LessonRendererMemoryPhase::kComplete, 500);
     }
 
     const LessonRendererMemoryThresholds thresholds{

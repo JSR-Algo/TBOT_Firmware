@@ -41,6 +41,13 @@ protected:
     int lesson_robot_overlay_height_ = 0;
     void* lesson_robot_animation_context_ = nullptr;
     LessonRendererMemoryProbe lesson_renderer_memory_probe_;
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+    lv_timer_t* lesson_renderer_settled_timer_ = nullptr;
+    uint32_t lesson_renderer_settled_generation_ = 0;
+    uint32_t lesson_renderer_settled_armed_generation_ = 0;
+    LessonRendererMemoryPhase lesson_renderer_settled_phase_ =
+        LessonRendererMemoryPhase::kComplete;
+#endif
     int lesson_robot_arrived_left_ = 0;
     int lesson_robot_arrived_top_ = 0;
     int lesson_robot_arrived_width_ = 0;
@@ -60,6 +67,11 @@ protected:
 
     void InitializeLcdThemes();
     void CancelLessonRobotEntranceLocked();
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+    void CancelLessonRendererSettledObservationLocked();
+    void ScheduleLessonRendererSettledObservationLocked(
+        LessonRendererMemoryPhase phase);
+#endif
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
 

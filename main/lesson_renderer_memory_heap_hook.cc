@@ -7,15 +7,14 @@
 #include <esp_attr.h>
 
 extern "C" {
-volatile uint32_t g_lesson_renderer_frame_allocation_count = 0;
-volatile bool g_lesson_renderer_frame_allocation_measurement_active = false;
+DRAM_ATTR volatile uint32_t g_lesson_renderer_frame_allocation_observed = 0;
+DRAM_ATTR volatile uint32_t g_lesson_renderer_frame_allocation_measurement_active = 0;
 
 IRAM_ATTR void esp_heap_trace_alloc_hook(void* ptr, size_t, uint32_t) {
     if (ptr != nullptr &&
-        __atomic_load_n(&g_lesson_renderer_frame_allocation_measurement_active,
-                        __ATOMIC_RELAXED)) {
-        __atomic_add_fetch(&g_lesson_renderer_frame_allocation_count, 1,
-                           __ATOMIC_RELAXED);
+        g_lesson_renderer_frame_allocation_measurement_active != 0) {
+        // Allocator hooks are synchronous; concurrent writers only store 1.
+        g_lesson_renderer_frame_allocation_observed = 1;
     }
 }
 }

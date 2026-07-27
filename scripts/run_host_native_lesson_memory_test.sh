@@ -10,6 +10,12 @@ CXX_FLAGS=(-std=c++17 -Wall -Wextra -Werror \
   -DTBOT_RENDERER_MEMORY_DIAGNOSTICS=1 \
   -DCONFIG_HEAP_USE_HOOKS=1 \
   -DHEAP_IRAM_ATTR=)
+
+if ! rg -q 'CaptureSettled\(' "${ROOT}/main/display/lcd_display.cc"; then
+  echo "production display does not schedule a real settled memory observation" >&2
+  exit 1
+fi
+
 if [[ "${SANITIZE:-0}" == "1" ]]; then
   CXX_FLAGS+=(-fsanitize=address,undefined -fno-omit-frame-pointer)
 fi

@@ -78,7 +78,6 @@ struct LessonRendererMemoryReport {
 };
 
 struct LessonRendererFrameAllocationToken {
-    uint32_t allocation_count = 0;
     bool measured = false;
 };
 
@@ -101,7 +100,9 @@ public:
     LessonRendererMemoryProbe(LessonRendererMemoryReader reader, void* context);
 #endif
 
-    void Capture(LessonRendererMemoryPhase phase, uint32_t elapsed_since_terminal_ms = 0);
+    void Capture(LessonRendererMemoryPhase phase);
+    void CaptureSettled(LessonRendererMemoryPhase phase,
+                        uint32_t elapsed_since_terminal_ms);
     LessonRendererFrameAllocationToken BeginFrameAllocationMeasurement();
     size_t EndFrameAllocationMeasurement(
         const LessonRendererFrameAllocationToken& token);

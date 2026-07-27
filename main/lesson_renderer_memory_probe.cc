@@ -37,20 +37,19 @@ size_t Loss(size_t baseline, size_t current) {
 
 #if defined(TBOT_RENDERER_MEMORY_DIAGNOSTICS) && defined(CONFIG_HEAP_USE_HOOKS)
 #if defined(TBOT_LESSON_MEMORY_TEST)
-volatile uint32_t g_lesson_renderer_frame_allocation_count = 0;
-volatile bool g_lesson_renderer_frame_allocation_measurement_active = false;
+volatile uint32_t g_lesson_renderer_frame_allocation_observed = 0;
+volatile uint32_t g_lesson_renderer_frame_allocation_measurement_active = 0;
 
 extern "C" void esp_heap_trace_alloc_hook(void* ptr, size_t, uint32_t) {
     if (ptr != nullptr &&
-        __atomic_load_n(&g_lesson_renderer_frame_allocation_measurement_active,
-                        __ATOMIC_RELAXED)) {
-        __atomic_add_fetch(&g_lesson_renderer_frame_allocation_count, 1,
-                           __ATOMIC_RELAXED);
+        g_lesson_renderer_frame_allocation_measurement_active != 0) {
+        g_lesson_renderer_frame_allocation_observed = 1;
     }
 }
 #else
-extern "C" volatile uint32_t g_lesson_renderer_frame_allocation_count;
-extern "C" volatile bool g_lesson_renderer_frame_allocation_measurement_active;
+extern "C" volatile uint32_t g_lesson_renderer_frame_allocation_observed;
+extern "C" volatile uint32_t
+    g_lesson_renderer_frame_allocation_measurement_active;
 #endif
 #endif
 
@@ -111,8 +110,7 @@ LessonRendererAnimationFrameResult AdvanceLessonRendererAnimationFrame(
     };
 }
 
-void LessonRendererMemoryProbe::Capture(LessonRendererMemoryPhase phase,
-                                        uint32_t elapsed_since_terminal_ms) {
+void LessonRendererMemoryProbe::Capture(LessonRendererMemoryPhase phase) {
     const LessonRendererMemorySample sample = Read();
     if (!has_baseline_) {
         baseline_ = sample;
@@ -128,16 +126,6 @@ void LessonRendererMemoryProbe::Capture(LessonRendererMemoryPhase phase,
         latest_complete_ = sample;
         has_complete_ = true;
     }
-    if ((phase == LessonRendererMemoryPhase::kCancel ||
-         phase == LessonRendererMemoryPhase::kComplete) &&
-        elapsed_since_terminal_ms >= 500) {
-        ++settled_observations_at_500ms_;
-        max_settled_animations_ =
-            std::max(max_settled_animations_, sample.live_lvgl_animations);
-        max_settled_contexts_ =
-            std::max(max_settled_contexts_, sample.live_animation_contexts);
-    }
-
     if (frame_allocations_measured_) {
         ESP_LOGI(kTag,
                  "renderer_mem phase=%s ifree=%u ilargest=%u psfree=%u layers=%u "
@@ -162,14 +150,39 @@ void LessonRendererMemoryProbe::Capture(LessonRendererMemoryPhase phase,
     }
 }
 
+void LessonRendererMemoryProbe::CaptureSettled(
+    LessonRendererMemoryPhase phase, uint32_t elapsed_since_terminal_ms) {
+    if ((phase != LessonRendererMemoryPhase::kCancel &&
+         phase != LessonRendererMemoryPhase::kComplete) ||
+        elapsed_since_terminal_ms < 500) {
+        return;
+    }
+
+    const LessonRendererMemorySample sample = Read();
+    min_internal_free_ = std::min(min_internal_free_, sample.internal_free);
+    max_live_decoded_layers_ =
+        std::max(max_live_decoded_layers_, sample.live_decoded_layers);
+    ++settled_observations_at_500ms_;
+    max_settled_animations_ =
+        std::max(max_settled_animations_, sample.live_lvgl_animations);
+    max_settled_contexts_ =
+        std::max(max_settled_contexts_, sample.live_animation_contexts);
+
+    ESP_LOGI(kTag,
+             "renderer_mem phase=%s_settled settled_ms=%u layers=%u anim=%u "
+             "ctx=%u",
+             PhaseName(phase), static_cast<unsigned>(elapsed_since_terminal_ms),
+             static_cast<unsigned>(sample.live_decoded_layers),
+             static_cast<unsigned>(sample.live_lvgl_animations),
+             static_cast<unsigned>(sample.live_animation_contexts));
+}
+
 LessonRendererFrameAllocationToken
 LessonRendererMemoryProbe::BeginFrameAllocationMeasurement() {
 #if defined(TBOT_RENDERER_MEMORY_DIAGNOSTICS) && defined(CONFIG_HEAP_USE_HOOKS)
-    const uint32_t count =
-        __atomic_load_n(&g_lesson_renderer_frame_allocation_count, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_lesson_renderer_frame_allocation_measurement_active, true,
-                     __ATOMIC_RELAXED);
-    return {count, true};
+    g_lesson_renderer_frame_allocation_observed = 0;
+    g_lesson_renderer_frame_allocation_measurement_active = 1;
+    return {true};
 #else
     return {};
 #endif
@@ -179,11 +192,8 @@ size_t LessonRendererMemoryProbe::EndFrameAllocationMeasurement(
     const LessonRendererFrameAllocationToken& token) {
     if (!token.measured) return 0;
 #if defined(TBOT_RENDERER_MEMORY_DIAGNOSTICS) && defined(CONFIG_HEAP_USE_HOOKS)
-    __atomic_store_n(&g_lesson_renderer_frame_allocation_measurement_active, false,
-                     __ATOMIC_RELAXED);
-    const uint32_t current =
-        __atomic_load_n(&g_lesson_renderer_frame_allocation_count, __ATOMIC_RELAXED);
-    const size_t delta = static_cast<size_t>(current - token.allocation_count);
+    g_lesson_renderer_frame_allocation_measurement_active = 0;
+    const size_t delta = g_lesson_renderer_frame_allocation_observed != 0 ? 1 : 0;
     RecordFrameAllocations(delta);
     return delta;
 #else

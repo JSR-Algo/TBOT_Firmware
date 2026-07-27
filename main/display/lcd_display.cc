@@ -36,6 +36,9 @@ constexpr int kLessonCaptionBottomInsetDivisor = 60;
 constexpr uint32_t kLessonRobotAnimationTickMs = 16;
 constexpr uint32_t kLessonRobotAnimationTimeoutMs = 6000;
 constexpr size_t kLessonRobotAnimationMinInternalHeapBytes = 24 * 1024;
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+constexpr uint32_t kLessonRendererSettledObservationMs = 500;
+#endif
 
 struct LessonRobotAnimationContext {
     LcdDisplay* owner;
@@ -340,6 +343,12 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 
 LcdDisplay::~LcdDisplay() {
     CancelLessonRobotEntrance();
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+    {
+        DisplayLockGuard lock(this);
+        CancelLessonRendererSettledObservationLocked();
+    }
+#endif
     ReplaceTrackedLessonLayer(&lesson_background_cached_, nullptr);
     ReplaceTrackedLessonLayer(&lesson_object_cached_, nullptr);
     ReplaceTrackedLessonLayer(&lesson_robot_overlay_cached_, nullptr);
@@ -1590,6 +1599,9 @@ bool LcdDisplay::StartLessonRobotEntrance(
     {
         DisplayLockGuard lock(this);
         CancelLessonRobotEntranceLocked();
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+        CancelLessonRendererSettledObservationLocked();
+#endif
         lesson_renderer_memory_probe_.Capture(LessonRendererMemoryPhase::kStart);
         do {
             const lesson_tvideo::LayoutGeometry* arrived =
@@ -1693,6 +1705,10 @@ bool LcdDisplay::StartLessonRobotEntrance(
                     LessonRendererMemoryContextClosed();
                     animation->owner->lesson_renderer_memory_probe_.Capture(
                         LessonRendererMemoryPhase::kComplete);
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+                    animation->owner->ScheduleLessonRendererSettledObservationLocked(
+                        LessonRendererMemoryPhase::kComplete);
+#endif
                     delete animation;
                 }
                 if (timer_completion) timer_completion(timer_result, timer_reason);
@@ -1715,6 +1731,10 @@ bool LcdDisplay::StartLessonRobotEntrance(
         } while (false);
         if (complete_now) {
             lesson_renderer_memory_probe_.Capture(LessonRendererMemoryPhase::kComplete);
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+            ScheduleLessonRendererSettledObservationLocked(
+                LessonRendererMemoryPhase::kComplete);
+#endif
         }
     }
     if (complete_now && deferred_completion) {
@@ -1735,7 +1755,49 @@ void LcdDisplay::CancelLessonRobotEntranceLocked() {
     LessonRendererMemoryContextClosed();
     delete context;
     lesson_renderer_memory_probe_.Capture(LessonRendererMemoryPhase::kCancel);
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+    ScheduleLessonRendererSettledObservationLocked(
+        LessonRendererMemoryPhase::kCancel);
+#endif
 }
+
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+void LcdDisplay::CancelLessonRendererSettledObservationLocked() {
+    ++lesson_renderer_settled_generation_;
+    lesson_renderer_settled_armed_generation_ = 0;
+    if (lesson_renderer_settled_timer_ == nullptr) return;
+    lv_timer_delete(lesson_renderer_settled_timer_);
+    lesson_renderer_settled_timer_ = nullptr;
+}
+
+void LcdDisplay::ScheduleLessonRendererSettledObservationLocked(
+    LessonRendererMemoryPhase phase) {
+    CancelLessonRendererSettledObservationLocked();
+    lesson_renderer_settled_phase_ = phase;
+    lesson_renderer_settled_armed_generation_ =
+        lesson_renderer_settled_generation_;
+    lesson_renderer_settled_timer_ = lv_timer_create([](lv_timer_t* timer) {
+        auto* owner = static_cast<LcdDisplay*>(lv_timer_get_user_data(timer));
+        if (owner == nullptr) return;
+        DisplayLockGuard lock(owner);
+        if (owner->lesson_renderer_settled_timer_ != timer ||
+            owner->lesson_renderer_settled_armed_generation_ !=
+                owner->lesson_renderer_settled_generation_) {
+            return;
+        }
+        const LessonRendererMemoryPhase phase =
+            owner->lesson_renderer_settled_phase_;
+        owner->lesson_renderer_settled_timer_ = nullptr;
+        owner->lesson_renderer_settled_armed_generation_ = 0;
+        lv_timer_delete(timer);
+        owner->lesson_renderer_memory_probe_.CaptureSettled(
+            phase, kLessonRendererSettledObservationMs);
+    }, kLessonRendererSettledObservationMs, this);
+    if (lesson_renderer_settled_timer_ == nullptr) {
+        lesson_renderer_settled_armed_generation_ = 0;
+    }
+}
+#endif
 
 void LcdDisplay::CancelLessonRobotEntrance() {
     DisplayLockGuard lock(this);
