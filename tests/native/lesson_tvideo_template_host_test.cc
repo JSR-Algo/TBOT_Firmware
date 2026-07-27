@@ -1,4 +1,5 @@
 #include "lesson_tvideo_template.h"
+#include "lesson_handler.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -14,6 +15,10 @@ void require(bool condition, const char* message) {
 
 int main() {
     using namespace lesson_tvideo;
+    require(std::string(kLessonRendererV1) == "teebot-lesson-renderer.v1",
+            "renderer v1 identity remains frozen");
+    require(std::string(kLessonRendererV2) == "teebot-lesson-renderer.v2",
+            "renderer v2 identity is frozen");
     require(IsSupported("tvideoFlyWalk", 1, "centerRoad", 1), "centerRoad v1 supported");
     require(!IsSupported("tvideoFlyWalk", 2, "centerRoad", 1), "unknown template version rejected");
     require(!IsSupported("tvideoFlyWalk", 1, "freeform", 1), "raw/freeform layout rejected");

@@ -1,6 +1,11 @@
 #ifndef LESSON_HANDLER_H
 #define LESSON_HANDLER_H
 
+#include <cstddef>
+#include <cstdint>
+
+struct cJSON;
+
 // US-006 Slice-01 — additive lesson_* renderer (LANE-FIRMWARE / S10 / CP-6).
 //
 // Frozen wire contract (S2/CP-2):
@@ -54,8 +59,46 @@
 
 // Frozen contract identity (fixture _meta.protocolVersion). Single source of truth
 // shared by the renderer and the hello.features advertisement.
+constexpr char kLessonRendererV1[] = "teebot-lesson-renderer.v1";
+constexpr char kLessonRendererV2[] = "teebot-lesson-renderer.v2";
 constexpr char kLessonProtocolVersion[] = "teebot-lesson-renderer.v1";
-constexpr char kLessonRendererName[]    = "teebot-lesson-renderer.v1";
+constexpr char kLessonRendererName[] = "teebot-lesson-renderer.v1";
+
+void AddLessonRendererFeatures(cJSON* features);
+
+enum class LessonQueueItemKind : std::uint8_t {
+    kFrame,
+    kAbandonTransport,
+    kVisualCompleted,
+    kVisualTimedOut,
+};
+
+enum class LessonVisualCompletionResult : std::uint8_t {
+    kApplied,
+    kDegraded,
+    kRejected,
+    kPhaseTimeout,
+};
+
+// FreeRTOS queues copy items as bytes. Completion identity therefore uses fixed
+// buffers and never borrows a parsed frame or cJSON node.
+struct LessonQueueItem {
+    static constexpr std::size_t kIdentityBytes = 129;
+
+    LessonQueueItemKind kind = LessonQueueItemKind::kFrame;
+    char* payload = nullptr;
+    std::uint64_t transport_epoch = 0;
+    std::uint64_t visual_generation = 0;
+    std::int64_t server_sequence = 0;
+    char assignment_id[kIdentityBytes] = {};
+    char session_id[kIdentityBytes] = {};
+    char step_id[kIdentityBytes] = {};
+    LessonVisualCompletionResult completion_result = LessonVisualCompletionResult::kRejected;
+};
+
+void SetLessonTransportEpoch(std::uint64_t transport_epoch);
+void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch);
+bool AcceptLessonVisualCompletion(const LessonQueueItem& item);
 
 // The only render profile this firmware (lcdwiki-es3c35p) implements (plan §7).
 constexpr char kLessonProfileEspTft[]   = "espTft";

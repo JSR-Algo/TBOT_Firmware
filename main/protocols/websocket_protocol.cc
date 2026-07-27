@@ -3,7 +3,7 @@
 #include "system_info.h"
 #include "application.h"
 #include "settings.h"
-#include "lesson_handler.h"  // US-006 Slice-01: kLessonRendererName (D-CAP-FLAG)
+#include "lesson_handler.h"
 #include "json_payload_safety.h"
 #include "esp_build_identity.h"
 
@@ -530,6 +530,7 @@ std::string WebsocketProtocol::GetHelloMessage() {
     // that did not advertise this. Purely additive — does not disturb aec/mcp/voice.
     cJSON_AddBoolToObject(features, "lesson", true);
     cJSON_AddStringToObject(features, "renderer", kLessonRendererName);
+    AddLessonRendererFeatures(features);
     cJSON_AddItemToObject(root, "features", features);
     cJSON_AddStringToObject(root, "transport", "websocket");
     cJSON* audio_params = cJSON_CreateObject();

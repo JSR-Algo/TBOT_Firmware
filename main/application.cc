@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <ctime>
+#include <cstdio>
 #include <cstring>
 #include <new>
 #include <esp_err.h>
@@ -76,17 +77,6 @@ static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 static constexpr UBaseType_t kLessonMessageQueueDepth = 16;
-
-enum class LessonQueueItemKind : uint8_t {
-    kFrame,
-    kAbandonTransport,
-};
-
-struct LessonQueueItem {
-    LessonQueueItemKind kind = LessonQueueItemKind::kFrame;
-    char* payload = nullptr;
-    std::uint64_t transport_epoch = 0;
-};
 static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
 static constexpr int kOtaCheckMaxAttempts = 3;
 static constexpr int kOtaRetryDelaysSeconds[] = {2, 4};
@@ -169,12 +159,47 @@ Application::~Application() {
     if (lesson_message_queue_ != nullptr) {
         LessonQueueItem item;
         while (xQueueReceive(lesson_message_queue_, &item, 0) == pdTRUE) {
-            if (item.payload != nullptr) cJSON_free(item.payload);
+            if (item.kind == LessonQueueItemKind::kFrame && item.payload != nullptr) {
+                cJSON_free(item.payload);
+            }
         }
         vQueueDelete(lesson_message_queue_);
         lesson_message_queue_ = nullptr;
     }
     vEventGroupDelete(event_group_);
+}
+
+void Application::EnqueueLessonVisualCompletion(
+    LessonQueueItemKind kind,
+    std::uint64_t transport_epoch,
+    std::uint64_t visual_generation,
+    std::int64_t server_sequence,
+    const char* assignment_id,
+    const char* session_id,
+    const char* step_id,
+    LessonVisualCompletionResult result
+) {
+    if ((kind != LessonQueueItemKind::kVisualCompleted &&
+         kind != LessonQueueItemKind::kVisualTimedOut) ||
+        lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
+        return;
+    }
+    LessonQueueItem item{};
+    item.kind = kind;
+    item.transport_epoch = transport_epoch;
+    item.visual_generation = visual_generation;
+    item.server_sequence = server_sequence;
+    item.completion_result = result;
+    std::snprintf(item.assignment_id, sizeof(item.assignment_id), "%s",
+                  assignment_id != nullptr ? assignment_id : "");
+    std::snprintf(item.session_id, sizeof(item.session_id), "%s",
+                  session_id != nullptr ? session_id : "");
+    std::snprintf(item.step_id, sizeof(item.step_id), "%s",
+                  step_id != nullptr ? step_id : "");
+    if (xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "lesson visual completion dropped: worker queue full seq=%ld",
+                 static_cast<long>(server_sequence));
+    }
 }
 
 void Application::EnqueueLessonMessage(
@@ -242,16 +267,25 @@ void Application::LessonMessageTask(void* arg) {
         }
         if (item.kind == LessonQueueItemKind::kAbandonTransport) {
             if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(item.transport_epoch)) {
+                InvalidateLessonVisualCompletionState(item.transport_epoch);
                 self->AbandonLessonStorageSession();
             }
             self->lesson_abandonment_pending_.store(false);
             continue;
         }
         if (!self->lesson_transport_epoch_gate_.WorkerAcceptFrame(item.transport_epoch)) {
-            cJSON_free(item.payload);
-            item.payload = nullptr;
+            if (item.kind == LessonQueueItemKind::kFrame && item.payload != nullptr) {
+                cJSON_free(item.payload);
+                item.payload = nullptr;
+            }
             continue;
         }
+        if (item.kind == LessonQueueItemKind::kVisualCompleted ||
+            item.kind == LessonQueueItemKind::kVisualTimedOut) {
+            AcceptLessonVisualCompletion(item);
+            continue;
+        }
+        if (item.kind != LessonQueueItemKind::kFrame || item.payload == nullptr) continue;
         const size_t payload_bytes = strlen(item.payload);
         LogLessonHeapBoundary("worker.before_parse", payload_bytes);
         cJSON* root = cJSON_Parse(item.payload);
@@ -262,6 +296,7 @@ void Application::LessonMessageTask(void* arg) {
             ESP_LOGI(TAG, "lesson_worker handling type=%s seq=%d",
                      cJSON_IsString(type) ? type->valuestring : "(missing)",
                      cJSON_IsNumber(sequence) ? sequence->valueint : -1);
+            SetLessonTransportEpoch(item.transport_epoch);
             self->HandleLessonMessage(root);
             LogLessonHeapBoundary("worker.after_handle", payload_bytes);
             cJSON_Delete(root);

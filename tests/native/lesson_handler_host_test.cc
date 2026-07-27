@@ -264,6 +264,28 @@ std::string StartFrame(int seq) {
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
 }
+
+std::string V2PrepareFrame(int seq) {
+    return std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"sequence\":" + std::to_string(seq) +
+           ",\"body\":{\"profile\":\"espTft\",\"runtimeControls\":{"
+           "\"openingEntranceEnabled\":true,\"visualStateEventsEnabled\":true,"
+           "\"motionPresetsEnabled\":true,\"physicalMotionOwner\":\"server\"}}}";
+}
+
+std::string V2StartFrame(int seq, const std::string& opening_entrance) {
+    return std::string("{\"type\":\"lesson_start\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"sequence\":" + std::to_string(seq) +
+           ",\"body\":{\"openingEntrance\":" + opening_entrance + "}}";
+}
+
+const char* ValidV2OpeningEntrance() {
+    return "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
+           "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
+           "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"staticGreet\"}";
+}
 std::string StopFrame(int seq, const std::string& body = "") {
     return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -442,6 +464,79 @@ void test_prepare_basic() {
     // lifecycle prepare echoes stepId as JSON null (no stepId in frame)
     require(FrameStepIdIsNull(0), "lifecycle ack stepId is null");
     require(!FrameHasAssetPack(0), "prepare without assetPack carries no assetPack ack");
+}
+
+void test_renderer_v2_capability_shape_and_exact_tokens() {
+    require(std::string(kLessonRendererV1) == "teebot-lesson-renderer.v1",
+            "renderer v1 token remains exact");
+    require(std::string(kLessonRendererV2) == "teebot-lesson-renderer.v2",
+            "renderer v2 token is exact");
+    cJSON* features = cJSON_CreateObject();
+    cJSON_AddBoolToObject(features, "lesson", true);
+    cJSON_AddStringToObject(features, "renderer", kLessonRendererName);
+    AddLessonRendererFeatures(features);
+    char* encoded = cJSON_PrintUnformatted(features);
+    require(encoded != nullptr, "renderer capability serializes");
+    require(std::string(encoded) ==
+                "{\"lesson\":true,\"renderer\":[\"teebot-lesson-renderer.v1\","
+                "\"teebot-lesson-renderer.v2\"],\"lessonRendererV2\":{"
+                "\"openingEntrance\":true,\"visualStateEvents\":true,"
+                "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true}}",
+            "hello advertises both renderer tokens and structured v2 ownership");
+    cJSON_free(encoded);
+    cJSON_Delete(features);
+}
+
+void test_renderer_v2_start_and_visual_contracts_fail_closed() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    require(FrameType(0) == "lesson_ack", "valid v2 prepare is accepted");
+
+    Handle(V2StartFrame(2,
+        "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"everyStep\","
+        "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
+        "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"staticGreet\"}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "malformed v2 opening entrance fails closed");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "malformed v2 opening entrance reports a stable contract error");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(7);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(Sent().size() == 1,
+            "valid v2 opening entrance does not ACK before asynchronous completion");
+    LessonQueueItem completion{};
+    completion.kind = LessonQueueItemKind::kVisualCompleted;
+    completion.transport_epoch = 6;
+    completion.visual_generation = 1;
+    completion.server_sequence = 2;
+    completion.completion_result = LessonVisualCompletionResult::kApplied;
+    std::snprintf(completion.assignment_id, sizeof(completion.assignment_id), "%s", AID());
+    std::snprintf(completion.session_id, sizeof(completion.session_id), "%s", SID());
+    require(!AcceptLessonVisualCompletion(completion),
+            "completion from a stale transport epoch is rejected");
+    completion.transport_epoch = 7;
+    completion.visual_generation = 2;
+    require(!AcceptLessonVisualCompletion(completion),
+            "completion from a stale visual generation is rejected");
+    completion.visual_generation = 1;
+    require(AcceptLessonVisualCompletion(completion),
+            "matching epoch, generation, sequence, and session identity is accepted");
+    Handle(std::string("{\"type\":\"lesson_visual_state\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"stepId\":\"s2\",\"sequence\":3,\"body\":{"
+           "\"state\":\"guessedLocally\",\"overlayKey\":\"thinking\","
+           "\"motionPreset\":\"encourage\",\"visualGeneration\":17}}}");
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "malformed v2 visual state fails closed");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "malformed v2 visual state reports a stable contract error");
 }
 
 void test_prepare_assetpack_not_ready_branches() {
@@ -4617,6 +4712,8 @@ void test_layer_install_timeout_degrades_without_committing_layer_state() {
 int main() {
     test_envelope_guards();
     test_prepare_basic();
+    test_renderer_v2_capability_shape_and_exact_tokens();
+    test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
     test_prepare_assetpack_derives_local_path_from_root_and_key();

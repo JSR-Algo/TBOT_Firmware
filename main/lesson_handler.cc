@@ -53,6 +53,22 @@
 
 #define TAG "Lesson"
 
+void AddLessonRendererFeatures(cJSON* features) {
+    if (features == nullptr) return;
+    cJSON_DeleteItemFromObject(features, "renderer");
+    cJSON* renderers = cJSON_CreateArray();
+    cJSON_AddItemToArray(renderers, cJSON_CreateString(kLessonRendererV1));
+    cJSON_AddItemToArray(renderers, cJSON_CreateString(kLessonRendererV2));
+    cJSON_AddItemToObject(features, "renderer", renderers);
+
+    cJSON* renderer_v2 = cJSON_CreateObject();
+    cJSON_AddBoolToObject(renderer_v2, "openingEntrance", true);
+    cJSON_AddBoolToObject(renderer_v2, "visualStateEvents", true);
+    cJSON_AddStringToObject(renderer_v2, "physicalMotionOwner", "server");
+    cJSON_AddBoolToObject(renderer_v2, "singleSpriteEntrance", true);
+    cJSON_AddItemToObject(features, "lessonRendererV2", renderer_v2);
+}
+
 namespace {
 
 // ---- null-safe accessors (every envelope + body.scene.* field is guarded) ----
@@ -241,6 +257,55 @@ bool ExactPositiveInteger(const cJSON* object, const char* key) {
            value <= 4294967295.0 && std::floor(value) == value;
 }
 
+bool ExactUint64(const cJSON* object, const char* key, std::uint64_t* out) {
+    double value = 0;
+    if (!Num(object, key, value) || !std::isfinite(value) || value <= 0 ||
+        std::floor(value) != value || value > 9007199254740991.0) {
+        return false;
+    }
+    if (out != nullptr) *out = static_cast<std::uint64_t>(value);
+    return true;
+}
+
+bool ExactString(const cJSON* object, const char* key, const char* expected) {
+    const char* value = Str(object, key);
+    return value != nullptr && std::strcmp(value, expected) == 0;
+}
+
+bool ValidOpeningEntrance(const cJSON* entrance) {
+    static const std::set<std::string_view> kKeys = {
+        "preset", "policy", "layoutPreset", "backgroundAssetKey", "robotAssetKey", "fallback",
+    };
+    const char* layout = Str(entrance, "layoutPreset");
+    return ExactObjectKeys(entrance, kKeys) &&
+           ExactString(entrance, "preset", "flyLandWalkGreet") &&
+           ExactString(entrance, "policy", "oncePerLessonSession") &&
+           layout != nullptr &&
+           (std::strcmp(layout, "centerRoad") == 0 ||
+            std::strcmp(layout, "leftApproach") == 0 ||
+            std::strcmp(layout, "rightApproach") == 0) &&
+           !Blank(Str(entrance, "backgroundAssetKey")) &&
+           !Blank(Str(entrance, "robotAssetKey")) &&
+           ExactString(entrance, "fallback", "staticGreet");
+}
+
+bool ValidVisualStateContract(const cJSON* root, std::uint64_t* visual_generation) {
+    static const std::set<std::string_view> kKeys = {
+        "state", "overlayKey", "motionPreset", "visualGeneration",
+    };
+    static const std::set<std::string_view> kStates = {
+        "teach", "listen", "thinking", "correct", "nearMiss", "incorrect",
+        "retry", "celebrate", "completion",
+    };
+    const cJSON* body = Obj(root, "body");
+    const char* state = Str(body, "state");
+    return ExactObjectKeys(body, kKeys) && state != nullptr &&
+           kStates.find(state) != kStates.end() && !Blank(Str(body, "overlayKey")) &&
+           !Blank(Str(body, "motionPreset")) &&
+           ExactUint64(body, "visualGeneration", visual_generation) &&
+           IsValidLessonIdentity(Str(root, "stepId"));
+}
+
 bool IsSha256(const char* value) {
     if (value == nullptr || std::strlen(value) != 64) return false;
     for (const char* ch = value; *ch != '\0'; ++ch) {
@@ -386,6 +451,14 @@ struct LessonSession {
     bool        first_lesson_step_seen = false;
     bool        motion_presets_enabled = false;
     bool        tvideo_entrance_consumed = false;
+    bool        renderer_v2 = false;
+    bool        opening_entrance_consumed = false;
+    bool        entrance_active = false;
+    std::uint64_t visual_generation = 0;
+    std::uint64_t current_transport_epoch = 0;
+    int64_t     pending_server_sequence = 0;
+    std::string pending_step_id;
+    bool        pending_ack = false;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
     // processed inbound sequence, so a duplicate re-ack can REPLAY the prior ack body
     // idempotently (protocol §6 / lesson-robot-protocol.md:436-438) instead of
@@ -1083,6 +1156,36 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
 
 }  // namespace
 
+void SetLessonTransportEpoch(std::uint64_t transport_epoch) {
+    g_session.current_transport_epoch = transport_epoch;
+}
+
+void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch) {
+    g_session.current_transport_epoch = transport_epoch;
+    ++g_session.visual_generation;
+    g_session.entrance_active = false;
+    g_session.pending_server_sequence = 0;
+    g_session.pending_step_id.clear();
+    g_session.pending_ack = false;
+}
+
+bool AcceptLessonVisualCompletion(const LessonQueueItem& item) {
+    if (!g_session.pending_ack ||
+        item.transport_epoch != g_session.current_transport_epoch ||
+        item.visual_generation != g_session.visual_generation ||
+        item.server_sequence != g_session.pending_server_sequence ||
+        g_session.assignment_id != item.assignment_id ||
+        g_session.session_id != item.session_id ||
+        g_session.pending_step_id != item.step_id) {
+        return false;
+    }
+    g_session.entrance_active = false;
+    g_session.pending_ack = false;
+    g_session.pending_server_sequence = 0;
+    g_session.pending_step_id.clear();
+    return true;
+}
+
 // Sub-dispatch the slice subset (lesson_prepare/start/step/stop) and render ONE
 // espTft lesson_step. Additive: never reached for the 8 legacy types, the voice
 // path, or the MCP arm tools.
@@ -1120,6 +1223,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     double sequence_d = 0.0;
     const bool has_seq = Num(root, "sequence", sequence_d);
     const cJSON* body = Obj(root, "body");
+    const std::uint64_t frame_transport_epoch = g_session.current_transport_epoch;
 
     if (assignment_id == nullptr || session_id == nullptr || !has_seq) {
         ESP_LOGW(TAG, "lesson_* dropped: missing assignmentId/sessionId/sequence");
@@ -1267,6 +1371,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     auto end_lesson_after_failure = [this, &show_lesson_failure_display,
                                      &abort_speaking_if_needed,
                                      &end_lesson_asset_session](bool release_asset_session = true) {
+        InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);
@@ -1279,6 +1384,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         show_lesson_failure_display();
     };
     auto clear_stale_lesson_for_fresh_prepare = [this](bool show_waiting_state) {
+        InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
         Application::GetInstance().CancelLessonInteractiveListening();
         Application::GetInstance().SetLessonRuntimeActive(false);
         ClearTerminalLessonCursor();
@@ -1326,8 +1432,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
         !restart_prepare &&
         !prepare_has_newer_assignment_version;
 
-    const bool version_ok = (protocol_version != nullptr) &&
-                            strcmp(protocol_version, kLessonProtocolVersion) == 0;
+    const bool renderer_v1 = protocol_version != nullptr &&
+                             strcmp(protocol_version, kLessonProtocolVersion) == 0;
+    const bool renderer_v2 = protocol_version != nullptr &&
+                             strcmp(protocol_version, kLessonRendererV2) == 0;
+    const bool version_ok = renderer_v1 || renderer_v2;
     const char* profile = Str(body, "profile");
     const bool profile_ok = (profile == nullptr) ||
                             strcmp(profile, kLessonProfileEspTft) == 0;
@@ -1508,6 +1617,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
 
     const bool is_start = strcmp(type, "lesson_start") == 0;
     const bool is_step = strcmp(type, "lesson_step") == 0;
+    const bool is_visual = strcmp(type, "lesson_visual_state") == 0;
     const bool is_pause = strcmp(type, "lesson_pause") == 0;
     const bool is_resume = strcmp(type, "lesson_resume") == 0;
     const bool is_stop = strcmp(type, "lesson" "_stop") == 0;
@@ -1518,6 +1628,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (is_step && (!g_session.prepared || !g_session.running)) {
         ESP_LOGW(TAG, "lesson_step outside running session; dropping");
+        return;
+    }
+    if (is_visual && (!g_session.prepared || !g_session.running || !g_session.renderer_v2)) {
+        ESP_LOGW(TAG, "lesson_visual_state outside renderer-v2 running session; dropping");
         return;
     }
     if ((is_pause || is_resume) && (!g_session.prepared || !g_session.running)) {
@@ -1549,6 +1663,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // duplicate is older than the single cached entry (slice-01 keeps only the last),
     // fall back to false/false — the conservative non-rendered ack.
     if ((!is_prepare || duplicate_prepare) && sequence <= g_session.last_in_sequence) {
+        if (g_session.pending_ack && sequence == g_session.pending_server_sequence) {
+            ESP_LOGI(TAG, "lesson_* duplicate seq=%ld still awaits visual completion",
+                     static_cast<long>(sequence));
+            if (is_prepare) release_new_lesson_asset_session();
+            return;
+        }
         for (auto it = g_session.ack_history.rbegin(); it != g_session.ack_history.rend(); ++it) {
             if (it->sequence == sequence) {
                 cJSON* replay_body = cJSON_Parse(it->body_json.c_str());
@@ -1593,6 +1713,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.assignment_id = assignment_id;
             g_session.session_id = session_id;
             g_session.lesson_asset_generation = prepare_asset_generation;
+            g_session.current_transport_epoch = frame_transport_epoch;
             g_session.last_in_sequence = sequence;
             if (prepare_has_assignment_version) {
                 g_session.assignment_version = prepare_assignment_version;
@@ -1625,18 +1746,35 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.assignment_id = assignment_id;
         g_session.session_id = session_id;
         g_session.lesson_asset_generation = prepare_asset_generation;
+        g_session.current_transport_epoch = frame_transport_epoch;
         g_session.last_in_sequence = sequence;
         if (prepare_has_assignment_version) {
             g_session.assignment_version = prepare_assignment_version;
         }
         // Defense in depth: every fresh manifest starts disabled. Only the explicit
         // runtime control boolean can arm lesson motion for this session.
-        g_session.motion_presets_enabled = cJSON_IsTrue(motion_enabled);
+        g_session.motion_presets_enabled = !renderer_v2 && cJSON_IsTrue(motion_enabled);
+        g_session.renderer_v2 = renderer_v2;
         g_session.prepared = true;
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false, asset_pack_ack);
         return;
     }
     if (strcmp(type, "lesson_start") == 0) {
+        if (g_session.renderer_v2) {
+            const cJSON* opening_entrance = Obj(body, "openingEntrance");
+            if (!ValidOpeningEntrance(opening_entrance)) {
+                emit(root, "lesson_error", MakeErrorBody(
+                    "LESSON_FRAME_INVALID",
+                    "lesson_start openingEntrance is invalid",
+                    false,
+                    "unsupportedContract"));
+                return;
+            }
+            if (g_session.opening_entrance_consumed) {
+                emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
+                return;
+            }
+        }
         g_session.running = true;
         g_session.paused = false;
         Application::GetInstance().SetLessonRuntimeActive(true);
@@ -1660,10 +1798,21 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
             });
         }
+        if (g_session.renderer_v2) {
+            g_session.opening_entrance_consumed = true;
+            g_session.entrance_active = true;
+            ++g_session.visual_generation;
+            g_session.pending_server_sequence = sequence;
+            g_session.pending_step_id.clear();
+            g_session.pending_ack = true;
+            return;
+        }
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
         return;
     }
     if (strcmp(type, "lesson_pause") == 0) {
+        InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
+        g_session.opening_entrance_consumed = true;
         g_session.paused = true;
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
@@ -1709,6 +1858,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         return;
     }
     if (strcmp(type, "lesson_stop") == 0) {
+        InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
         const char* stop_reason = Str(body, "reason");
         const std::string normalized_stop_reason = NormalizeAsciiToken(stop_reason);
         const bool stop_cancelled = normalized_stop_reason == "CANCELLED";
@@ -1766,6 +1916,23 @@ void Application::HandleLessonMessage(const cJSON* root) {
         // layers and show a child-safe failure message instead of leaving the last step
         // frozen on screen.
         end_lesson_after_failure();
+        return;
+    }
+    if (is_visual) {
+        std::uint64_t requested_generation = 0;
+        if (!ValidVisualStateContract(root, &requested_generation)) {
+            emit(root, "lesson_error", MakeErrorBody(
+                "LESSON_FRAME_INVALID",
+                "lesson_visual_state body is invalid",
+                false,
+                "unsupportedContract"));
+            return;
+        }
+        g_session.entrance_active = false;
+        g_session.visual_generation = requested_generation;
+        g_session.pending_server_sequence = sequence;
+        g_session.pending_step_id = Str(root, "stepId");
+        g_session.pending_ack = true;
         return;
     }
     if (strcmp(type, "lesson_step") != 0) {

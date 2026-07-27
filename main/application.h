@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include "lesson_transport_epoch_gate.h"
+#include "lesson_handler.h"
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -465,6 +466,15 @@ private:
     TbotBleSubstate GetBleSubstate() const;
     bool HandleRobotActionMessage(const cJSON* root);
     void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);
+    void EnqueueLessonVisualCompletion(
+        LessonQueueItemKind kind,
+        std::uint64_t transport_epoch,
+        std::uint64_t visual_generation,
+        std::int64_t server_sequence,
+        const char* assignment_id,
+        const char* session_id,
+        const char* step_id,
+        LessonVisualCompletionResult result);
     void RequestLessonStorageAbandonment();
     static void LessonMessageTask(void* arg);
     // US-006 Slice-01 (S10): additive lesson_* renderer entry — see lesson_handler.cc.

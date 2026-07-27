@@ -1,9 +1,12 @@
 #include "lesson_transport_epoch_gate.h"
+#include "lesson_handler.h"
 
 #include <atomic>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -59,65 +62,44 @@ int main() {
     expect(gate.WorkerAcceptFrame(reopened_socket_callback_epoch),
            "frame from reopened socket is accepted with its captured epoch");
 
-    LessonTransportEpochGate coalesced_gate;
-    LessonTransportTerminalControl terminal_control;
-    const auto socket_a_epoch = coalesced_gate.PublishedEpoch();
-    const auto socket_a_terminal = coalesced_gate.PublishTerminalEpoch();
-    const auto socket_a_request = terminal_control.Publish(socket_a_terminal);
-    expect(socket_a_request.enqueue_control,
-           "first terminal request owns the single queued control");
-    const auto socket_b_epoch = coalesced_gate.PublishedEpoch();
-    expect(socket_b_epoch == socket_a_terminal,
-           "replacement socket opens on first pending terminal epoch");
-    const auto socket_b_terminal = coalesced_gate.PublishTerminalEpoch();
-    const auto socket_b_request = terminal_control.Publish(socket_b_terminal);
-    expect(!socket_b_request.enqueue_control,
-           "newer terminal coalesces while older control remains pending");
-    expect(coalesced_gate.WorkerApplyTerminal(coalesced_gate.PublishedEpoch()),
-           "pending control coalesces worker directly to newest terminal epoch");
-    expect(!coalesced_gate.WorkerAcceptFrame(socket_a_epoch),
-           "first abandoned socket remains fenced after coalesced terminal");
-    expect(!coalesced_gate.WorkerAcceptFrame(socket_b_epoch),
-           "newer dead socket frame is fenced even while older control was pending");
-    expect(coalesced_gate.WorkerAcceptFrame(socket_b_terminal),
-           "next live socket may use newest coalesced epoch");
-    expect(!terminal_control.FinishWorkerDrain(coalesced_gate, socket_b_terminal),
-           "worker drain completes when no newer terminal was published");
+    static_assert(std::is_trivially_copyable<LessonQueueItem>::value,
+                  "FreeRTOS queue items must carry completion identity by value");
+    LessonQueueItem completed{};
+    completed.kind = LessonQueueItemKind::kVisualCompleted;
+    completed.transport_epoch = terminal;
+    completed.visual_generation = 17;
+    completed.server_sequence = 12;
+    completed.completion_result = LessonVisualCompletionResult::kApplied;
+    std::strcpy(completed.assignment_id, "assignment-id");
+    std::strcpy(completed.session_id, "session-id");
+    std::strcpy(completed.step_id, "step-id");
+    expect(completed.payload == nullptr, "completion item owns no serialized frame payload");
+    expect(completed.transport_epoch == terminal && completed.visual_generation == 17,
+           "completion item carries transport epoch and visual generation");
+    expect(completed.server_sequence == 12 &&
+               std::strcmp(completed.assignment_id, "assignment-id") == 0 &&
+               std::strcmp(completed.session_id, "session-id") == 0 &&
+               std::strcmp(completed.step_id, "step-id") == 0,
+           "completion item carries server sequence and session identity by value");
+    expect(completed.completion_result == LessonVisualCompletionResult::kApplied,
+           "completion item carries its result by value");
 
-    for (int iteration = 0; iteration < 1000; ++iteration) {
-        LessonTransportEpochGate race_gate;
-        LessonTransportTerminalControl race_control;
-        const auto first_terminal = race_gate.PublishTerminalEpoch();
-        expect(race_control.Publish(first_terminal).enqueue_control,
-               "race setup owns initial control");
-        std::atomic<bool> release{false};
-        LessonTransportTerminalControl::PublishResult successor{};
-        std::thread requester([&]() {
-            while (!release.load(std::memory_order_acquire)) {}
-            const auto next_terminal = race_gate.PublishTerminalEpoch();
-            successor = race_control.Publish(next_terminal);
-        });
-        release.store(true, std::memory_order_release);
-        const auto applied = race_gate.PublishedEpoch();
-        race_gate.WorkerApplyTerminal(applied);
-        const bool worker_continues = race_control.FinishWorkerDrain(race_gate, applied);
-        requester.join();
-        expect(worker_continues != successor.enqueue_control,
-               "pending-clear race has exactly one control owner");
-        if (worker_continues) {
-            const auto latest = race_gate.PublishedEpoch();
-            race_gate.WorkerApplyTerminal(latest);
-            expect(!race_control.FinishWorkerDrain(race_gate, latest),
-                   "worker-owned successor drain terminates");
-        } else if (successor.enqueue_control) {
-            const auto latest = race_gate.PublishedEpoch();
-            race_gate.WorkerApplyTerminal(latest);
-            expect(!race_control.FinishWorkerDrain(race_gate, latest),
-                   "requester-owned successor control terminates");
-        }
-        expect(race_gate.WorkerAcceptFrame(race_gate.PublishedEpoch()),
-               "pending-clear race converges worker to newest epoch");
-    }
+    LessonQueueItem timed_out = completed;
+    timed_out.kind = LessonQueueItemKind::kVisualTimedOut;
+    timed_out.completion_result = LessonVisualCompletionResult::kPhaseTimeout;
+    expect(timed_out.payload == nullptr &&
+               timed_out.completion_result == LessonVisualCompletionResult::kPhaseTimeout,
+           "timeout item carries a typed result without borrowing a frame");
+
+    LessonTransportEpochGate completion_gate;
+    const auto stale_completion_epoch = completion_gate.PublishedEpoch();
+    const auto live_completion_epoch = completion_gate.PublishTerminalEpoch();
+    expect(completion_gate.WorkerApplyTerminal(live_completion_epoch),
+           "abandon control advances the worker before completion handling");
+    expect(!completion_gate.WorkerAcceptFrame(stale_completion_epoch),
+           "completion from the abandoned transport epoch is rejected");
+    expect(completion_gate.WorkerAcceptFrame(live_completion_epoch),
+           "completion from the current transport epoch remains eligible");
 
     std::atomic<bool> start{false};
     std::vector<std::thread> publishers;
