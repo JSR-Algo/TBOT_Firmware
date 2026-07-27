@@ -96,6 +96,7 @@ struct LessonQueueItem {
     char* payload = nullptr;
     std::uint64_t transport_epoch = 0;
     std::uint64_t visual_generation = 0;
+    std::uint64_t visual_nonce = 0;
     std::int64_t server_sequence = 0;
     char assignment_id[kIdentityBytes] = {};
     char session_id[kIdentityBytes] = {};
@@ -113,12 +114,14 @@ inline LessonQueueItem MakeLessonVisualQueueItem(
     const char* session_id,
     const char* step_id,
     LessonVisualCompletionResult result,
-    const char* degraded_reason
+    const char* degraded_reason,
+    std::uint64_t visual_nonce = 0
 ) {
     LessonQueueItem item{};
     item.kind = kind;
     item.transport_epoch = transport_epoch;
     item.visual_generation = visual_generation;
+    item.visual_nonce = visual_nonce;
     item.server_sequence = server_sequence;
     item.completion_result = result;
     std::snprintf(item.assignment_id, sizeof(item.assignment_id), "%s",

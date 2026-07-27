@@ -265,13 +265,14 @@ std::string StartFrame(int seq) {
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
 }
 
-std::string V2PrepareFrame(int seq) {
+std::string V2PrepareFrame(int seq, const std::string& extra_body = "") {
     return std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
            kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\",\"sequence\":" + std::to_string(seq) +
            ",\"body\":{\"profile\":\"espTft\",\"runtimeControls\":{"
            "\"openingEntranceEnabled\":true,\"visualStateEventsEnabled\":true,"
-           "\"motionPresetsEnabled\":true,\"physicalMotionOwner\":\"server\"}}}";
+           "\"motionPresetsEnabled\":true,\"physicalMotionOwner\":\"server\"}" +
+           extra_body + "}}";
 }
 
 std::string V2StartFrame(int seq, const std::string& opening_entrance) {
@@ -526,9 +527,10 @@ void test_renderer_v2_start_and_visual_contracts_fail_closed() {
     Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
     require(Sent().size() == 1,
             "valid v2 opening entrance does not ACK before asynchronous completion");
+    const std::uint64_t start_nonce = App().lesson_visual_queue.back().visual_nonce;
     LessonQueueItem completion = MakeLessonVisualQueueItem(
         LessonQueueItemKind::kVisualCompleted, 6, 1, 2, AID(), SID(), nullptr,
-        LessonVisualCompletionResult::kApplied, nullptr);
+        LessonVisualCompletionResult::kApplied, nullptr, start_nonce);
     std::string completion_ack;
     require(!AcceptLessonVisualCompletion(completion, &completion_ack) && completion_ack.empty(),
             "completion from a stale transport epoch is rejected");
@@ -558,9 +560,10 @@ void test_renderer_v2_start_and_visual_contracts_fail_closed() {
             "duplicate completion emits no second ACK");
 
     Handle(V2VisualFrame(3, "thinking", 17));
+    const std::uint64_t timeout_nonce = App().lesson_visual_queue.back().visual_nonce;
     LessonQueueItem timeout = MakeLessonVisualQueueItem(
         LessonQueueItemKind::kVisualTimedOut, 7, 17, 3, AID(), SID(), "s2",
-        LessonVisualCompletionResult::kPhaseTimeout, nullptr);
+        LessonVisualCompletionResult::kPhaseTimeout, nullptr, timeout_nonce);
     require(DispatchLessonVisualCompletion(timeout, App().protocol_.get()),
             "worker dispatch sends the matching timeout ACK");
     ack = cJSON_Parse(Sent().back().c_str());
@@ -572,9 +575,10 @@ void test_renderer_v2_start_and_visual_contracts_fail_closed() {
     cJSON_Delete(ack);
 
     Handle(V2VisualFrame(4, "incorrect", 18));
+    const std::uint64_t rejected_nonce = App().lesson_visual_queue.back().visual_nonce;
     LessonQueueItem rejected = MakeLessonVisualQueueItem(
         LessonQueueItemKind::kVisualCompleted, 7, 18, 4, AID(), SID(), "s2",
-        LessonVisualCompletionResult::kRejected, "randomReason");
+        LessonVisualCompletionResult::kRejected, "randomReason", rejected_nonce);
     require(DispatchLessonVisualCompletion(rejected, App().protocol_.get()),
             "worker dispatch sends the matching negative visual ACK");
     ack = cJSON_Parse(Sent().back().c_str());
@@ -601,9 +605,10 @@ void test_renderer_v2_worker_dispatch_emits_exactly_one_ack() {
     SetLessonTransportEpoch(23);
     Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
     const size_t before_completion = Sent().size();
+    const std::uint64_t completion_nonce = App().lesson_visual_queue.back().visual_nonce;
     LessonQueueItem completion = MakeLessonVisualQueueItem(
         LessonQueueItemKind::kVisualCompleted, 23, 1, 2, AID(), SID(), nullptr,
-        LessonVisualCompletionResult::kApplied, nullptr);
+        LessonVisualCompletionResult::kApplied, nullptr, completion_nonce);
     require(DispatchLessonVisualCompletion(completion, App().protocol_.get()),
             "production worker dispatch accepts current callback identity");
     require(Sent().size() == before_completion + 1 &&
@@ -727,6 +732,39 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
                 FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
                     "unsupportedContract",
             "production rejection crosses the worker and emits frozen negative ACK semantics");
+}
+
+void test_renderer_v2_old_completion_cannot_claim_reused_identity() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    SetLessonTransportEpoch(34);
+    Handle(V2PrepareFrame(1, ",\"assignmentVersion\":1"));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    require(App().lesson_visual_queue.size() == 1,
+            "first start produces one queued completion");
+    const LessonQueueItem old_completion = App().lesson_visual_queue.front();
+    App().lesson_visual_queue.clear();
+
+    Handle(V2PrepareFrame(1, ",\"assignmentVersion\":2"));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    const size_t before_old_completion = Sent().size();
+    require(!DispatchLessonVisualCompletion(old_completion, App().protocol_.get()) &&
+                Sent().size() == before_old_completion,
+            "queued completion from the reset session cannot claim reused wire identity");
+    require(display.entrance_start_calls == 2,
+            "old completion cannot replay or revive a third entrance");
+
+    display.CompleteEntrance();
+    require(App().lesson_visual_queue.size() == 1,
+            "replacement start has its own completion");
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == before_old_completion + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 2,
+            "replacement completion alone emits the reused sequence ACK");
 }
 
 void test_prepare_assetpack_not_ready_branches() {
@@ -4906,6 +4944,7 @@ int main() {
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();
+    test_renderer_v2_old_completion_cannot_claim_reused_identity();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
     test_prepare_assetpack_derives_local_path_from_root_and_key();

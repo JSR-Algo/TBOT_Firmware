@@ -190,7 +190,8 @@ public:
         const char* session_id,
         const char* step_id,
         LessonVisualCompletionResult result,
-        const char* degraded_reason = nullptr);
+        const char* degraded_reason = nullptr,
+        std::uint64_t visual_nonce = 0);
 
 private:
     Application();

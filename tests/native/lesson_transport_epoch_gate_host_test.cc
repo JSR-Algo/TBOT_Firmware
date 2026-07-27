@@ -73,10 +73,12 @@ int main() {
         "session-id",
         "step-id",
         LessonVisualCompletionResult::kApplied,
-        nullptr);
+        nullptr,
+        44);
     expect(completed.payload == nullptr, "completion item owns no serialized frame payload");
-    expect(completed.transport_epoch == terminal && completed.visual_generation == 17,
-           "completion item carries transport epoch and visual generation");
+    expect(completed.transport_epoch == terminal && completed.visual_generation == 17 &&
+               completed.visual_nonce == 44,
+           "completion item carries transport epoch, visual generation, and nonce");
     expect(completed.server_sequence == 12 &&
                std::strcmp(completed.assignment_id, "assignment-id") == 0 &&
                std::strcmp(completed.session_id, "session-id") == 0 &&

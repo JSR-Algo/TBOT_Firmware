@@ -187,7 +187,8 @@ void Application::EnqueueLessonVisualCompletion(
     const char* session_id,
     const char* step_id,
     LessonVisualCompletionResult result,
-    const char* degraded_reason
+    const char* degraded_reason,
+    std::uint64_t visual_nonce
 ) {
     if ((kind != LessonQueueItemKind::kVisualCompleted &&
          kind != LessonQueueItemKind::kVisualTimedOut) ||
@@ -196,7 +197,7 @@ void Application::EnqueueLessonVisualCompletion(
     }
     LessonQueueItem item = MakeLessonVisualQueueItem(
         kind, transport_epoch, visual_generation, server_sequence,
-        assignment_id, session_id, step_id, result, degraded_reason);
+        assignment_id, session_id, step_id, result, degraded_reason, visual_nonce);
     if (!lesson_queue_data_admission_.TryAcquire()) {
         ESP_LOGW(TAG, "lesson visual completion dropped: data capacity full seq=%ld",
                  static_cast<long>(server_sequence));

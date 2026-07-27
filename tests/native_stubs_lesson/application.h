@@ -107,10 +107,11 @@ public:
         const char* session_id,
         const char* step_id,
         LessonVisualCompletionResult result,
-        const char* degraded_reason = nullptr) {
+        const char* degraded_reason = nullptr,
+        std::uint64_t visual_nonce = 0) {
         lesson_visual_queue.push_back(MakeLessonVisualQueueItem(
             kind, transport_epoch, visual_generation, server_sequence,
-            assignment_id, session_id, step_id, result, degraded_reason));
+            assignment_id, session_id, step_id, result, degraded_reason, visual_nonce));
     }
     void DrainLessonVisualQueue() {
         auto items = std::move(lesson_visual_queue);
