@@ -76,7 +76,7 @@ static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
-static constexpr UBaseType_t kLessonMessageQueueDepth = 16;
+static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
 static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
 static constexpr int kOtaCheckMaxAttempts = 3;
 static constexpr int kOtaRetryDelaysSeconds[] = {2, 4};
@@ -188,7 +188,13 @@ void Application::EnqueueLessonVisualCompletion(
     LessonQueueItem item = MakeLessonVisualQueueItem(
         kind, transport_epoch, visual_generation, server_sequence,
         assignment_id, session_id, step_id, result, degraded_reason);
+    if (!lesson_queue_data_admission_.TryAcquire()) {
+        ESP_LOGW(TAG, "lesson visual completion dropped: data capacity full seq=%ld",
+                 static_cast<long>(server_sequence));
+        return;
+    }
     if (xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
+        lesson_queue_data_admission_.Release();
         ESP_LOGW(TAG, "lesson visual completion dropped: worker queue full seq=%ld",
                  static_cast<long>(server_sequence));
     }
@@ -224,8 +230,11 @@ void Application::EnqueueLessonMessage(
         payload,
         transport_epoch,
     };
-    if (uxQueueMessagesWaiting(lesson_message_queue_) >= kLessonMessageQueueDepth ||
-        xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
+    const bool queue_full =
+        uxQueueMessagesWaiting(lesson_message_queue_) >= kLessonMessageQueueDepth;
+    const bool admitted = !queue_full && lesson_queue_data_admission_.TryAcquire();
+    if (!admitted || xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
+        if (admitted) lesson_queue_data_admission_.Release();
         ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d",
                  type_value, sequence_value);
         cJSON_free(payload);
@@ -247,33 +256,41 @@ void Application::RequestLessonStorageAbandonment() {
         terminal_epoch,
     };
     if (xQueueSendToFront(lesson_message_queue_, &item, 0) != pdTRUE) {
-        lesson_terminal_control_.CancelQueuedControl();
-        ESP_LOGE(TAG, "lesson abandonment control enqueue failed");
+        ESP_LOGW(TAG, "lesson abandonment wakeup enqueue failed; worker will drain published epoch");
     }
 }
 
 void Application::LessonMessageTask(void* arg) {
     auto* self = static_cast<Application*>(arg);
     LessonQueueItem item;
+    const auto drain_terminal = [self]() {
+        if (!self->lesson_terminal_control_.WorkerShouldDrain()) {
+            return false;
+        }
+        for (;;) {
+            const std::uint64_t latest_epoch =
+                self->lesson_transport_epoch_gate_.PublishedEpoch();
+            if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(latest_epoch)) {
+                InvalidateLessonVisualCompletionState(latest_epoch);
+            }
+            if (!self->lesson_terminal_control_.FinishWorkerDrain(
+                    self->lesson_transport_epoch_gate_, latest_epoch)) {
+                break;
+            }
+        }
+        self->AbandonLessonStorageSession();
+        return true;
+    };
     for (;;) {
         if (xQueueReceive(self->lesson_message_queue_, &item, portMAX_DELAY) != pdTRUE) {
             continue;
         }
         if (item.kind == LessonQueueItemKind::kAbandonTransport) {
-            for (;;) {
-                const std::uint64_t latest_epoch =
-                    self->lesson_transport_epoch_gate_.PublishedEpoch();
-                if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(latest_epoch)) {
-                    InvalidateLessonVisualCompletionState(latest_epoch);
-                }
-                if (!self->lesson_terminal_control_.FinishWorkerDrain(
-                        self->lesson_transport_epoch_gate_, latest_epoch)) {
-                    break;
-                }
-            }
-            self->AbandonLessonStorageSession();
+            drain_terminal();
             continue;
         }
+        self->lesson_queue_data_admission_.Release();
+        drain_terminal();
         if (!self->lesson_transport_epoch_gate_.WorkerAcceptFrame(item.transport_epoch)) {
             if (item.kind == LessonQueueItemKind::kFrame && item.payload != nullptr) {
                 cJSON_free(item.payload);

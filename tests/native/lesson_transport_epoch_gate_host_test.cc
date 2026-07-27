@@ -100,6 +100,54 @@ int main() {
     expect(!terminal_control.FinishWorkerDrain(coalesced_gate, coalesced_epoch),
            "coalesced drain ends when no successor terminal exists");
 
+    LessonQueueDataAdmission data_admission(kLessonMessageDataQueueDepth);
+    std::atomic<bool> admission_start{false};
+    std::atomic<int> admitted_frames{0};
+    std::atomic<int> admitted_visuals{0};
+    std::vector<std::thread> data_producers;
+    for (int index = 0; index < 64; ++index) {
+        data_producers.emplace_back([&, index]() {
+            while (!admission_start.load(std::memory_order_acquire)) {}
+            if (!data_admission.TryAcquire()) return;
+            if ((index % 2) == 0) {
+                admitted_frames.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                admitted_visuals.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    admission_start.store(true, std::memory_order_release);
+    for (auto& producer : data_producers) producer.join();
+    expect(admitted_frames.load() + admitted_visuals.load() ==
+               static_cast<int>(kLessonMessageDataQueueDepth),
+           "mixed frame and visual producers cannot consume the reserved control slot");
+    expect(admitted_frames.load() > 0 && admitted_visuals.load() > 0,
+           "stress fills data capacity through both non-control producer paths");
+    expect(!data_admission.TryAcquire(), "full data capacity rejects another visual completion");
+    data_admission.Release();
+    expect(data_admission.TryAcquire(), "worker receive returns one shared data admission slot");
+
+    LessonTransportEpochGate failed_enqueue_gate;
+    LessonTransportTerminalControl failed_enqueue_control;
+    const auto stale_full_queue_epoch = failed_enqueue_gate.PublishedEpoch();
+    const auto first_failed_enqueue_epoch = failed_enqueue_gate.PublishTerminalEpoch();
+    expect(failed_enqueue_control.Publish(first_failed_enqueue_epoch).enqueue_control,
+           "terminal publication owns a wakeup attempt");
+    const auto latest_failed_enqueue_epoch = failed_enqueue_gate.PublishTerminalEpoch();
+    expect(!failed_enqueue_control.Publish(latest_failed_enqueue_epoch).enqueue_control,
+           "newest abandonment coalesces while mixed producers keep the data queue full");
+    expect(failed_enqueue_control.WorkerShouldDrain(),
+           "published terminal remains worker-visible when the queue wakeup fails");
+    expect(failed_enqueue_gate.WorkerApplyTerminal(failed_enqueue_gate.PublishedEpoch()),
+           "worker applies latest epoch without requiring a queued control item");
+    expect(!failed_enqueue_control.FinishWorkerDrain(
+               failed_enqueue_gate, failed_enqueue_gate.PublishedEpoch()),
+           "fallback terminal drain converges without deadlock");
+    expect(!failed_enqueue_gate.WorkerAcceptFrame(stale_full_queue_epoch),
+           "fallback terminal drain rejects stale queued work");
+    expect(failed_enqueue_gate.WorkerAcceptFrame(latest_failed_enqueue_epoch),
+           "fallback terminal drain accepts work only from the newest replacement epoch");
+
     for (int iteration = 0; iteration < 1000; ++iteration) {
         LessonTransportEpochGate race_gate;
         LessonTransportTerminalControl race_control;

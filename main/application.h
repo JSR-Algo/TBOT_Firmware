@@ -317,6 +317,7 @@ private:
     TaskHandle_t lesson_message_task_handle_ = nullptr;
     LessonTransportEpochGate lesson_transport_epoch_gate_;
     LessonTransportTerminalControl lesson_terminal_control_;
+    LessonQueueDataAdmission lesson_queue_data_admission_{kLessonMessageDataQueueDepth};
 
     // Set on a backend/ws error, cleared on (re)connect. Lets the connect mapper
     // tell ONLINE apart from OFFLINE_RETRY ("Server unavailable. Retrying...").

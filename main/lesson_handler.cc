@@ -306,6 +306,23 @@ bool ValidVisualStateContract(const cJSON* root, std::uint64_t* visual_generatio
            IsValidLessonIdentity(Str(root, "stepId"));
 }
 
+struct StaticVisualStatePresentation {
+    const char* emotion;
+    const char* status;
+};
+
+StaticVisualStatePresentation VisualStatePresentation(const char* state) {
+    if (std::strcmp(state, "teach") == 0) return {"happy", "Đang học..."};
+    if (std::strcmp(state, "listen") == 0) return {"thinking", "Con nói nhé..."};
+    if (std::strcmp(state, "thinking") == 0) return {"thinking", "Đang suy nghĩ..."};
+    if (std::strcmp(state, "correct") == 0) return {"happy", "Chính xác!"};
+    if (std::strcmp(state, "nearMiss") == 0) return {"neutral", "Gần đúng rồi!"};
+    if (std::strcmp(state, "incorrect") == 0) return {"sad", "Chưa đúng"};
+    if (std::strcmp(state, "retry") == 0) return {"thinking", "Thử lại nhé!"};
+    if (std::strcmp(state, "celebrate") == 0) return {"happy", "Tuyệt vời!"};
+    return {"happy", "Hoàn thành bài học"};
+}
+
 const char* StableVisualDegradedReason(const char* value) {
     if (value == nullptr) return nullptr;
     for (const char* allowed : {
@@ -2082,16 +2099,42 @@ void Application::HandleLessonMessage(const cJSON* root) {
             Num(root, "lessonVersion", g_session.pending_lesson_version);
         g_session.pending_step_id = Str(root, "stepId");
         g_session.pending_ack = true;
-        Application::GetInstance().EnqueueLessonVisualCompletion(
-            LessonQueueItemKind::kVisualCompleted,
-            g_session.current_transport_epoch,
-            g_session.visual_generation,
-            sequence,
-            g_session.assignment_id.c_str(),
-            g_session.session_id.c_str(),
-            g_session.pending_step_id.c_str(),
-            LessonVisualCompletionResult::kRejected,
-            "unsupportedContract");
+        Display* display = Board::GetInstance().GetDisplay();
+        if (display == nullptr) {
+            Application::GetInstance().EnqueueLessonVisualCompletion(
+                LessonQueueItemKind::kVisualCompleted,
+                g_session.current_transport_epoch,
+                g_session.visual_generation,
+                sequence,
+                g_session.assignment_id.c_str(),
+                g_session.session_id.c_str(),
+                g_session.pending_step_id.c_str(),
+                LessonVisualCompletionResult::kRejected,
+                "unsupportedContract");
+            return;
+        }
+        const auto presentation = VisualStatePresentation(Str(body, "state"));
+        const std::uint64_t callback_transport_epoch = g_session.current_transport_epoch;
+        const std::uint64_t callback_visual_generation = g_session.visual_generation;
+        const std::string callback_assignment_id = g_session.assignment_id;
+        const std::string callback_session_id = g_session.session_id;
+        const std::string callback_step_id = g_session.pending_step_id;
+        Schedule([display, presentation, callback_transport_epoch,
+                  callback_visual_generation, sequence, callback_assignment_id,
+                  callback_session_id, callback_step_id]() {
+            display->SetEmotion(presentation.emotion);
+            display->SetStatus(presentation.status);
+            Application::GetInstance().EnqueueLessonVisualCompletion(
+                LessonQueueItemKind::kVisualCompleted,
+                callback_transport_epoch,
+                callback_visual_generation,
+                sequence,
+                callback_assignment_id.c_str(),
+                callback_session_id.c_str(),
+                callback_step_id.c_str(),
+                LessonVisualCompletionResult::kDegraded,
+                "missingOverlay");
+        });
         return;
     }
     if (strcmp(type, "lesson_step") != 0) {

@@ -642,16 +642,44 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
     require(Sent().size() == before_drain + 1,
             "duplicate production callback remains an idempotent no-op");
 
-    Handle(V2VisualFrame(3, "thinking", 17));
-    require(App().lesson_visual_queue.size() == 1 &&
-                App().lesson_visual_queue.front().completion_result ==
-                    LessonVisualCompletionResult::kRejected,
-            "unsupported synchronous visual state enqueues a production rejection");
-    App().DrainLessonVisualQueue();
-    require(!FrameBodyBool(Sent().size() - 1, "accepted", true) &&
-                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
-                    "unsupportedContract",
-            "unsupported visual state rejection crosses the production worker path");
+    struct VisualExpectation {
+        const char* state;
+        const char* emotion;
+        const char* status;
+    };
+    const VisualExpectation expectations[] = {
+        {"teach", "happy", "Đang học..."},
+        {"listen", "thinking", "Con nói nhé..."},
+        {"thinking", "thinking", "Đang suy nghĩ..."},
+        {"correct", "happy", "Chính xác!"},
+        {"nearMiss", "neutral", "Gần đúng rồi!"},
+        {"incorrect", "sad", "Chưa đúng"},
+        {"retry", "thinking", "Thử lại nhé!"},
+        {"celebrate", "happy", "Tuyệt vời!"},
+        {"completion", "happy", "Hoàn thành bài học"},
+    };
+    int visual_sequence = 3;
+    std::uint64_t visual_generation = 17;
+    for (const auto& expectation : expectations) {
+        Handle(V2VisualFrame(visual_sequence, expectation.state, visual_generation));
+        require(display.last_emotion == expectation.emotion &&
+                    display.last_status == expectation.status,
+                "valid visual state installs its child-visible static display state");
+        require(App().lesson_visual_queue.size() == 1 &&
+                    App().lesson_visual_queue.front().completion_result ==
+                        LessonVisualCompletionResult::kDegraded &&
+                    std::string(App().lesson_visual_queue.front().degraded_reason) ==
+                        "missingOverlay",
+                "static visual install queues a truthful degraded completion after display calls");
+        App().DrainLessonVisualQueue();
+        require(FrameBodyBool(Sent().size() - 1, "accepted", false) &&
+                    FrameBodyBool(Sent().size() - 1, "degraded", false) &&
+                    FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                        "missingOverlay",
+                "valid visual state crosses the production worker path with a positive ACK");
+        ++visual_sequence;
+        ++visual_generation;
+    }
 
     ResetObservable();
     FreshSession();

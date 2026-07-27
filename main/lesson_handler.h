@@ -68,6 +68,7 @@ constexpr char kLessonRendererV1[] = "teebot-lesson-renderer.v1";
 constexpr char kLessonRendererV2[] = "teebot-lesson-renderer.v2";
 constexpr char kLessonProtocolVersion[] = "teebot-lesson-renderer.v1";
 constexpr char kLessonRendererName[] = "teebot-lesson-renderer.v1";
+constexpr std::size_t kLessonMessageDataQueueDepth = 16;
 
 void AddLessonRendererFeatures(cJSON* features);
 
@@ -145,6 +146,10 @@ public:
         return {!pending_.exchange(true, std::memory_order_acq_rel)};
     }
 
+    bool WorkerShouldDrain() const {
+        return pending_.load(std::memory_order_acquire);
+    }
+
     bool FinishWorkerDrain(
         const LessonTransportEpochGate& gate,
         std::uint64_t applied_epoch
@@ -162,6 +167,31 @@ public:
 private:
     std::atomic<bool> pending_{false};
     std::atomic<std::uint64_t> latest_epoch_{0};
+};
+
+class LessonQueueDataAdmission {
+public:
+    explicit LessonQueueDataAdmission(std::size_t capacity) : capacity_(capacity) {}
+
+    bool TryAcquire() {
+        std::size_t observed = in_use_.load(std::memory_order_relaxed);
+        while (observed < capacity_) {
+            if (in_use_.compare_exchange_weak(
+                    observed, observed + 1,
+                    std::memory_order_acq_rel, std::memory_order_relaxed)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void Release() {
+        in_use_.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+private:
+    const std::size_t capacity_;
+    std::atomic<std::size_t> in_use_{0};
 };
 
 void SetLessonTransportEpoch(std::uint64_t transport_epoch);
