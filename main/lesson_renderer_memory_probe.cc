@@ -35,6 +35,25 @@ size_t Loss(size_t baseline, size_t current) {
 }
 }  // namespace
 
+#if defined(TBOT_RENDERER_MEMORY_DIAGNOSTICS) && defined(CONFIG_HEAP_USE_HOOKS)
+#if defined(TBOT_LESSON_MEMORY_TEST)
+volatile uint32_t g_lesson_renderer_frame_allocation_count = 0;
+volatile bool g_lesson_renderer_frame_allocation_measurement_active = false;
+
+extern "C" void esp_heap_trace_alloc_hook(void* ptr, size_t, uint32_t) {
+    if (ptr != nullptr &&
+        __atomic_load_n(&g_lesson_renderer_frame_allocation_measurement_active,
+                        __ATOMIC_RELAXED)) {
+        __atomic_add_fetch(&g_lesson_renderer_frame_allocation_count, 1,
+                           __ATOMIC_RELAXED);
+    }
+}
+#else
+extern "C" volatile uint32_t g_lesson_renderer_frame_allocation_count;
+extern "C" volatile bool g_lesson_renderer_frame_allocation_measurement_active;
+#endif
+#endif
+
 LessonRendererMemoryProbe::LessonRendererMemoryProbe() = default;
 
 #ifdef TBOT_LESSON_MEMORY_TEST
@@ -119,19 +138,61 @@ void LessonRendererMemoryProbe::Capture(LessonRendererMemoryPhase phase,
             std::max(max_settled_contexts_, sample.live_animation_contexts);
     }
 
-    ESP_LOGI(kTag,
-             "renderer_mem phase=%s ifree=%u ilargest=%u psfree=%u layers=%u "
-             "anim=%u ctx=%u frame_alloc=%u",
-             PhaseName(phase), static_cast<unsigned>(sample.internal_free),
-             static_cast<unsigned>(sample.largest_internal_block),
-             static_cast<unsigned>(sample.psram_free),
-             static_cast<unsigned>(sample.live_decoded_layers),
-             static_cast<unsigned>(sample.live_lvgl_animations),
-             static_cast<unsigned>(sample.live_animation_contexts),
-             static_cast<unsigned>(frame_allocations_));
+    if (frame_allocations_measured_) {
+        ESP_LOGI(kTag,
+                 "renderer_mem phase=%s ifree=%u ilargest=%u psfree=%u layers=%u "
+                 "anim=%u ctx=%u frame_alloc=%u",
+                 PhaseName(phase), static_cast<unsigned>(sample.internal_free),
+                 static_cast<unsigned>(sample.largest_internal_block),
+                 static_cast<unsigned>(sample.psram_free),
+                 static_cast<unsigned>(sample.live_decoded_layers),
+                 static_cast<unsigned>(sample.live_lvgl_animations),
+                 static_cast<unsigned>(sample.live_animation_contexts),
+                 static_cast<unsigned>(frame_allocations_));
+    } else {
+        ESP_LOGI(kTag,
+                 "renderer_mem phase=%s ifree=%u ilargest=%u psfree=%u layers=%u "
+                 "anim=%u ctx=%u frame_alloc=na",
+                 PhaseName(phase), static_cast<unsigned>(sample.internal_free),
+                 static_cast<unsigned>(sample.largest_internal_block),
+                 static_cast<unsigned>(sample.psram_free),
+                 static_cast<unsigned>(sample.live_decoded_layers),
+                 static_cast<unsigned>(sample.live_lvgl_animations),
+                 static_cast<unsigned>(sample.live_animation_contexts));
+    }
+}
+
+LessonRendererFrameAllocationToken
+LessonRendererMemoryProbe::BeginFrameAllocationMeasurement() {
+#if defined(TBOT_RENDERER_MEMORY_DIAGNOSTICS) && defined(CONFIG_HEAP_USE_HOOKS)
+    const uint32_t count =
+        __atomic_load_n(&g_lesson_renderer_frame_allocation_count, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_lesson_renderer_frame_allocation_measurement_active, true,
+                     __ATOMIC_RELAXED);
+    return {count, true};
+#else
+    return {};
+#endif
+}
+
+size_t LessonRendererMemoryProbe::EndFrameAllocationMeasurement(
+    const LessonRendererFrameAllocationToken& token) {
+    if (!token.measured) return 0;
+#if defined(TBOT_RENDERER_MEMORY_DIAGNOSTICS) && defined(CONFIG_HEAP_USE_HOOKS)
+    __atomic_store_n(&g_lesson_renderer_frame_allocation_measurement_active, false,
+                     __ATOMIC_RELAXED);
+    const uint32_t current =
+        __atomic_load_n(&g_lesson_renderer_frame_allocation_count, __ATOMIC_RELAXED);
+    const size_t delta = static_cast<size_t>(current - token.allocation_count);
+    RecordFrameAllocations(delta);
+    return delta;
+#else
+    return 0;
+#endif
 }
 
 void LessonRendererMemoryProbe::RecordFrameAllocations(size_t allocations) {
+    frame_allocations_measured_ = true;
     frame_allocations_ += allocations;
 }
 
@@ -140,6 +201,7 @@ LessonRendererMemoryReport LessonRendererMemoryProbe::Evaluate(
     bool forbidden_markers_found) const {
     LessonRendererMemoryReport report;
     report.forbidden_markers_found = forbidden_markers_found;
+    report.frame_allocations_measured = frame_allocations_measured_;
     report.cancel_cycles = cancel_cycles_;
     report.complete_cycles = complete_cycles_;
     report.frame_allocations = frame_allocations_;
@@ -158,6 +220,7 @@ LessonRendererMemoryReport LessonRendererMemoryProbe::Evaluate(
     report.thresholds = thresholds;
     report.passed = has_baseline_ && has_complete_ && cancel_cycles_ == 100 &&
                     complete_cycles_ == 100 && settled_observations_at_500ms_ == 200 &&
+                    frame_allocations_measured_ &&
                     frame_allocations_ <= thresholds.max_frame_allocations &&
                     max_live_decoded_layers_ <= thresholds.max_live_decoded_layers &&
                     max_settled_animations_ <=
@@ -177,9 +240,10 @@ std::string LessonRendererMemoryReport::ToJson(const char* measurement_kind) con
     char json[2048];
     std::snprintf(
         json, sizeof(json),
-        "{\"schemaVersion\":1,\"measurementKind\":\"%s\",\"passed\":%s,"
+        "{\"schemaVersion\":2,\"measurementKind\":\"%s\",\"passed\":%s,"
         "\"cycles\":{\"cancel\":%u,\"complete\":%u},"
-        "\"actual\":{\"frameAllocations\":%u,\"maxLiveDecodedLayers\":%u,"
+        "\"actual\":{\"frameAllocationsMeasured\":%s,\"frameAllocations\":%s,"
+        "\"maxLiveDecodedLayers\":%u,"
         "\"maxSettledAnimations\":%u,\"maxSettledContexts\":%u,"
         "\"internalHeapLossBytes\":%u,\"psramLossBytes\":%u,"
         "\"largestInternalBlockBytes\":%u,\"minInternalFreeBytes\":%u,"
@@ -190,7 +254,9 @@ std::string LessonRendererMemoryReport::ToJson(const char* measurement_kind) con
         "\"minLargestInternalBlockBytes\":%u,\"minInternalFreeBytes\":%u}}",
         measurement_kind == nullptr ? "unknown" : measurement_kind,
         passed ? "true" : "false", static_cast<unsigned>(cancel_cycles),
-        static_cast<unsigned>(complete_cycles), static_cast<unsigned>(frame_allocations),
+        static_cast<unsigned>(complete_cycles),
+        frame_allocations_measured ? "true" : "false",
+        frame_allocations_measured ? std::to_string(frame_allocations).c_str() : "null",
         static_cast<unsigned>(max_live_decoded_layers),
         static_cast<unsigned>(max_settled_animations),
         static_cast<unsigned>(max_settled_contexts),

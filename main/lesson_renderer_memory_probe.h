@@ -58,6 +58,7 @@ struct LessonRendererMemoryThresholds {
 struct LessonRendererMemoryReport {
     bool passed = false;
     bool forbidden_markers_found = false;
+    bool frame_allocations_measured = false;
     size_t cancel_cycles = 0;
     size_t complete_cycles = 0;
     size_t frame_allocations = 0;
@@ -74,6 +75,11 @@ struct LessonRendererMemoryReport {
 #ifdef TBOT_LESSON_MEMORY_TEST
     std::string ToJson(const char* measurement_kind) const;
 #endif
+};
+
+struct LessonRendererFrameAllocationToken {
+    uint32_t allocation_count = 0;
+    bool measured = false;
 };
 
 #ifdef TBOT_LESSON_MEMORY_TEST
@@ -96,6 +102,9 @@ public:
 #endif
 
     void Capture(LessonRendererMemoryPhase phase, uint32_t elapsed_since_terminal_ms = 0);
+    LessonRendererFrameAllocationToken BeginFrameAllocationMeasurement();
+    size_t EndFrameAllocationMeasurement(
+        const LessonRendererFrameAllocationToken& token);
     void RecordFrameAllocations(size_t allocations);
     LessonRendererMemoryReport Evaluate(const LessonRendererMemoryThresholds& thresholds,
                                         bool forbidden_markers_found) const;
@@ -114,6 +123,7 @@ private:
     size_t cancel_cycles_ = 0;
     size_t complete_cycles_ = 0;
     size_t frame_allocations_ = 0;
+    bool frame_allocations_measured_ = false;
     size_t max_live_decoded_layers_ = 0;
     size_t max_settled_animations_ = 0;
     size_t max_settled_contexts_ = 0;

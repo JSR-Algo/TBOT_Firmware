@@ -50,6 +50,7 @@ set(SOURCES "audio/audio_codec.cc"
             "lesson_handler.cc"
             "lesson_tvideo_template.cc"
             "lesson_heap_probe.cc"
+            "lesson_renderer_memory_heap_hook.cc"
             "lesson_renderer_memory_probe.cc"
             "lesson_motion_presets.cc"
             "lesson_layer_state.cc"
@@ -1069,6 +1070,17 @@ idf_component_register(SRCS ${SOURCES}
 
 idf_component_get_property(TBOT_LVGL_COMPONENT_LIB lvgl__lvgl COMPONENT_LIB)
 target_compile_definitions(${TBOT_LVGL_COMPONENT_LIB} PRIVATE LODEPNG_NO_COMPILE_ALLOCATORS=1)
+
+option(TBOT_RENDERER_MEMORY_DIAGNOSTICS
+       "Measure renderer frame allocations with ESP-IDF heap hooks" OFF)
+if(TBOT_RENDERER_MEMORY_DIAGNOSTICS)
+    if(NOT CONFIG_HEAP_USE_HOOKS)
+        message(FATAL_ERROR
+            "TBOT_RENDERER_MEMORY_DIAGNOSTICS requires CONFIG_HEAP_USE_HOOKS=y")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE
+        TBOT_RENDERER_MEMORY_DIAGNOSTICS=1)
+endif()
 
 if(TBOT_NATIVE_COVERAGE)
     set(TBOT_NATIVE_COVERAGE_SOURCES "" CACHE STRING "Semicolon-separated main component sources to instrument; empty instruments all main sources")

@@ -3,6 +3,7 @@
 #ifdef TBOT_LESSON_MEMORY_TEST
 #include "lesson_renderer_memory_probe.h"
 #include <esp_log.h>
+extern "C" void esp_heap_trace_alloc_hook(void* ptr, size_t size, uint32_t caps);
 #endif
 
 #include <algorithm>
@@ -77,12 +78,17 @@ void AdvanceWithoutAllocations(lesson_tvideo::StateMachine* animation,
                                uint32_t* callback_elapsed_ms, uint32_t tick_ms,
                                HostBoundsState* bounds) {
     const size_t before = frame_allocations.load(std::memory_order_relaxed);
+    const LessonRendererFrameAllocationToken allocation_token =
+        probe->BeginFrameAllocationMeasurement();
     inside_animation_frame = true;
     (void)AdvanceLessonRendererAnimationFrame(
         animation, callback_elapsed_ms, tick_ms, 6000, WriteHostBounds, bounds);
     inside_animation_frame = false;
-    probe->RecordFrameAllocations(
-        frame_allocations.load(std::memory_order_relaxed) - before);
+    const size_t measured_delta =
+        probe->EndFrameAllocationMeasurement(allocation_token);
+    require(allocation_token.measured, "diagnostic frame allocation window is active");
+    require(measured_delta == frame_allocations.load(std::memory_order_relaxed) - before,
+            "diagnostic allocator hook matches the host allocation cross-check");
 }
 
 void RunMemoryGate() {
@@ -90,8 +96,21 @@ void RunMemoryGate() {
     frame_allocations.store(0, std::memory_order_relaxed);
 
     HostMemoryState state;
+    LessonRendererMemoryProbe accounting_probe(ReadHostMemory, &state);
+    const LessonRendererFrameAllocationToken accounting_token =
+        accounting_probe.BeginFrameAllocationMeasurement();
+    inside_animation_frame = true;
+    volatile char* diagnostic_allocation = new char[8];
+    inside_animation_frame = false;
+    delete[] diagnostic_allocation;
+    require(accounting_probe.EndFrameAllocationMeasurement(accounting_token) == 1,
+            "diagnostic ESP heap hook counts an allocation in the frame window");
+    frame_allocations.store(0, std::memory_order_relaxed);
+
     LessonRendererMemoryProbe probe(ReadHostMemory, &state);
     probe.Capture(LessonRendererMemoryPhase::kStart);
+    require(HostEspLogs().front().find("frame_alloc=na") != std::string::npos,
+            "unmeasured production frame allocation logs as N/A");
     LessonRendererMemoryDecodedLayerOpened();
     LessonRendererMemoryDecodedLayerOpened();
     LessonRendererMemoryDecodedLayerOpened();
@@ -167,6 +186,8 @@ void RunMemoryGate() {
     require(report.cancel_cycles == 100 && report.complete_cycles == 100,
             "memory report includes all soak cycles");
     require(report.frame_allocations == 0, "animation frames allocate no memory");
+    require(report.frame_allocations_measured,
+            "numeric zero is reported only after diagnostic measurement");
     require(report.max_live_decoded_layers <= 3, "decoded layer count stays bounded");
     require(report.max_settled_animations == 0 && report.max_settled_contexts == 0,
             "animations and contexts release by 500ms");
@@ -193,8 +214,13 @@ void RunMemoryGate() {
 
 #ifdef TBOT_LESSON_MEMORY_TEST
 void* operator new(std::size_t size) {
-    if (inside_animation_frame) frame_allocations.fetch_add(1, std::memory_order_relaxed);
-    if (void* pointer = std::malloc(size)) return pointer;
+    if (void* pointer = std::malloc(size)) {
+        if (inside_animation_frame) {
+            frame_allocations.fetch_add(1, std::memory_order_relaxed);
+            esp_heap_trace_alloc_hook(pointer, size, 0);
+        }
+        return pointer;
+    }
     throw std::bad_alloc();
 }
 

@@ -1657,6 +1657,11 @@ bool LcdDisplay::StartLessonRobotEntrance(
                 {
                     DisplayLockGuard lock(animation->owner);
                     if (animation->owner->lesson_robot_animation_context_ != animation) return;
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+                    const LessonRendererFrameAllocationToken allocation_token =
+                        animation->owner->lesson_renderer_memory_probe_
+                            .BeginFrameAllocationMeasurement();
+#endif
                     const LessonRendererAnimationFrameResult frame =
                         AdvanceLessonRendererAnimationFrame(
                             &animation->machine, &animation->elapsed_ms,
@@ -1672,6 +1677,10 @@ bool LcdDisplay::StartLessonRobotEntrance(
                                 }
                             },
                             animation->owner);
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+                    animation->owner->lesson_renderer_memory_probe_
+                        .EndFrameAllocationMeasurement(allocation_token);
+#endif
                     if (!frame.complete) return;
 
                     timer_completion = std::move(animation->completion);

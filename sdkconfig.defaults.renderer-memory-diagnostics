@@ -1,0 +1,3 @@
+# HIL-only renderer allocation accounting. Pair with:
+# idf.py -D TBOT_RENDERER_MEMORY_DIAGNOSTICS=ON ...
+CONFIG_HEAP_USE_HOOKS=y
