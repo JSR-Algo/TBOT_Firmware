@@ -42,36 +42,34 @@ def _function_body(text: str, signature: str) -> str:
 
 # ---------------------------------------------------------------------------
 # FW1: wifi_board.cc — BeginWifiProvisioning appears BEFORE
-#      blufi.init() in the explicit Wi-Fi-config setup path.
+#      RestartForSetup() in the explicit Wi-Fi-config setup path.
 # ---------------------------------------------------------------------------
 def test_fw1_release_wake_word_before_ble_init_in_config_path():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    # The wake-word resource release must run before the BLE stack is brought up,
-    # otherwise the AFE detection task contends with BLE during provisioning.
+    # The wake-word resource release must run before BLE setup restart, otherwise
+    # the AFE detection task contends with BLE during provisioning.
     assert "BeginWifiProvisioning" in body
-    assert "blufi.init();" in body
+    assert "blufi.RestartForSetup();" in body
     release_idx = body.index("BeginWifiProvisioning")
-    init_idx = body.index("blufi.init();")
-    assert release_idx < init_idx
+    restart_idx = body.index("blufi.RestartForSetup();")
+    assert release_idx < restart_idx
 
 
 # ---------------------------------------------------------------------------
-# FW2: wifi_board.cc — BleState::kTimeout is accepted for explicit setup
-#      re-entry (re-init BLE + re-arm StartBleSetupTimeout).
+# FW2: wifi_board.cc — explicit setup re-entry restarts the BLE generation
+#      before re-arming StartBleSetupTimeout.
 # ---------------------------------------------------------------------------
 def test_fw2_ble_timeout_accepted_for_explicit_setup_reentry():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    # A prior hard-timeout is equivalent to off for an explicit setup entry: the
-    # state read must accept kTimeout so the stack is re-initialized and the
-    # hard-timeout window is re-armed for the new attempt.
-    assert "Blufi::BleState::kTimeout" in body
-    init_idx = body.index("blufi.init();")
+    # The restart helper handles off, timeout, and already-advertising states so
+    # every explicit setup entry gets a fresh generation and scan window.
+    restart_idx = body.index("blufi.RestartForSetup();")
     rearm_idx = body.index("blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC)")
-    assert init_idx < rearm_idx
+    assert restart_idx < rearm_idx
 
 
 # ---------------------------------------------------------------------------
@@ -1934,7 +1932,7 @@ def test_fw33_boot_reentry_starts_a_new_generation_and_clean_ble_session():
     restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
 
     assert "blufi.TryReserveProvisioningSession()" in start
-    assert "blufi.init();" in start
+    assert "blufi.RestartForSetup();" in start
     assert "CancelBleSetupTimeout();" in restart
     assert "setup_generation_.fetch_add" in restart
     assert "deinit();" in restart

@@ -66,11 +66,11 @@ def _connected_event_body(wifi_board: str) -> str:
 
 # ---------------------------------------------------------------------------
 # WB1: StartWifiConfigMode() full setup ordering for the BLE provisioning path:
-#      reserve -> BeginWifiProvisioning -> commit -> GetBleState() ->
-#      successful blufi.init() -> visible state mutation -> timeout. The wake-word release must free
-#      the AFE detection task before BLE comes up; the state read gates the
-#      conditional init; the hard-timeout is armed last so advertising cannot
-#      run forever.
+#      reserve -> BeginWifiProvisioning -> commit -> RestartForSetup() ->
+#      visible state mutation -> timeout. The wake-word release must free
+#      the AFE detection task before BLE comes up; the restart helper owns
+#      BLE generation reset/deinit/init; the hard-timeout is armed last so
+#      advertising cannot run forever.
 # ---------------------------------------------------------------------------
 def test_wb1_start_config_mode_setup_step_ordering():
     wifi_board = read("main/boards/common/wifi_board.cc")
@@ -79,23 +79,22 @@ def test_wb1_start_config_mode_setup_step_ordering():
     reserve_idx = body.index("TryReserveProvisioningSession")
     release_idx = body.index("BeginWifiProvisioning")
     commit_idx = body.index("provisioning_reservation.Commit(provisioning_token)")
-    get_state_idx = body.index("blufi.GetBleState();")
-    init_idx = body.index("blufi.init();")
+    restart_idx = body.index("blufi.RestartForSetup();")
     stop_idx = body.index("WifiManager::GetInstance().StopStation();")
     config_idx = body.index("in_config_mode_ = true;")
     state_idx = body.index("PublishWifiConfigEntry(preparation)")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
 
-    assert reserve_idx < release_idx < commit_idx < get_state_idx < init_idx
-    assert init_idx < state_idx < stop_idx < config_idx < timer_idx, (
+    assert reserve_idx < release_idx < commit_idx < restart_idx
+    assert restart_idx < state_idx < stop_idx < config_idx < timer_idx, (
         "StartWifiConfigMode() BLE setup steps must run in order: "
-        "reservation -> wake-word release -> binding -> init success -> "
+        "reservation -> wake-word release -> binding -> restart success -> "
         "checked state publication -> station/config mutation -> StartBleSetupTimeout()"
     )
-    assert "if (blufi_init_error != ESP_OK)" in body
-    init_failure = body[body.index("if (blufi_init_error != ESP_OK)"):stop_idx]
-    assert "AbortProvisioningSetup(provisioning_token)" in init_failure
-    assert init_failure.index("AbortProvisioningSetup(provisioning_token)") < init_failure.index(
+    assert "if (blufi_restart_error != ESP_OK)" in body
+    restart_failure = body[body.index("if (blufi_restart_error != ESP_OK)"):stop_idx]
+    assert "AbortProvisioningSetup(provisioning_token)" in restart_failure
+    assert restart_failure.index("AbortProvisioningSetup(provisioning_token)") < restart_failure.index(
         "RollbackWifiConfigEntry(preparation)"
     )
 
@@ -111,7 +110,7 @@ def test_wb2_explicit_setup_always_opens_a_fresh_blufi_session():
     body = _start_wifi_config_body(wifi_board)
 
     assert body.count("blufi.TryReserveProvisioningSession()") == 1
-    assert body.index("TryReserveProvisioningSession") < body.index("blufi.init();")
+    assert body.index("TryReserveProvisioningSession") < body.index("blufi.RestartForSetup();")
     assert "prior provisioning completion still active" in body
 
     restart_idx = body.index("blufi.RestartForSetup();")
@@ -294,10 +293,10 @@ def test_application_prepares_realtime_before_blufi_and_checks_publication():
 
     prepare = start.index("PrepareWifiConfigEntry")
     reserve = start.index("TryReserveProvisioningSession")
-    init = start.index("blufi.init()")
+    restart = start.index("blufi.RestartForSetup()")
     publish = start.index("PublishWifiConfigEntry")
     stop = start.index("StopStation")
-    assert prepare < reserve < init < publish < stop
+    assert prepare < reserve < restart < publish < stop
     assert "struct WifiConfigEntryPreparation" in app_h
     assert "bool PrepareWifiConfigEntry(WifiConfigEntryPreparation&" in app_h
     assert "bool PublishWifiConfigEntry(const WifiConfigEntryPreparation&" in app_h

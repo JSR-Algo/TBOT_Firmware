@@ -309,27 +309,16 @@ void WifiBoard::StartWifiConfigMode(bool show_notification) {
         }
         return;
     }
-    // initialize esp-blufi protocol.
-    // Guard against double-init: the Application now also brings BLE up while the
-    // robot is unclaimed in claimable standby (so the app can discover it over
-    // BLE). If we entered config mode from that state the BLE stack is already
-    // advertising; calling init() again would leak the controller/host. A prior
-    // hard-timeout is equivalent to off for an explicit BOOT setup entry: the
-    // stack was torn down and must be initialized again so the phone can scan it.
-    const auto ble_state = blufi.GetBleState();
-    if (ble_state == Blufi::BleState::kOff ||
-        ble_state == Blufi::BleState::kTimeout) {
-        const esp_err_t blufi_init_error = blufi.init();
-        if (blufi_init_error != ESP_OK) {
-            ESP_LOGE(TAG, "WiFi config aborted: BLUFI init failed: %s",
-                     esp_err_to_name(blufi_init_error));
-            if (!blufi.AbortProvisioningSetup(provisioning_token)) {
-                ESP_LOGE(TAG, "BLUFI init rollback incomplete; provisioning remains fail-closed");
-            } else if (!app.RollbackWifiConfigEntry(preparation)) {
-                ESP_LOGE(TAG, "BLUFI init rollback could not restore application state");
-            }
-            return;
+    const esp_err_t blufi_restart_error = blufi.RestartForSetup();
+    if (blufi_restart_error != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi config aborted: BLUFI restart failed: %s",
+                 esp_err_to_name(blufi_restart_error));
+        if (!blufi.AbortProvisioningSetup(provisioning_token)) {
+            ESP_LOGE(TAG, "BLUFI restart rollback incomplete; provisioning remains fail-closed");
+        } else if (!app.RollbackWifiConfigEntry(preparation)) {
+            ESP_LOGE(TAG, "BLUFI restart rollback could not restore application state");
         }
+        return;
     }
 #endif
 

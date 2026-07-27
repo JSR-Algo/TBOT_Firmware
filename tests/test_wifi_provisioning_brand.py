@@ -113,11 +113,9 @@ def test_blufi_config_mode_reopens_robot_scan_after_ble_timeout():
     start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
 
-    assert "Blufi::BleState::kTimeout" in body
-    assert "blufi.init();" in body
-    init_idx = body.index("blufi.RestartForSetup();")
+    restart_idx = body.index("blufi.RestartForSetup();")
     timer_idx = body.index("blufi.StartBleSetupTimeout")
-    assert init_idx < timer_idx
+    assert restart_idx < timer_idx
 
 
 def test_blufi_only_build_does_not_reference_softap_timeout_without_hotspot_guard():
@@ -140,8 +138,8 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
     release_idx = body.index("BeginWifiProvisioning")
-    init_idx = body.index("blufi.init();")
-    assert release_idx < init_idx
+    restart_idx = body.index("blufi.RestartForSetup();")
+    assert release_idx < restart_idx
 
     assert "WifiProvisioningBeginResult BeginWifiProvisioning();" in audio_h
     release_start = audio_cc.index("AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning()")

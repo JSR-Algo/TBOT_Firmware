@@ -85,7 +85,7 @@ def test_wifi_provisioning_rearms_only_after_ble_deinit():
     source = read("main/boards/common/wifi_board.cc")
     start = source.index("void WifiBoard::StartWifiConfigMode(")
     start_body = source[start:source.index("void WifiBoard::EnterWifiConfigMode()", start)]
-    assert start_body.index("BeginWifiProvisioning()") < start_body.index("blufi.init();")
+    assert start_body.index("BeginWifiProvisioning()") < start_body.index("blufi.RestartForSetup();")
 
     connected = source[source.index("case NetworkEvent::Connected:"):]
     connected = connected[:connected.index("case NetworkEvent::Scanning:")]
