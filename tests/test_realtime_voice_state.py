@@ -926,8 +926,9 @@ def test_lesson_runtime_audio_open_callback_suppresses_stale_side_effects():
         opened_body.index("if (passive_ws_intent_.load())") :
         opened_body.index("} else {")
     ]
-    assert "if (!lesson_runtime_active_.load())" in passive_branch
-    assert passive_branch.index("if (!lesson_runtime_active_.load())") < passive_branch.index(
+    claimed_lesson_guard = "if (IsDeviceClaimed() && !lesson_runtime_active_.load())"
+    assert claimed_lesson_guard in passive_branch
+    assert passive_branch.index(claimed_lesson_guard) < passive_branch.index(
         "audio_service_.EnableWakeWordDetection(true);"
     )
 

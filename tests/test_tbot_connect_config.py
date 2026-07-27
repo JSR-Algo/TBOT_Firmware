@@ -27,6 +27,11 @@ def kconfig_default(text: str, config_name: str) -> str:
     return default.group("value")
 
 
+def local_build_configs() -> list[Path]:
+    # Defaults are maintained inputs; sdkconfig is the production resolved config.
+    return [ROOT / "sdkconfig", *sorted(ROOT.glob("sdkconfig.defaults*"))]
+
+
 def test_firmware_compiles_no_ephemeral_websocket_endpoint_fallback():
     kconfig = read("main/Kconfig.projbuild")
 
@@ -48,11 +53,10 @@ def test_project_version_advances_past_current_production_lcdwiki_ota():
 
 
 def test_local_firmware_build_configs_compile_no_ephemeral_websocket_seed():
-    local_configs = sorted(
-        path for path in ROOT.glob("sdkconfig*")
-        if path.is_file() and not path.name.endswith((".bak", ".old"))
-    )
-    assert local_configs
+    local_configs = local_build_configs()
+    assert all(path.is_file() for path in local_configs)
+    assert ROOT / "sdkconfig" in local_configs
+    assert ROOT / "sdkconfig.blufi" not in local_configs
 
     for sdkconfig in local_configs:
         contents = sdkconfig.read_text(encoding="utf-8")
@@ -65,11 +69,10 @@ def test_local_firmware_build_configs_compile_no_ephemeral_websocket_seed():
 
 
 def test_local_firmware_build_configs_compile_only_current_production_ota_seed():
-    local_configs = sorted(
-        path for path in ROOT.glob("sdkconfig*")
-        if path.is_file() and not path.name.endswith((".bak", ".old"))
-    )
-    assert local_configs
+    local_configs = local_build_configs()
+    assert all(path.is_file() for path in local_configs)
+    assert ROOT / "sdkconfig" in local_configs
+    assert ROOT / "sdkconfig.blufi" not in local_configs
 
     for sdkconfig in local_configs:
         contents = sdkconfig.read_text(encoding="utf-8")
