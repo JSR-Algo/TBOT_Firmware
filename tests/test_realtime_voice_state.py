@@ -2170,8 +2170,9 @@ def test_firmware_exposes_generic_lesson_asset_pack_sync_to_sd():
 
 def test_lesson_asset_pack_sync_http_download_does_not_starve_main_watchdog():
     mcp_server = read("main/mcp_server.cc")
-    start = mcp_server.index("bool DownloadLessonAssetToFile")
-    end = mcp_server.index("\n}\n}\n\nMcpServer::McpServer", start)
+    declaration = mcp_server.index("bool DownloadLessonAssetToFile")
+    start = mcp_server.index("bool DownloadLessonAssetToFile", declaration + 1)
+    end = mcp_server.index("\n    return true;\n}", start)
     body = mcp_server[start:end]
 
     assert "auto http = network->CreateHttp(1);" in body

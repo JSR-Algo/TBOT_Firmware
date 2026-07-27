@@ -27,6 +27,7 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_pack_activation.h"
 #include "lesson_asset_storage_coordinator.h"
@@ -36,6 +37,7 @@
 #include "lesson_asset_sample_url_policy.h"
 #include "lesson_asset_sync_path_policy.h"
 #include <lesson_asset_sync_attestation.h>
+#endif
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
 #include "lesson_storage_hil_mcp_tools.h"
 #include "lesson_storage_hil_controller.h"
@@ -46,6 +48,19 @@
 
 namespace {
 constexpr size_t kMcpToolsListMaxPayloadBytes = 2500;
+bool IsLessonSnapshotEvidenceCall(
+    const std::string& tool_name,
+    const cJSON* tool_arguments
+) {
+    if (tool_name != "self.screen.snapshot" || !cJSON_IsObject(tool_arguments)) {
+        return false;
+    }
+    const cJSON* allow_during_lesson =
+        cJSON_GetObjectItem(tool_arguments, "allowDuringLesson");
+    return cJSON_IsTrue(allow_during_lesson);
+}
+
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 constexpr size_t kLessonAssetSyncMaxAssets = 64;
 constexpr const char* kLessonAssetPackRoot = "/sdcard/tbot/lesson-assets/";
 constexpr const char* kSampleLessonAssetDir = "/sdcard/tbot/lesson-assets/sample-barn";
@@ -111,18 +126,6 @@ void EnsureLessonAssetParentDirs(
 const char* JsonStringField(const cJSON* object, const char* key) {
     const cJSON* value = cJSON_GetObjectItem(object, key);
     return cJSON_IsString(value) ? value->valuestring : nullptr;
-}
-
-bool IsLessonSnapshotEvidenceCall(
-    const std::string& tool_name,
-    const cJSON* tool_arguments
-) {
-    if (tool_name != "self.screen.snapshot" || !cJSON_IsObject(tool_arguments)) {
-        return false;
-    }
-    const cJSON* allow_during_lesson =
-        cJSON_GetObjectItem(tool_arguments, "allowDuringLesson");
-    return cJSON_IsTrue(allow_during_lesson);
 }
 
 struct ValidatedLessonAsset {
@@ -423,6 +426,7 @@ bool DownloadLessonAssetToFile(
         bytes_out);
     return true;
 }
+#endif
 }
 
 McpServer::McpServer() {
@@ -858,6 +862,7 @@ void McpServer::AddUserOnlyTools() {
     }
 #endif // HAVE_LVGL
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     AddUserOnlyTool("self.lesson_assets.evict_cache_key",
         "Evict one exact lesson asset cache key from the SD card.",
         PropertyList({
@@ -1063,6 +1068,7 @@ void McpServer::AddUserOnlyTools() {
             CheckedCJsonAddItemToObject(json.get(), "files", std::move(files));
             return json.release();
         });
+#endif
 
     AddUserOnlyTool("self.assets.set_download_url", "Set the download url for the assets",
             PropertyList({

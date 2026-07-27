@@ -39,21 +39,6 @@ set(SOURCES "audio/audio_codec.cc"
             "system_info.cc"
             "application.cc"
             "json_payload_safety.cc"
-            "lesson_asset_cache_evict.cc"
-            "lesson_asset_download_staging.cc"
-            "lesson_asset_http_transfer.cc"
-            "lesson_asset_pack_activation.cc"
-            "lesson_asset_sample_url_policy.cc"
-            "lesson_asset_storage_coordinator.cc"
-            "lesson_asset_sync_path_policy.cc"
-            "lesson_asset_sync_attestation.cc"
-            "lesson_handler.cc"
-            "lesson_tvideo_template.cc"
-            "lesson_heap_probe.cc"
-            "lesson_renderer_memory_heap_hook.cc"
-            "lesson_renderer_memory_probe.cc"
-            "lesson_motion_presets.cc"
-            "lesson_layer_state.cc"
             "esp_build_identity.cc"
             "ota.cc"
             "settings.cc"
@@ -62,16 +47,6 @@ set(SOURCES "audio/audio_codec.cc"
             "sd_fat_session_guard.cc"
             "main.cc"
             )
-
-if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
-    list(APPEND SOURCES
-        "physical_sd_identity.cc"
-        "lesson_storage_hil_controller.cc"
-        "lesson_storage_hil_hooks.cc"
-        "lesson_storage_hil_fixture.cc"
-        "lesson_storage_hil_mcp_tools.cc"
-    )
-endif()
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 
@@ -846,6 +821,41 @@ elseif(CONFIG_BOARD_TYPE_AI_VOX3)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 endif()
 
+# The TBOT lesson renderer and SD materialization runtime target the production
+# LCDWiki robot. Keeping these sources out of unrelated board images preserves
+# their smaller OTA partitions and avoids advertising an unsupported renderer.
+if(CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P)
+    list(APPEND SOURCES
+        "lesson_asset_cache_evict.cc"
+        "lesson_asset_download_staging.cc"
+        "lesson_asset_http_transfer.cc"
+        "lesson_asset_pack_activation.cc"
+        "lesson_asset_sample_url_policy.cc"
+        "lesson_asset_storage_coordinator.cc"
+        "lesson_asset_sync_path_policy.cc"
+        "lesson_asset_sync_attestation.cc"
+        "lesson_handler.cc"
+        "lesson_tvideo_template.cc"
+        "lesson_heap_probe.cc"
+        "lesson_renderer_memory_heap_hook.cc"
+        "lesson_renderer_memory_probe.cc"
+        "lesson_motion_presets.cc"
+        "lesson_layer_state.cc"
+    )
+
+    if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
+        list(APPEND SOURCES
+            "physical_sd_identity.cc"
+            "lesson_storage_hil_controller.cc"
+            "lesson_storage_hil_hooks.cc"
+            "lesson_storage_hil_fixture.cc"
+            "lesson_storage_hil_mcp_tools.cc"
+        )
+    endif()
+elseif(CONFIG_TBOT_HIL_STORAGE_FAULTS)
+    message(FATAL_ERROR "TBOT lesson storage HIL is supported only on lcdwiki-es3c35p")
+endif()
+
 if(MANUFACTURER)
     file(GLOB BOARD_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/boards/${MANUFACTURER}/${BOARD_TYPE}/*.cc
@@ -1068,8 +1078,10 @@ idf_component_register(SRCS ${SOURCES}
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 
-idf_component_get_property(TBOT_LVGL_COMPONENT_LIB lvgl__lvgl COMPONENT_LIB)
-target_compile_definitions(${TBOT_LVGL_COMPONENT_LIB} PRIVATE LODEPNG_NO_COMPILE_ALLOCATORS=1)
+if(CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P)
+    idf_component_get_property(TBOT_LVGL_COMPONENT_LIB lvgl__lvgl COMPONENT_LIB)
+    target_compile_definitions(${TBOT_LVGL_COMPONENT_LIB} PRIVATE LODEPNG_NO_COMPILE_ALLOCATORS=1)
+endif()
 
 option(TBOT_RENDERER_MEMORY_DIAGNOSTICS
        "Measure renderer frame allocations with ESP-IDF heap hooks" OFF)

@@ -23,6 +23,7 @@
 #define TAG "LcdDisplay"
 
 namespace {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 constexpr int kLessonObjectMaxWidthPercent = 46;
 constexpr int kLessonObjectMaxHeightPercent = 50;
 constexpr int kLessonObjectYOffsetDivisor = 12;
@@ -74,6 +75,7 @@ int LessonImageCoverScale(int image_width, int image_height, int target_width, i
     const int scale_h = 256 * target_height / image_height;
     return std::max(1, std::max(scale_w, scale_h));
 }
+#endif
 }  // namespace
 
 LV_FONT_DECLARE(BUILTIN_TEXT_FONT);
@@ -342,6 +344,7 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 }
 
 LcdDisplay::~LcdDisplay() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     CancelLessonRobotEntrance();
 #ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
     {
@@ -352,6 +355,7 @@ LcdDisplay::~LcdDisplay() {
     ReplaceTrackedLessonLayer(&lesson_background_cached_, nullptr);
     ReplaceTrackedLessonLayer(&lesson_object_cached_, nullptr);
     ReplaceTrackedLessonLayer(&lesson_robot_overlay_cached_, nullptr);
+#endif
     SetPreviewImage(nullptr);
     
     // Clean up GIF controller
@@ -465,6 +469,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     /* US-006 lesson background: full-screen, persistent poster. Created on `screen`
      * (NOT inside the flex `container_`) so it underlays the whole chat layout and is
      * not subject to flex sizing; moved to the back of the z-order so the chat bars
@@ -523,6 +528,7 @@ void LcdDisplay::SetupUI() {
     lv_label_set_text(lesson_caption_label_, "");
     lv_obj_center(lesson_caption_label_);
     lv_obj_add_flag(lesson_caption_bar_, LV_OBJ_FLAG_HIDDEN);
+#endif
 
     /* Layer 1: Top bar - for status icons */
     top_bar_ = lv_obj_create(container_);
@@ -928,6 +934,7 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     lv_obj_scroll_to_view_recursive(img_bubble, LV_ANIM_ON);
 }
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 // US-006 lesson image render: full-screen PERSISTENT background poster (wechat-style
 // build). Distinct from SetPreviewImage above (a transient chat bubble inside the
 // scrolling content_): this draws into the screen-level lesson_background_ object,
@@ -1068,6 +1075,17 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
     if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
 }
+#else
+void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) { (void)image; }
+void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) { (void)image; }
+void LcdDisplay::SetLessonRobotOverlayBounds(int left, int top, int width, int height) {
+    (void)left;
+    (void)top;
+    (void)width;
+    (void)height;
+}
+void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) { (void)image; }
+#endif
 
 void LcdDisplay::ClearChatMessages() {
     DisplayLockGuard lock(this);
@@ -1117,6 +1135,7 @@ void LcdDisplay::SetupUI() {
     lv_obj_set_style_bg_color(container_, lvgl_theme->background_color(), 0);
     lv_obj_set_style_border_color(container_, lvgl_theme->border_color(), 0);
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     /* US-006 lesson background: full-screen, persistent poster behind everything.
      * Created right after container_ so it sits at the BOTTOM of the z-order — the
      * emoji face, top/status bars and chat caption are all created after it and stay
@@ -1153,6 +1172,7 @@ void LcdDisplay::SetupUI() {
     lv_label_set_text(lesson_word_label_, "");
     lv_obj_center(lesson_word_label_);
     lv_obj_add_flag(lesson_word_pill_, LV_OBJ_FLAG_HIDDEN);
+#endif
 
     /* Bottom layer: emoji_box_ - centered display */
     emoji_box_ = lv_obj_create(screen);
@@ -1355,6 +1375,7 @@ void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     ESP_ERROR_CHECK(esp_timer_start_once(preview_timer_, PREVIEW_IMAGE_DURATION_MS * 1000));
 }
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 // US-006 lesson image render: full-screen PERSISTENT background poster. Unlike
 // SetPreviewImage (centered, half-screen, 5s auto-hide), this fills the screen and
 // stays up for the whole lesson step — there is NO preview_timer_ involvement. Pass
@@ -1501,6 +1522,17 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
     if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
     if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
 }
+#else
+void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) { (void)image; }
+void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) { (void)image; }
+void LcdDisplay::SetLessonRobotOverlayBounds(int left, int top, int width, int height) {
+    (void)left;
+    (void)top;
+    (void)width;
+    (void)height;
+}
+void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) { (void)image; }
+#endif
 
 void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     if (!setup_ui_called_) {
@@ -1543,6 +1575,7 @@ void LcdDisplay::ClearChatMessages() {
 }
 #endif
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 void LcdDisplay::SetLessonCaption(const char* content) {
     DisplayLockGuard lock(this);
     const bool empty = content == nullptr || content[0] == '\0';
@@ -1861,6 +1894,34 @@ void LcdDisplay::SetLessonMode(bool active) {
         }
     }
 }
+#else
+void LcdDisplay::SetLessonCaption(const char* content) { (void)content; }
+void LcdDisplay::SetLessonTeachingWord(const char* text) { (void)text; }
+bool LcdDisplay::StartLessonRobotEntrance(
+    const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) {
+    (void)plan;
+    if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");
+    return false;
+}
+void LcdDisplay::CancelLessonRobotEntranceLocked() {
+    lesson_robot_animation_context_ = nullptr;
+}
+#ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
+void LcdDisplay::CancelLessonRendererSettledObservationLocked() {}
+void LcdDisplay::ScheduleLessonRendererSettledObservationLocked(
+    LessonRendererMemoryPhase phase) {
+    (void)phase;
+}
+#endif
+void LcdDisplay::CancelLessonRobotEntrance() {}
+bool LcdDisplay::ApplyLessonVisualState(
+    const LessonVisualState& state, LessonVisualCompletion completion) {
+    (void)state;
+    if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");
+    return false;
+}
+void LcdDisplay::SetLessonMode(bool active) { (void)active; }
+#endif
 
 void LcdDisplay::SetEmotion(const char* emotion) {
     if (!setup_ui_called_) {

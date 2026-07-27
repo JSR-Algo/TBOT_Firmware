@@ -3,7 +3,9 @@
 #include "system_info.h"
 #include "application.h"
 #include "settings.h"
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_handler.h"
+#endif
 #include "json_payload_safety.h"
 #include "esp_build_identity.h"
 
@@ -84,6 +86,7 @@ void WebsocketProtocol::RefreshSettings() {
 }
 
 bool WebsocketProtocol::IsAllowedUnclaimedPublicLessonMessage(const cJSON* root) const {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     const cJSON* type = cJSON_GetObjectItem(root, "type");
     if (!cJSON_IsString(type) || strcmp(type->valuestring, "mcp") != 0) {
         return false;
@@ -107,6 +110,10 @@ bool WebsocketProtocol::IsAllowedUnclaimedPublicLessonMessage(const cJSON* root)
     return cJSON_IsString(name) &&
            strcmp(name->valuestring, "self.lesson_assets.sync_to_sd") == 0 &&
            cJSON_IsObject(arguments);
+#else
+    (void)root;
+    return false;
+#endif
 }
 
 WebsocketProtocol::WebsocketProtocol() {
@@ -115,7 +122,12 @@ WebsocketProtocol::WebsocketProtocol() {
 }
 
 void WebsocketProtocol::SetUnclaimedPublicLessonOnly(bool enabled) {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     unclaimed_public_lesson_only_ = enabled;
+#else
+    (void)enabled;
+    unclaimed_public_lesson_only_ = false;
+#endif
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
@@ -525,12 +537,14 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddBoolToObject(features, "aec", true);
 #endif
     cJSON_AddBoolToObject(features, "mcp", true);
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     // US-006 Slice-01 (D-CAP-FLAG, ADR 0013 §I): advertise lesson-render capability.
     // Absence == no support; the ESP Server MUST NOT send lesson_prepare to firmware
     // that did not advertise this. Purely additive — does not disturb aec/mcp/voice.
     cJSON_AddBoolToObject(features, "lesson", true);
     cJSON_AddStringToObject(features, "renderer", kLessonRendererName);
     AddLessonRendererFeatures(features);
+#endif
     cJSON_AddItemToObject(root, "features", features);
     cJSON_AddStringToObject(root, "transport", "websocket");
     cJSON* audio_params = cJSON_CreateObject();

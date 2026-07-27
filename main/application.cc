@@ -14,7 +14,9 @@
 #include "robot_uart.h"
 #include "app_manager.h"
 #include "tbot_connect_mapper.h"
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_heap_probe.h"
+#endif
 #include "passive_reconnect_policy.h"
 #include "protocol_lifetime_token.h"
 #include "esp_build_identity.h"
@@ -84,8 +86,10 @@ static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
 static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
+#endif
 static constexpr int kOtaCheckMaxAttempts = 3;
 static constexpr int kOtaRetryDelaysSeconds[] = {2, 4};
 static constexpr int kOtaCheckPhaseBudgetMs =
@@ -161,6 +165,7 @@ Application::~Application() {
         esp_timer_stop(speaking_timeout_timer_);
         esp_timer_delete(speaking_timeout_timer_);
     }
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     if (lesson_message_task_handle_ != nullptr) {
         vTaskDelete(lesson_message_task_handle_);
         lesson_message_task_handle_ = nullptr;
@@ -175,6 +180,7 @@ Application::~Application() {
         vQueueDelete(lesson_message_queue_);
         lesson_message_queue_ = nullptr;
     }
+#endif
     vEventGroupDelete(event_group_);
 }
 
@@ -190,6 +196,7 @@ void Application::EnqueueLessonVisualCompletion(
     const char* degraded_reason,
     std::uint64_t visual_nonce
 ) {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     if ((kind != LessonQueueItemKind::kVisualCompleted &&
          kind != LessonQueueItemKind::kVisualTimedOut) ||
         lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
@@ -208,12 +215,25 @@ void Application::EnqueueLessonVisualCompletion(
         ESP_LOGW(TAG, "lesson visual completion dropped: worker queue full seq=%ld",
                  static_cast<long>(server_sequence));
     }
+#else
+    (void)kind;
+    (void)transport_epoch;
+    (void)visual_generation;
+    (void)server_sequence;
+    (void)assignment_id;
+    (void)session_id;
+    (void)step_id;
+    (void)result;
+    (void)degraded_reason;
+    (void)visual_nonce;
+#endif
 }
 
 void Application::EnqueueLessonMessage(
     const cJSON* root,
     std::uint64_t transport_epoch
 ) {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     const cJSON* type = cJSON_GetObjectItem(root, "type");
     const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
     const char* type_value = cJSON_IsString(type) ? type->valuestring : "(missing)";
@@ -252,9 +272,14 @@ void Application::EnqueueLessonMessage(
         ESP_LOGI(TAG, "lesson_* enqueued type=%s seq=%d bytes=%u",
                  type_value, sequence_value, (unsigned)payload_bytes);
     }
+#else
+    (void)root;
+    (void)transport_epoch;
+#endif
 }
 
 void Application::RequestLessonStorageAbandonment() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     Schedule([]() { CancelLessonRobotEntranceOnDisplay(); });
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) return;
     const std::uint64_t terminal_epoch =
@@ -269,8 +294,10 @@ void Application::RequestLessonStorageAbandonment() {
     if (xQueueSendToFront(lesson_message_queue_, &item, 0) != pdTRUE) {
         ESP_LOGW(TAG, "lesson abandonment wakeup enqueue failed; worker will drain published epoch");
     }
+#endif
 }
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 void Application::LessonMessageTask(void* arg) {
     auto* self = static_cast<Application*>(arg);
     LessonQueueItem item;
@@ -339,6 +366,7 @@ void Application::LessonMessageTask(void* arg) {
         LogLessonHeapBoundary("worker.after_payload_free", payload_bytes);
     }
 }
+#endif
 
 bool Application::SetDeviceState(DeviceState state) {
     return state_machine_.TransitionTo(state);
@@ -2986,6 +3014,7 @@ void Application::InitializeProtocol() {
     }
     protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     if (is_websocket_protocol && lesson_message_queue_ == nullptr &&
         lesson_message_task_handle_ == nullptr) {
         lesson_message_queue_ = xQueueCreate(
@@ -3002,6 +3031,7 @@ void Application::InitializeProtocol() {
             lesson_message_task_handle_ = nullptr;
         }
     }
+#endif
 
     Protocol* callback_protocol = protocol_.get();
     protocol_->OnConnected([this]() {
@@ -3426,12 +3456,14 @@ void Application::InitializeProtocol() {
                 ESP_LOGW(TAG, "Invalid custom message format: missing payload");
             }
 #endif
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
         } else if (strncmp(type->valuestring, "lesson_", 7) == 0) {
             // US-006 Slice-01 (S10): additive lesson_* dispatch. Placed immediately
             // ABOVE the unknown-type no-op so un-upgraded firmware keeps dropping
             // lesson_* silently (backward-compat). Queue it so HTTP/TLS image fetch
             // and decode never run on the WebSocket receive callback / lwIP stack.
             EnqueueLessonMessage(root, callback_transport_epoch);
+#endif
         } else {
             ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
         }

@@ -41,8 +41,13 @@ private:
     std::string url_;
     std::string token_;
     int version_ = 1;
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     bool unclaimed_public_lesson_only_ = true;
     WebsocketSessionMode session_mode_ = WebsocketSessionMode::kUnclaimedPublicLesson;
+#else
+    bool unclaimed_public_lesson_only_ = false;
+    WebsocketSessionMode session_mode_ = WebsocketSessionMode::kAuthenticatedRealtime;
+#endif
     PassiveWebsocketLiveness passive_liveness_;
     ConnectionCloseState close_state_;
 

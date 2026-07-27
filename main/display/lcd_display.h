@@ -40,7 +40,9 @@ protected:
     int lesson_robot_overlay_width_ = 0;
     int lesson_robot_overlay_height_ = 0;
     void* lesson_robot_animation_context_ = nullptr;
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     LessonRendererMemoryProbe lesson_renderer_memory_probe_;
+#endif
 #ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
     lv_timer_t* lesson_renderer_settled_timer_ = nullptr;
     uint32_t lesson_renderer_settled_generation_ = 0;
