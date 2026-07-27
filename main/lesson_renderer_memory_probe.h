@@ -1,5 +1,7 @@
 #pragma once
 
+#include "lesson_tvideo_template.h"
+
 #include <cstddef>
 #include <cstdint>
 #ifdef TBOT_LESSON_MEMORY_TEST
@@ -14,6 +16,27 @@ struct LessonRendererMemorySample {
     size_t live_lvgl_animations;
     size_t live_animation_contexts;
 };
+
+struct LessonRendererAllocatorSample {
+    size_t internal_free;
+    size_t largest_internal_block;
+    size_t psram_free;
+};
+
+struct LessonRendererAnimationFrameResult {
+    lesson_tvideo::Rect robot;
+    bool hidden;
+    bool complete;
+    bool timed_out;
+};
+
+using LessonRendererAnimationBoundsWriter =
+    void (*)(void* context, const lesson_tvideo::Rect& robot, bool hidden);
+
+LessonRendererAnimationFrameResult AdvanceLessonRendererAnimationFrame(
+    lesson_tvideo::StateMachine* machine, uint32_t* elapsed_ms,
+    uint32_t tick_ms, uint32_t timeout_ms,
+    LessonRendererAnimationBoundsWriter bounds_writer, void* bounds_context);
 
 enum class LessonRendererMemoryPhase : uint8_t {
     kStart,
@@ -54,7 +77,15 @@ struct LessonRendererMemoryReport {
 };
 
 #ifdef TBOT_LESSON_MEMORY_TEST
-using LessonRendererMemoryReader = LessonRendererMemorySample (*)(void* context);
+using LessonRendererMemoryReader = LessonRendererAllocatorSample (*)(void* context);
+
+struct LessonRendererMemoryLiveCounters {
+    size_t decoded_layers;
+    size_t lvgl_animations;
+    size_t animation_contexts;
+};
+
+LessonRendererMemoryLiveCounters LessonRendererMemoryLiveCountersForTest();
 #endif
 
 class LessonRendererMemoryProbe {

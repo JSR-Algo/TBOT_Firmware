@@ -32,20 +32,27 @@ struct HostMemoryState {
     size_t internal_free = 128 * 1024;
     size_t largest_internal_block = 96 * 1024;
     size_t psram_free = 4 * 1024 * 1024;
-    size_t live_decoded_layers = 0;
-    size_t live_lvgl_animations = 0;
-    size_t live_animation_contexts = 0;
 };
 
-LessonRendererMemorySample ReadHostMemory(void* context) {
+struct HostBoundsState {
+    lesson_tvideo::Rect robot{};
+    bool hidden = false;
+    size_t writes = 0;
+};
+
+void WriteHostBounds(void* context, const lesson_tvideo::Rect& robot, bool hidden) {
+    auto* bounds = static_cast<HostBoundsState*>(context);
+    bounds->robot = robot;
+    bounds->hidden = hidden;
+    ++bounds->writes;
+}
+
+LessonRendererAllocatorSample ReadHostMemory(void* context) {
     const auto& state = *static_cast<HostMemoryState*>(context);
     return {
         state.internal_free,
         state.largest_internal_block,
         state.psram_free,
-        state.live_decoded_layers,
-        state.live_lvgl_animations,
-        state.live_animation_contexts,
     };
 }
 
@@ -53,25 +60,26 @@ void StartEntrance(HostMemoryState* state) {
     state->internal_free = 124 * 1024;
     state->largest_internal_block = 88 * 1024;
     state->psram_free = 4 * 1024 * 1024 - 6 * 1024;
-    state->live_decoded_layers = 3;
-    state->live_lvgl_animations = 1;
-    state->live_animation_contexts = 1;
+    LessonRendererMemoryAnimationStarted();
+    LessonRendererMemoryContextOpened();
 }
 
 void SettleEntrance(HostMemoryState* state, bool completed) {
     state->internal_free = completed ? 127 * 1024 : 128 * 1024;
     state->largest_internal_block = 88 * 1024;
     state->psram_free = completed ? 4 * 1024 * 1024 - 2 * 1024 : 4 * 1024 * 1024;
-    state->live_decoded_layers = completed ? 3 : 0;
-    state->live_lvgl_animations = 0;
-    state->live_animation_contexts = 0;
+    LessonRendererMemoryAnimationStopped();
+    LessonRendererMemoryContextClosed();
 }
 
 void AdvanceWithoutAllocations(lesson_tvideo::StateMachine* animation,
-                               LessonRendererMemoryProbe* probe, uint32_t elapsed_ms) {
+                               LessonRendererMemoryProbe* probe,
+                               uint32_t* callback_elapsed_ms, uint32_t tick_ms,
+                               HostBoundsState* bounds) {
     const size_t before = frame_allocations.load(std::memory_order_relaxed);
     inside_animation_frame = true;
-    animation->Advance(elapsed_ms);
+    (void)AdvanceLessonRendererAnimationFrame(
+        animation, callback_elapsed_ms, tick_ms, 6000, WriteHostBounds, bounds);
     inside_animation_frame = false;
     probe->RecordFrameAllocations(
         frame_allocations.load(std::memory_order_relaxed) - before);
@@ -84,13 +92,39 @@ void RunMemoryGate() {
     HostMemoryState state;
     LessonRendererMemoryProbe probe(ReadHostMemory, &state);
     probe.Capture(LessonRendererMemoryPhase::kStart);
+    LessonRendererMemoryDecodedLayerOpened();
+    LessonRendererMemoryDecodedLayerOpened();
+    LessonRendererMemoryDecodedLayerOpened();
+
+    lesson_tvideo::StateMachine timeout_animation(
+        {"tvideoFlyWalk", 1, "centerRoad", 1, true, true, false});
+    uint32_t timeout_elapsed_ms = 0;
+    HostBoundsState timeout_bounds;
+    const size_t timeout_allocations_before =
+        frame_allocations.load(std::memory_order_relaxed);
+    inside_animation_frame = true;
+    const LessonRendererAnimationFrameResult timeout_frame =
+        AdvanceLessonRendererAnimationFrame(
+            &timeout_animation, &timeout_elapsed_ms, 6001, 6000,
+            WriteHostBounds, &timeout_bounds);
+    inside_animation_frame = false;
+    require(timeout_frame.complete && timeout_frame.timed_out,
+            "production callback step reports phase timeout");
+    require(timeout_bounds.writes == 1,
+            "production callback step applies one bounds update");
+    require(frame_allocations.load(std::memory_order_relaxed) ==
+                timeout_allocations_before,
+            "production callback timeout path allocates no memory");
 
     for (int cycle = 0; cycle < 100; ++cycle) {
         lesson_tvideo::StateMachine animation(
             {"tvideoFlyWalk", 1, "leftApproach", 1, true, true, false});
         StartEntrance(&state);
         probe.Capture(LessonRendererMemoryPhase::kPeak);
-        AdvanceWithoutAllocations(&animation, &probe, 100 + (cycle % 5) * 400);
+        uint32_t callback_elapsed_ms = 0;
+        HostBoundsState bounds;
+        AdvanceWithoutAllocations(&animation, &probe, &callback_elapsed_ms,
+                                  100 + (cycle % 5) * 400, &bounds);
         animation.Timeout();
         SettleEntrance(&state, false);
         probe.Capture(LessonRendererMemoryPhase::kCancel, 500);
@@ -101,8 +135,11 @@ void RunMemoryGate() {
             {"tvideoFlyWalk", 1, "rightApproach", 1, true, true, false});
         StartEntrance(&state);
         probe.Capture(LessonRendererMemoryPhase::kPeak);
+        uint32_t callback_elapsed_ms = 0;
+        HostBoundsState bounds;
         for (int elapsed = 0; elapsed < 5200; elapsed += 40) {
-            AdvanceWithoutAllocations(&animation, &probe, 40);
+            AdvanceWithoutAllocations(
+                &animation, &probe, &callback_elapsed_ms, 40, &bounds);
         }
         require(animation.phase() == lesson_tvideo::Phase::kRevealTeachingContent,
                 "completed memory cycle reaches reveal");
@@ -141,6 +178,14 @@ void RunMemoryGate() {
             "every terminal cycle has a 500ms cleanup observation");
     require(!report.forbidden_markers_found, "memory logs contain no failure markers");
     require(report.passed, "renderer memory thresholds pass");
+    LessonRendererMemoryDecodedLayerClosed();
+    LessonRendererMemoryDecodedLayerClosed();
+    LessonRendererMemoryDecodedLayerClosed();
+    const LessonRendererMemoryLiveCounters counters =
+        LessonRendererMemoryLiveCountersForTest();
+    require(counters.decoded_layers == 0 && counters.lvgl_animations == 0 &&
+                counters.animation_contexts == 0,
+            "production lifecycle hooks balance after the soak");
     std::cout << report.ToJson("simulated-host") << "\n";
 }
 #endif

@@ -3,6 +3,7 @@
 
 #include "lvgl_display.h"
 #include "gif/lvgl_gif.h"
+#include "lesson_renderer_memory_probe.h"
 
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -39,6 +40,7 @@ protected:
     int lesson_robot_overlay_width_ = 0;
     int lesson_robot_overlay_height_ = 0;
     void* lesson_robot_animation_context_ = nullptr;
+    LessonRendererMemoryProbe lesson_renderer_memory_probe_;
     int lesson_robot_arrived_left_ = 0;
     int lesson_robot_arrived_top_ = 0;
     int lesson_robot_arrived_width_ = 0;

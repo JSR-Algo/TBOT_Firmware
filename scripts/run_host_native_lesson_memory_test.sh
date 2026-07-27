@@ -15,6 +15,21 @@ if ! rg -q '"lesson_renderer_memory_probe\.cc"' "${ROOT}/main/CMakeLists.txt"; t
   exit 1
 fi
 
+for production_hook in \
+  'AdvanceLessonRendererAnimationFrame' \
+  'LessonRendererMemoryDecodedLayerOpened' \
+  'LessonRendererMemoryAnimationStarted' \
+  'LessonRendererMemoryContextOpened' \
+  'LessonRendererMemoryPhase::kStart' \
+  'LessonRendererMemoryPhase::kPeak' \
+  'LessonRendererMemoryPhase::kComplete' \
+  'LessonRendererMemoryPhase::kCancel'; do
+  if ! rg -q "${production_hook}" "${ROOT}/main/display/lcd_display.cc"; then
+    echo "{\"schemaVersion\":1,\"passed\":false,\"error\":\"missing-production-hook:${production_hook}\"}"
+    exit 1
+  fi
+done
+
 "${CXX_BIN}" "${CXX_FLAGS[@]}" \
   -I"${ROOT}/tests/native_stubs_lesson" \
   -I"${ROOT}/main" \

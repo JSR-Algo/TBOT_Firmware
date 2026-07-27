@@ -45,8 +45,16 @@ LessonRendererMemoryProbe::LessonRendererMemoryProbe(
 
 LessonRendererMemorySample LessonRendererMemoryProbe::Read() const {
 #ifdef TBOT_LESSON_MEMORY_TEST
-    if (reader_ != nullptr) return reader_(reader_context_);
-    return {};
+    const LessonRendererAllocatorSample allocator =
+        reader_ == nullptr ? LessonRendererAllocatorSample{} : reader_(reader_context_);
+    return {
+        allocator.internal_free,
+        allocator.largest_internal_block,
+        allocator.psram_free,
+        g_live_decoded_layers.load(std::memory_order_relaxed),
+        g_live_lvgl_animations.load(std::memory_order_relaxed),
+        g_live_animation_contexts.load(std::memory_order_relaxed),
+    };
 #else
     return {
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -57,6 +65,31 @@ LessonRendererMemorySample LessonRendererMemoryProbe::Read() const {
         g_live_animation_contexts.load(std::memory_order_relaxed),
     };
 #endif
+}
+
+LessonRendererAnimationFrameResult AdvanceLessonRendererAnimationFrame(
+    lesson_tvideo::StateMachine* machine, uint32_t* elapsed_ms,
+    uint32_t tick_ms, uint32_t timeout_ms,
+    LessonRendererAnimationBoundsWriter bounds_writer, void* bounds_context) {
+    if (machine == nullptr || elapsed_ms == nullptr) return {};
+    *elapsed_ms += tick_ms;
+    if (*elapsed_ms > timeout_ms) {
+        machine->Timeout();
+    } else {
+        machine->Advance(tick_ms);
+    }
+    const bool complete =
+        machine->phase() == lesson_tvideo::Phase::kRevealTeachingContent;
+    const lesson_tvideo::Rect robot = machine->geometry().robot;
+    const bool hidden = machine->phase() == lesson_tvideo::Phase::kHidden;
+    if (bounds_writer != nullptr) bounds_writer(bounds_context, robot, hidden);
+    return {
+        robot,
+        hidden,
+        complete,
+        complete && machine->degraded_reason() ==
+                        lesson_tvideo::DegradedReason::kPhaseTimeout,
+    };
 }
 
 void LessonRendererMemoryProbe::Capture(LessonRendererMemoryPhase phase,
@@ -200,3 +233,13 @@ void LessonRendererMemoryContextOpened() {
 void LessonRendererMemoryContextClosed() {
     DecrementIfPositive(&g_live_animation_contexts);
 }
+
+#ifdef TBOT_LESSON_MEMORY_TEST
+LessonRendererMemoryLiveCounters LessonRendererMemoryLiveCountersForTest() {
+    return {
+        g_live_decoded_layers.load(std::memory_order_relaxed),
+        g_live_lvgl_animations.load(std::memory_order_relaxed),
+        g_live_animation_contexts.load(std::memory_order_relaxed),
+    };
+}
+#endif

@@ -4,6 +4,7 @@
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
 #include "lesson_layer_state.h"
+#include "lesson_renderer_memory_probe.h"
 #include "lesson_tvideo_template.h"
 
 #include <vector>
@@ -43,6 +44,15 @@ struct LessonRobotAnimationContext {
     lv_timer_t* timer = nullptr;
     uint32_t elapsed_ms = 0;
 };
+
+void ReplaceTrackedLessonLayer(std::unique_ptr<LvglImage>* current,
+                               std::unique_ptr<LvglImage> next) {
+    const bool had_layer = *current != nullptr;
+    const bool has_layer = next != nullptr;
+    if (!had_layer && has_layer) LessonRendererMemoryDecodedLayerOpened();
+    if (had_layer && !has_layer) LessonRendererMemoryDecodedLayerClosed();
+    *current = std::move(next);
+}
 
 int LessonImageFitScale(int image_width, int image_height, int max_width, int max_height) {
     if (image_width <= 0 || image_height <= 0 || max_width <= 0 || max_height <= 0) {
@@ -330,6 +340,9 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 
 LcdDisplay::~LcdDisplay() {
     CancelLessonRobotEntrance();
+    ReplaceTrackedLessonLayer(&lesson_background_cached_, nullptr);
+    ReplaceTrackedLessonLayer(&lesson_object_cached_, nullptr);
+    ReplaceTrackedLessonLayer(&lesson_robot_overlay_cached_, nullptr);
     SetPreviewImage(nullptr);
     
     // Clean up GIF controller
@@ -919,7 +932,7 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
 
     if (image == nullptr) {
         lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
-        lesson_background_cached_.reset();
+        ReplaceTrackedLessonLayer(&lesson_background_cached_, nullptr);
         auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
         if (container_ != nullptr) {
             lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
@@ -932,7 +945,7 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
         return;
     }
 
-    lesson_background_cached_ = std::move(image);
+    ReplaceTrackedLessonLayer(&lesson_background_cached_, std::move(image));
     auto img_dsc = lesson_background_cached_->image_dsc();
     lv_image_set_src(lesson_background_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
@@ -960,11 +973,11 @@ void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
 
     if (image == nullptr) {
         lv_obj_add_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
-        lesson_object_cached_.reset();
+        ReplaceTrackedLessonLayer(&lesson_object_cached_, nullptr);
         return;
     }
 
-    lesson_object_cached_ = std::move(image);
+    ReplaceTrackedLessonLayer(&lesson_object_cached_, std::move(image));
     auto img_dsc = lesson_object_cached_->image_dsc();
     lv_image_set_src(lesson_object_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
@@ -1009,11 +1022,11 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
 
     if (image == nullptr) {
         lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
-        lesson_robot_overlay_cached_.reset();
+        ReplaceTrackedLessonLayer(&lesson_robot_overlay_cached_, nullptr);
         return;
     }
 
-    lesson_robot_overlay_cached_ = std::move(image);
+    ReplaceTrackedLessonLayer(&lesson_robot_overlay_cached_, std::move(image));
     auto img_dsc = lesson_robot_overlay_cached_->image_dsc();
     lv_image_set_src(lesson_robot_overlay_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
@@ -1346,7 +1359,7 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
 
     if (image == nullptr) {
         lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
-        lesson_background_cached_.reset();
+        ReplaceTrackedLessonLayer(&lesson_background_cached_, nullptr);
         auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
         if (container_ != nullptr) {
             lv_obj_set_style_bg_opa(container_, LV_OPA_COVER, 0);
@@ -1359,7 +1372,7 @@ void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
         return;
     }
 
-    lesson_background_cached_ = std::move(image);
+    ReplaceTrackedLessonLayer(&lesson_background_cached_, std::move(image));
     auto img_dsc = lesson_background_cached_->image_dsc();
     lv_image_set_src(lesson_background_, img_dsc);
     // Scale the decoded poster to FILL the panel width (full-screen background),
@@ -1391,11 +1404,11 @@ void LcdDisplay::SetLessonObject(std::unique_ptr<LvglImage> image) {
 
     if (image == nullptr) {
         lv_obj_add_flag(lesson_object_, LV_OBJ_FLAG_HIDDEN);
-        lesson_object_cached_.reset();
+        ReplaceTrackedLessonLayer(&lesson_object_cached_, nullptr);
         return;
     }
 
-    lesson_object_cached_ = std::move(image);
+    ReplaceTrackedLessonLayer(&lesson_object_cached_, std::move(image));
     auto img_dsc = lesson_object_cached_->image_dsc();
     lv_image_set_src(lesson_object_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
@@ -1441,11 +1454,11 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
 
     if (image == nullptr) {
         lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
-        lesson_robot_overlay_cached_.reset();
+        ReplaceTrackedLessonLayer(&lesson_robot_overlay_cached_, nullptr);
         return;
     }
 
-    lesson_robot_overlay_cached_ = std::move(image);
+    ReplaceTrackedLessonLayer(&lesson_robot_overlay_cached_, std::move(image));
     auto img_dsc = lesson_robot_overlay_cached_->image_dsc();
     lv_image_set_src(lesson_robot_overlay_, img_dsc);
     if (img_dsc->header.w > 0 && img_dsc->header.h > 0) {
@@ -1577,6 +1590,7 @@ bool LcdDisplay::StartLessonRobotEntrance(
     {
         DisplayLockGuard lock(this);
         CancelLessonRobotEntranceLocked();
+        lesson_renderer_memory_probe_.Capture(LessonRendererMemoryPhase::kStart);
         do {
             const lesson_tvideo::LayoutGeometry* arrived =
                 lesson_tvideo::ArrivedGeometry(plan.layout_preset, 1);
@@ -1632,6 +1646,7 @@ bool LcdDisplay::StartLessonRobotEntrance(
                 break;
             }
             lesson_robot_animation_context_ = context;
+            LessonRendererMemoryContextOpened();
             context->timer = lv_timer_create([](lv_timer_t* timer) {
                 auto* animation = static_cast<LessonRobotAnimationContext*>(
                     lv_timer_get_user_data(timer));
@@ -1642,32 +1657,33 @@ bool LcdDisplay::StartLessonRobotEntrance(
                 {
                     DisplayLockGuard lock(animation->owner);
                     if (animation->owner->lesson_robot_animation_context_ != animation) return;
-                    animation->elapsed_ms += kLessonRobotAnimationTickMs;
-                    if (animation->elapsed_ms > kLessonRobotAnimationTimeoutMs) {
-                        animation->machine.Timeout();
-                    } else {
-                        animation->machine.Advance(kLessonRobotAnimationTickMs);
-                    }
-                    const auto& robot = animation->machine.geometry().robot;
-                    if (animation->machine.phase() == lesson_tvideo::Phase::kHidden) {
-                        animation->owner->SetLessonRobotOverlayBounds(0, 0, 0, 0);
-                    } else {
-                        animation->owner->SetLessonRobotOverlayBounds(
-                            robot.left, robot.top, robot.width, robot.height);
-                    }
-                    if (animation->machine.phase() !=
-                        lesson_tvideo::Phase::kRevealTeachingContent) {
-                        return;
-                    }
+                    const LessonRendererAnimationFrameResult frame =
+                        AdvanceLessonRendererAnimationFrame(
+                            &animation->machine, &animation->elapsed_ms,
+                            kLessonRobotAnimationTickMs,
+                            kLessonRobotAnimationTimeoutMs,
+                            [](void* owner, const lesson_tvideo::Rect& robot, bool hidden) {
+                                auto* display = static_cast<LcdDisplay*>(owner);
+                                if (hidden) {
+                                    display->SetLessonRobotOverlayBounds(0, 0, 0, 0);
+                                } else {
+                                    display->SetLessonRobotOverlayBounds(
+                                        robot.left, robot.top, robot.width, robot.height);
+                                }
+                            },
+                            animation->owner);
+                    if (!frame.complete) return;
 
-                    const bool timed_out = animation->machine.degraded_reason() ==
-                                           lesson_tvideo::DegradedReason::kPhaseTimeout;
                     timer_completion = std::move(animation->completion);
-                    timer_result = timed_out ? LessonVisualApplyResult::kPhaseTimeout
-                                             : LessonVisualApplyResult::kApplied;
-                    timer_reason = timed_out ? "phaseTimeout" : nullptr;
+                    timer_result = frame.timed_out ? LessonVisualApplyResult::kPhaseTimeout
+                                                   : LessonVisualApplyResult::kApplied;
+                    timer_reason = frame.timed_out ? "phaseTimeout" : nullptr;
                     animation->owner->lesson_robot_animation_context_ = nullptr;
                     lv_timer_delete(animation->timer);
+                    LessonRendererMemoryAnimationStopped();
+                    LessonRendererMemoryContextClosed();
+                    animation->owner->lesson_renderer_memory_probe_.Capture(
+                        LessonRendererMemoryPhase::kComplete);
                     delete animation;
                 }
                 if (timer_completion) timer_completion(timer_result, timer_reason);
@@ -1675,6 +1691,7 @@ bool LcdDisplay::StartLessonRobotEntrance(
             if (context->timer == nullptr) {
                 lesson_robot_animation_context_ = nullptr;
                 deferred_completion = std::move(context->completion);
+                LessonRendererMemoryContextClosed();
                 delete context;
                 SetLessonRobotOverlayBounds(arrived->robot.left, arrived->robot.top,
                                             arrived->robot.width, arrived->robot.height);
@@ -1682,8 +1699,14 @@ bool LcdDisplay::StartLessonRobotEntrance(
                 deferred_reason = "animationStartFailed";
                 complete_now = true;
                 started = false;
+            } else {
+                LessonRendererMemoryAnimationStarted();
+                lesson_renderer_memory_probe_.Capture(LessonRendererMemoryPhase::kPeak);
             }
         } while (false);
+        if (complete_now) {
+            lesson_renderer_memory_probe_.Capture(LessonRendererMemoryPhase::kComplete);
+        }
     }
     if (complete_now && deferred_completion) {
         deferred_completion(deferred_result, deferred_reason);
@@ -1695,9 +1718,14 @@ void LcdDisplay::CancelLessonRobotEntranceLocked() {
     auto* context = static_cast<LessonRobotAnimationContext*>(lesson_robot_animation_context_);
     lesson_robot_animation_context_ = nullptr;
     if (context == nullptr) return;
-    if (context->timer != nullptr) lv_timer_delete(context->timer);
+    if (context->timer != nullptr) {
+        lv_timer_delete(context->timer);
+        LessonRendererMemoryAnimationStopped();
+    }
     context->completion = nullptr;
+    LessonRendererMemoryContextClosed();
     delete context;
+    lesson_renderer_memory_probe_.Capture(LessonRendererMemoryPhase::kCancel);
 }
 
 void LcdDisplay::CancelLessonRobotEntrance() {
