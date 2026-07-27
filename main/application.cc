@@ -2,6 +2,7 @@
 #include "wifi_config_entry_policy.h"
 #include "board.h"
 #include "display.h"
+#include "display/lvgl_display/lvgl_display.h"
 #include "system_info.h"
 #include "audio_codec.h"
 #include "mqtt_protocol.h"
@@ -49,6 +50,13 @@ static constexpr uint32_t kTtsStopPlaybackDrainTimeoutMs = 15000;
 static constexpr uint32_t kListeningNoSpeechTimeoutMs = 15000;
 static constexpr uint32_t kListeningAutoStopMaxTurnMs = 10000;
 static constexpr uint32_t kListeningMaxTurnMs = 60000;
+
+static void CancelLessonRobotEntranceOnDisplay() {
+    Display* display = Board::GetInstance().GetDisplay();
+    if (auto* lvgl_display = dynamic_cast<LvglDisplay*>(display)) {
+        lvgl_display->CancelLessonRobotEntrance();
+    }
+}
 
 static void SecureClearString(std::string& value) {
     if (!value.empty()) {
@@ -128,6 +136,7 @@ Application::Application() {
 }
 
 Application::~Application() {
+    CancelLessonRobotEntranceOnDisplay();
     if (clock_timer_handle_ != nullptr) {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
@@ -245,6 +254,7 @@ void Application::EnqueueLessonMessage(
 }
 
 void Application::RequestLessonStorageAbandonment() {
+    Schedule([]() { CancelLessonRobotEntranceOnDisplay(); });
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) return;
     const std::uint64_t terminal_epoch =
         lesson_transport_epoch_gate_.PublishTerminalEpoch();
@@ -272,6 +282,7 @@ void Application::LessonMessageTask(void* arg) {
                 self->lesson_transport_epoch_gate_.PublishedEpoch();
             if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(latest_epoch)) {
                 InvalidateLessonVisualCompletionState(latest_epoch);
+                self->Schedule([]() { CancelLessonRobotEntranceOnDisplay(); });
             }
             if (!self->lesson_terminal_control_.FinishWorkerDrain(
                     self->lesson_transport_epoch_gate_, latest_epoch)) {
@@ -5155,6 +5166,7 @@ void Application::CompleteReboot() {
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         CloseAudioChannelByIntent();
     }
+    CancelLessonRobotEntranceOnDisplay();
     protocol_.reset();
     protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
     audio_service_.Stop();
@@ -5360,6 +5372,7 @@ void Application::DoResetProtocol() {
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         CloseAudioChannelByIntent();
     }
+    CancelLessonRobotEntranceOnDisplay();
     protocol_.reset();
     protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 }

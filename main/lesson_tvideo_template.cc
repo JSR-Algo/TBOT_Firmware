@@ -40,6 +40,24 @@ uint8_t PhaseIndex(Phase phase) {
     return static_cast<uint8_t>(phase);
 }
 
+int16_t Interpolate(int16_t from, int16_t to, uint32_t elapsed_ms, uint32_t duration_ms) {
+    if (duration_ms == 0 || elapsed_ms >= duration_ms) return to;
+    const int32_t delta = static_cast<int32_t>(to) - static_cast<int32_t>(from);
+    return static_cast<int16_t>(static_cast<int32_t>(from) +
+                                delta * static_cast<int32_t>(elapsed_ms) /
+                                    static_cast<int32_t>(duration_ms));
+}
+
+Rect InterpolateRect(const Rect& from, const Rect& to,
+                     uint32_t elapsed_ms, uint32_t duration_ms) {
+    return {
+        Interpolate(from.left, to.left, elapsed_ms, duration_ms),
+        Interpolate(from.top, to.top, elapsed_ms, duration_ms),
+        Interpolate(from.width, to.width, elapsed_ms, duration_ms),
+        Interpolate(from.height, to.height, elapsed_ms, duration_ms),
+    };
+}
+
 }  // namespace
 
 bool IsSupported(const char* template_id, uint8_t template_version,
@@ -99,6 +117,7 @@ StateMachine::StateMachine(const Config& config) : layout_preset_(config.layout_
         return;
     }
     const auto* preset = FindPreset(layout_preset_);
+    layout_preset_ = preset->id;
     geometry_ = preset->arrived;
     if (!config.arrived_pose_available) {
         Reveal(DegradedReason::kMissingOverlay);
@@ -127,6 +146,7 @@ void StateMachine::Advance(uint32_t elapsed_ms) {
         }
         ApplyPhaseGeometry();
     }
+    ApplyPhaseGeometry();
 }
 
 void StateMachine::Timeout() {
@@ -145,8 +165,19 @@ void StateMachine::ApplyPhaseGeometry() {
     const auto* preset = FindPreset(layout_preset_);
     if (preset == nullptr) return;
     geometry_ = preset->arrived;
-    if (phase_ == Phase::kHidden || phase_ == Phase::kFlyIn) geometry_.robot = preset->entry;
-    if (phase_ == Phase::kLandFar || phase_ == Phase::kSettle) geometry_.robot = preset->land;
+    if (phase_ == Phase::kHidden) {
+        geometry_.robot = preset->entry;
+    } else if (phase_ == Phase::kFlyIn) {
+        geometry_.robot = InterpolateRect(
+            preset->entry, preset->land, phase_elapsed_ms_,
+            PhaseDurationMs(PhaseIndex(Phase::kFlyIn)));
+    } else if (phase_ == Phase::kLandFar || phase_ == Phase::kSettle) {
+        geometry_.robot = preset->land;
+    } else if (phase_ == Phase::kWalkToward) {
+        geometry_.robot = InterpolateRect(
+            preset->land, preset->arrived.robot, phase_elapsed_ms_,
+            PhaseDurationMs(PhaseIndex(Phase::kWalkToward)));
+    }
 }
 
 }  // namespace lesson_tvideo

@@ -624,11 +624,15 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
     Handle(V2PrepareFrame(1));
     SetLessonTransportEpoch(31);
     Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
-    require(!display.lesson_mode_calls.empty() && display.lesson_mode_calls.back(),
-            "production v2 start callback installs lesson display mode before completion");
+    require(display.entrance_start_calls == 1 &&
+                display.last_entrance_layout == "centerRoad",
+            "production v2 start delegates the reviewed entrance plan to LVGL");
+    require(App().lesson_visual_queue.empty(),
+            "production v2 start cannot complete before the reveal callback");
+    display.CompleteEntrance();
     require(App().lesson_visual_queue.size() == 1 &&
                 App().lesson_visual_queue.front().kind == LessonQueueItemKind::kVisualCompleted,
-            "production display callback enqueues typed completion after install");
+            "production reveal callback enqueues typed completion after animation");
     const LessonQueueItem completed_callback = App().lesson_visual_queue.front();
     const size_t before_drain = Sent().size();
     App().DrainLessonVisualQueue();
@@ -665,6 +669,11 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
         require(display.last_emotion == expectation.emotion &&
                     display.last_status == expectation.status,
                 "valid visual state installs its child-visible static display state");
+        require(display.visual_state_calls == visual_sequence - 2,
+                "valid visual state delegates static arrived-state transforms to LVGL");
+        require(App().lesson_visual_queue.empty(),
+                "static visual state waits for its LVGL completion callback");
+        display.CompleteVisualState(LessonVisualApplyResult::kDegraded, "missingOverlay");
         require(App().lesson_visual_queue.size() == 1 &&
                     App().lesson_visual_queue.front().completion_result ==
                         LessonVisualCompletionResult::kDegraded &&
@@ -687,12 +696,17 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
     Handle(V2PrepareFrame(1));
     SetLessonTransportEpoch(32);
     App().defer_scheduled_callbacks = true;
+    const int before_deferred_start_calls = display.entrance_start_calls;
     Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
     require(App().lesson_visual_queue.empty(),
             "deferred display install cannot complete before its Application callback runs");
     Handle(V2PauseFrame(3));
+    require(display.entrance_cancel_calls > 0,
+            "pause cancels the active entrance before its control ACK can win");
     const size_t after_pause = Sent().size();
     App().FlushScheduledCallbacks();
+    require(display.entrance_start_calls == before_deferred_start_calls,
+            "stale deferred start callback cannot revive the entrance after pause");
     App().DrainLessonVisualQueue();
     require(Sent().size() == after_pause,
             "late display callback after pause is generation-gated and emits no ACK");

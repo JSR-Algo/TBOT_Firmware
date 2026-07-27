@@ -11,7 +11,42 @@
 #include "lvgl_image.h"
 
 #include <memory>
+#include <functional>
+#include <string>
 #include <vector>
+
+enum class LessonVisualApplyResult {
+    kApplied,
+    kDegraded,
+    kRejected,
+    kPhaseTimeout,
+};
+
+enum class LessonVisualStateKind {
+    kTeach,
+    kListen,
+    kThinking,
+    kCorrect,
+    kNearMiss,
+    kIncorrect,
+    kRetry,
+    kCelebrate,
+    kCompletion,
+    kReveal,
+};
+
+struct LessonRobotEntrancePlan {
+    const char* layout_preset = nullptr;
+    bool reduced_motion = false;
+};
+
+struct LessonVisualState {
+    LessonVisualStateKind kind = LessonVisualStateKind::kTeach;
+    bool overlay_available = false;
+};
+
+using LessonVisualCompletion =
+    std::function<void(LessonVisualApplyResult result, const char* degraded_reason)>;
 
 class LvglDisplay : public Display {
 public:
@@ -25,6 +60,13 @@ public:
     // (lesson_stop/lesson_error). Lets a test prove the smiley is suppressed for the
     // whole lesson rather than only occluded by overlapping image layers.
     std::vector<bool> lesson_mode_calls;
+    int entrance_start_calls = 0;
+    int entrance_cancel_calls = 0;
+    int visual_state_calls = 0;
+    std::string last_entrance_layout;
+    LessonVisualStateKind last_visual_state = LessonVisualStateKind::kTeach;
+    LessonVisualCompletion pending_entrance_completion;
+    LessonVisualCompletion pending_visual_state_completion;
 
     virtual void SetLessonBackground(std::unique_ptr<LvglImage> image) {
         background_calls.push_back(image != nullptr);
@@ -43,5 +85,36 @@ public:
     }
     virtual void SetLessonMode(bool active) {
         lesson_mode_calls.push_back(active);
+    }
+    virtual bool StartLessonRobotEntrance(
+        const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) {
+        entrance_start_calls++;
+        last_entrance_layout = plan.layout_preset ? plan.layout_preset : "";
+        pending_entrance_completion = std::move(completion);
+        return true;
+    }
+    virtual void CancelLessonRobotEntrance() {
+        entrance_cancel_calls++;
+        pending_entrance_completion = nullptr;
+        pending_visual_state_completion = nullptr;
+    }
+    virtual bool ApplyLessonVisualState(
+        const LessonVisualState& state, LessonVisualCompletion completion) {
+        visual_state_calls++;
+        last_visual_state = state.kind;
+        pending_visual_state_completion = std::move(completion);
+        return true;
+    }
+    void CompleteEntrance(LessonVisualApplyResult result = LessonVisualApplyResult::kApplied,
+                          const char* reason = nullptr) {
+        auto completion = std::move(pending_entrance_completion);
+        pending_entrance_completion = nullptr;
+        if (completion) completion(result, reason);
+    }
+    void CompleteVisualState(LessonVisualApplyResult result = LessonVisualApplyResult::kApplied,
+                             const char* reason = nullptr) {
+        auto completion = std::move(pending_visual_state_completion);
+        pending_visual_state_completion = nullptr;
+        if (completion) completion(result, reason);
     }
 };

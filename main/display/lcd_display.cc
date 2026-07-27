@@ -4,6 +4,7 @@
 #include "lvgl_theme.h"
 #include "assets/lang_config.h"
 #include "lesson_layer_state.h"
+#include "lesson_tvideo_template.h"
 
 #include <vector>
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
 #include <cstring>
+#include <new>
 #include <src/misc/cache/lv_cache.h>
 
 #include "board.h"
@@ -30,6 +32,17 @@ constexpr int kLessonCaptionWidthPercent = 92;
 constexpr int kLessonCaptionLabelWidthPercent = 86;
 constexpr int kLessonCaptionMaxHeightPercent = 24;
 constexpr int kLessonCaptionBottomInsetDivisor = 60;
+constexpr uint32_t kLessonRobotAnimationTickMs = 16;
+constexpr uint32_t kLessonRobotAnimationTimeoutMs = 6000;
+constexpr size_t kLessonRobotAnimationMinInternalHeapBytes = 24 * 1024;
+
+struct LessonRobotAnimationContext {
+    LcdDisplay* owner;
+    lesson_tvideo::StateMachine machine;
+    LessonVisualCompletion completion;
+    lv_timer_t* timer = nullptr;
+    uint32_t elapsed_ms = 0;
+};
 
 int LessonImageFitScale(int image_width, int image_height, int max_width, int max_height) {
     if (image_width <= 0 || image_height <= 0 || max_width <= 0 || max_height <= 0) {
@@ -316,6 +329,7 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 }
 
 LcdDisplay::~LcdDisplay() {
+    CancelLessonRobotEntrance();
     SetPreviewImage(nullptr);
     
     // Clean up GIF controller
@@ -973,6 +987,17 @@ void LcdDisplay::SetLessonRobotOverlayBounds(int left, int top, int width, int h
     lesson_robot_overlay_top_ = top;
     lesson_robot_overlay_width_ = width;
     lesson_robot_overlay_height_ = height;
+    if (lesson_robot_overlay_ == nullptr || lesson_robot_overlay_cached_ == nullptr) return;
+    if (!lesson_robot_overlay_bounds_set_) {
+        lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_set_size(lesson_robot_overlay_, width * width_ / 480, height * height_ / 320);
+    lv_image_set_scale(lesson_robot_overlay_, 256);
+    lv_image_set_inner_align(lesson_robot_overlay_, LV_IMAGE_ALIGN_CONTAIN);
+    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_TOP_LEFT,
+                 left * width_ / 480, top * height_ / 320);
+    lv_obj_remove_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
 }
 
 void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
@@ -1394,6 +1419,17 @@ void LcdDisplay::SetLessonRobotOverlayBounds(int left, int top, int width, int h
     lesson_robot_overlay_top_ = top;
     lesson_robot_overlay_width_ = width;
     lesson_robot_overlay_height_ = height;
+    if (lesson_robot_overlay_ == nullptr || lesson_robot_overlay_cached_ == nullptr) return;
+    if (!lesson_robot_overlay_bounds_set_) {
+        lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_set_size(lesson_robot_overlay_, width * width_ / 480, height * height_ / 320);
+    lv_image_set_scale(lesson_robot_overlay_, 256);
+    lv_image_set_inner_align(lesson_robot_overlay_, LV_IMAGE_ALIGN_CONTAIN);
+    lv_obj_align(lesson_robot_overlay_, LV_ALIGN_TOP_LEFT,
+                 left * width_ / 480, top * height_ / 320);
+    lv_obj_remove_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
 }
 
 void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {
@@ -1529,6 +1565,131 @@ void LcdDisplay::SetLessonTeachingWord(const char* text) {
     }
     lv_obj_remove_flag(lesson_word_pill_, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(lesson_word_pill_);
+}
+
+bool LcdDisplay::StartLessonRobotEntrance(
+    const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) {
+    CancelLessonRobotEntrance();
+    const lesson_tvideo::LayoutGeometry* arrived =
+        lesson_tvideo::ArrivedGeometry(plan.layout_preset, 1);
+    if (arrived == nullptr) {
+        if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");
+        return false;
+    }
+
+    lesson_robot_arrived_left_ = arrived->robot.left;
+    lesson_robot_arrived_top_ = arrived->robot.top;
+    lesson_robot_arrived_width_ = arrived->robot.width;
+    lesson_robot_arrived_height_ = arrived->robot.height;
+
+    if (lesson_robot_overlay_cached_ == nullptr) {
+        SetLessonRobotOverlayBounds(0, 0, 0, 0);
+        if (completion) completion(LessonVisualApplyResult::kDegraded, "missingOverlay");
+        return true;
+    }
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) <
+        kLessonRobotAnimationMinInternalHeapBytes) {
+        SetLessonRobotOverlayBounds(0, 0, 0, 0);
+        if (completion) completion(LessonVisualApplyResult::kDegraded, "insufficientHeap");
+        return true;
+    }
+    if (plan.reduced_motion) {
+        SetLessonRobotOverlayBounds(
+            arrived->robot.left, arrived->robot.top, arrived->robot.width, arrived->robot.height);
+        if (completion) completion(LessonVisualApplyResult::kDegraded, "reducedMotion");
+        return true;
+    }
+
+    auto* context = new (std::nothrow) LessonRobotAnimationContext{
+        this,
+        lesson_tvideo::StateMachine({
+            "tvideoFlyWalk", 1, plan.layout_preset, 1, true, true, false}),
+        std::move(completion),
+    };
+    if (context == nullptr) {
+        SetLessonRobotOverlayBounds(
+            arrived->robot.left, arrived->robot.top, arrived->robot.width, arrived->robot.height);
+        if (completion) completion(LessonVisualApplyResult::kDegraded, "insufficientHeap");
+        return true;
+    }
+    lesson_robot_animation_context_ = context;
+    context->timer = lv_timer_create([](lv_timer_t* timer) {
+        auto* animation = static_cast<LessonRobotAnimationContext*>(lv_timer_get_user_data(timer));
+        if (animation == nullptr ||
+            animation->owner->lesson_robot_animation_context_ != animation) {
+            return;
+        }
+        animation->elapsed_ms += kLessonRobotAnimationTickMs;
+        if (animation->elapsed_ms > kLessonRobotAnimationTimeoutMs) {
+            animation->machine.Timeout();
+        } else {
+            animation->machine.Advance(kLessonRobotAnimationTickMs);
+        }
+        const auto& robot = animation->machine.geometry().robot;
+        if (animation->machine.phase() == lesson_tvideo::Phase::kHidden) {
+            animation->owner->SetLessonRobotOverlayBounds(0, 0, 0, 0);
+        } else {
+            animation->owner->SetLessonRobotOverlayBounds(
+                robot.left, robot.top, robot.width, robot.height);
+        }
+        if (animation->machine.phase() != lesson_tvideo::Phase::kRevealTeachingContent) return;
+
+        const bool timed_out =
+            animation->machine.degraded_reason() == lesson_tvideo::DegradedReason::kPhaseTimeout;
+        auto completion = std::move(animation->completion);
+        animation->owner->lesson_robot_animation_context_ = nullptr;
+        lv_timer_delete(animation->timer);
+        delete animation;
+        if (completion) {
+            completion(timed_out ? LessonVisualApplyResult::kPhaseTimeout
+                                 : LessonVisualApplyResult::kApplied,
+                       timed_out ? "phaseTimeout" : nullptr);
+        }
+    }, kLessonRobotAnimationTickMs, context);
+    if (context->timer == nullptr) {
+        lesson_robot_animation_context_ = nullptr;
+        auto failed_completion = std::move(context->completion);
+        delete context;
+        SetLessonRobotOverlayBounds(
+            arrived->robot.left, arrived->robot.top, arrived->robot.width, arrived->robot.height);
+        if (failed_completion) {
+            failed_completion(LessonVisualApplyResult::kDegraded, "animationStartFailed");
+        }
+        return false;
+    }
+    return true;
+}
+
+void LcdDisplay::CancelLessonRobotEntrance() {
+    DisplayLockGuard lock(this);
+    auto* context = static_cast<LessonRobotAnimationContext*>(lesson_robot_animation_context_);
+    lesson_robot_animation_context_ = nullptr;
+    if (context == nullptr) return;
+    if (context->timer != nullptr) lv_timer_delete(context->timer);
+    context->completion = nullptr;
+    delete context;
+}
+
+bool LcdDisplay::ApplyLessonVisualState(
+    const LessonVisualState& state, LessonVisualCompletion completion) {
+    CancelLessonRobotEntrance();
+    if (!state.overlay_available || lesson_robot_overlay_cached_ == nullptr) {
+        SetLessonRobotOverlayBounds(0, 0, 0, 0);
+        if (completion) completion(LessonVisualApplyResult::kDegraded, "missingOverlay");
+        return true;
+    }
+    int top = lesson_robot_arrived_top_;
+    int width = lesson_robot_arrived_width_;
+    int height = lesson_robot_arrived_height_;
+    if (state.kind == LessonVisualStateKind::kCelebrate) top -= 8;
+    if (state.kind == LessonVisualStateKind::kCompletion) {
+        width += 4;
+        height += 4;
+    }
+    SetLessonRobotOverlayBounds(
+        lesson_robot_arrived_left_, top, width, height);
+    if (completion) completion(LessonVisualApplyResult::kApplied, nullptr);
+    return true;
 }
 
 // US-006 lesson display mode: hide/show the idle realtime emoji face. Some layouts wrap

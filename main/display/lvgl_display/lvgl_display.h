@@ -11,6 +11,40 @@
 
 #include <string>
 #include <chrono>
+#include <functional>
+
+enum class LessonVisualApplyResult {
+    kApplied,
+    kDegraded,
+    kRejected,
+    kPhaseTimeout,
+};
+
+enum class LessonVisualStateKind {
+    kTeach,
+    kListen,
+    kThinking,
+    kCorrect,
+    kNearMiss,
+    kIncorrect,
+    kRetry,
+    kCelebrate,
+    kCompletion,
+    kReveal,
+};
+
+struct LessonRobotEntrancePlan {
+    const char* layout_preset = nullptr;
+    bool reduced_motion = false;
+};
+
+struct LessonVisualState {
+    LessonVisualStateKind kind = LessonVisualStateKind::kTeach;
+    bool overlay_available = false;
+};
+
+using LessonVisualCompletion =
+    std::function<void(LessonVisualApplyResult result, const char* degraded_reason)>;
 
 class LvglDisplay : public Display {
 public:
@@ -37,6 +71,17 @@ public:
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {}
     virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) {}
     virtual void SetLessonTeachingWord(const char* text) {}
+    virtual bool StartLessonRobotEntrance(
+        const LessonRobotEntrancePlan&, LessonVisualCompletion completion) {
+        if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");
+        return false;
+    }
+    virtual void CancelLessonRobotEntrance() {}
+    virtual bool ApplyLessonVisualState(
+        const LessonVisualState&, LessonVisualCompletion completion) {
+        if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");
+        return false;
+    }
     // Lesson display mode: when active, hide the idle realtime emoji face so ONLY the
     // lesson's three image layers (background/object/overlay) show. Toggled true on
     // lesson_start and false on lesson_stop/lesson_error so the smiley does not bleed

@@ -39,6 +39,8 @@
 #include <memory>
 #include <set>
 #include <deque>
+#include <map>
+#include <atomic>
 
 #include <cJSON.h>
 #include <esp_err.h>
@@ -323,6 +325,28 @@ StaticVisualStatePresentation VisualStatePresentation(const char* state) {
     return {"happy", "Hoàn thành bài học"};
 }
 
+LessonVisualStateKind VisualStateKind(const char* state) {
+    if (std::strcmp(state, "listen") == 0) return LessonVisualStateKind::kListen;
+    if (std::strcmp(state, "thinking") == 0) return LessonVisualStateKind::kThinking;
+    if (std::strcmp(state, "correct") == 0) return LessonVisualStateKind::kCorrect;
+    if (std::strcmp(state, "nearMiss") == 0) return LessonVisualStateKind::kNearMiss;
+    if (std::strcmp(state, "incorrect") == 0) return LessonVisualStateKind::kIncorrect;
+    if (std::strcmp(state, "retry") == 0) return LessonVisualStateKind::kRetry;
+    if (std::strcmp(state, "celebrate") == 0) return LessonVisualStateKind::kCelebrate;
+    if (std::strcmp(state, "completion") == 0) return LessonVisualStateKind::kCompletion;
+    return LessonVisualStateKind::kTeach;
+}
+
+LessonVisualCompletionResult QueueCompletionResult(LessonVisualApplyResult result) {
+    switch (result) {
+    case LessonVisualApplyResult::kApplied: return LessonVisualCompletionResult::kApplied;
+    case LessonVisualApplyResult::kDegraded: return LessonVisualCompletionResult::kDegraded;
+    case LessonVisualApplyResult::kRejected: return LessonVisualCompletionResult::kRejected;
+    case LessonVisualApplyResult::kPhaseTimeout: return LessonVisualCompletionResult::kPhaseTimeout;
+    }
+    return LessonVisualCompletionResult::kRejected;
+}
+
 const char* StableVisualDegradedReason(const char* value) {
     if (value == nullptr) return nullptr;
     for (const char* allowed : {
@@ -490,6 +514,7 @@ struct LessonSession {
     bool        pending_has_lesson_version = false;
     std::string pending_step_id;
     bool        pending_ack = false;
+    std::map<std::string, std::string> verified_asset_paths;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
     // processed inbound sequence, so a duplicate re-ack can REPLAY the prior ack body
     // idempotently (protocol §6 / lesson-robot-protocol.md:436-438) instead of
@@ -508,6 +533,7 @@ struct LessonSession {
 };
 LessonSession g_session;
 LessonLayerState g_layer_state;
+std::atomic<std::uint64_t> g_visual_callback_token{0};
 
 void ClearTerminalLessonCursor() {
     // A completed/failed lesson is terminal. The server may reuse the same assignmentId
@@ -1051,6 +1077,31 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
     return out;
 }
 
+std::map<std::string, std::string> VerifiedAssetPaths(const cJSON* body) {
+    std::map<std::string, std::string> paths;
+    const cJSON* pack = Obj(body, "assetPack");
+    if (pack == nullptr) return paths;
+    const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
+    const char* local_root = Str(pack, "localRoot");
+    std::string root = local_root != nullptr ? local_root : "";
+    TrimAsciiWhitespace(root);
+    while (!root.empty() && root.back() == '/') root.pop_back();
+    if (!cJSON_IsArray(assets)) return paths;
+    const cJSON* asset = nullptr;
+    cJSON_ArrayForEach(asset, assets) {
+        const char* key = Str(asset, "key");
+        const char* local_path = Str(asset, "localPath");
+        std::string derived;
+        if (key == nullptr) continue;
+        if (Blank(local_path) && !root.empty()) {
+            derived = root + "/" + EncodeLessonAssetPathSegment(key);
+            local_path = derived.c_str();
+        }
+        if (!Blank(local_path)) paths.emplace(key, local_path);
+    }
+    return paths;
+}
+
 // US-006 image render — HTTP GET a lesson image URL and DECODE it into an LvglImage.
 // This is the firmware half the recon flagged as missing: the backend already emits
 // resolved scene.*.src URLs and the ESP server downloads/sha256-verifies the bytes,
@@ -1192,6 +1243,7 @@ void SetLessonTransportEpoch(std::uint64_t transport_epoch) {
 }
 
 void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch) {
+    g_visual_callback_token.fetch_add(1, std::memory_order_acq_rel);
     g_session.current_transport_epoch = transport_epoch;
     ++g_session.visual_generation;
     g_session.entrance_active = false;
@@ -1463,6 +1515,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
             Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
@@ -1516,6 +1569,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
             Schedule([display, lvgl_display, show_waiting_state]() {
+                if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
@@ -1862,6 +1916,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             return;
         }
         const cJSON* runtime_controls = Obj(body, "runtimeControls");
+        const auto verified_asset_paths = VerifiedAssetPaths(body);
         const cJSON* motion_enabled = runtime_controls != nullptr
             ? cJSON_GetObjectItem(runtime_controls, "motionPresetsEnabled")
             : nullptr;
@@ -1879,6 +1934,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         // runtime control boolean can arm lesson motion for this session.
         g_session.motion_presets_enabled = !renderer_v2 && cJSON_IsTrue(motion_enabled);
         g_session.renderer_v2 = renderer_v2;
+        g_session.verified_asset_paths = verified_asset_paths;
         g_session.prepared = true;
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false, asset_pack_ack);
         return;
@@ -1905,9 +1961,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         g_layer_state.ClearAll();
+        std::uint64_t visual_callback_token = 0;
         if (g_session.renderer_v2) {
             g_session.opening_entrance_consumed = true;
             g_session.entrance_active = true;
+            visual_callback_token =
+                g_visual_callback_token.fetch_add(1, std::memory_order_acq_rel) + 1;
             ++g_session.visual_generation;
             g_session.pending_server_sequence = sequence;
             g_session.pending_protocol_version = protocol_version;
@@ -1920,6 +1979,31 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         // Clear stale layers, enter lesson mode, then show a short child-visible loading
         // cue until the first real lesson_step redraws the authored scene.
+        std::shared_ptr<std::unique_ptr<LvglImage>> opening_background;
+        std::shared_ptr<std::unique_ptr<LvglImage>> opening_robot;
+        bool opening_asset_identity_mismatch = false;
+        if (g_session.renderer_v2 && !g_session.verified_asset_paths.empty()) {
+            const cJSON* opening_entrance = Obj(body, "openingEntrance");
+            const char* background_key = Str(opening_entrance, "backgroundAssetKey");
+            const char* robot_key = Str(opening_entrance, "robotAssetKey");
+            const auto background_path = g_session.verified_asset_paths.find(
+                background_key != nullptr ? background_key : "");
+            const auto robot_path = g_session.verified_asset_paths.find(
+                robot_key != nullptr ? robot_key : "");
+            opening_asset_identity_mismatch =
+                background_path == g_session.verified_asset_paths.end() ||
+                robot_path == g_session.verified_asset_paths.end();
+            if (!opening_asset_identity_mismatch) {
+                if (auto image = FetchLessonImage(background_path->second.c_str())) {
+                    opening_background =
+                        std::make_shared<std::unique_ptr<LvglImage>>(std::move(image));
+                }
+                if (auto image = FetchLessonImage(robot_path->second.c_str())) {
+                    opening_robot =
+                        std::make_shared<std::unique_ptr<LvglImage>>(std::move(image));
+                }
+            }
+        }
         Display* start_display = Board::GetInstance().GetDisplay();
         LvglDisplay* start_lvgl = dynamic_cast<LvglDisplay*>(start_display);
         if (start_display) {
@@ -1928,28 +2012,57 @@ void Application::HandleLessonMessage(const cJSON* root) {
             const std::uint64_t callback_visual_generation = g_session.visual_generation;
             const std::string callback_assignment_id = g_session.assignment_id;
             const std::string callback_session_id = g_session.session_id;
-            Schedule([start_display, start_lvgl, renderer_v2_callback,
+            const char* opening_layout = Str(Obj(body, "openingEntrance"), "layoutPreset");
+            const std::string callback_layout = opening_layout != nullptr ? opening_layout : "";
+            Schedule([start_display, start_lvgl, renderer_v2_callback, visual_callback_token,
                       callback_transport_epoch, callback_visual_generation, sequence,
-                      callback_assignment_id, callback_session_id]() {
-                if (start_lvgl) start_lvgl->SetLessonBackground(nullptr);
+                      callback_assignment_id, callback_session_id, callback_layout,
+                      opening_background, opening_robot, opening_asset_identity_mismatch]() mutable {
+                if (renderer_v2_callback &&
+                    g_visual_callback_token.load(std::memory_order_acquire) !=
+                        visual_callback_token) {
+                    return;
+                }
+                if (start_lvgl) start_lvgl->CancelLessonRobotEntrance();
+                if (start_lvgl && opening_background) {
+                    start_lvgl->SetLessonBackground(std::move(*opening_background));
+                } else if (start_lvgl) {
+                    start_lvgl->SetLessonBackground(nullptr);
+                }
                 if (start_lvgl) start_lvgl->SetLessonObject(nullptr);
-                if (start_lvgl) start_lvgl->SetLessonRobotOverlay(nullptr);
+                if (start_lvgl && opening_robot) {
+                    start_lvgl->SetLessonRobotOverlay(std::move(*opening_robot));
+                } else if (start_lvgl) {
+                    start_lvgl->SetLessonRobotOverlay(nullptr);
+                }
                 if (start_lvgl) start_lvgl->SetLessonTeachingWord("");
                 start_display->SetLessonCaption("");
                 start_display->ClearChatMessages();
                 if (start_lvgl) start_lvgl->SetLessonMode(true);
                 start_display->SetStatus(Lang::Strings::PLEASE_WAIT);
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
-                if (renderer_v2_callback) {
-                    Application::GetInstance().EnqueueLessonVisualCompletion(
-                        LessonQueueItemKind::kVisualCompleted,
-                        callback_transport_epoch,
-                        callback_visual_generation,
-                        sequence,
-                        callback_assignment_id.c_str(),
-                        callback_session_id.c_str(),
-                        nullptr,
-                        LessonVisualCompletionResult::kApplied);
+                if (renderer_v2_callback && start_lvgl) {
+                    if (opening_asset_identity_mismatch) {
+                        Application::GetInstance().EnqueueLessonVisualCompletion(
+                            LessonQueueItemKind::kVisualCompleted, callback_transport_epoch,
+                            callback_visual_generation, sequence, callback_assignment_id.c_str(),
+                            callback_session_id.c_str(), nullptr,
+                            LessonVisualCompletionResult::kRejected, "assetIdentityMismatch");
+                        return;
+                    }
+                    start_lvgl->StartLessonRobotEntrance(
+                        {callback_layout.c_str(), false},
+                        [callback_transport_epoch, callback_visual_generation, sequence,
+                         callback_assignment_id, callback_session_id](
+                            LessonVisualApplyResult result, const char* degraded_reason) {
+                            Application::GetInstance().EnqueueLessonVisualCompletion(
+                                result == LessonVisualApplyResult::kPhaseTimeout
+                                    ? LessonQueueItemKind::kVisualTimedOut
+                                    : LessonQueueItemKind::kVisualCompleted,
+                                callback_transport_epoch, callback_visual_generation, sequence,
+                                callback_assignment_id.c_str(), callback_session_id.c_str(), nullptr,
+                                QueueCompletionResult(result), degraded_reason);
+                        });
                 }
             });
         }
@@ -1980,13 +2093,21 @@ void Application::HandleLessonMessage(const cJSON* root) {
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display, lvgl_display]() {
-                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
-                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
-                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
-                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
-                if (lvgl_display) lvgl_display->SetLessonMode(false);
-                display->SetLessonCaption("");
+            const bool renderer_v2_pause = g_session.renderer_v2;
+            Schedule([display, lvgl_display, renderer_v2_pause]() {
+                if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
+                if (renderer_v2_pause && lvgl_display) {
+                    lvgl_display->ApplyLessonVisualState(
+                        {LessonVisualStateKind::kTeach, true}, nullptr);
+                    lvgl_display->SetLessonMode(true);
+                } else {
+                    if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                    if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                    if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                    if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
+                    if (lvgl_display) lvgl_display->SetLessonMode(false);
+                    display->SetLessonCaption("");
+                }
                 display->ClearChatMessages();
                 display->SetStatus("Tạm dừng bài học");
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
@@ -2003,13 +2124,21 @@ void Application::HandleLessonMessage(const cJSON* root) {
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display, lvgl_display]() {
-                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
-                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
-                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
-                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
-                if (lvgl_display) lvgl_display->SetLessonMode(false);
-                display->SetLessonCaption("");
+            const bool renderer_v2_resume = g_session.renderer_v2;
+            Schedule([display, lvgl_display, renderer_v2_resume]() {
+                if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
+                if (renderer_v2_resume && lvgl_display) {
+                    lvgl_display->ApplyLessonVisualState(
+                        {LessonVisualStateKind::kTeach, true}, nullptr);
+                    lvgl_display->SetLessonMode(true);
+                } else {
+                    if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                    if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                    if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                    if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
+                    if (lvgl_display) lvgl_display->SetLessonMode(false);
+                    display->SetLessonCaption("");
+                }
                 display->ClearChatMessages();
                 display->SetStatus("Đang học...");
                 Application::GetInstance().PlaySound(Lang::Sounds::OGG_POPUP);
@@ -2056,6 +2185,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
             Schedule([display, lvgl_display, stop_status, stop_emotion, stop_message, stop_sound]() {
+                if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
@@ -2090,6 +2220,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
             return;
         }
         g_session.entrance_active = false;
+        const std::uint64_t visual_callback_token =
+            g_visual_callback_token.fetch_add(1, std::memory_order_acq_rel) + 1;
         g_session.visual_generation = requested_generation;
         g_session.pending_server_sequence = sequence;
         g_session.pending_protocol_version = protocol_version;
@@ -2119,11 +2251,34 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const std::string callback_assignment_id = g_session.assignment_id;
         const std::string callback_session_id = g_session.session_id;
         const std::string callback_step_id = g_session.pending_step_id;
-        Schedule([display, presentation, callback_transport_epoch,
+        LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+        const LessonVisualStateKind visual_state = VisualStateKind(Str(body, "state"));
+        Schedule([display, lvgl_display, presentation, visual_state, visual_callback_token,
+                  callback_transport_epoch,
                   callback_visual_generation, sequence, callback_assignment_id,
                   callback_session_id, callback_step_id]() {
+            if (g_visual_callback_token.load(std::memory_order_acquire) !=
+                visual_callback_token) {
+                return;
+            }
             display->SetEmotion(presentation.emotion);
             display->SetStatus(presentation.status);
+            if (lvgl_display) {
+                lvgl_display->ApplyLessonVisualState(
+                    {visual_state, true},
+                    [callback_transport_epoch, callback_visual_generation, sequence,
+                     callback_assignment_id, callback_session_id, callback_step_id](
+                        LessonVisualApplyResult result, const char* degraded_reason) {
+                        Application::GetInstance().EnqueueLessonVisualCompletion(
+                            result == LessonVisualApplyResult::kPhaseTimeout
+                                ? LessonQueueItemKind::kVisualTimedOut
+                                : LessonQueueItemKind::kVisualCompleted,
+                            callback_transport_epoch, callback_visual_generation, sequence,
+                            callback_assignment_id.c_str(), callback_session_id.c_str(),
+                            callback_step_id.c_str(), QueueCompletionResult(result), degraded_reason);
+                    });
+                return;
+            }
             Application::GetInstance().EnqueueLessonVisualCompletion(
                 LessonQueueItemKind::kVisualCompleted,
                 callback_transport_epoch,
@@ -2483,6 +2638,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                   tvideo_use_bounds, tvideo_arrived_bounds,
                   has_visible_content, cap = caption,
                   word = normalized_teaching_word]() {
+            if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
             if (lvgl_display) lvgl_display->SetLessonMode(has_visible_content);
             if (clear_bg && lvgl_display) lvgl_display->SetLessonBackground(nullptr);
             if (clear_object && lvgl_display) lvgl_display->SetLessonObject(nullptr);
