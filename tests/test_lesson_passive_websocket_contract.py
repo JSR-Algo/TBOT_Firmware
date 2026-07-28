@@ -400,7 +400,7 @@ def test_passive_lesson_reconnect_reuses_preallocated_internal_worker_stack():
     worker = function_body(source, "void Application::OpenChannelTask")
 
     assert "StaticTask_t open_channel_task_buffer" in source
-    assert "open_channel_task_stack[kOpenChannelWorkerStackBytes / sizeof(StackType_t)]" in source
+    assert "open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
     assert "xTaskCreateStatic(" in constructor
     assert "&Application::OpenChannelTask" in constructor
     assert "xQueueCreateStatic" in constructor

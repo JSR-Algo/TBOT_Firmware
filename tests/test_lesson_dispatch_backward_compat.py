@@ -52,17 +52,17 @@ def test_lesson_branch_is_additive_above_the_unknown_type_noop():
 def test_lesson_frames_are_serialized_off_websocket_receive_stack():
     app = read("main/application.cc")
     header = read("main/application.h")
-    initialize = app[app.index("void Application::Initialize()") : app.index("void Application::Run()")]
+    constructor = app[app.index("Application::Application()") : app.index("Application::~Application()")]
     initialize_protocol = app[app.index("void Application::InitializeProtocol()") : app.index("protocol_->OnConnected")]
 
     assert "QueueHandle_t lesson_message_queue_" in header
     assert "static void LessonMessageTask(void* arg);" in header
     assert "void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);" in header
-    assert "kLessonMessageWorkerStackBytes = 12288" in app
-    assert 'xTaskCreateWithCaps(&Application::LessonMessageTask, "lesson_worker"' in initialize_protocol
-    assert "kLessonMessageWorkerStackBytes, this" in initialize_protocol
-    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in initialize_protocol
-    assert "lesson_worker" not in initialize
+    assert "kLessonMessageWorkerStackDepth = 12288" in app
+    assert 'xTaskCreateStatic(\n            &Application::LessonMessageTask, "lesson_worker"' in constructor
+    assert "kLessonMessageWorkerStackDepth, this" in constructor
+    assert "MALLOC_CAP_SPIRAM" not in constructor
+    assert "lesson_worker" not in initialize_protocol
     assert "xQueueSend(lesson_message_queue_, &item" in app
     assert "LessonQueueItemKind::kFrame" in app
     assert "transport_epoch" in app

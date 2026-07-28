@@ -37,16 +37,19 @@ def test_websocket_open_requests_share_one_static_internal_dram_stack():
     )
     compact_constructor = " ".join(constructor.split())
 
-    assert constructor.count("xTaskCreateStatic(") == 1
+    assert constructor.count("xTaskCreateStatic(") == 2
     assert "&Application::OpenChannelTask" in constructor
     assert '"lesson_ws"' in constructor
+    assert "&Application::LessonMessageTask" in constructor
+    assert '"lesson_worker"' in constructor
     assert "xQueueCreateStatic(1, sizeof(void*)" in compact_constructor
     assert "reinterpret_cast<uint8_t*>(open_channel_queue_storage)" in constructor
     assert "DRAM_ATTR StaticQueue_t open_channel_queue_buffer;" in source
     assert "DRAM_ATTR void* open_channel_queue_storage[1];" in source
     assert "DRAM_ATTR StackType_t" in source
-    assert "open_channel_task_stack[kOpenChannelWorkerStackBytes" in source
-    assert "kOpenChannelWorkerStackBytes, this," in compact_constructor
+    assert "open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
+    assert "kOpenChannelWorkerStackDepth, this," in compact_constructor
+    assert "sizeof(open_channel_task_stack) == kOpenChannelWorkerStackDepth" in source
     assert "xTaskCreateWithCaps" not in constructor
     assert "MALLOC_CAP_SPIRAM" not in constructor
 
@@ -118,10 +121,10 @@ def test_passive_lesson_websocket_keeps_full_static_internal_stack_size():
         "Application::~Application",
     )
 
-    assert "kOpenChannelWorkerStackBytes = 8192" in source
-    assert "open_channel_task_stack[kOpenChannelWorkerStackBytes / sizeof(StackType_t)]" in source
-    assert "kOpenChannelWorkerStackBytes = 6144" not in source
-    assert "kOpenChannelWorkerStackBytes = 4096" not in source
+    assert "kOpenChannelWorkerStackDepth = 8192" in source
+    assert "open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
+    assert "kOpenChannelWorkerStackDepth = 6144" not in source
+    assert "kOpenChannelWorkerStackDepth = 4096" not in source
     assert "xTaskCreateStatic(" in constructor
     assert "&Application::OpenChannelTask" in constructor
 

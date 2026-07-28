@@ -87,21 +87,32 @@ static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
-static constexpr uint32_t kOpenChannelWorkerStackBytes = 8192;
+static constexpr uint32_t kOpenChannelWorkerStackDepth = 8192;
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
+static constexpr uint32_t kLessonMessageWorkerStackDepth = 12288;
+#endif
 
 namespace {
 DRAM_ATTR StaticTask_t open_channel_task_buffer;
-DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackBytes / sizeof(StackType_t)];
+DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
+static_assert(sizeof(open_channel_task_stack) == kOpenChannelWorkerStackDepth,
+              "ESP-IDF task stack depth must remain byte-sized on ESP32-S3");
 DRAM_ATTR StaticQueue_t open_channel_queue_buffer;
 DRAM_ATTR void* open_channel_queue_storage[1];
 QueueHandle_t open_channel_queue = nullptr;
 TaskHandle_t open_channel_task = nullptr;
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+DRAM_ATTR StaticTask_t lesson_message_task_buffer;
+DRAM_ATTR StackType_t lesson_message_task_stack[kLessonMessageWorkerStackDepth];
+static_assert(sizeof(lesson_message_task_stack) == kLessonMessageWorkerStackDepth,
+              "ESP-IDF task stack depth must remain byte-sized on ESP32-S3");
+DRAM_ATTR StaticQueue_t lesson_message_queue_buffer;
+DRAM_ATTR uint8_t lesson_message_queue_storage[
+    (kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem)];
+#endif
 }  // namespace
 
-#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
-static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
-#endif
 static constexpr int kOtaCheckMaxAttempts = 3;
 static constexpr int kOtaRetryDelaysSeconds[] = {2, 4};
 static constexpr int kOtaCheckPhaseBudgetMs =
@@ -134,12 +145,26 @@ Application::Application() {
                            &open_channel_queue_buffer);
     if (open_channel_queue != nullptr) {
         open_channel_task = xTaskCreateStatic(
-            &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackBytes, this,
+            &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackDepth, this,
             tskIDLE_PRIORITY + 3, open_channel_task_stack, &open_channel_task_buffer);
     }
     if (open_channel_queue == nullptr || open_channel_task == nullptr) {
         ESP_LOGE(TAG, "Failed to create persistent internal websocket worker");
     }
+
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+    lesson_message_queue_ = xQueueCreateStatic(
+        kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem), lesson_message_queue_storage,
+        &lesson_message_queue_buffer);
+    if (lesson_message_queue_ != nullptr) {
+        lesson_message_task_handle_ = xTaskCreateStatic(
+            &Application::LessonMessageTask, "lesson_worker", kLessonMessageWorkerStackDepth, this,
+            tskIDLE_PRIORITY + 2, lesson_message_task_stack, &lesson_message_task_buffer);
+    }
+    if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create persistent internal lesson worker");
+    }
+#endif
 
 #if CONFIG_USE_DEVICE_AEC && CONFIG_USE_SERVER_AEC
 #error "CONFIG_USE_DEVICE_AEC and CONFIG_USE_SERVER_AEC cannot be enabled at the same time"
@@ -202,7 +227,7 @@ Application::~Application() {
                 cJSON_free(item.payload);
             }
         }
-        vQueueDelete(lesson_message_queue_);
+        // Static queue storage lives for the process lifetime and must not be freed.
         lesson_message_queue_ = nullptr;
     }
 #endif
@@ -3039,25 +3064,6 @@ void Application::InitializeProtocol() {
     }
     protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 
-#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-    if (is_websocket_protocol && lesson_message_queue_ == nullptr &&
-        lesson_message_task_handle_ == nullptr) {
-        lesson_message_queue_ = xQueueCreate(
-            kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem));
-        if (lesson_message_queue_ == nullptr) {
-            ESP_LOGE(TAG, "lesson_worker queue create failed");
-        } else if (xTaskCreateWithCaps(&Application::LessonMessageTask, "lesson_worker",
-                                       kLessonMessageWorkerStackBytes, this,
-                                       tskIDLE_PRIORITY + 2, &lesson_message_task_handle_,
-                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
-            ESP_LOGE(TAG, "lesson_worker task create failed");
-            vQueueDelete(lesson_message_queue_);
-            lesson_message_queue_ = nullptr;
-            lesson_message_task_handle_ = nullptr;
-        }
-    }
-#endif
-
     Protocol* callback_protocol = protocol_.get();
     protocol_->OnConnected([this]() {
         if (IsConnectSuccessPublicationSuppressed()) {
@@ -3229,7 +3235,8 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingJson(
-        [this, display](const cJSON* root, std::uint64_t callback_transport_epoch) {
+        [this, display, is_websocket_protocol](
+            const cJSON* root, std::uint64_t callback_transport_epoch) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
         // US-006 Slice-01 (DIV-FW-NULLDEREF): guard the type deref on the path the
@@ -3487,6 +3494,10 @@ void Application::InitializeProtocol() {
             // ABOVE the unknown-type no-op so un-upgraded firmware keeps dropping
             // lesson_* silently (backward-compat). Queue it so HTTP/TLS image fetch
             // and decode never run on the WebSocket receive callback / lwIP stack.
+            if (!is_websocket_protocol) {
+                ESP_LOGW(TAG, "lesson_* ignored on non-WebSocket transport");
+                return;
+            }
             EnqueueLessonMessage(root, callback_transport_epoch);
 #endif
         } else {
