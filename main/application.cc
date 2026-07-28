@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <new>
+#include <esp_attr.h>
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
@@ -86,6 +87,17 @@ static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
+static constexpr uint32_t kOpenChannelWorkerStackBytes = 8192;
+
+namespace {
+DRAM_ATTR StaticTask_t open_channel_task_buffer;
+DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackBytes / sizeof(StackType_t)];
+DRAM_ATTR StaticQueue_t open_channel_queue_buffer;
+DRAM_ATTR void* open_channel_queue_storage[1];
+QueueHandle_t open_channel_queue = nullptr;
+TaskHandle_t open_channel_task = nullptr;
+}  // namespace
+
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
 static constexpr uint32_t kLessonMessageWorkerStackBytes = 12288;
@@ -101,7 +113,9 @@ static_assert(kOtaCheckPhaseBudgetMs <= 60000,
 // TBOT claim poll (C4): cadence 10s. The backend's 5-minute cap applies only
 // after a pending claim exists; unclaimed standby must keep polling so a late
 // phone scan can still find and claim the robot.
-static constexpr uint64_t kClaimPollIntervalUs = 10ULL * 1000000ULL;      // 10s (was 4s: blocking HTTP/TLS poll was hammering main task + flaky backend)
+static constexpr uint64_t kClaimPollIntervalUs =
+    10ULL *
+    1000000ULL;  // 10s (was 4s: blocking HTTP/TLS poll was hammering main task + flaky backend)
 // "Hi ESP needs many tries" fix: once the realtime WS is up (online_intent_)
 // the device is fully functional and the claim poll is pure background. Back it
 // off hard so a residual still-polling state (e.g. online-but-not-yet-claimed)
@@ -110,11 +124,22 @@ static constexpr uint64_t kClaimPollIntervalIdleUs = 60ULL * 1000000ULL;  // 60s
 static constexpr int64_t kClaimPollWindowMs = 5LL * 60LL * 1000LL;        // 5 min cap
 
 // TBOT heartbeat (C5): POST /v1/device/heartbeat every 20s while claimed/online.
-static constexpr uint64_t kHeartbeatIntervalUs = 20ULL * 1000000ULL;     // 20s
-
+static constexpr uint64_t kHeartbeatIntervalUs = 20ULL * 1000000ULL;  // 20s
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
+
+    open_channel_queue =
+        xQueueCreateStatic(1, sizeof(void*), reinterpret_cast<uint8_t*>(open_channel_queue_storage),
+                           &open_channel_queue_buffer);
+    if (open_channel_queue != nullptr) {
+        open_channel_task = xTaskCreateStatic(
+            &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackBytes, this,
+            tskIDLE_PRIORITY + 3, open_channel_task_stack, &open_channel_task_buffer);
+    }
+    if (open_channel_queue == nullptr || open_channel_task == nullptr) {
+        ESP_LOGE(TAG, "Failed to create persistent internal websocket worker");
+    }
 
 #if CONFIG_USE_DEVICE_AEC && CONFIG_USE_SERVER_AEC
 #error "CONFIG_USE_DEVICE_AEC and CONFIG_USE_SERVER_AEC cannot be enabled at the same time"
@@ -3967,14 +3992,13 @@ void Application::StartPassiveLessonWebsocket() {
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
     auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
-    auto created = xTaskCreate(&Application::OpenChannelTask, "lesson_ws", 8192, ctx,
-                               tskIDLE_PRIORITY + 3, nullptr);
-    if (created != pdPASS) {
+    if (open_channel_queue == nullptr || open_channel_task == nullptr ||
+        xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE) {
         delete ctx;
         connect_in_flight_.store(false);
         passive_ws_intent_.store(false);
         CancelConnectWatchdog();
-        ESP_LOGE(TAG, "lesson_ws task create failed");
+        ESP_LOGE(TAG, "lesson_ws worker unavailable");
         SchedulePassiveLessonReconnect();
     }
 }
@@ -4007,8 +4031,9 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         return;
     }
     // SM-1/WSS-1: OpenAudioChannel() blocks (TCP+TLS handshake + server hello,
-    // up to ~20s). Run it on a short-lived worker so the app task keeps draining
-    // audio/VAD/abort/UI. connect_generation_ invalidates a stale result; the
+    // up to ~20s). Queue it on the persistent worker so the app task keeps draining
+    // audio/VAD/abort/UI without reallocating a large internal stack. connect_generation_
+    // invalidates a stale result; the
     // connect watchdog (SM-3) recovers a wedged/black-hole connect.
     reconnect_mode_ = mode;
     online_intent_.store(true);  // we want an open channel -> reconnect on unexpected drop
@@ -4018,193 +4043,199 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     ArmConnectWatchdog();
     passive_ws_intent_.store(false);
     auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
-    if (xTaskCreate(&Application::OpenChannelTask, "ws_open", 8192, ctx,
-                    tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+    if (open_channel_queue == nullptr || open_channel_task == nullptr ||
+        xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE) {
         delete ctx;
         connect_in_flight_.store(false);
         connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
         CancelConnectWatchdog();
-        ESP_LOGE(TAG, "ws_open task create failed -> idle");
+        ESP_LOGE(TAG, "ws_open worker unavailable -> idle");
         SetDeviceState(kDeviceStateIdle);
     }
 }
 
 void Application::OpenChannelTask(void* arg) {
-    auto* ctx = static_cast<ConnectContext*>(arg);
-    Application* self = ctx->app;
-    ListeningMode mode = ctx->mode;
-    uint32_t gen = ctx->generation;
-    std::string wake_word = ctx->wake_word;
-    bool wake_word_invoke = ctx->wake_word_invoke;
-    bool passive_preconnect = ctx->passive_preconnect;
-    delete ctx;
+    auto* self = static_cast<Application*>(arg);
+    for (;;) {
+        ConnectContext* ctx = nullptr;
+        if (xQueueReceive(open_channel_queue, &ctx, portMAX_DELAY) != pdTRUE || ctx == nullptr) {
+            continue;
+        }
+        ListeningMode mode = ctx->mode;
+        uint32_t gen = ctx->generation;
+        std::string wake_word = ctx->wake_word;
+        bool wake_word_invoke = ctx->wake_word_invoke;
+        bool passive_preconnect = ctx->passive_preconnect;
+        delete ctx;
 
-    // The ONLY blocking call, now off the app task.
-    bool ok = false;
-    int max_attempts = wake_word_invoke ? kWakeWordAudioChannelOpenMaxAttempts : 1;
-    for (int attempt = 1;
-         self->protocol_ && !self->protocol_->IsAudioChannelOpened() && attempt <= max_attempts;
-         ++attempt) {
-        self->protocol_->SetIncomingJsonTransportEpoch(
-            self->lesson_transport_epoch_gate_.PublishedEpoch());
-        ok = self->protocol_->OpenAudioChannel();
-        if (ok) {
-            break;
-        }
-        if (wake_word_invoke) {
-            ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d",
-                     attempt, kWakeWordAudioChannelOpenMaxAttempts);
-        }
-        if (wake_word_invoke && attempt < max_attempts) {
-            vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
-        }
-    }
-    if (self->protocol_ && self->protocol_->IsAudioChannelOpened()) {
-        ok = true;
-    }
-    self->connect_in_flight_.store(false);  // worker is done using protocol_
-
-    self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
-        self->CancelConnectWatchdog();
-        if (self->reboot_pending_.exchange(false)) {
-            self->reset_pending_.store(false);
-            self->connect_close_deferral_.Cancel();
-            self->CompleteReboot();
-            return;
-        }
-        // A ResetProtocol arrived while we were mid-connect and deferred the
-        // actual reset to us (now safe: the worker no longer touches protocol_).
-        if (self->reset_pending_.exchange(false)) {
-            const bool reinit_protocol = self->protocol_reinit_pending_.exchange(false);
-            self->connect_close_deferral_.Cancel();
-            self->DoResetProtocol();
-            if (reinit_protocol) {
-                self->InitializeProtocol();
+        // The ONLY blocking call, now off the app task.
+        bool ok = false;
+        int max_attempts = wake_word_invoke ? kWakeWordAudioChannelOpenMaxAttempts : 1;
+        for (int attempt = 1;
+             self->protocol_ && !self->protocol_->IsAudioChannelOpened() && attempt <= max_attempts;
+             ++attempt) {
+            self->protocol_->SetIncomingJsonTransportEpoch(
+                self->lesson_transport_epoch_gate_.PublishedEpoch());
+            ok = self->protocol_->OpenAudioChannel();
+            if (ok) {
+                break;
             }
-            return;
-        }
-        if (self->connect_close_deferral_.TakeAfterWorker()) {
-            if (self->protocol_ != nullptr) {
-                self->protocol_->CloseAudioChannel();
-            }
-            return;
-        }
-        if (gen != self->connect_generation_.load()) {
-            return;  // superseded by a newer connect or the watchdog
-        }
-        if (!passive_preconnect) {
-            const DeviceState state = self->GetDeviceState();
             if (wake_word_invoke) {
-                if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
-                    return;
-                }
-            } else if (state != kDeviceStateConnecting) {
+                ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d", attempt,
+                         kWakeWordAudioChannelOpenMaxAttempts);
+            }
+            if (wake_word_invoke && attempt < max_attempts) {
+                vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
+            }
+        }
+        if (self->protocol_ && self->protocol_->IsAudioChannelOpened()) {
+            ok = true;
+        }
+        self->connect_in_flight_.store(false);  // worker is done using protocol_
+
+        self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
+            self->CancelConnectWatchdog();
+            if (self->reboot_pending_.exchange(false)) {
+                self->reset_pending_.store(false);
+                self->connect_close_deferral_.Cancel();
+                self->CompleteReboot();
                 return;
             }
-        }
-        if (ok) {
-            self->backend_offline_.store(false);
-            self->reconnect_attempt_ = 0;
-            self->connect_attempt_active_.store(false);  // WSS-8: connect cycle resolved (success)
-            if (passive_preconnect) {
-                self->passive_reconnect_attempt_ = 0;
-                self->reconnect_passive_.store(false);
-                ESP_LOGI(TAG, "passive_lesson_websocket_opened");
-                const bool lesson_answer_turn =
-                    self->lesson_interactive_listen_pending_.load() ||
-                    self->lesson_interactive_listening_active_.load();
-                if (self->lesson_runtime_active_.load() && lesson_answer_turn) {
-                    self->passive_ws_intent_.store(false);
-                    self->StartHeartbeat();
-                    self->DispatchDeviceHeartbeat();
-                    self->SetListeningMode(kListeningModeManualStop);
-                } else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load()) {
-                    const std::string deferred_wake_word = self->deferred_wake_word_;
-                    self->deferred_wake_word_.clear();
-                    if (!deferred_wake_word.empty()) {
-                        ESP_LOGI(TAG, "passive_lesson_deferred_wake_resumed");
-                        self->FinishWakeWordInvoke(deferred_wake_word);
-                    } else {
-                        self->audio_service_.EnableWakeWordDetection(true);
-                        ESP_LOGI(TAG, "passive_lesson_wake_word_rearmed running=%d",
-                                 self->audio_service_.IsWakeWordRunning() ? 1 : 0);
-                    }
+            // A ResetProtocol arrived while we were mid-connect and deferred the
+            // actual reset to us (now safe: the worker no longer touches protocol_).
+            if (self->reset_pending_.exchange(false)) {
+                const bool reinit_protocol = self->protocol_reinit_pending_.exchange(false);
+                self->connect_close_deferral_.Cancel();
+                self->DoResetProtocol();
+                if (reinit_protocol) {
+                    self->InitializeProtocol();
                 }
-            } else if (wake_word_invoke) {
-                self->FinishWakeWordInvoke(wake_word);
-            } else {
-                const bool lesson_answer_turn =
-                    self->lesson_interactive_listen_pending_.load() ||
-                    self->lesson_interactive_listening_active_.load();
-                if (self->lesson_runtime_active_.load() && !lesson_answer_turn) {
-                    ESP_LOGI(TAG, "lesson open worker ignored state=%d",
-                             static_cast<int>(self->GetDeviceState()));
-                    self->online_intent_.store(false);
+                return;
+            }
+            if (self->connect_close_deferral_.TakeAfterWorker()) {
+                if (self->protocol_ != nullptr) {
+                    self->protocol_->CloseAudioChannel();
+                }
+                return;
+            }
+            if (gen != self->connect_generation_.load()) {
+                return;  // superseded by a newer connect or the watchdog
+            }
+            if (!passive_preconnect) {
+                const DeviceState state = self->GetDeviceState();
+                if (wake_word_invoke) {
+                    if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
+                        return;
+                    }
+                } else if (state != kDeviceStateConnecting) {
                     return;
                 }
-                if (self->reconnect_resume_listening_.exchange(true)) {
-                    self->SetListeningMode(mode);
-                } else {
-                    self->SetDeviceState(kDeviceStateIdle);
-                }
             }
-        } else {
-            const bool lesson_answer_turn =
-                self->lesson_interactive_listen_pending_.load() ||
-                self->lesson_interactive_listening_active_.load();
-            if (self->lesson_runtime_active_.load()) {
-                if (lesson_answer_turn || (!passive_preconnect && !wake_word_invoke)) {
-                    ESP_LOGW(TAG, "lesson open_audio_channel_failed -> wait");
-                    self->backend_offline_.store(true);
-                    self->passive_ws_intent_.store(false);
-                    self->online_intent_.store(false);
-                    self->connect_attempt_active_.store(false);
-                    if (!lesson_answer_turn) {
-                        self->lesson_interactive_listen_generation_.fetch_add(1);
-                        self->lesson_interactive_listen_pending_.store(false);
-                        self->lesson_interactive_listening_active_.store(false);
+            if (ok) {
+                self->backend_offline_.store(false);
+                self->reconnect_attempt_ = 0;
+                self->connect_attempt_active_.store(
+                    false);  // WSS-8: connect cycle resolved (success)
+                if (passive_preconnect) {
+                    self->passive_reconnect_attempt_ = 0;
+                    self->reconnect_passive_.store(false);
+                    ESP_LOGI(TAG, "passive_lesson_websocket_opened");
+                    const bool lesson_answer_turn =
+                        self->lesson_interactive_listen_pending_.load() ||
+                        self->lesson_interactive_listening_active_.load();
+                    if (self->lesson_runtime_active_.load() && lesson_answer_turn) {
+                        self->passive_ws_intent_.store(false);
+                        self->StartHeartbeat();
+                        self->DispatchDeviceHeartbeat();
+                        self->SetListeningMode(kListeningModeManualStop);
+                    } else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load()) {
+                        const std::string deferred_wake_word = self->deferred_wake_word_;
+                        self->deferred_wake_word_.clear();
+                        if (!deferred_wake_word.empty()) {
+                            ESP_LOGI(TAG, "passive_lesson_deferred_wake_resumed");
+                            self->FinishWakeWordInvoke(deferred_wake_word);
+                        } else {
+                            self->audio_service_.EnableWakeWordDetection(true);
+                            ESP_LOGI(TAG, "passive_lesson_wake_word_rearmed running=%d",
+                                     self->audio_service_.IsWakeWordRunning() ? 1 : 0);
+                        }
                     }
-                    self->lesson_idle_repaint_suppressed_.store(true);
-                    if (self->GetDeviceState() == kDeviceStateConnecting) {
+                } else if (wake_word_invoke) {
+                    self->FinishWakeWordInvoke(wake_word);
+                } else {
+                    const bool lesson_answer_turn =
+                        self->lesson_interactive_listen_pending_.load() ||
+                        self->lesson_interactive_listening_active_.load();
+                    if (self->lesson_runtime_active_.load() && !lesson_answer_turn) {
+                        ESP_LOGI(TAG, "lesson open worker ignored state=%d",
+                                 static_cast<int>(self->GetDeviceState()));
+                        self->online_intent_.store(false);
+                        return;
+                    }
+                    if (self->reconnect_resume_listening_.exchange(true)) {
+                        self->SetListeningMode(mode);
+                    } else {
                         self->SetDeviceState(kDeviceStateIdle);
                     }
-                    auto display = Board::GetInstance().GetDisplay();
-                    display->SetStatus(Lang::Strings::PLEASE_WAIT);
-                    if (lesson_answer_turn) {
-                        self->SchedulePassiveLessonReconnect();
+                }
+            } else {
+                const bool lesson_answer_turn = self->lesson_interactive_listen_pending_.load() ||
+                                                self->lesson_interactive_listening_active_.load();
+                if (self->lesson_runtime_active_.load()) {
+                    if (lesson_answer_turn || (!passive_preconnect && !wake_word_invoke)) {
+                        ESP_LOGW(TAG, "lesson open_audio_channel_failed -> wait");
+                        self->backend_offline_.store(true);
+                        self->passive_ws_intent_.store(false);
+                        self->online_intent_.store(false);
+                        self->connect_attempt_active_.store(false);
+                        if (!lesson_answer_turn) {
+                            self->lesson_interactive_listen_generation_.fetch_add(1);
+                            self->lesson_interactive_listen_pending_.store(false);
+                            self->lesson_interactive_listening_active_.store(false);
+                        }
+                        self->lesson_idle_repaint_suppressed_.store(true);
+                        if (self->GetDeviceState() == kDeviceStateConnecting) {
+                            self->SetDeviceState(kDeviceStateIdle);
+                        }
+                        auto display = Board::GetInstance().GetDisplay();
+                        display->SetStatus(Lang::Strings::PLEASE_WAIT);
+                        if (lesson_answer_turn) {
+                            self->SchedulePassiveLessonReconnect();
+                        }
+                        return;
                     }
-                    return;
+                }
+                if (passive_preconnect) {
+                    ESP_LOGW(TAG, "passive_lesson_websocket_failed");
+                    self->deferred_wake_word_.clear();
+                    self->passive_ws_intent_.store(false);
+                    self->SchedulePassiveLessonReconnect();
+                } else if (wake_word_invoke) {
+                    ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");
+                } else {
+                    ESP_LOGW(TAG, "open_audio_channel_failed -> idle + backoff");
+                }
+                self->backend_offline_.store(true);
+                if (wake_word_invoke) {
+                    self->audio_service_.EnableWakeWordDetection(true);
+                }
+                if (self->GetDeviceState() == kDeviceStateConnecting) {
+                    self->SetDeviceState(kDeviceStateIdle);
+                }
+                if (!wake_word_invoke && !passive_preconnect) {
+                    self->ScheduleReconnect(
+                        mode,
+                        self->reconnect_resume_listening_.load());  // WSS-4: long-horizon retry
+                } else if (wake_word_invoke) {
+                    // WSS-8: the wake open-loop exhausted all attempts -> terminal.
+                    // Per-attempt errors were suppressed (connect_attempt_active_),
+                    // so surface the offline banner exactly once now.
+                    self->connect_attempt_active_.store(false);
+                    xEventGroupSetBits(self->event_group_, MAIN_EVENT_ERROR);
                 }
             }
-            if (passive_preconnect) {
-                ESP_LOGW(TAG, "passive_lesson_websocket_failed");
-                self->deferred_wake_word_.clear();
-                self->passive_ws_intent_.store(false);
-                self->SchedulePassiveLessonReconnect();
-            } else if (wake_word_invoke) {
-                ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");
-            } else {
-                ESP_LOGW(TAG, "open_audio_channel_failed -> idle + backoff");
-            }
-            self->backend_offline_.store(true);
-            if (wake_word_invoke) {
-                self->audio_service_.EnableWakeWordDetection(true);
-            }
-            if (self->GetDeviceState() == kDeviceStateConnecting) {
-                self->SetDeviceState(kDeviceStateIdle);
-            }
-            if (!wake_word_invoke && !passive_preconnect) {
-                self->ScheduleReconnect(mode, self->reconnect_resume_listening_.load());   // WSS-4: long-horizon retry
-            } else if (wake_word_invoke) {
-                // WSS-8: the wake open-loop exhausted all attempts -> terminal.
-                // Per-attempt errors were suppressed (connect_attempt_active_),
-                // so surface the offline banner exactly once now.
-                self->connect_attempt_active_.store(false);
-                xEventGroupSetBits(self->event_group_, MAIN_EVENT_ERROR);
-            }
-        }
-    });
-    vTaskDelete(nullptr);
+        });
+    }
 }
 
 void Application::ArmConnectWatchdog() {
@@ -4635,13 +4666,13 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         ArmConnectWatchdog();
         passive_ws_intent_.store(false);
         auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
-        if (xTaskCreate(&Application::OpenChannelTask, "wake_ws_open", 8192, ctx,
-                        tskIDLE_PRIORITY + 3, nullptr) != pdPASS) {
+        if (open_channel_queue == nullptr || open_channel_task == nullptr ||
+            xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE) {
             delete ctx;
             connect_in_flight_.store(false);
             connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
             CancelConnectWatchdog();
-            ESP_LOGE(TAG, "wake_ws_open task create failed -> idle");
+            ESP_LOGE(TAG, "wake_ws_open worker unavailable -> idle");
             audio_service_.EnableWakeWordDetection(true);
             SetDeviceState(kDeviceStateIdle);
         }

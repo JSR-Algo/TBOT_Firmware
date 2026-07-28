@@ -42,5 +42,8 @@ def test_heartbeat_https_worker_has_stack_headroom_next_to_passive_websocket():
 def test_websocket_open_worker_has_tls_stack_headroom():
     source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
 
-    for task_name in ("lesson_ws", "ws_open", "wake_ws_open"):
-        assert f'"{task_name}", {MIN_WEBSOCKET_OPEN_STACK_BYTES}' in source
+    assert f"kOpenChannelWorkerStackBytes = {MIN_WEBSOCKET_OPEN_STACK_BYTES}" in source
+    assert (
+        "open_channel_task_stack[kOpenChannelWorkerStackBytes / sizeof(StackType_t)]"
+        in source
+    )

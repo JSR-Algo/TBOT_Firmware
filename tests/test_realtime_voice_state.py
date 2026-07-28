@@ -838,7 +838,7 @@ def test_lesson_runtime_blocks_stale_wake_word_continuations():
     assert "lesson_runtime_active_.load()" in continue_body
     assert "lesson wake continue ignored" in continue_body
     assert continue_body.index("lesson_runtime_active_.load()") < continue_body.index(
-        "xTaskCreate(&Application::OpenChannelTask"
+        "xQueueSend(open_channel_queue"
     )
 
     finish_end = app_cc.index("// H3: localized screen copy", finish_start)
@@ -870,7 +870,7 @@ def test_lesson_runtime_blocks_stale_generic_open_continuations():
     ) < continue_body.index("if (protocol_->IsAudioChannelOpened())")
     assert continue_body.index(
         "if (lesson_runtime_active_.load() && !lesson_answer_turn)"
-    ) < continue_body.index("xTaskCreate(&Application::OpenChannelTask")
+    ) < continue_body.index("xQueueSend(open_channel_queue")
 
     task_end = app_cc.index("void Application::ArmConnectWatchdog", task_start)
     task_body = app_cc[task_start:task_end]
@@ -914,6 +914,22 @@ def test_lesson_runtime_open_failure_clears_answer_turn_without_generic_reconnec
         "self->lesson_interactive_listen_pending_.store(false);"
     )
     assert lesson_start < failure_body.index("if (passive_preconnect)")
+
+
+def test_generic_open_queue_failure_cleans_context_and_recovers_idle():
+    app_cc = read("main/application.cc")
+    start = app_cc.index("void Application::ContinueOpenAudioChannel")
+    end = app_cc.index("void Application::OpenChannelTask", start)
+    body = app_cc[start:end]
+    failure = body[body.index("if (open_channel_queue == nullptr") :]
+
+    assert "xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE" in failure
+    assert "delete ctx;" in failure
+    assert "connect_in_flight_.store(false);" in failure
+    assert "connect_attempt_active_.store(false);" in failure
+    assert "CancelConnectWatchdog();" in failure
+    assert 'ESP_LOGE(TAG, "ws_open worker unavailable -> idle");' in failure
+    assert "SetDeviceState(kDeviceStateIdle);" in failure
 
 def test_lesson_runtime_audio_open_callback_suppresses_stale_side_effects():
     app_cc = read("main/application.cc")
@@ -1516,7 +1532,7 @@ def test_cold_wake_word_open_uses_worker_instead_of_blocking_app_task():
     assert "void FinishWakeWordInvoke(const std::string& wake_word);" in app_h
     assert "connect_in_flight_.load()" in continue_body
     assert "ArmConnectWatchdog();" in continue_body
-    assert "xTaskCreate(&Application::OpenChannelTask" in continue_body
+    assert "xQueueSend(open_channel_queue" in continue_body
     assert "protocol_->OpenAudioChannel()" not in continue_body
 
     open_start = app_cc.index("void Application::OpenChannelTask")
@@ -1525,6 +1541,23 @@ def test_cold_wake_word_open_uses_worker_instead_of_blocking_app_task():
     assert "ctx->wake_word" in open_body
     assert "kWakeWordAudioChannelOpenMaxAttempts" in open_body
     assert "FinishWakeWordInvoke(wake_word)" in open_body
+
+
+def test_wake_word_open_queue_failure_cleans_context_and_rearms_detection():
+    app_cc = read("main/application.cc")
+    start = app_cc.index("void Application::ContinueWakeWordInvoke")
+    end = app_cc.index("void Application::FinishWakeWordInvoke", start)
+    body = app_cc[start:end]
+    failure = body[body.index("if (open_channel_queue == nullptr") :]
+
+    assert "xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE" in failure
+    assert "delete ctx;" in failure
+    assert "connect_in_flight_.store(false);" in failure
+    assert "connect_attempt_active_.store(false);" in failure
+    assert "CancelConnectWatchdog();" in failure
+    assert 'ESP_LOGE(TAG, "wake_ws_open worker unavailable -> idle");' in failure
+    assert "audio_service_.EnableWakeWordDetection(true);" in failure
+    assert "SetDeviceState(kDeviceStateIdle);" in failure
 
 
 def test_wake_word_connect_watchdog_allows_slow_websocket_open_retries():

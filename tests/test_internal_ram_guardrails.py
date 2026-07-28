@@ -28,35 +28,45 @@ def test_esp32s3_malloc_prefers_psram_for_allocations_over_512_bytes():
     assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=2048" not in sdkconfig
 
 
-def test_websocket_open_workers_use_standard_internal_dram_stacks():
+def test_websocket_open_requests_share_one_static_internal_dram_stack():
     source = read("main/application.cc")
+    constructor = function_body(
+        source,
+        "Application::Application",
+        "Application::~Application",
+    )
+    compact_constructor = " ".join(constructor.split())
 
-    for signature, next_signature, task_name in [
+    assert constructor.count("xTaskCreateStatic(") == 1
+    assert "&Application::OpenChannelTask" in constructor
+    assert '"lesson_ws"' in constructor
+    assert "xQueueCreateStatic(1, sizeof(void*)" in compact_constructor
+    assert "reinterpret_cast<uint8_t*>(open_channel_queue_storage)" in constructor
+    assert "DRAM_ATTR StaticQueue_t open_channel_queue_buffer;" in source
+    assert "DRAM_ATTR void* open_channel_queue_storage[1];" in source
+    assert "DRAM_ATTR StackType_t" in source
+    assert "open_channel_task_stack[kOpenChannelWorkerStackBytes" in source
+    assert "kOpenChannelWorkerStackBytes, this," in compact_constructor
+    assert "xTaskCreateWithCaps" not in constructor
+    assert "MALLOC_CAP_SPIRAM" not in constructor
+
+    for signature, next_signature in [
         (
             "void Application::StartPassiveLessonWebsocket",
             "void Application::ContinueOpenAudioChannel",
-            '"lesson_ws"',
         ),
         (
             "void Application::ContinueOpenAudioChannel",
             "void Application::OpenChannelTask",
-            '"ws_open"',
         ),
         (
             "void Application::ContinueWakeWordInvoke",
             "void Application::FinishWakeWordInvoke",
-            '"wake_ws_open"',
         ),
     ]:
         body = function_body(source, signature, next_signature)
-        task_index = body.index(task_name)
-        create_start = body.rfind("xTaskCreate", 0, task_index)
-        create_call = body[create_start:body.index(";", task_index)]
-
-        assert create_start != -1, task_name
-        assert "xTaskCreate(&Application::OpenChannelTask" in create_call, task_name
-        assert "xTaskCreateWithCaps" not in create_call, task_name
-        assert "MALLOC_CAP_" not in create_call, task_name
+        assert "xQueueSend(open_channel_queue" in body
+        assert "xTaskCreate" not in body
 
 
 def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
@@ -85,7 +95,7 @@ def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
     assert "settings.GetInt(" in refresh_body
 
 
-def test_websocket_open_worker_uses_standard_task_self_delete():
+def test_websocket_open_worker_stays_alive_for_reconnect_reuse():
     source = read("main/application.cc")
     worker_body = function_body(
         source,
@@ -93,24 +103,27 @@ def test_websocket_open_worker_uses_standard_task_self_delete():
         "void Application::ArmConnectWatchdog",
     )
 
-    assert "vTaskDelete(nullptr);" in worker_body
+    assert "for (;;)" in worker_body
+    assert "xQueueReceive(open_channel_queue" in worker_body
+    assert "portMAX_DELAY" in worker_body
+    assert "vTaskDelete(nullptr);" not in worker_body
     assert "vTaskDeleteWithCaps(nullptr);" not in worker_body
 
 
-def test_passive_lesson_websocket_keeps_full_standard_internal_stack_size():
+def test_passive_lesson_websocket_keeps_full_static_internal_stack_size():
     source = read("main/application.cc")
-    passive = function_body(
+    constructor = function_body(
         source,
-        "void Application::StartPassiveLessonWebsocket",
-        "void Application::ContinueOpenAudioChannel",
+        "Application::Application",
+        "Application::~Application",
     )
 
-    assert '"lesson_ws", 8192' in passive
-    assert '"lesson_ws", 6144' not in passive
-    assert '"lesson_ws", 4096' not in passive
-    assert "xTaskCreate(&Application::OpenChannelTask" in passive
-    assert "xTaskCreateWithCaps(&Application::OpenChannelTask" not in passive
-    assert "MALLOC_CAP_" not in passive[passive.index('"lesson_ws", 8192') :]
+    assert "kOpenChannelWorkerStackBytes = 8192" in source
+    assert "open_channel_task_stack[kOpenChannelWorkerStackBytes / sizeof(StackType_t)]" in source
+    assert "kOpenChannelWorkerStackBytes = 6144" not in source
+    assert "kOpenChannelWorkerStackBytes = 4096" not in source
+    assert "xTaskCreateStatic(" in constructor
+    assert "&Application::OpenChannelTask" in constructor
 
 
 def test_transient_http_workers_use_internal_dram_stacks():

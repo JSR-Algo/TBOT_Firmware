@@ -376,18 +376,39 @@ def test_passive_lesson_socket_connect_failure_retries_passively():
     assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
     assert "passive_lesson_reconnect_scheduled" in passive_scheduler
 
-def test_passive_lesson_socket_task_create_failure_retries_passively():
+def test_passive_lesson_socket_worker_unavailable_retries_passively():
     source = read("main/application.cc")
     passive = function_body(source, "void Application::StartPassiveLessonWebsocket")
     failure = passive[
-        passive.index("if (created != pdPASS)", passive.index('"lesson_ws", 8192')) :
-        passive.index("}", passive.index('ESP_LOGE(TAG, "lesson_ws task create failed")'))
+        passive.index("if (open_channel_queue == nullptr") :
+        passive.index("}", passive.index('ESP_LOGE(TAG, "lesson_ws worker unavailable")'))
     ]
 
+    assert "xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE" in failure
+    assert "delete ctx;" in failure
     assert "connect_in_flight_.store(false);" in failure
     assert "passive_ws_intent_.store(false);" in failure
     assert "CancelConnectWatchdog();" in failure
+    assert 'ESP_LOGE(TAG, "lesson_ws worker unavailable");' in failure
     assert "SchedulePassiveLessonReconnect();" in failure
+
+
+def test_passive_lesson_reconnect_reuses_preallocated_internal_worker_stack():
+    source = read("main/application.cc")
+    constructor = function_body(source, "Application::Application")
+    passive = function_body(source, "void Application::StartPassiveLessonWebsocket")
+    worker = function_body(source, "void Application::OpenChannelTask")
+
+    assert "StaticTask_t open_channel_task_buffer" in source
+    assert "open_channel_task_stack[kOpenChannelWorkerStackBytes / sizeof(StackType_t)]" in source
+    assert "xTaskCreateStatic(" in constructor
+    assert "&Application::OpenChannelTask" in constructor
+    assert "xQueueCreateStatic" in constructor
+    assert "xTaskCreate" not in passive
+    assert "xQueueSend(open_channel_queue" in passive
+    assert "xQueueReceive(open_channel_queue" in worker
+    assert "portMAX_DELAY" in worker
+    assert "vTaskDelete(nullptr);" not in worker
 
 
 def test_network_disconnect_defers_channel_close_until_connect_worker_exits():
