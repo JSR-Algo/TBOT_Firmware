@@ -104,12 +104,9 @@ QueueHandle_t open_channel_queue = nullptr;
 TaskHandle_t open_channel_task = nullptr;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 DRAM_ATTR StaticTask_t lesson_message_task_buffer;
-DRAM_ATTR StackType_t lesson_message_task_stack[kLessonMessageWorkerStackDepth];
-static_assert(sizeof(lesson_message_task_stack) == kLessonMessageWorkerStackDepth,
-              "ESP-IDF task stack depth must remain byte-sized on ESP32-S3");
 DRAM_ATTR StaticQueue_t lesson_message_queue_buffer;
-DRAM_ATTR uint8_t lesson_message_queue_storage[
-    (kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem)];
+StackType_t* lesson_message_task_stack = nullptr;
+uint8_t* lesson_message_queue_storage = nullptr;
 #endif
 }  // namespace
 
@@ -153,16 +150,36 @@ Application::Application() {
     }
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-    lesson_message_queue_ = xQueueCreateStatic(
-        kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem), lesson_message_queue_storage,
-        &lesson_message_queue_buffer);
-    if (lesson_message_queue_ != nullptr) {
+    constexpr uint32_t kLessonWorkerMemoryCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    lesson_message_task_stack = static_cast<StackType_t*>(heap_caps_malloc(
+        kLessonMessageWorkerStackDepth * sizeof(StackType_t), kLessonWorkerMemoryCaps));
+    lesson_message_queue_storage = static_cast<uint8_t*>(heap_caps_malloc(
+        (kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem),
+        kLessonWorkerMemoryCaps));
+    if (lesson_message_task_stack != nullptr && lesson_message_queue_storage != nullptr) {
+        lesson_message_queue_ = xQueueCreateStatic(
+            kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem),
+            lesson_message_queue_storage, &lesson_message_queue_buffer);
+    }
+    if (lesson_message_queue_ != nullptr && lesson_message_task_stack != nullptr) {
         lesson_message_task_handle_ = xTaskCreateStatic(
             &Application::LessonMessageTask, "lesson_worker", kLessonMessageWorkerStackDepth, this,
             tskIDLE_PRIORITY + 2, lesson_message_task_stack, &lesson_message_task_buffer);
     }
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create persistent internal lesson worker");
+        ESP_LOGE(TAG,
+                 "Failed to create persistent PSRAM lesson worker stack=%p storage=%p queue=%p task=%p",
+                 lesson_message_task_stack, lesson_message_queue_storage,
+                 lesson_message_queue_, lesson_message_task_handle_);
+        if (lesson_message_task_handle_ != nullptr) {
+            vTaskDelete(lesson_message_task_handle_);
+            lesson_message_task_handle_ = nullptr;
+        }
+        lesson_message_queue_ = nullptr;
+        heap_caps_free(lesson_message_queue_storage);
+        lesson_message_queue_storage = nullptr;
+        heap_caps_free(lesson_message_task_stack);
+        lesson_message_task_stack = nullptr;
     }
 #endif
 
@@ -227,9 +244,12 @@ Application::~Application() {
                 cJSON_free(item.payload);
             }
         }
-        // Static queue storage lives for the process lifetime and must not be freed.
         lesson_message_queue_ = nullptr;
     }
+    heap_caps_free(lesson_message_queue_storage);
+    lesson_message_queue_storage = nullptr;
+    heap_caps_free(lesson_message_task_stack);
+    lesson_message_task_stack = nullptr;
 #endif
     vEventGroupDelete(event_group_);
 }

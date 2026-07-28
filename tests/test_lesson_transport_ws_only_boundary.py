@@ -91,19 +91,34 @@ def test_lesson_protocol_dispatch_remains_websocket_only_with_persistent_worker(
     )
 
 
-def test_lesson_worker_uses_static_internal_storage_for_full_application_lifetime():
+def test_lesson_worker_reserves_persistent_psram_buffers_with_internal_control_blocks():
     app = read("main/application.cc")
     constructor = app[app.index("Application::Application()"): app.index("Application::~Application()")]
     destructor = app[app.index("Application::~Application()"): app.index("void Application::EnqueueLessonVisualCompletion")]
 
     assert "DRAM_ATTR StaticQueue_t lesson_message_queue_buffer;" in app
-    assert "DRAM_ATTR uint8_t lesson_message_queue_storage[" in app
     assert "DRAM_ATTR StaticTask_t lesson_message_task_buffer;" in app
-    assert "DRAM_ATTR StackType_t lesson_message_task_stack[" in app
-    assert "lesson_message_task_stack[kLessonMessageWorkerStackDepth]" in app
-    assert "sizeof(lesson_message_task_stack) == kLessonMessageWorkerStackDepth" in app
+    assert "StackType_t* lesson_message_task_stack = nullptr;" in app
+    assert "uint8_t* lesson_message_queue_storage = nullptr;" in app
+    assert "DRAM_ATTR StackType_t lesson_message_task_stack[" not in app
+    assert "DRAM_ATTR uint8_t lesson_message_queue_storage[" not in app
+    assert constructor.count("heap_caps_malloc(") >= 2
+    assert "kLessonWorkerMemoryCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in constructor
+    assert constructor.count("kLessonWorkerMemoryCaps") == 3
+    assert constructor.index("heap_caps_malloc(") < constructor.index(
+        "lesson_message_queue_ = xQueueCreateStatic("
+    )
     assert "lesson_message_queue_ = xQueueCreateStatic(" in constructor
     assert "lesson_message_task_handle_ = xTaskCreateStatic(" in constructor
     assert "xQueueCreate(" not in constructor
     assert "xTaskCreateWithCaps" not in constructor
+    assert "MALLOC_CAP_INTERNAL" not in constructor
+    assert "ESP_LOGE(TAG" in constructor
+    assert "Failed to create persistent PSRAM lesson worker" in constructor
+    assert constructor.count("heap_caps_free(") >= 2
     assert "vQueueDelete(lesson_message_queue_)" not in destructor
+    task_delete = destructor.index("vTaskDelete(lesson_message_task_handle_)")
+    queue_drain = destructor.index("xQueueReceive(lesson_message_queue_", task_delete)
+    queue_free = destructor.index("heap_caps_free(lesson_message_queue_storage)", queue_drain)
+    stack_free = destructor.index("heap_caps_free(lesson_message_task_stack)", queue_free)
+    assert task_delete < queue_drain < queue_free < stack_free

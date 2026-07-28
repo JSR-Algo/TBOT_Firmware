@@ -61,7 +61,7 @@ def test_lesson_frames_are_serialized_off_websocket_receive_stack():
     assert "kLessonMessageWorkerStackDepth = 12288" in app
     assert 'xTaskCreateStatic(\n            &Application::LessonMessageTask, "lesson_worker"' in constructor
     assert "kLessonMessageWorkerStackDepth, this" in constructor
-    assert "MALLOC_CAP_SPIRAM" not in constructor
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in constructor
     assert "lesson_worker" not in initialize_protocol
     assert "xQueueSend(lesson_message_queue_, &item" in app
     assert "LessonQueueItemKind::kFrame" in app

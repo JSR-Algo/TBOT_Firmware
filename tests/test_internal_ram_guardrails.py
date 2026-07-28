@@ -35,6 +35,7 @@ def test_websocket_open_requests_share_one_static_internal_dram_stack():
         "Application::Application",
         "Application::~Application",
     )
+    open_worker_constructor = constructor[:constructor.index("#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P")]
     compact_constructor = " ".join(constructor.split())
 
     assert constructor.count("xTaskCreateStatic(") == 2
@@ -50,8 +51,8 @@ def test_websocket_open_requests_share_one_static_internal_dram_stack():
     assert "open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
     assert "kOpenChannelWorkerStackDepth, this," in compact_constructor
     assert "sizeof(open_channel_task_stack) == kOpenChannelWorkerStackDepth" in source
-    assert "xTaskCreateWithCaps" not in constructor
-    assert "MALLOC_CAP_SPIRAM" not in constructor
+    assert "xTaskCreateWithCaps" not in open_worker_constructor
+    assert "MALLOC_CAP_SPIRAM" not in open_worker_constructor
 
     for signature, next_signature in [
         (
