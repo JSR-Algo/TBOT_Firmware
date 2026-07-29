@@ -2216,6 +2216,19 @@ def test_lesson_asset_pack_sync_http_download_does_not_starve_main_watchdog():
     assert "esp_task_wdt_reset();" in body
     assert body.index("esp_task_wdt_reset();") < body.index('http->Open("GET", url)')
 
+def test_lesson_asset_pack_sync_reuses_verified_duplicate_bytes_before_network_download():
+    mcp_server = read("main/mcp_server.cc")
+    start = mcp_server.index('AddUserOnlyTool("self.lesson_assets.sync_to_sd"')
+    end = mcp_server.index('AddUserOnlyTool("self.assets.set_download_url"', start)
+    body = mcp_server[start:end]
+
+    assert "verified_asset_files" in body
+    assert "CopyVerifiedLessonAssetFile" in body
+    assert body.index("CopyVerifiedLessonAssetFile") < body.index(
+        "DownloadLessonAssetToVerifiedFile"
+    )
+    assert '"reusedCount"' in body
+
 def test_sample_lesson_asset_sync_does_not_mkdir_sd_mount_point():
     mcp_server = read("main/mcp_server.cc")
 

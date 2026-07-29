@@ -139,6 +139,12 @@ struct ValidatedLessonAsset {
     size_t declared_size;
 };
 
+struct VerifiedLessonAssetFile {
+    std::string sha256;
+    std::string destination;
+    size_t size;
+};
+
 template <size_t N>
 bool HasOnlyAllowedJsonFields(
     const cJSON* object,
@@ -369,6 +375,51 @@ void DownloadLessonAssetToVerifiedFile(
         url,
         staging.path(),
         bytes_out);
+    CommitVerifiedLessonAssetDownload(staging, cache_key, dest_path, sha256);
+}
+
+void CopyVerifiedLessonAssetFile(
+    const LessonAssetMutationLease& mutation,
+    const char* cache_key,
+    const std::string& source_path,
+    const std::string& dest_path,
+    const std::string& sha256,
+    size_t& bytes_out
+) {
+    RequireLessonAssetMutationLease(mutation);
+    EnsureLessonAssetParentDirs(mutation, dest_path);
+    LessonAssetDownloadStagingFile staging(dest_path);
+    std::unique_ptr<FILE, decltype(&std::fclose)> source(
+        std::fopen(source_path.c_str(), "rb"), &std::fclose);
+    std::unique_ptr<FILE, decltype(&std::fclose)> destination(
+        std::fopen(staging.path().c_str(), "wb"), &std::fclose);
+    if (!source || !destination) {
+        throw std::runtime_error("lesson asset local reuse open failed");
+    }
+
+    std::vector<unsigned char> buffer(4096);
+    bytes_out = 0;
+    while (true) {
+        const size_t read = std::fread(buffer.data(), 1, buffer.size(), source.get());
+        if (read > 0) {
+            if (std::fwrite(buffer.data(), 1, read, destination.get()) != read) {
+                throw std::runtime_error("lesson asset local reuse write failed");
+            }
+            bytes_out += read;
+            esp_task_wdt_reset();
+        }
+        if (read < buffer.size()) {
+            if (std::ferror(source.get())) {
+                throw std::runtime_error("lesson asset local reuse read failed");
+            }
+            break;
+        }
+    }
+    if (std::fflush(destination.get()) != 0) {
+        throw std::runtime_error("lesson asset local reuse flush failed");
+    }
+    source.reset();
+    destination.reset();
     CommitVerifiedLessonAssetDownload(staging, cache_key, dest_path, sha256);
 }
 
@@ -964,6 +1015,7 @@ void McpServer::AddUserOnlyTools() {
             const char* manifest_checksum = JsonStringField(pack.get(), "manifestChecksum");
             auto files = MakeCheckedCJsonArray();
             int downloaded = 0;
+            int reused = 0;
             int skipped = 0;
             int failed = 0;
             int critical_failed = 0;
@@ -972,6 +1024,8 @@ void McpServer::AddUserOnlyTools() {
             const int asset_count = static_cast<int>(validated_assets.size());
             LessonAssetPackActivationResult activation{
                 false, false, false, std::string(), std::string()};
+            std::vector<VerifiedLessonAssetFile> verified_asset_files;
+            verified_asset_files.reserve(validated_assets.size());
 
             {
                 auto mutation =
@@ -1002,22 +1056,53 @@ void McpServer::AddUserOnlyTools() {
                             CheckedCJsonAddStringToObject(item.get(), "state", "SKIPPED");
                         } else {
                             size_t bytes = 0;
-                            DownloadLessonAssetToVerifiedFile(
-                                mutation,
-                                cache_key,
-                                asset.has_declared_size,
-                                asset.declared_size,
-                                asset.url,
-                                asset.destination,
-                                asset.sha256,
-                                bytes);
+                            const VerifiedLessonAssetFile* reusable = nullptr;
+                            for (const auto& verified_file : verified_asset_files) {
+                                if (verified_file.sha256 == asset.sha256 &&
+                                    (!asset.has_declared_size ||
+                                     verified_file.size == asset.declared_size)) {
+                                    reusable = &verified_file;
+                                    break;
+                                }
+                            }
+                            if (reusable != nullptr) {
+                                CopyVerifiedLessonAssetFile(
+                                    mutation,
+                                    cache_key,
+                                    reusable->destination,
+                                    asset.destination,
+                                    asset.sha256,
+                                    bytes);
+                                reused += 1;
+                                CheckedCJsonAddStringToObject(item.get(), "state", "REUSED");
+                            } else {
+                                DownloadLessonAssetToVerifiedFile(
+                                    mutation,
+                                    cache_key,
+                                    asset.has_declared_size,
+                                    asset.declared_size,
+                                    asset.url,
+                                    asset.destination,
+                                    asset.sha256,
+                                    bytes);
+                                downloaded += 1;
+                                CheckedCJsonAddStringToObject(
+                                    item.get(), "state", "DOWNLOADED");
+                            }
                             total_bytes += bytes;
-                            downloaded += 1;
-                            CheckedCJsonAddStringToObject(
-                                item.get(), "state", "DOWNLOADED");
                             CheckedCJsonAddNumberToObject(
                                 item.get(), "bytes", static_cast<double>(bytes));
                         }
+                        struct stat verified_stat {};
+                        if (stat(asset.destination, &verified_stat) != 0 ||
+                            !S_ISREG(verified_stat.st_mode) || verified_stat.st_size < 0) {
+                            throw std::runtime_error("lesson asset verified file missing");
+                        }
+                        verified_asset_files.push_back({
+                            asset.sha256,
+                            asset.destination,
+                            static_cast<size_t>(verified_stat.st_size),
+                        });
                         verified += 1;
                     } catch (const std::runtime_error& error) {
                         if (std::strcmp(error.what(), kMcpResponseAllocationError) == 0) {
@@ -1057,6 +1142,7 @@ void McpServer::AddUserOnlyTools() {
                 json.get(), cache_key, manifest_checksum, asset_count,
                 verified, failed);
             CheckedCJsonAddNumberToObject(json.get(), "downloadedCount", downloaded);
+            CheckedCJsonAddNumberToObject(json.get(), "reusedCount", reused);
             CheckedCJsonAddNumberToObject(json.get(), "skippedCount", skipped);
             CheckedCJsonAddNumberToObject(json.get(), "failedCount", failed);
             CheckedCJsonAddNumberToObject(json.get(), "criticalFailedCount", critical_failed);
