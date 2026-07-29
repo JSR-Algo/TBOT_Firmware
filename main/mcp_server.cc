@@ -1074,6 +1074,7 @@ void McpServer::AddUserOnlyTools() {
                                     asset.sha256,
                                     bytes);
                                 reused += 1;
+                                skipped += 1;
                                 CheckedCJsonAddStringToObject(item.get(), "state", "REUSED");
                             } else {
                                 DownloadLessonAssetToVerifiedFile(
