@@ -404,7 +404,9 @@ bool DownloadLessonAssetToFile(
     if (!http) {
         throw std::runtime_error("failed to create HTTP client");
     }
-    http->SetTimeout(2000);
+    // Public lesson assets may traverse DNS and a CDN before the body starts.
+    // Stay below the task watchdog window while allowing normal Wi-Fi latency.
+    http->SetTimeout(6000);
     esp_task_wdt_reset();
     if (!http->Open("GET", url)) {
         throw std::runtime_error("failed to open URL: " + url);

@@ -2209,7 +2209,7 @@ def test_lesson_asset_pack_sync_http_download_does_not_starve_main_watchdog():
     body = mcp_server[start:end]
 
     assert "auto http = network->CreateHttp(1);" in body
-    assert "http->SetTimeout(2000);" in body
+    assert "http->SetTimeout(6000);" in body
     assert "http->SetTimeout(10000);" not in body
     assert "http->SetTimeout(4000);" not in body
     assert body.count("http->GetStatusCode()") == 1
