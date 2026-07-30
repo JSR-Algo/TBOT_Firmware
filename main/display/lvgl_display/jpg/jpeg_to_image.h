@@ -66,6 +66,29 @@ esp_err_t jpeg_to_image(const uint8_t* src, size_t src_len, uint8_t** out, size_
 esp_err_t jpeg_to_image_with_caps(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len,
                                   size_t* width, size_t* height, size_t* stride, uint32_t output_caps);
 
+/** Caller-owned ROM JPEG state for allocation-free repeated RGB565 decoding. */
+typedef struct {
+    uint8_t* working_buffer;
+    size_t working_buffer_size;
+    uint8_t* output_buffer;
+    size_t output_buffer_size;
+    size_t max_width;
+    size_t max_height;
+    uint32_t output_caps;
+} jpeg_reusable_decoder_t;
+
+/** Allocates the decoder workspace and maximum RGB565 output buffer once. */
+esp_err_t jpeg_reusable_decoder_prepare(jpeg_reusable_decoder_t* decoder, size_t max_width,
+                                        size_t max_height, uint32_t output_caps);
+
+/** Decodes into decoder->output_buffer without allocating or transferring ownership. */
+esp_err_t jpeg_reusable_decoder_decode(jpeg_reusable_decoder_t* decoder, const uint8_t* src,
+                                       size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
+                                       size_t* height, size_t* stride);
+
+/** Releases buffers allocated by jpeg_reusable_decoder_prepare(). */
+void jpeg_reusable_decoder_destroy(jpeg_reusable_decoder_t* decoder);
+
 #ifdef __cplusplus
 }
 #endif

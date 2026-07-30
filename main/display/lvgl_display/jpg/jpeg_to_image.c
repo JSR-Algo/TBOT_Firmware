@@ -234,6 +234,114 @@ jpeg_rom_dec_failed:
     return ret;
 }
 
+esp_err_t jpeg_reusable_decoder_prepare(jpeg_reusable_decoder_t* decoder, size_t max_width, size_t max_height,
+                                        uint32_t output_caps) {
+    if (decoder == NULL || decoder->working_buffer != NULL || decoder->output_buffer != NULL || max_width == 0 ||
+        max_height == 0 || max_width > JPEG_MAX_DIMENSION || max_height > JPEG_MAX_DIMENSION || output_caps == 0 ||
+        max_width > SIZE_MAX / 2) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const size_t stride = max_width * 2;
+    if (max_height > SIZE_MAX / stride) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const size_t output_size = stride * max_height;
+    if (output_size == 0 || output_size > JPEG_MAX_DECODED_BYTES || output_size > UINT32_MAX) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    uint8_t* working_buffer = heap_caps_malloc(JPEG_ROM_WORK_BUFFER_SIZE, output_caps);
+    if (working_buffer == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    uint8_t* output_buffer = heap_caps_aligned_calloc(16, 1, output_size, output_caps);
+    if (output_buffer == NULL) {
+        heap_caps_free(working_buffer);
+        return ESP_ERR_NO_MEM;
+    }
+
+    decoder->working_buffer = working_buffer;
+    decoder->working_buffer_size = JPEG_ROM_WORK_BUFFER_SIZE;
+    decoder->output_buffer = output_buffer;
+    decoder->output_buffer_size = output_size;
+    decoder->max_width = max_width;
+    decoder->max_height = max_height;
+    decoder->output_caps = output_caps;
+    return ESP_OK;
+}
+
+esp_err_t jpeg_reusable_decoder_decode(jpeg_reusable_decoder_t* decoder, const uint8_t* src, size_t src_len,
+                                       uint8_t** out, size_t* out_len, size_t* width, size_t* height, size_t* stride) {
+    if (out != NULL) *out = NULL;
+    if (out_len != NULL) *out_len = 0;
+    if (width != NULL) *width = 0;
+    if (height != NULL) *height = 0;
+    if (stride != NULL) *stride = 0;
+    if (decoder == NULL || decoder->working_buffer == NULL || decoder->output_buffer == NULL || src == NULL ||
+        src_len == 0 || src_len > UINT32_MAX || out == NULL || out_len == NULL || width == NULL || height == NULL ||
+        stride == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    validated_jpeg_info_t validated_info = {0};
+    esp_err_t ret = validate_baseline_jpeg(src, src_len, &validated_info);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    if (validated_info.width > decoder->max_width || validated_info.height > decoder->max_height ||
+        validated_info.decoded_size > decoder->output_buffer_size ||
+        decoder->working_buffer_size < JPEG_ROM_WORK_BUFFER_SIZE) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    esp_jpeg_image_cfg_t config = {
+        .indata = (uint8_t*)src,
+        .indata_size = src_len,
+        .outbuf = decoder->output_buffer,
+        .outbuf_size = decoder->output_buffer_size,
+        .out_format = JPEG_IMAGE_FORMAT_RGB565,
+        .out_scale = JPEG_IMAGE_SCALE_0,
+        .flags = {.swap_color_bytes = 0},
+        .advanced = {
+            .working_buffer = decoder->working_buffer,
+            .working_buffer_size = decoder->working_buffer_size,
+        },
+    };
+    esp_jpeg_image_output_t header_info = {0};
+    ret = esp_jpeg_get_image_info(&config, &header_info);
+    if (ret != ESP_OK || header_info.width != validated_info.width || header_info.height != validated_info.height ||
+        header_info.output_len != validated_info.decoded_size) {
+        return ESP_FAIL;
+    }
+
+    esp_jpeg_image_output_t decoded_info = {0};
+    ret = esp_jpeg_decode(&config, &decoded_info);
+    if (ret != ESP_OK || decoded_info.width != validated_info.width || decoded_info.height != validated_info.height ||
+        decoded_info.output_len != validated_info.decoded_size) {
+        return ret == ESP_ERR_NO_MEM ? ret : ESP_FAIL;
+    }
+
+    *out = decoder->output_buffer;
+    *out_len = validated_info.decoded_size;
+    *width = validated_info.width;
+    *height = validated_info.height;
+    *stride = validated_info.stride;
+    return ESP_OK;
+}
+
+void jpeg_reusable_decoder_destroy(jpeg_reusable_decoder_t* decoder) {
+    if (decoder == NULL) {
+        return;
+    }
+    if (decoder->working_buffer != NULL) {
+        heap_caps_free(decoder->working_buffer);
+    }
+    if (decoder->output_buffer != NULL) {
+        heap_caps_free(decoder->output_buffer);
+    }
+    *decoder = (jpeg_reusable_decoder_t){0};
+}
+
 #ifdef CONFIG_XIAOZHI_ENABLE_HARDWARE_JPEG_DECODER
 static esp_err_t decode_with_hardware_jpeg(const uint8_t* src, size_t src_len, uint8_t** out, size_t* out_len,
                                            size_t* width, size_t* height, size_t* stride) {

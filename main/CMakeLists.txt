@@ -45,6 +45,7 @@ set(SOURCES "audio/audio_codec.cc"
             "device_state_machine.cc"
             "assets.cc"
             "sd_fat_session_guard.cc"
+            "lesson_mjpeg_mp4.cc"
             "main.cc"
             )
 
