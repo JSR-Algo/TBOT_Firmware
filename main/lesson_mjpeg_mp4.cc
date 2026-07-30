@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 namespace tbot {
 namespace {
@@ -588,6 +590,120 @@ LessonMjpegMp4Status LessonMjpegMp4Reader::ReadFrame(
     }
     *bytes_read = selected.size;
     return LessonMjpegMp4Status::kOk;
+}
+
+namespace {
+
+void* OpenStdFile(void*, const char* path) {
+    return std::fopen(path, "rb");
+}
+
+bool SizeStdFile(void*, void* raw_file, std::uint64_t* size) {
+    FILE* file = static_cast<FILE*>(raw_file);
+    if (fseeko(file, 0, SEEK_END) != 0) {
+        return false;
+    }
+    const off_t end = ftello(file);
+    if (end < 0) {
+        return false;
+    }
+    *size = static_cast<std::uint64_t>(end);
+    return true;
+}
+
+bool SeekStdFile(void*, void* raw_file, std::uint64_t offset) {
+    if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+        return false;
+    }
+    return fseeko(static_cast<FILE*>(raw_file), static_cast<off_t>(offset), SEEK_SET) == 0;
+}
+
+std::size_t ReadStdFile(void*, void* raw_file, std::uint8_t* out, std::size_t size) {
+    return std::fread(out, 1, size, static_cast<FILE*>(raw_file));
+}
+
+void CloseStdFile(void*, void* raw_file) {
+    std::fclose(static_cast<FILE*>(raw_file));
+}
+
+LessonMjpegMp4FileOps DefaultFileOps() {
+    return {nullptr, OpenStdFile, SizeStdFile, SeekStdFile, ReadStdFile, CloseStdFile};
+}
+
+bool ValidFileOps(const LessonMjpegMp4FileOps& ops) {
+    return ops.open != nullptr && ops.size != nullptr && ops.seek != nullptr && ops.read != nullptr &&
+           ops.close != nullptr;
+}
+
+}  // namespace
+
+LessonMjpegMp4File::~LessonMjpegMp4File() {
+    Close();
+}
+
+LessonMjpegMp4Status LessonMjpegMp4File::OpenUnderLessonSession(
+    const char* path,
+    const std::string& assignment_id,
+    const std::string& session_id,
+    std::uint64_t generation,
+    LessonMjpegMp4FileOps ops
+) {
+    Close();
+    if (path == nullptr || path[0] == '\0') {
+        return LessonMjpegMp4Status::kInvalidArgument;
+    }
+    if (ops.open == nullptr) {
+        ops = DefaultFileOps();
+    }
+    if (!ValidFileOps(ops)) {
+        return LessonMjpegMp4Status::kInvalidArgument;
+    }
+
+    LessonAssetReadLease read_lease = LessonAssetStorageCoordinator::GetInstance().TryRetainLessonSession(
+        assignment_id, session_id, generation
+    );
+    if (!read_lease) {
+        return LessonMjpegMp4Status::kLeaseUnavailable;
+    }
+    void* file = ops.open(ops.context, path);
+    if (file == nullptr) {
+        return LessonMjpegMp4Status::kIoError;
+    }
+    std::uint64_t file_size = 0;
+    if (!ops.size(ops.context, file, &file_size)) {
+        ops.close(ops.context, file);
+        return LessonMjpegMp4Status::kIoError;
+    }
+    if (file_size == 0 || file_size > kLessonMjpegMp4MaxFileBytes) {
+        ops.close(ops.context, file);
+        return file_size > kLessonMjpegMp4MaxFileBytes ? LessonMjpegMp4Status::kLimitExceeded
+                                                       : LessonMjpegMp4Status::kMalformed;
+    }
+
+    file_ = file;
+    ops_ = ops;
+    lesson_read_lease_ = std::move(read_lease);
+    const LessonMjpegMp4Status status = reader_.Open({this, ReadAt, file_size});
+    if (status != LessonMjpegMp4Status::kOk) {
+        Close();
+    }
+    return status;
+}
+
+void LessonMjpegMp4File::Close() {
+    reader_ = LessonMjpegMp4Reader{};
+    if (file_ != nullptr) {
+        ops_.close(ops_.context, file_);
+        file_ = nullptr;
+    }
+    ops_ = {};
+    lesson_read_lease_ = {};
+}
+
+bool LessonMjpegMp4File::ReadAt(void* context, std::uint64_t offset, std::uint8_t* out, std::size_t size) {
+    auto* self = static_cast<LessonMjpegMp4File*>(context);
+    return self != nullptr && self->file_ != nullptr && self->ops_.seek(self->ops_.context, self->file_, offset) &&
+           self->ops_.read(self->ops_.context, self->file_, out, size) == size;
 }
 
 }  // namespace tbot

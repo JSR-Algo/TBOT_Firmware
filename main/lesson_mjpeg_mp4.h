@@ -4,6 +4,9 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+
+#include "lesson_asset_storage_coordinator.h"
 
 namespace tbot {
 
@@ -24,6 +27,7 @@ enum class LessonMjpegMp4Status : std::uint8_t {
     kUnsupported,
     kLimitExceeded,
     kMetadataMismatch,
+    kLeaseUnavailable,
 };
 
 struct LessonMjpegMp4Io {
@@ -67,6 +71,45 @@ private:
     std::uint64_t duration_ticks_ = 0;
     std::uint32_t frame_duration_ticks_ = 0;
     std::uint32_t fps_milli_ = 0;
+};
+
+struct LessonMjpegMp4FileOps {
+    void* context;
+    void* (*open)(void* context, const char* path);
+    bool (*size)(void* context, void* file, std::uint64_t* size);
+    bool (*seek)(void* context, void* file, std::uint64_t offset);
+    std::size_t (*read)(void* context, void* file, std::uint8_t* out, std::size_t size);
+    void (*close)(void* context, void* file);
+};
+
+class LessonMjpegMp4File {
+public:
+    LessonMjpegMp4File() = default;
+    ~LessonMjpegMp4File();
+
+    LessonMjpegMp4Status OpenUnderLessonSession(
+        const char* path,
+        const std::string& assignment_id,
+        const std::string& session_id,
+        std::uint64_t generation,
+        LessonMjpegMp4FileOps ops = {}
+    );
+    void Close();
+    bool is_open() const { return file_ != nullptr; }
+    const LessonMjpegMp4Reader& reader() const { return reader_; }
+
+    LessonMjpegMp4File(const LessonMjpegMp4File&) = delete;
+    LessonMjpegMp4File& operator=(const LessonMjpegMp4File&) = delete;
+    LessonMjpegMp4File(LessonMjpegMp4File&&) = delete;
+    LessonMjpegMp4File& operator=(LessonMjpegMp4File&&) = delete;
+
+private:
+    static bool ReadAt(void* context, std::uint64_t offset, std::uint8_t* out, std::size_t size);
+
+    void* file_ = nullptr;
+    LessonMjpegMp4FileOps ops_{};
+    LessonAssetReadLease lesson_read_lease_;
+    LessonMjpegMp4Reader reader_;
 };
 
 }  // namespace tbot

@@ -7,6 +7,8 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
   -fsanitize=address,undefined -fno-omit-frame-pointer \
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_mjpeg_mp4.cc" \
+  "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
+  "${ROOT}/main/sd_fat_session_guard.cc" \
   "${ROOT}/tests/native/lesson_mjpeg_mp4_test.cc" \
   -o "${BUILD_DIR}/lesson_mjpeg_mp4_test"
 "${BUILD_DIR}/lesson_mjpeg_mp4_test"

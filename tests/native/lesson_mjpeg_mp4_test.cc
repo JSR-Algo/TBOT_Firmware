@@ -5,7 +5,9 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
+#include "lesson_asset_storage_coordinator.h"
 #include "lesson_mjpeg_mp4.h"
 
 namespace {
@@ -222,6 +224,55 @@ void ExpectRejected(const Bytes& bytes, const char* message) {
     Check(Open(bytes, &reader) != tbot::LessonMjpegMp4Status::kOk, message);
 }
 
+std::string WriteTempFile(const Bytes& bytes) {
+    char path[] = "/tmp/tbot-mjpeg-mp4-XXXXXX";
+    const int fd = mkstemp(path);
+    Check(fd >= 0, "temporary MP4 opens");
+    Check(write(fd, bytes.data(), bytes.size()) == static_cast<ssize_t>(bytes.size()), "temporary MP4 writes");
+    Check(close(fd) == 0, "temporary MP4 closes after write");
+    return path;
+}
+
+struct FakeFile {
+    Bytes bytes;
+    std::uint64_t cursor = 0;
+    bool fail_seek = false;
+    bool fail_read = false;
+    int closes = 0;
+};
+
+void* FakeOpen(void* context, const char*) {
+    return context;
+}
+
+bool FakeSize(void* context, void*, std::uint64_t* size) {
+    *size = static_cast<FakeFile*>(context)->bytes.size();
+    return true;
+}
+
+bool FakeSeek(void* context, void*, std::uint64_t offset) {
+    auto* file = static_cast<FakeFile*>(context);
+    if (file->fail_seek || offset > file->bytes.size()) return false;
+    file->cursor = offset;
+    return true;
+}
+
+std::size_t FakeRead(void* context, void*, std::uint8_t* out, std::size_t size) {
+    auto* file = static_cast<FakeFile*>(context);
+    if (file->fail_read || size > file->bytes.size() - static_cast<std::size_t>(file->cursor)) return 0;
+    std::memcpy(out, file->bytes.data() + file->cursor, size);
+    file->cursor += size;
+    return size;
+}
+
+void FakeClose(void* context, void*) {
+    ++static_cast<FakeFile*>(context)->closes;
+}
+
+tbot::LessonMjpegMp4FileOps FakeOps(FakeFile* file) {
+    return {file, FakeOpen, FakeSize, FakeSeek, FakeRead, FakeClose};
+}
+
 }  // namespace
 
 int main() {
@@ -344,6 +395,87 @@ int main() {
     Check(co64_pos != bad_co64.end(), "co64 fixture exists");
     Patch32(bad_co64, static_cast<std::size_t>(co64_pos - bad_co64.begin()) + 12, 1);
     ExpectRejected(bad_co64, "co64 offset beyond file is rejected");
+
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    coordinator.ForceEndLessonSession();
+    const std::string path = WriteTempFile(valid);
+    const auto session = coordinator.TryBeginLessonSession("assignment-mp4", "session-mp4");
+    Check(session.acquired, "lesson session owns the SD lease");
+    {
+        tbot::LessonMjpegMp4File file_reader;
+        Check(file_reader.OpenUnderLessonSession(path.c_str(), "assignment-mp4", "session-mp4", session.generation) ==
+                  tbot::LessonMjpegMp4Status::kOk,
+              "production FILE adapter opens under the existing lesson lease");
+        Check(!coordinator.EndLessonSession("assignment-mp4", "session-mp4", session.generation),
+              "adapter retains the lesson lease until close");
+        std::uint8_t file_frame[8] = {};
+        std::size_t file_frame_size = 0;
+        Check(file_reader.reader().ReadFrame(1, file_frame, sizeof(file_frame), &file_frame_size) ==
+                  tbot::LessonMjpegMp4Status::kOk,
+              "FILE adapter streams an exact sample");
+        Check(file_frame_size == sizeof(jpeg2) && std::memcmp(file_frame, jpeg2, sizeof(jpeg2)) == 0,
+              "FILE adapter sample bytes are exact");
+        file_reader.Close();
+        file_reader.Close();
+    }
+    Check(coordinator.EndLessonSession("assignment-mp4", "session-mp4", session.generation),
+          "adapter close releases its retained lease exactly once");
+    auto raw_lease = tbot::SdFatSessionGuard::GetInstance().TryAcquire();
+    Check(static_cast<bool>(raw_lease), "SD lease is reusable after session and adapter close");
+    raw_lease = {};
+
+    const auto forced_session = coordinator.TryBeginLessonSession("assignment-force", "session-force");
+    Check(forced_session.acquired, "forced teardown fixture session acquires");
+    tbot::LessonMjpegMp4File forced_reader;
+    Check(forced_reader.OpenUnderLessonSession(path.c_str(), "assignment-force", "session-force",
+                                               forced_session.generation) == tbot::LessonMjpegMp4Status::kOk,
+          "forced teardown fixture adapter opens");
+    coordinator.ForceEndLessonSession();
+    auto lease_during_forced_close = tbot::SdFatSessionGuard::GetInstance().TryAcquire();
+    Check(!lease_during_forced_close, "forced session teardown retains SD ownership while adapter is open");
+    forced_reader.Close();
+    auto lease_after_forced_close = tbot::SdFatSessionGuard::GetInstance().TryAcquire();
+    Check(static_cast<bool>(lease_after_forced_close), "adapter close releases deferred forced-teardown lease");
+    lease_after_forced_close = {};
+
+    Bytes truncated(valid.begin(), valid.end() - 2);
+    const std::string truncated_path = WriteTempFile(truncated);
+    const auto truncated_session = coordinator.TryBeginLessonSession("assignment-short", "session-short");
+    Check(truncated_session.acquired, "truncated fixture session acquires");
+    tbot::LessonMjpegMp4File truncated_reader;
+    Check(truncated_reader.OpenUnderLessonSession(truncated_path.c_str(), "assignment-short", "session-short",
+                                                  truncated_session.generation) !=
+              tbot::LessonMjpegMp4Status::kOk,
+          "truncated file is rejected through FILE adapter");
+    Check(coordinator.EndLessonSession("assignment-short", "session-short", truncated_session.generation),
+          "failed open releases the retained lease");
+
+    FakeFile seek_failure{valid};
+    seek_failure.fail_seek = true;
+    const auto seek_session = coordinator.TryBeginLessonSession("assignment-seek", "session-seek");
+    Check(seek_session.acquired, "seek failure fixture session acquires");
+    tbot::LessonMjpegMp4File seek_reader;
+    Check(seek_reader.OpenUnderLessonSession("fake", "assignment-seek", "session-seek", seek_session.generation,
+                                             FakeOps(&seek_failure)) == tbot::LessonMjpegMp4Status::kIoError,
+          "seek failure is reported");
+    Check(seek_failure.closes == 1, "seek failure closes the file once");
+    Check(coordinator.EndLessonSession("assignment-seek", "session-seek", seek_session.generation),
+          "seek failure releases the retained lease");
+
+    FakeFile read_failure{valid};
+    read_failure.fail_read = true;
+    const auto read_session = coordinator.TryBeginLessonSession("assignment-read", "session-read");
+    Check(read_session.acquired, "read failure fixture session acquires");
+    tbot::LessonMjpegMp4File read_reader;
+    Check(read_reader.OpenUnderLessonSession("fake", "assignment-read", "session-read", read_session.generation,
+                                             FakeOps(&read_failure)) == tbot::LessonMjpegMp4Status::kIoError,
+          "read failure is reported");
+    Check(read_failure.closes == 1, "read failure closes the file once");
+    Check(coordinator.EndLessonSession("assignment-read", "session-read", read_session.generation),
+          "read failure releases the retained lease");
+
+    unlink(path.c_str());
+    unlink(truncated_path.c_str());
 
     std::cout << "lesson_mjpeg_mp4 test passed\n";
     return 0;

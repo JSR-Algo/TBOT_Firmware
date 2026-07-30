@@ -13,6 +13,45 @@ bool IsValidIdentity(const std::string& identity) {
 
 }  // namespace
 
+LessonAssetReadLease::LessonAssetReadLease(
+    LessonAssetStorageCoordinator* coordinator,
+    std::uint64_t generation
+) : coordinator_(coordinator), generation_(generation) {}
+
+LessonAssetReadLease::LessonAssetReadLease(LessonAssetReadLease&& other) noexcept
+    : coordinator_(other.coordinator_), generation_(other.generation_) {
+    other.coordinator_ = nullptr;
+    other.generation_ = 0;
+}
+
+LessonAssetReadLease& LessonAssetReadLease::operator=(LessonAssetReadLease&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    Release();
+    coordinator_ = other.coordinator_;
+    generation_ = other.generation_;
+    other.coordinator_ = nullptr;
+    other.generation_ = 0;
+    return *this;
+}
+
+LessonAssetReadLease::~LessonAssetReadLease() {
+    Release();
+}
+
+LessonAssetReadLease::operator bool() const {
+    return coordinator_ != nullptr && generation_ != 0;
+}
+
+void LessonAssetReadLease::Release() {
+    if (coordinator_ != nullptr && generation_ != 0) {
+        coordinator_->ReleaseLessonRead(generation_);
+    }
+    coordinator_ = nullptr;
+    generation_ = 0;
+}
+
 LessonAssetMutationLease::LessonAssetMutationLease(
     LessonAssetStorageCoordinator* coordinator,
     LessonAssetReservationCode code,
@@ -153,6 +192,23 @@ LessonAssetSessionResult LessonAssetStorageCoordinator::TryBeginLessonSession(
     return {LessonAssetReservationCode::kAcquired, true, false, generation};
 }
 
+LessonAssetReadLease LessonAssetStorageCoordinator::TryRetainLessonSession(
+    const std::string& assignment_id,
+    const std::string& session_id,
+    std::uint64_t generation
+) {
+    if (generation == 0 || !IsValidIdentity(assignment_id) || !IsValidIdentity(session_id)) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!lesson_session_active_ || assignment_id_ != assignment_id || session_id_ != session_id ||
+        lesson_session_generation_ != generation || lesson_readers_ == std::numeric_limits<std::size_t>::max()) {
+        return {};
+    }
+    ++lesson_readers_;
+    return LessonAssetReadLease(this, generation);
+}
+
 bool LessonAssetStorageCoordinator::EndLessonSession(
     const std::string& assignment_id,
     const std::string& session_id,
@@ -163,7 +219,7 @@ bool LessonAssetStorageCoordinator::EndLessonSession(
         return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!lesson_session_active_ || assignment_id_ != assignment_id ||
+    if (!lesson_session_active_ || lesson_readers_ != 0 || assignment_id_ != assignment_id ||
         session_id_ != session_id || lesson_session_generation_ != generation) {
         return false;
     }
@@ -171,6 +227,7 @@ bool LessonAssetStorageCoordinator::EndLessonSession(
     assignment_id_.clear();
     session_id_.clear();
     lesson_session_generation_ = 0;
+    lesson_readers_ = 0;
     lesson_sd_session_.reset();
     return true;
 }
@@ -178,9 +235,13 @@ bool LessonAssetStorageCoordinator::EndLessonSession(
 void LessonAssetStorageCoordinator::ForceEndLessonSession() {
     std::lock_guard<std::mutex> lock(mutex_);
     lesson_session_active_ = false;
+    if (lesson_readers_ != 0) {
+        return;
+    }
     assignment_id_.clear();
     session_id_.clear();
     lesson_session_generation_ = 0;
+    lesson_readers_ = 0;
     lesson_sd_session_.reset();
 }
 
@@ -225,4 +286,17 @@ void LessonAssetStorageCoordinator::ReleaseMutation() {
     std::lock_guard<std::mutex> lock(mutex_);
     mutation_active_ = false;
     mutation_operation_ = MutationOperationLabel::kNone;
+}
+
+void LessonAssetStorageCoordinator::ReleaseLessonRead(std::uint64_t generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (lesson_session_generation_ == generation && lesson_readers_ != 0) {
+        --lesson_readers_;
+        if (lesson_readers_ == 0 && !lesson_session_active_) {
+            assignment_id_.clear();
+            session_id_.clear();
+            lesson_session_generation_ = 0;
+            lesson_sd_session_.reset();
+        }
+    }
 }

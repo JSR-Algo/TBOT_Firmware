@@ -22,6 +22,26 @@ enum class LessonAssetReservationCode {
 
 class LessonAssetStorageCoordinator;
 
+class LessonAssetReadLease {
+public:
+    LessonAssetReadLease() = default;
+    LessonAssetReadLease(LessonAssetReadLease&& other) noexcept;
+    LessonAssetReadLease& operator=(LessonAssetReadLease&& other) noexcept;
+    ~LessonAssetReadLease();
+    explicit operator bool() const;
+
+    LessonAssetReadLease(const LessonAssetReadLease&) = delete;
+    LessonAssetReadLease& operator=(const LessonAssetReadLease&) = delete;
+
+private:
+    friend class LessonAssetStorageCoordinator;
+    LessonAssetReadLease(LessonAssetStorageCoordinator* coordinator, std::uint64_t generation);
+    void Release();
+
+    LessonAssetStorageCoordinator* coordinator_{nullptr};
+    std::uint64_t generation_{0};
+};
+
 class LessonAssetMutationLease {
 public:
     LessonAssetMutationLease(LessonAssetMutationLease&& other) noexcept;
@@ -67,6 +87,11 @@ public:
         const std::string& assignment_id,
         const std::string& session_id
     );
+    LessonAssetReadLease TryRetainLessonSession(
+        const std::string& assignment_id,
+        const std::string& session_id,
+        std::uint64_t generation
+    );
     bool EndLessonSession(
         const std::string& assignment_id,
         const std::string& session_id,
@@ -85,6 +110,7 @@ public:
 
 private:
     friend class LessonAssetMutationLease;
+    friend class LessonAssetReadLease;
 
     enum class MutationOperationLabel : std::uint8_t {
         kNone,
@@ -96,6 +122,7 @@ private:
     LessonAssetStorageCoordinator() = default;
     static MutationOperationLabel ClassifyOperationLabel(const char* operation);
     void ReleaseMutation();
+    void ReleaseLessonRead(std::uint64_t generation);
 
     mutable std::mutex mutex_;
     bool mutation_active_ = false;
@@ -104,6 +131,7 @@ private:
     std::string assignment_id_;
     std::string session_id_;
     std::uint64_t lesson_session_generation_ = 0;
+    std::size_t lesson_readers_ = 0;
     std::uint64_t last_generation_ = 0;
     std::optional<tbot::SdFatSessionLease> lesson_sd_session_;
 };

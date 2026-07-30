@@ -27,14 +27,25 @@ JPEG_CONFIG=(
   -DCONFIG_JD_TBLCLIP=1
   -DCONFIG_JD_DEFAULT_HUFFMAN=0
 )
+ALLOC_INTERCEPT=(
+  -Dmalloc=tbot_test_malloc
+  -Dcalloc=tbot_test_calloc
+  -Drealloc=tbot_test_realloc
+  -Dfree=tbot_test_free
+)
 "${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" "${INCLUDES[@]}" \
-  -c "${ROOT}/main/display/lvgl_display/jpg/jpeg_to_image.c" -o "${BUILD_DIR}/jpeg_to_image.o"
+  "${ALLOC_INTERCEPT[@]}" -c "${ROOT}/main/display/lvgl_display/jpg/jpeg_to_image.c" \
+  -o "${BUILD_DIR}/jpeg_to_image.o"
 "${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" -Wno-incompatible-function-pointer-types \
-  "${INCLUDES[@]}" "${COMPAT[@]}" "${JPEG_CONFIG[@]}" -c "${JPEG_COMPONENT_ROOT}/jpeg_decoder.c" \
+  "${INCLUDES[@]}" "${COMPAT[@]}" "${JPEG_CONFIG[@]}" "${ALLOC_INTERCEPT[@]}" \
+  -c "${JPEG_COMPONENT_ROOT}/jpeg_decoder.c" \
   -o "${BUILD_DIR}/jpeg_decoder.o"
 "${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" "${INCLUDES[@]}" "${COMPAT[@]}" "${JPEG_CONFIG[@]}" \
-  -c "${JPEG_COMPONENT_ROOT}/tjpgd/tjpgd.c" -o "${BUILD_DIR}/tjpgd.o"
+  "${ALLOC_INTERCEPT[@]}" -c "${JPEG_COMPONENT_ROOT}/tjpgd/tjpgd.c" -o "${BUILD_DIR}/tjpgd.o"
+"${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" "${ALLOC_INTERCEPT[@]}" \
+  -c "${ROOT}/tests/native/lesson_jpeg_allocation_probe.c" -o "${BUILD_DIR}/allocation_probe.o"
 "${CXX}" -std=c++17 -O0 -g "${SANITIZERS[@]}" "${INCLUDES[@]}" \
   "${ROOT}/tests/native/lesson_jpeg_reuse_test.cc" "${BUILD_DIR}/jpeg_to_image.o" \
-  "${BUILD_DIR}/jpeg_decoder.o" "${BUILD_DIR}/tjpgd.o" -o "${BUILD_DIR}/lesson_jpeg_reuse_test"
+  "${BUILD_DIR}/jpeg_decoder.o" "${BUILD_DIR}/tjpgd.o" "${BUILD_DIR}/allocation_probe.o" \
+  -o "${BUILD_DIR}/lesson_jpeg_reuse_test"
 "${BUILD_DIR}/lesson_jpeg_reuse_test" "${JPEG_COMPONENT_ROOT}/test_apps/main/logo.jpg"
