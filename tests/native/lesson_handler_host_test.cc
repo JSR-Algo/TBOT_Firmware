@@ -557,11 +557,13 @@ void test_renderer_v3_capability_is_fail_closed_until_initialized() {
     features = cJSON_CreateObject();
     AddLessonRendererFeatures(features);
     encoded = cJSON_PrintUnformatted(features);
-    require(encoded != nullptr &&
-                std::string(encoded).find("teebot-lesson-renderer.v3") != std::string::npos &&
-                std::string(encoded).find("directMp4Cinematic") != std::string::npos &&
-                std::string(encoded).find("\"sdAssetPack\":true") != std::string::npos,
-            "initialized renderer advertises exact v3/template/SD capability tokens");
+    require(encoded != nullptr && std::string(encoded) ==
+                "{\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
+                "\"teebot-lesson-renderer.v3\"],\"lessonRendererV2\":{"
+                "\"openingEntrance\":true,\"visualStateEvents\":true,"
+                "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
+                "\"lessonRendererV3\":{\"directMp4Cinematic\":true,\"sdAssetPack\":true}}",
+            "initialized renderer advertises exact Task-7 v3 capability booleans");
     cJSON_free(encoded);
     cJSON_Delete(features);
     tbot::SetLessonCinematicRendererCapabilityReady(false);
@@ -657,6 +659,53 @@ void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
         cJSON_Delete(ack);
     }
     require(fake.closes == 3, "cancel closes all streams before handler releases lesson lease");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
+void test_renderer_v3_rejections_use_task7_consumed_lesson_error() {
+    ResetObservable();
+    FreshSession();
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    Handle(V3PrepareFrame(1));
+    require(FrameType(0) == "lesson_error",
+            "rejected cinematic prepare uses lesson_error instead of an unmatchable ACK");
+    require(FrameBodyStr(0, nullptr, "code") == "CINEMATIC_CAPABILITY_UNSUPPORTED",
+            "cinematic lesson_error preserves the typed failure code");
+
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                             V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    std::string invalid_layers = V3PrepareFrame(1);
+    const std::string expected = "\"layer\":\"background\",\"slot\":\"backgroundScene\"";
+    const auto position = invalid_layers.find(expected);
+    require(position != std::string::npos, "v3 fixture contains background identity");
+    invalid_layers.replace(position, expected.size(),
+                           "\"layer\":\"teachingObject\",\"slot\":\"backgroundScene\"");
+    Handle(invalid_layers);
+    require(FrameType(0) == "lesson_error" && fake.opens == 0,
+            "wrong layer identity/order fails before renderer prepare");
+    require(FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH",
+            "wrong layer identity reports typed metadata failure");
+
+    ResetObservable();
+    FreshSession();
+    Handle(V3Frame("lesson_start", 1,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":42}}"));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
+            "rejected cinematic start uses a Task-7-consumed lesson_error");
+
+    ResetObservable();
+    FreshSession();
+    Handle(V3Frame("lesson_cinematic_control", 1,
+        "{\"command\":\"pause\",\"phaseId\":\"opening\",\"commandSequenceId\":43}"));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
+            "rejected cinematic control uses a Task-7-consumed lesson_error");
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
@@ -5166,6 +5215,7 @@ int main() {
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v3_capability_is_fail_closed_until_initialized();
     test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
+    test_renderer_v3_rejections_use_task7_consumed_lesson_error();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();

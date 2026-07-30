@@ -26,7 +26,9 @@ struct FakeRuntime {
     std::size_t presents = 0;
     std::size_t last_frame = 999;
     bool fail_decode = false;
+    bool fail_open_psram = false;
     bool enough_memory = true;
+    std::uint64_t decode_elapsed_ms = 0;
     std::vector<std::size_t> decoded_indices;
 };
 
@@ -45,6 +47,7 @@ void Free(void* raw, void* ptr) {
 bool Open(void* raw, const char* path, tbot::LessonCinematicStreamMetadata* metadata,
           void** handle) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
+    if (fake.fail_open_psram) return false;
     if (path == nullptr || std::strstr(path, "missing") != nullptr) return false;
     ++fake.opens;
     const bool background = std::strstr(path, "background") != nullptr;
@@ -63,6 +66,7 @@ bool Decode(void* raw, void*, std::size_t index, std::uint8_t* destination,
             std::size_t capacity, std::uint16_t* width, std::uint16_t* height,
             std::size_t* stride) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
+    fake.now_ms += fake.decode_elapsed_ms;
     if (fake.fail_decode) return false;
     fake.decoded_indices.push_back(index);
     const bool background = capacity >= 480u * 320u * 2u;
@@ -72,6 +76,16 @@ bool Decode(void* raw, void*, std::size_t index, std::uint8_t* destination,
     std::memset(destination, background ? static_cast<int>(index) : 255,
                 static_cast<std::size_t>(*height) * *stride);
     return true;
+}
+
+tbot::LessonCinematicError LastError(void* raw) {
+    return static_cast<FakeRuntime*>(raw)->fail_open_psram
+        ? tbot::LessonCinematicError::kInsufficientPsram
+        : tbot::LessonCinematicError::kNone;
+}
+
+std::uint64_t MonotonicMs(void* raw) {
+    return static_cast<FakeRuntime*>(raw)->now_ms;
 }
 
 bool Present(void* raw, const std::uint16_t*, std::uint16_t width, std::uint16_t height,
@@ -84,7 +98,7 @@ bool Present(void* raw, const std::uint16_t*, std::uint16_t width, std::uint16_t
 }
 
 tbot::LessonCinematicRendererOps Ops(FakeRuntime* fake) {
-    return {fake, Allocate, Free, Open, Close, Decode, Present};
+    return {fake, Allocate, Free, Open, Close, Decode, Present, LastError, MonotonicMs};
 }
 
 tbot::LessonCinematicPhaseConfig Config() {
@@ -164,6 +178,11 @@ void TestIdempotencyValidationFailureAndSafeStop() {
     Require(!response.accepted && response.error == tbot::LessonCinematicError::kInsufficientPsram,
             "prepare returns typed PSRAM failure");
     fake.enough_memory = true;
+    fake.fail_open_psram = true;
+    response = renderer.Prepare(Config(), 0);
+    Require(!response.accepted && response.error == tbot::LessonCinematicError::kInsufficientPsram,
+            "production-style JPEG workspace allocation failure is typed as PSRAM exhaustion");
+    fake.fail_open_psram = false;
     response = renderer.Prepare(Config(), 0);
     Require(response.accepted, "valid retry prepares");
     const auto present_count = fake.presents;
@@ -187,11 +206,22 @@ void TestIdempotencyValidationFailureAndSafeStop() {
             "stale phase/sequence is ACK-safe and rejected");
 }
 
+void TestReadDecodeDeadlineIsTyped() {
+    FakeRuntime fake;
+    fake.decode_elapsed_ms = 101;
+    tbot::LessonCinematicRenderer renderer(Ops(&fake));
+    const auto response = renderer.Prepare(Config(), 0);
+    Require(!response.accepted && response.error == tbot::LessonCinematicError::kDecodeTimeout,
+            "read/decode elapsed-time deadline returns a typed timeout failure");
+    Require(fake.presents == 0, "timed-out frame is never presented");
+}
+
 }  // namespace
 
 int main() {
     TestPrepareStartClockPauseResumeAndNoSteadyAllocations();
     TestIdempotencyValidationFailureAndSafeStop();
+    TestReadDecodeDeadlineIsTyped();
     std::cout << "lesson_cinematic_renderer test passed\n";
     return 0;
 }

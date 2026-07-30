@@ -30,6 +30,7 @@ enum class LessonCinematicError : std::uint8_t {
     kMetadataMismatch,
     kInsufficientPsram,
     kDecodeFailed,
+    kDecodeTimeout,
     kPresentFailed,
     kStaleCommand,
     kInvalidState,
@@ -84,6 +85,8 @@ struct LessonCinematicRendererOps {
                    std::uint16_t*, std::uint16_t*, std::size_t*) = nullptr;
     bool (*present)(void*, const std::uint16_t*, std::uint16_t, std::uint16_t,
                     std::size_t) = nullptr;
+    LessonCinematicError (*last_error)(void*) = nullptr;
+    std::uint64_t (*monotonic_ms)(void*) = nullptr;
 };
 
 class LessonCinematicRenderer {
@@ -113,7 +116,8 @@ private:
     LessonCinematicResponse Applied(LessonCinematicResponseType type,
                                     std::uint64_t sequence) const;
     LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* phase_id) const;
-    bool RenderFrame(std::size_t frame_index);
+    LessonCinematicError RenderFrame(std::size_t frame_index);
+    LessonCinematicError OperationError(LessonCinematicError fallback) const;
     void CloseStreams();
     void ReleaseBuffers();
     void Reset();

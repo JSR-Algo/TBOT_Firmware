@@ -75,9 +75,8 @@ void AddLessonRendererFeatures(cJSON* features) {
     cJSON_AddItemToObject(features, "lessonRendererV2", renderer_v2);
     if (tbot::LessonCinematicRendererCapabilityReady()) {
         cJSON* renderer_v3 = cJSON_CreateObject();
-        cJSON_AddStringToObject(renderer_v3, "template", tbot::kLessonDirectMp4CinematicTemplate);
+        cJSON_AddBoolToObject(renderer_v3, "directMp4Cinematic", true);
         cJSON_AddBoolToObject(renderer_v3, "sdAssetPack", true);
-        cJSON_AddBoolToObject(renderer_v3, "integerFrameClock", true);
         cJSON_AddItemToObject(features, "lessonRendererV3", renderer_v3);
     }
 }
@@ -1654,6 +1653,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             case tbot::LessonCinematicError::kFileOpen: return "CINEMATIC_SD_PATH_MISSING";
             case tbot::LessonCinematicError::kInsufficientPsram: return "CINEMATIC_INSUFFICIENT_PSRAM";
             case tbot::LessonCinematicError::kDecodeFailed: return "CINEMATIC_DECODE_FAILED";
+            case tbot::LessonCinematicError::kDecodeTimeout: return "CINEMATIC_DECODE_TIMEOUT";
             case tbot::LessonCinematicError::kPresentFailed: return "CINEMATIC_PRESENT_FAILED";
             case tbot::LessonCinematicError::kStaleCommand: return "CINEMATIC_STALE_COMMAND";
             case tbot::LessonCinematicError::kInvalidPhase:
@@ -1664,6 +1664,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
             return "CINEMATIC_METADATA_MISMATCH";
         };
         auto emit_cinematic_ack = [&](const tbot::LessonCinematicResponse& response) {
+            if (!response.accepted) {
+                emit(root, "lesson_error", MakeErrorBody(
+                    cinematic_error_name(response.error), "cinematic command rejected",
+                    false, "cinematicPhase"));
+                return;
+            }
             cJSON* ack_body = cJSON_CreateObject();
             cJSON_AddNumberToObject(ack_body, "acks", static_cast<double>(sequence));
             cJSON* cinematic = cJSON_CreateObject();
@@ -1681,10 +1687,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 cJSON_AddBoolToObject(cinematic, "frameZeroReady", true);
             } else if (response.accepted && start_frame) {
                 cJSON_AddBoolToObject(cinematic, "phaseReady", true);
-            } else if (!response.accepted) {
-                cJSON* error = cJSON_CreateObject();
-                cJSON_AddStringToObject(error, "code", cinematic_error_name(response.error));
-                cJSON_AddItemToObject(cinematic, "error", error);
             }
             cJSON_AddItemToObject(ack_body, "cinematicPhase", cinematic);
             emit(root, "lesson_ack", ack_body);
@@ -1711,11 +1713,18 @@ void Application::HandleLessonMessage(const cJSON* root) {
             std::array<std::string, 3> normalized_paths;
             const cJSON* layers = cJSON_GetObjectItem(command_body, "layers");
             bool valid_layers = cJSON_IsArray(layers) && cJSON_GetArraySize(layers) == 3;
+            static constexpr const char* kExpectedLayers[3] = {
+                "background", "teachingObject", "robotOverlay"};
+            static constexpr const char* kExpectedSlots[3] = {
+                "backgroundScene", "teachingObject", "robotOverlay"};
             for (int index = 0; valid_layers && index < 3; ++index) {
                 const cJSON* layer = cJSON_GetArrayItem(layers, index);
                 const cJSON* rect = Obj(layer, "rect");
                 double x = 0, y = 0, width = 0, height = 0;
-                valid_layers = Num(rect, "x", x) && Num(rect, "y", y) &&
+                valid_layers = Str(layer, "layer") != nullptr && Str(layer, "slot") != nullptr &&
+                    strcmp(Str(layer, "layer"), kExpectedLayers[index]) == 0 &&
+                    strcmp(Str(layer, "slot"), kExpectedSlots[index]) == 0 &&
+                    Num(rect, "x", x) && Num(rect, "y", y) &&
                     Num(rect, "width", width) && Num(rect, "height", height) &&
                     std::trunc(x) == x && std::trunc(y) == y && std::trunc(width) == width &&
                     std::trunc(height) == height && width > 0 && height > 0 &&
