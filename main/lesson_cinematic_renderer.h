@@ -115,7 +115,8 @@ private:
     LessonCinematicResponse Failure(std::uint64_t sequence, LessonCinematicError error) const;
     LessonCinematicResponse Applied(LessonCinematicResponseType type,
                                     std::uint64_t sequence) const;
-    LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* phase_id) const;
+    LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* phase_id,
+                                            const char* command) const;
     LessonCinematicError RenderFrame(std::size_t frame_index);
     LessonCinematicError OperationError(LessonCinematicError fallback) const;
     void CloseStreams();
@@ -137,10 +138,14 @@ private:
     std::uint64_t paused_at_ms_ = 0;
     std::size_t displayed_frame_ = 0;
     LessonCinematicResponse last_response_{};
+    std::string last_command_;
+    std::string last_fingerprint_;
 };
 
 void SetActiveLessonCinematicRenderer(LessonCinematicRenderer* renderer);
 LessonCinematicRenderer* ActiveLessonCinematicRenderer();
+LessonCinematicResponse TickActiveLessonCinematicRenderer(std::uint64_t now_ms);
+std::uint64_t LessonCinematicCompletedSequence();
 bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display);
 void ConfigureProductionLessonCinematicSession(const std::string& assignment_id,
                                                 const std::string& session_id,

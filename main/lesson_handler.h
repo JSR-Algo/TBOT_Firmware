@@ -71,6 +71,9 @@ constexpr char kLessonRendererName[] = "teebot-lesson-renderer.v1";
 constexpr std::size_t kLessonMessageDataQueueDepth = 16;
 
 void AddLessonRendererFeatures(cJSON* features);
+namespace tbot {
+void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_failure);
+}
 
 enum class LessonQueueItemKind : std::uint8_t {
     kFrame,

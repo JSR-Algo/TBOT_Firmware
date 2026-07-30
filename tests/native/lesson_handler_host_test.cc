@@ -290,7 +290,7 @@ std::string V3Frame(const char* type, int seq, const std::string& body) {
            std::to_string(seq) + ",\"body\":" + body + "}";
 }
 
-std::string V3PrepareFrame(int seq, int command_sequence_id = 41) {
+std::string V3PrepareFrame(int seq, std::uint64_t command_sequence_id = 41) {
     return V3Frame("lesson_prepare", seq,
         "{\"profile\":\"espTft\",\"cinematicPhase\":{"
         "\"command\":\"prepare\",\"commandSequenceId\":" +
@@ -706,6 +706,89 @@ void test_renderer_v3_rejections_use_task7_consumed_lesson_error() {
     require(FrameType(0) == "lesson_error" &&
                 FrameBodyStr(0, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
             "rejected cinematic control uses a Task-7-consumed lesson_error");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
+void test_renderer_v3_duplicate_sequence_requires_exact_original_command() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                             V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    Handle(V3PrepareFrame(1));
+    require(FrameType(0) == "lesson_ack", "baseline v3 prepare is accepted");
+
+    std::string changed_phase = V3PrepareFrame(2);
+    const auto phase = changed_phase.find("\"phaseId\":\"opening\"");
+    changed_phase.replace(phase, strlen("\"phaseId\":\"opening\""),
+                          "\"phaseId\":\"teach\"");
+    Handle(changed_phase);
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
+            "same sequence with changed phase is rejected, not replayed under current payload");
+
+    std::string changed_layers = V3PrepareFrame(3);
+    const auto rect = changed_layers.find("\"x\":10,\"y\":10");
+    changed_layers.replace(rect, strlen("\"x\":10,\"y\":10"), "\"x\":11,\"y\":10");
+    Handle(changed_layers);
+    require(FrameType(2) == "lesson_error" &&
+                FrameBodyStr(2, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
+            "same prepare sequence with changed layers is rejected");
+
+    Handle(V3Frame("lesson_start", 4,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":41}}"));
+    require(FrameType(3) == "lesson_error" &&
+                FrameBodyStr(3, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
+            "same sequence reused by a different command is rejected");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
+void test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                             V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    constexpr std::uint64_t kMaxJsonSafeInteger = 9007199254740991ULL;
+    Handle(V3PrepareFrame(1, kMaxJsonSafeInteger));
+    require(FrameType(0) == "lesson_ack",
+            "maximum JSON-safe commandSequenceId is accepted");
+
+    renderer.Cancel(kMaxJsonSafeInteger + 1, "opening");
+    ResetObservable();
+    FreshSession();
+    Handle(V3PrepareFrame(1, kMaxJsonSafeInteger + 1));
+    require(FrameType(0) == "lesson_error" && fake.opens == 3,
+            "commandSequenceId above JSON-safe range is rejected before renderer work");
+
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    V3RendererFake oom_fake;
+    tbot::LessonCinematicRenderer oom_renderer(
+        {&oom_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&oom_renderer);
+    ResetObservable();
+    FreshSession();
+    for (int fail_after = 0; fail_after <= 9; ++fail_after) {
+        tbot::SetLessonCinematicJsonFailAfterForTest(fail_after);
+        Handle(V3PrepareFrame(fail_after + 1, 51 + fail_after));
+        require(Sent().empty(),
+                "frameZeroReady ACK cJSON OOM at every construction step sends no partial ACK");
+    }
+    ResetObservable();
+    tbot::SetLessonCinematicJsonFailAfterForTest(0);
+    Handle(V3Frame("lesson_start", 11,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":61}}"));
+    require(Sent().empty(), "phaseReady ACK cJSON OOM drops instead of sending a partial ACK");
+    ResetObservable();
+    tbot::SetLessonCinematicJsonFailAfterForTest(0);
+    Handle(V3Frame("lesson_cinematic_control", 12,
+        "{\"command\":\"pause\",\"phaseId\":\"opening\",\"commandSequenceId\":62}"));
+    require(Sent().empty(), "commandApplied ACK cJSON OOM drops instead of sending a partial ACK");
+    tbot::SetLessonCinematicJsonFailAfterForTest(-1);
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
@@ -5216,6 +5299,8 @@ int main() {
     test_renderer_v3_capability_is_fail_closed_until_initialized();
     test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
     test_renderer_v3_rejections_use_task7_consumed_lesson_error();
+    test_renderer_v3_duplicate_sequence_requires_exact_original_command();
+    test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();

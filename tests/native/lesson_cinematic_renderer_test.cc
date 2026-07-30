@@ -1,9 +1,12 @@
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "lesson_cinematic_renderer.h"
@@ -29,6 +32,9 @@ struct FakeRuntime {
     bool fail_open_psram = false;
     bool enough_memory = true;
     std::uint64_t decode_elapsed_ms = 0;
+    std::atomic<bool> block_decode{false};
+    std::atomic<bool> decode_entered{false};
+    std::atomic<bool> allow_decode{false};
     std::vector<std::size_t> decoded_indices;
 };
 
@@ -66,6 +72,10 @@ bool Decode(void* raw, void*, std::size_t index, std::uint8_t* destination,
             std::size_t capacity, std::uint16_t* width, std::uint16_t* height,
             std::size_t* stride) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
+    if (fake.block_decode) {
+        fake.decode_entered = true;
+        while (!fake.allow_decode) std::this_thread::yield();
+    }
     fake.now_ms += fake.decode_elapsed_ms;
     if (fake.fail_decode) return false;
     fake.decoded_indices.push_back(index);
@@ -216,12 +226,54 @@ void TestReadDecodeDeadlineIsTyped() {
     Require(fake.presents == 0, "timed-out frame is never presented");
 }
 
+void TestDuplicateSequenceFingerprintAndActiveTickLifecycle() {
+    FakeRuntime fake;
+    tbot::LessonCinematicRenderer renderer(Ops(&fake));
+    auto config = Config();
+    Require(renderer.Prepare(config, 0).accepted, "baseline prepare succeeds");
+
+    auto changed = config;
+    changed.layers[1].rect.x = 1;
+    auto response = renderer.Prepare(changed, 0);
+    Require(!response.accepted && response.error == tbot::LessonCinematicError::kStaleCommand,
+            "duplicate prepare sequence rejects changed layer fingerprint");
+    response = renderer.Start(config.command_sequence_id, "teach", 0);
+    Require(!response.accepted && response.error == tbot::LessonCinematicError::kStaleCommand,
+            "duplicate sequence rejects a changed command");
+
+    Require(renderer.Start(8, "teach", 0).accepted, "renderer starts for timer lifecycle test");
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    fake.block_decode = true;
+    std::thread callback([&]() { tbot::TickActiveLessonCinematicRenderer(100); });
+    while (!fake.decode_entered) std::this_thread::yield();
+    std::atomic<bool> shutdown_complete{false};
+    std::thread shutdown([&]() {
+        tbot::SetActiveLessonCinematicRenderer(nullptr);
+        shutdown_complete = true;
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    Require(!shutdown_complete, "active renderer clear waits for in-flight timer Tick");
+    fake.allow_decode = true;
+    callback.join();
+    shutdown.join();
+    Require(shutdown_complete, "active renderer clear completes after Tick drains");
+
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    response = tbot::TickActiveLessonCinematicRenderer(300);
+    Require(response.type == tbot::LessonCinematicResponseType::kPhaseComplete && response.accepted,
+            "timer-facing Tick explicitly reports internal phase completion");
+    Require(tbot::LessonCinematicCompletedSequence() == 8,
+            "Task-7-internal completion is consumed into a synchronized completion latch");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
 }  // namespace
 
 int main() {
     TestPrepareStartClockPauseResumeAndNoSteadyAllocations();
     TestIdempotencyValidationFailureAndSafeStop();
     TestReadDecodeDeadlineIsTyped();
+    TestDuplicateSequenceFingerprintAndActiveTickLifecycle();
     std::cout << "lesson_cinematic_renderer test passed\n";
     return 0;
 }

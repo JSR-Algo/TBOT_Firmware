@@ -56,6 +56,46 @@
 
 #define TAG "Lesson"
 
+namespace {
+std::atomic<int> g_cinematic_json_fail_after{-1};
+
+bool CinematicJsonOperationAllowed() {
+    int remaining = g_cinematic_json_fail_after.load(std::memory_order_relaxed);
+    while (remaining >= 0) {
+        if (remaining == 0) return false;
+        if (g_cinematic_json_fail_after.compare_exchange_weak(
+                remaining, remaining - 1, std::memory_order_relaxed)) return true;
+    }
+    return true;
+}
+
+cJSON* CinematicJsonCreateObject() {
+    return CinematicJsonOperationAllowed() ? cJSON_CreateObject() : nullptr;
+}
+
+bool CinematicJsonAddString(cJSON* object, const char* key, const char* value) {
+    return CinematicJsonOperationAllowed() &&
+           cJSON_AddStringToObject(object, key, value) != nullptr;
+}
+
+bool CinematicJsonAddNumber(cJSON* object, const char* key, double value) {
+    return CinematicJsonOperationAllowed() &&
+           cJSON_AddNumberToObject(object, key, value) != nullptr;
+}
+
+bool CinematicJsonAddBool(cJSON* object, const char* key, bool value) {
+    return CinematicJsonOperationAllowed() &&
+           cJSON_AddBoolToObject(object, key, value) != nullptr;
+}
+}  // namespace
+
+namespace tbot {
+void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_failure) {
+    g_cinematic_json_fail_after.store(successful_operations_before_failure,
+                                      std::memory_order_relaxed);
+}
+}  // namespace tbot
+
 void AddLessonRendererFeatures(cJSON* features) {
     if (features == nullptr) return;
     cJSON_DeleteItemFromObject(features, "renderer");
@@ -579,6 +619,11 @@ void ClearTerminalLessonCursor() {
 // frame; the firmware owns only type/sequence/timestamp/body. `body` is consumed.
 std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON* body) {
     cJSON* root = cJSON_CreateObject();
+    if (root == nullptr || body == nullptr) {
+        cJSON_Delete(root);
+        cJSON_Delete(body);
+        return "";
+    }
     cJSON_AddStringToObject(root, "type", type);
     CopyStr(root, in, "protocolVersion");
     CopyStr(root, in, "assignmentId");
@@ -590,7 +635,22 @@ std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON*
     else                    cJSON_AddNullToObject(root, "stepId");
     cJSON_AddNumberToObject(root, "sequence", static_cast<double>(fs_seq));
     cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(NowMs()));
-    if (body != nullptr) cJSON_AddItemToObject(root, "body", body);
+    if (!cJSON_AddItemToObject(root, "body", body)) {
+        cJSON_Delete(body);
+        cJSON_Delete(root);
+        return "";
+    }
+    if (cJSON_GetObjectItem(root, "type") == nullptr ||
+        cJSON_GetObjectItem(root, "protocolVersion") == nullptr ||
+        cJSON_GetObjectItem(root, "assignmentId") == nullptr ||
+        cJSON_GetObjectItem(root, "sessionId") == nullptr ||
+        cJSON_GetObjectItem(root, "stepId") == nullptr ||
+        cJSON_GetObjectItem(root, "sequence") == nullptr ||
+        cJSON_GetObjectItem(root, "timestamp") == nullptr ||
+        cJSON_GetObjectItem(root, "body") == nullptr) {
+        cJSON_Delete(root);
+        return "";
+    }
     char* s = cJSON_PrintUnformatted(root);
     std::string out = (s != nullptr) ? std::string(s) : std::string();
     if (s != nullptr) cJSON_free(s);
@@ -653,12 +713,16 @@ void LogLessonAckEvidence(const cJSON* in, const cJSON* ack_body) {
 
 cJSON* MakeErrorBody(const char* code, const char* message, bool retryable, const char* reason) {
     cJSON* b = cJSON_CreateObject();
-    cJSON_AddStringToObject(b, "code", code);
-    cJSON_AddStringToObject(b, "message", message);
-    cJSON_AddBoolToObject(b, "retryable", retryable);
     cJSON* ctx = cJSON_CreateObject();
-    cJSON_AddStringToObject(ctx, "reason", reason);
-    cJSON_AddItemToObject(b, "context", ctx);
+    if (b == nullptr || ctx == nullptr || cJSON_AddStringToObject(b, "code", code) == nullptr ||
+        cJSON_AddStringToObject(b, "message", message) == nullptr ||
+        cJSON_AddBoolToObject(b, "retryable", retryable) == nullptr ||
+        cJSON_AddStringToObject(ctx, "reason", reason) == nullptr ||
+        !cJSON_AddItemToObject(b, "context", ctx)) {
+        cJSON_Delete(ctx);
+        cJSON_Delete(b);
+        return nullptr;
+    }
     return b;
 }
 
@@ -1444,13 +1508,15 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // would leak frame_body (a latent per-frame heap leak if protocol_ is ever torn
     // down with a frame in flight).
     auto emit = [this](const cJSON* in, const char* frame_type, cJSON* frame_body) {
+        if (frame_body == nullptr) return;
         const int64_t seq = ++g_session.fs_sequence;
         std::string frame = BuildFrame(in, frame_type, seq, frame_body);
-        if (protocol_) protocol_->SendLessonFrame(frame);
+        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
     };
     auto emit_isolated_prepare_error = [this](const cJSON* in, cJSON* frame_body) {
+        if (frame_body == nullptr) return;
         std::string frame = BuildFrame(in, "lesson_error", 1, frame_body);
-        if (protocol_) protocol_->SendLessonFrame(frame);
+        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
     };
     // Canonical lesson_ack (plan §5.3 / P0): body.acks echoes the ACKED sequence;
     // the ack's own envelope.sequence is the firmware F->S counter; there is NO
@@ -1629,7 +1695,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool command_sequence_ok = Num(command_body, "commandSequenceId",
                                               command_sequence_number) &&
             std::isfinite(command_sequence_number) && command_sequence_number > 0 &&
-            command_sequence_number <= static_cast<double>(UINT32_MAX) &&
+            command_sequence_number <= 9007199254740991.0 &&
             std::trunc(command_sequence_number) == command_sequence_number;
         const bool command_matches_frame = command != nullptr &&
             ((prepare_frame && strcmp(command, "prepare") == 0) ||
@@ -1670,25 +1736,31 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     false, "cinematicPhase"));
                 return;
             }
-            cJSON* ack_body = cJSON_CreateObject();
-            cJSON_AddNumberToObject(ack_body, "acks", static_cast<double>(sequence));
-            cJSON* cinematic = cJSON_CreateObject();
+            cJSON* ack_body = CinematicJsonCreateObject();
+            cJSON* cinematic = CinematicJsonCreateObject();
             const char* event = response.type == tbot::LessonCinematicResponseType::kFrameZeroReady
                 ? "frameZeroReady"
                 : response.type == tbot::LessonCinematicResponseType::kPhaseReady
                     ? "phaseReady" : "commandApplied";
-            cJSON_AddStringToObject(cinematic, "event", event);
-            cJSON_AddStringToObject(cinematic, "command", command != nullptr ? command : "");
-            cJSON_AddStringToObject(cinematic, "phaseId", phase_id != nullptr ? phase_id : "");
-            cJSON_AddNumberToObject(cinematic, "commandSequenceId",
-                                    static_cast<double>(command_sequence_id));
-            cJSON_AddBoolToObject(cinematic, "accepted", response.accepted);
+            bool built = ack_body != nullptr && cinematic != nullptr &&
+                CinematicJsonAddNumber(ack_body, "acks", static_cast<double>(sequence)) &&
+                CinematicJsonAddString(cinematic, "event", event) &&
+                CinematicJsonAddString(cinematic, "command", command != nullptr ? command : "") &&
+                CinematicJsonAddString(cinematic, "phaseId", phase_id != nullptr ? phase_id : "") &&
+                CinematicJsonAddNumber(cinematic, "commandSequenceId",
+                                       static_cast<double>(command_sequence_id)) &&
+                CinematicJsonAddBool(cinematic, "accepted", true);
             if (response.accepted && prepare_frame) {
-                cJSON_AddBoolToObject(cinematic, "frameZeroReady", true);
+                built = built && CinematicJsonAddBool(cinematic, "frameZeroReady", true);
             } else if (response.accepted && start_frame) {
-                cJSON_AddBoolToObject(cinematic, "phaseReady", true);
+                built = built && CinematicJsonAddBool(cinematic, "phaseReady", true);
             }
-            cJSON_AddItemToObject(ack_body, "cinematicPhase", cinematic);
+            if (!built || !CinematicJsonOperationAllowed() ||
+                !cJSON_AddItemToObject(ack_body, "cinematicPhase", cinematic)) {
+                cJSON_Delete(cinematic);
+                cJSON_Delete(ack_body);
+                return;
+            }
             emit(root, "lesson_ack", ack_body);
         };
 

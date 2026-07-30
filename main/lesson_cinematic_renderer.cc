@@ -5,12 +5,15 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
+#include <string_view>
 
 #ifdef ESP_PLATFORM
 #include "display/lcd_display.h"
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
 #include "lesson_mjpeg_mp4.h"
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <esp_timer.h>
 #endif
 
@@ -19,6 +22,44 @@ namespace {
 
 std::atomic<bool> g_capability_ready{false};
 std::atomic<LessonCinematicRenderer*> g_active_renderer{nullptr};
+std::atomic<std::uint64_t> g_completed_phase_sequence{0};
+std::mutex g_active_renderer_mutex;
+
+void AppendFingerprintString(std::string& destination, const char* value) {
+    const std::string_view text = value != nullptr ? std::string_view(value) : std::string_view();
+    destination += std::to_string(text.size());
+    destination += ":";
+    destination.append(text.data(), text.size());
+    destination += ";";
+}
+
+std::string ControlFingerprint(const char* command, const char* phase_id) {
+    std::string value;
+    AppendFingerprintString(value, command);
+    AppendFingerprintString(value, phase_id);
+    return value;
+}
+
+std::string PrepareFingerprint(const LessonCinematicPhaseConfig& config) {
+    std::string value = ControlFingerprint("prepare", config.phase_id);
+    AppendFingerprintString(value, config.renderer_id);
+    AppendFingerprintString(value, config.template_id);
+    for (const auto& layer : config.layers) {
+        AppendFingerprintString(value, layer.sd_path);
+        for (const auto number : {static_cast<std::int64_t>(layer.rect.x),
+                                  static_cast<std::int64_t>(layer.rect.y),
+                                  static_cast<std::int64_t>(layer.rect.width),
+                                  static_cast<std::int64_t>(layer.rect.height),
+                                  static_cast<std::int64_t>(layer.chroma.color.red),
+                                  static_cast<std::int64_t>(layer.chroma.color.green),
+                                  static_cast<std::int64_t>(layer.chroma.color.blue),
+                                  static_cast<std::int64_t>(layer.chroma.tolerance),
+                                  static_cast<std::int64_t>(layer.chroma.feather)}) {
+            value += ":" + std::to_string(number);
+        }
+    }
+    return value;
+}
 
 bool LocalPath(const char* path) {
     return path != nullptr && path[0] == '/' && std::strstr(path, "://") == nullptr;
@@ -49,8 +90,28 @@ void SetLessonCinematicRendererCapabilityReady(bool ready) {
 }
 
 void SetActiveLessonCinematicRenderer(LessonCinematicRenderer* renderer) {
+    std::lock_guard<std::mutex> lock(g_active_renderer_mutex);
     g_active_renderer.store(renderer, std::memory_order_release);
+    if (renderer != nullptr) g_completed_phase_sequence.store(0, std::memory_order_release);
     SetLessonCinematicRendererCapabilityReady(renderer != nullptr && renderer->initialized());
+}
+
+LessonCinematicResponse TickActiveLessonCinematicRenderer(std::uint64_t now_ms) {
+    std::lock_guard<std::mutex> lock(g_active_renderer_mutex);
+    LessonCinematicRenderer* renderer = g_active_renderer.load(std::memory_order_acquire);
+    if (renderer == nullptr) {
+        return {LessonCinematicResponseType::kFailure, false, 0, "",
+                LessonCinematicError::kInvalidState};
+    }
+    const LessonCinematicResponse response = renderer->Tick(now_ms);
+    if (response.type == LessonCinematicResponseType::kPhaseComplete && response.accepted) {
+        g_completed_phase_sequence.store(response.command_sequence_id, std::memory_order_release);
+    }
+    return response;
+}
+
+std::uint64_t LessonCinematicCompletedSequence() {
+    return g_completed_phase_sequence.load(std::memory_order_acquire);
 }
 
 LessonCinematicRenderer* ActiveLessonCinematicRenderer() {
@@ -226,9 +287,17 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
         ProductionMonotonicMs});
     const esp_timer_create_args_t timer_args = {
         .callback = [](void*) {
-            LessonCinematicRenderer* renderer = ActiveLessonCinematicRenderer();
-            if (renderer != nullptr) {
-                renderer->Tick(static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
+            const auto response = TickActiveLessonCinematicRenderer(
+                static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
+            // Task 7 defines only command-correlated ACKs. Phase completion is internal:
+            // the renderer returns to prepared while the server remains the lifecycle owner.
+            if (response.type == LessonCinematicResponseType::kPhaseComplete) {
+                ESP_LOGI("LessonCinematic", "phase complete at command sequence %llu",
+                         static_cast<unsigned long long>(response.command_sequence_id));
+            } else if (!response.accepted &&
+                       response.error != LessonCinematicError::kInvalidState) {
+                ESP_LOGW("LessonCinematic", "timer tick failed: %u",
+                         static_cast<unsigned>(response.error));
             }
         },
         .arg = nullptr,
@@ -314,8 +383,10 @@ LessonCinematicError LessonCinematicRenderer::OperationError(
 LessonCinematicResponse LessonCinematicRenderer::Prepare(
     const LessonCinematicPhaseConfig& config, std::uint64_t) {
     std::lock_guard<std::mutex> lock(mutex_);
+    const std::string fingerprint = PrepareFingerprint(config);
     if (config.command_sequence_id == last_sequence_ && last_response_.accepted) {
-        return last_response_;
+        if (last_command_ == "prepare" && last_fingerprint_ == fingerprint) return last_response_;
+        return Failure(config.command_sequence_id, LessonCinematicError::kStaleCommand);
     }
     if (!initialized() || config.renderer_id == nullptr || config.template_id == nullptr ||
         std::strcmp(config.renderer_id, kLessonRendererV3) != 0 ||
@@ -381,12 +452,19 @@ LessonCinematicResponse LessonCinematicRenderer::Prepare(
     displayed_frame_ = 0;
     last_sequence_ = config.command_sequence_id;
     last_response_ = Applied(LessonCinematicResponseType::kFrameZeroReady, last_sequence_);
+    last_command_ = "prepare";
+    last_fingerprint_ = fingerprint;
     return last_response_;
 }
 
 LessonCinematicResponse LessonCinematicRenderer::ValidateControl(
-    std::uint64_t sequence, const char* phase_id) const {
-    if (sequence == last_sequence_ && last_response_.accepted) return last_response_;
+    std::uint64_t sequence, const char* phase_id, const char* command) const {
+    if (sequence == last_sequence_ && last_response_.accepted) {
+        if (last_command_ == command && last_fingerprint_ == ControlFingerprint(command, phase_id)) {
+            return last_response_;
+        }
+        return Failure(sequence, LessonCinematicError::kStaleCommand);
+    }
     if (sequence < last_sequence_ || phase_id == nullptr || phase_id_ != phase_id) {
         return Failure(sequence, LessonCinematicError::kStaleCommand);
     }
@@ -397,58 +475,76 @@ LessonCinematicResponse LessonCinematicRenderer::ValidateControl(
 LessonCinematicResponse LessonCinematicRenderer::Start(
     std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id);
+    const auto valid = ValidateControl(sequence, phase_id, "start");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kPrepared) return Failure(sequence, LessonCinematicError::kInvalidState);
     state_ = State::kRunning;
     clock_origin_ms_ = now_ms;
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kPhaseReady, sequence);
+    last_command_ = "start";
+    last_fingerprint_ = ControlFingerprint("start", phase_id);
     return last_response_;
 }
 
 LessonCinematicResponse LessonCinematicRenderer::Pause(
     std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id);
+    const auto valid = ValidateControl(sequence, phase_id, "pause");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kRunning) return Failure(sequence, LessonCinematicError::kInvalidState);
     state_ = State::kPaused;
     paused_at_ms_ = now_ms;
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+    last_command_ = "pause";
+    last_fingerprint_ = ControlFingerprint("pause", phase_id);
     return last_response_;
 }
 
 LessonCinematicResponse LessonCinematicRenderer::Resume(
     std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id);
+    const auto valid = ValidateControl(sequence, phase_id, "resume");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kPaused) return Failure(sequence, LessonCinematicError::kInvalidState);
     clock_origin_ms_ += now_ms - paused_at_ms_;
     state_ = State::kRunning;
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+    last_command_ = "resume";
+    last_fingerprint_ = ControlFingerprint("resume", phase_id);
     return last_response_;
 }
 
 LessonCinematicResponse LessonCinematicRenderer::Stop(
     std::uint64_t sequence, const char* phase_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id);
+    const auto valid = ValidateControl(sequence, phase_id, "stop");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     CloseStreams();
     ReleaseBuffers();
     state_ = State::kIdle;
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+    last_command_ = "stop";
+    last_fingerprint_ = ControlFingerprint("stop", phase_id);
     return last_response_;
 }
 
 LessonCinematicResponse LessonCinematicRenderer::Cancel(
     std::uint64_t sequence, const char* phase_id) {
-    return Stop(sequence, phase_id);
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto valid = ValidateControl(sequence, phase_id, "cancel");
+    if (!valid.accepted || sequence == last_sequence_) return valid;
+    CloseStreams();
+    ReleaseBuffers();
+    state_ = State::kIdle;
+    last_sequence_ = sequence;
+    last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+    last_command_ = "cancel";
+    last_fingerprint_ = ControlFingerprint("cancel", phase_id);
+    return last_response_;
 }
 
 LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
