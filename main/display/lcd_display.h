@@ -93,6 +93,8 @@ public:
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) override;
     virtual void SetLessonTeachingWord(const char* text) override;
+    bool PresentLessonFramebuffer(const std::uint16_t* pixels, std::uint16_t width,
+                                  std::uint16_t height);
     virtual bool StartLessonRobotEntrance(
         const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) override;
     virtual void CancelLessonRobotEntrance() override;

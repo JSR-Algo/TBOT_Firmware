@@ -40,6 +40,8 @@ cp main/lesson_asset_storage_coordinator.cc \
     "${BUILD_DIR}/src/lesson_layer_state.cc" \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \
     main/lesson_tvideo_template.cc \
+    main/lesson_cinematic_renderer.cc \
+    main/lesson_chroma_compositor.cc \
     main/json_payload_safety.cc \
     main/sd_fat_session_guard.cc \
     "${BUILD_DIR}/cJSON.o" \

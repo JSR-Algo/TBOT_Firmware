@@ -27,6 +27,8 @@
 #include "settings.h"
 #include "lvgl_theme.h"
 #include "lvgl_display.h"
+#include "lcd_display.h"
+#include "lesson_cinematic_renderer.h"
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_pack_activation.h"
@@ -483,9 +485,18 @@ bool DownloadLessonAssetToFile(
 }
 
 McpServer::McpServer() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+    auto* display = dynamic_cast<LcdDisplay*>(Board::GetInstance().GetDisplay());
+    tbot::InitializeProductionLessonCinematicRenderer(display);
+#else
+    tbot::SetLessonCinematicRendererCapabilityReady(false);
+#endif
 }
 
 McpServer::~McpServer() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+    tbot::ShutdownProductionLessonCinematicRenderer();
+#endif
     for (auto tool : tools_) {
         delete tool;
     }

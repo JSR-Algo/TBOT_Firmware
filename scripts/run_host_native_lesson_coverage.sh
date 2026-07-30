@@ -78,6 +78,8 @@ cp main/lesson_asset_storage_coordinator.cc \
     tests/native/lesson_handler_host_test.cc \
     "${BUILD_DIR}/src/lesson_handler.cc" \
     main/lesson_tvideo_template.cc \
+    main/lesson_cinematic_renderer.cc \
+    main/lesson_chroma_compositor.cc \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \
     "${BUILD_DIR}/src/lesson_layer_state.cc" \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \

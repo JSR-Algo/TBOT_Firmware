@@ -484,6 +484,10 @@ int main() {
               "production FILE adapter opens under the existing lesson lease");
         Check(!coordinator.EndLessonSession("assignment-mp4", "session-mp4", session.generation),
               "adapter retains the lesson lease until close");
+        const auto metadata = file_reader.metadata();
+        Check(metadata.width == 320 && metadata.height == 120 && metadata.fps_milli == 10000 &&
+                  metadata.frame_count == 2 && metadata.duration_ticks == 200,
+              "production FILE adapter exposes parser metadata to the cinematic renderer");
         std::uint8_t file_frame[8] = {};
         std::size_t file_frame_size = 0;
         Check(file_reader.ReadFrame(1, file_frame, sizeof(file_frame), &file_frame_size) ==

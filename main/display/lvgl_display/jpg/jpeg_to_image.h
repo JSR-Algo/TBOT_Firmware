@@ -81,10 +81,20 @@ typedef struct {
 esp_err_t jpeg_reusable_decoder_prepare(jpeg_reusable_decoder_t* decoder, size_t max_width,
                                         size_t max_height, uint32_t output_caps);
 
+esp_err_t jpeg_reusable_decoder_prepare_workspace(jpeg_reusable_decoder_t* decoder,
+                                                  size_t max_width, size_t max_height,
+                                                  uint32_t output_caps);
+
 /** Decodes into decoder->output_buffer without allocating or transferring ownership. */
 esp_err_t jpeg_reusable_decoder_decode(jpeg_reusable_decoder_t* decoder, const uint8_t* src,
                                        size_t src_len, uint8_t** out, size_t* out_len, size_t* width,
                                        size_t* height, size_t* stride);
+
+esp_err_t jpeg_reusable_decoder_decode_into(jpeg_reusable_decoder_t* decoder,
+                                            const uint8_t* src, size_t src_len,
+                                            uint8_t* destination, size_t destination_size,
+                                            size_t* out_len, size_t* width, size_t* height,
+                                            size_t* stride);
 
 /** Releases buffers allocated by jpeg_reusable_decoder_prepare(). */
 void jpeg_reusable_decoder_destroy(jpeg_reusable_decoder_t* decoder);

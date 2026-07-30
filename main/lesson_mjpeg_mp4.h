@@ -42,6 +42,16 @@ struct LessonMjpegMp4Frame {
     std::uint32_t size;
 };
 
+struct LessonMjpegMp4Metadata {
+    std::uint16_t width;
+    std::uint16_t height;
+    std::uint32_t timescale;
+    std::uint64_t duration_ticks;
+    std::uint32_t frame_duration_ticks;
+    std::uint32_t fps_milli;
+    std::size_t frame_count;
+};
+
 class LessonMjpegMp4Reader {
 public:
     LessonMjpegMp4Status Open(const LessonMjpegMp4Io& io);
@@ -104,6 +114,7 @@ public:
     LessonMjpegMp4Status GetFrame(std::size_t index, LessonMjpegMp4Frame* frame) const;
     void Close();
     bool is_open() const;
+    LessonMjpegMp4Metadata metadata() const;
 
     LessonMjpegMp4File(const LessonMjpegMp4File&) = delete;
     LessonMjpegMp4File& operator=(const LessonMjpegMp4File&) = delete;

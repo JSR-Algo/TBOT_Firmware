@@ -155,6 +155,31 @@ int main(int argc, char** argv) {
 
     jpeg_reusable_decoder_destroy(&decoder);
     Check(decoder.output_buffer == nullptr && decoder.working_buffer == nullptr, "destroy clears ownership");
+
+    jpeg_reusable_decoder_t caller_owned = {};
+    Check(jpeg_reusable_decoder_prepare_workspace(&caller_owned, 46, 46, 0x1234u) == ESP_OK,
+          "workspace-only decoder prepares without a second output allocation");
+    Check(caller_owned.output_buffer == nullptr && caller_owned.working_buffer != nullptr,
+          "workspace-only decoder leaves presentation ownership with caller");
+    std::vector<std::uint8_t> caller_pixels(46 * 46 * 2);
+    ResetCounts();
+    track_allocations = true;
+    size_t caller_len = 0;
+    size_t caller_width = 0;
+    size_t caller_height = 0;
+    size_t caller_stride = 0;
+    Check(jpeg_reusable_decoder_decode_into(
+              &caller_owned, jpeg.data(), jpeg.size(), caller_pixels.data(), caller_pixels.size(),
+              &caller_len, &caller_width, &caller_height, &caller_stride) == ESP_OK,
+          "decoder writes directly into caller-owned RGB565 framebuffer");
+    track_allocations = false;
+    Check(caller_len == caller_pixels.size() && caller_width == 46 && caller_height == 46 &&
+              caller_stride == 92,
+          "caller-owned decode preserves RGB565 metadata");
+    Check(counts.heap_allocs == 0 && counts.mallocs == 0 && counts.callocs == 0 &&
+              counts.reallocs == 0 && counts.news == 0,
+          "caller-owned decode has no steady-state allocation");
+    jpeg_reusable_decoder_destroy(&caller_owned);
     std::cout << "lesson_jpeg_reuse test passed\n";
     return 0;
 }

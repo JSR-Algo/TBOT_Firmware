@@ -437,6 +437,16 @@ void LcdDisplay::Unlock() {
     lvgl_port_unlock();
 }
 
+bool LcdDisplay::PresentLessonFramebuffer(const std::uint16_t* pixels,
+                                          std::uint16_t width,
+                                          std::uint16_t height) {
+    if (pixels == nullptr || panel_ == nullptr || width != width_ || height != height_) {
+        return false;
+    }
+    DisplayLockGuard lock(this);
+    return esp_lcd_panel_draw_bitmap(panel_, 0, 0, width, height, pixels) == ESP_OK;
+}
+
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
 void LcdDisplay::SetupUI() {
     // Prevent duplicate calls - if already called, return early

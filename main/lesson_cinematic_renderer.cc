@@ -1,0 +1,505 @@
+#include "lesson_cinematic_renderer.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <limits>
+#include <memory>
+
+#ifdef ESP_PLATFORM
+#include "display/lcd_display.h"
+#include "display/lvgl_display/jpg/jpeg_to_image.h"
+#include "lesson_mjpeg_mp4.h"
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
+#endif
+
+namespace tbot {
+namespace {
+
+std::atomic<bool> g_capability_ready{false};
+std::atomic<LessonCinematicRenderer*> g_active_renderer{nullptr};
+
+bool LocalPath(const char* path) {
+    return path != nullptr && path[0] == '/' && std::strstr(path, "://") == nullptr;
+}
+
+bool SameTiming(const LessonCinematicStreamMetadata& left,
+                const LessonCinematicStreamMetadata& right) {
+    return left.fps == right.fps && left.frame_count == right.frame_count &&
+           left.duration_ms == right.duration_ms;
+}
+
+bool ValidRect(const LessonCinematicRect& rect) {
+    if (rect.width == 0 || rect.height == 0 || rect.width > 240 || rect.height > 240) return false;
+    const std::int64_t right = static_cast<std::int64_t>(rect.x) + rect.width;
+    const std::int64_t bottom = static_cast<std::int64_t>(rect.y) + rect.height;
+    return right > 0 && bottom > 0 && rect.x < kLessonCinematicWidth &&
+           rect.y < kLessonCinematicHeight;
+}
+
+}  // namespace
+
+bool LessonCinematicRendererCapabilityReady() {
+    return g_capability_ready.load(std::memory_order_acquire);
+}
+
+void SetLessonCinematicRendererCapabilityReady(bool ready) {
+    g_capability_ready.store(ready, std::memory_order_release);
+}
+
+void SetActiveLessonCinematicRenderer(LessonCinematicRenderer* renderer) {
+    g_active_renderer.store(renderer, std::memory_order_release);
+    SetLessonCinematicRendererCapabilityReady(renderer != nullptr && renderer->initialized());
+}
+
+LessonCinematicRenderer* ActiveLessonCinematicRenderer() {
+    return g_active_renderer.load(std::memory_order_acquire);
+}
+
+#ifdef ESP_PLATFORM
+namespace {
+
+struct ProductionRendererContext {
+    ::LcdDisplay* display = nullptr;
+    std::string assignment_id;
+    std::string session_id;
+    std::uint64_t generation = 0;
+    std::array<LessonMjpegMp4File, 3> files;
+    jpeg_reusable_decoder_t decoder{};
+    std::uint8_t* jpeg_input = nullptr;
+    std::size_t jpeg_input_capacity = kLessonMjpegMp4MaxSampleBytes;
+    esp_timer_handle_t frame_timer = nullptr;
+};
+
+std::unique_ptr<ProductionRendererContext> g_production_context;
+std::unique_ptr<LessonCinematicRenderer> g_production_renderer;
+
+void* ProductionAllocate(void*, std::size_t size) {
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+void ProductionFree(void*, void* pointer) {
+    heap_caps_free(pointer);
+}
+
+bool ProductionOpen(void* raw, const char* path, LessonCinematicStreamMetadata* metadata,
+                    void** handle) {
+    auto* context = static_cast<ProductionRendererContext*>(raw);
+    if (context == nullptr || context->generation == 0 || metadata == nullptr || handle == nullptr) {
+        return false;
+    }
+    if (context->jpeg_input == nullptr) {
+        context->jpeg_input = static_cast<std::uint8_t*>(heap_caps_malloc(
+            context->jpeg_input_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (context->jpeg_input == nullptr ||
+            jpeg_reusable_decoder_prepare_workspace(
+                &context->decoder, kLessonCinematicWidth, kLessonCinematicHeight,
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != ESP_OK) {
+            if (context->jpeg_input != nullptr) heap_caps_free(context->jpeg_input);
+            context->jpeg_input = nullptr;
+            return false;
+        }
+    }
+    LessonMjpegMp4File* file = nullptr;
+    for (auto& candidate : context->files) {
+        if (!candidate.is_open()) {
+            file = &candidate;
+            break;
+        }
+    }
+    if (file == nullptr || file->OpenUnderLessonSession(
+            path, context->assignment_id, context->session_id, context->generation) !=
+            LessonMjpegMp4Status::kOk) {
+        return false;
+    }
+    const LessonMjpegMp4Metadata parsed = file->metadata();
+    if (parsed.timescale == 0 || parsed.fps_milli % 1000 != 0 ||
+        parsed.duration_ticks > UINT64_MAX / 1000) {
+        file->Close();
+        return false;
+    }
+    *metadata = {parsed.width, parsed.height,
+                 static_cast<std::uint16_t>(parsed.fps_milli / 1000),
+                 static_cast<std::uint32_t>(parsed.frame_count),
+                 static_cast<std::uint32_t>(parsed.duration_ticks * 1000 / parsed.timescale),
+                 kLessonMjpegMp4MaxSampleBytes};
+    *handle = file;
+    return true;
+}
+
+void ProductionClose(void* raw, void* handle) {
+    auto* context = static_cast<ProductionRendererContext*>(raw);
+    if (handle != nullptr) static_cast<LessonMjpegMp4File*>(handle)->Close();
+    bool any_open = false;
+    for (const auto& file : context->files) any_open = any_open || file.is_open();
+    if (!any_open) {
+        jpeg_reusable_decoder_destroy(&context->decoder);
+        if (context->jpeg_input != nullptr) heap_caps_free(context->jpeg_input);
+        context->jpeg_input = nullptr;
+    }
+}
+
+bool ProductionDecode(void* raw, void* handle, std::size_t index,
+                      std::uint8_t* destination, std::size_t capacity,
+                      std::uint16_t* width, std::uint16_t* height, std::size_t* stride) {
+    auto* context = static_cast<ProductionRendererContext*>(raw);
+    std::size_t jpeg_size = 0;
+    if (context == nullptr || handle == nullptr ||
+        static_cast<LessonMjpegMp4File*>(handle)->ReadFrame(
+            index, context->jpeg_input, context->jpeg_input_capacity, &jpeg_size) !=
+            LessonMjpegMp4Status::kOk) {
+        return false;
+    }
+    std::size_t decoded_size = 0;
+    std::size_t decoded_width = 0;
+    std::size_t decoded_height = 0;
+    if (jpeg_reusable_decoder_decode_into(
+            &context->decoder, context->jpeg_input, jpeg_size, destination, capacity,
+            &decoded_size, &decoded_width, &decoded_height, stride) != ESP_OK ||
+        decoded_width > UINT16_MAX || decoded_height > UINT16_MAX) {
+        return false;
+    }
+    *width = static_cast<std::uint16_t>(decoded_width);
+    *height = static_cast<std::uint16_t>(decoded_height);
+    return decoded_size == decoded_height * *stride;
+}
+
+bool ProductionPresent(void* raw, const std::uint16_t* pixels, std::uint16_t width,
+                       std::uint16_t height, std::size_t) {
+    auto* context = static_cast<ProductionRendererContext*>(raw);
+    return context != nullptr && context->display != nullptr &&
+           context->display->PresentLessonFramebuffer(pixels, width, height);
+}
+
+}  // namespace
+#endif
+
+bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
+#ifdef ESP_PLATFORM
+    constexpr std::size_t kRequiredPsram =
+        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2 +
+        static_cast<std::size_t>(240) * 240 * 2 + kLessonMjpegMp4MaxSampleBytes + 128 * 1024;
+    if (display == nullptr || heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kRequiredPsram) {
+        return false;
+    }
+    void* framebuffer_probe = heap_caps_malloc(
+        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void* foreground_probe = heap_caps_malloc(static_cast<std::size_t>(240) * 240 * 2,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    void* jpeg_probe = heap_caps_malloc(kLessonMjpegMp4MaxSampleBytes,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    jpeg_reusable_decoder_t decoder_probe{};
+    const bool decoder_ready = jpeg_reusable_decoder_prepare_workspace(
+        &decoder_probe, kLessonCinematicWidth, kLessonCinematicHeight,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == ESP_OK;
+    const bool buffers_ready = framebuffer_probe != nullptr && foreground_probe != nullptr &&
+                               jpeg_probe != nullptr && decoder_ready;
+    if (framebuffer_probe != nullptr) heap_caps_free(framebuffer_probe);
+    if (foreground_probe != nullptr) heap_caps_free(foreground_probe);
+    if (jpeg_probe != nullptr) heap_caps_free(jpeg_probe);
+    jpeg_reusable_decoder_destroy(&decoder_probe);
+    if (!buffers_ready) return false;
+    g_production_context = std::make_unique<ProductionRendererContext>();
+    g_production_context->display = display;
+    g_production_renderer = std::make_unique<LessonCinematicRenderer>(LessonCinematicRendererOps{
+        g_production_context.get(), ProductionAllocate, ProductionFree, ProductionOpen,
+        ProductionClose, ProductionDecode, ProductionPresent});
+    const esp_timer_create_args_t timer_args = {
+        .callback = [](void*) {
+            LessonCinematicRenderer* renderer = ActiveLessonCinematicRenderer();
+            if (renderer != nullptr) {
+                renderer->Tick(static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
+            }
+        },
+        .arg = nullptr,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "lesson_cinematic",
+        .skip_unhandled_events = true,
+    };
+    if (esp_timer_create(&timer_args, &g_production_context->frame_timer) != ESP_OK ||
+        esp_timer_start_periodic(g_production_context->frame_timer, 10000) != ESP_OK) {
+        ShutdownProductionLessonCinematicRenderer();
+        return false;
+    }
+    SetActiveLessonCinematicRenderer(g_production_renderer.get());
+    return LessonCinematicRendererCapabilityReady();
+#else
+    (void)display;
+    return false;
+#endif
+}
+
+void ConfigureProductionLessonCinematicSession(const std::string& assignment_id,
+                                                const std::string& session_id,
+                                                std::uint64_t generation) {
+#ifdef ESP_PLATFORM
+    if (g_production_context != nullptr) {
+        g_production_context->assignment_id = assignment_id;
+        g_production_context->session_id = session_id;
+        g_production_context->generation = generation;
+    }
+#else
+    (void)assignment_id;
+    (void)session_id;
+    (void)generation;
+#endif
+}
+
+void ShutdownProductionLessonCinematicRenderer() {
+#ifdef ESP_PLATFORM
+    SetActiveLessonCinematicRenderer(nullptr);
+    if (g_production_context != nullptr && g_production_context->frame_timer != nullptr) {
+        esp_timer_stop(g_production_context->frame_timer);
+        esp_timer_delete(g_production_context->frame_timer);
+        g_production_context->frame_timer = nullptr;
+    }
+    g_production_renderer.reset();
+    g_production_context.reset();
+#endif
+}
+
+LessonCinematicRenderer::LessonCinematicRenderer(LessonCinematicRendererOps ops) : ops_(ops) {}
+
+LessonCinematicRenderer::~LessonCinematicRenderer() {
+    Reset();
+}
+
+bool LessonCinematicRenderer::initialized() const {
+    return ops_.allocate != nullptr && ops_.free != nullptr && ops_.open != nullptr &&
+           ops_.close != nullptr && ops_.decode != nullptr && ops_.present != nullptr;
+}
+
+bool LessonCinematicRenderer::prepared() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_ == State::kPrepared || state_ == State::kRunning || state_ == State::kPaused;
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Failure(
+    std::uint64_t sequence, LessonCinematicError error) const {
+    return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Applied(
+    LessonCinematicResponseType type, std::uint64_t sequence) const {
+    return {type, true, sequence, phase_id_, LessonCinematicError::kNone};
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Prepare(
+    const LessonCinematicPhaseConfig& config, std::uint64_t) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (config.command_sequence_id == last_sequence_ && last_response_.accepted) {
+        return last_response_;
+    }
+    if (!initialized() || config.renderer_id == nullptr || config.template_id == nullptr ||
+        std::strcmp(config.renderer_id, kLessonRendererV3) != 0 ||
+        std::strcmp(config.template_id, kLessonDirectMp4CinematicTemplate) != 0) {
+        return Failure(config.command_sequence_id, LessonCinematicError::kUnsupportedContract);
+    }
+    if (config.phase_id == nullptr || config.phase_id[0] == '\0') {
+        return Failure(config.command_sequence_id, LessonCinematicError::kInvalidPhase);
+    }
+    for (const auto& layer : config.layers) {
+        if (!LocalPath(layer.sd_path)) {
+            return Failure(config.command_sequence_id, LessonCinematicError::kInvalidPath);
+        }
+    }
+    if (!ValidRect(config.layers[1].rect) || !ValidRect(config.layers[2].rect)) {
+        return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
+    }
+
+    Reset();
+    phase_id_ = config.phase_id;
+    layers_ = config.layers;
+    constexpr std::size_t kFramebufferBytes =
+        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
+    foreground_capacity_ = static_cast<std::size_t>(240) * 240 * 2;
+    framebuffer_ = static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kFramebufferBytes));
+    foreground_scratch_ = static_cast<std::uint8_t*>(
+        ops_.allocate(ops_.context, foreground_capacity_));
+    if (framebuffer_ == nullptr || foreground_scratch_ == nullptr) {
+        Reset();
+        phase_id_ = config.phase_id;
+        return Failure(config.command_sequence_id, LessonCinematicError::kInsufficientPsram);
+    }
+
+    for (std::size_t index = 0; index < streams_.size(); ++index) {
+        if (!ops_.open(ops_.context, config.layers[index].sd_path, &metadata_[index],
+                       &streams_[index])) {
+            CloseStreams();
+            ReleaseBuffers();
+            return Failure(config.command_sequence_id, LessonCinematicError::kFileOpen);
+        }
+    }
+    const bool metadata_ok = metadata_[0].width == kLessonCinematicWidth &&
+        metadata_[0].height == kLessonCinematicHeight &&
+        metadata_[0].fps != 0 && (metadata_[0].fps == 10 || metadata_[0].fps == 15) &&
+        metadata_[0].frame_count != 0 && metadata_[0].duration_ms != 0 &&
+        metadata_[1].width <= 240 && metadata_[1].height <= 240 &&
+        metadata_[2].width <= 240 && metadata_[2].height <= 240 &&
+        SameTiming(metadata_[0], metadata_[1]) && SameTiming(metadata_[0], metadata_[2]);
+    if (!metadata_ok) {
+        CloseStreams();
+        ReleaseBuffers();
+        return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
+    }
+    if (!RenderFrame(0)) {
+        CloseStreams();
+        ReleaseBuffers();
+        state_ = State::kFailed;
+        return Failure(config.command_sequence_id, LessonCinematicError::kDecodeFailed);
+    }
+    state_ = State::kPrepared;
+    displayed_frame_ = 0;
+    last_sequence_ = config.command_sequence_id;
+    last_response_ = Applied(LessonCinematicResponseType::kFrameZeroReady, last_sequence_);
+    return last_response_;
+}
+
+LessonCinematicResponse LessonCinematicRenderer::ValidateControl(
+    std::uint64_t sequence, const char* phase_id) const {
+    if (sequence == last_sequence_ && last_response_.accepted) return last_response_;
+    if (sequence < last_sequence_ || phase_id == nullptr || phase_id_ != phase_id) {
+        return Failure(sequence, LessonCinematicError::kStaleCommand);
+    }
+    return {LessonCinematicResponseType::kCommandApplied, true, sequence, phase_id_,
+            LessonCinematicError::kNone};
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Start(
+    std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto valid = ValidateControl(sequence, phase_id);
+    if (!valid.accepted || sequence == last_sequence_) return valid;
+    if (state_ != State::kPrepared) return Failure(sequence, LessonCinematicError::kInvalidState);
+    state_ = State::kRunning;
+    clock_origin_ms_ = now_ms;
+    last_sequence_ = sequence;
+    last_response_ = Applied(LessonCinematicResponseType::kPhaseReady, sequence);
+    return last_response_;
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Pause(
+    std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto valid = ValidateControl(sequence, phase_id);
+    if (!valid.accepted || sequence == last_sequence_) return valid;
+    if (state_ != State::kRunning) return Failure(sequence, LessonCinematicError::kInvalidState);
+    state_ = State::kPaused;
+    paused_at_ms_ = now_ms;
+    last_sequence_ = sequence;
+    last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+    return last_response_;
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Resume(
+    std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto valid = ValidateControl(sequence, phase_id);
+    if (!valid.accepted || sequence == last_sequence_) return valid;
+    if (state_ != State::kPaused) return Failure(sequence, LessonCinematicError::kInvalidState);
+    clock_origin_ms_ += now_ms - paused_at_ms_;
+    state_ = State::kRunning;
+    last_sequence_ = sequence;
+    last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+    return last_response_;
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Stop(
+    std::uint64_t sequence, const char* phase_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto valid = ValidateControl(sequence, phase_id);
+    if (!valid.accepted || sequence == last_sequence_) return valid;
+    CloseStreams();
+    ReleaseBuffers();
+    state_ = State::kIdle;
+    last_sequence_ = sequence;
+    last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+    return last_response_;
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Cancel(
+    std::uint64_t sequence, const char* phase_id) {
+    return Stop(sequence, phase_id);
+}
+
+LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_ == State::kPaused) return Applied(LessonCinematicResponseType::kCommandApplied,
+                                                 last_sequence_);
+    if (state_ != State::kRunning) return Failure(last_sequence_, LessonCinematicError::kInvalidState);
+    const std::uint64_t elapsed = now_ms >= clock_origin_ms_ ? now_ms - clock_origin_ms_ : 0;
+    const std::uint64_t frame = elapsed * metadata_[0].fps / 1000;
+    if (frame >= metadata_[0].frame_count) {
+        state_ = State::kPrepared;
+        displayed_frame_ = metadata_[0].frame_count - 1;
+        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    }
+    if (frame == displayed_frame_) return Applied(LessonCinematicResponseType::kCommandApplied,
+                                                   last_sequence_);
+    if (!RenderFrame(static_cast<std::size_t>(frame))) {
+        state_ = State::kFailed;
+        return Failure(last_sequence_, LessonCinematicError::kDecodeFailed);
+    }
+    displayed_frame_ = static_cast<std::size_t>(frame);
+    return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
+}
+
+bool LessonCinematicRenderer::RenderFrame(std::size_t frame_index) {
+    std::uint16_t width = 0;
+    std::uint16_t height = 0;
+    std::size_t stride = 0;
+    constexpr std::size_t kBackgroundCapacity =
+        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
+    if (!ops_.decode(ops_.context, streams_[0], frame_index,
+                     reinterpret_cast<std::uint8_t*>(framebuffer_),
+                     kBackgroundCapacity, &width, &height, &stride) ||
+        width != kLessonCinematicWidth || height != kLessonCinematicHeight ||
+        stride != static_cast<std::size_t>(width) * 2) {
+        return false;
+    }
+    for (std::size_t index = 1; index < streams_.size(); ++index) {
+        if (!ops_.decode(ops_.context, streams_[index], frame_index, foreground_scratch_,
+                         foreground_capacity_, &width, &height, &stride) ||
+            width == 0 || height == 0 || width > 240 || height > 240 ||
+            stride != static_cast<std::size_t>(width) * 2 ||
+            !LessonCompositeRgb565(
+                {reinterpret_cast<const std::uint16_t*>(foreground_scratch_), width, height,
+                 stride / 2},
+                {framebuffer_, kLessonCinematicWidth, kLessonCinematicHeight,
+                 kLessonCinematicWidth}, layers_[index].rect, layers_[index].chroma)) {
+            return false;
+        }
+    }
+    return ops_.present(ops_.context, framebuffer_, kLessonCinematicWidth,
+                        kLessonCinematicHeight, frame_index);
+}
+
+void LessonCinematicRenderer::CloseStreams() {
+    for (void*& stream : streams_) {
+        if (stream != nullptr) {
+            ops_.close(ops_.context, stream);
+            stream = nullptr;
+        }
+    }
+}
+
+void LessonCinematicRenderer::ReleaseBuffers() {
+    if (foreground_scratch_ != nullptr) ops_.free(ops_.context, foreground_scratch_);
+    if (framebuffer_ != nullptr) ops_.free(ops_.context, framebuffer_);
+    foreground_scratch_ = nullptr;
+    framebuffer_ = nullptr;
+    foreground_capacity_ = 0;
+}
+
+void LessonCinematicRenderer::Reset() {
+    CloseStreams();
+    ReleaseBuffers();
+    state_ = State::kIdle;
+    displayed_frame_ = 0;
+    clock_origin_ms_ = 0;
+    paused_at_ms_ = 0;
+}
+
+}  // namespace tbot

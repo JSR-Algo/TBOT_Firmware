@@ -740,6 +740,12 @@ bool LessonMjpegMp4File::is_open() const {
     return file_ != nullptr;
 }
 
+LessonMjpegMp4Metadata LessonMjpegMp4File::metadata() const {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    return {reader_.width(), reader_.height(), reader_.timescale(), reader_.duration_ticks(),
+            reader_.frame_duration_ticks(), reader_.fps_milli(), reader_.frame_count()};
+}
+
 bool LessonMjpegMp4File::ReadAt(void* context, std::uint64_t offset, std::uint8_t* out, std::size_t size) {
     auto* self = static_cast<LessonMjpegMp4File*>(context);
     return self != nullptr && self->file_ != nullptr && self->ops_.seek(self->ops_.context, self->file_, offset) &&

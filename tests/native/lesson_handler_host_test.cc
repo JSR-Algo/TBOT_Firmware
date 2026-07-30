@@ -23,6 +23,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "lesson_handler.h"
+#include "lesson_cinematic_renderer.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
 #include "system_info.h"
@@ -282,6 +283,32 @@ std::string V2StartFrame(int seq, const std::string& opening_entrance) {
            ",\"body\":{\"openingEntrance\":" + opening_entrance + "}}";
 }
 
+std::string V3Frame(const char* type, int seq, const std::string& body) {
+    return std::string("{\"type\":\"") + type +
+           "\",\"protocolVersion\":\"teebot-lesson-renderer.v3\",\"assignmentId\":\"" +
+           AID() + "\",\"sessionId\":\"" + SID() + "\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":" + body + "}";
+}
+
+std::string V3PrepareFrame(int seq, int command_sequence_id = 41) {
+    return V3Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"directMp4Cinematic\",\"templateVersion\":1,"
+        "\"phaseId\":\"opening\",\"durationMs\":300,\"fps\":10,\"frameCount\":3,"
+        "\"layers\":["
+        "{\"layer\":\"background\",\"slot\":\"backgroundScene\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/background.mp4\",\"rect\":{\"x\":0,\"y\":0,\"width\":480,\"height\":320},\"chromaKey\":null},"
+        "{\"layer\":\"teachingObject\",\"slot\":\"teachingObject\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/object.mp4\",\"rect\":{\"x\":10,\"y\":10,\"width\":2,\"height\":2},"
+        "\"chromaKey\":{\"keyColor\":\"#00ff00\",\"tolerance\":20,\"featherPx\":1}},"
+        "{\"layer\":\"robotOverlay\",\"slot\":\"robotOverlay\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/robot.mp4\",\"rect\":{\"x\":20,\"y\":20,\"width\":2,\"height\":2},"
+        "\"chromaKey\":{\"keyColor\":\"#00ff00\",\"tolerance\":20,\"featherPx\":1}}]}}"
+    );
+}
+
 const char* ValidV2OpeningEntrance() {
     return "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
            "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
@@ -513,6 +540,124 @@ void test_renderer_v2_capability_shape_and_exact_tokens() {
             "hello advertises both renderer tokens and structured v2 ownership");
     cJSON_free(encoded);
     cJSON_Delete(features);
+}
+
+void test_renderer_v3_capability_is_fail_closed_until_initialized() {
+    tbot::SetLessonCinematicRendererCapabilityReady(false);
+    cJSON* features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    char* encoded = cJSON_PrintUnformatted(features);
+    require(encoded != nullptr && std::string(encoded).find("teebot-lesson-renderer.v3") ==
+                                      std::string::npos,
+            "renderer v3 is absent before display/PSRAM/JPEG initialization succeeds");
+    cJSON_free(encoded);
+    cJSON_Delete(features);
+
+    tbot::SetLessonCinematicRendererCapabilityReady(true);
+    features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    encoded = cJSON_PrintUnformatted(features);
+    require(encoded != nullptr &&
+                std::string(encoded).find("teebot-lesson-renderer.v3") != std::string::npos &&
+                std::string(encoded).find("directMp4Cinematic") != std::string::npos &&
+                std::string(encoded).find("\"sdAssetPack\":true") != std::string::npos,
+            "initialized renderer advertises exact v3/template/SD capability tokens");
+    cJSON_free(encoded);
+    cJSON_Delete(features);
+    tbot::SetLessonCinematicRendererCapabilityReady(false);
+}
+
+struct V3RendererFake {
+    int opens = 0;
+    int closes = 0;
+    int presents = 0;
+    std::vector<std::string> opened_paths;
+};
+
+void* V3Allocate(void*, std::size_t size) { return std::malloc(size); }
+void V3Free(void*, void* pointer) { std::free(pointer); }
+bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata* metadata,
+            void** handle) {
+    auto* fake = static_cast<V3RendererFake*>(context);
+    fake->opened_paths.emplace_back(path);
+    const bool background = std::string(path).find("background") != std::string::npos;
+    *metadata = {static_cast<std::uint16_t>(background ? 480 : 2),
+                 static_cast<std::uint16_t>(background ? 320 : 2), 10, 3, 300, 64};
+    *handle = reinterpret_cast<void*>(static_cast<std::uintptr_t>(++fake->opens));
+    return true;
+}
+void V3Close(void* context, void*) { ++static_cast<V3RendererFake*>(context)->closes; }
+bool V3Decode(void*, void*, std::size_t, std::uint8_t* destination, std::size_t capacity,
+              std::uint16_t* width, std::uint16_t* height, std::size_t* stride) {
+    const bool background = capacity >= 480u * 320u * 2u;
+    *width = background ? 480 : 2;
+    *height = background ? 320 : 2;
+    *stride = static_cast<std::size_t>(*width) * 2;
+    std::memset(destination, 0, *stride * *height);
+    return true;
+}
+bool V3Present(void* context, const std::uint16_t*, std::uint16_t, std::uint16_t,
+               std::size_t) {
+    ++static_cast<V3RendererFake*>(context)->presents;
+    return true;
+}
+
+void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                             V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    Handle(V3PrepareFrame(1));
+    require(fake.opened_paths == std::vector<std::string>({
+                "/sdcard/tbot/lesson-assets/background.mp4",
+                "/sdcard/tbot/lesson-assets/object.mp4",
+                "/sdcard/tbot/lesson-assets/robot.mp4"}),
+            "v3 prepare normalizes sd:// asset aliases before renderer file open");
+    require(FrameType(0) == "lesson_ack", "v3 prepare returns lesson_ack");
+    cJSON* ack = cJSON_Parse(Sent().back().c_str());
+    cJSON* cinematic = cJSON_GetObjectItem(cJSON_GetObjectItem(ack, "body"), "cinematicPhase");
+    require(cJSON_GetArraySize(cinematic) == 6 &&
+                std::string(cJSON_GetObjectItem(cinematic, "event")->valuestring) == "frameZeroReady" &&
+                std::string(cJSON_GetObjectItem(cinematic, "command")->valuestring) == "prepare" &&
+                std::string(cJSON_GetObjectItem(cinematic, "phaseId")->valuestring) == "opening" &&
+                cJSON_GetObjectItem(cinematic, "commandSequenceId")->valueint == 41 &&
+                cJSON_IsTrue(cJSON_GetObjectItem(cinematic, "accepted")) &&
+                cJSON_IsTrue(cJSON_GetObjectItem(cinematic, "frameZeroReady")),
+            "v3 prepare ACK exactly matches Task-7 frameZeroReady DTO");
+    cJSON_Delete(ack);
+    const int presents = fake.presents;
+    Handle(V3PrepareFrame(2));
+    require(fake.presents == presents, "duplicate prepare command ID replays ACK without work");
+
+    Handle(V3Frame("lesson_start", 3,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\",\"commandSequenceId\":42}}"));
+    ack = cJSON_Parse(Sent().back().c_str());
+    cinematic = cJSON_GetObjectItem(cJSON_GetObjectItem(ack, "body"), "cinematicPhase");
+    require(cJSON_GetArraySize(cinematic) == 6 &&
+                std::string(cJSON_GetObjectItem(cinematic, "event")->valuestring) == "phaseReady" &&
+                cJSON_IsTrue(cJSON_GetObjectItem(cinematic, "phaseReady")),
+            "v3 start ACK exactly matches Task-7 phaseReady DTO");
+    cJSON_Delete(ack);
+
+    for (const char* command : {"pause", "resume", "cancel"}) {
+        const int command_id = command[0] == 'p' ? 43 : command[0] == 'r' ? 44 : 45;
+        Handle(V3Frame("lesson_cinematic_control", command_id,
+            std::string("{\"command\":\"") + command +
+            "\",\"phaseId\":\"opening\",\"commandSequenceId\":" +
+            std::to_string(command_id) + "}"));
+        ack = cJSON_Parse(Sent().back().c_str());
+        cinematic = cJSON_GetObjectItem(cJSON_GetObjectItem(ack, "body"), "cinematicPhase");
+        require(cJSON_GetArraySize(cinematic) == 5 &&
+                    std::string(cJSON_GetObjectItem(cinematic, "event")->valuestring) == "commandApplied" &&
+                    std::string(cJSON_GetObjectItem(cinematic, "command")->valuestring) == command &&
+                    cJSON_IsTrue(cJSON_GetObjectItem(cinematic, "accepted")),
+                "v3 control ACK exactly matches Task-7 commandApplied DTO");
+        cJSON_Delete(ack);
+    }
+    require(fake.closes == 3, "cancel closes all streams before handler releases lesson lease");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
 void test_renderer_v2_start_and_visual_contracts_fail_closed() {
@@ -5019,6 +5164,8 @@ int main() {
     test_envelope_guards();
     test_prepare_basic();
     test_renderer_v2_capability_shape_and_exact_tokens();
+    test_renderer_v3_capability_is_fail_closed_until_initialized();
+    test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();

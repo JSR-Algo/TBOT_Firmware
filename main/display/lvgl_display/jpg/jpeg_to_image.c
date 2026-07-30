@@ -236,6 +236,19 @@ jpeg_rom_dec_failed:
 
 esp_err_t jpeg_reusable_decoder_prepare(jpeg_reusable_decoder_t* decoder, size_t max_width, size_t max_height,
                                         uint32_t output_caps) {
+    esp_err_t ret = jpeg_reusable_decoder_prepare_workspace(decoder, max_width, max_height, output_caps);
+    if (ret != ESP_OK) return ret;
+    uint8_t* output_buffer = heap_caps_aligned_calloc(16, 1, decoder->output_buffer_size, output_caps);
+    if (output_buffer == NULL) {
+        jpeg_reusable_decoder_destroy(decoder);
+        return ESP_ERR_NO_MEM;
+    }
+    decoder->output_buffer = output_buffer;
+    return ESP_OK;
+}
+
+esp_err_t jpeg_reusable_decoder_prepare_workspace(jpeg_reusable_decoder_t* decoder, size_t max_width,
+                                                  size_t max_height, uint32_t output_caps) {
     if (decoder == NULL || decoder->working_buffer != NULL || decoder->output_buffer != NULL || max_width == 0 ||
         max_height == 0 || max_width > JPEG_MAX_DIMENSION || max_height > JPEG_MAX_DIMENSION || output_caps == 0 ||
         max_width > SIZE_MAX / 2) {
@@ -254,15 +267,9 @@ esp_err_t jpeg_reusable_decoder_prepare(jpeg_reusable_decoder_t* decoder, size_t
     if (working_buffer == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    uint8_t* output_buffer = heap_caps_aligned_calloc(16, 1, output_size, output_caps);
-    if (output_buffer == NULL) {
-        heap_caps_free(working_buffer);
-        return ESP_ERR_NO_MEM;
-    }
-
     decoder->working_buffer = working_buffer;
     decoder->working_buffer_size = JPEG_ROM_WORK_BUFFER_SIZE;
-    decoder->output_buffer = output_buffer;
+    decoder->output_buffer = NULL;
     decoder->output_buffer_size = output_size;
     decoder->max_width = max_width;
     decoder->max_height = max_height;
@@ -283,13 +290,33 @@ esp_err_t jpeg_reusable_decoder_decode(jpeg_reusable_decoder_t* decoder, const u
         return ESP_ERR_INVALID_ARG;
     }
 
+    esp_err_t ret = jpeg_reusable_decoder_decode_into(decoder, src, src_len, decoder->output_buffer,
+                                                      decoder->output_buffer_size, out_len, width,
+                                                      height, stride);
+    if (ret == ESP_OK) *out = decoder->output_buffer;
+    return ret;
+}
+
+esp_err_t jpeg_reusable_decoder_decode_into(jpeg_reusable_decoder_t* decoder, const uint8_t* src,
+                                            size_t src_len, uint8_t* destination,
+                                            size_t destination_size, size_t* out_len,
+                                            size_t* width, size_t* height, size_t* stride) {
+    if (out_len != NULL) *out_len = 0;
+    if (width != NULL) *width = 0;
+    if (height != NULL) *height = 0;
+    if (stride != NULL) *stride = 0;
+    if (decoder == NULL || decoder->working_buffer == NULL || destination == NULL || src == NULL ||
+        src_len == 0 || src_len > UINT32_MAX || out_len == NULL || width == NULL || height == NULL ||
+        stride == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
     validated_jpeg_info_t validated_info = {0};
     esp_err_t ret = validate_baseline_jpeg(src, src_len, &validated_info);
     if (ret != ESP_OK) {
         return ret;
     }
     if (validated_info.width > decoder->max_width || validated_info.height > decoder->max_height ||
-        validated_info.decoded_size > decoder->output_buffer_size ||
+        validated_info.decoded_size > destination_size ||
         decoder->working_buffer_size < JPEG_ROM_WORK_BUFFER_SIZE) {
         return ESP_ERR_INVALID_SIZE;
     }
@@ -297,8 +324,8 @@ esp_err_t jpeg_reusable_decoder_decode(jpeg_reusable_decoder_t* decoder, const u
     esp_jpeg_image_cfg_t config = {
         .indata = (uint8_t*)src,
         .indata_size = src_len,
-        .outbuf = decoder->output_buffer,
-        .outbuf_size = decoder->output_buffer_size,
+        .outbuf = destination,
+        .outbuf_size = destination_size,
         .out_format = JPEG_IMAGE_FORMAT_RGB565,
         .out_scale = JPEG_IMAGE_SCALE_0,
         .flags = {.swap_color_bytes = 0},
@@ -321,7 +348,6 @@ esp_err_t jpeg_reusable_decoder_decode(jpeg_reusable_decoder_t* decoder, const u
         return ret == ESP_ERR_NO_MEM ? ret : ESP_FAIL;
     }
 
-    *out = decoder->output_buffer;
     *out_len = validated_info.decoded_size;
     *width = validated_info.width;
     *height = validated_info.height;
