@@ -592,6 +592,17 @@ LessonMjpegMp4Status LessonMjpegMp4Reader::ReadFrame(
     return LessonMjpegMp4Status::kOk;
 }
 
+LessonMjpegMp4Status LessonMjpegMp4Reader::GetFrame(
+    std::size_t index,
+    LessonMjpegMp4Frame* frame
+) const {
+    if (index >= frame_count_ || frame == nullptr) {
+        return LessonMjpegMp4Status::kInvalidArgument;
+    }
+    *frame = frames_[index];
+    return LessonMjpegMp4Status::kOk;
+}
+
 namespace {
 
 void* OpenStdFile(void*, const char* path) {
@@ -648,7 +659,8 @@ LessonMjpegMp4Status LessonMjpegMp4File::OpenUnderLessonSession(
     std::uint64_t generation,
     LessonMjpegMp4FileOps ops
 ) {
-    Close();
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    CloseLocked();
     if (path == nullptr || path[0] == '\0') {
         return LessonMjpegMp4Status::kInvalidArgument;
     }
@@ -685,12 +697,17 @@ LessonMjpegMp4Status LessonMjpegMp4File::OpenUnderLessonSession(
     lesson_read_lease_ = std::move(read_lease);
     const LessonMjpegMp4Status status = reader_.Open({this, ReadAt, file_size});
     if (status != LessonMjpegMp4Status::kOk) {
-        Close();
+        CloseLocked();
     }
     return status;
 }
 
 void LessonMjpegMp4File::Close() {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    CloseLocked();
+}
+
+void LessonMjpegMp4File::CloseLocked() {
     reader_ = LessonMjpegMp4Reader{};
     if (file_ != nullptr) {
         ops_.close(ops_.context, file_);
@@ -698,6 +715,29 @@ void LessonMjpegMp4File::Close() {
     }
     ops_ = {};
     lesson_read_lease_ = {};
+}
+
+LessonMjpegMp4Status LessonMjpegMp4File::ReadFrame(
+    std::size_t index,
+    std::uint8_t* destination,
+    std::size_t capacity,
+    std::size_t* bytes_read
+) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    return reader_.ReadFrame(index, destination, capacity, bytes_read);
+}
+
+LessonMjpegMp4Status LessonMjpegMp4File::GetFrame(
+    std::size_t index,
+    LessonMjpegMp4Frame* frame
+) const {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    return reader_.GetFrame(index, frame);
+}
+
+bool LessonMjpegMp4File::is_open() const {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    return file_ != nullptr;
 }
 
 bool LessonMjpegMp4File::ReadAt(void* context, std::uint64_t offset, std::uint8_t* out, std::size_t size) {

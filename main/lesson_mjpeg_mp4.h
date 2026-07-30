@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "lesson_asset_storage_coordinator.h"
@@ -50,6 +51,7 @@ public:
         std::size_t capacity,
         std::size_t* bytes_read
     ) const;
+    LessonMjpegMp4Status GetFrame(std::size_t index, LessonMjpegMp4Frame* frame) const;
 
     std::size_t frame_count() const { return frame_count_; }
     std::uint16_t width() const { return width_; }
@@ -58,7 +60,6 @@ public:
     std::uint64_t duration_ticks() const { return duration_ticks_; }
     std::uint32_t frame_duration_ticks() const { return frame_duration_ticks_; }
     std::uint32_t fps_milli() const { return fps_milli_; }
-    const LessonMjpegMp4Frame& frame(std::size_t index) const { return frames_[index]; }
 
 private:
     friend class LessonMjpegMp4Parser;
@@ -94,9 +95,15 @@ public:
         std::uint64_t generation,
         LessonMjpegMp4FileOps ops = {}
     );
+    LessonMjpegMp4Status ReadFrame(
+        std::size_t index,
+        std::uint8_t* destination,
+        std::size_t capacity,
+        std::size_t* bytes_read
+    );
+    LessonMjpegMp4Status GetFrame(std::size_t index, LessonMjpegMp4Frame* frame) const;
     void Close();
-    bool is_open() const { return file_ != nullptr; }
-    const LessonMjpegMp4Reader& reader() const { return reader_; }
+    bool is_open() const;
 
     LessonMjpegMp4File(const LessonMjpegMp4File&) = delete;
     LessonMjpegMp4File& operator=(const LessonMjpegMp4File&) = delete;
@@ -105,7 +112,9 @@ public:
 
 private:
     static bool ReadAt(void* context, std::uint64_t offset, std::uint8_t* out, std::size_t size);
+    void CloseLocked();
 
+    mutable std::mutex io_mutex_;
     void* file_ = nullptr;
     LessonMjpegMp4FileOps ops_{};
     LessonAssetReadLease lesson_read_lease_;

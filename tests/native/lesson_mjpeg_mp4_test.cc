@@ -1,9 +1,13 @@
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <thread>
+#include <mutex>
 #include <vector>
 #include <unistd.h>
 
@@ -273,6 +277,71 @@ tbot::LessonMjpegMp4FileOps FakeOps(FakeFile* file) {
     return {file, FakeOpen, FakeSize, FakeSeek, FakeRead, FakeClose};
 }
 
+struct InterleavingFile {
+    Bytes bytes;
+    std::uint64_t cursor = 0;
+    std::mutex mutex;
+    std::condition_variable condition;
+    int seek_waiters = 0;
+    int closes = 0;
+    bool interleave = false;
+    bool block_read = false;
+    bool read_entered = false;
+    bool allow_read = false;
+    bool closed = false;
+};
+
+void* InterleavingOpen(void* context, const char*) {
+    return context;
+}
+
+bool InterleavingSize(void* context, void*, std::uint64_t* size) {
+    *size = static_cast<InterleavingFile*>(context)->bytes.size();
+    return true;
+}
+
+bool InterleavingSeek(void* context, void*, std::uint64_t offset) {
+    auto* file = static_cast<InterleavingFile*>(context);
+    std::unique_lock<std::mutex> lock(file->mutex);
+    if (file->closed || offset > file->bytes.size()) return false;
+    file->cursor = offset;
+    if (file->interleave) {
+        ++file->seek_waiters;
+        if (file->seek_waiters == 1) {
+            file->condition.wait_for(lock, std::chrono::milliseconds(100), [&]() { return file->seek_waiters >= 2; });
+        } else {
+            file->condition.notify_all();
+        }
+    }
+    return true;
+}
+
+std::size_t InterleavingRead(void* context, void*, std::uint8_t* out, std::size_t size) {
+    auto* file = static_cast<InterleavingFile*>(context);
+    std::unique_lock<std::mutex> lock(file->mutex);
+    if (file->block_read) {
+        file->read_entered = true;
+        file->condition.notify_all();
+        file->condition.wait(lock, [&]() { return file->allow_read; });
+    }
+    if (file->closed || size > file->bytes.size() - static_cast<std::size_t>(file->cursor)) return 0;
+    std::memcpy(out, file->bytes.data() + file->cursor, size);
+    file->cursor += size;
+    return size;
+}
+
+void InterleavingClose(void* context, void*) {
+    auto* file = static_cast<InterleavingFile*>(context);
+    std::lock_guard<std::mutex> lock(file->mutex);
+    file->closed = true;
+    ++file->closes;
+    file->condition.notify_all();
+}
+
+tbot::LessonMjpegMp4FileOps InterleavingOps(InterleavingFile* file) {
+    return {file, InterleavingOpen, InterleavingSize, InterleavingSeek, InterleavingRead, InterleavingClose};
+}
+
 }  // namespace
 
 int main() {
@@ -283,6 +352,13 @@ int main() {
     Check(reader.width() == 320 && reader.height() == 120, "dimensions are parsed");
     Check(reader.timescale() == 1000 && reader.duration_ticks() == 200, "duration is parsed");
     Check(reader.frame_duration_ticks() == 100 && reader.fps_milli() == 10000, "fps is consistent");
+    tbot::LessonMjpegMp4Frame metadata{};
+    Check(reader.GetFrame(1, &metadata) == tbot::LessonMjpegMp4Status::kOk && metadata.size == 5,
+          "checked frame metadata lookup succeeds");
+    Check(reader.GetFrame(reader.frame_count(), &metadata) == tbot::LessonMjpegMp4Status::kInvalidArgument,
+          "checked frame metadata rejects out-of-range index");
+    Check(reader.GetFrame(0, nullptr) == tbot::LessonMjpegMp4Status::kInvalidArgument,
+          "checked frame metadata rejects null output");
     std::uint8_t frame[8] = {};
     std::size_t frame_size = 0;
     Check(reader.ReadFrame(0, frame, sizeof(frame), &frame_size) == tbot::LessonMjpegMp4Status::kOk,
@@ -410,7 +486,7 @@ int main() {
               "adapter retains the lesson lease until close");
         std::uint8_t file_frame[8] = {};
         std::size_t file_frame_size = 0;
-        Check(file_reader.reader().ReadFrame(1, file_frame, sizeof(file_frame), &file_frame_size) ==
+        Check(file_reader.ReadFrame(1, file_frame, sizeof(file_frame), &file_frame_size) ==
                   tbot::LessonMjpegMp4Status::kOk,
               "FILE adapter streams an exact sample");
         Check(file_frame_size == sizeof(jpeg2) && std::memcmp(file_frame, jpeg2, sizeof(jpeg2)) == 0,
@@ -473,6 +549,66 @@ int main() {
     Check(read_failure.closes == 1, "read failure closes the file once");
     Check(coordinator.EndLessonSession("assignment-read", "session-read", read_session.generation),
           "read failure releases the retained lease");
+
+    InterleavingFile concurrent_file;
+    concurrent_file.bytes = valid;
+    const auto concurrent_session = coordinator.TryBeginLessonSession("assignment-concurrent", "session-concurrent");
+    Check(concurrent_session.acquired, "concurrent read fixture session acquires");
+    tbot::LessonMjpegMp4File concurrent_reader;
+    Check(concurrent_reader.OpenUnderLessonSession("fake", "assignment-concurrent", "session-concurrent",
+                                                   concurrent_session.generation, InterleavingOps(&concurrent_file)) ==
+              tbot::LessonMjpegMp4Status::kOk,
+          "concurrent read fixture opens");
+    concurrent_file.interleave = true;
+    std::uint8_t concurrent_first[8] = {};
+    std::uint8_t concurrent_second[8] = {};
+    std::size_t concurrent_first_size = 0;
+    std::size_t concurrent_second_size = 0;
+    tbot::LessonMjpegMp4Status first_status = tbot::LessonMjpegMp4Status::kIoError;
+    tbot::LessonMjpegMp4Status second_status = tbot::LessonMjpegMp4Status::kIoError;
+    std::thread first_thread([&]() {
+        first_status = concurrent_reader.ReadFrame(0, concurrent_first, sizeof(concurrent_first), &concurrent_first_size);
+    });
+    std::thread second_thread([&]() {
+        second_status = concurrent_reader.ReadFrame(1, concurrent_second, sizeof(concurrent_second),
+                                                    &concurrent_second_size);
+    });
+    first_thread.join();
+    second_thread.join();
+    Check(first_status == tbot::LessonMjpegMp4Status::kOk && concurrent_first_size == 4 &&
+              std::memcmp(concurrent_first, "\xff\xd8\xff\xd9", 4) == 0,
+          "serialized first concurrent read is exact");
+    Check(second_status == tbot::LessonMjpegMp4Status::kOk && concurrent_second_size == sizeof(jpeg2) &&
+              std::memcmp(concurrent_second, jpeg2, sizeof(jpeg2)) == 0,
+          "serialized second concurrent read is exact");
+
+    concurrent_file.interleave = false;
+    concurrent_file.block_read = true;
+    tbot::LessonMjpegMp4Status blocked_status = tbot::LessonMjpegMp4Status::kIoError;
+    std::thread blocked_reader([&]() {
+        std::uint8_t blocked_frame[8] = {};
+        std::size_t blocked_size = 0;
+        blocked_status = concurrent_reader.ReadFrame(0, blocked_frame, sizeof(blocked_frame), &blocked_size);
+    });
+    {
+        std::unique_lock<std::mutex> lock(concurrent_file.mutex);
+        concurrent_file.condition.wait(lock, [&]() { return concurrent_file.read_entered; });
+    }
+    std::thread closer([&]() { concurrent_reader.Close(); });
+    {
+        std::unique_lock<std::mutex> lock(concurrent_file.mutex);
+        Check(!concurrent_file.condition.wait_for(lock, std::chrono::milliseconds(50),
+                                                   [&]() { return concurrent_file.closes != 0; }),
+              "close waits for the active frame read");
+        concurrent_file.allow_read = true;
+        concurrent_file.condition.notify_all();
+    }
+    blocked_reader.join();
+    closer.join();
+    Check(blocked_status == tbot::LessonMjpegMp4Status::kOk, "active read completes before close");
+    Check(concurrent_file.closes == 1, "coordinated close closes once");
+    Check(coordinator.EndLessonSession("assignment-concurrent", "session-concurrent", concurrent_session.generation),
+          "coordinated close releases retained lesson lease");
 
     unlink(path.c_str());
     unlink(truncated_path.c_str());
