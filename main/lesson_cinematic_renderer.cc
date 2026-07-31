@@ -369,6 +369,11 @@ bool LessonCinematicRenderer::prepared() const {
     return state_ == State::kPrepared || state_ == State::kRunning || state_ == State::kPaused;
 }
 
+void LessonCinematicRenderer::DiscardSession() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Reset();
+}
+
 LessonCinematicResponse LessonCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
     return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};

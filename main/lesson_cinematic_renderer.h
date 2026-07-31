@@ -37,6 +37,7 @@ enum class LessonCinematicError : std::uint8_t {
     kPresentFailed,
     kStaleCommand,
     kInvalidState,
+    kSessionReleaseFailed,
 };
 
 enum class LessonCinematicResponseType : std::uint8_t {
@@ -111,6 +112,7 @@ public:
 
     bool initialized() const;
     bool prepared() const;
+    void DiscardSession();
 
 private:
     enum class State : std::uint8_t { kIdle, kPrepared, kRunning, kPaused, kFailed };

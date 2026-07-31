@@ -602,6 +602,8 @@ void test_renderer_v3_capability_is_fail_closed_until_initialized() {
 }
 
 struct V3RendererFake {
+    int allocations = 0;
+    int frees = 0;
     int opens = 0;
     int closes = 0;
     int presents = 0;
@@ -609,8 +611,15 @@ struct V3RendererFake {
     bool fail_open = false;
 };
 
-void* V3Allocate(void*, std::size_t size) { return std::malloc(size); }
-void V3Free(void*, void* pointer) { std::free(pointer); }
+void* V3Allocate(void* context, std::size_t size) {
+    void* allocation = std::malloc(size);
+    if (allocation != nullptr) ++static_cast<V3RendererFake*>(context)->allocations;
+    return allocation;
+}
+void V3Free(void* context, void* pointer) {
+    if (pointer != nullptr) ++static_cast<V3RendererFake*>(context)->frees;
+    std::free(pointer);
+}
 bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata* metadata,
             void** handle) {
     auto* fake = static_cast<V3RendererFake*>(context);
@@ -724,6 +733,117 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
             "malformed v4 command returns the typed metadata error");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
     tbot::SetLessonFlattenedCinematicRendererCapabilityReady(false);
+}
+
+void test_renderer_v4_numeric_narrowing_rejects_before_renderer_work() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+
+    const std::vector<std::pair<std::string, std::string>> invalid_numbers = {
+        {"\"durationMs\":300", "\"durationMs\":4294967596"},
+        {"\"durationMs\":300", "\"durationMs\":300.5"},
+        {"\"frameCount\":3", "\"frameCount\":4294967299"},
+        {"\"bytes\":1234", "\"bytes\":9007199254740992"},
+        {"\"commandSequenceId\":71", "\"commandSequenceId\":9007199254740992"},
+    };
+    int sequence = 1;
+    for (const auto& replacement : invalid_numbers) {
+        Handle(ReplaceOnce(V4PrepareFrame(sequence++), replacement.first, replacement.second));
+        require(FrameType(Sent().size() - 1) == "lesson_error",
+                "unsafe v4 numeric narrowing is rejected with a typed error");
+        require(fake.allocations == 0 && fake.opens == 0 && fake.presents == 0,
+                "unsafe v4 numeric narrowing is rejected before renderer work");
+    }
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "unsafe v4 numeric narrowing does not acquire an asset lease");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_cinematic_cross_renderer_handoff_releases_old_resources() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake v3_fake;
+    V3RendererFake v4_fake;
+    tbot::LessonCinematicRenderer v3_renderer(
+        {&v3_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::LessonFlattenedCinematicRenderer v4_renderer(
+        {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&v4_renderer);
+
+    Handle(V3PrepareFrame(1));
+    Handle(V4PrepareFrame(2));
+    require(FrameType(1) == "lesson_ack" && !v3_renderer.prepared() && v4_renderer.prepared(),
+            "v3 to v4 handoff commits only the new renderer");
+    require(v3_fake.opens == v3_fake.closes && v3_fake.allocations == v3_fake.frees,
+            "v3 to v4 handoff releases every old file and allocation");
+    Handle(V4Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":72,"
+        "\"reason\":\"testCleanup\"}"));
+    require(FrameType(2) == "lesson_ack" && v4_fake.opens == v4_fake.closes &&
+                v4_fake.allocations == v4_fake.frees,
+            "v4 cancel releases every handoff target file and allocation");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "v4 cancel releases the handoff asset lease");
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "next storage operation is allowed after v3 to v4");
+    }
+
+    ResetObservable();
+    FreshSession();
+    Handle(V4PrepareFrame(1, 81));
+    Handle(V3PrepareFrame(2, 82));
+    require(FrameType(1) == "lesson_ack" && !v4_renderer.prepared() && v3_renderer.prepared(),
+            "v4 to v3 handoff commits only the new renderer");
+    require(v4_fake.opens == v4_fake.closes && v4_fake.allocations == v4_fake.frees,
+            "v4 to v3 handoff releases every old file and allocation");
+    Handle(V3Frame("lesson_stop", 3,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":83}}"));
+    require(FrameType(2) == "lesson_ack" && v3_fake.opens == v3_fake.closes &&
+                v3_fake.allocations == v3_fake.frees,
+            "v3 stop releases every handoff target file and allocation");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "v3 stop releases the handoff asset lease");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_cinematic_terminal_waits_for_asset_lease_release() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    Handle(V4PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent, "v4 terminal test owns its asset session");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryRetainLessonSession(
+        AID(), SID(), owner.generation);
+    require(static_cast<bool>(retained), "v4 terminal test holds a blocking read lease");
+
+    const std::string cancel = V4Frame("lesson_cinematic_control", 2,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":72,"
+        "\"reason\":\"testCleanup\"}");
+    Handle(cancel);
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_SESSION_RELEASE_FAILED",
+            "terminal cleanup reports a typed failure while a read lease remains");
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "failed terminal cleanup preserves the asset session for retry");
+
+    retained = {};
+    Handle(cancel);
+    require(FrameType(2) == "lesson_ack" &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "duplicate terminal command completes after the blocking lease releases");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
 }
 
 void test_renderer_v4_fresh_prepare_resets_session_sequence_stream() {
@@ -5556,9 +5676,12 @@ int main() {
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v3_capability_is_fail_closed_until_initialized();
     test_renderer_v4_capability_and_exact_single_asset_routing();
+    test_renderer_v4_numeric_narrowing_rejects_before_renderer_work();
     test_renderer_v4_fresh_prepare_resets_session_sequence_stream();
     test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
     test_cinematic_controls_cannot_cross_renderer_session_identity();
+    test_cinematic_cross_renderer_handoff_releases_old_resources();
+    test_cinematic_terminal_waits_for_asset_lease_release();
     test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
     test_renderer_v3_controls_reject_v4_only_fields();
     test_renderer_v3_rejections_use_task7_consumed_lesson_error();

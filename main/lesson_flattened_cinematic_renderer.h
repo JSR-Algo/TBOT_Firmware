@@ -60,6 +60,7 @@ public:
 
     bool initialized() const;
     bool prepared() const;
+    void DiscardSession();
 
 private:
     enum class State : std::uint8_t { kIdle, kPrepared, kRunning, kPaused, kFailed };

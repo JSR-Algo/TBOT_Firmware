@@ -146,6 +146,11 @@ bool LessonFlattenedCinematicRenderer::prepared() const {
     return state_ == State::kPrepared || state_ == State::kRunning || state_ == State::kPaused;
 }
 
+void LessonFlattenedCinematicRenderer::DiscardSession() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Reset();
+}
+
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
     return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};
