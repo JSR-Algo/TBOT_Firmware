@@ -1,4 +1,5 @@
 #include "lesson_cinematic_renderer.h"
+#include "lesson_flattened_cinematic_renderer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -287,8 +288,11 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
         ProductionMonotonicMs});
     const esp_timer_create_args_t timer_args = {
         .callback = [](void*) {
-            const auto response = TickActiveLessonCinematicRenderer(
-                static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
+            const std::uint64_t now_ms =
+                static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+            const auto response = LessonCinematicTimerRoutesV4()
+                ? TickActiveLessonFlattenedCinematicRenderer(now_ms)
+                : TickActiveLessonCinematicRenderer(now_ms);
             // Task 7 defines only command-correlated ACKs. Phase completion is internal:
             // the renderer returns to prepared while the server remains the lifecycle owner.
             if (response.type == LessonCinematicResponseType::kPhaseComplete) {
@@ -311,6 +315,7 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
         return false;
     }
     SetActiveLessonCinematicRenderer(g_production_renderer.get());
+    InitializeProductionLessonFlattenedCinematicRenderer(display);
     return LessonCinematicRendererCapabilityReady();
 #else
     (void)display;
@@ -342,6 +347,7 @@ void ShutdownProductionLessonCinematicRenderer() {
         esp_timer_delete(g_production_context->frame_timer);
         g_production_context->frame_timer = nullptr;
     }
+    ShutdownProductionLessonFlattenedCinematicRenderer();
     g_production_renderer.reset();
     g_production_context.reset();
 #endif

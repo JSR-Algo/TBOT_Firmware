@@ -48,6 +48,7 @@ set(SOURCES "audio/audio_codec.cc"
             "lesson_mjpeg_mp4.cc"
             "lesson_chroma_compositor.cc"
             "lesson_cinematic_renderer.cc"
+            "lesson_flattened_cinematic_renderer.cc"
             "main.cc"
             )
 

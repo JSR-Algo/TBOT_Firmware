@@ -24,6 +24,7 @@
 #include "esp_timer.h"
 #include "lesson_handler.h"
 #include "lesson_cinematic_renderer.h"
+#include "lesson_flattened_cinematic_renderer.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
 #include "system_info.h"
@@ -309,6 +310,28 @@ std::string V3PrepareFrame(int seq, std::uint64_t command_sequence_id = 41) {
     );
 }
 
+std::string V4Frame(const char* type, int seq, const std::string& body) {
+    return std::string("{\"type\":\"") + type +
+           "\",\"protocolVersion\":\"teebot-lesson-renderer.v4\",\"assignmentId\":\"" +
+           AID() + "\",\"sessionId\":\"" + SID() + "\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":" + body + "}";
+}
+
+std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
+                           const std::string& asset_extra = "") {
+    return V4Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"flattenedMjpegCinematic\",\"templateVersion\":1,"
+        "\"phaseId\":\"opening\",\"durationMs\":300,\"fps\":10,\"frameCount\":3,"
+        "\"asset\":{\"derivativeId\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\","
+        "\"phaseId\":\"opening\",\"sdPath\":\"sd://tbot/lesson-assets/flattenedCinematic.opening\","
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"bytes\":1234,\"mediaType\":\"video/mp4\",\"width\":480,\"height\":320" +
+        asset_extra + "}}}" );
+}
+
 const char* ValidV2OpeningEntrance() {
     return "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
            "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
@@ -582,7 +605,8 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
             void** handle) {
     auto* fake = static_cast<V3RendererFake*>(context);
     fake->opened_paths.emplace_back(path);
-    const bool background = std::string(path).find("background") != std::string::npos;
+    const bool background = std::string(path).find("background") != std::string::npos ||
+        std::string(path).find("flattenedCinematic") != std::string::npos;
     *metadata = {static_cast<std::uint16_t>(background ? 480 : 2),
                  static_cast<std::uint16_t>(background ? 320 : 2), 10, 3, 300, 64};
     *handle = reinterpret_cast<void*>(static_cast<std::uintptr_t>(++fake->opens));
@@ -602,6 +626,52 @@ bool V3Present(void* context, const std::uint16_t*, std::uint16_t, std::uint16_t
                std::size_t) {
     ++static_cast<V3RendererFake*>(context)->presents;
     return true;
+}
+
+void test_renderer_v4_capability_and_exact_single_asset_routing() {
+    tbot::SetLessonCinematicRendererCapabilityReady(false);
+    tbot::SetLessonFlattenedCinematicRendererCapabilityReady(true);
+    cJSON* features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    char* encoded = cJSON_PrintUnformatted(features);
+    require(encoded != nullptr && std::string(encoded) ==
+                "{\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
+                "\"teebot-lesson-renderer.v4\"],\"lessonRendererV2\":{"
+                "\"openingEntrance\":true,\"visualStateEvents\":true,"
+                "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
+                "\"lessonRendererV4\":{\"flattenedMjpegCinematic\":true,\"sdAssetPack\":true}}",
+            "hello advertises exact v4 feature only when v4 production capability is ready");
+    cJSON_free(encoded);
+    cJSON_Delete(features);
+
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    Handle(V4PrepareFrame(1));
+    require(fake.opened_paths == std::vector<std::string>({
+                "/sdcard/tbot/lesson-assets/flattenedCinematic.opening"}),
+            "v4 routes one normalized SD asset to the flattened renderer");
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady",
+            "v4 prepare returns the exact typed frame-zero ACK");
+    Handle(V4Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":72,\"extra\":true}}"));
+    require(FrameType(1) == "lesson_error" && fake.presents == 1,
+            "v4 rejects extra control keys before changing renderer state");
+
+    ResetObservable();
+    FreshSession();
+    Handle(V4PrepareFrame(1, 72, ",\"extra\":true"));
+    require(FrameType(0) == "lesson_error" && fake.opens == 1,
+            "v4 rejects extra asset keys before file open");
+    require(FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH",
+            "malformed v4 command returns the typed metadata error");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+    tbot::SetLessonFlattenedCinematicRendererCapabilityReady(false);
 }
 
 void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
@@ -5297,6 +5367,7 @@ int main() {
     test_prepare_basic();
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v3_capability_is_fail_closed_until_initialized();
+    test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
     test_renderer_v3_rejections_use_task7_consumed_lesson_error();
     test_renderer_v3_duplicate_sequence_requires_exact_original_command();
