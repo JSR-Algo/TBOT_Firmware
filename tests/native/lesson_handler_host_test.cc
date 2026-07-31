@@ -332,6 +332,15 @@ std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
         asset_extra + "}}}" );
 }
 
+std::string WithSession(std::string frame, const std::string& session_id) {
+    const std::string current = std::string("\"sessionId\":\"") + SID() + "\"";
+    const std::string replacement = std::string("\"sessionId\":\"") + session_id + "\"";
+    const auto position = frame.find(current);
+    require(position != std::string::npos, "fixture contains current session identity");
+    frame.replace(position, current.size(), replacement);
+    return frame;
+}
+
 const char* ValidV2OpeningEntrance() {
     return "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
            "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
@@ -597,6 +606,7 @@ struct V3RendererFake {
     int closes = 0;
     int presents = 0;
     std::vector<std::string> opened_paths;
+    bool fail_open = false;
 };
 
 void* V3Allocate(void*, std::size_t size) { return std::malloc(size); }
@@ -604,6 +614,7 @@ void V3Free(void*, void* pointer) { std::free(pointer); }
 bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata* metadata,
             void** handle) {
     auto* fake = static_cast<V3RendererFake*>(context);
+    if (fake->fail_open) return false;
     fake->opened_paths.emplace_back(path);
     const bool background = std::string(path).find("background") != std::string::npos ||
         std::string(path).find("flattenedCinematic") != std::string::npos;
@@ -657,11 +668,52 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
     require(FrameType(0) == "lesson_ack" &&
                 FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady",
             "v4 prepare returns the exact typed frame-zero ACK");
+    Handle(WithSession(V4Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":72}}"), "foreign-session"));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_SESSION_MISMATCH" &&
+                fake.presents == 1,
+            "foreign v4 start is rejected before touching renderer state");
     Handle(V4Frame("lesson_start", 2,
         "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
         "\"commandSequenceId\":72,\"extra\":true}}"));
-    require(FrameType(1) == "lesson_error" && fake.presents == 1,
+    require(FrameType(2) == "lesson_error" && fake.presents == 1,
             "v4 rejects extra control keys before changing renderer state");
+    Handle(V4Frame("lesson_start", 3,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":72}}"));
+    require(FrameType(3) == "lesson_ack" &&
+                FrameBodyStr(3, "cinematicPhase", "event") == "phaseReady",
+            "valid owner v4 start still applies after foreign and malformed controls");
+    Handle(V4Frame("lesson_cinematic_control", 4,
+        "{\"command\":\"pause\",\"phaseId\":\"opening\",\"commandSequenceId\":73}"));
+    require(FrameType(4) == "lesson_ack", "valid v4 pause applies");
+    Handle(V4Frame("lesson_cinematic_control", 5,
+        "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":74,"
+        "\"clockRebaseSequenceId\":\"74\"}"));
+    require(FrameType(5) == "lesson_error", "string resume rebase identity is rejected");
+    Handle(V4Frame("lesson_cinematic_control", 6,
+        "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":74,"
+        "\"clockRebaseSequenceId\":999}"));
+    require(FrameType(6) == "lesson_error", "mismatched resume rebase identity is rejected");
+    Handle(V4Frame("lesson_cinematic_control", 7,
+        "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":74,"
+        "\"clockRebaseSequenceId\":74}"));
+    require(FrameType(7) == "lesson_ack", "matching positive resume rebase identity applies");
+    Handle(V4Frame("lesson_cinematic_control", 8,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":75,"
+        "\"reason\":\"\"}"));
+    require(FrameType(8) == "lesson_error", "empty cancel reason is rejected");
+    Handle(V4Frame("lesson_cinematic_control", 9,
+        std::string("{\"command\":\"cancel\",\"phaseId\":\"opening\","
+                    "\"commandSequenceId\":75,\"reason\":\"") +
+        std::string(65, 'x') + "\"}"));
+    require(FrameType(9) == "lesson_error", "cancel reason longer than 64 bytes is rejected");
+    Handle(V4Frame("lesson_cinematic_control", 10,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":75,"
+        "\"reason\":\"assignmentReplaced\"}"));
+    require(FrameType(10) == "lesson_ack", "bounded nonempty cancel reason applies");
 
     ResetObservable();
     FreshSession();
@@ -672,6 +724,98 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
             "malformed v4 command returns the typed metadata error");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
     tbot::SetLessonFlattenedCinematicRendererCapabilityReady(false);
+}
+
+void test_renderer_v4_fresh_prepare_resets_session_sequence_stream() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake v3_fake;
+    V3RendererFake v4_fake;
+    tbot::LessonCinematicRenderer v3_renderer(
+        {&v3_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::LessonFlattenedCinematicRenderer v4_renderer(
+        {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&v4_renderer);
+    Handle(V3PrepareFrame(9, 61));
+    Handle(V3Frame("lesson_start", 10,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":62}}"));
+    require(FrameSeq(0) == 1 && FrameSeq(1) == 2,
+            "previous cinematic session owns a nonzero firmware sequence stream");
+
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    FreshSession();
+    Handle(V4PrepareFrame(1, 71));
+    require(FrameType(2) == "lesson_ack" && FrameSeq(2) == 1,
+            "fresh v4 prepare resets F-to-S sequence before frame-zero ACK");
+    Handle(V4Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":72}}"));
+    require(FrameType(3) == "lesson_ack" && FrameSeq(3) == 2,
+            "fresh v4 session continues its own sequence stream");
+    Handle(V4Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":73,"
+        "\"reason\":\"testCleanup\"}"));
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_renderer_v4_failed_same_session_reprepare_keeps_session_playable() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    Handle(V4PrepareFrame(1, 80));
+    require(FrameType(0) == "lesson_ack" && renderer.prepared(),
+            "baseline v4 session is prepared");
+    fake.fail_open = true;
+    Handle(V4PrepareFrame(2, 81));
+    require(FrameType(1) == "lesson_error" && renderer.prepared(),
+            "failed idempotent reprepare preserves prepared renderer and handler lease");
+    fake.fail_open = false;
+    Handle(V4Frame("lesson_start", 3,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":82}}"));
+    require(FrameType(2) == "lesson_ack" &&
+                FrameBodyStr(2, "cinematicPhase", "event") == "phaseReady",
+            "old stream remains playable after same-session reprepare failure");
+    Handle(V4Frame("lesson_cinematic_control", 4,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":83,"
+        "\"reason\":\"testCleanup\"}"));
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_cinematic_controls_cannot_cross_renderer_session_identity() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake v3_fake;
+    V3RendererFake v4_fake;
+    tbot::LessonCinematicRenderer v3_renderer(
+        {&v3_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::LessonFlattenedCinematicRenderer v4_renderer(
+        {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&v4_renderer);
+    Handle(V4PrepareFrame(1, 90));
+    Handle(V3Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":91}}"));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_SESSION_MISMATCH",
+            "v3 control cannot operate a v4-prepared session with the same IDs");
+    Handle(V4Frame("lesson_start", 3,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":91}}"));
+    require(FrameType(2) == "lesson_ack",
+            "correct renderer control remains usable after cross-renderer rejection");
+    Handle(V4Frame("lesson_cinematic_control", 4,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":92,"
+        "\"reason\":\"testCleanup\"}"));
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
 }
 
 void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
@@ -703,6 +847,14 @@ void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
     Handle(V3PrepareFrame(2));
     require(fake.presents == presents, "duplicate prepare command ID replays ACK without work");
 
+    Handle(WithSession(V3Frame("lesson_start", 3,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":42}}"), "foreign-session"));
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "code") ==
+                    "CINEMATIC_SESSION_MISMATCH",
+            "foreign v3 start is rejected without advancing renderer state");
+
     Handle(V3Frame("lesson_start", 3,
         "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\",\"commandSequenceId\":42}}"));
     ack = cJSON_Parse(Sent().back().c_str());
@@ -715,10 +867,13 @@ void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
 
     for (const char* command : {"pause", "resume", "cancel"}) {
         const int command_id = command[0] == 'p' ? 43 : command[0] == 'r' ? 44 : 45;
+        const std::string command_metadata = command[0] == 'r'
+            ? ",\"clockRebaseSequenceId\":" + std::to_string(command_id)
+            : command[0] == 'c' ? ",\"reason\":\"testCleanup\"" : "";
         Handle(V3Frame("lesson_cinematic_control", command_id,
             std::string("{\"command\":\"") + command +
             "\",\"phaseId\":\"opening\",\"commandSequenceId\":" +
-            std::to_string(command_id) + "}"));
+            std::to_string(command_id) + command_metadata + "}"));
         ack = cJSON_Parse(Sent().back().c_str());
         cinematic = cJSON_GetObjectItem(cJSON_GetObjectItem(ack, "body"), "cinematicPhase");
         require(cJSON_GetArraySize(cinematic) == 5 &&
@@ -766,16 +921,16 @@ void test_renderer_v3_rejections_use_task7_consumed_lesson_error() {
         "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
         "\"commandSequenceId\":42}}"));
     require(FrameType(0) == "lesson_error" &&
-                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
-            "rejected cinematic start uses a Task-7-consumed lesson_error");
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_SESSION_MISMATCH",
+            "unprepared cinematic start reports the scoped session error");
 
     ResetObservable();
     FreshSession();
     Handle(V3Frame("lesson_cinematic_control", 1,
         "{\"command\":\"pause\",\"phaseId\":\"opening\",\"commandSequenceId\":43}"));
     require(FrameType(0) == "lesson_error" &&
-                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
-            "rejected cinematic control uses a Task-7-consumed lesson_error");
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_SESSION_MISMATCH",
+            "unprepared cinematic control reports the scoped session error");
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
@@ -5368,6 +5523,9 @@ int main() {
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v3_capability_is_fail_closed_until_initialized();
     test_renderer_v4_capability_and_exact_single_asset_routing();
+    test_renderer_v4_fresh_prepare_resets_session_sequence_stream();
+    test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
+    test_cinematic_controls_cannot_cross_renderer_session_identity();
     test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
     test_renderer_v3_rejections_use_task7_consumed_lesson_error();
     test_renderer_v3_duplicate_sequence_requires_exact_original_command();

@@ -70,6 +70,8 @@ private:
     LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* phase_id,
                                             const char* command) const;
     LessonCinematicError RenderFrame(std::size_t frame_index);
+    LessonCinematicError RenderFrameOn(void* stream, std::uint16_t* framebuffer,
+                                       std::size_t frame_index);
     LessonCinematicError OperationError(LessonCinematicError fallback) const;
     void CloseStream();
     void ReleaseBuffer();

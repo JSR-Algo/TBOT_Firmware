@@ -563,6 +563,7 @@ struct LessonSession {
     bool        motion_presets_enabled = false;
     bool        tvideo_entrance_consumed = false;
     bool        renderer_v2 = false;
+    std::string cinematic_renderer_id;
     bool        opening_entrance_consumed = false;
     bool        entrance_active = false;
     std::uint64_t visual_generation = 0;
@@ -1737,6 +1738,18 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     ? kCancelKeys : kBasicControlKeys;
             v4_command_shape_ok = ExactObjectKeys(command_body, expected);
         }
+        bool control_values_ok = true;
+        if (!prepare_frame && command != nullptr && strcmp(command, "resume") == 0) {
+            double rebase_sequence = 0;
+            control_values_ok = Num(command_body, "clockRebaseSequenceId", rebase_sequence) &&
+                std::isfinite(rebase_sequence) && rebase_sequence > 0 &&
+                rebase_sequence <= 9007199254740991.0 &&
+                std::trunc(rebase_sequence) == rebase_sequence &&
+                rebase_sequence == command_sequence_number;
+        } else if (!prepare_frame && command != nullptr && strcmp(command, "cancel") == 0) {
+            const char* reason = Str(command_body, "reason");
+            control_values_ok = reason != nullptr && !Blank(reason) && std::strlen(reason) <= 64;
+        }
         const std::uint64_t command_sequence_id = command_sequence_ok
             ? static_cast<std::uint64_t>(command_sequence_number) : 0;
 
@@ -1795,13 +1808,23 @@ void Application::HandleLessonMessage(const cJSON* root) {
             emit(root, "lesson_ack", ack_body);
         };
 
+        if (!prepare_frame &&
+            (!g_session.prepared || g_session.lesson_asset_generation == 0 ||
+             g_session.assignment_id != assignment_id || g_session.session_id != session_id ||
+             g_session.cinematic_renderer_id != protocol_version)) {
+            emit_isolated_prepare_error(root, MakeErrorBody(
+                "CINEMATIC_SESSION_MISMATCH", "cinematic command session is not active",
+                false, "cinematicPhase"));
+            return;
+        }
+
         tbot::LessonCinematicRenderer* renderer_v3 = cinematic_v3
             ? tbot::ActiveLessonCinematicRenderer() : nullptr;
         tbot::LessonFlattenedCinematicRenderer* renderer_v4 = cinematic_v4
             ? tbot::ActiveLessonFlattenedCinematicRenderer() : nullptr;
         const bool renderer_available = renderer_v3 != nullptr || renderer_v4 != nullptr;
         if (!command_matches_frame || !known_phase || !command_sequence_ok ||
-            !v4_command_shape_ok || !renderer_available) {
+            !v4_command_shape_ok || !control_values_ok || !renderer_available) {
             emit_cinematic_ack({tbot::LessonCinematicResponseType::kFailure, false,
                                 command_sequence_id, phase_id != nullptr ? phase_id : "",
                                 !renderer_available
@@ -1811,6 +1834,26 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
 
         const std::uint64_t now_ms = static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+        auto commit_cinematic_prepare_session = [&](std::uint64_t generation) {
+            const bool fresh_session = !g_session.prepared ||
+                g_session.assignment_id != assignment_id || g_session.session_id != session_id;
+            if (fresh_session) {
+                InvalidateLessonVisualCompletionState(frame_transport_epoch);
+                Application::GetInstance().CancelLessonInteractiveListening();
+                Application::GetInstance().SetLessonRuntimeActive(false);
+                g_layer_state.ClearAll();
+                g_session = LessonSession{};
+                g_session.assignment_id = assignment_id;
+                g_session.session_id = session_id;
+                g_session.current_transport_epoch = frame_transport_epoch;
+            }
+            g_session.lesson_asset_generation = generation;
+            g_session.last_in_sequence = sequence;
+            g_session.cinematic_renderer_id = protocol_version;
+            g_session.prepared = true;
+            g_session.running = false;
+            g_session.paused = false;
+        };
         tbot::LessonCinematicResponse response;
         if (prepare_frame) {
             if (cinematic_v4) {
@@ -1868,10 +1911,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         response = renderer_v4->Prepare(config, now_ms);
                         if (response.accepted) {
                             tbot::SetLessonCinematicTimerRouteV4(true);
-                            g_session.assignment_id = assignment_id;
-                            g_session.session_id = session_id;
-                            g_session.lesson_asset_generation = reservation.generation;
-                            g_session.prepared = true;
+                            commit_cinematic_prepare_session(reservation.generation);
                         } else if (!reservation.idempotent) {
                             LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                                 assignment_id, session_id, reservation.generation);
@@ -1948,10 +1988,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     response = renderer_v3->Prepare(config, now_ms);
                     if (response.accepted) {
                         tbot::SetLessonCinematicTimerRouteV4(false);
-                        g_session.assignment_id = assignment_id;
-                        g_session.session_id = session_id;
-                        g_session.lesson_asset_generation = reservation.generation;
-                        g_session.prepared = true;
+                        commit_cinematic_prepare_session(reservation.generation);
                     } else if (!reservation.idempotent) {
                         LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                             assignment_id, session_id, reservation.generation);

@@ -27,6 +27,7 @@ struct FakeRuntime {
     bool fail_open = false;
     bool fail_decode = false;
     bool fail_present = false;
+    bool metadata_mismatch = false;
     tbot::LessonCinematicError operation_error = tbot::LessonCinematicError::kNone;
     std::vector<std::size_t> decoded_indices;
 };
@@ -48,7 +49,8 @@ bool Open(void* raw, const char* path, tbot::LessonCinematicStreamMetadata* meta
     auto& fake = *static_cast<FakeRuntime*>(raw);
     if (fake.fail_open || path == nullptr || std::strstr(path, "missing") != nullptr) return false;
     ++fake.opens;
-    *metadata = {480, 320, 10, 3, 300, 64};
+    *metadata = {480, 320, 10, static_cast<std::uint32_t>(fake.metadata_mismatch ? 2 : 3),
+                 300, 64};
     *handle = reinterpret_cast<void*>(fake.opens);
     return true;
 }
@@ -218,12 +220,51 @@ void TestRepeatedPreparePlayCancelIsLeakFree() {
             "repeated phase cycles leak neither files nor buffers");
 }
 
+void TestFailedRepreparePreservesPreparedStreamTransactionally() {
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "baseline stream prepares");
+    Require(fake.opens == 1 && fake.closes == 0, "baseline stream remains open");
+
+    auto retry = Config();
+    retry.command_sequence_id = 50;
+    fake.enough_memory = false;
+    Require(renderer.Prepare(retry, 0).error == tbot::LessonCinematicError::kInsufficientPsram &&
+                renderer.prepared() && fake.opens == 1 && fake.closes == 0,
+            "allocation failure preserves the old prepared stream");
+    fake.enough_memory = true;
+
+    retry.command_sequence_id = 51;
+    fake.fail_open = true;
+    Require(renderer.Prepare(retry, 0).error == tbot::LessonCinematicError::kFileOpen &&
+                renderer.prepared() && fake.opens == 1 && fake.closes == 0,
+            "open failure preserves the old prepared stream");
+    fake.fail_open = false;
+
+    retry.command_sequence_id = 52;
+    fake.metadata_mismatch = true;
+    Require(renderer.Prepare(retry, 0).error == tbot::LessonCinematicError::kMetadataMismatch &&
+                renderer.prepared() && fake.opens == 2 && fake.closes == 1,
+            "metadata failure closes only the staged stream");
+    fake.metadata_mismatch = false;
+
+    Require(renderer.Start(53, "opening", 0).accepted,
+            "old prepared stream remains playable after failed reparations");
+    fake.now_ms = 100;
+    Require(renderer.Tick(fake.now_ms).accepted && fake.last_frame == 1,
+            "old stream continues decoding after failed reparations");
+    Require(renderer.Cancel(54, "opening").accepted && fake.opens == fake.closes &&
+                fake.allocation_sizes.size() == fake.frees,
+            "transactional reprepare failures leak no staged or active resources");
+}
+
 }  // namespace
 
 int main() {
     TestExactContractAllocationTimingAndLifecycle();
     TestValidationErrorsIdempotencyAndCleanup();
     TestRepeatedPreparePlayCancelIsLeakFree();
+    TestFailedRepreparePreservesPreparedStreamTransactionally();
     std::cout << "lesson_flattened_cinematic_renderer tests passed\n";
     return 0;
 }

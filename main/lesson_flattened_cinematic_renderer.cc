@@ -181,33 +181,41 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
 
-    Reset();
-    phase_id_ = config.phase_id;
     constexpr std::size_t kFramebufferBytes =
         static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
-    framebuffer_ = static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kFramebufferBytes));
-    if (framebuffer_ == nullptr) {
+    std::uint16_t* candidate_framebuffer =
+        static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kFramebufferBytes));
+    if (candidate_framebuffer == nullptr) {
         return Failure(config.command_sequence_id, LessonCinematicError::kInsufficientPsram);
     }
-    if (!ops_.open(ops_.context, config.asset.sd_path, &metadata_, &stream_)) {
-        ReleaseBuffer();
+    void* candidate_stream = nullptr;
+    LessonCinematicStreamMetadata candidate_metadata{};
+    if (!ops_.open(ops_.context, config.asset.sd_path, &candidate_metadata,
+                   &candidate_stream)) {
+        ops_.free(ops_.context, candidate_framebuffer);
         return Failure(config.command_sequence_id, OperationError(LessonCinematicError::kFileOpen));
     }
-    const bool metadata_ok = metadata_.width == config.asset.width &&
-        metadata_.height == config.asset.height && metadata_.fps == config.fps &&
-        metadata_.frame_count == config.frame_count && metadata_.duration_ms == config.duration_ms;
+    const bool metadata_ok = candidate_metadata.width == config.asset.width &&
+        candidate_metadata.height == config.asset.height && candidate_metadata.fps == config.fps &&
+        candidate_metadata.frame_count == config.frame_count &&
+        candidate_metadata.duration_ms == config.duration_ms;
     if (!metadata_ok) {
-        CloseStream();
-        ReleaseBuffer();
+        ops_.close(ops_.context, candidate_stream);
+        ops_.free(ops_.context, candidate_framebuffer);
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
-    const auto frame_zero_error = RenderFrame(0);
+    const auto frame_zero_error = RenderFrameOn(candidate_stream, candidate_framebuffer, 0);
     if (frame_zero_error != LessonCinematicError::kNone) {
-        CloseStream();
-        ReleaseBuffer();
-        state_ = State::kFailed;
+        ops_.close(ops_.context, candidate_stream);
+        ops_.free(ops_.context, candidate_framebuffer);
         return Failure(config.command_sequence_id, frame_zero_error);
     }
+    CloseStream();
+    ReleaseBuffer();
+    stream_ = candidate_stream;
+    metadata_ = candidate_metadata;
+    framebuffer_ = candidate_framebuffer;
+    phase_id_ = config.phase_id;
     state_ = State::kPrepared;
     displayed_frame_ = 0;
     last_sequence_ = config.command_sequence_id;
@@ -344,6 +352,11 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Tick(std::uint64_t now
 }
 
 LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrame(std::size_t frame_index) {
+    return RenderFrameOn(stream_, framebuffer_, frame_index);
+}
+
+LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrameOn(
+    void* stream, std::uint16_t* framebuffer, std::size_t frame_index) {
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     std::size_t stride = 0;
@@ -352,8 +365,8 @@ LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrame(std::size_t f
     constexpr std::uint64_t kReadDecodeDeadlineMs = 100;
     const std::uint64_t started = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : 0;
-    if (!ops_.decode(ops_.context, stream_, frame_index,
-                     reinterpret_cast<std::uint8_t*>(framebuffer_), kFramebufferBytes,
+    if (!ops_.decode(ops_.context, stream, frame_index,
+                     reinterpret_cast<std::uint8_t*>(framebuffer), kFramebufferBytes,
                      &width, &height, &stride)) {
         return OperationError(LessonCinematicError::kDecodeFailed);
     }
@@ -367,7 +380,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrame(std::size_t f
         stride != static_cast<std::size_t>(width) * 2) {
         return LessonCinematicError::kDecodeFailed;
     }
-    return ops_.present(ops_.context, framebuffer_, width, height, frame_index)
+    return ops_.present(ops_.context, framebuffer, width, height, frame_index)
         ? LessonCinematicError::kNone : LessonCinematicError::kPresentFailed;
 }
 
@@ -400,7 +413,7 @@ struct ProductionFlattenedRendererContext {
     std::string assignment_id;
     std::string session_id;
     std::uint64_t generation = 0;
-    LessonMjpegMp4File file;
+    std::array<LessonMjpegMp4File, 2> files;
     jpeg_reusable_decoder_t decoder{};
     std::uint8_t* jpeg_input = nullptr;
     std::size_t jpeg_input_capacity = kLessonMjpegMp4MaxSampleBytes;
@@ -409,6 +422,16 @@ struct ProductionFlattenedRendererContext {
 
 std::unique_ptr<ProductionFlattenedRendererContext> g_production_context;
 std::unique_ptr<LessonFlattenedCinematicRenderer> g_production_renderer;
+
+void ReleaseProductionDecodeWorkspaceIfIdle(ProductionFlattenedRendererContext* context) {
+    if (context == nullptr) return;
+    for (const auto& file : context->files) {
+        if (file.is_open()) return;
+    }
+    jpeg_reusable_decoder_destroy(&context->decoder);
+    if (context->jpeg_input != nullptr) heap_caps_free(context->jpeg_input);
+    context->jpeg_input = nullptr;
+}
 
 void* ProductionAllocate(void*, std::size_t size) {
     return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -423,38 +446,47 @@ bool ProductionOpen(void* raw, const char* path, LessonCinematicStreamMetadata* 
         return false;
     }
     context->last_error = LessonCinematicError::kNone;
-    context->jpeg_input = static_cast<std::uint8_t*>(heap_caps_malloc(
-        context->jpeg_input_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-    if (context->jpeg_input == nullptr ||
-        jpeg_reusable_decoder_prepare_workspace(
-            &context->decoder, kLessonCinematicWidth, kLessonCinematicHeight,
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != ESP_OK) {
-        if (context->jpeg_input != nullptr) heap_caps_free(context->jpeg_input);
-        context->jpeg_input = nullptr;
-        jpeg_reusable_decoder_destroy(&context->decoder);
-        context->last_error = LessonCinematicError::kInsufficientPsram;
+    if (context->jpeg_input == nullptr) {
+        context->jpeg_input = static_cast<std::uint8_t*>(heap_caps_malloc(
+            context->jpeg_input_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (context->jpeg_input == nullptr ||
+            jpeg_reusable_decoder_prepare_workspace(
+                &context->decoder, kLessonCinematicWidth, kLessonCinematicHeight,
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != ESP_OK) {
+            if (context->jpeg_input != nullptr) heap_caps_free(context->jpeg_input);
+            context->jpeg_input = nullptr;
+            jpeg_reusable_decoder_destroy(&context->decoder);
+            context->last_error = LessonCinematicError::kInsufficientPsram;
+            return false;
+        }
+    }
+    LessonMjpegMp4File* file = nullptr;
+    for (auto& candidate : context->files) {
+        if (!candidate.is_open()) {
+            file = &candidate;
+            break;
+        }
+    }
+    if (file == nullptr) {
+        context->last_error = LessonCinematicError::kFileOpen;
         return false;
     }
-    const LessonMjpegMp4Status open_status = context->file.OpenUnderLessonSession(
+    const LessonMjpegMp4Status open_status = file->OpenUnderLessonSession(
         path, context->assignment_id, context->session_id, context->generation);
     if (open_status != LessonMjpegMp4Status::kOk) {
-        jpeg_reusable_decoder_destroy(&context->decoder);
-        heap_caps_free(context->jpeg_input);
-        context->jpeg_input = nullptr;
         context->last_error = open_status == LessonMjpegMp4Status::kLeaseUnavailable
             ? LessonCinematicError::kSessionMismatch
             : open_status == LessonMjpegMp4Status::kIoError
                 ? LessonCinematicError::kFileOpen : LessonCinematicError::kParserFailed;
+        ReleaseProductionDecodeWorkspaceIfIdle(context);
         return false;
     }
-    const LessonMjpegMp4Metadata parsed = context->file.metadata();
+    const LessonMjpegMp4Metadata parsed = file->metadata();
     if (parsed.timescale == 0 || parsed.fps_milli % 1000 != 0 ||
         parsed.duration_ticks > UINT64_MAX / 1000 || parsed.frame_count > UINT32_MAX) {
-        context->file.Close();
-        jpeg_reusable_decoder_destroy(&context->decoder);
-        heap_caps_free(context->jpeg_input);
-        context->jpeg_input = nullptr;
+        file->Close();
         context->last_error = LessonCinematicError::kMetadataMismatch;
+        ReleaseProductionDecodeWorkspaceIfIdle(context);
         return false;
     }
     *metadata = {parsed.width, parsed.height,
@@ -462,7 +494,7 @@ bool ProductionOpen(void* raw, const char* path, LessonCinematicStreamMetadata* 
                  static_cast<std::uint32_t>(parsed.frame_count),
                  static_cast<std::uint32_t>(parsed.duration_ticks * 1000 / parsed.timescale),
                  kLessonMjpegMp4MaxSampleBytes};
-    *handle = &context->file;
+    *handle = file;
     return true;
 }
 
@@ -470,9 +502,7 @@ void ProductionClose(void* raw, void* handle) {
     auto* context = static_cast<ProductionFlattenedRendererContext*>(raw);
     if (context == nullptr) return;
     if (handle != nullptr) static_cast<LessonMjpegMp4File*>(handle)->Close();
-    jpeg_reusable_decoder_destroy(&context->decoder);
-    if (context->jpeg_input != nullptr) heap_caps_free(context->jpeg_input);
-    context->jpeg_input = nullptr;
+    ReleaseProductionDecodeWorkspaceIfIdle(context);
 }
 
 bool ProductionDecode(void* raw, void* handle, std::size_t index,
