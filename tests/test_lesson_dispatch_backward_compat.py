@@ -259,15 +259,19 @@ def test_interactive_step_opens_listening_instead_of_completing_from_render():
 # ── FW-02: prepare validates before either transactional commit path ────────────────
 def test_prepare_validates_version_before_transactional_session_commit():
     h = read("main/lesson_handler.cc")
-    reset = h.index("g_session = LessonSession{};")
-    gate = h.index("const bool version_ok =")
-    assert gate < reset
-    assert "emit_isolated_prepare_error" in h[gate:reset]
-    reset_positions = [
-        index for index in range(len(h)) if h.startswith("g_session = LessonSession{};", index)
-    ]
-    assert len(reset_positions) == 2
-    assert all(index > gate for index in reset_positions)
+    normal_prepare_start = h.index('const bool is_prepare = strcmp(type, "lesson_prepare") == 0;')
+    normal_prepare_end = h.index('if (strcmp(type, "lesson_start") == 0)', normal_prepare_start)
+    normal_prepare = h[normal_prepare_start:normal_prepare_end]
+    gate = normal_prepare.index("const bool version_ok =")
+    version_rejection = normal_prepare.index(
+        "if (is_prepare && (!version_ok || !profile_ok))", gate
+    )
+    isolated_error = normal_prepare.index("emit_isolated_prepare_error", gate)
+    reset = normal_prepare.index("g_session = LessonSession{};", version_rejection)
+
+    assert gate < isolated_error < reset
+    assert gate < version_rejection < reset
+    assert "emit_prepare_error" in normal_prepare[version_rejection:reset]
 
 
 # ── FW-LESSON-02: duplicate re-ack replays the cached rendered/degraded ────────────
@@ -283,11 +287,18 @@ def test_duplicate_reack_replays_cached_rendered_degraded():
 
 def test_duplicate_prepare_is_deduped_before_session_reset():
     h = read("main/lesson_handler.cc")
-    duplicate_prepare = h.index("const bool duplicate_prepare =")
-    reset = h.index("g_session = LessonSession{};")
-    assert duplicate_prepare < reset
-    assert "(!is_prepare || duplicate_prepare)" in h
-    assert "g_session.session_id == session_id" in h
+    normal_prepare_start = h.index('const bool is_prepare = strcmp(type, "lesson_prepare") == 0;')
+    normal_prepare_end = h.index('if (strcmp(type, "lesson_start") == 0)', normal_prepare_start)
+    normal_prepare = h[normal_prepare_start:normal_prepare_end]
+    duplicate_prepare = normal_prepare.index("const bool duplicate_prepare =")
+    dedup = normal_prepare.index(
+        "if ((!is_prepare || duplicate_prepare) && sequence <= g_session.last_in_sequence)",
+        duplicate_prepare,
+    )
+    reset = normal_prepare.index("g_session = LessonSession{};", dedup)
+
+    assert "g_session.session_id == session_id" in normal_prepare[:duplicate_prepare]
+    assert duplicate_prepare < dedup < reset
 
 
 def test_duplicate_prepare_reack_replays_cached_asset_pack_metadata():
