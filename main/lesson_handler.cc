@@ -1724,29 +1724,32 @@ void Application::HandleLessonMessage(const cJSON* root) {
              strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0 ||
              strcmp(phase_id, "thinking") == 0 || strcmp(phase_id, "correct") == 0 ||
              strcmp(phase_id, "retry") == 0 || strcmp(phase_id, "celebrate") == 0);
-        bool v4_command_shape_ok = true;
-        if (cinematic_v4 && !prepare_frame) {
+        bool cinematic_command_shape_ok = true;
+        if (!prepare_frame) {
             static const std::set<std::string_view> kBasicControlKeys = {
                 "command", "phaseId", "commandSequenceId"};
             static const std::set<std::string_view> kResumeKeys = {
                 "command", "phaseId", "commandSequenceId", "clockRebaseSequenceId"};
             static const std::set<std::string_view> kCancelKeys = {
                 "command", "phaseId", "commandSequenceId", "reason"};
-            const auto& expected = command != nullptr && strcmp(command, "resume") == 0
+            const auto& expected = cinematic_v4 && command != nullptr &&
+                    strcmp(command, "resume") == 0
                 ? kResumeKeys
-                : command != nullptr && strcmp(command, "cancel") == 0
+                : cinematic_v4 && command != nullptr && strcmp(command, "cancel") == 0
                     ? kCancelKeys : kBasicControlKeys;
-            v4_command_shape_ok = ExactObjectKeys(command_body, expected);
+            cinematic_command_shape_ok = ExactObjectKeys(command_body, expected);
         }
         bool control_values_ok = true;
-        if (!prepare_frame && command != nullptr && strcmp(command, "resume") == 0) {
+        if (cinematic_v4 && !prepare_frame && command != nullptr &&
+            strcmp(command, "resume") == 0) {
             double rebase_sequence = 0;
             control_values_ok = Num(command_body, "clockRebaseSequenceId", rebase_sequence) &&
                 std::isfinite(rebase_sequence) && rebase_sequence > 0 &&
                 rebase_sequence <= 9007199254740991.0 &&
                 std::trunc(rebase_sequence) == rebase_sequence &&
                 rebase_sequence == command_sequence_number;
-        } else if (!prepare_frame && command != nullptr && strcmp(command, "cancel") == 0) {
+        } else if (cinematic_v4 && !prepare_frame && command != nullptr &&
+                   strcmp(command, "cancel") == 0) {
             const char* reason = Str(command_body, "reason");
             control_values_ok = reason != nullptr && !Blank(reason) && std::strlen(reason) <= 64;
         }
@@ -1824,7 +1827,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             ? tbot::ActiveLessonFlattenedCinematicRenderer() : nullptr;
         const bool renderer_available = renderer_v3 != nullptr || renderer_v4 != nullptr;
         if (!command_matches_frame || !known_phase || !command_sequence_ok ||
-            !v4_command_shape_ok || !control_values_ok || !renderer_available) {
+            !cinematic_command_shape_ok || !control_values_ok || !renderer_available) {
             emit_cinematic_ack({tbot::LessonCinematicResponseType::kFailure, false,
                                 command_sequence_id, phase_id != nullptr ? phase_id : "",
                                 !renderer_available

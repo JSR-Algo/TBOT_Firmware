@@ -867,13 +867,10 @@ void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
 
     for (const char* command : {"pause", "resume", "cancel"}) {
         const int command_id = command[0] == 'p' ? 43 : command[0] == 'r' ? 44 : 45;
-        const std::string command_metadata = command[0] == 'r'
-            ? ",\"clockRebaseSequenceId\":" + std::to_string(command_id)
-            : command[0] == 'c' ? ",\"reason\":\"testCleanup\"" : "";
         Handle(V3Frame("lesson_cinematic_control", command_id,
             std::string("{\"command\":\"") + command +
             "\",\"phaseId\":\"opening\",\"commandSequenceId\":" +
-            std::to_string(command_id) + command_metadata + "}"));
+            std::to_string(command_id) + "}"));
         ack = cJSON_Parse(Sent().back().c_str());
         cinematic = cJSON_GetObjectItem(cJSON_GetObjectItem(ack, "body"), "cinematicPhase");
         require(cJSON_GetArraySize(cinematic) == 5 &&
@@ -884,6 +881,42 @@ void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
         cJSON_Delete(ack);
     }
     require(fake.closes == 3, "cancel closes all streams before handler releases lesson lease");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
+void test_renderer_v3_controls_reject_v4_only_fields() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                             V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    Handle(V3PrepareFrame(1));
+    Handle(V3Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":42}}"));
+    Handle(V3Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"pause\",\"phaseId\":\"opening\",\"commandSequenceId\":43}"));
+
+    Handle(V3Frame("lesson_cinematic_control", 4,
+        "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":44,"
+        "\"clockRebaseSequenceId\":44}"));
+    require(FrameType(3) == "lesson_error",
+            "v3 resume rejects the v4-only clock rebase field");
+    Handle(V3Frame("lesson_cinematic_control", 5,
+        "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":44}"));
+    require(FrameType(4) == "lesson_ack",
+            "v3 resume retains its original three-field control contract");
+
+    Handle(V3Frame("lesson_cinematic_control", 6,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":45,"
+        "\"reason\":\"testCleanup\"}"));
+    require(FrameType(5) == "lesson_error",
+            "v3 cancel rejects the v4-only reason field");
+    Handle(V3Frame("lesson_cinematic_control", 7,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":45}"));
+    require(FrameType(6) == "lesson_ack",
+            "v3 cancel retains its original three-field control contract");
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
@@ -5527,6 +5560,7 @@ int main() {
     test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
     test_cinematic_controls_cannot_cross_renderer_session_identity();
     test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
+    test_renderer_v3_controls_reject_v4_only_fields();
     test_renderer_v3_rejections_use_task7_consumed_lesson_error();
     test_renderer_v3_duplicate_sequence_requires_exact_original_command();
     test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom();
