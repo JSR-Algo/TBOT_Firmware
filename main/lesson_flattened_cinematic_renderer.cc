@@ -1,4 +1,5 @@
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_mjpeg_mp4.h"
 
 #include <atomic>
 #include <cstring>
@@ -8,7 +9,6 @@
 #ifdef ESP_PLATFORM
 #include "display/lcd_display.h"
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
-#include "lesson_mjpeg_mp4.h"
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #endif
@@ -20,6 +20,10 @@ std::atomic<bool> g_capability_ready{false};
 std::atomic<LessonFlattenedCinematicRenderer*> g_active_renderer{nullptr};
 std::atomic<bool> g_timer_route_v4{false};
 std::mutex g_active_renderer_mutex;
+
+constexpr std::size_t kFlattenedFramebufferBytes =
+    static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
+constexpr std::size_t kFlattenedDecoderWorkspaceReserveBytes = 128u * 1024u;
 
 void AppendFingerprint(std::string& destination, const char* value) {
     const std::string_view text = value != nullptr ? std::string_view(value) : std::string_view();
@@ -185,6 +189,36 @@ bool LessonFlattenedCinematicRendererCapabilityReady() {
     return g_capability_ready.load(std::memory_order_acquire);
 }
 
+bool ProbeLessonFlattenedCinematicReplacementCapacity(
+    const LessonFlattenedCinematicCapacityOps& ops) {
+    if (ops.allocate == nullptr || ops.release == nullptr ||
+        ops.prepare_decoder_workspace == nullptr ||
+        ops.destroy_decoder_workspace == nullptr) {
+        return false;
+    }
+    void* first_framebuffer = ops.allocate(ops.context, kFlattenedFramebufferBytes);
+    void* second_framebuffer = first_framebuffer != nullptr
+        ? ops.allocate(ops.context, kFlattenedFramebufferBytes) : nullptr;
+    void* jpeg_input = second_framebuffer != nullptr
+        ? ops.allocate(ops.context, kLessonMjpegMp4MaxSampleBytes) : nullptr;
+    const bool workspace_attempted = jpeg_input != nullptr;
+    const bool workspace_ready = workspace_attempted &&
+        ops.prepare_decoder_workspace(ops.context, kFlattenedDecoderWorkspaceReserveBytes);
+    if (workspace_attempted) {
+        ops.destroy_decoder_workspace(ops.context, kFlattenedDecoderWorkspaceReserveBytes);
+    }
+    if (jpeg_input != nullptr) {
+        ops.release(ops.context, jpeg_input, kLessonMjpegMp4MaxSampleBytes);
+    }
+    if (second_framebuffer != nullptr) {
+        ops.release(ops.context, second_framebuffer, kFlattenedFramebufferBytes);
+    }
+    if (first_framebuffer != nullptr) {
+        ops.release(ops.context, first_framebuffer, kFlattenedFramebufferBytes);
+    }
+    return workspace_ready;
+}
+
 void SetLessonFlattenedCinematicRendererCapabilityReady(bool ready) {
     g_capability_ready.store(ready, std::memory_order_release);
 }
@@ -192,7 +226,7 @@ void SetLessonFlattenedCinematicRendererCapabilityReady(bool ready) {
 void SetActiveLessonFlattenedCinematicRenderer(LessonFlattenedCinematicRenderer* renderer) {
     std::lock_guard<std::mutex> lock(g_active_renderer_mutex);
     g_active_renderer.store(renderer, std::memory_order_release);
-    SetLessonFlattenedCinematicRendererCapabilityReady(renderer != nullptr && renderer->initialized());
+    SetLessonFlattenedCinematicRendererCapabilityReady(false);
 }
 
 LessonFlattenedCinematicRenderer* ActiveLessonFlattenedCinematicRenderer() {
@@ -281,10 +315,8 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
 
-    constexpr std::size_t kFramebufferBytes =
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
     std::uint16_t* candidate_framebuffer =
-        static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kFramebufferBytes));
+        static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kFlattenedFramebufferBytes));
     if (candidate_framebuffer == nullptr) {
         return Failure(config.command_sequence_id, LessonCinematicError::kInsufficientPsram);
     }
@@ -500,13 +532,12 @@ LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrameOn(
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     std::size_t stride = 0;
-    constexpr std::size_t kFramebufferBytes =
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
     constexpr std::uint64_t kReadDecodeDeadlineMs = 100;
     const std::uint64_t started = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : 0;
     if (!ops_.decode(ops_.context, stream, frame_index,
-                     reinterpret_cast<std::uint8_t*>(framebuffer), kFramebufferBytes,
+                     reinterpret_cast<std::uint8_t*>(framebuffer),
+                     kFlattenedFramebufferBytes,
                      &width, &height, &stride)) {
         return OperationError(LessonCinematicError::kDecodeFailed);
     }
@@ -560,6 +591,10 @@ struct ProductionFlattenedRendererContext {
     LessonCinematicError last_error = LessonCinematicError::kNone;
 };
 
+struct ProductionCapacityProbeContext {
+    jpeg_reusable_decoder_t decoder{};
+};
+
 std::unique_ptr<ProductionFlattenedRendererContext> g_production_context;
 std::unique_ptr<LessonFlattenedCinematicRenderer> g_production_renderer;
 
@@ -578,6 +613,26 @@ void* ProductionAllocate(void*, std::size_t size) {
 }
 
 void ProductionFree(void*, void* pointer) { heap_caps_free(pointer); }
+
+void* ProductionCapacityAllocate(void*, std::size_t size) {
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+void ProductionCapacityRelease(void*, void* pointer, std::size_t) {
+    heap_caps_free(pointer);
+}
+
+bool ProductionCapacityPrepareDecoder(void* raw, std::size_t) {
+    auto* context = static_cast<ProductionCapacityProbeContext*>(raw);
+    return context != nullptr && jpeg_reusable_decoder_prepare_workspace(
+        &context->decoder, kLessonCinematicWidth, kLessonCinematicHeight,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == ESP_OK;
+}
+
+void ProductionCapacityDestroyDecoder(void* raw, std::size_t) {
+    auto* context = static_cast<ProductionCapacityProbeContext*>(raw);
+    if (context != nullptr) jpeg_reusable_decoder_destroy(&context->decoder);
+}
 
 bool ProductionOpen(void* raw, const char* path, LessonCinematicStreamMetadata* metadata,
                     void** handle) {
@@ -692,26 +747,22 @@ std::uint64_t ProductionMonotonicMs(void*) {
 
 bool InitializeProductionLessonFlattenedCinematicRenderer(::LcdDisplay* display) {
 #ifdef ESP_PLATFORM
+    SetLessonFlattenedCinematicRendererCapabilityReady(false);
     constexpr std::size_t kRequiredPsram =
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2 +
-        kLessonMjpegMp4MaxSampleBytes + 128 * 1024;
-    if (display == nullptr || heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kRequiredPsram) {
+        2 * kFlattenedFramebufferBytes + kLessonMjpegMp4MaxSampleBytes +
+        kFlattenedDecoderWorkspaceReserveBytes;
+    constexpr std::size_t kLargestRequiredAllocation =
+        kLessonMjpegMp4MaxSampleBytes > kFlattenedFramebufferBytes
+            ? kLessonMjpegMp4MaxSampleBytes : kFlattenedFramebufferBytes;
+    if (display == nullptr || heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kRequiredPsram ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < kLargestRequiredAllocation) {
         return false;
     }
-    void* framebuffer_probe = heap_caps_malloc(
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    void* jpeg_probe = heap_caps_malloc(kLessonMjpegMp4MaxSampleBytes,
-                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    jpeg_reusable_decoder_t decoder_probe{};
-    const bool decoder_ready = jpeg_reusable_decoder_prepare_workspace(
-        &decoder_probe, kLessonCinematicWidth, kLessonCinematicHeight,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == ESP_OK;
-    const bool ready = framebuffer_probe != nullptr && jpeg_probe != nullptr && decoder_ready;
-    if (framebuffer_probe != nullptr) heap_caps_free(framebuffer_probe);
-    if (jpeg_probe != nullptr) heap_caps_free(jpeg_probe);
-    jpeg_reusable_decoder_destroy(&decoder_probe);
-    if (!ready) return false;
+    ProductionCapacityProbeContext capacity_context;
+    const LessonFlattenedCinematicCapacityOps capacity_ops{
+        &capacity_context, ProductionCapacityAllocate, ProductionCapacityRelease,
+        ProductionCapacityPrepareDecoder, ProductionCapacityDestroyDecoder};
+    if (!ProbeLessonFlattenedCinematicReplacementCapacity(capacity_ops)) return false;
     g_production_context = std::make_unique<ProductionFlattenedRendererContext>();
     g_production_context->display = display;
     g_production_renderer = std::make_unique<LessonFlattenedCinematicRenderer>(
@@ -719,6 +770,7 @@ bool InitializeProductionLessonFlattenedCinematicRenderer(::LcdDisplay* display)
             ProductionFree, ProductionOpen, ProductionClose, ProductionDecode,
             ProductionPresent, ProductionLastError, ProductionMonotonicMs});
     SetActiveLessonFlattenedCinematicRenderer(g_production_renderer.get());
+    SetLessonFlattenedCinematicRendererCapabilityReady(g_production_renderer->initialized());
     return LessonFlattenedCinematicRendererCapabilityReady();
 #else
     (void)display;

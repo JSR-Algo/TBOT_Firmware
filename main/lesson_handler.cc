@@ -1904,7 +1904,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
         tbot::LessonFlattenedCinematicRenderer* renderer_v4 =
             tbot::ActiveLessonFlattenedCinematicRenderer();
         const bool renderer_available = cinematic_v3 ? renderer_v3 != nullptr
-                                                     : renderer_v4 != nullptr;
+            : renderer_v4 != nullptr &&
+                tbot::LessonFlattenedCinematicRendererCapabilityReady();
         if (!command_matches_frame || !known_identity || !prepare_template_version_ok ||
             !command_sequence_ok || !cinematic_command_shape_ok || !control_values_ok ||
             !renderer_available) {

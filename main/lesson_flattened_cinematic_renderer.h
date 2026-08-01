@@ -18,6 +18,17 @@ inline constexpr char kLessonFlattenedMjpegCinematicTemplate[] =
 bool LessonFlattenedCinematicRendererCapabilityReady();
 void SetLessonFlattenedCinematicRendererCapabilityReady(bool ready);
 
+struct LessonFlattenedCinematicCapacityOps {
+    void* context = nullptr;
+    void* (*allocate)(void*, std::size_t) = nullptr;
+    void (*release)(void*, void*, std::size_t) = nullptr;
+    bool (*prepare_decoder_workspace)(void*, std::size_t) = nullptr;
+    void (*destroy_decoder_workspace)(void*, std::size_t) = nullptr;
+};
+
+bool ProbeLessonFlattenedCinematicReplacementCapacity(
+    const LessonFlattenedCinematicCapacityOps& ops);
+
 enum class LessonCinematicPlaybackMode : std::uint8_t { kOnce, kLoop };
 
 struct LessonFlattenedCinematicAssetConfig {

@@ -676,6 +676,12 @@ bool V3Present(void* context, const std::uint16_t*, std::uint16_t, std::uint16_t
     return true;
 }
 
+void ActivateV4Renderer(tbot::LessonFlattenedCinematicRenderer* renderer) {
+    tbot::SetActiveLessonFlattenedCinematicRenderer(renderer);
+    tbot::SetLessonFlattenedCinematicRendererCapabilityReady(renderer != nullptr &&
+                                                              renderer->initialized());
+}
+
 void test_renderer_v4_capability_and_exact_single_asset_routing() {
     tbot::SetLessonCinematicRendererCapabilityReady(false);
     tbot::SetLessonFlattenedCinematicRendererCapabilityReady(true);
@@ -697,7 +703,17 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
     V3RendererFake fake;
     tbot::LessonFlattenedCinematicRenderer renderer(
         {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    ActivateV4Renderer(&renderer);
+    tbot::SetLessonFlattenedCinematicRendererCapabilityReady(false);
+    Handle(V4PrepareFrame(1));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_CAPABILITY_UNSUPPORTED" &&
+                fake.allocations == 0 && fake.opens == 0,
+            "active renderer remains unavailable until replacement peak capacity is proven");
+
+    ResetObservable();
+    FreshSession();
+    tbot::SetLessonFlattenedCinematicRendererCapabilityReady(true);
     Handle(V4PrepareFrame(1));
     require(fake.opened_paths == std::vector<std::string>({
                 "/sdcard/tbot/lesson-assets/flattenedCinematic.opening"}),
@@ -769,7 +785,7 @@ void test_renderer_v4_numeric_narrowing_rejects_before_renderer_work() {
     V3RendererFake fake;
     tbot::LessonFlattenedCinematicRenderer renderer(
         {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    ActivateV4Renderer(&renderer);
 
     const std::vector<std::pair<std::string, std::string>> invalid_numbers = {
         {"\"durationMs\":300", "\"durationMs\":4294967596"},
@@ -797,7 +813,7 @@ void test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity() {
     V3RendererFake fake;
     tbot::LessonFlattenedCinematicRenderer renderer(
         {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    ActivateV4Renderer(&renderer);
 
     Handle(V4V2PrepareFrame(1));
     require(FrameType(0) == "lesson_ack" &&
@@ -894,7 +910,7 @@ void test_cinematic_cross_renderer_handoff_releases_old_resources() {
     tbot::LessonFlattenedCinematicRenderer v4_renderer(
         {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
     tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&v4_renderer);
+    ActivateV4Renderer(&v4_renderer);
 
     Handle(V3PrepareFrame(1));
     Handle(V4PrepareFrame(2));
@@ -941,7 +957,7 @@ void test_cinematic_terminal_waits_for_asset_lease_release() {
     V3RendererFake fake;
     tbot::LessonFlattenedCinematicRenderer renderer(
         {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    ActivateV4Renderer(&renderer);
     Handle(V4PrepareFrame(1));
     auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
     require(owner.acquired && owner.idempotent, "v4 terminal test owns its asset session");
@@ -977,7 +993,7 @@ void test_renderer_v4_fresh_prepare_resets_session_sequence_stream() {
     tbot::LessonFlattenedCinematicRenderer v4_renderer(
         {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
     tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&v4_renderer);
+    ActivateV4Renderer(&v4_renderer);
     Handle(V3PrepareFrame(9, 61));
     Handle(V3Frame("lesson_start", 10,
         "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
@@ -1008,7 +1024,7 @@ void test_renderer_v4_failed_same_session_reprepare_keeps_session_playable() {
     V3RendererFake fake;
     tbot::LessonFlattenedCinematicRenderer renderer(
         {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    ActivateV4Renderer(&renderer);
     Handle(V4PrepareFrame(1, 80));
     require(FrameType(0) == "lesson_ack" && renderer.prepared(),
             "baseline v4 session is prepared");
@@ -1039,7 +1055,7 @@ void test_cinematic_controls_cannot_cross_renderer_session_identity() {
     tbot::LessonFlattenedCinematicRenderer v4_renderer(
         {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
     tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
-    tbot::SetActiveLessonFlattenedCinematicRenderer(&v4_renderer);
+    ActivateV4Renderer(&v4_renderer);
     Handle(V4PrepareFrame(1, 90));
     Handle(V3Frame("lesson_start", 2,
         "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","

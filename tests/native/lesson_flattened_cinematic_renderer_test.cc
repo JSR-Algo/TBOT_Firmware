@@ -1,5 +1,7 @@
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_mjpeg_mp4.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -51,6 +53,54 @@ struct FakeRuntime {
     tbot::LessonCinematicError operation_error = tbot::LessonCinematicError::kNone;
     std::vector<std::size_t> decoded_indices;
 };
+
+struct FakeCapacity {
+    std::size_t capacity = 0;
+    std::size_t live_bytes = 0;
+    std::size_t peak_bytes = 0;
+    std::size_t allocations = 0;
+    std::size_t frees = 0;
+    std::size_t workspace_prepares = 0;
+    std::size_t workspace_destroys = 0;
+    bool workspace_live = false;
+};
+
+void* CapacityAllocate(void* raw, std::size_t size) {
+    auto& fake = *static_cast<FakeCapacity*>(raw);
+    if (size > fake.capacity - fake.live_bytes) return nullptr;
+    void* pointer = std::malloc(size);
+    if (pointer == nullptr) return nullptr;
+    ++fake.allocations;
+    fake.live_bytes += size;
+    fake.peak_bytes = std::max(fake.peak_bytes, fake.live_bytes);
+    return pointer;
+}
+
+void CapacityFree(void* raw, void* pointer, std::size_t size) {
+    auto& fake = *static_cast<FakeCapacity*>(raw);
+    if (pointer == nullptr) return;
+    ++fake.frees;
+    fake.live_bytes -= size;
+    std::free(pointer);
+}
+
+bool CapacityPrepareWorkspace(void* raw, std::size_t size) {
+    auto& fake = *static_cast<FakeCapacity*>(raw);
+    ++fake.workspace_prepares;
+    if (size > fake.capacity - fake.live_bytes) return false;
+    fake.workspace_live = true;
+    fake.live_bytes += size;
+    fake.peak_bytes = std::max(fake.peak_bytes, fake.live_bytes);
+    return true;
+}
+
+void CapacityDestroyWorkspace(void* raw, std::size_t size) {
+    auto& fake = *static_cast<FakeCapacity*>(raw);
+    ++fake.workspace_destroys;
+    if (!fake.workspace_live) return;
+    fake.workspace_live = false;
+    fake.live_bytes -= size;
+}
 
 void* Allocate(void* raw, std::size_t size) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
@@ -441,6 +491,66 @@ void TestTemplateV2RejectsUnsafeOrInexactMetadata() {
             "v2 playback mode must match the effect contract");
 }
 
+void TestReplacementCapabilityRequiresPeakLiveResourcesAndCleansProbe() {
+    constexpr std::size_t kFramebufferBytes = 480u * 320u * 2u;
+    constexpr std::size_t kJpegInputBytes = tbot::kLessonMjpegMp4MaxSampleBytes;
+    constexpr std::size_t kDecoderWorkspaceBytes = 128u * 1024u;
+
+    FakeCapacity one_framebuffer{kFramebufferBytes};
+    const tbot::LessonFlattenedCinematicCapacityOps one_ops{
+        &one_framebuffer, CapacityAllocate, CapacityFree,
+        CapacityPrepareWorkspace, CapacityDestroyWorkspace};
+    Require(!tbot::ProbeLessonFlattenedCinematicReplacementCapacity(one_ops) &&
+                one_framebuffer.live_bytes == 0 && one_framebuffer.allocations == 1 &&
+                one_framebuffer.frees == 1 && one_framebuffer.workspace_prepares == 0,
+            "one-framebuffer capacity is not advertised and the partial probe is cleaned");
+
+    FakeCapacity short_workspace{
+        2 * kFramebufferBytes + kJpegInputBytes + kDecoderWorkspaceBytes - 1};
+    const tbot::LessonFlattenedCinematicCapacityOps short_workspace_ops{
+        &short_workspace, CapacityAllocate, CapacityFree,
+        CapacityPrepareWorkspace, CapacityDestroyWorkspace};
+    Require(!tbot::ProbeLessonFlattenedCinematicReplacementCapacity(short_workspace_ops) &&
+                short_workspace.live_bytes == 0 && short_workspace.allocations == 3 &&
+                short_workspace.frees == 3 && short_workspace.workspace_prepares == 1 &&
+                short_workspace.workspace_destroys == 1,
+            "failed decoder workspace probe destroys partial state and frees every buffer");
+
+    FakeCapacity peak_capacity{
+        2 * kFramebufferBytes + kJpegInputBytes + kDecoderWorkspaceBytes};
+    const tbot::LessonFlattenedCinematicCapacityOps peak_ops{
+        &peak_capacity, CapacityAllocate, CapacityFree,
+        CapacityPrepareWorkspace, CapacityDestroyWorkspace};
+    const bool replacement_ready =
+        tbot::ProbeLessonFlattenedCinematicReplacementCapacity(peak_ops);
+    Require(replacement_ready &&
+                peak_capacity.peak_bytes == peak_capacity.capacity &&
+                peak_capacity.live_bytes == 0 && peak_capacity.allocations == 3 &&
+                peak_capacity.frees == 3 && peak_capacity.workspace_prepares == 1 &&
+                peak_capacity.workspace_destroys == 1,
+            "two framebuffers plus JPEG workspace advertise ready and fully clean the probe");
+
+    FakeRuntime runtime;
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&runtime));
+    tbot::SetLessonFlattenedCinematicRendererCapabilityReady(true);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    Require(!tbot::LessonFlattenedCinematicRendererCapabilityReady() &&
+                renderer.Prepare(V2Config(), 0).accepted,
+            "activating a renderer does not advertise it before the peak probe, but direct initial cue works");
+    tbot::SetLessonFlattenedCinematicRendererCapabilityReady(replacement_ready);
+    auto replacement = V2Config("barn-thinking", "thinking");
+    replacement.command_sequence_id = 42;
+    replacement.asset.cue_id = "barn-thinking";
+    replacement.asset.sd_path =
+        "/sdcard/tbot/lesson-assets/flattenedCinematic.barn-thinking";
+    Require(tbot::LessonFlattenedCinematicRendererCapabilityReady() &&
+                renderer.Prepare(replacement, 0).accepted && runtime.opens == 2 &&
+                runtime.closes == 1 && runtime.allocation_sizes.size() == 2 &&
+                runtime.frees == 1,
+            "advertised peak capacity supports transactional runtime replacement");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
 }  // namespace
 
 int main() {
@@ -453,6 +563,7 @@ int main() {
     TestTemplateV2LoopPauseResumePreservesPhase();
     TestTemplateV2IdentityFencingAndTransactionalReplacement();
     TestTemplateV2RejectsUnsafeOrInexactMetadata();
+    TestReplacementCapabilityRequiresPeakLiveResourcesAndCleansProbe();
     std::cout << "lesson_flattened_cinematic_renderer tests passed\n";
     return 0;
 }
