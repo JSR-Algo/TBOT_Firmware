@@ -744,40 +744,46 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
         "\"commandSequenceId\":72,\"extra\":true}}"));
     require(FrameType(2) == "lesson_error" && fake.presents == 1,
             "v4 rejects extra control keys before changing renderer state");
+    Handle(V4Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"start\",\"phaseId\":\"opening\",\"commandSequenceId\":72}"));
+    require(FrameType(3) == "lesson_error" &&
+                FrameBodyStr(3, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.presents == 1,
+            "v4 template-v1 rejects control-frame start without consuming the command");
     Handle(V4Frame("lesson_start", 3,
         "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
         "\"commandSequenceId\":72}}"));
-    require(FrameType(3) == "lesson_ack" &&
-                FrameBodyStr(3, "cinematicPhase", "event") == "phaseReady",
-            "valid owner v4 start still applies after foreign and malformed controls");
+    require(FrameType(4) == "lesson_ack" &&
+                FrameBodyStr(4, "cinematicPhase", "event") == "phaseReady",
+            "valid owner v4 start still applies after foreign and rejected control starts");
     Handle(V4Frame("lesson_cinematic_control", 4,
         "{\"command\":\"pause\",\"phaseId\":\"opening\",\"commandSequenceId\":73}"));
-    require(FrameType(4) == "lesson_ack", "valid v4 pause applies");
+    require(FrameType(5) == "lesson_ack", "valid v4 pause applies");
     Handle(V4Frame("lesson_cinematic_control", 5,
         "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":74,"
         "\"clockRebaseSequenceId\":\"74\"}"));
-    require(FrameType(5) == "lesson_error", "string resume rebase identity is rejected");
+    require(FrameType(6) == "lesson_error", "string resume rebase identity is rejected");
     Handle(V4Frame("lesson_cinematic_control", 6,
         "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":74,"
         "\"clockRebaseSequenceId\":999}"));
-    require(FrameType(6) == "lesson_error", "mismatched resume rebase identity is rejected");
+    require(FrameType(7) == "lesson_error", "mismatched resume rebase identity is rejected");
     Handle(V4Frame("lesson_cinematic_control", 7,
         "{\"command\":\"resume\",\"phaseId\":\"opening\",\"commandSequenceId\":74,"
         "\"clockRebaseSequenceId\":74}"));
-    require(FrameType(7) == "lesson_ack", "matching positive resume rebase identity applies");
+    require(FrameType(8) == "lesson_ack", "matching positive resume rebase identity applies");
     Handle(V4Frame("lesson_cinematic_control", 8,
         "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":75,"
         "\"reason\":\"\"}"));
-    require(FrameType(8) == "lesson_error", "empty cancel reason is rejected");
+    require(FrameType(9) == "lesson_error", "empty cancel reason is rejected");
     Handle(V4Frame("lesson_cinematic_control", 9,
         std::string("{\"command\":\"cancel\",\"phaseId\":\"opening\","
                     "\"commandSequenceId\":75,\"reason\":\"") +
         std::string(65, 'x') + "\"}"));
-    require(FrameType(9) == "lesson_error", "cancel reason longer than 64 bytes is rejected");
+    require(FrameType(10) == "lesson_error", "cancel reason longer than 64 bytes is rejected");
     Handle(V4Frame("lesson_cinematic_control", 10,
         "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":75,"
         "\"reason\":\"assignmentReplaced\"}"));
-    require(FrameType(10) == "lesson_ack", "bounded nonempty cancel reason applies");
+    require(FrameType(11) == "lesson_ack", "bounded nonempty cancel reason applies");
 
     ResetObservable();
     FreshSession();
@@ -840,13 +846,26 @@ void test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity() {
             "v2 frame-zero ACK has the exact six-field cue schema");
     cJSON_Delete(ack);
 
-    Handle(V4Frame("lesson_start", 2,
-        "{\"cinematicPhase\":{\"command\":\"start\",\"cueId\":\"barn-correct\","
-        "\"commandSequenceId\":82}}"));
+    Handle(V4Frame("lesson_cinematic_control", 2,
+        "{\"command\":\"start\",\"cueId\":\"barn-correct\",\"commandSequenceId\":82}"));
     require(FrameType(1) == "lesson_ack" &&
                 FrameBodyStr(1, "cinematicPhase", "event") == "phaseReady" &&
                 FrameBodyStr(1, "cinematicPhase", "cueId") == "barn-correct",
-            "v2 start uses cue identity end to end");
+            "v2 control-frame start uses cue identity end to end");
+    ack = cJSON_Parse(Sent().back().c_str());
+    cinematic = cJSON_GetObjectItem(cJSON_GetObjectItem(ack, "body"), "cinematicPhase");
+    require(cJSON_GetArraySize(cinematic) == 6 &&
+                std::string(cJSON_GetObjectItem(cinematic, "event")->valuestring) ==
+                    "phaseReady" &&
+                std::string(cJSON_GetObjectItem(cinematic, "command")->valuestring) == "start" &&
+                std::string(cJSON_GetObjectItem(cinematic, "cueId")->valuestring) ==
+                    "barn-correct" &&
+                cJSON_GetObjectItem(cinematic, "phaseId") == nullptr &&
+                cJSON_GetObjectItem(cinematic, "commandSequenceId")->valueint == 82 &&
+                cJSON_IsTrue(cJSON_GetObjectItem(cinematic, "accepted")) &&
+                cJSON_IsTrue(cJSON_GetObjectItem(cinematic, "phaseReady")),
+            "v2 control-start ACK has the exact six-field cue identity schema");
+    cJSON_Delete(ack);
     Handle(V4Frame("lesson_cinematic_control", 3,
         "{\"command\":\"pause\",\"cueId\":\"barn-correct\",\"commandSequenceId\":83}"));
     require(FrameType(2) == "lesson_ack", "v2 pause accepts exact cue control schema");
@@ -1222,6 +1241,14 @@ void test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency() {
                 FrameBodyStr(Sent().size() - 1, nullptr, "code") ==
                     "CINEMATIC_SESSION_MISMATCH",
             "foreign v3 start is rejected without advancing renderer state");
+
+    Handle(V3Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"start\",\"phaseId\":\"opening\",\"commandSequenceId\":42}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "code") ==
+                    "CINEMATIC_METADATA_MISMATCH" &&
+                fake.presents == presents,
+            "v3 rejects control-frame start without consuming the command");
 
     Handle(V3Frame("lesson_start", 3,
         "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\",\"commandSequenceId\":42}}"));

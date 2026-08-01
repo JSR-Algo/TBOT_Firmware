@@ -1753,8 +1753,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const cJSON* command_body = (prepare_frame || start_frame || stop_frame)
             ? Obj(body, "cinematicPhase") : body;
         const char* command = Str(command_body, "command");
-        const bool start_command = start_frame ||
-            (control_frame && command != nullptr && strcmp(command, "start") == 0);
         const char* phase_id = Str(command_body, "phaseId");
         const char* cue_id = Str(command_body, "cueId");
         double prepare_template_version_number = 0;
@@ -1768,6 +1766,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 ? static_cast<std::uint16_t>(prepare_template_version_number)
                 : g_session.cinematic_template_version;
         const bool cinematic_v4_v2 = cinematic_v4 && cinematic_template_version == 2;
+        const bool start_command = command != nullptr && strcmp(command, "start") == 0 &&
+            (start_frame || (control_frame && cinematic_v4_v2));
         const char* cinematic_identity = cinematic_v4_v2 ? cue_id : phase_id;
         double command_sequence_number = 0;
         const bool command_sequence_ok = Num(command_body, "commandSequenceId",
