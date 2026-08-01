@@ -332,6 +332,30 @@ std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
         asset_extra + "}}}" );
 }
 
+std::string V4V2PrepareFrame(int seq, std::uint64_t command_sequence_id = 81,
+                             const std::string& command_extra = "",
+                             const std::string& asset_extra = "",
+                             const std::string& cue_id = "barn-correct",
+                             const std::string& effect = "correct",
+                             const std::string& playback_mode = "once",
+                             int duration_ms = 600, int frame_count = 6) {
+    return V4Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"flattenedMjpegCinematic\",\"templateVersion\":2,"
+        "\"cueId\":\"" + cue_id + "\",\"effect\":\"" + effect +
+        "\",\"stepKey\":\"barn\",\"playbackMode\":\"" + playback_mode +
+        "\",\"durationMs\":" + std::to_string(duration_ms) +
+        ",\"fps\":10,\"frameCount\":" + std::to_string(frame_count) + ","
+        "\"asset\":{\"derivativeId\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\","
+        "\"cueId\":\"" + cue_id + "\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/flattenedCinematic." + cue_id + "\","
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"bytes\":1234,\"mediaType\":\"video/mp4\",\"width\":480,\"height\":320" +
+        asset_extra + "}" + command_extra + "}}" );
+}
+
 std::string WithSession(std::string frame, const std::string& session_id) {
     const std::string current = std::string("\"sessionId\":\"") + SID() + "\"";
     const std::string replacement = std::string("\"sessionId\":\"") + session_id + "\"";
@@ -627,8 +651,12 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     fake->opened_paths.emplace_back(path);
     const bool background = std::string(path).find("background") != std::string::npos ||
         std::string(path).find("flattenedCinematic") != std::string::npos;
+    const bool v2_correct = std::string(path).find("barn-correct") != std::string::npos;
+    const bool v2_loop = std::string(path).find("barn-listen") != std::string::npos;
     *metadata = {static_cast<std::uint16_t>(background ? 480 : 2),
-                 static_cast<std::uint16_t>(background ? 320 : 2), 10, 3, 300, 64};
+                 static_cast<std::uint16_t>(background ? 320 : 2), 10,
+                 static_cast<std::uint32_t>(v2_correct ? 6 : v2_loop ? 13 : 3),
+                 static_cast<std::uint32_t>(v2_correct ? 600 : v2_loop ? 1300 : 300), 64};
     *handle = reinterpret_cast<void*>(static_cast<std::uintptr_t>(++fake->opens));
     return true;
 }
@@ -760,6 +788,99 @@ void test_renderer_v4_numeric_narrowing_rejects_before_renderer_work() {
     }
     require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
             "unsafe v4 numeric narrowing does not acquire an asset lease");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+
+    Handle(V4V2PrepareFrame(1));
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady" &&
+                FrameBodyStr(0, "cinematicPhase", "cueId") == "barn-correct" &&
+                FrameBodyStr(0, "cinematicPhase", "phaseId").empty(),
+            "v2 prepare ACK echoes cueId without relabeling it as phaseId");
+    cJSON* ack = cJSON_Parse(Sent().back().c_str());
+    cJSON* cinematic = cJSON_GetObjectItem(cJSON_GetObjectItem(ack, "body"), "cinematicPhase");
+    require(cJSON_GetArraySize(cinematic) == 6 &&
+                cJSON_GetObjectItem(cinematic, "cueId") != nullptr &&
+                cJSON_GetObjectItem(cinematic, "phaseId") == nullptr,
+            "v2 frame-zero ACK has the exact six-field cue schema");
+    cJSON_Delete(ack);
+
+    Handle(V4Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"cueId\":\"barn-correct\","
+        "\"commandSequenceId\":82}}"));
+    require(FrameType(1) == "lesson_ack" &&
+                FrameBodyStr(1, "cinematicPhase", "event") == "phaseReady" &&
+                FrameBodyStr(1, "cinematicPhase", "cueId") == "barn-correct",
+            "v2 start uses cue identity end to end");
+    Handle(V4Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"pause\",\"cueId\":\"barn-correct\",\"commandSequenceId\":83}"));
+    require(FrameType(2) == "lesson_ack", "v2 pause accepts exact cue control schema");
+    Handle(V4Frame("lesson_cinematic_control", 4,
+        "{\"command\":\"resume\",\"cueId\":\"barn-correct\",\"commandSequenceId\":84,"
+        "\"clockRebaseSequenceId\":84}"));
+    require(FrameType(3) == "lesson_ack", "v2 resume accepts exact cue control schema");
+    Handle(V4Frame("lesson_cinematic_control", 5,
+        "{\"command\":\"cancel\",\"cueId\":\"barn-correct\",\"commandSequenceId\":85,"
+        "\"reason\":\"testCleanup\"}"));
+    require(FrameType(4) == "lesson_ack", "v2 cancel accepts exact cue control schema");
+
+    ResetObservable();
+    FreshSession();
+    Handle(V4V2PrepareFrame(1, 1));
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "cueId") == "barn-correct",
+            "fresh v2 session safely resets its command sequence to one");
+    Handle(V4Frame("lesson_cinematic_control", 2,
+        "{\"command\":\"cancel\",\"cueId\":\"barn-correct\",\"commandSequenceId\":2,"
+        "\"reason\":\"testCleanup\"}"));
+    require(FrameType(1) == "lesson_ack", "fresh low-sequence v2 session remains controllable");
+
+    ResetObservable();
+    FreshSession();
+    Handle(V4V2PrepareFrame(1, 11, "", "", "barn-listen", "listen", "loop", 1300, 13));
+    require(FrameType(0) == "lesson_ack", "v2 loop cue parses through the exact handler schema");
+    Handle(V4Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"cueId\":\"barn-listen\","
+        "\"commandSequenceId\":12}}"));
+    require(renderer.Tick(1300).type == tbot::LessonCinematicResponseType::kCommandApplied,
+            "handler maps v2 loop playback instead of completing at the first seam");
+    Handle(V4Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"cancel\",\"cueId\":\"barn-listen\",\"commandSequenceId\":13,"
+        "\"reason\":\"testCleanup\"}"));
+    require(FrameType(2) == "lesson_ack", "parsed v2 loop cue cleans up normally");
+
+    ResetObservable();
+    FreshSession();
+    const int baseline_opens = fake.opens;
+    const std::vector<std::string> malformed = {
+        V4V2PrepareFrame(1, 91, ",\"phaseId\":\"correct\""),
+        V4V2PrepareFrame(2, 92, ",\"extra\":true"),
+        ReplaceOnce(V4V2PrepareFrame(3, 93), "\"cueId\":\"barn-correct\",", ""),
+        ReplaceOnce(V4V2PrepareFrame(4, 94), "\"cueId\":\"barn-correct\"",
+                    "\"cueId\":\"Barn Correct\""),
+        ReplaceOnce(V4V2PrepareFrame(5, 95), "\"effect\":\"correct\"",
+                    "\"effect\":\"unknown\""),
+        ReplaceOnce(V4V2PrepareFrame(6, 96), "\"playbackMode\":\"once\"",
+                    "\"playbackMode\":\"loop\""),
+        V4V2PrepareFrame(7, 97, "", ",\"phaseId\":\"correct\""),
+    };
+    for (const auto& frame : malformed) {
+        Handle(frame);
+        require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                    FrameBodyStr(Sent().size() - 1, nullptr, "code") ==
+                        "CINEMATIC_METADATA_MISMATCH",
+                "malformed or inexact v2 schema is rejected with typed metadata error");
+    }
+    require(fake.opens == baseline_opens,
+            "malformed v2 commands are rejected before renderer file work");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
 }
 
@@ -5677,6 +5798,7 @@ int main() {
     test_renderer_v3_capability_is_fail_closed_until_initialized();
     test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v4_numeric_narrowing_rejects_before_renderer_work();
+    test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity();
     test_renderer_v4_fresh_prepare_resets_session_sequence_stream();
     test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
     test_cinematic_controls_cannot_cross_renderer_session_identity();

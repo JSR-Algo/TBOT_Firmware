@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <mutex>
+#include <utility>
 
 class LcdDisplay;
 
@@ -49,11 +50,20 @@ enum class LessonCinematicResponseType : std::uint8_t {
 };
 
 struct LessonCinematicResponse {
+    LessonCinematicResponse() = default;
+    LessonCinematicResponse(LessonCinematicResponseType response_type, bool is_accepted,
+                            std::uint64_t sequence, std::string phase,
+                            LessonCinematicError response_error,
+                            std::string cue = {})
+        : type(response_type), accepted(is_accepted), command_sequence_id(sequence),
+          phase_id(std::move(phase)), error(response_error), cue_id(std::move(cue)) {}
+
     LessonCinematicResponseType type = LessonCinematicResponseType::kFailure;
     bool accepted = false;
     std::uint64_t command_sequence_id = 0;
     std::string phase_id;
     LessonCinematicError error = LessonCinematicError::kNone;
+    std::string cue_id;
 };
 
 struct LessonCinematicStreamMetadata {

@@ -3,8 +3,28 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <new>
 #include <string>
 #include <vector>
+
+std::size_t g_host_heap_allocations = 0;
+
+void* operator new(std::size_t size) {
+    ++g_host_heap_allocations;
+    if (void* pointer = std::malloc(size)) return pointer;
+    throw std::bad_alloc();
+}
+
+void* operator new[](std::size_t size) {
+    ++g_host_heap_allocations;
+    if (void* pointer = std::malloc(size)) return pointer;
+    throw std::bad_alloc();
+}
+
+void operator delete(void* pointer) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
+void operator delete[](void* pointer) noexcept { std::free(pointer); }
+void operator delete[](void* pointer, std::size_t) noexcept { std::free(pointer); }
 
 namespace {
 
@@ -49,8 +69,19 @@ bool Open(void* raw, const char* path, tbot::LessonCinematicStreamMetadata* meta
     auto& fake = *static_cast<FakeRuntime*>(raw);
     if (fake.fail_open || path == nullptr || std::strstr(path, "missing") != nullptr) return false;
     ++fake.opens;
-    *metadata = {480, 320, 10, static_cast<std::uint32_t>(fake.metadata_mismatch ? 2 : 3),
-                 300, 64};
+    std::uint32_t frame_count = 3;
+    std::uint32_t duration_ms = 300;
+    if (std::strstr(path, "barn-listen") != nullptr ||
+        std::strstr(path, "barn-thinking") != nullptr) {
+        frame_count = 13;
+        duration_ms = 1300;
+    } else if (std::strstr(path, "barn-correct") != nullptr) {
+        frame_count = 6;
+        duration_ms = 600;
+    }
+    *metadata = {480, 320, 10,
+                 static_cast<std::uint32_t>(fake.metadata_mismatch ? 2 : frame_count),
+                 duration_ms, 64};
     *handle = reinterpret_cast<void*>(fake.opens);
     return true;
 }
@@ -112,6 +143,25 @@ tbot::LessonFlattenedCinematicPhaseConfig Config() {
     return config;
 }
 
+tbot::LessonFlattenedCinematicPhaseConfig V2Config(
+    const char* cue_id = "barn-listen", const char* effect = "listen",
+    tbot::LessonCinematicPlaybackMode playback_mode =
+        tbot::LessonCinematicPlaybackMode::kLoop) {
+    auto config = Config();
+    config.template_version = 2;
+    config.phase_id = nullptr;
+    config.cue_id = cue_id;
+    config.effect = effect;
+    config.step_key = "barn";
+    config.playback_mode = playback_mode;
+    config.duration_ms = 1300;
+    config.frame_count = 13;
+    config.asset.phase_id = nullptr;
+    config.asset.cue_id = cue_id;
+    config.asset.sd_path = "/sdcard/tbot/lesson-assets/flattenedCinematic.barn-listen";
+    return config;
+}
+
 void TestExactContractAllocationTimingAndLifecycle() {
     FakeRuntime fake;
     tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
@@ -167,6 +217,11 @@ void TestValidationErrorsIdempotencyAndCleanup() {
         "Dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
     Require(renderer.Prepare(invalid, 0).error == tbot::LessonCinematicError::kMetadataMismatch,
             "derivative identity must be exact lowercase SHA-256");
+    invalid = Config();
+    invalid.phase_id = "barn-listen";
+    invalid.asset.phase_id = "barn-listen";
+    Require(renderer.Prepare(invalid, 0).error == tbot::LessonCinematicError::kMetadataMismatch,
+            "v1 remains restricted to its exact legacy phase allowlist");
 
     fake.fail_open = true;
     fake.operation_error = tbot::LessonCinematicError::kParserFailed;
@@ -258,6 +313,134 @@ void TestFailedRepreparePreservesPreparedStreamTransactionally() {
             "transactional reprepare failures leak no staged or active resources");
 }
 
+void TestTemplateV2OnceCompletesAtEof() {
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+    auto config = V2Config("barn-correct", "correct",
+                           tbot::LessonCinematicPlaybackMode::kOnce);
+    config.duration_ms = 600;
+    config.frame_count = 6;
+    config.asset.sd_path = "/sdcard/tbot/lesson-assets/flattenedCinematic.barn-correct";
+    const auto prepared = renderer.Prepare(config, 0);
+    Require(prepared.accepted && prepared.phase_id.empty() &&
+                prepared.cue_id == "barn-correct",
+            "v2 once cue prepares without relabeling cue identity as a phase");
+    Require(renderer.Start(42, "barn-correct", 0).accepted, "v2 once cue starts by cue ID");
+    const auto response = renderer.Tick(600);
+    Require(response.accepted &&
+                response.type == tbot::LessonCinematicResponseType::kPhaseComplete,
+            "v2 once cue completes at EOF");
+}
+
+void TestTemplateV2LoopCrossesSeamsWithoutResourceChurn() {
+    FakeRuntime fake;
+    fake.decoded_indices.reserve(2005);
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(V2Config(), 0).accepted, "v2 loop cue prepares");
+    Require(renderer.Start(42, "barn-listen", 0).accepted, "v2 loop cue starts by cue ID");
+    Require(renderer.Tick(1299).accepted && fake.last_frame == 12,
+            "loop renders the final frame before its seam");
+    Require(renderer.Tick(1300).accepted && fake.last_frame == 0,
+            "loop maps its seam to frame zero");
+    const auto heap_allocations_before_ticks = g_host_heap_allocations;
+    for (std::uint64_t seam = 1; seam <= 1000; ++seam) {
+        const auto response = renderer.Tick(seam * 1300 + 100);
+        Require(response.accepted &&
+                    response.type == tbot::LessonCinematicResponseType::kCommandApplied &&
+                    fake.last_frame == 1,
+                "loop remains running across every seam");
+    }
+    Require(fake.opens == 1 && fake.allocation_sizes.size() == 1 &&
+                fake.closes == 0 && fake.frees == 0,
+            "loop seams do not reopen, close, allocate, or free resources");
+    Require(g_host_heap_allocations == heap_allocations_before_ticks,
+            "loop Tick performs no global heap allocation across 1,000 seams");
+}
+
+void TestTemplateV2LoopPauseResumePreservesPhase() {
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(V2Config(), 0).accepted, "v2 loop cue prepares for pause");
+    Require(renderer.Start(42, "barn-listen", 0).accepted, "v2 loop cue starts for pause");
+    Require(renderer.Tick(1200).accepted && fake.last_frame == 12,
+            "loop advances before pause");
+    Require(renderer.Pause(43, "barn-listen", 1200).accepted, "v2 loop pauses");
+    Require(renderer.Tick(5000).accepted && fake.last_frame == 12,
+            "paused loop does not advance");
+    Require(renderer.Resume(44, "barn-listen", 5000).accepted, "v2 loop resumes");
+    Require(renderer.Tick(5099).accepted && fake.last_frame == 12,
+            "resume preserves the pre-pause loop phase");
+    Require(renderer.Tick(5100).accepted && fake.last_frame == 0,
+            "resume reaches the same seam after the remaining interval");
+}
+
+void TestTemplateV2IdentityFencingAndTransactionalReplacement() {
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(V2Config(), 0).accepted, "first v2 cue prepares");
+
+    auto stale = V2Config("barn-thinking", "thinking");
+    stale.command_sequence_id = 40;
+    stale.asset.cue_id = "barn-thinking";
+    Require(renderer.Prepare(stale, 0).error == tbot::LessonCinematicError::kStaleCommand,
+            "lower-sequence v2 prepare is rejected without staging resources");
+    Require(renderer.Start(40, "barn-listen", 0).error ==
+                tbot::LessonCinematicError::kStaleCommand,
+            "lower-sequence v2 control is rejected");
+    Require(renderer.Start(41, "barn-thinking", 0).error ==
+                tbot::LessonCinematicError::kStaleCommand,
+            "same sequence with changed cue identity is rejected");
+    Require(fake.opens == 1 && fake.closes == 0 && fake.allocation_sizes.size() == 1,
+            "stale v2 commands do not touch resources");
+
+    auto replacement = V2Config("barn-thinking", "thinking");
+    replacement.command_sequence_id = 42;
+    replacement.asset.cue_id = "barn-thinking";
+    replacement.asset.sd_path =
+        "/sdcard/tbot/lesson-assets/flattenedCinematic.barn-thinking";
+    Require(renderer.Prepare(replacement, 0).accepted,
+            "a newer v2 cue transactionally replaces the old cue");
+    Require(fake.opens == 2 && fake.closes == 1 &&
+                fake.allocation_sizes.size() == 2 && fake.frees == 1,
+            "old cue closes and frees exactly once after replacement frame zero succeeds");
+
+    auto changed_identity = replacement;
+    changed_identity.effect = "listen";
+    Require(renderer.Prepare(changed_identity, 0).error ==
+                tbot::LessonCinematicError::kStaleCommand,
+            "same sequence with changed v2 effect is rejected");
+    replacement.command_sequence_id = 1;
+    replacement.new_session = true;
+    fake.fail_open = true;
+    Require(renderer.Prepare(replacement, 0).error == tbot::LessonCinematicError::kFileOpen &&
+                renderer.prepared() && fake.opens == 2 && fake.closes == 1,
+            "failed fresh-session staging preserves the previous cue and sequence state");
+    fake.fail_open = false;
+    Require(renderer.Prepare(replacement, 0).accepted,
+            "fresh session transactionally permits a command sequence starting at one");
+}
+
+void TestTemplateV2RejectsUnsafeOrInexactMetadata() {
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+    auto invalid = V2Config("Barn Listen");
+    invalid.asset.cue_id = "Barn Listen";
+    Require(renderer.Prepare(invalid, 0).error == tbot::LessonCinematicError::kMetadataMismatch,
+            "v2 cue ID must be a safe lowercase slug");
+    invalid = V2Config();
+    invalid.step_key = "barn/one";
+    Require(renderer.Prepare(invalid, 0).error == tbot::LessonCinematicError::kMetadataMismatch,
+            "v2 step key must be a safe lowercase slug");
+    invalid = V2Config();
+    invalid.effect = "unknown";
+    Require(renderer.Prepare(invalid, 0).error == tbot::LessonCinematicError::kMetadataMismatch,
+            "v2 effect must be allowlisted");
+    invalid = V2Config();
+    invalid.playback_mode = tbot::LessonCinematicPlaybackMode::kOnce;
+    Require(renderer.Prepare(invalid, 0).error == tbot::LessonCinematicError::kMetadataMismatch,
+            "v2 playback mode must match the effect contract");
+}
+
 }  // namespace
 
 int main() {
@@ -265,6 +448,11 @@ int main() {
     TestValidationErrorsIdempotencyAndCleanup();
     TestRepeatedPreparePlayCancelIsLeakFree();
     TestFailedRepreparePreservesPreparedStreamTransactionally();
+    TestTemplateV2OnceCompletesAtEof();
+    TestTemplateV2LoopCrossesSeamsWithoutResourceChurn();
+    TestTemplateV2LoopPauseResumePreservesPhase();
+    TestTemplateV2IdentityFencingAndTransactionalReplacement();
+    TestTemplateV2RejectsUnsafeOrInexactMetadata();
     std::cout << "lesson_flattened_cinematic_renderer tests passed\n";
     return 0;
 }
