@@ -1753,6 +1753,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const cJSON* command_body = (prepare_frame || start_frame || stop_frame)
             ? Obj(body, "cinematicPhase") : body;
         const char* command = Str(command_body, "command");
+        const bool start_command = start_frame ||
+            (control_frame && command != nullptr && strcmp(command, "start") == 0);
         const char* phase_id = Str(command_body, "phaseId");
         const char* cue_id = Str(command_body, "cueId");
         double prepare_template_version_number = 0;
@@ -1773,7 +1775,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             PositiveIntegerAtMost(command_sequence_number, kMaxJsonSafeInteger);
         const bool command_matches_frame = command != nullptr &&
             ((prepare_frame && strcmp(command, "prepare") == 0) ||
-             (start_frame && strcmp(command, "start") == 0) ||
+             (start_command && strcmp(command, "start") == 0) ||
              (stop_frame && strcmp(command, "stop") == 0) ||
              (control_frame && (strcmp(command, "pause") == 0 ||
                                 strcmp(command, "resume") == 0 ||
@@ -1878,7 +1880,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 CinematicJsonAddBool(cinematic, "accepted", true);
             if (response.accepted && prepare_frame) {
                 built = built && CinematicJsonAddBool(cinematic, "frameZeroReady", true);
-            } else if (response.accepted && start_frame) {
+            } else if (response.accepted && start_command) {
                 built = built && CinematicJsonAddBool(cinematic, "phaseReady", true);
             }
             if (!built || !CinematicJsonOperationAllowed() ||
@@ -2148,7 +2150,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 }
             }
             }
-        } else if (start_frame) {
+        } else if (start_command) {
             response = cinematic_v4 ? renderer_v4->Start(command_sequence_id,
                                                           cinematic_identity, now_ms)
                                     : renderer_v3->Start(command_sequence_id, phase_id, now_ms);

@@ -34,6 +34,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -651,12 +652,22 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     fake->opened_paths.emplace_back(path);
     const bool background = std::string(path).find("background") != std::string::npos ||
         std::string(path).find("flattenedCinematic") != std::string::npos;
-    const bool v2_correct = std::string(path).find("barn-correct") != std::string::npos;
-    const bool v2_loop = std::string(path).find("barn-listen") != std::string::npos;
+    const std::string opened(path);
+    std::uint32_t duration_ms = 300;
+    if (opened.find("-opening") != std::string::npos) duration_ms = 9500;
+    else if (opened.find("-greet") != std::string::npos) duration_ms = 1200;
+    else if (opened.find("-teach") != std::string::npos) duration_ms = 2600;
+    else if (opened.find("-listen") != std::string::npos ||
+             opened.find("-thinking") != std::string::npos) duration_ms = 1300;
+    else if (opened.find("-correct") != std::string::npos) duration_ms = 600;
+    else if (opened.find("-retry-level-1") != std::string::npos) duration_ms = 1200;
+    else if (opened.find("-retry-level-2") != std::string::npos) duration_ms = 1400;
+    else if (opened.find("-retry-level-3") != std::string::npos) duration_ms = 1600;
+    else if (opened.find("-celebrate") != std::string::npos) duration_ms = 3000;
+    else if (opened.find("-word-transition") != std::string::npos) duration_ms = 1100;
     *metadata = {static_cast<std::uint16_t>(background ? 480 : 2),
                  static_cast<std::uint16_t>(background ? 320 : 2), 10,
-                 static_cast<std::uint32_t>(v2_correct ? 6 : v2_loop ? 13 : 3),
-                 static_cast<std::uint32_t>(v2_correct ? 600 : v2_loop ? 1300 : 300), 64};
+                 duration_ms / 100, duration_ms, 64};
     *handle = reinterpret_cast<void*>(static_cast<std::uintptr_t>(++fake->opens));
     return true;
 }
@@ -850,6 +861,16 @@ void test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity() {
 
     ResetObservable();
     FreshSession();
+    Handle(V4V2PrepareFrame(1, 86));
+    Handle(V4Frame("lesson_cinematic_control", 2,
+        "{\"command\":\"start\",\"cueId\":\"barn-correct\",\"commandSequenceId\":87,"
+        "\"effect\":\"correct\"}"));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH",
+            "v2 control-start rejects leaked prepare metadata instead of widening schema");
+
+    ResetObservable();
+    FreshSession();
     Handle(V4V2PrepareFrame(1, 1));
     require(FrameType(0) == "lesson_ack" &&
                 FrameBodyStr(0, "cinematicPhase", "cueId") == "barn-correct",
@@ -898,6 +919,96 @@ void test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity() {
     require(fake.opens == baseline_opens,
             "malformed v2 commands are rejected before renderer file work");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_tvideo_farm_cross_repository_fixture_runs_prepare_start_through_handler() {
+    const auto object = [](cJSON* parent, const char* key) -> cJSON* {
+        cJSON* value = cJSON_GetObjectItem(parent, key);
+        return cJSON_IsObject(value) ? value : nullptr;
+    };
+    const auto string = [](cJSON* parent, const char* key) -> const char* {
+        cJSON* value = cJSON_GetObjectItem(parent, key);
+        return cJSON_IsString(value) ? value->valuestring : nullptr;
+    };
+    const char* fixture_path = std::getenv("TBOT_TVIDEO_FARM_COMMAND_FIXTURE");
+    require(fixture_path != nullptr && fixture_path[0] != '\0',
+            "farm command fixture path is configured");
+    std::ifstream input(fixture_path, std::ios::binary);
+    require(input.good(), "farm command fixture opens");
+    const std::string encoded((std::istreambuf_iterator<char>(input)),
+                              std::istreambuf_iterator<char>());
+    cJSON* fixture = cJSON_ParseWithLength(encoded.data(), encoded.size());
+    require(fixture != nullptr, "farm command fixture parses");
+    require(std::string(string(fixture, "schemaVersion")) == "tvideo-farm-command.v2" &&
+                cJSON_IsTrue(cJSON_GetObjectItem(fixture, "softwareOnly")) &&
+                std::string(string(fixture, "hardwareStatus")) == "PENDING_ATTENDED_HARDWARE",
+            "farm fixture is explicitly software-only");
+    cJSON* source = object(fixture, "source");
+    cJSON* frames = cJSON_GetObjectItem(fixture, "frames");
+    require(source != nullptr && frames != nullptr && cJSON_IsArray(frames) &&
+                cJSON_GetArraySize(frames) == 38 &&
+                cJSON_GetNumberValue(cJSON_GetObjectItem(source, "cueCount")) == 19,
+            "farm fixture contains the exact 19 ordered prepare-start pairs");
+
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    ActivateV4Renderer(&renderer);
+    std::vector<std::string> cue_order;
+    for (int index = 0; index < 38; index += 2) {
+        cJSON* prepare = cJSON_GetArrayItem(frames, index);
+        cJSON* start = cJSON_GetArrayItem(frames, index + 1);
+        cJSON* prepare_body = object(prepare, "body");
+        cJSON* command = object(prepare_body, "cinematicPhase");
+        cJSON* start_body = object(start, "body");
+        cJSON* asset = object(command, "asset");
+        const char* cue_id = string(command, "cueId");
+        require(cue_id != nullptr && std::string(string(asset, "cueId")) == cue_id &&
+                    std::string(string(start_body, "cueId")) == cue_id &&
+                    cJSON_GetArraySize(start_body) == 3 &&
+                    cJSON_GetObjectItem(start_body, "effect") == nullptr &&
+                    cJSON_GetObjectItem(start_body, "asset") == nullptr,
+                "farm pair preserves cue identity and strict metadata-free start schema");
+        cue_order.emplace_back(cue_id);
+
+        char* prepare_json = cJSON_PrintUnformatted(prepare);
+        char* start_json = cJSON_PrintUnformatted(start);
+        require(prepare_json != nullptr && start_json != nullptr,
+                "farm pair serializes for the real handler");
+        const std::size_t before = Sent().size();
+        Handle(prepare_json);
+        if (!(Sent().size() == before + 1 && FrameType(before) == "lesson_ack" &&
+              FrameBodyStr(before, "cinematicPhase", "event") == "frameZeroReady")) {
+            std::cerr << "farm prepare rejected cue=" << cue_id
+                      << " response=" << (Sent().size() > before ? Sent().back() : "<none>")
+                      << "\n";
+        }
+        require(Sent().size() == before + 1 && FrameType(before) == "lesson_ack" &&
+                    FrameBodyStr(before, "cinematicPhase", "event") == "frameZeroReady" &&
+                    FrameBodyStr(before, "cinematicPhase", "cueId") == cue_id,
+                "farm prepare reaches the real renderer boundary and ACKs frame zero");
+        Handle(start_json);
+        if (!(Sent().size() == before + 2 && FrameType(before + 1) == "lesson_ack" &&
+              FrameBodyStr(before + 1, "cinematicPhase", "event") == "phaseReady")) {
+            std::cerr << "farm start rejected cue=" << cue_id
+                      << " response=" << (Sent().size() > before + 1 ? Sent().back() : "<none>")
+                      << "\n";
+        }
+        require(Sent().size() == before + 2 && FrameType(before + 1) == "lesson_ack" &&
+                    FrameBodyStr(before + 1, "cinematicPhase", "event") == "phaseReady" &&
+                    FrameBodyStr(before + 1, "cinematicPhase", "cueId") == cue_id,
+                "farm start reaches the real renderer boundary with exact cue identity");
+        cJSON_free(prepare_json);
+        cJSON_free(start_json);
+    }
+    require(cue_order.front() == "barn-opening" &&
+                cue_order[10] == "barn-to-hay-word-transition" &&
+                cue_order.back() == "hay-celebrate" && fake.opens == 19,
+            "farm fixture preserves exact cue order and opens one stream per prepared cue");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+    cJSON_Delete(fixture);
 }
 
 void test_cinematic_cross_renderer_handoff_releases_old_resources() {
@@ -5815,6 +5926,7 @@ int main() {
     test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v4_numeric_narrowing_rejects_before_renderer_work();
     test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity();
+    test_tvideo_farm_cross_repository_fixture_runs_prepare_start_through_handler();
     test_renderer_v4_fresh_prepare_resets_session_sequence_stream();
     test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
     test_cinematic_controls_cannot_cross_renderer_session_identity();
