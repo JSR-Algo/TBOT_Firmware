@@ -65,7 +65,23 @@ def archive_manager_commit(commit: str, destination: Path) -> None:
     archive_path = destination / "manager.tar"
     archive_path.write_bytes(archive)
     with tarfile.open(archive_path) as source:
-        source.extractall(destination / "manager")
+        manager_files = json.loads(FIXTURE.read_text(encoding="utf-8"))["managerFiles"]
+        required = set(manager_files.values())
+        target_root = destination / "manager"
+        for member in source:
+            if member.name not in required:
+                continue
+            if not member.isfile() or member.name.startswith("/") or ".." in Path(member.name).parts:
+                raise RuntimeError(f"unsafe manager archive member: {member.name}")
+            payload = source.extractfile(member)
+            if payload is None:
+                raise RuntimeError(f"missing manager archive member: {member.name}")
+            target = target_root / member.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload.read())
+        for required_path in required:
+            if not (target_root / required_path).is_file():
+                raise RuntimeError(f"missing required manager file: {required_path}")
 
 
 def run_checker(manager_root: Path) -> subprocess.CompletedProcess[str]:

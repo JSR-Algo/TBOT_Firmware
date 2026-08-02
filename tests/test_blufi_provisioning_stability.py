@@ -1165,13 +1165,17 @@ def test_fw21f_deferred_teardown_and_failure_secret_snapshot_are_synchronized():
     )
     stale_unlock_idx = continuation.index("continuation_lock.unlock();", generation_idx)
     stale_return_idx = continuation.index("return;", stale_unlock_idx)
-    cancel_idx = continuation.index("self->CancelBleSetupTimeout();", stale_return_idx)
-    deinit_idx = continuation.index("self->deinit();", cancel_idx)
-    success_unlock_idx = continuation.index("continuation_lock.unlock();", deinit_idx)
+    teardown_idx = continuation.index(
+        "self->CompleteSuccessfulProvisioningTeardown(", stale_return_idx
+    )
+    assert '"wifi_credentials_connected", provisioning_token' in continuation[
+        teardown_idx:teardown_idx + 180
+    ]
+    success_unlock_idx = continuation.index("continuation_lock.unlock();", teardown_idx)
     report_idx = continuation.index("self->TryReportProvisioningAuthenticated", success_unlock_idx)
     claim_idx = continuation.index("SchedulePendingTbotClaimRefresh", report_idx)
     assert lock_idx < generation_idx < stale_unlock_idx < stale_return_idx
-    assert stale_return_idx < cancel_idx < deinit_idx < success_unlock_idx < report_idx < claim_idx
+    assert stale_return_idx < teardown_idx < success_unlock_idx < report_idx < claim_idx
 
     token_snapshot = failure.index(
         "std::string failure_token = self->bootstrap_token_;"
@@ -1504,13 +1508,13 @@ def test_fw21l_custom_data_is_bound_to_ble_connection_generation():
     restart_generation = restart.index("setup_generation_.fetch_add(1)")
     assert restart_invalidate < restart_stopping < restart_generation
 
-    deinit = _function_body(blufi, "esp_err_t Blufi::deinit")
+    deinit = _function_body(blufi, "esp_err_t Blufi::_deinit_impl")
     deinit_invalidate = deinit.index("ble_session_state_.exchange(")
     deinit_host = deinit.index("_host_deinit()")
     assert "BleSessionPhase::kStopping" in deinit[deinit_invalidate:deinit_host]
     assert deinit_invalidate < deinit_host
 
-    init = _function_body(blufi, "esp_err_t Blufi::init")
+    init = _function_body(blufi, "esp_err_t Blufi::_init_impl")
     host_ready = init.index("_host_and_cb_init()")
     accepting_publish = init.index("BleSessionPhase::kAccepting", host_ready)
     assert host_ready < accepting_publish
@@ -1557,7 +1561,9 @@ def test_fw22_no_authenticated_post_or_claim_refresh_inline_while_ble_up():
     # and the claim refresh (so TLS only ever runs after BLE is down).
     sched_body = success[sched_idx:]
     deinit_pos = sched_body.index("self->CompleteSuccessfulProvisioningTeardown")
-    assert deinit_pos < sched_body.index("SchedulePendingTbotClaimRefresh")
+    report_pos = sched_body.index("self->TryReportProvisioningAuthenticated", deinit_pos)
+    refresh_pos = sched_body.index("SchedulePendingTbotClaimRefresh", report_pos)
+    assert deinit_pos < report_pos < refresh_pos
 
 
 # ---------------------------------------------------------------------------
@@ -1874,8 +1880,12 @@ def test_fw31_unclaimed_boot_defers_audio_workers_until_claim_confirmation():
     audio_start = initialize.index("audio_service_.Start()")
     assert claimed_gate < audio_start
 
-    assert "audio_service_.Start();" in confirm
-    assert confirm.index("audio_service_.Start();") < confirm.index(
+    assert "FinishClaimActivationAfterLocalAssetsReady()" in confirm
+    finish = _function_body(
+        application, "bool Application::FinishClaimActivationAfterLocalAssetsReady"
+    )
+    assert "audio_service_.Start();" in finish
+    assert finish.index("audio_service_.Start();") < finish.index(
         "audio_service_.EnableWakeWordDetection(true)"
     )
 
@@ -2254,7 +2264,7 @@ def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():
     assert "teardown_failed_.store(true)" in deinit
     assert "teardown_failed_.store(false)" in deinit
     already_deinited = deinit[
-        deinit.index("if (m_deinited)") : deinit.index("m_deinited = true")
+        deinit.index("if (m_deinited &&") : deinit.index("m_deinited = true")
     ]
     assert "teardown_failed_.load()" in already_deinited
     assert "ESP_ERR_INVALID_STATE" in already_deinited

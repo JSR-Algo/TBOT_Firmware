@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cinttypes>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -296,8 +297,8 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
             // Task 7 defines only command-correlated ACKs. Phase completion is internal:
             // the renderer returns to prepared while the server remains the lifecycle owner.
             if (response.type == LessonCinematicResponseType::kPhaseComplete) {
-                ESP_LOGI("LessonCinematic", "phase complete at command sequence %llu",
-                         static_cast<unsigned long long>(response.command_sequence_id));
+                ESP_LOGI("LessonCinematic", "phase complete at command sequence %" PRIu64,
+                         response.command_sequence_id);
             } else if (!response.accepted &&
                        response.error != LessonCinematicError::kInvalidState) {
                 ESP_LOGW("LessonCinematic", "timer tick failed: %u",

@@ -42,6 +42,7 @@ cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/l
   "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
   "${ROOT}/main/lesson_tvideo_template.cc" \
   "${ROOT}/main/lesson_cinematic_renderer.cc" \
+  "${ROOT}/main/lesson_flattened_cinematic_renderer.cc" \
   "${ROOT}/main/lesson_chroma_compositor.cc" \
   "${ROOT}/main/json_payload_safety.cc" \
   "${ROOT}/main/sd_fat_session_guard.cc" \

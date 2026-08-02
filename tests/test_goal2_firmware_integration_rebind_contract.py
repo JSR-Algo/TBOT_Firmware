@@ -77,7 +77,7 @@ def test_websocket_emits_build_identity_on_canonical_transport_before_connect():
     source = read("main/protocols/websocket_protocol.cc")
     assert '#include "esp_build_identity.h"' in source
     identity = source.index("ReadRunningEspBuildIdentity")
-    set_header = source.index("websocket_->SetHeader", identity)
+    set_header = source.index("replacement_websocket->SetHeader", identity)
     connect = source.index("websocket_->Connect", set_header)
     assert identity < set_header < connect
 

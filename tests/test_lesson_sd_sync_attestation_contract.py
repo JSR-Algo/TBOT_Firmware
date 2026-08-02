@@ -7,6 +7,21 @@ ATTESTATION_SOURCE = ROOT / "main" / "lesson_asset_sync_attestation.cc"
 MAIN_CMAKE = ROOT / "main" / "CMakeLists.txt"
 
 
+def function_body(text: str, signature: str, offset: int = 0) -> str:
+    start = text.index(signature, offset)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace : index + 1]
+    raise AssertionError(f"unterminated function {signature}")
+
+
 def sync_body() -> str:
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index('AddUserOnlyTool("self.lesson_assets.sync_to_sd"')
@@ -323,7 +338,7 @@ def test_mcp_delegates_the_real_transfer_loop_to_the_host_tested_unit():
     start = source.index(
         "bool DownloadLessonAssetToFile(", source.index("void EnsureSampleLessonAssetDir")
     )
-    body = source[start : source.index("\n}\n}\n\nMcpServer::McpServer", start)]
+    body = function_body(source, "bool DownloadLessonAssetToFile(", start)
 
     assert '"lesson_asset_http_transfer.cc"' in cmake
     assert "DownloadLessonAssetHttpBodyToFile(" in body
