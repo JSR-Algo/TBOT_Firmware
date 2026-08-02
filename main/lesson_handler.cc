@@ -669,6 +669,16 @@ std::uint64_t NextVisualCompletionNonce() {
     return nonce;
 }
 
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+}  // namespace
+namespace tbot {
+void SetLessonVisualCompletionNonceForTest(std::uint64_t value) {
+    g_visual_completion_nonce.store(value, std::memory_order_relaxed);
+}
+}  // namespace tbot
+namespace {
+#endif
+
 void ClearTerminalLessonCursor() {
     // A completed/failed lesson is terminal. The server may reuse the same assignmentId
     // / sessionId for the next sample lesson and restart S->F sequence at 1; clear the

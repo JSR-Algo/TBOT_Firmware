@@ -75,6 +75,7 @@ namespace tbot {
 void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_failure);
 #ifdef TBOT_HOST_NATIVE_COVERAGE
 void SetLessonJsonFailAfterForTest(int successful_operations_before_failure);
+void SetLessonVisualCompletionNonceForTest(std::uint64_t value);
 #endif
 }
 

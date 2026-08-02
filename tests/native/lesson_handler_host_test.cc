@@ -747,6 +747,8 @@ void test_cinematic_renderer_failures_use_stable_error_mapping() {
          "CINEMATIC_DECODE_TIMEOUT"},
         {FailureMode::kPresent, tbot::LessonCinematicError::kNone,
          "CINEMATIC_PRESENT_FAILED"},
+        {FailureMode::kOpen, static_cast<tbot::LessonCinematicError>(0xff),
+         "CINEMATIC_METADATA_MISMATCH"},
     };
 
     int sequence = 1;
@@ -1857,6 +1859,49 @@ void test_renderer_v2_duplicate_visual_waits_for_original_completion() {
     }
     require(FrameBodyNum(Sent().size() - 1, "acks") == 20,
             "completed visual ACKs advance beyond the bounded replay window");
+}
+
+void test_renderer_v2_visual_completion_nonce_wrap_skips_zero() {
+    tbot::SetLessonVisualCompletionNonceForTest(UINT64_MAX);
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    App().DrainLessonVisualQueue();
+    tbot::SetLessonVisualCompletionNonceForTest(UINT64_MAX);
+    Handle(V2VisualFrame(3, "thinking", 2));
+    require(!App().lesson_visual_queue.empty() &&
+                App().lesson_visual_queue.back().visual_nonce != 0,
+            "visual completion nonce skips zero after wraparound");
+    tbot::SetLessonVisualCompletionNonceForTest(0);
+}
+
+void test_renderer_v2_invalid_visual_completion_result_rejects_fail_closed() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+
+    Handle(V2VisualFrame(3, "thinking", 17));
+    display.CompleteVisualState(static_cast<LessonVisualApplyResult>(0xff), "randomReason");
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().kind == LessonQueueItemKind::kVisualCompleted &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kRejected,
+            "unknown visual callback result is queued as a fail-closed rejection");
+    App().DrainLessonVisualQueue();
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 3 &&
+                !FrameBodyBool(Sent().size() - 1, "accepted", true) &&
+                !FrameBodyBool(Sent().size() - 1, "degraded", true) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "unsupportedContract",
+            "unknown visual callback result emits the stable rejected ACK mapping");
 }
 
 void test_renderer_v2_non_lvgl_display_rejects_start_completion() {
@@ -6361,6 +6406,8 @@ int main() {
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();
     test_renderer_v2_duplicate_visual_waits_for_original_completion();
+    test_renderer_v2_visual_completion_nonce_wrap_skips_zero();
+    test_renderer_v2_invalid_visual_completion_result_rejects_fail_closed();
     test_renderer_v2_non_lvgl_display_rejects_start_completion();
     test_renderer_v2_start_ack_is_serialized_before_early_step_ack();
     test_renderer_v2_start_ack_is_serialized_before_early_visual_ack();
