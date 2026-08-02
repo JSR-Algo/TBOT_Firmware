@@ -1527,6 +1527,52 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
             "production rejection crosses the worker and emits frozen negative ACK semantics");
 }
 
+void test_renderer_v2_duplicate_visual_waits_for_original_completion() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(34);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+
+    const std::string visual = V2VisualFrame(3, "thinking", 17);
+    Handle(visual);
+    const int visual_calls = display.visual_state_calls;
+    const int schedule_calls = App().schedule_calls;
+    const size_t frames_before_duplicate = Sent().size();
+    require(App().lesson_visual_queue.empty(),
+            "visual ACK remains pending while its LVGL callback is incomplete");
+
+    Handle(visual);
+    require(display.visual_state_calls == visual_calls,
+            "pending duplicate visual does not render a second time");
+    require(App().schedule_calls == schedule_calls,
+            "pending duplicate visual does not schedule a second display install");
+    require(Sent().size() == frames_before_duplicate,
+            "pending duplicate visual emits no premature ACK");
+
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == frames_before_duplicate + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameStepId(Sent().size() - 1) == "s2" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 3 &&
+                FrameBodyNum(Sent().size() - 1, "visualGeneration") == 17 &&
+                FrameBodyBool(Sent().size() - 1, "accepted", false),
+            "original visual completion emits exactly its correlated ACK");
+
+    for (int sequence = 4; sequence <= 20; ++sequence) {
+        Handle(V2VisualFrame(sequence, "thinking", sequence + 14));
+        display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+        App().DrainLessonVisualQueue();
+    }
+    require(FrameBodyNum(Sent().size() - 1, "acks") == 20,
+            "completed visual ACKs advance beyond the bounded replay window");
+}
+
 void test_renderer_v2_non_lvgl_display_rejects_start_completion() {
     ResetObservable();
     FreshSession();
@@ -2208,19 +2254,29 @@ void test_delayed_duplicate_prepare_replays_assetpack_after_start_ack() {
     const std::string ready_pack = ReadyAssetPackExtra(
         "ck-delayed-abcdef1234567890", "abcdef1234567890", ready_file_name);
 
-    Handle(PrepareFrame(1, ready_pack));
+    Handle(PrepareFrame(5, ready_pack));
     require(Sent().size() == 1, "initial prepare emits assetPack ack");
     require(FrameHasAssetPack(0), "initial prepare ack carries assetPack");
 
-    Handle(StartFrame(2));
+    Handle(StartFrame(6));
     require(Sent().size() == 2, "start emits lifecycle ack");
     require(!FrameHasAssetPack(1), "start ack carries no assetPack");
 
-    Handle(PrepareFrame(1, ready_pack));
-    require(Sent().size() == 3, "delayed duplicate prepare re-acks");
-    require(FrameHasAssetPack(2), "delayed duplicate prepare replays original assetPack");
-    require(FrameBodyStr(2, "assetPack", "cacheKey") == "ck-delayed-abcdef1234567890",
-            "delayed duplicate prepare replays original assetPack cacheKey");
+    for (int sequence = 7; sequence <= 24; ++sequence) {
+        Handle((sequence % 2) ? PauseFrame(sequence) : ResumeFrame(sequence));
+    }
+
+    Handle(PrepareFrame(5, ready_pack));
+    const size_t replay_index = Sent().size() - 1;
+    require(Sent().size() == 21, "expired duplicate prepare re-acks after replay-window eviction");
+    require(FrameHasAssetPack(replay_index),
+            "expired duplicate prepare replays the dedicated cached assetPack");
+    require(FrameBodyStr(replay_index, "assetPack", "cacheKey") ==
+                "ck-delayed-abcdef1234567890",
+            "expired duplicate prepare replays original assetPack cacheKey");
+    require(!FrameBodyBool(replay_index, "rendered", true) &&
+                !FrameBodyBool(replay_index, "degraded", true),
+            "expired duplicate prepare uses conservative render fallback semantics");
     RemoveReadyAssetPackFixture(ready_file_name);
 }
 
@@ -5369,6 +5425,32 @@ void test_lesson_asset_reservation_retained_across_runtime_and_terminal_release(
             "terminal no-visible-content step releases reservation");
 }
 
+void test_abandon_lesson_storage_session_noop_failure_and_success() {
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1));
+    Handle(StopFrame(2));
+    require(!App().AbandonLessonStorageSession(),
+            "abandon without an active lesson generation is a no-op");
+
+    ResetObservable();
+    FreshSession();
+    Handle(PrepareFrame(1));
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    require(!App().AbandonLessonStorageSession(),
+            "abandon reports failure when the coordinator already ended the owner");
+
+    FreshSession();
+    Handle(PrepareFrame(1));
+    require(App().AbandonLessonStorageSession(),
+            "abandon releases the matching active lesson generation");
+    require(!App().lesson_runtime_active,
+            "successful abandon clears the lesson runtime state");
+    auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation),
+            "storage mutation can acquire immediately after successful abandon");
+}
+
 void test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release() {
     ResetObservable();
     FreshSession();
@@ -5817,6 +5899,7 @@ int main() {
     test_renderer_v2_opening_layouts_and_visual_generation_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();
+    test_renderer_v2_duplicate_visual_waits_for_original_completion();
     test_renderer_v2_non_lvgl_display_rejects_start_completion();
     test_renderer_v2_start_ack_is_serialized_before_early_step_ack();
     test_renderer_v2_start_ack_is_serialized_before_early_visual_ack();
@@ -5844,6 +5927,7 @@ int main() {
     test_not_ready_asset_candidate_does_not_commit_lesson_session();
     test_republished_not_ready_candidate_uses_isolated_stream();
     test_lesson_asset_reservation_retained_across_runtime_and_terminal_release();
+    test_abandon_lesson_storage_session_noop_failure_and_success();
     test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release();
     test_prepare_reject_preserves_active_lesson_scene();
     test_version_profile_gate();
