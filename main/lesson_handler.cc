@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <algorithm>
 #include <array>
 #include <set>
 #include <deque>
