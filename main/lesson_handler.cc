@@ -1465,26 +1465,39 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
         cJSON_Delete(body);
         return false;
     }
-    LessonJsonAddString(root, "type", "lesson_ack");
-    LessonJsonAddString(root, "protocolVersion", g_session.pending_protocol_version.c_str());
-    LessonJsonAddString(root, "assignmentId", g_session.assignment_id.c_str());
-    LessonJsonAddString(root, "sessionId", g_session.session_id.c_str());
+    bool built = LessonJsonAddString(root, "type", "lesson_ack") != nullptr &&
+                 LessonJsonAddString(root, "protocolVersion",
+                                     g_session.pending_protocol_version.c_str()) != nullptr &&
+                 LessonJsonAddString(root, "assignmentId", g_session.assignment_id.c_str()) != nullptr &&
+                 LessonJsonAddString(root, "sessionId", g_session.session_id.c_str()) != nullptr;
     if (!g_session.pending_lesson_id.empty()) {
-        LessonJsonAddString(root, "lessonId", g_session.pending_lesson_id.c_str());
+        built = built && LessonJsonAddString(
+            root, "lessonId", g_session.pending_lesson_id.c_str()) != nullptr;
     }
     if (g_session.pending_has_lesson_version) {
-        LessonJsonAddNumber(root, "lessonVersion", g_session.pending_lesson_version);
+        built = built && LessonJsonAddNumber(
+            root, "lessonVersion", g_session.pending_lesson_version) != nullptr;
     }
-    if (g_session.pending_step_id.empty()) LessonJsonAddNull(root, "stepId");
-    else LessonJsonAddString(root, "stepId", g_session.pending_step_id.c_str());
-    LessonJsonAddNumber(root, "sequence", static_cast<double>(++g_session.fs_sequence));
-    LessonJsonAddNumber(root, "timestamp", static_cast<double>(NowMs()));
-    LessonJsonAddNumber(body, "acks", static_cast<double>(item.server_sequence));
-    LessonJsonAddBool(body, "accepted", accepted);
-    LessonJsonAddBool(body, "degraded", degraded);
-    if (degraded_reason == nullptr) LessonJsonAddNull(body, "degradedReason");
-    else LessonJsonAddString(body, "degradedReason", degraded_reason);
-    LessonJsonAddNumber(body, "visualGeneration", static_cast<double>(item.visual_generation));
+    const int64_t ack_sequence = g_session.fs_sequence + 1;
+    built = built &&
+            (g_session.pending_step_id.empty()
+                ? LessonJsonAddNull(root, "stepId") != nullptr
+                : LessonJsonAddString(root, "stepId", g_session.pending_step_id.c_str()) != nullptr) &&
+            LessonJsonAddNumber(root, "sequence", static_cast<double>(ack_sequence)) != nullptr &&
+            LessonJsonAddNumber(root, "timestamp", static_cast<double>(NowMs())) != nullptr &&
+            LessonJsonAddNumber(body, "acks", static_cast<double>(item.server_sequence)) != nullptr &&
+            LessonJsonAddBool(body, "accepted", accepted) != nullptr &&
+            LessonJsonAddBool(body, "degraded", degraded) != nullptr &&
+            (degraded_reason == nullptr
+                ? LessonJsonAddNull(body, "degradedReason") != nullptr
+                : LessonJsonAddString(body, "degradedReason", degraded_reason) != nullptr) &&
+            LessonJsonAddNumber(body, "visualGeneration",
+                                static_cast<double>(item.visual_generation)) != nullptr;
+    if (!built) {
+        cJSON_Delete(root);
+        cJSON_Delete(body);
+        return false;
+    }
 
     char* body_json = LessonJsonPrintUnformatted(body);
     if (!LessonJsonAttachItem(root, "body", body)) {
@@ -1499,6 +1512,7 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
         if (body_json != nullptr) cJSON_free(body_json);
         return false;
     }
+    g_session.fs_sequence = ack_sequence;
     *ack_frame = serialized;
     cJSON_free(serialized);
     if (body_json != nullptr) {

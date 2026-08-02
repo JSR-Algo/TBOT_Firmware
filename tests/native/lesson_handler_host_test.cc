@@ -1391,60 +1391,37 @@ void test_generic_lesson_json_failures_drop_partial_frames_and_clean_up() {
                 "MakeErrorBody cJSON failure sends no partial error frame");
     }
 
-    tbot::SetLessonJsonFailAfterForTest(-1);
-    ResetObservable();
-    FreshSession();
-    Board::GetInstance().display_ = nullptr;
-    SetLessonTransportEpoch(71);
-    Handle(V2PrepareFrame(1));
-    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
-    LessonQueueItem completion = App().lesson_visual_queue.back();
-    std::string ack;
-    tbot::SetLessonJsonFailAfterForTest(0);
-    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
-            "visual completion root allocation failure sends no partial ACK");
-    tbot::SetLessonJsonFailAfterForTest(1);
-    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
-            "visual completion body allocation failure sends no partial ACK");
+    for (int fail_after = 0; fail_after <= 18; ++fail_after) {
+        tbot::SetLessonJsonFailAfterForTest(-1);
+        ResetObservable();
+        FreshSession();
+        Board::GetInstance().display_ = nullptr;
+        SetLessonTransportEpoch(71 + fail_after);
+        Handle(V2PrepareFrame(1));
+        Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+        std::string ack;
+        require(AcceptLessonVisualCompletion(App().lesson_visual_queue.back(), &ack),
+                "visual failpoint fixture completes opening entrance first");
+        App().lesson_visual_queue.clear();
+        std::string visual = V2VisualFrame(3, "thinking", 17);
+        visual = ReplaceOnce(visual, "\"stepId\":\"s2\"",
+                             "\"lessonId\":\"L1\",\"lessonVersion\":3,\"stepId\":\"s2\"");
+        Handle(visual);
+        const LessonQueueItem completion = App().lesson_visual_queue.back();
+        ack.clear();
+        tbot::SetLessonJsonFailAfterForTest(fail_after);
+        require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
+                "visual completion cJSON failure sends no partial ACK");
 
-    tbot::SetLessonJsonFailAfterForTest(-1);
-    ResetObservable();
-    FreshSession();
-    Board::GetInstance().display_ = nullptr;
-    SetLessonTransportEpoch(72);
-    Handle(V2PrepareFrame(1));
-    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
-    completion = App().lesson_visual_queue.back();
-    ack.clear();
-    tbot::SetLessonJsonFailAfterForTest(14);
-    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
-            "visual completion body serialization failure sends no partial ACK");
-
-    tbot::SetLessonJsonFailAfterForTest(-1);
-    ResetObservable();
-    FreshSession();
-    Board::GetInstance().display_ = nullptr;
-    SetLessonTransportEpoch(73);
-    Handle(V2PrepareFrame(1));
-    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
-    completion = App().lesson_visual_queue.back();
-    ack.clear();
-    tbot::SetLessonJsonFailAfterForTest(15);
-    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
-            "visual completion body attach failure sends no partial ACK");
-
-    tbot::SetLessonJsonFailAfterForTest(-1);
-    ResetObservable();
-    FreshSession();
-    Board::GetInstance().display_ = nullptr;
-    SetLessonTransportEpoch(74);
-    Handle(V2PrepareFrame(1));
-    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
-    completion = App().lesson_visual_queue.back();
-    ack.clear();
-    tbot::SetLessonJsonFailAfterForTest(16);
-    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
-            "visual completion envelope serialization failure sends no partial ACK");
+        tbot::SetLessonJsonFailAfterForTest(-1);
+        require(AcceptLessonVisualCompletion(completion, &ack),
+                "visual completion session remains recoverable after cJSON failure");
+        cJSON* recovered = cJSON_Parse(ack.c_str());
+        require(recovered != nullptr &&
+                    cJSON_GetObjectItem(recovered, "sequence")->valueint == 3,
+                "failed visual ACK construction does not consume the outbound sequence");
+        cJSON_Delete(recovered);
+    }
     tbot::SetLessonJsonFailAfterForTest(-1);
 }
 
