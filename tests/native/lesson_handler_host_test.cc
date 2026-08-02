@@ -5846,6 +5846,45 @@ void test_lesson_transport_rejects_decoded_nul_before_cjson_truncation() {
             "raw NUL byte is rejected before parsing");
 }
 
+void test_lesson_asset_reservation_refusal_mapping_is_total() {
+    using Code = LessonAssetReservationCode;
+    struct Case {
+        Code code;
+        const char* expected_code;
+        const char* expected_message;
+        const char* expected_reason;
+        bool expected_retryable;
+    };
+    const Case cases[] = {
+        {Code::kMutationActive, "LESSON_ASSET_MUTATION_ACTIVE",
+         "lesson assets are being updated", "asset_mutation_active", true},
+        {Code::kLessonSessionActive, "LESSON_SESSION_CONFLICT",
+         "another lesson session owns lesson assets", "lesson_session_mismatch", true},
+        {Code::kLessonSessionMismatch, "LESSON_SESSION_CONFLICT",
+         "another lesson session owns lesson assets", "lesson_session_mismatch", true},
+        {Code::kInvalidIdentity, "LESSON_IDENTITY_INVALID",
+         "lesson identity is invalid", "invalid_identity", false},
+        {Code::kGenerationExhausted, "LESSON_RESERVATION_EXHAUSTED",
+         "lesson storage reservation unavailable", "generation_exhausted", false},
+        {Code::kAcquired, "LESSON_RESERVATION_EXHAUSTED",
+         "lesson storage reservation unavailable", "generation_exhausted", false},
+        {static_cast<Code>(0xff), "LESSON_RESERVATION_EXHAUSTED",
+         "lesson storage reservation unavailable", "generation_exhausted", false},
+    };
+
+    for (const auto& c : cases) {
+        const auto mapping = tbot::LessonReservationRefusalMappingForTest(c.code);
+        require(std::string(mapping.code) == c.expected_code,
+                "reservation refusal mapping returns stable error code");
+        require(std::string(mapping.message) == c.expected_message,
+                "reservation refusal mapping returns stable message");
+        require(std::string(mapping.reason) == c.expected_reason,
+                "reservation refusal mapping returns privacy-safe reason");
+        require(mapping.retryable == c.expected_retryable,
+                "reservation refusal mapping returns retryability");
+    }
+}
+
 void test_lesson_asset_reservation_invalid_and_exhausted_prepare() {
     ResetObservable();
     Board::GetInstance().display_ = nullptr;
@@ -5963,6 +6002,39 @@ void test_not_ready_asset_candidate_does_not_commit_lesson_session() {
     Handle(StopFrame(replacement_sequence + 1));
     require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
             "preserved owner can stop after not-ready replacement");
+}
+
+void test_isolated_not_ready_asset_prepare_ack_json_failure_sends_no_empty_frame() {
+    const std::string not_ready_republish =
+        ",\"assignmentVersion\":11,"
+        "\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"republish-abcdef1234567890\",\"assets\":[]}";
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"assignmentVersion\":10"));
+    Handle(StartFrame(2));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent, "json-fail fixture has running owner");
+
+    const size_t sent_before_failure = Sent().size();
+    tbot::SetLessonJsonFailAfterForTest(0);
+    Handle(PrepareFrame(1, not_ready_republish));
+    require(Sent().size() == sent_before_failure,
+            "isolated not-ready prepare ACK JSON failure sends no empty frame");
+
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    Handle(PrepareFrame(1, not_ready_republish));
+    require(Sent().size() == sent_before_failure + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameSeq(Sent().size() - 1) == 1 &&
+                !FrameAssetPackReady(Sent().size() - 1),
+            "isolated not-ready prepare ACK recovers on the same isolated sequence");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(retained.acquired && retained.idempotent && retained.generation == owner.generation,
+            "failed isolated not-ready ACK preserves running owner generation");
+    Handle(StopFrame(3));
 }
 
 void test_republished_not_ready_candidate_uses_isolated_stream() {
@@ -6604,9 +6676,11 @@ int main() {
     test_prepare_pure_contract_validation_precedes_storage_reservation();
     test_prepare_sequence_zero_is_pure_rejection_without_generation_burn();
     test_lesson_transport_rejects_decoded_nul_before_cjson_truncation();
+    test_lesson_asset_reservation_refusal_mapping_is_total();
     test_lesson_asset_reservation_invalid_and_exhausted_prepare();
     test_lesson_asset_reservation_prepare_failure_release_ownership();
     test_not_ready_asset_candidate_does_not_commit_lesson_session();
+    test_isolated_not_ready_asset_prepare_ack_json_failure_sends_no_empty_frame();
     test_republished_not_ready_candidate_uses_isolated_stream();
     test_lesson_asset_reservation_retained_across_runtime_and_terminal_release();
     test_abandon_lesson_storage_session_noop_failure_and_success();

@@ -62,6 +62,34 @@
 namespace {
 std::atomic<int> g_cinematic_json_fail_after{-1};
 
+struct ReservationRefusalMapping {
+    const char* code;
+    const char* message;
+    const char* reason;
+    bool retryable;
+};
+
+ReservationRefusalMapping MapLessonReservationRefusal(LessonAssetReservationCode code) {
+    switch (code) {
+    case LessonAssetReservationCode::kMutationActive:
+        return {"LESSON_ASSET_MUTATION_ACTIVE", "lesson assets are being updated",
+                "asset_mutation_active", true};
+    case LessonAssetReservationCode::kLessonSessionMismatch:
+    case LessonAssetReservationCode::kLessonSessionActive:
+        return {"LESSON_SESSION_CONFLICT", "another lesson session owns lesson assets",
+                "lesson_session_mismatch", true};
+    case LessonAssetReservationCode::kInvalidIdentity:
+        return {"LESSON_IDENTITY_INVALID", "lesson identity is invalid",
+                "invalid_identity", false};
+    case LessonAssetReservationCode::kGenerationExhausted:
+    case LessonAssetReservationCode::kAcquired:
+        return {"LESSON_RESERVATION_EXHAUSTED", "lesson storage reservation unavailable",
+                "generation_exhausted", false};
+    }
+    return {"LESSON_RESERVATION_EXHAUSTED", "lesson storage reservation unavailable",
+            "generation_exhausted", false};
+}
+
 #ifdef TBOT_HOST_NATIVE_COVERAGE
 std::atomic<int> g_lesson_json_fail_after{-1};
 
@@ -155,6 +183,12 @@ void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_fai
                                       std::memory_order_relaxed);
 }
 #ifdef TBOT_HOST_NATIVE_COVERAGE
+LessonReservationRefusalMapping LessonReservationRefusalMappingForTest(
+    LessonAssetReservationCode code) {
+    const auto mapping = MapLessonReservationRefusal(code);
+    return {mapping.code, mapping.message, mapping.reason, mapping.retryable};
+}
+
 void SetLessonJsonFailAfterForTest(int successful_operations_before_failure) {
     g_lesson_json_fail_after.store(successful_operations_before_failure,
                                    std::memory_order_relaxed);
@@ -1731,7 +1765,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         LogLessonAckEvidence(in, body);
         std::string frame = BuildFrame(in, "lesson_ack", 1, body);
-        if (protocol_) protocol_->SendLessonFrame(frame);
+        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
     };
     auto show_lesson_failure_display = [this]() {
         Display* display = Board::GetInstance().GetDisplay();
@@ -2282,38 +2316,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
             LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
                 assignment_id, session_id);
         if (!reservation.acquired) {
-            const char* error_code = "LESSON_RESERVATION_EXHAUSTED";
-            const char* error_message = "lesson storage reservation unavailable";
-            const char* error_reason = "generation_exhausted";
-            bool retryable = false;
-            switch (reservation.code) {
-            case LessonAssetReservationCode::kMutationActive:
-                error_code = "LESSON_ASSET_MUTATION_ACTIVE";
-                error_message = "lesson assets are being updated";
-                error_reason = "asset_mutation_active";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kLessonSessionMismatch:
-            case LessonAssetReservationCode::kLessonSessionActive:
-                error_code = "LESSON_SESSION_CONFLICT";
-                error_message = "another lesson session owns lesson assets";
-                error_reason = "lesson_session_mismatch";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kInvalidIdentity:
-                // Pure envelope validation makes this unreachable in the handler;
-                // retain fail-closed mapping if coordinator validation ever tightens.
-                error_code = "LESSON_IDENTITY_INVALID";  // GCOVR_EXCL_LINE
-                error_message = "lesson identity is invalid";  // GCOVR_EXCL_LINE
-                error_reason = "invalid_identity";  // GCOVR_EXCL_LINE
-                break;  // GCOVR_EXCL_LINE
-            case LessonAssetReservationCode::kGenerationExhausted:
-            case LessonAssetReservationCode::kAcquired:
-                break;
-            }
+            const auto error = MapLessonReservationRefusal(reservation.code);
             emit_isolated_prepare_error(
-                root, MakeErrorBody(error_code, error_message, retryable, error_reason));
-            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s", error_reason);
+                root, MakeErrorBody(error.code, error.message, error.retryable, error.reason));
+            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s", error.reason);
             return;
         }
         prepare_newly_acquired_asset_session = !reservation.idempotent;

@@ -335,7 +335,7 @@ def test_emit_builds_frame_before_guarding_send_so_body_is_always_consumed():
     h = read("main/lesson_handler.cc")
     emit_start = h.index("auto emit = [this]")
     build = h.index("BuildFrame(in, frame_type, seq, frame_body)", emit_start)
-    guard = h.index("if (protocol_) protocol_->SendLessonFrame(frame)", emit_start)
+    guard = h.index("if (protocol_ && !frame.empty())", emit_start)
     # BuildFrame (the sole consumer of frame_body) is called unconditionally, BEFORE
     # the protocol_ guard, so frame_body is freed even when protocol_ is null.
     assert build < guard
@@ -459,6 +459,10 @@ def test_prepare_handles_every_storage_reservation_refusal_before_io():
     prepare_end = h.index('if (strcmp(type, "lesson_start") == 0)', prepare_start)
     prepare = h[prepare_start:prepare_end]
     refusal = prepare[:prepare.index("BuildAssetPackAck(body)")]
+    helper_start = h.index("ReservationRefusalMapping MapLessonReservationRefusal")
+    helper_end = h.index("#ifdef TBOT_HOST_NATIVE_COVERAGE", helper_start)
+    helper = h[helper_start:helper_end]
+    assert "MapLessonReservationRefusal(reservation.code)" in refusal
     for code in (
         "LessonAssetReservationCode::kMutationActive",
         "LessonAssetReservationCode::kLessonSessionMismatch",
@@ -469,7 +473,7 @@ def test_prepare_handles_every_storage_reservation_refusal_before_io():
         '"LESSON_IDENTITY_INVALID"',
         '"LESSON_RESERVATION_EXHAUSTED"',
     ):
-        assert code in refusal
+        assert code in helper
 
 
 def test_terminal_lesson_paths_release_exact_storage_generation_without_force():
