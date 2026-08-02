@@ -76,6 +76,7 @@ void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_fai
 #ifdef TBOT_HOST_NATIVE_COVERAGE
 void SetLessonJsonFailAfterForTest(int successful_operations_before_failure);
 void SetLessonVisualCompletionNonceForTest(std::uint64_t value);
+void ClearLessonAckReplayHistoryForTest();
 #endif
 }
 

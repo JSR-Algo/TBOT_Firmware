@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <array>
 #include <set>
 #include <deque>
 #include <map>
@@ -382,6 +383,20 @@ bool ExactObjectKeys(const cJSON* object, const std::set<std::string_view>& expe
     return count == expected.size();
 }
 
+template <std::size_t N>
+bool ExactObjectKeys(const cJSON* object, const std::array<std::string_view, N>& expected) {
+    if (!cJSON_IsObject(object)) return false;
+    size_t count = 0;
+    for (const cJSON* item = object->child; item != nullptr; item = item->next) {
+        if (item->string == nullptr ||
+            std::find(expected.begin(), expected.end(), std::string_view(item->string)) == expected.end()) {
+            return false;
+        }
+        ++count;
+    }
+    return count == expected.size();
+}
+
 bool ExactPositiveInteger(const cJSON* object, const char* key) {
     double value = 0;
     return Num(object, key, value) && std::isfinite(value) && value > 0 &&
@@ -404,7 +419,7 @@ bool ExactString(const cJSON* object, const char* key, const char* expected) {
 }
 
 bool ValidOpeningEntrance(const cJSON* entrance) {
-    static const std::set<std::string_view> kKeys = {
+    constexpr std::array<std::string_view, 6> kKeys = {
         "preset", "policy", "layoutPreset", "backgroundAssetKey", "robotAssetKey", "fallback",
     };
     const char* layout = Str(entrance, "layoutPreset");
@@ -421,17 +436,18 @@ bool ValidOpeningEntrance(const cJSON* entrance) {
 }
 
 bool ValidVisualStateContract(const cJSON* root, std::uint64_t* visual_generation) {
-    static const std::set<std::string_view> kKeys = {
+    constexpr std::array<std::string_view, 4> kKeys = {
         "state", "overlayKey", "motionPreset", "visualGeneration",
     };
-    static const std::set<std::string_view> kStates = {
+    constexpr std::array<std::string_view, 9> kStates = {
         "teach", "listen", "thinking", "correct", "nearMiss", "incorrect",
         "retry", "celebrate", "completion",
     };
     const cJSON* body = Obj(root, "body");
     const char* state = Str(body, "state");
     return ExactObjectKeys(body, kKeys) && state != nullptr &&
-           kStates.find(state) != kStates.end() && !Blank(Str(body, "overlayKey")) &&
+           std::find(kStates.begin(), kStates.end(), std::string_view(state)) != kStates.end() &&
+           !Blank(Str(body, "overlayKey")) &&
            !Blank(Str(body, "motionPreset")) &&
            ExactUint64(body, "visualGeneration", visual_generation) &&
            IsValidLessonIdentity(Str(root, "stepId"));
@@ -681,6 +697,9 @@ std::uint64_t NextVisualCompletionNonce() {
 namespace tbot {
 void SetLessonVisualCompletionNonceForTest(std::uint64_t value) {
     g_visual_completion_nonce.store(value, std::memory_order_relaxed);
+}
+void ClearLessonAckReplayHistoryForTest() {
+    g_session.ack_history.clear();
 }
 }  // namespace tbot
 namespace {

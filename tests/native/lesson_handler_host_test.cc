@@ -1487,6 +1487,104 @@ void test_buildframe_failure_does_not_consume_outbound_sequence() {
     tbot::SetLessonJsonFailAfterForTest(-1);
 }
 
+void test_buildframe_missing_required_protocol_sends_no_partial_error() {
+    ResetObservable();
+    FreshSession();
+    Handle(std::string("{\"type\":\"lesson_prepare\",\"assignmentId\":\"") + AID() +
+           "\",\"sessionId\":\"" + SID() +
+           "\",\"sequence\":1,\"body\":{\"profile\":\"espTft\"}}");
+    require(Sent().empty(),
+            "BuildFrame drops an error envelope that cannot echo required protocolVersion");
+}
+
+void test_renderer_v2_valid_opening_entrance_contract_acks_center_road() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(display.entrance_start_calls == 1 &&
+                display.last_entrance_layout == "centerRoad",
+            "valid renderer-v2 opening entrance reaches the LVGL center-road entrance");
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 2 &&
+                FrameBodyBool(Sent().size() - 1, "accepted", false),
+            "valid renderer-v2 opening entrance completion emits the correlated ACK");
+}
+
+void test_renderer_v2_valid_visual_state_contract_enqueues_static_completion() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+
+    Handle(V2VisualFrameWithStepId(3, "valid-step", 2));
+    require(display.visual_state_calls == 1 &&
+                display.last_emotion == "thinking" &&
+                display.last_status == "Đang suy nghĩ...",
+            "valid renderer-v2 visual state contract reaches static LVGL state");
+    require(App().lesson_visual_queue.empty(),
+            "valid renderer-v2 visual state waits for display completion callback");
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameStepId(Sent().size() - 1) == "valid-step" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 3 &&
+                FrameBodyNum(Sent().size() - 1, "visualGeneration") == 2 &&
+                FrameBodyBool(Sent().size() - 1, "accepted", false),
+            "valid renderer-v2 visual state completion emits the correlated ACK");
+}
+
+void test_renderer_v2_contracts_reject_unexpected_and_duplicate_keys() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2,
+        "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
+        "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
+        "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"staticGreet\","
+        "\"unexpected\":true}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "renderer-v2 opening entrance rejects unexpected contract keys");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2,
+        "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
+        "\"layoutPreset\":\"centerRoad\",\"backgroundAssetKey\":\"scene.farm\","
+        "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"staticGreet\","
+        "\"policy\":\"oncePerLessonSession\"}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "renderer-v2 opening entrance rejects duplicate accepted contract keys");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    Handle(std::string("{\"type\":\"lesson_visual_state\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"stepId\":\"valid-step\",\"sequence\":3,"
+           "\"body\":{\"state\":\"thinking\",\"overlayKey\":\"thinking\","
+           "\"motionPreset\":\"encourage\",\"visualGeneration\":2,"
+           "\"overlayKey\":\"thinking\"}}");
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "renderer-v2 visual state rejects duplicate accepted contract keys");
+}
+
 void test_renderer_v2_start_and_visual_contracts_fail_closed() {
     ResetObservable();
     FreshSession();
@@ -6380,6 +6478,32 @@ void test_ack_replay_window_handles_delayed_and_expired_duplicates() {
             "duplicate outside replay window receives conservative ack");
 }
 
+void test_duplicate_prepare_replays_cached_ack_summary_when_history_is_unavailable() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    const std::string ready_file_name = "tbot-task8-cached-last-ready.bin";
+    const std::string ready_pack = ReadyAssetPackExtra(
+        "ck-task8-cached-last-abcdef1234567890",
+        "abcdef1234567890",
+        ready_file_name);
+    Handle(PrepareFrame(1, ready_pack));
+    require(FrameType(0) == "lesson_ack" && FrameHasAssetPack(0) && FrameAssetPackReady(0),
+            "baseline prepare caches a ready assetPack ACK body");
+
+    tbot::ClearLessonAckReplayHistoryForTest();
+    Handle(PrepareFrame(1, ready_pack));
+    RemoveReadyAssetPackFixture(ready_file_name);
+    require(Sent().size() == 2 &&
+                FrameType(1) == "lesson_ack" &&
+                FrameBodyNum(1, "acks") == 1 &&
+                !FrameBodyBool(1, "rendered", true) &&
+                !FrameBodyBool(1, "degraded", true) &&
+                FrameHasAssetPack(1) &&
+                FrameAssetPackReady(1),
+            "duplicate prepare falls back to cached last ACK summary and assetPack when replay history is unavailable");
+}
+
 void test_layer_install_timeout_degrades_without_committing_layer_state() {
     ResetObservable();
     LvglDisplay disp;
@@ -6442,6 +6566,10 @@ int main() {
     test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom();
     test_generic_lesson_json_failures_drop_partial_frames_and_clean_up();
     test_buildframe_failure_does_not_consume_outbound_sequence();
+    test_buildframe_missing_required_protocol_sends_no_partial_error();
+    test_renderer_v2_valid_opening_entrance_contract_acks_center_road();
+    test_renderer_v2_valid_visual_state_contract_enqueues_static_completion();
+    test_renderer_v2_contracts_reject_unexpected_and_duplicate_keys();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_opening_layouts_and_visual_generation_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
@@ -6557,6 +6685,7 @@ int main() {
     test_step_evidence_telemetry_and_privacy_safe_logs();
     test_teaching_word_telemetry_reuse_and_duplicate_ack_parity();
     test_ack_replay_window_handles_delayed_and_expired_duplicates();
+    test_duplicate_prepare_replays_cached_ack_summary_when_history_is_unavailable();
     test_layer_install_timeout_degrades_without_committing_layer_state();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
