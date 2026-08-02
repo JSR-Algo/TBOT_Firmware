@@ -103,6 +103,8 @@ public:
 
 #ifdef TBOT_LESSON_ASSET_COORDINATOR_TESTING
     bool SetLastGenerationForTest(std::uint64_t generation);
+    void ResetLessonSessionReservationAttemptsForTest();
+    std::uint64_t LessonSessionReservationAttemptsForTest() const;
 #endif
 
     LessonAssetStorageCoordinator(const LessonAssetStorageCoordinator&) = delete;
@@ -133,6 +135,9 @@ private:
     std::uint64_t lesson_session_generation_ = 0;
     std::size_t lesson_readers_ = 0;
     std::uint64_t last_generation_ = 0;
+#ifdef TBOT_LESSON_ASSET_COORDINATOR_TESTING
+    std::uint64_t lesson_session_reservation_attempts_for_test_ = 0;
+#endif
     std::optional<tbot::SdFatSessionLease> lesson_sd_session_;
 };
 

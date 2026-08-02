@@ -5546,6 +5546,37 @@ void test_lesson_asset_reservation_duplicate_and_foreign_prepare() {
             "foreign refusal does not advance owner F->S sequence");
 }
 
+void test_normal_prepare_consumes_one_storage_reservation_attempt_and_generation() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    require(coordinator.SetLastGenerationForTest(100),
+            "single-reservation test seeds coordinator generation while idle");
+    coordinator.ResetLessonSessionReservationAttemptsForTest();
+
+    Handle(PrepareFrame(1));
+
+    require(FrameType(0) == "lesson_ack", "normal prepare is accepted");
+    require(coordinator.LessonSessionReservationAttemptsForTest() == 1,
+            "normal prepare performs exactly one storage reservation attempt");
+    auto owner = coordinator.TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent && owner.generation == 101,
+            "normal prepare owns exactly the next coordinator generation");
+    require(coordinator.LessonSessionReservationAttemptsForTest() == 2,
+            "test generation inspection accounts for its own idempotent reservation");
+    require(App().AbandonLessonStorageSession(),
+            "single-reservation test releases prepared lesson owner");
+
+    auto next = coordinator.TryBeginLessonSession("next-assignment", "next-session");
+    require(next.acquired && !next.idempotent && next.generation == 102,
+            "next lesson owner receives the next generation after one consumed prepare");
+    require(coordinator.EndLessonSession("next-assignment", "next-session", next.generation),
+            "single-reservation test releases next owner");
+    require(coordinator.SetLastGenerationForTest(0),
+            "single-reservation test restores coordinator generation");
+}
+
 void test_prepare_pure_contract_validation_precedes_storage_reservation() {
     ResetObservable();
     FreshSession();
@@ -6441,6 +6472,7 @@ int main() {
     test_prepare_assetpack_requires_manifest_checksum_before_ack();
     test_lesson_asset_reservation_blocks_prepare_before_asset_io();
     test_lesson_asset_reservation_duplicate_and_foreign_prepare();
+    test_normal_prepare_consumes_one_storage_reservation_attempt_and_generation();
     test_prepare_pure_contract_validation_precedes_storage_reservation();
     test_prepare_sequence_zero_is_pure_rejection_without_generation_burn();
     test_lesson_transport_rejects_decoded_nul_before_cjson_truncation();

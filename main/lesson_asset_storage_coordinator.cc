@@ -155,6 +155,9 @@ LessonAssetSessionResult LessonAssetStorageCoordinator::TryBeginLessonSession(
     std::string validated_assignment_id(assignment_id);
     std::string validated_session_id(session_id);
     std::lock_guard<std::mutex> lock(mutex_);
+#ifdef TBOT_LESSON_ASSET_COORDINATOR_TESTING
+    ++lesson_session_reservation_attempts_for_test_;
+#endif
     if (mutation_active_) {
         return {LessonAssetReservationCode::kMutationActive, false, false, 0};
     }
@@ -265,6 +268,16 @@ bool LessonAssetStorageCoordinator::SetLastGenerationForTest(
     }
     last_generation_ = generation;
     return true;
+}
+
+void LessonAssetStorageCoordinator::ResetLessonSessionReservationAttemptsForTest() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    lesson_session_reservation_attempts_for_test_ = 0;
+}
+
+std::uint64_t LessonAssetStorageCoordinator::LessonSessionReservationAttemptsForTest() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return lesson_session_reservation_attempts_for_test_;
 }
 #endif
 
