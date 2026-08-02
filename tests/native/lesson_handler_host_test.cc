@@ -392,6 +392,11 @@ std::string V2PauseFrame(int seq) {
            kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\",\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
 }
+std::string V2ResumeFrame(int seq) {
+    return std::string("{\"type\":\"lesson_resume\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
+}
 std::string StopFrame(int seq, const std::string& body = "") {
     return std::string("{\"type\":\"lesson_stop\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -627,10 +632,17 @@ struct V3RendererFake {
     int closes = 0;
     int presents = 0;
     std::vector<std::string> opened_paths;
+    bool fail_allocate = false;
     bool fail_open = false;
+    bool fail_decode = false;
+    bool fail_present = false;
+    tbot::LessonCinematicError operation_error = tbot::LessonCinematicError::kNone;
+    std::uint64_t monotonic_ms = 0;
+    std::uint64_t monotonic_step_ms = 0;
 };
 
 void* V3Allocate(void* context, std::size_t size) {
+    if (static_cast<V3RendererFake*>(context)->fail_allocate) return nullptr;
     void* allocation = std::malloc(size);
     if (allocation != nullptr) ++static_cast<V3RendererFake*>(context)->allocations;
     return allocation;
@@ -652,8 +664,9 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     return true;
 }
 void V3Close(void* context, void*) { ++static_cast<V3RendererFake*>(context)->closes; }
-bool V3Decode(void*, void*, std::size_t, std::uint8_t* destination, std::size_t capacity,
+bool V3Decode(void* context, void*, std::size_t, std::uint8_t* destination, std::size_t capacity,
               std::uint16_t* width, std::uint16_t* height, std::size_t* stride) {
+    if (static_cast<V3RendererFake*>(context)->fail_decode) return false;
     const bool background = capacity >= 480u * 320u * 2u;
     *width = background ? 480 : 2;
     *height = background ? 320 : 2;
@@ -663,8 +676,164 @@ bool V3Decode(void*, void*, std::size_t, std::uint8_t* destination, std::size_t 
 }
 bool V3Present(void* context, const std::uint16_t*, std::uint16_t, std::uint16_t,
                std::size_t) {
-    ++static_cast<V3RendererFake*>(context)->presents;
-    return true;
+    auto* fake = static_cast<V3RendererFake*>(context);
+    ++fake->presents;
+    return !fake->fail_present;
+}
+tbot::LessonCinematicError V3LastError(void* context) {
+    return static_cast<V3RendererFake*>(context)->operation_error;
+}
+std::uint64_t V3MonotonicMs(void* context) {
+    auto* fake = static_cast<V3RendererFake*>(context);
+    const std::uint64_t now = fake->monotonic_ms;
+    fake->monotonic_ms += fake->monotonic_step_ms;
+    return now;
+}
+
+void test_cinematic_rejects_unsupported_frames_and_accepts_all_late_phases() {
+    ResetObservable();
+    FreshSession();
+    Handle(V3Frame("lesson_visual_state", 1, "{}"));
+    require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_COMMAND_UNSUPPORTED" &&
+                FrameBodyStr(0, "context", "reason") == "command",
+            "cinematic renderer rejects unsupported frame types with the stable command error");
+
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                             V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    int sequence = 1;
+    std::uint64_t command_sequence = 101;
+    for (const char* phase : {"thinking", "correct", "retry", "celebrate"}) {
+        ResetObservable();
+        FreshSession();
+        const std::string frame = ReplaceOnce(
+            V3PrepareFrame(sequence++, command_sequence++),
+            "\"phaseId\":\"opening\"", std::string("\"phaseId\":\"") + phase + "\"");
+        Handle(frame);
+        require(Sent().size() == 1 && FrameType(0) == "lesson_ack" &&
+                    FrameBodyStr(0, "cinematicPhase", "phaseId") == phase &&
+                    FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady",
+                "late cinematic phase alternatives are accepted and echoed in the typed ACK");
+    }
+    Handle(V3Frame("lesson_cinematic_control", sequence,
+        std::string("{\"command\":\"cancel\",\"phaseId\":\"celebrate\","
+                    "\"commandSequenceId\":") + std::to_string(command_sequence) + "}"));
+    require(FrameType(Sent().size() - 1) == "lesson_ack",
+            "late-phase cinematic fixture releases its active handler session");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
+void test_cinematic_renderer_failures_use_stable_error_mapping() {
+    enum class FailureMode { kOpen, kAllocate, kDecode, kTimeout, kPresent };
+    struct FailureCase {
+        FailureMode mode;
+        tbot::LessonCinematicError operation_error;
+        const char* expected_code;
+    };
+    const FailureCase cases[] = {
+        {FailureMode::kOpen, tbot::LessonCinematicError::kParserFailed,
+         "CINEMATIC_PARSER_FAILED"},
+        {FailureMode::kDecode, tbot::LessonCinematicError::kFileRead,
+         "CINEMATIC_FILE_READ_FAILED"},
+        {FailureMode::kOpen, tbot::LessonCinematicError::kSessionMismatch,
+         "CINEMATIC_SESSION_MISMATCH"},
+        {FailureMode::kAllocate, tbot::LessonCinematicError::kNone,
+         "CINEMATIC_INSUFFICIENT_PSRAM"},
+        {FailureMode::kDecode, tbot::LessonCinematicError::kNone,
+         "CINEMATIC_DECODE_FAILED"},
+        {FailureMode::kTimeout, tbot::LessonCinematicError::kNone,
+         "CINEMATIC_DECODE_TIMEOUT"},
+        {FailureMode::kPresent, tbot::LessonCinematicError::kNone,
+         "CINEMATIC_PRESENT_FAILED"},
+    };
+
+    int sequence = 1;
+    std::uint64_t command_sequence = 201;
+    for (const auto& failure : cases) {
+        ResetObservable();
+        FreshSession();
+        V3RendererFake fake;
+        fake.operation_error = failure.operation_error;
+        fake.fail_open = failure.mode == FailureMode::kOpen;
+        fake.fail_allocate = failure.mode == FailureMode::kAllocate;
+        fake.fail_decode = failure.mode == FailureMode::kDecode;
+        fake.fail_present = failure.mode == FailureMode::kPresent;
+        fake.monotonic_step_ms = failure.mode == FailureMode::kTimeout ? 101 : 0;
+        tbot::LessonFlattenedCinematicRenderer renderer(
+            {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present,
+             V3LastError, failure.mode == FailureMode::kTimeout ? V3MonotonicMs : nullptr});
+        tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+
+        Handle(V4PrepareFrame(sequence++, command_sequence++));
+        require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == failure.expected_code &&
+                    FrameBodyStr(0, "context", "reason") == "cinematicPhase",
+                "cinematic renderer failure maps to its stable outbound error code");
+        require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession() &&
+                    fake.allocations == fake.frees && fake.opens == fake.closes,
+                "rejected v4 prepare releases its newly acquired lease and renderer resources");
+        tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+    }
+}
+
+void test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake v4_fake;
+    tbot::LessonFlattenedCinematicRenderer v4_renderer(
+        {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&v4_renderer);
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "v4 reservation-refusal fixture holds mutation lease");
+        Handle(V4PrepareFrame(1));
+        require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "CINEMATIC_SD_PATH_MISSING" &&
+                    v4_fake.allocations == 0 && v4_fake.opens == 0,
+                "v4 reservation refusal emits the stable path error before renderer work");
+    }
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+
+    ResetObservable();
+    FreshSession();
+    V3RendererFake v3_fake;
+    tbot::LessonCinematicRenderer v3_renderer(
+        {&v3_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "v3 reservation-refusal fixture holds mutation lease");
+        Handle(V3PrepareFrame(1));
+        require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "CINEMATIC_SD_PATH_MISSING" &&
+                    v3_fake.allocations == 0 && v3_fake.opens == 0,
+                "v3 reservation refusal emits the stable path error before renderer work");
+    }
+
+    ResetObservable();
+    FreshSession();
+    v3_fake.fail_open = true;
+    Handle(V3PrepareFrame(2, 302));
+    require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_SD_PATH_MISSING" &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession() &&
+                v3_fake.allocations == v3_fake.frees,
+            "rejected v3 renderer prepare releases its new reservation and allocations");
+
+    ResetObservable();
+    FreshSession();
+    v3_fake.fail_open = false;
+    std::string invalid_chroma = ReplaceOnce(
+        V3PrepareFrame(3, 303), "\"keyColor\":\"#00ff00\"",
+        "\"keyColor\":\"#zzzzzz\"");
+    Handle(invalid_chroma);
+    require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                v3_fake.opens == 0,
+            "v3 chroma sscanf failure rejects metadata before renderer work");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
 void test_renderer_v4_capability_and_exact_single_asset_routing() {
@@ -1670,6 +1839,176 @@ void test_renderer_v2_old_completion_cannot_claim_reused_identity() {
                 FrameType(Sent().size() - 1) == "lesson_ack" &&
                 FrameBodyNum(Sent().size() - 1, "acks") == 2,
             "replacement completion alone emits the reused sequence ACK");
+}
+
+void test_renderer_v2_visual_outside_running_session_is_dropped() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    const size_t frames_before_visual = Sent().size();
+    Handle(V2VisualFrame(2, "thinking", 17));
+    require(Sent().size() == frames_before_visual && display.visual_state_calls == 0 &&
+                App().lesson_visual_queue.empty(),
+            "renderer-v2 visual outside a running session is dropped without display or ACK work");
+}
+
+void test_renderer_v2_repeated_start_acks_once_and_resume_restores_teach_state() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(41);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+    const int entrance_calls = display.entrance_start_calls;
+
+    Handle(V2StartFrame(3, ValidV2OpeningEntrance()));
+    require(Sent().size() == 3 && FrameType(2) == "lesson_ack" &&
+                FrameBodyNum(2, "acks") == 3 && display.entrance_start_calls == entrance_calls &&
+                App().lesson_visual_queue.empty(),
+            "repeated renderer-v2 start emits an immediate correlated ACK without replaying entrance");
+
+    Handle(V2PauseFrame(4));
+    const int visual_calls_after_pause = display.visual_state_calls;
+    Handle(V2ResumeFrame(5));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 5 &&
+                display.visual_state_calls == visual_calls_after_pause + 1 &&
+                display.last_visual_state == LessonVisualStateKind::kTeach &&
+                !display.lesson_mode_calls.empty() && display.lesson_mode_calls.back(),
+            "renderer-v2 resume restores the static teach state and lesson mode before ACK");
+}
+
+void test_renderer_v2_verified_opening_assets_and_identity_mismatch() {
+    const char* fixture_root = "/tmp/tbot-v2-opening-assets";
+    require(system("mkdir -p /tmp/tbot-v2-opening-assets") == 0,
+            "renderer-v2 opening asset directory is staged");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", fixture_root, 1);
+    const std::vector<unsigned char> jpeg = JpegBody();
+    for (const char* name : {"scene.farm", "robotOverlay.teach"}) {
+        const std::string path = std::string(fixture_root) + "/" + name;
+        FILE* file = fopen(path.c_str(), "wb");
+        require(file != nullptr, "renderer-v2 opening JPEG fixture opens");
+        require(fwrite(jpeg.data(), 1, jpeg.size(), file) == jpeg.size(),
+                "renderer-v2 opening JPEG fixture writes completely");
+        fclose(file);
+    }
+    const std::string checksum = "abcdef1234567890";
+    const std::string ready_assets =
+        ",\"manifestRef\":{\"manifestChecksum\":\"" + checksum +
+        "\"},\"assetPack\":{\"cacheKey\":\"opening-" + checksum +
+        "\",\"assets\":["
+        "{\"key\":\"scene.farm\",\"state\":\"READY\",\"checksumOk\":true,"
+        "\"localPath\":\"sd://sdcard/tbot/lesson-assets/scene.farm\",\"size\":" +
+        std::to_string(jpeg.size()) + "},"
+        "{\"key\":\"robotOverlay.teach\",\"state\":\"READY\",\"checksumOk\":true,"
+        "\"localPath\":\"sd://sdcard/tbot/lesson-assets/robotOverlay.teach\",\"size\":" +
+        std::to_string(jpeg.size()) + "}]}";
+
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    HostJpegDecodeMode() = 0;
+    Handle(V2PrepareFrame(1, ready_assets));
+    require(FrameAssetPackReady(0), "verified renderer-v2 opening asset pack is ready");
+    SetLessonTransportEpoch(42);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(!display.background_calls.empty() && display.background_calls.back() &&
+                !display.overlay_calls.empty() && display.overlay_calls.back() &&
+                display.entrance_start_calls == 1 && App().lesson_visual_queue.empty(),
+            "verified opening background and robot assets install before entrance begins");
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 2,
+            "verified opening asset entrance completion emits its correlated ACK");
+
+    const std::string background_only_assets =
+        ",\"manifestRef\":{\"manifestChecksum\":\"" + checksum +
+        "\"},\"assetPack\":{\"cacheKey\":\"opening-mismatch-" + checksum +
+        "\",\"assets\":["
+        "{\"key\":\"scene.farm\",\"state\":\"READY\",\"checksumOk\":true,"
+        "\"localPath\":\"sd://sdcard/tbot/lesson-assets/scene.farm\",\"size\":" +
+        std::to_string(jpeg.size()) + "}]}";
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1, background_only_assets));
+    SetLessonTransportEpoch(43);
+    const int entrance_calls_before_mismatch = display.entrance_start_calls;
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kRejected &&
+                std::string(App().lesson_visual_queue.front().degraded_reason) ==
+                    "assetIdentityMismatch" &&
+                display.entrance_start_calls == entrance_calls_before_mismatch,
+            "opening asset identity mismatch queues rejection without starting entrance");
+    App().DrainLessonVisualQueue();
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                !FrameBodyBool(Sent().size() - 1, "accepted", true) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "assetIdentityMismatch",
+            "opening asset identity mismatch drains to the exact stable negative ACK");
+
+    remove("/tmp/tbot-v2-opening-assets/scene.farm");
+    remove("/tmp/tbot-v2-opening-assets/robotOverlay.teach");
+    rmdir(fixture_root);
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_renderer_v2_stale_visual_callback_and_non_lvgl_degraded_completion() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(44);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+
+    App().defer_scheduled_callbacks = true;
+    const int visual_calls_before_deferred = display.visual_state_calls;
+    const int emotion_calls_before_deferred = display.set_emotion_calls;
+    Handle(V2VisualFrame(3, "thinking", 17));
+    Handle(V2PauseFrame(4));
+    const size_t frames_after_pause = Sent().size();
+    App().FlushScheduledCallbacks();
+    require(display.visual_state_calls == visual_calls_before_deferred + 1 &&
+                display.set_emotion_calls == emotion_calls_before_deferred &&
+                App().lesson_visual_queue.empty() && Sent().size() == frames_after_pause,
+            "stale deferred visual callback returns before display mutation or late ACK");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    SetLessonTransportEpoch(45);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+    NoDisplay non_lvgl;
+    Board::GetInstance().display_ = &non_lvgl;
+    Handle(V2VisualFrame(3, "thinking", 18));
+    require(non_lvgl.last_emotion == "thinking" && non_lvgl.last_status == "Đang suy nghĩ..." &&
+                App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kDegraded &&
+                std::string(App().lesson_visual_queue.front().degraded_reason) == "missingOverlay",
+            "non-LVGL visual applies child-visible state and queues degraded completion");
+    App().DrainLessonVisualQueue();
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 3 &&
+                FrameBodyBool(Sent().size() - 1, "accepted", false) &&
+                FrameBodyBool(Sent().size() - 1, "degraded", false) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") == "missingOverlay",
+            "non-LVGL degraded visual completion drains to the exact correlated ACK");
 }
 
 void test_prepare_assetpack_not_ready_branches() {
@@ -5883,6 +6222,9 @@ int main() {
     test_prepare_basic();
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v3_capability_is_fail_closed_until_initialized();
+    test_cinematic_rejects_unsupported_frames_and_accepts_all_late_phases();
+    test_cinematic_renderer_failures_use_stable_error_mapping();
+    test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v4_numeric_narrowing_rejects_before_renderer_work();
     test_renderer_v4_fresh_prepare_resets_session_sequence_stream();
@@ -5904,6 +6246,10 @@ int main() {
     test_renderer_v2_start_ack_is_serialized_before_early_step_ack();
     test_renderer_v2_start_ack_is_serialized_before_early_visual_ack();
     test_renderer_v2_old_completion_cannot_claim_reused_identity();
+    test_renderer_v2_visual_outside_running_session_is_dropped();
+    test_renderer_v2_repeated_start_acks_once_and_resume_restores_teach_state();
+    test_renderer_v2_verified_opening_assets_and_identity_mismatch();
+    test_renderer_v2_stale_visual_callback_and_non_lvgl_degraded_completion();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
     test_prepare_assetpack_derives_local_path_from_root_and_key();
