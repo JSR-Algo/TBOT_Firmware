@@ -60,6 +60,56 @@
 namespace {
 std::atomic<int> g_cinematic_json_fail_after{-1};
 
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+std::atomic<int> g_lesson_json_fail_after{-1};
+
+bool LessonJsonOperationAllowed() {
+    int remaining = g_lesson_json_fail_after.load(std::memory_order_relaxed);
+    while (remaining >= 0) {
+        if (remaining == 0) return false;
+        if (g_lesson_json_fail_after.compare_exchange_weak(
+                remaining, remaining - 1, std::memory_order_relaxed)) return true;
+    }
+    return true;
+}
+
+cJSON* LessonJsonCreateObject() {
+    return LessonJsonOperationAllowed() ? cJSON_CreateObject() : nullptr;
+}
+
+cJSON* LessonJsonAddString(cJSON* object, const char* key, const char* value) {
+    return LessonJsonOperationAllowed() ? cJSON_AddStringToObject(object, key, value) : nullptr;
+}
+
+cJSON* LessonJsonAddNumber(cJSON* object, const char* key, double value) {
+    return LessonJsonOperationAllowed() ? cJSON_AddNumberToObject(object, key, value) : nullptr;
+}
+
+cJSON* LessonJsonAddBool(cJSON* object, const char* key, bool value) {
+    return LessonJsonOperationAllowed() ? cJSON_AddBoolToObject(object, key, value) : nullptr;
+}
+
+cJSON* LessonJsonAddNull(cJSON* object, const char* key) {
+    return LessonJsonOperationAllowed() ? cJSON_AddNullToObject(object, key) : nullptr;
+}
+
+cJSON_bool LessonJsonAttachItem(cJSON* object, const char* key, cJSON* item) {
+    return LessonJsonOperationAllowed() ? cJSON_AddItemToObject(object, key, item) : false;
+}
+
+char* LessonJsonPrintUnformatted(const cJSON* item) {
+    return LessonJsonOperationAllowed() ? cJSON_PrintUnformatted(item) : nullptr;
+}
+#else
+#define LessonJsonCreateObject cJSON_CreateObject
+#define LessonJsonAddString cJSON_AddStringToObject
+#define LessonJsonAddNumber cJSON_AddNumberToObject
+#define LessonJsonAddBool cJSON_AddBoolToObject
+#define LessonJsonAddNull cJSON_AddNullToObject
+#define LessonJsonAttachItem cJSON_AddItemToObject
+#define LessonJsonPrintUnformatted cJSON_PrintUnformatted
+#endif
+
 bool CinematicJsonOperationAllowed() {
     int remaining = g_cinematic_json_fail_after.load(std::memory_order_relaxed);
     while (remaining >= 0) {
@@ -95,6 +145,12 @@ void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_fai
     g_cinematic_json_fail_after.store(successful_operations_before_failure,
                                       std::memory_order_relaxed);
 }
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+void SetLessonJsonFailAfterForTest(int successful_operations_before_failure) {
+    g_lesson_json_fail_after.store(successful_operations_before_failure,
+                                   std::memory_order_relaxed);
+}
+#endif
 }  // namespace tbot
 
 void AddLessonRendererFeatures(cJSON* features) {
@@ -535,11 +591,11 @@ bool ValidTvideoProjection(const cJSON* projection) {
 // lessonVersion a NUMBER on the wire).
 void CopyStr(cJSON* dst, const cJSON* src, const char* k) {
     const char* v = Str(src, k);
-    if (v != nullptr) cJSON_AddStringToObject(dst, k, v);
+    if (v != nullptr) LessonJsonAddString(dst, k, v);
 }
 void CopyNum(cJSON* dst, const cJSON* src, const char* k) {
     double v = 0.0;
-    if (Num(src, k, v)) cJSON_AddNumberToObject(dst, k, v);
+    if (Num(src, k, v)) LessonJsonAddNumber(dst, k, v);
 }
 
 int64_t NowMs() { return static_cast<int64_t>(time(nullptr)) * 1000LL; }
@@ -635,24 +691,24 @@ void ClearTerminalLessonCursor() {
 // sessionId/lessonId/lessonVersion/stepId) is echoed verbatim from the inbound
 // frame; the firmware owns only type/sequence/timestamp/body. `body` is consumed.
 std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON* body) {
-    cJSON* root = cJSON_CreateObject();
+    cJSON* root = LessonJsonCreateObject();
     if (root == nullptr || body == nullptr) {
         cJSON_Delete(root);
         cJSON_Delete(body);
         return "";
     }
-    cJSON_AddStringToObject(root, "type", type);
+    LessonJsonAddString(root, "type", type);
     CopyStr(root, in, "protocolVersion");
     CopyStr(root, in, "assignmentId");
     CopyStr(root, in, "sessionId");
     CopyStr(root, in, "lessonId");
     CopyNum(root, in, "lessonVersion");                 // NUMBER on the wire (D-LV)
     const char* step_id = Str(in, "stepId");            // echoed: "s4" on steps, null on lifecycle
-    if (step_id != nullptr) cJSON_AddStringToObject(root, "stepId", step_id);
-    else                    cJSON_AddNullToObject(root, "stepId");
-    cJSON_AddNumberToObject(root, "sequence", static_cast<double>(fs_seq));
-    cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(NowMs()));
-    if (!cJSON_AddItemToObject(root, "body", body)) {
+    if (step_id != nullptr) LessonJsonAddString(root, "stepId", step_id);
+    else                    LessonJsonAddNull(root, "stepId");
+    LessonJsonAddNumber(root, "sequence", static_cast<double>(fs_seq));
+    LessonJsonAddNumber(root, "timestamp", static_cast<double>(NowMs()));
+    if (!LessonJsonAttachItem(root, "body", body)) {
         cJSON_Delete(body);
         cJSON_Delete(root);
         return "";
@@ -668,7 +724,7 @@ std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON*
         cJSON_Delete(root);
         return "";
     }
-    char* s = cJSON_PrintUnformatted(root);
+    char* s = LessonJsonPrintUnformatted(root);
     std::string out = (s != nullptr) ? std::string(s) : std::string();
     if (s != nullptr) cJSON_free(s);
     cJSON_Delete(root);
@@ -729,13 +785,13 @@ void LogLessonAckEvidence(const cJSON* in, const cJSON* ack_body) {
 }
 
 cJSON* MakeErrorBody(const char* code, const char* message, bool retryable, const char* reason) {
-    cJSON* b = cJSON_CreateObject();
-    cJSON* ctx = cJSON_CreateObject();
-    if (b == nullptr || ctx == nullptr || cJSON_AddStringToObject(b, "code", code) == nullptr ||
-        cJSON_AddStringToObject(b, "message", message) == nullptr ||
-        cJSON_AddBoolToObject(b, "retryable", retryable) == nullptr ||
-        cJSON_AddStringToObject(ctx, "reason", reason) == nullptr ||
-        !cJSON_AddItemToObject(b, "context", ctx)) {
+    cJSON* b = LessonJsonCreateObject();
+    cJSON* ctx = LessonJsonCreateObject();
+    if (b == nullptr || ctx == nullptr || LessonJsonAddString(b, "code", code) == nullptr ||
+        LessonJsonAddString(b, "message", message) == nullptr ||
+        LessonJsonAddBool(b, "retryable", retryable) == nullptr ||
+        LessonJsonAddString(ctx, "reason", reason) == nullptr ||
+        !LessonJsonAttachItem(b, "context", ctx)) {
         cJSON_Delete(ctx);
         cJSON_Delete(b);
         return nullptr;
@@ -1402,37 +1458,42 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
         break;
     }
 
-    cJSON* root = cJSON_CreateObject();
-    cJSON* body = cJSON_CreateObject();
+    cJSON* root = LessonJsonCreateObject();
+    cJSON* body = LessonJsonCreateObject();
     if (root == nullptr || body == nullptr) {
         cJSON_Delete(root);
         cJSON_Delete(body);
         return false;
     }
-    cJSON_AddStringToObject(root, "type", "lesson_ack");
-    cJSON_AddStringToObject(root, "protocolVersion", g_session.pending_protocol_version.c_str());
-    cJSON_AddStringToObject(root, "assignmentId", g_session.assignment_id.c_str());
-    cJSON_AddStringToObject(root, "sessionId", g_session.session_id.c_str());
+    LessonJsonAddString(root, "type", "lesson_ack");
+    LessonJsonAddString(root, "protocolVersion", g_session.pending_protocol_version.c_str());
+    LessonJsonAddString(root, "assignmentId", g_session.assignment_id.c_str());
+    LessonJsonAddString(root, "sessionId", g_session.session_id.c_str());
     if (!g_session.pending_lesson_id.empty()) {
-        cJSON_AddStringToObject(root, "lessonId", g_session.pending_lesson_id.c_str());
+        LessonJsonAddString(root, "lessonId", g_session.pending_lesson_id.c_str());
     }
     if (g_session.pending_has_lesson_version) {
-        cJSON_AddNumberToObject(root, "lessonVersion", g_session.pending_lesson_version);
+        LessonJsonAddNumber(root, "lessonVersion", g_session.pending_lesson_version);
     }
-    if (g_session.pending_step_id.empty()) cJSON_AddNullToObject(root, "stepId");
-    else cJSON_AddStringToObject(root, "stepId", g_session.pending_step_id.c_str());
-    cJSON_AddNumberToObject(root, "sequence", static_cast<double>(++g_session.fs_sequence));
-    cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(NowMs()));
-    cJSON_AddNumberToObject(body, "acks", static_cast<double>(item.server_sequence));
-    cJSON_AddBoolToObject(body, "accepted", accepted);
-    cJSON_AddBoolToObject(body, "degraded", degraded);
-    if (degraded_reason == nullptr) cJSON_AddNullToObject(body, "degradedReason");
-    else cJSON_AddStringToObject(body, "degradedReason", degraded_reason);
-    cJSON_AddNumberToObject(body, "visualGeneration", static_cast<double>(item.visual_generation));
+    if (g_session.pending_step_id.empty()) LessonJsonAddNull(root, "stepId");
+    else LessonJsonAddString(root, "stepId", g_session.pending_step_id.c_str());
+    LessonJsonAddNumber(root, "sequence", static_cast<double>(++g_session.fs_sequence));
+    LessonJsonAddNumber(root, "timestamp", static_cast<double>(NowMs()));
+    LessonJsonAddNumber(body, "acks", static_cast<double>(item.server_sequence));
+    LessonJsonAddBool(body, "accepted", accepted);
+    LessonJsonAddBool(body, "degraded", degraded);
+    if (degraded_reason == nullptr) LessonJsonAddNull(body, "degradedReason");
+    else LessonJsonAddString(body, "degradedReason", degraded_reason);
+    LessonJsonAddNumber(body, "visualGeneration", static_cast<double>(item.visual_generation));
 
-    char* body_json = cJSON_PrintUnformatted(body);
-    cJSON_AddItemToObject(root, "body", body);
-    char* serialized = cJSON_PrintUnformatted(root);
+    char* body_json = LessonJsonPrintUnformatted(body);
+    if (!LessonJsonAttachItem(root, "body", body)) {
+        if (body_json != nullptr) cJSON_free(body_json);
+        cJSON_Delete(body);
+        cJSON_Delete(root);
+        return false;
+    }
+    char* serialized = LessonJsonPrintUnformatted(root);
     cJSON_Delete(root);
     if (serialized == nullptr) {
         if (body_json != nullptr) cJSON_free(body_json);

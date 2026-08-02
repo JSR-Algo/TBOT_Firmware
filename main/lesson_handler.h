@@ -73,6 +73,9 @@ constexpr std::size_t kLessonMessageDataQueueDepth = 16;
 void AddLessonRendererFeatures(cJSON* features);
 namespace tbot {
 void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_failure);
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+void SetLessonJsonFailAfterForTest(int successful_operations_before_failure);
+#endif
 }
 
 enum class LessonQueueItemKind : std::uint8_t {

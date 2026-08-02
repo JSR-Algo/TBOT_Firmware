@@ -1358,6 +1358,96 @@ void test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom() {
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
+void test_generic_lesson_json_failures_drop_partial_frames_and_clean_up() {
+    ResetObservable();
+    FreshSession();
+    tbot::SetLessonJsonFailAfterForTest(0);
+    Handle(PrepareFrame(1));
+    require(Sent().empty(), "v1 BuildFrame root allocation failure sends no partial ACK");
+
+    ResetObservable();
+    FreshSession();
+    tbot::SetLessonJsonFailAfterForTest(8);
+    Handle(PrepareFrame(1));
+    require(Sent().empty(), "v1 BuildFrame body attach failure sends no partial ACK");
+
+    ResetObservable();
+    FreshSession();
+    tbot::SetLessonJsonFailAfterForTest(9);
+    Handle(V2PrepareFrame(1));
+    require(Sent().empty(), "v2 BuildFrame serialization failure sends no partial ACK");
+
+    for (int fail_after = 0; fail_after <= 6; ++fail_after) {
+        tbot::SetLessonJsonFailAfterForTest(-1);
+        ResetObservable();
+        FreshSession();
+        Board::GetInstance().display_ = nullptr;
+        Handle(V2PrepareFrame(1));
+        const size_t frames_before_error = Sent().size();
+        tbot::SetLessonJsonFailAfterForTest(fail_after);
+        Handle(V2StartFrame(2,
+            "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"everyStep\"}"));
+        require(Sent().size() == frames_before_error,
+                "MakeErrorBody cJSON failure sends no partial error frame");
+    }
+
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    SetLessonTransportEpoch(71);
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    LessonQueueItem completion = App().lesson_visual_queue.back();
+    std::string ack;
+    tbot::SetLessonJsonFailAfterForTest(0);
+    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
+            "visual completion root allocation failure sends no partial ACK");
+    tbot::SetLessonJsonFailAfterForTest(1);
+    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
+            "visual completion body allocation failure sends no partial ACK");
+
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    SetLessonTransportEpoch(72);
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    completion = App().lesson_visual_queue.back();
+    ack.clear();
+    tbot::SetLessonJsonFailAfterForTest(14);
+    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
+            "visual completion body serialization failure sends no partial ACK");
+
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    SetLessonTransportEpoch(73);
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    completion = App().lesson_visual_queue.back();
+    ack.clear();
+    tbot::SetLessonJsonFailAfterForTest(15);
+    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
+            "visual completion body attach failure sends no partial ACK");
+
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    SetLessonTransportEpoch(74);
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    completion = App().lesson_visual_queue.back();
+    ack.clear();
+    tbot::SetLessonJsonFailAfterForTest(16);
+    require(!AcceptLessonVisualCompletion(completion, &ack) && ack.empty(),
+            "visual completion envelope serialization failure sends no partial ACK");
+    tbot::SetLessonJsonFailAfterForTest(-1);
+}
+
 void test_renderer_v2_start_and_visual_contracts_fail_closed() {
     ResetObservable();
     FreshSession();
@@ -6237,6 +6327,7 @@ int main() {
     test_renderer_v3_rejections_use_task7_consumed_lesson_error();
     test_renderer_v3_duplicate_sequence_requires_exact_original_command();
     test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom();
+    test_generic_lesson_json_failures_drop_partial_frames_and_clean_up();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_opening_layouts_and_visual_generation_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
