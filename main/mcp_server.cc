@@ -209,6 +209,108 @@ bool IsOptionalExactSha256(const cJSON* object, const char* field) {
            (cJSON_IsString(value) && IsExactLowerLessonAssetSha256(value->valuestring));
 }
 
+bool IsOptionalSafeCueToken(const cJSON* object, const char* field) {
+    const cJSON* value = cJSON_GetObjectItem(object, field);
+    if (value == nullptr) return true;
+    if (!cJSON_IsString(value) ||
+        !IsBoundedMetadataString(value->valuestring, kLessonAssetIdentityMaxBytes)) {
+        return false;
+    }
+    for (const unsigned char* cursor =
+             reinterpret_cast<const unsigned char*>(value->valuestring);
+         *cursor != '\0'; ++cursor) {
+        if (!(std::isalnum(*cursor) || *cursor == '.' || *cursor == '_' ||
+              *cursor == '+' || *cursor == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsOptionalLessonPlaybackMode(const cJSON* object, const char* field) {
+    const cJSON* value = cJSON_GetObjectItem(object, field);
+    return value == nullptr ||
+           (cJSON_IsString(value) &&
+            (std::strcmp(value->valuestring, "once") == 0 ||
+             std::strcmp(value->valuestring, "loop") == 0));
+}
+
+bool IsOptionalRendererV4CueMetadata(const cJSON* asset) {
+    const cJSON* cue_id = cJSON_GetObjectItem(asset, "cueId");
+    const cJSON* effect = cJSON_GetObjectItem(asset, "effect");
+    const cJSON* step_key = cJSON_GetObjectItem(asset, "stepKey");
+    const cJSON* playback_mode = cJSON_GetObjectItem(asset, "playbackMode");
+    const bool any_present =
+        cue_id != nullptr || effect != nullptr || step_key != nullptr ||
+        playback_mode != nullptr;
+    if (!any_present) return true;
+    return cue_id != nullptr && effect != nullptr && step_key != nullptr &&
+           playback_mode != nullptr &&
+           IsOptionalSafeCueToken(asset, "cueId") &&
+           IsOptionalSafeCueToken(asset, "effect") &&
+           IsOptionalSafeCueToken(asset, "stepKey") &&
+           IsOptionalLessonPlaybackMode(asset, "playbackMode");
+}
+
+bool IsBoundedPositiveIntegerField(
+    const cJSON* object,
+    const char* field,
+    int maximum
+) {
+    const cJSON* value = cJSON_GetObjectItem(object, field);
+    return cJSON_IsNumber(value) && value->valueint > 0 &&
+           value->valueint <= maximum &&
+           value->valuedouble == static_cast<double>(value->valueint);
+}
+
+bool IsExactRendererV4CompatibilityMetadata(const cJSON* metadata) {
+    static constexpr const char* kCompatibilityFields[] = {
+        "codec", "width", "height", "fps", "durationMs", "frameCount",
+        "hasAudio",
+    };
+    if (!cJSON_IsObject(metadata) ||
+        !HasOnlyAllowedJsonFields(metadata, kCompatibilityFields)) {
+        return false;
+    }
+    const cJSON* codec = cJSON_GetObjectItem(metadata, "codec");
+    const cJSON* has_audio = cJSON_GetObjectItem(metadata, "hasAudio");
+    return cJSON_IsString(codec) &&
+           std::strcmp(codec->valuestring, "mjpeg") == 0 &&
+           IsBoundedPositiveIntegerField(metadata, "width", 1920) &&
+           IsBoundedPositiveIntegerField(metadata, "height", 1080) &&
+           IsBoundedPositiveIntegerField(metadata, "fps", 60) &&
+           IsBoundedPositiveIntegerField(metadata, "durationMs", 600000) &&
+           IsBoundedPositiveIntegerField(metadata, "frameCount", 900) &&
+           cJSON_IsFalse(has_audio);
+}
+
+bool IsOptionalRendererV4AssetMetadata(const cJSON* asset) {
+    const cJSON* derivative_id = cJSON_GetObjectItem(asset, "derivativeId");
+    const cJSON* phase_id = cJSON_GetObjectItem(asset, "phaseId");
+    const cJSON* compatibility =
+        cJSON_GetObjectItem(asset, "compatibilityMetadata");
+    const bool cue_present =
+        cJSON_GetObjectItem(asset, "cueId") != nullptr ||
+        cJSON_GetObjectItem(asset, "effect") != nullptr ||
+        cJSON_GetObjectItem(asset, "stepKey") != nullptr ||
+        cJSON_GetObjectItem(asset, "playbackMode") != nullptr;
+    const bool any_present = derivative_id != nullptr || phase_id != nullptr ||
+                             compatibility != nullptr || cue_present;
+    if (!any_present) return true;
+    if (!cJSON_IsString(derivative_id) ||
+        !IsExactLowerLessonAssetSha256(derivative_id->valuestring) ||
+        !IsExactRendererV4CompatibilityMetadata(compatibility)) {
+        return false;
+    }
+    const bool phase_valid =
+        phase_id != nullptr && !cue_present &&
+        IsOptionalSafeCueToken(asset, "phaseId");
+    const bool cue_valid =
+        phase_id == nullptr && cue_present &&
+        IsOptionalRendererV4CueMetadata(asset);
+    return phase_valid || cue_valid;
+}
+
 const char* NormalizedAliasOrThrow(
     const cJSON* object,
     const char* preferred_field,
@@ -267,7 +369,8 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
     static constexpr const char* kAssetFields[] = {
         "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
         "mediaType", "critical", "layer", "role", "state", "checksumOk",
-        "localPath", "sdPath",
+        "localPath", "sdPath", "cueId", "effect", "stepKey", "playbackMode",
+        "derivativeId", "phaseId", "compatibilityMetadata",
     };
     const char* cache_key = JsonStringField(pack, "cacheKey");
     const char* lesson_id = JsonStringField(pack, "lessonId");
@@ -327,7 +430,8 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             !IsOptionalBoundedString(asset, "mediaType", 128) ||
             !IsOptionalBoundedString(asset, "layer", 128) ||
             !IsOptionalBoundedString(asset, "role", 128) ||
-            !IsOptionalBoundedString(asset, "state", 128)) {
+            !IsOptionalBoundedString(asset, "state", 128) ||
+            !IsOptionalRendererV4AssetMetadata(asset)) {
             throw std::runtime_error("lesson asset sync request invalid");
         }
         const auto path_result = ValidateLessonAssetSyncPath(cache_key, local_path, key);

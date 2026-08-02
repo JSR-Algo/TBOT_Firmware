@@ -265,6 +265,21 @@ void TestOversizedHttpReadFailsBeforeWriting() {
     Expect(Read(destination) == "known-good", "oversized read replaced destination");
 }
 
+void TestCinematicMp4LargerThanLegacyImageCapStreamsToSd() {
+    const std::string body(3 * 1024 * 1024, 'm');
+    FakeHttp http(body);
+    const std::string destination = std::string(kRoot) + "/cinematic.mp4";
+    size_t bytes = 0;
+    {
+        LessonAssetDownloadStagingFile staging(destination);
+        Expect(Transfer(http, staging, nullptr, true, body.size(), bytes),
+               "cinematic MP4 above the legacy image cap was rejected");
+        Expect(bytes == body.size(), "cinematic MP4 byte count was truncated");
+        Expect(fs::file_size(staging.path()) == body.size(),
+               "cinematic MP4 was not streamed completely to SD staging");
+    }
+}
+
 void TestZeroLimitContinueFailsClosedInsteadOfSpinning() {
     ArmSync(LessonStorageHilCheckpoint::kAfterDownloadBytes,
             LessonStorageHilAction::kPause, 5, 11);
@@ -295,6 +310,7 @@ int main() {
     TestDeclaredSizeMustMatchDownloadedBytesBeforeCommit();
     TestSampleEmptyContextCannotConsumeCanonicalArm();
     TestOversizedHttpReadFailsBeforeWriting();
+    TestCinematicMp4LargerThanLegacyImageCapStreamsToSd();
     TestZeroLimitContinueFailsClosedInsteadOfSpinning();
     fs::remove_all(kRoot);
     std::cout << "lesson asset HTTP transfer host tests passed\n";

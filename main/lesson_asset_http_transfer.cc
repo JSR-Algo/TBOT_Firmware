@@ -16,7 +16,7 @@
 
 namespace {
 
-constexpr std::size_t kLessonAssetSyncMaxBytes = 512 * 1024;
+constexpr std::size_t kLessonAssetSyncMaxBytes = 4 * 1024 * 1024;
 constexpr std::size_t kLessonAssetDownloadBufferBytes = 4096;
 #if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
     defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)

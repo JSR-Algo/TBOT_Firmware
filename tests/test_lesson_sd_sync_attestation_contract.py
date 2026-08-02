@@ -53,6 +53,37 @@ def test_generic_sync_aliases_must_be_strings_when_present():
     assert "!cJSON_IsString(preferred)" in validation
     assert "!cJSON_IsString(fallback)" in validation
 
+
+def test_generic_sync_accepts_only_valid_renderer_v4_cue_metadata():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = source[
+        source.index("ValidateLessonAssetSyncPackOrThrow(") :
+        source.index("void DownloadLessonAssetToVerifiedFile(")
+    ]
+
+    for field in ("cueId", "effect", "stepKey", "playbackMode"):
+        assert f'"{field}"' in validation
+    assert "IsOptionalRendererV4AssetMetadata(asset)" in validation
+    assert "IsOptionalRendererV4CueMetadata(asset)" in source
+    assert "IsOptionalSafeCueToken" in source
+    assert "IsOptionalLessonPlaybackMode" in source
+
+
+def test_generic_sync_strictly_validates_renderer_v4_derivative_attestation():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = source[
+        source.index("ValidateLessonAssetSyncPackOrThrow(") :
+        source.index("void DownloadLessonAssetToVerifiedFile(")
+    ]
+
+    for field in ("derivativeId", "phaseId", "compatibilityMetadata"):
+        assert f'"{field}"' in validation
+    assert "IsOptionalRendererV4AssetMetadata(asset)" in validation
+    assert "IsExactRendererV4CompatibilityMetadata" in source
+    assert "HasOnlyAllowedJsonFields(metadata, kCompatibilityFields)" in source
+    assert 'std::strcmp(codec->valuestring, "mjpeg") == 0' in source
+    assert "cJSON_IsFalse(has_audio)" in source
+
 def test_generic_sync_counts_critical_failures_and_activates_only_verified_critical_pack():
     source = SOURCE.read_text(encoding="utf-8")
     body = sync_body()
