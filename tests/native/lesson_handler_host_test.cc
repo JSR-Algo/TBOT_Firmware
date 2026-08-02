@@ -347,13 +347,32 @@ const char* ValidV2OpeningEntrance() {
            "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"staticGreet\"}";
 }
 
-std::string V2VisualFrame(int seq, const char* state, std::uint64_t generation) {
+std::string ValidV2OpeningEntranceForLayout(const char* layout) {
+    return std::string("{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
+           "\"layoutPreset\":\"") + layout + "\",\"backgroundAssetKey\":\"scene.farm\","
+           "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"staticGreet\"}";
+}
+
+std::string V2VisualFrameWithGeneration(int seq, const char* state,
+                                        const std::string& generation_json) {
     return std::string("{\"type\":\"lesson_visual_state\",\"protocolVersion\":\"") +
            kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\",\"stepId\":\"s2\",\"sequence\":" + std::to_string(seq) +
            ",\"body\":{\"state\":\"" + state + "\",\"overlayKey\":\"thinking\","
+           "\"motionPreset\":\"encourage\",\"visualGeneration\":" + generation_json + "}}";
+}
+
+std::string V2VisualFrameWithStepId(int seq, const char* step_id, std::uint64_t generation) {
+    return std::string("{\"type\":\"lesson_visual_state\",\"protocolVersion\":\"") +
+           kLessonRendererV2 + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
+           SID() + "\",\"stepId\":\"" + step_id + "\",\"sequence\":" + std::to_string(seq) +
+           ",\"body\":{\"state\":\"thinking\",\"overlayKey\":\"thinking\","
            "\"motionPreset\":\"encourage\",\"visualGeneration\":" +
            std::to_string(generation) + "}}";
+}
+
+std::string V2VisualFrame(int seq, const char* state, std::uint64_t generation) {
+    return V2VisualFrameWithGeneration(seq, state, std::to_string(generation));
 }
 
 std::string V2StepFrame(int seq, const std::string& step_id) {
@@ -1264,6 +1283,72 @@ void test_renderer_v2_start_and_visual_contracts_fail_closed() {
             "malformed v2 visual state reports a stable contract error");
 }
 
+void test_renderer_v2_opening_layouts_and_visual_generation_contracts_fail_closed() {
+    const char* layouts[] = {"leftApproach", "rightApproach"};
+    for (const char* layout : layouts) {
+        ResetObservable();
+        FreshSession();
+        LvglDisplay display;
+        Board::GetInstance().display_ = &display;
+        Handle(V2PrepareFrame(1));
+        SetLessonTransportEpoch(41);
+        Handle(V2StartFrame(2, ValidV2OpeningEntranceForLayout(layout)));
+        require(display.entrance_start_calls == 1 &&
+                    display.last_entrance_layout == layout,
+                "renderer-v2 alternate opening layout is delegated to LVGL");
+        display.CompleteEntrance();
+        App().DrainLessonVisualQueue();
+        require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                    FrameBodyNum(Sent().size() - 1, "acks") == 2 &&
+                    FrameBodyBool(Sent().size() - 1, "accepted", false),
+                "renderer-v2 alternate opening layout emits a correlated ACK");
+    }
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2,
+        "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"oncePerLessonSession\","
+        "\"layoutPreset\":\"leftApproach\",\"backgroundAssetKey\":\"scene.farm\","
+        "\"robotAssetKey\":\"robotOverlay.teach\",\"fallback\":\"spinInPlace\"}"));
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "renderer-v2 opening entrance with invalid fallback fails closed");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "renderer-v2 opening entrance final contract failure reports a stable error");
+
+    const char* invalid_generations[] = {"0", "1.5"};
+    for (const char* generation : invalid_generations) {
+        ResetObservable();
+        FreshSession();
+        LvglDisplay display;
+        Board::GetInstance().display_ = &display;
+        Handle(V2PrepareFrame(1));
+        Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+        display.CompleteEntrance();
+        App().DrainLessonVisualQueue();
+        Handle(V2VisualFrameWithGeneration(3, "thinking", generation));
+        require(FrameType(Sent().size() - 1) == "lesson_error",
+                "invalid renderer-v2 visualGeneration fails closed");
+        require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+                "invalid renderer-v2 visualGeneration reports a stable contract error");
+    }
+
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+    Handle(V2VisualFrameWithStepId(3, "", 2));
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "renderer-v2 visual state with invalid step identity fails closed");
+    require(FrameBodyStr(Sent().size() - 1, nullptr, "code") == "LESSON_FRAME_INVALID",
+            "renderer-v2 visual state final contract failure reports a stable error");
+}
+
 void test_renderer_v2_worker_dispatch_emits_exactly_one_ack() {
     ResetObservable();
     FreshSession();
@@ -1318,6 +1403,47 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
     require(Sent().size() == before_drain + 1,
             "duplicate production callback remains an idempotent no-op");
 
+    Handle(V2VisualFrame(3, "thinking", 17));
+    display.CompleteVisualState(LessonVisualApplyResult::kRejected, "randomReason");
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kRejected &&
+                std::string(App().lesson_visual_queue.front().degraded_reason) ==
+                    "randomReason",
+            "production rejected visual callback queues the typed rejection result");
+    const size_t before_rejected_drain = Sent().size();
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == before_rejected_drain + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameStepId(Sent().size() - 1) == "s2" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 3 &&
+                FrameBodyNum(Sent().size() - 1, "visualGeneration") == 17 &&
+                !FrameBodyBool(Sent().size() - 1, "accepted", true) &&
+                !FrameBodyBool(Sent().size() - 1, "degraded", true) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "unsupportedContract",
+            "production rejected visual callback drains to an exact negative ACK");
+
+    Handle(V2VisualFrame(4, "thinking", 18));
+    display.CompleteVisualState(LessonVisualApplyResult::kPhaseTimeout, nullptr);
+    require(App().lesson_visual_queue.size() == 1 &&
+                App().lesson_visual_queue.front().completion_result ==
+                    LessonVisualCompletionResult::kPhaseTimeout &&
+                App().lesson_visual_queue.front().kind == LessonQueueItemKind::kVisualTimedOut,
+            "production phase-timeout visual callback queues the typed timeout result");
+    const size_t before_timeout_drain = Sent().size();
+    App().DrainLessonVisualQueue();
+    require(Sent().size() == before_timeout_drain + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameStepId(Sent().size() - 1) == "s2" &&
+                FrameBodyNum(Sent().size() - 1, "acks") == 4 &&
+                FrameBodyNum(Sent().size() - 1, "visualGeneration") == 18 &&
+                FrameBodyBool(Sent().size() - 1, "accepted", false) &&
+                FrameBodyBool(Sent().size() - 1, "degraded", false) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "phaseTimeout",
+            "production phase-timeout visual callback drains to an exact degraded ACK");
+
     struct VisualExpectation {
         const char* state;
         const char* emotion;
@@ -1334,8 +1460,8 @@ void test_renderer_v2_production_render_callback_reaches_worker_ack() {
         {"celebrate", "happy", "Tuyệt vời!"},
         {"completion", "happy", "Hoàn thành bài học"},
     };
-    int visual_sequence = 3;
-    std::uint64_t visual_generation = 17;
+    int visual_sequence = 5;
+    std::uint64_t visual_generation = 19;
     for (const auto& expectation : expectations) {
         Handle(V2VisualFrame(visual_sequence, expectation.state, visual_generation));
         require(display.last_emotion == expectation.emotion &&
@@ -5688,6 +5814,7 @@ int main() {
     test_renderer_v3_duplicate_sequence_requires_exact_original_command();
     test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
+    test_renderer_v2_opening_layouts_and_visual_generation_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
     test_renderer_v2_production_render_callback_reaches_worker_ack();
     test_renderer_v2_non_lvgl_display_rejects_start_completion();
