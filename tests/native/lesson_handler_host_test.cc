@@ -971,6 +971,11 @@ void test_cinematic_cross_renderer_handoff_releases_old_resources() {
             "v3 to v4 handoff commits only the new renderer");
     require(v3_fake.opens == v3_fake.closes && v3_fake.allocations == v3_fake.frees,
             "v3 to v4 handoff releases every old file and allocation");
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(!static_cast<bool>(mutation),
+                "v3 to v4 handoff keeps storage mutation blocked while v4 is active");
+    }
     Handle(V4Frame("lesson_cinematic_control", 3,
         "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":72,"
         "\"reason\":\"testCleanup\"}"));
@@ -992,6 +997,11 @@ void test_cinematic_cross_renderer_handoff_releases_old_resources() {
             "v4 to v3 handoff commits only the new renderer");
     require(v4_fake.opens == v4_fake.closes && v4_fake.allocations == v4_fake.frees,
             "v4 to v3 handoff releases every old file and allocation");
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(!static_cast<bool>(mutation),
+                "v4 to v3 handoff keeps storage mutation blocked while v3 is active");
+    }
     Handle(V3Frame("lesson_stop", 3,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"opening\","
         "\"commandSequenceId\":83}}"));

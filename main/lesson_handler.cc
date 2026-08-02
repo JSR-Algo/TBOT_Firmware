@@ -138,6 +138,13 @@ bool CinematicJsonAddBool(cJSON* object, const char* key, bool value) {
     return CinematicJsonOperationAllowed() &&
            cJSON_AddBoolToObject(object, key, value) != nullptr;
 }
+
+LessonAssetSessionResult BeginCinematicLessonSession(
+    const std::string& assignment_id,
+    const std::string& session_id) {
+    return LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        assignment_id, session_id);
+}
 }  // namespace
 
 namespace tbot {
@@ -1957,24 +1964,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 !g_session.cinematic_renderer_id.empty() &&
                 g_session.cinematic_renderer_id != protocol_version;
             if (renderer_handoff) {
-                bool old_renderer_released = false;
                 if (g_session.cinematic_renderer_id == tbot::kLessonRendererV3 &&
                     renderer_v3 != nullptr) {
                     renderer_v3->DiscardSession();
-                    old_renderer_released = !renderer_v3->prepared();
                 } else if (g_session.cinematic_renderer_id == tbot::kLessonRendererV4 &&
                            renderer_v4 != nullptr) {
                     renderer_v4->DiscardSession();
-                    old_renderer_released = !renderer_v4->prepared();
-                }
-                if (!old_renderer_released) {
-                    if (route_v4) renderer_v4->DiscardSession();
-                    else renderer_v3->DiscardSession();
-                    prepare_response = {
-                        tbot::LessonCinematicResponseType::kFailure, false,
-                        command_sequence_id, phase_id,
-                        tbot::LessonCinematicError::kSessionReleaseFailed};
-                    return;
                 }
             }
             tbot::SetLessonCinematicTimerRouteV4(route_v4);
@@ -2026,8 +2021,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     config.asset.media_type = Str(asset, "mediaType");
                     config.asset.width = static_cast<std::uint16_t>(width);
                     config.asset.height = static_cast<std::uint16_t>(height);
-                    const auto reservation = LessonAssetStorageCoordinator::GetInstance()
-                        .TryBeginLessonSession(assignment_id, session_id);
+                    const auto reservation = BeginCinematicLessonSession(
+                        assignment_id, session_id);
                     if (!reservation.acquired) {
                         response = {tbot::LessonCinematicResponseType::kFailure, false,
                                     command_sequence_id, phase_id,
@@ -2038,10 +2033,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         response = renderer_v4->Prepare(config, now_ms);
                         if (response.accepted) {
                             complete_cinematic_prepare(response, reservation.generation, true);
-                            if (!response.accepted && !reservation.idempotent) {
-                                LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
-                                    assignment_id, session_id, reservation.generation);
-                            }
                         } else if (!reservation.idempotent) {
                             LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                                 assignment_id, session_id, reservation.generation);
@@ -2106,8 +2097,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             command_sequence_id, phase_id,
                             tbot::LessonCinematicError::kMetadataMismatch};
             } else {
-                const auto reservation = LessonAssetStorageCoordinator::GetInstance()
-                    .TryBeginLessonSession(assignment_id, session_id);
+                const auto reservation = BeginCinematicLessonSession(
+                    assignment_id, session_id);
                 if (!reservation.acquired) {
                     response = {tbot::LessonCinematicResponseType::kFailure, false,
                                 command_sequence_id, phase_id,
@@ -2118,10 +2109,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     response = renderer_v3->Prepare(config, now_ms);
                     if (response.accepted) {
                         complete_cinematic_prepare(response, reservation.generation, false);
-                        if (!response.accepted && !reservation.idempotent) {
-                            LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
-                                assignment_id, session_id, reservation.generation);
-                        }
                     } else if (!reservation.idempotent) {
                         LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                             assignment_id, session_id, reservation.generation);
@@ -2160,9 +2147,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.paused = false;
             if (cinematic_v4) renderer_v4->DiscardSession();
             else renderer_v3->DiscardSession();
-            const bool renderer_released = cinematic_v4 ? !renderer_v4->prepared()
-                                                        : !renderer_v3->prepared();
-            const bool session_released = renderer_released &&
+            const bool session_released =
                 (g_session.lesson_asset_generation == 0 ||
                 LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                     g_session.assignment_id, g_session.session_id,
@@ -2347,44 +2332,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
 
     if (is_prepare) {
-        const auto reservation =
-            LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
-                assignment_id, session_id);
-        if (!reservation.acquired) {
-            const char* error_code = "LESSON_RESERVATION_EXHAUSTED";
-            const char* error_message = "lesson storage reservation unavailable";
-            const char* error_reason = "generation_exhausted";
-            bool retryable = false;
-            switch (reservation.code) {
-            case LessonAssetReservationCode::kMutationActive:
-                error_code = "LESSON_ASSET_MUTATION_ACTIVE";
-                error_message = "lesson assets are being updated";
-                error_reason = "asset_mutation_active";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kLessonSessionActive:
-            case LessonAssetReservationCode::kLessonSessionMismatch:
-                error_code = "LESSON_SESSION_CONFLICT";
-                error_message = "another lesson session owns lesson assets";
-                error_reason = "lesson_session_mismatch";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kInvalidIdentity:
-                error_code = "LESSON_IDENTITY_INVALID";
-                error_message = "lesson identity is invalid";
-                error_reason = "invalid_identity";
-                break;
-            case LessonAssetReservationCode::kGenerationExhausted:
-            case LessonAssetReservationCode::kAcquired:
-                break;
-            }
-            emit(root, "lesson_error",
-                 MakeErrorBody(error_code, error_message, retryable, error_reason));
-            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s",
-                     error_reason);
-            return;
-        }
-        g_session.lesson_asset_generation = reservation.generation;
+        g_session.lesson_asset_generation = prepare_asset_generation;
     }
 
     const bool is_start = strcmp(type, "lesson_start") == 0;
