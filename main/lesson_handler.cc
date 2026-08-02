@@ -1601,9 +1601,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // down with a frame in flight).
     auto emit = [this](const cJSON* in, const char* frame_type, cJSON* frame_body) {
         if (frame_body == nullptr) return;
-        const int64_t seq = ++g_session.fs_sequence;
+        const int64_t seq = g_session.fs_sequence + 1;
         std::string frame = BuildFrame(in, frame_type, seq, frame_body);
-        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
+        if (protocol_ && !frame.empty()) {
+            g_session.fs_sequence = seq;
+            protocol_->SendLessonFrame(frame);
+        }
     };
     auto emit_isolated_prepare_error = [this](const cJSON* in, cJSON* frame_body) {
         if (frame_body == nullptr) return;

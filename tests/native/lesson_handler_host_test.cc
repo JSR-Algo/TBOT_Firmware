@@ -1425,6 +1425,56 @@ void test_generic_lesson_json_failures_drop_partial_frames_and_clean_up() {
     tbot::SetLessonJsonFailAfterForTest(-1);
 }
 
+void test_buildframe_failure_does_not_consume_outbound_sequence() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    tbot::SetLessonJsonFailAfterForTest(0);
+    Handle(PrepareFrame(1));
+    require(Sent().empty(), "failed v1 prepare ACK sends no frame");
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    Handle(StartFrame(2));
+    require(Sent().size() == 1 && FrameSeq(0) == 1,
+            "v1 ACK recovery reuses the unsent outbound sequence");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    SetLessonTransportEpoch(101);
+    tbot::SetLessonJsonFailAfterForTest(0);
+    Handle(V2PrepareFrame(1));
+    require(Sent().empty(), "failed v2 prepare ACK sends no frame");
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    std::string completion_ack;
+    require(AcceptLessonVisualCompletion(App().lesson_visual_queue.back(), &completion_ack),
+            "v2 session recovers after the unsent prepare ACK");
+    cJSON* completion = cJSON_Parse(completion_ack.c_str());
+    require(completion != nullptr &&
+                cJSON_GetObjectItem(completion, "sequence")->valueint == 1,
+            "v2 ACK recovery reuses the unsent outbound sequence");
+    cJSON_Delete(completion);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(V2PrepareFrame(1));
+    const size_t frames_before_failed_error = Sent().size();
+    tbot::SetLessonJsonFailAfterForTest(7);
+    Handle(V2StartFrame(2,
+        "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"everyStep\"}"));
+    require(Sent().size() == frames_before_failed_error,
+            "failed ordinary error envelope sends no partial frame");
+    tbot::SetLessonJsonFailAfterForTest(-1);
+    Handle(V2StartFrame(3,
+        "{\"preset\":\"flyLandWalkGreet\",\"policy\":\"everyStep\"}"));
+    require(Sent().size() == frames_before_failed_error + 1 &&
+                FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameSeq(Sent().size() - 1) == 2,
+            "ordinary error recovery reuses the unsent outbound sequence");
+    tbot::SetLessonJsonFailAfterForTest(-1);
+}
+
 void test_renderer_v2_start_and_visual_contracts_fail_closed() {
     ResetObservable();
     FreshSession();
@@ -6305,6 +6355,7 @@ int main() {
     test_renderer_v3_duplicate_sequence_requires_exact_original_command();
     test_renderer_v3_json_safe_sequence_boundaries_and_ack_oom();
     test_generic_lesson_json_failures_drop_partial_frames_and_clean_up();
+    test_buildframe_failure_does_not_consume_outbound_sequence();
     test_renderer_v2_start_and_visual_contracts_fail_closed();
     test_renderer_v2_opening_layouts_and_visual_generation_contracts_fail_closed();
     test_renderer_v2_worker_dispatch_emits_exactly_one_ack();
