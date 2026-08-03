@@ -270,6 +270,11 @@ void TestIndexAndFileRejections() {
                      "wrong indexed frame size is rejected");
 
     bytes = MakeStream();
+    bytes[kHeaderBytes + 2 * kIndexRecordBytes] = 1;
+    ExpectOpenStatus(std::move(bytes), tbot::LessonRgb565Status::kMalformed,
+                     "non-zero index padding is rejected");
+
+    bytes = MakeStream();
     bytes.resize(79);
     ExpectOpenStatus(std::move(bytes), tbot::LessonRgb565Status::kTruncated,
                      "truncated index is rejected");
