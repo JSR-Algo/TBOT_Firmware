@@ -195,6 +195,8 @@ void TestValidOpenAndFrameRead() {
     Require(metadata.fps == 10 && metadata.frame_count == 2 && metadata.duration_ms == 200,
             "timeline metadata is parsed");
     Require(metadata.frame_bytes == kFrameBytes, "frame size metadata is parsed");
+    Require(metadata.file_bytes == file.bytes.size(),
+            "exact container byte identity is exposed to playback");
 
     Bytes output(kFrameBytes);
     Require(stream.ReadFrame(1, output.data(), output.size()) == tbot::LessonRgb565Status::kOk,

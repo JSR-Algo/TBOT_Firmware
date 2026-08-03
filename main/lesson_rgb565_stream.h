@@ -43,6 +43,7 @@ struct LessonRgb565Metadata {
     std::uint32_t frame_count;
     std::uint32_t duration_ms;
     std::uint32_t frame_bytes;
+    std::uint64_t file_bytes;
 };
 
 class LessonRgb565Reader {

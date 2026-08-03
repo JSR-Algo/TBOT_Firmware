@@ -173,6 +173,7 @@ LessonRgb565Status LessonRgb565Reader::Open(const LessonRgb565Io& io) {
     const std::uint32_t pixel_format = Le32(header.data() + 44);
     const std::uint32_t orientation = Le32(header.data() + 48);
     const std::uint64_t file_bytes = Le64(header.data() + 56);
+    metadata.file_bytes = file_bytes;
 
     if (metadata.stored_width != 320 || metadata.stored_height != 480 ||
         metadata.display_width != 480 || metadata.display_height != 320 ||
