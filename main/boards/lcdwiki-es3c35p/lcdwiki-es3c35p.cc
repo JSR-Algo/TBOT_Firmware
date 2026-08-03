@@ -378,7 +378,20 @@ public:
 
     ~St77922QspiDisplay() override {
         EndLessonCinematic();
+        if (lesson_cinematic_pending_.load(std::memory_order_acquire)) {
+            xSemaphoreTake(lesson_cinematic_done_, portMAX_DELAY);
+            EndLessonCinematic();
+        }
         if (lesson_cinematic_done_ != nullptr) {
+            const bool locked = Lock(0);
+            ESP_ERROR_CHECK(locked ? ESP_OK : ESP_FAIL);
+            ESP_ERROR_CHECK_WITHOUT_ABORT(lvgl_port_stop());
+            lv_refr_now(display_);
+            ESP_ERROR_CHECK(esp_lcd_panel_io_tx_param(panel_io_, -1, nullptr, 0));
+            const esp_lcd_panel_io_callbacks_t no_callbacks = {};
+            ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(
+                panel_io_, &no_callbacks, nullptr));
+            Unlock();
             vSemaphoreDelete(lesson_cinematic_done_);
             lesson_cinematic_done_ = nullptr;
         }
@@ -407,7 +420,8 @@ private:
     static bool OnColorTransferDone(esp_lcd_panel_io_handle_t,
                                     esp_lcd_panel_io_event_data_t*, void* context) {
         auto* self = static_cast<St77922QspiDisplay*>(context);
-        if (self->lesson_cinematic_pending_.exchange(false, std::memory_order_acq_rel)) {
+        if (self->lesson_cinematic_completion_gate_.OnPanelCompletion() &&
+            self->lesson_cinematic_pending_.exchange(false, std::memory_order_acq_rel)) {
             BaseType_t higher_priority_task_woken = pdFALSE;
             xSemaphoreGiveFromISR(self->lesson_cinematic_done_, &higher_priority_task_woken);
             return higher_priority_task_woken == pdTRUE;
@@ -438,25 +452,33 @@ private:
             return false;
         }
 
-        lv_refr_now(display_);
         const esp_err_t stop_result = lvgl_port_stop();
         if (stop_result != ESP_OK) {
             Unlock();
             return false;
         }
+        lesson_cinematic_stopped_ = true;
+        lv_refr_now(display_);
+        const esp_err_t barrier_result =
+            esp_lcd_panel_io_tx_param(panel_io_, -1, nullptr, 0);
+        if (barrier_result != ESP_OK) {
+            Unlock();
+            return false;
+        }
 
         while (xSemaphoreTake(lesson_cinematic_done_, 0) == pdTRUE) {}
-        lesson_cinematic_stopped_ = true;
         Unlock();
         return true;
     }
 
     bool QueueLessonCinematicTransport(const std::uint16_t* pixels) {
         while (xSemaphoreTake(lesson_cinematic_done_, 0) == pdTRUE) {}
+        lesson_cinematic_completion_gate_.ArmNextCompletion();
         lesson_cinematic_pending_.store(true, std::memory_order_release);
         const esp_err_t result = esp_lcd_panel_draw_bitmap(panel_, 0, 0, 320, 480, pixels);
         if (result != ESP_OK) {
             lesson_cinematic_pending_.store(false, std::memory_order_release);
+            lesson_cinematic_completion_gate_.Disarm();
             return false;
         }
         return true;
@@ -473,7 +495,7 @@ private:
         }
         const bool buffer_released =
             !lesson_cinematic_pending_.load(std::memory_order_acquire);
-        if (!lesson_cinematic_stopped_) return buffer_released;
+        if (!buffer_released || !lesson_cinematic_stopped_) return buffer_released;
 
         const bool locked = Lock(1000);
         if (locked) {
@@ -488,6 +510,7 @@ private:
     }
 
     SemaphoreHandle_t lesson_cinematic_done_ = nullptr;
+    LessonCinematicPanelCompletionGate lesson_cinematic_completion_gate_;
     std::atomic<bool> lesson_cinematic_pending_{false};
     bool lesson_cinematic_stopped_ = false;
     LessonCinematicDisplayTransport lesson_cinematic_transport_{{

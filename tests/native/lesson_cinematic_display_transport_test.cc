@@ -2,7 +2,10 @@
 #include "display/lcd_display.h"
 
 #include <cstdlib>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
+#include <thread>
 
 namespace {
 
@@ -18,6 +21,7 @@ struct FakeTransport {
     int queues = 0;
     int waits = 0;
     int ends = 0;
+    int resumes = 0;
     bool begin_ok = true;
     bool queue_ok = true;
     bool wait_ok = true;
@@ -25,6 +29,11 @@ struct FakeTransport {
     bool completion_ready = false;
     const std::uint16_t* queued_pixels = nullptr;
     std::uint32_t last_timeout_ms = 0;
+    bool block_wait = false;
+    bool wait_entered = false;
+    bool release_wait = false;
+    std::mutex mutex;
+    std::condition_variable condition;
 };
 
 bool Begin(void* raw) {
@@ -44,17 +53,32 @@ bool Wait(void* raw, std::uint32_t timeout_ms) {
     auto& fake = *static_cast<FakeTransport*>(raw);
     ++fake.waits;
     fake.last_timeout_ms = timeout_ms;
+    if (fake.block_wait) {
+        std::unique_lock<std::mutex> lock(fake.mutex);
+        fake.wait_entered = true;
+        fake.condition.notify_all();
+        fake.condition.wait(lock, [&fake] { return fake.release_wait; });
+    }
     return fake.wait_ok && fake.completion_ready;
 }
 
 bool End(void* raw) {
     auto& fake = *static_cast<FakeTransport*>(raw);
     ++fake.ends;
+    if (fake.end_ok) ++fake.resumes;
     return fake.end_ok;
 }
 
 LessonCinematicDisplayTransport MakeTransport(FakeTransport* fake) {
     return LessonCinematicDisplayTransport({fake, Begin, Queue, Wait, End});
+}
+
+void TestPanelIdleGenerationRejectsDelayedLvglCompletion() {
+    LessonCinematicPanelCompletionGate gate;
+    Require(!gate.OnPanelCompletion(), "delayed LVGL completion is not cinematic");
+    gate.ArmNextCompletion();
+    Require(gate.OnPanelCompletion(), "first post-barrier completion owns cinematic generation");
+    Require(!gate.OnPanelCompletion(), "following LVGL completion is routed normally");
 }
 
 void TestOwnershipCompletionAndReuse() {
@@ -131,28 +155,64 @@ void TestFailureCleanup() {
     Require(timed_out.QueueLessonCinematicFrame(pixels, 320, 480),
             "timeout test queues frame");
     Require(!timed_out.WaitLessonCinematicFrame(9), "completion timeout is reported");
-    Require(timeout.ends == 1, "completion timeout resumes LVGL exactly once");
+    Require(timeout.ends == 0 && timeout.resumes == 0,
+            "completion timeout leaves ownership quarantined without cleanup");
     Require(!timed_out.BeginLessonCinematic(),
             "unknown DMA completion rejects new cinematic ownership");
     Require(!timed_out.QueueLessonCinematicFrame(pixels, 320, 480),
             "unknown DMA completion keeps the framebuffer quarantined");
     timed_out.EndLessonCinematic();
-    Require(timeout.ends == 1, "end after timeout does not resume twice");
+    Require(timeout.ends == 1 && timeout.resumes == 0,
+            "end while DMA is pending returns without resuming LVGL");
     timeout.completion_ready = true;
     Require(timed_out.WaitLessonCinematicFrame(0),
             "late callback releases the quarantined framebuffer");
-    Require(timeout.ends == 1, "late callback does not resume LVGL twice");
+    timeout.end_ok = true;
+    timed_out.EndLessonCinematic();
+    Require(timeout.resumes == 1, "late completion permits exactly one LVGL resume");
     Require(timed_out.BeginLessonCinematic(),
             "ownership can be reacquired after real DMA completion");
     timed_out.EndLessonCinematic();
 }
 
+void TestConcurrentEndDuringWaitSerializesCleanup() {
+    FakeTransport fake;
+    fake.block_wait = true;
+    fake.completion_ready = true;
+    auto transport = MakeTransport(&fake);
+    std::uint16_t pixels[1] = {};
+    Require(transport.BeginLessonCinematic(), "concurrent test begins ownership");
+    Require(transport.QueueLessonCinematicFrame(pixels, 320, 480),
+            "concurrent test queues frame");
+
+    bool wait_result = false;
+    std::thread waiter([&] { wait_result = transport.WaitLessonCinematicFrame(50); });
+    {
+        std::unique_lock<std::mutex> lock(fake.mutex);
+        fake.condition.wait(lock, [&fake] { return fake.wait_entered; });
+    }
+    std::thread ender([&] { transport.EndLessonCinematic(); });
+    ender.join();
+    {
+        std::lock_guard<std::mutex> lock(fake.mutex);
+        fake.release_wait = true;
+    }
+    fake.condition.notify_all();
+    waiter.join();
+
+    Require(wait_result, "blocked wait observes the real completion");
+    Require(fake.ends == 1 && fake.resumes == 1,
+            "concurrent end is deferred and resumes exactly once after wait");
+}
+
 }  // namespace
 
 int main() {
+    TestPanelIdleGenerationRejectsDelayedLvglCompletion();
     TestOwnershipCompletionAndReuse();
     TestValidationAndCallbackBeforeWait();
     TestFailureCleanup();
+    TestConcurrentEndDuringWaitSerializesCleanup();
     std::cout << "lesson cinematic display transport test passed\n";
     return 0;
 }

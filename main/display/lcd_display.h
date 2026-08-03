@@ -2,6 +2,32 @@
 #define LCD_DISPLAY_H
 
 #include <cstdint>
+#include <atomic>
+#include <mutex>
+
+class LessonCinematicPanelCompletionGate {
+public:
+    void ArmNextCompletion() {
+        armed_generation_.store(
+            completed_generation_.load(std::memory_order_acquire) + 1,
+            std::memory_order_release);
+    }
+
+    void Disarm() { armed_generation_.store(0, std::memory_order_release); }
+
+    bool OnPanelCompletion() {
+        const std::uint32_t completed =
+            completed_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        std::uint32_t armed = armed_generation_.load(std::memory_order_acquire);
+        return armed != 0 && completed == armed &&
+               armed_generation_.compare_exchange_strong(
+                   armed, 0, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+
+private:
+    std::atomic<std::uint32_t> completed_generation_{0};
+    std::atomic<std::uint32_t> armed_generation_{0};
+};
 
 class LessonCinematicDisplayTransport {
 public:
@@ -20,65 +46,138 @@ public:
     LessonCinematicDisplayTransport& operator=(const LessonCinematicDisplayTransport&) = delete;
 
     bool BeginLessonCinematic() {
-        if (owned_ || cleanup_owed_ || ops_.begin == nullptr || ops_.end == nullptr) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (state_ != State::kIdle || ops_.begin == nullptr || ops_.end == nullptr) {
+                return false;
+            }
+            state_ = State::kBeginning;
+            end_requested_ = false;
+        }
+
+        const bool began = ops_.begin(ops_.context);
+        bool finish_end = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!began || end_requested_) {
+                state_ = State::kEnding;
+                finish_end = true;
+            } else {
+                state_ = State::kOwned;
+            }
+        }
+        if (finish_end) FinishEnd(State::kIdle);
+        if (!began) {
             return false;
         }
-        cleanup_owed_ = true;
-        if (!ops_.begin(ops_.context)) {
-            EndLessonCinematic();
-            return false;
-        }
-        owned_ = true;
-        return true;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return state_ == State::kOwned;
     }
 
     bool QueueLessonCinematicFrame(const std::uint16_t* pixels, std::uint16_t width,
                                    std::uint16_t height) {
-        if (!owned_ || in_flight_ || pixels == nullptr || width != 320 || height != 480 ||
-            ops_.queue == nullptr) {
+        if (pixels == nullptr || width != 320 || height != 480 || ops_.queue == nullptr) {
             return false;
         }
-        in_flight_ = true;
-        if (!ops_.queue(ops_.context, pixels)) {
-            EndLessonCinematic();
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (state_ != State::kOwned) return false;
+            state_ = State::kQueueing;
+        }
+
+        const bool queued = ops_.queue(ops_.context, pixels);
+        bool finish_end = false;
+        State fallback = State::kOwned;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            fallback = queued ? State::kInFlight : State::kOwned;
+            if (!queued || end_requested_) {
+                state_ = State::kEnding;
+                finish_end = true;
+            } else {
+                state_ = State::kInFlight;
+            }
+        }
+        if (finish_end) FinishEnd(fallback);
+        if (!queued) {
             return false;
         }
-        return true;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return state_ == State::kInFlight;
     }
 
     bool WaitLessonCinematicFrame(std::uint32_t timeout_ms) {
-        if (!owned_ || !in_flight_ || ops_.wait == nullptr) return false;
-        if (!ops_.wait(ops_.context, timeout_ms)) {
-            if (hardware_failed_) return false;
-            EndLessonCinematic();
-            return false;
+        if (ops_.wait == nullptr) return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (state_ != State::kInFlight) return false;
+            state_ = State::kWaiting;
         }
-        in_flight_ = false;
-        if (hardware_failed_) {
-            hardware_failed_ = false;
-            owned_ = false;
+
+        const bool completed = ops_.wait(ops_.context, timeout_ms);
+        bool finish_end = false;
+        State fallback = completed ? State::kOwned : State::kInFlight;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (end_requested_) {
+                state_ = State::kEnding;
+                finish_end = true;
+            } else {
+                state_ = fallback;
+            }
         }
-        return true;
+        if (finish_end) FinishEnd(fallback);
+        return completed;
     }
 
     void EndLessonCinematic() {
-        if (!cleanup_owed_) return;
-        const bool buffer_released = ops_.end(ops_.context);
-        cleanup_owed_ = false;
-        if (buffer_released) {
-            in_flight_ = false;
-            owned_ = false;
-            return;
+        State fallback = State::kIdle;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            switch (state_) {
+                case State::kIdle:
+                case State::kEnding:
+                    return;
+                case State::kBeginning:
+                case State::kQueueing:
+                case State::kWaiting:
+                    end_requested_ = true;
+                    return;
+                case State::kOwned:
+                    fallback = State::kOwned;
+                    break;
+                case State::kInFlight:
+                    fallback = State::kInFlight;
+                    break;
+            }
+            state_ = State::kEnding;
         }
-        hardware_failed_ = true;
+        FinishEnd(fallback);
     }
 
 private:
+    enum class State {
+        kIdle,
+        kBeginning,
+        kOwned,
+        kQueueing,
+        kInFlight,
+        kWaiting,
+        kEnding,
+    };
+
+    void FinishEnd(State fallback) {
+        const bool released = ops_.end(ops_.context);
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_ = released ? State::kIdle : fallback;
+        end_requested_ = false;
+    }
+
     Ops ops_;
-    bool owned_ = false;
-    bool in_flight_ = false;
-    bool cleanup_owed_ = false;
-    bool hardware_failed_ = false;
+    std::mutex mutex_;
+    State state_ = State::kIdle;
+    bool end_requested_ = false;
 };
 
 #ifndef TBOT_LESSON_CINEMATIC_TRANSPORT_ONLY
