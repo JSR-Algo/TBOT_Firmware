@@ -37,6 +37,7 @@
 #include <esp_psram.h>
 #include <esp_vfs_fat.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <driver/sdmmc_host.h>
 #include <sdmmc_cmd.h>
@@ -353,6 +354,17 @@ public:
             return;
         }
 
+        lesson_cinematic_done_ = xSemaphoreCreateBinary();
+        if (lesson_cinematic_done_ == nullptr) {
+            ESP_LOGE(TAG, "Failed to create cinematic transfer semaphore");
+            return;
+        }
+        const esp_lcd_panel_io_callbacks_t panel_io_callbacks = {
+            .on_color_trans_done = OnColorTransferDone,
+        };
+        ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(
+            panel_io_, &panel_io_callbacks, this));
+
         if (landscape) {
             lvgl_port_lock(0);
             lv_display_set_rotation(display_, LV_DISPLAY_ROTATION_90);  // đổi 270 nếu lộn đầu
@@ -364,7 +376,129 @@ public:
         }
     }
 
+    ~St77922QspiDisplay() override {
+        EndLessonCinematic();
+        if (lesson_cinematic_done_ != nullptr) {
+            vSemaphoreDelete(lesson_cinematic_done_);
+            lesson_cinematic_done_ = nullptr;
+        }
+    }
+
+    bool BeginLessonCinematic() override {
+        return lesson_cinematic_transport_.BeginLessonCinematic();
+    }
+
+    bool QueueLessonCinematicFrame(const std::uint16_t* pixels, std::uint16_t width,
+                                   std::uint16_t height) override {
+        return lesson_cinematic_transport_.QueueLessonCinematicFrame(pixels, width, height);
+    }
+
+    bool WaitLessonCinematicFrame(std::uint32_t timeout_ms) override {
+        return lesson_cinematic_transport_.WaitLessonCinematicFrame(timeout_ms);
+    }
+
+    void EndLessonCinematic() override {
+        lesson_cinematic_transport_.EndLessonCinematic();
+    }
+
 private:
+    static bool OnColorTransferDone(esp_lcd_panel_io_handle_t,
+                                    esp_lcd_panel_io_event_data_t*, void* context) {
+        auto* self = static_cast<St77922QspiDisplay*>(context);
+        if (!self->lesson_cinematic_active_.load(std::memory_order_acquire)) {
+            lvgl_port_flush_ready(self->display_);
+            return false;
+        }
+        if (!self->lesson_cinematic_pending_.load(std::memory_order_acquire)) return false;
+
+        BaseType_t higher_priority_task_woken = pdFALSE;
+        xSemaphoreGiveFromISR(self->lesson_cinematic_done_, &higher_priority_task_woken);
+        return higher_priority_task_woken == pdTRUE;
+    }
+
+    static bool BeginLessonCinematicTransport(void* context) {
+        return static_cast<St77922QspiDisplay*>(context)->BeginLessonCinematicTransport();
+    }
+
+    static bool QueueLessonCinematicTransport(void* context, const std::uint16_t* pixels) {
+        return static_cast<St77922QspiDisplay*>(context)->QueueLessonCinematicTransport(pixels);
+    }
+
+    static bool WaitLessonCinematicTransport(void* context, std::uint32_t timeout_ms) {
+        return static_cast<St77922QspiDisplay*>(context)->WaitLessonCinematicTransport(timeout_ms);
+    }
+
+    static void EndLessonCinematicTransport(void* context) {
+        static_cast<St77922QspiDisplay*>(context)->EndLessonCinematicTransport();
+    }
+
+    bool BeginLessonCinematicTransport() {
+        if (display_ == nullptr || panel_ == nullptr || lesson_cinematic_done_ == nullptr ||
+            !Lock(1000)) {
+            return false;
+        }
+
+        lv_refr_now(display_);
+        const esp_err_t stop_result = lvgl_port_stop();
+        if (stop_result != ESP_OK) {
+            Unlock();
+            return false;
+        }
+
+        while (xSemaphoreTake(lesson_cinematic_done_, 0) == pdTRUE) {}
+        lesson_cinematic_stopped_ = true;
+        lesson_cinematic_active_.store(true, std::memory_order_release);
+        Unlock();
+        return true;
+    }
+
+    bool QueueLessonCinematicTransport(const std::uint16_t* pixels) {
+        while (xSemaphoreTake(lesson_cinematic_done_, 0) == pdTRUE) {}
+        lesson_cinematic_pending_.store(true, std::memory_order_release);
+        const esp_err_t result = esp_lcd_panel_draw_bitmap(panel_, 0, 0, 320, 480, pixels);
+        if (result != ESP_OK) {
+            lesson_cinematic_pending_.store(false, std::memory_order_release);
+            return false;
+        }
+        return true;
+    }
+
+    bool WaitLessonCinematicTransport(std::uint32_t timeout_ms) {
+        const bool completed = xSemaphoreTake(
+            lesson_cinematic_done_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+        if (completed) {
+            lesson_cinematic_pending_.store(false, std::memory_order_release);
+        }
+        return completed;
+    }
+
+    void EndLessonCinematicTransport() {
+        if (lesson_cinematic_pending_.load(std::memory_order_acquire)) {
+            xSemaphoreTake(lesson_cinematic_done_, portMAX_DELAY);
+            lesson_cinematic_pending_.store(false, std::memory_order_release);
+        }
+        if (!lesson_cinematic_stopped_) return;
+
+        Lock(0);
+        lesson_cinematic_active_.store(false, std::memory_order_release);
+        lv_obj_invalidate(lv_screen_active());
+        ESP_ERROR_CHECK_WITHOUT_ABORT(lvgl_port_resume());
+        lesson_cinematic_stopped_ = false;
+        Unlock();
+    }
+
+    SemaphoreHandle_t lesson_cinematic_done_ = nullptr;
+    std::atomic<bool> lesson_cinematic_active_{false};
+    std::atomic<bool> lesson_cinematic_pending_{false};
+    bool lesson_cinematic_stopped_ = false;
+    LessonCinematicDisplayTransport lesson_cinematic_transport_{{
+        this,
+        BeginLessonCinematicTransport,
+        QueueLessonCinematicTransport,
+        WaitLessonCinematicTransport,
+        EndLessonCinematicTransport,
+    }};
+
     void DrawBootProbePattern() {
         constexpr int kChunkLines = 20;
         constexpr uint16_t kColors[] = {0xFFFF, 0xF800, 0x07E0, 0x001F, 0xFFE0};

@@ -1,6 +1,77 @@
 #ifndef LCD_DISPLAY_H
 #define LCD_DISPLAY_H
 
+#include <cstdint>
+
+class LessonCinematicDisplayTransport {
+public:
+    struct Ops {
+        void* context = nullptr;
+        bool (*begin)(void* context) = nullptr;
+        bool (*queue)(void* context, const std::uint16_t* pixels) = nullptr;
+        bool (*wait)(void* context, std::uint32_t timeout_ms) = nullptr;
+        void (*end)(void* context) = nullptr;
+    };
+
+    explicit LessonCinematicDisplayTransport(Ops ops) : ops_(ops) {}
+    ~LessonCinematicDisplayTransport() { EndLessonCinematic(); }
+
+    LessonCinematicDisplayTransport(const LessonCinematicDisplayTransport&) = delete;
+    LessonCinematicDisplayTransport& operator=(const LessonCinematicDisplayTransport&) = delete;
+
+    bool BeginLessonCinematic() {
+        if (owned_ || cleanup_owed_ || ops_.begin == nullptr || ops_.end == nullptr) {
+            return false;
+        }
+        cleanup_owed_ = true;
+        if (!ops_.begin(ops_.context)) {
+            EndLessonCinematic();
+            return false;
+        }
+        owned_ = true;
+        return true;
+    }
+
+    bool QueueLessonCinematicFrame(const std::uint16_t* pixels, std::uint16_t width,
+                                   std::uint16_t height) {
+        if (!owned_ || in_flight_ || pixels == nullptr || width != 320 || height != 480 ||
+            ops_.queue == nullptr) {
+            return false;
+        }
+        in_flight_ = true;
+        if (!ops_.queue(ops_.context, pixels)) {
+            EndLessonCinematic();
+            return false;
+        }
+        return true;
+    }
+
+    bool WaitLessonCinematicFrame(std::uint32_t timeout_ms) {
+        if (!owned_ || !in_flight_ || ops_.wait == nullptr) return false;
+        if (!ops_.wait(ops_.context, timeout_ms)) {
+            EndLessonCinematic();
+            return false;
+        }
+        in_flight_ = false;
+        return true;
+    }
+
+    void EndLessonCinematic() {
+        if (!cleanup_owed_) return;
+        ops_.end(ops_.context);
+        in_flight_ = false;
+        owned_ = false;
+        cleanup_owed_ = false;
+    }
+
+private:
+    Ops ops_;
+    bool owned_ = false;
+    bool in_flight_ = false;
+    bool cleanup_owed_ = false;
+};
+
+#ifndef TBOT_LESSON_CINEMATIC_TRANSPORT_ONLY
 #include "lvgl_display.h"
 #include "gif/lvgl_gif.h"
 #include "lesson_renderer_memory_probe.h"
@@ -93,6 +164,11 @@ public:
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) override;
     virtual void SetLessonTeachingWord(const char* text) override;
+    virtual bool BeginLessonCinematic();
+    virtual bool QueueLessonCinematicFrame(const std::uint16_t* pixels, std::uint16_t width,
+                                           std::uint16_t height);
+    virtual bool WaitLessonCinematicFrame(std::uint32_t timeout_ms);
+    virtual void EndLessonCinematic();
     bool PresentLessonFramebuffer(const std::uint16_t* pixels, std::uint16_t width,
                                   std::uint16_t height);
     virtual bool StartLessonRobotEntrance(
@@ -132,5 +208,6 @@ public:
                    int width, int height, int offset_x, int offset_y,
                    bool mirror_x, bool mirror_y, bool swap_xy);
 };
+#endif  // TBOT_LESSON_CINEMATIC_TRANSPORT_ONLY
 
 #endif // LCD_DISPLAY_H
