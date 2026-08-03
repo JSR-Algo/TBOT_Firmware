@@ -21,6 +21,7 @@ struct FakeTransport {
     bool begin_ok = true;
     bool queue_ok = true;
     bool wait_ok = true;
+    bool end_ok = true;
     bool completion_ready = false;
     const std::uint16_t* queued_pixels = nullptr;
     std::uint32_t last_timeout_ms = 0;
@@ -46,7 +47,11 @@ bool Wait(void* raw, std::uint32_t timeout_ms) {
     return fake.wait_ok && fake.completion_ready;
 }
 
-void End(void* raw) { ++static_cast<FakeTransport*>(raw)->ends; }
+bool End(void* raw) {
+    auto& fake = *static_cast<FakeTransport*>(raw);
+    ++fake.ends;
+    return fake.end_ok;
+}
 
 LessonCinematicDisplayTransport MakeTransport(FakeTransport* fake) {
     return LessonCinematicDisplayTransport({fake, Begin, Queue, Wait, End});
@@ -120,14 +125,26 @@ void TestFailureCleanup() {
             "queue failure relinquishes ownership");
 
     FakeTransport timeout;
+    timeout.end_ok = false;
     auto timed_out = MakeTransport(&timeout);
     Require(timed_out.BeginLessonCinematic(), "timeout test acquires ownership");
     Require(timed_out.QueueLessonCinematicFrame(pixels, 320, 480),
             "timeout test queues frame");
     Require(!timed_out.WaitLessonCinematicFrame(9), "completion timeout is reported");
     Require(timeout.ends == 1, "completion timeout resumes LVGL exactly once");
+    Require(!timed_out.BeginLessonCinematic(),
+            "unknown DMA completion rejects new cinematic ownership");
+    Require(!timed_out.QueueLessonCinematicFrame(pixels, 320, 480),
+            "unknown DMA completion keeps the framebuffer quarantined");
     timed_out.EndLessonCinematic();
     Require(timeout.ends == 1, "end after timeout does not resume twice");
+    timeout.completion_ready = true;
+    Require(timed_out.WaitLessonCinematicFrame(0),
+            "late callback releases the quarantined framebuffer");
+    Require(timeout.ends == 1, "late callback does not resume LVGL twice");
+    Require(timed_out.BeginLessonCinematic(),
+            "ownership can be reacquired after real DMA completion");
+    timed_out.EndLessonCinematic();
 }
 
 }  // namespace

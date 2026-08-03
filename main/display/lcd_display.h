@@ -10,7 +10,7 @@ public:
         bool (*begin)(void* context) = nullptr;
         bool (*queue)(void* context, const std::uint16_t* pixels) = nullptr;
         bool (*wait)(void* context, std::uint32_t timeout_ms) = nullptr;
-        void (*end)(void* context) = nullptr;
+        bool (*end)(void* context) = nullptr;
     };
 
     explicit LessonCinematicDisplayTransport(Ops ops) : ops_(ops) {}
@@ -49,19 +49,28 @@ public:
     bool WaitLessonCinematicFrame(std::uint32_t timeout_ms) {
         if (!owned_ || !in_flight_ || ops_.wait == nullptr) return false;
         if (!ops_.wait(ops_.context, timeout_ms)) {
+            if (hardware_failed_) return false;
             EndLessonCinematic();
             return false;
         }
         in_flight_ = false;
+        if (hardware_failed_) {
+            hardware_failed_ = false;
+            owned_ = false;
+        }
         return true;
     }
 
     void EndLessonCinematic() {
         if (!cleanup_owed_) return;
-        ops_.end(ops_.context);
-        in_flight_ = false;
-        owned_ = false;
+        const bool buffer_released = ops_.end(ops_.context);
         cleanup_owed_ = false;
+        if (buffer_released) {
+            in_flight_ = false;
+            owned_ = false;
+            return;
+        }
+        hardware_failed_ = true;
     }
 
 private:
@@ -69,6 +78,7 @@ private:
     bool owned_ = false;
     bool in_flight_ = false;
     bool cleanup_owed_ = false;
+    bool hardware_failed_ = false;
 };
 
 #ifndef TBOT_LESSON_CINEMATIC_TRANSPORT_ONLY

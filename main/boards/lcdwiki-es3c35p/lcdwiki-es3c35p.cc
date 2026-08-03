@@ -402,18 +402,18 @@ public:
     }
 
 private:
+    static constexpr std::uint32_t kLessonCinematicCleanupTimeoutMs = 100;
+
     static bool OnColorTransferDone(esp_lcd_panel_io_handle_t,
                                     esp_lcd_panel_io_event_data_t*, void* context) {
         auto* self = static_cast<St77922QspiDisplay*>(context);
-        if (!self->lesson_cinematic_active_.load(std::memory_order_acquire)) {
-            lvgl_port_flush_ready(self->display_);
-            return false;
+        if (self->lesson_cinematic_pending_.exchange(false, std::memory_order_acq_rel)) {
+            BaseType_t higher_priority_task_woken = pdFALSE;
+            xSemaphoreGiveFromISR(self->lesson_cinematic_done_, &higher_priority_task_woken);
+            return higher_priority_task_woken == pdTRUE;
         }
-        if (!self->lesson_cinematic_pending_.load(std::memory_order_acquire)) return false;
-
-        BaseType_t higher_priority_task_woken = pdFALSE;
-        xSemaphoreGiveFromISR(self->lesson_cinematic_done_, &higher_priority_task_woken);
-        return higher_priority_task_woken == pdTRUE;
+        lvgl_port_flush_ready(self->display_);
+        return false;
     }
 
     static bool BeginLessonCinematicTransport(void* context) {
@@ -428,8 +428,8 @@ private:
         return static_cast<St77922QspiDisplay*>(context)->WaitLessonCinematicTransport(timeout_ms);
     }
 
-    static void EndLessonCinematicTransport(void* context) {
-        static_cast<St77922QspiDisplay*>(context)->EndLessonCinematicTransport();
+    static bool EndLessonCinematicTransport(void* context) {
+        return static_cast<St77922QspiDisplay*>(context)->EndLessonCinematicTransport();
     }
 
     bool BeginLessonCinematicTransport() {
@@ -447,7 +447,6 @@ private:
 
         while (xSemaphoreTake(lesson_cinematic_done_, 0) == pdTRUE) {}
         lesson_cinematic_stopped_ = true;
-        lesson_cinematic_active_.store(true, std::memory_order_release);
         Unlock();
         return true;
     }
@@ -464,31 +463,31 @@ private:
     }
 
     bool WaitLessonCinematicTransport(std::uint32_t timeout_ms) {
-        const bool completed = xSemaphoreTake(
-            lesson_cinematic_done_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-        if (completed) {
-            lesson_cinematic_pending_.store(false, std::memory_order_release);
-        }
-        return completed;
+        return xSemaphoreTake(lesson_cinematic_done_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     }
 
-    void EndLessonCinematicTransport() {
+    bool EndLessonCinematicTransport() {
         if (lesson_cinematic_pending_.load(std::memory_order_acquire)) {
-            xSemaphoreTake(lesson_cinematic_done_, portMAX_DELAY);
-            lesson_cinematic_pending_.store(false, std::memory_order_release);
+            xSemaphoreTake(lesson_cinematic_done_,
+                           pdMS_TO_TICKS(kLessonCinematicCleanupTimeoutMs));
         }
-        if (!lesson_cinematic_stopped_) return;
+        const bool buffer_released =
+            !lesson_cinematic_pending_.load(std::memory_order_acquire);
+        if (!lesson_cinematic_stopped_) return buffer_released;
 
-        Lock(0);
-        lesson_cinematic_active_.store(false, std::memory_order_release);
-        lv_obj_invalidate(lv_screen_active());
+        const bool locked = Lock(1000);
+        if (locked) {
+            lv_obj_invalidate(lv_screen_active());
+        } else {
+            ESP_LOGE(TAG, "Failed to lock LVGL while ending cinematic ownership");
+        }
         ESP_ERROR_CHECK_WITHOUT_ABORT(lvgl_port_resume());
         lesson_cinematic_stopped_ = false;
-        Unlock();
+        if (locked) Unlock();
+        return buffer_released;
     }
 
     SemaphoreHandle_t lesson_cinematic_done_ = nullptr;
-    std::atomic<bool> lesson_cinematic_active_{false};
     std::atomic<bool> lesson_cinematic_pending_{false};
     bool lesson_cinematic_stopped_ = false;
     LessonCinematicDisplayTransport lesson_cinematic_transport_{{
