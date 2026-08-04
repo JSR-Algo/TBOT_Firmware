@@ -103,6 +103,14 @@ const char* FaultText(LessonCinematicFault fault) {
 }
 
 #if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
+std::uint64_t GenerateBootNonce() {
+    std::uint64_t nonce = (static_cast<std::uint64_t>(esp_random()) << 32) | esp_random();
+    if (nonce == 0) {
+        nonce = (static_cast<std::uint64_t>(esp_random()) << 32) | esp_random();
+    }
+    return nonce != 0 ? nonce : 1;
+}
+
 const char* ResetReasonText(esp_reset_reason_t reason) {
     switch (reason) {
         case ESP_RST_POWERON:
@@ -180,7 +188,7 @@ void LessonCinematicEvidenceBoot() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
 #if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
-    g_boot.boot_nonce = (static_cast<std::uint64_t>(esp_random()) << 32) | esp_random();
+    g_boot.boot_nonce = GenerateBootNonce();
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason),
               ResetReasonText(esp_reset_reason()));
     g_boot.lifetime_internal_heap_min = static_cast<std::uint32_t>(

@@ -10,6 +10,7 @@
 #if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
 #include <esp_heap_caps.h>
+#include <esp_random.h>
 #endif
 
 namespace {
@@ -62,6 +63,26 @@ void TestEspCueHeapMonitorResetsForEveryCue() {
             "second ESP cue resets its minimum instead of inheriting the first cue");
     Require(HostHilHeapMonitorStartCalls() == 2, "each ESP cue starts one local monitor");
     Require(HostHilHeapMonitorStopCalls() == 2, "each ESP cue stops one local monitor");
+}
+
+void TestEspBootRepairsAnAllZeroRandomNonceWithOneBoundedRetry() {
+    HostEspRandomValue() = 0;
+    HostEspRandomCalls() = 0;
+
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceBoot();
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
+    char line[768] = {};
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 200, line, sizeof(line)),
+            "zero-RNG ESP cue line formats");
+    Require(std::string(line).find("boot_nonce=0x0 ") == std::string::npos,
+            "zero RNG cannot produce a zero boot nonce");
+    Require(HostEspRandomCalls() == 4,
+            "zero RNG receives exactly one bounded two-word retry");
+
+    HostEspRandomValue() = 0x1234abcdU;
 }
 
 #else
@@ -286,6 +307,7 @@ int main() {
 #if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
     TestEspCueHeapMonitorResetsForEveryCue();
+    TestEspBootRepairsAnAllZeroRandomNonceWithOneBoundedRetry();
 #else
     TestEspDisabledEntryPointsAreNoOps();
 #endif
