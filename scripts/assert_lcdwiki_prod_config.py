@@ -33,6 +33,9 @@ def main() -> int:
     if not re.search(r"^CONFIG_FATFS_LFN_HEAP=y$", sdkconfig, re.MULTILINE):
         failures.append("CONFIG_FATFS_LFN_HEAP=y must be enabled for LCDWiki lesson assets")
 
+    if not re.search(r"^CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y$", sdkconfig, re.MULTILINE):
+        failures.append("Release cinematic evidence must be enabled for LCDWiki production builds")
+
     if re.search(r"^CONFIG_TBOT_HIL_STORAGE_FAULTS=y$", sdkconfig, re.MULTILINE):
         failures.append("HIL storage faults must stay disabled for LCDWiki production builds")
 

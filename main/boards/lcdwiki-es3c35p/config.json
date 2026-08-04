@@ -15,7 +15,8 @@
                 "CONFIG_WAKE_WORD_DETECTION_IN_LISTENING=y",
                 "# CONFIG_MBEDTLS_HARDWARE_AES is not set",
                 "# CONFIG_FATFS_LFN_NONE is not set",
-                "CONFIG_FATFS_LFN_HEAP=y"
+                "CONFIG_FATFS_LFN_HEAP=y",
+                "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y"
             ]
         }
     ]

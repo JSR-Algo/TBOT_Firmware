@@ -120,6 +120,36 @@ def test_lcdwiki_es3c35p_reference_sdkconfig_passes_prod_gate(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_lcdwiki_enables_release_cinematic_evidence():
+    sdkconfig = lcdwiki_reference_sdkconfig()
+
+    assert "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y" in sdkconfig
+
+
+def test_lcdwiki_es3c35p_prod_gate_rejects_missing_release_cinematic_evidence(tmp_path):
+    sdkconfig = tmp_path / "sdkconfig.es3c35p-no-release-evidence"
+    sdkconfig.write_text(
+        lcdwiki_reference_sdkconfig().replace(
+            "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y",
+            "",
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/assert_lcdwiki_prod_config.py"),
+            str(sdkconfig),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Release cinematic evidence must be enabled" in result.stderr
+
+
 def test_lcdwiki_es3c35p_prod_gate_rejects_hil_storage_profile(tmp_path):
     sdkconfig = tmp_path / "sdkconfig.es3c35p-hil"
     sdkconfig.write_text(

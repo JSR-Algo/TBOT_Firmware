@@ -43,6 +43,15 @@ config TBOT_HIL_CINEMATIC_TELEMETRY
     help
         Emits parseable HIL_CINE boot and cue_end terminal lines for hardware-in-loop
         cinematic validation. Keep disabled for production images.
+
+config TBOT_RELEASE_CINEMATIC_EVIDENCE
+    bool "Enable production cinematic release evidence"
+    depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P
+    default n
+    help
+        Emits bounded serial-only CINE_EVIDENCE boot and cue_end records for
+        release verification. This does not enable HIL tools or fault injection.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE
