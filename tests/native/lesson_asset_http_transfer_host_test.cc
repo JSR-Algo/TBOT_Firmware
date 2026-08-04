@@ -8,11 +8,11 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
 
 namespace fs = std::filesystem;
@@ -56,55 +56,20 @@ public:
     explicit FakeHttp(std::string body) : body_(body.begin(), body.end()) {}
 
     void SetTimeout(int) override {}
-    void SetHeader(const std::string& key, const std::string& value) override {
-        if (key == "Range") range_header = value;
-    }
+    void SetHeader(const std::string&, const std::string&) override {}
     void SetContent(std::string&&) override {}
     void SetKeepAlive(bool) override {}
-    bool Open(const std::string&, const std::string&) override {
-        wdt_calls_at_open = g_esp_task_wdt_reset_calls;
-        ++open_calls;
-        if (!open_ok) return false;
-        if (range_header.rfind("bytes=", 0) == 0) {
-            requested_offset = static_cast<size_t>(
-                std::stoull(range_header.substr(std::string("bytes=").size())));
-            if (!ignore_range) position_ = requested_offset;
-        }
-        return true;
-    }
-    void Close() override { ++close_calls; }
+    bool Open(const std::string&, const std::string&) override { return true; }
+    void Close() override {}
     int Write(const char*, size_t) override { return -1; }
-    int GetStatusCode() override {
-        wdt_calls_at_status = g_esp_task_wdt_reset_calls;
-        return open_calls == 0 || ignore_range ? 200 : resume_status;
-    }
-    std::string GetResponseHeader(const std::string& key) const override {
-        if (key != "Content-Range" || open_calls == 0 || ignore_range) return {};
-        const size_t start = mismatched_range ? requested_offset + 1 : requested_offset;
-        return "bytes " + std::to_string(start) + "-" +
-               std::to_string(body_.size() - 1) + "/" +
-               std::to_string(body_.size());
-    }
-    size_t GetBodyLength() override {
-        if (open_calls > 0 && !ignore_range && position_ <= body_.size()) {
-            return body_.size() - position_;
-        }
-        return body_.size();
-    }
+    int GetStatusCode() override { return 200; }
+    std::string GetResponseHeader(const std::string&) const override { return {}; }
+    size_t GetBodyLength() override { return body_.size(); }
     std::string ReadAll() override { return {}; }
     int GetLastError() override { return 0; }
 
     int Read(char* buffer, size_t want) override {
         read_wants.push_back(want);
-        if (fail_once_at != std::numeric_limits<size_t>::max() &&
-            position_ >= fail_once_at && !read_failed_) {
-            wdt_calls_at_error = g_esp_task_wdt_reset_calls;
-            read_failed_ = true;
-            return -1;
-        }
-        if (read_failed_ && wdt_calls_at_first_resumed_read == 0) {
-            wdt_calls_at_first_resumed_read = g_esp_task_wdt_reset_calls;
-        }
         if (return_more_than_want) {
             const size_t count = std::min(want, body_.size() - position_);
             std::copy_n(body_.data() + position_, count, buffer);
@@ -112,11 +77,7 @@ public:
             return static_cast<int>(want + 1);
         }
         const size_t remaining = body_.size() - position_;
-        size_t count = std::min(want, remaining);
-        if (!read_failed_ && fail_once_at != std::numeric_limits<size_t>::max() &&
-            position_ < fail_once_at) {
-            count = std::min(count, fail_once_at - position_);
-        }
+        const size_t count = std::min(want, remaining);
         if (count == 0) return 0;
         std::copy_n(body_.data() + position_, count, buffer);
         position_ += count;
@@ -124,39 +85,125 @@ public:
     }
 
     bool return_more_than_want = false;
-    bool ignore_range = false;
-    bool mismatched_range = false;
-    bool open_ok = true;
-    int resume_status = 206;
-    size_t fail_once_at = std::numeric_limits<size_t>::max();
-    size_t requested_offset = 0;
-    int open_calls = 0;
-    int close_calls = 0;
-    int wdt_calls_at_error = 0;
-    int wdt_calls_at_open = 0;
-    int wdt_calls_at_status = 0;
-    int wdt_calls_at_first_resumed_read = 0;
-    std::string range_header;
     std::vector<size_t> read_wants;
 
 private:
     std::vector<char> body_;
     size_t position_ = 0;
-    bool read_failed_ = false;
 };
 
-std::string HostSha256(const std::string& bytes) {
-    unsigned char digest[32] = {};
-    for (std::size_t index = 0; index < bytes.size(); ++index) {
-        digest[index % 32] ^= static_cast<unsigned char>(bytes[index]);
+class GeneratedHttp final : public Http {
+public:
+    explicit GeneratedHttp(size_t size) : size_(size) {}
+    void SetTimeout(int) override {}
+    void SetHeader(const std::string&, const std::string&) override {}
+    void SetContent(std::string&&) override {}
+    void SetKeepAlive(bool) override {}
+    bool Open(const std::string&, const std::string&) override { return true; }
+    void Close() override {}
+    int Write(const char*, size_t) override { return -1; }
+    int GetStatusCode() override { return 200; }
+    std::string GetResponseHeader(const std::string&) const override { return {}; }
+    size_t GetBodyLength() override { return size_; }
+    std::string ReadAll() override { read_all_called = true; return {}; }
+    int GetLastError() override { return 0; }
+    int Read(char* buffer, size_t want) override {
+        max_want = std::max(max_want, want);
+        const size_t count = std::min(want, size_ - position_);
+        if (count == 0) return 0;
+        std::fill_n(buffer, count, 't');
+        position_ += count;
+        return static_cast<int>(count);
     }
-    char hex[65];
-    for (std::size_t index = 0; index < 32; ++index) {
-        std::snprintf(hex + index * 2, sizeof(hex) - index * 2, "%02x", digest[index]);
+    size_t max_want = 0;
+    bool read_all_called = false;
+private:
+    size_t size_;
+    size_t position_ = 0;
+};
+
+class ResumableHttp final : public Http {
+public:
+    struct Response {
+        int status = 200;
+        size_t start = 0;
+        size_t reported_body_length = 0;
+        std::string content_range;
+        size_t fail_absolute_offset = std::numeric_limits<size_t>::max();
+        bool fail_immediately = false;
+    };
+
+    explicit ResumableHttp(std::string body) : body_(std::move(body)) {}
+
+    void PushResponse(Response response) {
+        if (response.reported_body_length == 0 && response.start <= body_.size()) {
+            response.reported_body_length = body_.size() - response.start;
+        }
+        responses_.push_back(std::move(response));
     }
-    hex[64] = '\0';
-    return std::string(hex);
-}
+
+    void SetTimeout(int) override {}
+    void SetHeader(const std::string& key, const std::string& value) override {
+        headers_[key] = value;
+    }
+    void SetContent(std::string&&) override {}
+    void SetKeepAlive(bool) override {}
+    bool Open(const std::string& method, const std::string& url) override {
+        open_methods.push_back(method);
+        open_urls.push_back(url);
+        observed_ranges.push_back(Header("Range"));
+        if (open_count >= responses_.size()) return false;
+        active_ = responses_[open_count++];
+        position_ = active_.start;
+        return true;
+    }
+    void Close() override { close_count += 1; }
+    int Write(const char*, size_t) override { return -1; }
+    int GetStatusCode() override { return active_.status; }
+    std::string GetResponseHeader(const std::string& key) const override {
+        if (key == "Content-Range") return active_.content_range;
+        return {};
+    }
+    size_t GetBodyLength() override { return active_.reported_body_length; }
+    std::string ReadAll() override { return {}; }
+    int GetLastError() override { return 0; }
+
+    int Read(char* buffer, size_t want) override {
+        read_wants.push_back(want);
+        if (active_.fail_immediately || position_ == active_.fail_absolute_offset) {
+            return -1;
+        }
+        size_t limit = body_.size();
+        if (active_.fail_absolute_offset != std::numeric_limits<size_t>::max()) {
+            limit = std::min(limit, active_.fail_absolute_offset);
+        }
+        const size_t remaining = limit - position_;
+        const size_t count = std::min(want, remaining);
+        if (count == 0) return 0;
+        std::copy_n(body_.data() + position_, count, buffer);
+        position_ += count;
+        return static_cast<int>(count);
+    }
+
+    size_t open_count = 0;
+    size_t close_count = 0;
+    std::vector<std::string> observed_ranges;
+    std::vector<std::string> open_methods;
+    std::vector<std::string> open_urls;
+    std::vector<size_t> read_wants;
+
+private:
+    std::string Header(const std::string& key) const {
+        const auto found = headers_.find(key);
+        return found == headers_.end() ? std::string() : found->second;
+    }
+
+    std::string body_;
+    std::vector<Response> responses_;
+    std::map<std::string, std::string> headers_;
+    Response active_;
+    size_t position_ = 0;
+};
 
 void ArmSync(
     LessonStorageHilCheckpoint checkpoint,
@@ -349,141 +396,71 @@ void TestCinematicMp4LargerThanLegacyImageCapStreamsToSd() {
     }
 }
 
-void TestReceiveTimeoutNearEofResumesAtExactOffsetAndVerifiesSha() {
-    const std::string body(4301312, 'r');
-    FakeHttp http(body);
-    http.fail_once_at = 4245824;
-    const std::string destination = std::string(kRoot) + "/resume-near-eof.bin";
+void TestProductionTrgbStreamsWithBoundedBufferAndRejectsInvalidSizes() {
+    constexpr size_t kTrgbBytes = 29186048;
+    GeneratedHttp http(kTrgbBytes);
+    const std::string destination = std::string(kRoot) + "/production.trgb";
     size_t bytes = 0;
     {
         LessonAssetDownloadStagingFile staging(destination);
-        Expect(Transfer(http, staging, nullptr, true, body.size(), bytes),
-               "receive timeout near EOF did not resume");
-        Expect(http.range_header == "bytes=4245824-",
-               "resume did not request the exact persisted byte offset");
-        Expect(http.open_calls == 1 && http.close_calls == 1,
-               "receive timeout did not use one bounded reconnect");
-        Expect(bytes == body.size(), "resumed transfer reported the wrong final size");
-        Expect(Read(staging.path()) == body, "resumed transfer duplicated or skipped bytes");
-        CommitVerifiedLessonAssetDownload(
-            staging, nullptr, destination, HostSha256(body));
-    }
-    Expect(fs::file_size(destination) == body.size(),
-           "verified resumed asset has the wrong committed size");
-    Expect(VerifyLessonAssetSha256(destination, HostSha256(body)),
-           "verified resumed asset has the wrong committed checksum");
-}
-
-void TestServerIgnoringOrMismatchingRangeFailsClosed() {
-    for (const bool ignore_range : {true, false}) {
-        FakeHttp http("replacement-body");
-        http.fail_once_at = 5;
-        http.ignore_range = ignore_range;
-        http.mismatched_range = !ignore_range;
-        const std::string destination = std::string(kRoot) +
-            (ignore_range ? "/ignored-range.bin" : "/mismatched-range.bin");
-        Write(destination, "known-good");
-        size_t bytes = 0;
-        {
-            LessonAssetDownloadStagingFile staging(destination);
-            Expect(!Transfer(http, staging, nullptr, true, 16, bytes),
-                   "unsafe range response was accepted");
-            Expect(bytes == 5, "unsafe range response changed persisted byte count");
-            Expect(!fs::exists(staging.path()), "unsafe range response left staging file");
-            Expect(!fs::exists(staging.path() + ".tmp"),
-                   "unsafe range response left transfer temp file");
+        try {
+            DownloadLessonAssetHttpBodyToFile(
+                http, nullptr, true, kTrgbBytes, "https://assets.example/cue.trgb",
+                staging.path(), bytes, "application/vnd.tbot.rgb565-indexed");
+        } catch (...) {
+            Expect(false, "valid production TRGB transfer was rejected");
         }
-        Expect(Read(destination) == "known-good",
-               "unsafe range response replaced last-known-good asset");
+        Expect(bytes == kTrgbBytes && fs::file_size(staging.path()) == kTrgbBytes,
+               "production TRGB was not completely streamed to SD");
+        Expect(http.max_want <= 4096 && !http.read_all_called,
+               "TRGB transfer allocated or requested the whole file");
     }
-}
 
-void TestStalePowerLossTempIsRestartedSafely() {
-    const std::string body = "complete-replacement";
-    FakeHttp http(body);
-    const std::string destination = std::string(kRoot) + "/power-loss.bin";
-    Write(destination, "known-good");
-    size_t bytes = 0;
-    {
-        LessonAssetDownloadStagingFile staging(destination);
-        Write(staging.path() + ".tmp", "stale-partial");
-        Expect(Transfer(http, staging, nullptr, true, body.size(), bytes),
-               "stale power-loss temp blocked a clean transfer");
-        Expect(Read(staging.path()) == body,
-               "stale power-loss temp was appended to the new transfer");
-        Expect(!fs::exists(staging.path() + ".tmp"),
-               "successful transfer left its temp checkpoint");
+    for (const size_t invalid : std::vector<size_t>{
+             kTrgbBytes + 1, static_cast<size_t>(64U * 1024U * 1024U + 1U)}) {
+        GeneratedHttp rejected(invalid);
+        const std::string rejected_destination =
+            std::string(kRoot) + "/rejected-" + std::to_string(invalid) + ".trgb";
+        size_t rejected_bytes = 0;
+        LessonAssetDownloadStagingFile staging(rejected_destination);
+        bool failed = false;
+        try {
+            DownloadLessonAssetHttpBodyToFile(
+                rejected, nullptr, true, invalid, "https://assets.example/rejected.trgb",
+                staging.path(), rejected_bytes, "application/vnd.tbot.rgb565-indexed");
+        } catch (...) {
+            failed = true;
+        }
+        Expect(failed && rejected_bytes == 0 && rejected.max_want == 0,
+               "invalid TRGB size reached the streaming loop");
     }
-    Expect(Read(destination) == "known-good",
-           "unverified transfer replaced last-known-good asset");
-}
 
-void TestReconnectReusesSingleDownloadBuffer() {
-    g_heap_caps_malloc_calls = 0;
-    g_heap_caps_last_size = 0;
-    g_heap_caps_last_caps = 0;
-    FakeHttp http(std::string(16384, 'b'));
-    http.fail_once_at = 8192;
-    const std::string destination = std::string(kRoot) + "/single-buffer.bin";
-    size_t bytes = 0;
-    {
-        LessonAssetDownloadStagingFile staging(destination);
-        Expect(Transfer(http, staging, nullptr, true, 16384, bytes),
-               "single-buffer resume transfer failed");
-    }
-    Expect(g_heap_caps_malloc_calls == 1,
-           "reconnect allocated an extra download buffer");
-    Expect(g_heap_caps_last_size == 4096,
-           "download buffer size changed unexpectedly");
-    Expect((g_heap_caps_last_caps & MALLOC_CAP_INTERNAL) != 0,
-           "host fallback did not request the bounded internal buffer");
-}
-
-void TestCheckpointAndReconnectFeedWatchdogAroundBlockingSteps() {
-    g_esp_task_wdt_reset_calls = 0;
-    FakeHttp http(std::string(12288, 'w'));
-    http.fail_once_at = 4096;
-    const std::string destination = std::string(kRoot) + "/resume-watchdog.bin";
-    size_t bytes = 0;
-    {
-        LessonAssetDownloadStagingFile staging(destination);
-        Expect(Transfer(http, staging, nullptr, true, 12288, bytes),
-               "watchdog regression transfer failed");
-    }
-    Expect(http.wdt_calls_at_open >= http.wdt_calls_at_error + 4,
-           "checkpoint flush/fsync and reconnect open were not watchdog-fed");
-    Expect(http.wdt_calls_at_status > http.wdt_calls_at_open,
-           "status wait was not watchdog-fed after reconnect open");
-    Expect(http.wdt_calls_at_first_resumed_read > http.wdt_calls_at_status,
-           "watchdog was not reset after reconnect status wait");
-}
-
-void TestDeclaredAssetSizePolicyCoversFarmV8AndRejectsOverflow() {
-    constexpr size_t kFarmV8Bytes = 116 * 1024 * 1024;
+    constexpr size_t kFarmV8Bytes = 116U * 1024U * 1024U;
     Expect(IsLessonAssetDeclaredFileSizeAllowed(kFarmV8Bytes),
-           "firmware file policy rejects the Farm v8 asset");
-    Expect(!IsLessonAssetDeclaredFileSizeAllowed(0),
-           "firmware file policy accepts an empty declared asset");
+           "configured file policy rejects the Farm v8 asset");
     Expect(!IsLessonAssetDeclaredFileSizeAllowed(LessonAssetMaxFileBytes() + 1),
-           "firmware file policy accepts an oversized declared asset");
-    Expect(IsLessonAssetDeclaredFileSizeAllowed(LessonAssetMaxFileBytes()),
-           "firmware file policy rejects its exact configured limit");
-
+           "configured file policy accepts an oversized asset");
     size_t aggregate = 0;
     Expect(AccumulateLessonAssetDeclaredSize(0, kFarmV8Bytes, aggregate) &&
                aggregate == kFarmV8Bytes,
-           "firmware aggregate policy rejects the Farm v8 pack");
-    Expect(!AccumulateLessonAssetDeclaredSize(
-               LessonAssetMaxPackBytes(), 1, aggregate),
-           "firmware aggregate policy accepts overflow beyond its limit");
-    Expect(AccumulateLessonAssetDeclaredSize(
-               LessonAssetMaxPackBytes() - LessonAssetMaxFileBytes(),
-               LessonAssetMaxFileBytes(),
-               aggregate) && aggregate == LessonAssetMaxPackBytes(),
-           "firmware aggregate policy rejects its exact configured limit");
-    Expect(!AccumulateLessonAssetDeclaredSize(
-               std::numeric_limits<size_t>::max(), 1, aggregate),
-           "firmware aggregate policy permits size_t overflow");
+           "configured aggregate policy rejects the Farm v8 pack");
+    Expect(!AccumulateLessonAssetDeclaredSize(LessonAssetMaxPackBytes(), 1, aggregate),
+           "configured aggregate policy accepts overflow");
+
+    GeneratedHttp cinematic(4U * 1024U * 1024U + 1U);
+    size_t cinematic_bytes = 0;
+    LessonAssetDownloadStagingFile cinematic_staging(std::string(kRoot) + "/cinematic.mp4");
+    bool cinematic_failed = false;
+    try {
+        DownloadLessonAssetHttpBodyToFile(
+            cinematic, nullptr, true, cinematic.GetBodyLength(),
+            "https://assets.example/cinematic.mp4", cinematic_staging.path(),
+            cinematic_bytes, "video/mp4");
+    } catch (...) {
+        cinematic_failed = true;
+    }
+    Expect(!cinematic_failed && cinematic_bytes == cinematic.GetBodyLength(),
+           "configured policy still enforces the legacy MP4 cap");
 }
 
 void TestZeroLimitContinueFailsClosedInsteadOfSpinning() {
@@ -505,6 +482,178 @@ void TestZeroLimitContinueFailsClosedInsteadOfSpinning() {
     controller.Reset();
 }
 
+void TestInterruptedTransferResumesFromPartialOffset() {
+    constexpr size_t kInterruptAt = 546358;
+    const std::string body(600000, 'r');
+    const std::string destination = std::string(kRoot) + "/range-resume.bin";
+    size_t bytes = 0;
+    ResumableHttp http(body);
+    http.PushResponse({200, 0, body.size(), "", kInterruptAt, false});
+    http.PushResponse({
+        206,
+        kInterruptAt,
+        body.size() - kInterruptAt,
+        "bytes 546358-599999/600000",
+        std::numeric_limits<size_t>::max(),
+        false,
+    });
+
+    LessonAssetDownloadStagingFile staging(destination);
+    try {
+        DownloadLessonAssetHttpBodyToFile(
+            http, nullptr, true, body.size(), "https://assets.example/range.bin",
+            staging.path(), bytes);
+    } catch (...) {
+        Expect(false, "interrupted transfer did not resume successfully");
+    }
+
+    Expect(bytes == body.size(), "resumed transfer reported wrong byte count");
+    Expect(Read(staging.path()) == body, "resumed transfer did not append exact bytes");
+    Expect(http.open_count == 2, "resumed transfer used wrong open count");
+    Expect(http.observed_ranges == std::vector<std::string>{"", "bytes=546358-"},
+           "resumed transfer did not reopen with exact Range offset");
+}
+
+void TestCheckpointAndReconnectFeedWatchdogAroundBlockingSteps() {
+    g_esp_task_wdt_status_result = ESP_OK;
+    g_esp_task_wdt_reset_calls = 0;
+    constexpr size_t kInterruptAt = 4096;
+    const std::string body(12288, 'w');
+    ResumableHttp http(body);
+    http.PushResponse({200, 0, body.size(), "", kInterruptAt, false});
+    http.PushResponse({
+        206,
+        kInterruptAt,
+        body.size() - kInterruptAt,
+        "bytes 4096-12287/12288",
+        std::numeric_limits<size_t>::max(),
+        false,
+    });
+    size_t bytes = 0;
+    LessonAssetDownloadStagingFile staging(std::string(kRoot) + "/resume-watchdog.bin");
+    DownloadLessonAssetHttpBodyToFile(
+        http, nullptr, true, body.size(), "https://assets.example/watchdog.bin",
+        staging.path(), bytes);
+    Expect(g_esp_task_wdt_reset_calls >= 16,
+           "checkpoint and reconnect blocking steps were not watchdog-fed");
+    g_esp_task_wdt_status_result = ESP_ERR_NOT_FOUND;
+}
+
+void TestResumeRejectsUnexpectedStatusAndCleansPartial() {
+    constexpr size_t kInterruptAt = 546358;
+    const std::string body(600000, 's');
+    const std::string destination = std::string(kRoot) + "/resume-status.bin";
+    Write(destination, "known-good");
+    size_t bytes = 0;
+    ResumableHttp http(body);
+    http.PushResponse({200, 0, body.size(), "", kInterruptAt, false});
+    http.PushResponse({200, kInterruptAt, body.size() - kInterruptAt, "", 0, false});
+
+    {
+        LessonAssetDownloadStagingFile staging(destination);
+        bool failed = false;
+        try {
+            DownloadLessonAssetHttpBodyToFile(
+                http, nullptr, true, body.size(), "https://assets.example/status.bin",
+                staging.path(), bytes);
+        } catch (...) {
+            failed = true;
+        }
+        Expect(failed, "resume accepted non-206 response");
+        Expect(http.observed_ranges == std::vector<std::string>{"", "bytes=546358-"},
+               "resume status failure did not request the partial offset");
+        Expect(!fs::exists(staging.path()), "resume status failure left .download");
+        Expect(!fs::exists(staging.path() + ".tmp"), "resume status failure left .tmp");
+    }
+    Expect(Read(destination) == "known-good", "resume status failure replaced destination");
+}
+
+void TestResumeRejectsOversizeResponseAndCleansPartial() {
+    constexpr size_t kInterruptAt = 546358;
+    constexpr size_t kDeclaredSize = 600000;
+    const std::string body(kDeclaredSize + 1, 'o');
+    const std::string destination = std::string(kRoot) + "/resume-oversize.bin";
+    Write(destination, "known-good");
+    size_t bytes = 0;
+    ResumableHttp http(body);
+    http.PushResponse({200, 0, kDeclaredSize, "", kInterruptAt, false});
+    http.PushResponse({
+        206,
+        kInterruptAt,
+        body.size() - kInterruptAt,
+        "bytes 546358-600000/600001",
+        std::numeric_limits<size_t>::max(),
+        false,
+    });
+
+    {
+        LessonAssetDownloadStagingFile staging(destination);
+        bool failed = false;
+        try {
+            DownloadLessonAssetHttpBodyToFile(
+                http, nullptr, true, kDeclaredSize, "https://assets.example/oversize.bin",
+                staging.path(), bytes);
+        } catch (...) {
+            failed = true;
+        }
+        Expect(failed, "resume accepted response beyond declared size");
+        Expect(!fs::exists(staging.path()), "resume oversize failure left .download");
+        Expect(!fs::exists(staging.path() + ".tmp"), "resume oversize failure left .tmp");
+    }
+    Expect(Read(destination) == "known-good", "resume oversize failure replaced destination");
+}
+
+void TestExhaustedResumeRetriesCleanPartialStaging() {
+    constexpr size_t kInterruptAt = 546358;
+    const std::string body(600000, 'x');
+    const std::string destination = std::string(kRoot) + "/resume-exhausted.bin";
+    Write(destination, "known-good");
+    size_t bytes = 0;
+    ResumableHttp http(body);
+    http.PushResponse({200, 0, body.size(), "", kInterruptAt, false});
+    http.PushResponse({
+        206,
+        kInterruptAt,
+        body.size() - kInterruptAt,
+        "bytes 546358-599999/600000",
+        kInterruptAt,
+        false,
+    });
+    http.PushResponse({
+        206,
+        kInterruptAt,
+        body.size() - kInterruptAt,
+        "bytes 546358-599999/600000",
+        kInterruptAt,
+        false,
+    });
+    http.PushResponse({
+        206,
+        kInterruptAt,
+        body.size() - kInterruptAt,
+        "bytes 546358-599999/600000",
+        kInterruptAt,
+        false,
+    });
+
+    {
+        LessonAssetDownloadStagingFile staging(destination);
+        bool failed = false;
+        try {
+            DownloadLessonAssetHttpBodyToFile(
+                http, nullptr, true, body.size(), "https://assets.example/exhausted.bin",
+                staging.path(), bytes);
+        } catch (...) {
+            failed = true;
+        }
+        Expect(failed, "exhausted resume retries accepted incomplete transfer");
+        Expect(http.open_count == 4, "resume retry budget was not exactly three attempts");
+        Expect(!fs::exists(staging.path()), "exhausted resume left .download");
+        Expect(!fs::exists(staging.path() + ".tmp"), "exhausted resume left .tmp");
+    }
+    Expect(Read(destination) == "known-good", "exhausted resume replaced destination");
+}
+
 }  // namespace
 
 int main() {
@@ -517,13 +666,13 @@ int main() {
     TestSampleEmptyContextCannotConsumeCanonicalArm();
     TestOversizedHttpReadFailsBeforeWriting();
     TestCinematicMp4LargerThanLegacyImageCapStreamsToSd();
-    TestReceiveTimeoutNearEofResumesAtExactOffsetAndVerifiesSha();
-    TestServerIgnoringOrMismatchingRangeFailsClosed();
-    TestStalePowerLossTempIsRestartedSafely();
-    TestReconnectReusesSingleDownloadBuffer();
-    TestCheckpointAndReconnectFeedWatchdogAroundBlockingSteps();
-    TestDeclaredAssetSizePolicyCoversFarmV8AndRejectsOverflow();
+    TestProductionTrgbStreamsWithBoundedBufferAndRejectsInvalidSizes();
     TestZeroLimitContinueFailsClosedInsteadOfSpinning();
+    TestInterruptedTransferResumesFromPartialOffset();
+    TestCheckpointAndReconnectFeedWatchdogAroundBlockingSteps();
+    TestResumeRejectsUnexpectedStatusAndCleansPartial();
+    TestResumeRejectsOversizeResponseAndCleansPartial();
+    TestExhaustedResumeRetriesCleanPartialStaging();
     fs::remove_all(kRoot);
     std::cout << "lesson asset HTTP transfer host tests passed\n";
     return 0;

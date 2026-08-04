@@ -42,6 +42,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     main/lesson_tvideo_template.cc \
     main/lesson_cinematic_renderer.cc \
     main/lesson_flattened_cinematic_renderer.cc \
+    main/lesson_cinematic_hil_telemetry.cc \
     main/lesson_chroma_compositor.cc \
     main/json_payload_safety.cc \
     main/sd_fat_session_guard.cc \

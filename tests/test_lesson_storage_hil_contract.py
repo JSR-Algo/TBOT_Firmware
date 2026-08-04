@@ -40,6 +40,10 @@ def test_hil_profile_is_derived_from_kconfig_without_cmake_override():
     assert '"production"' in identity
     assert "#ifdef TBOT_HIL_PROFILE" in identity
     assert "#error" in identity
+    assert (
+        "value.hil_profile = kTbotEmbeddedProfileAudit + "
+        'sizeof("TBOT_EMBEDDED_PROFILE=") - 1;'
+    ) in identity
 
 
 def test_hil_sources_are_conditionally_compiled():

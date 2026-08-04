@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1128,6 +1129,15 @@ def test_autostop_tts_stop_drains_playback_before_returning_to_idle():
     )
 
 
+def test_tts_stop_playback_drain_stays_below_main_task_watchdog_budget():
+    app_cc = read("main/application.cc")
+    timeout = re.search(
+        r"kTtsStopPlaybackDrainTimeoutMs\s*=\s*(\d+)", app_cc
+    )
+    assert timeout is not None
+    assert int(timeout.group(1)) < 10_000
+
+
 def test_google_live_tts_stop_continue_listening_reopens_realtime_mic_loop():
     app_cc = read("main/application.cc")
 
@@ -2212,9 +2222,12 @@ def test_lesson_asset_pack_sync_http_download_does_not_starve_main_watchdog():
     assert "http->SetTimeout(6000);" in body
     assert "http->SetTimeout(10000);" not in body
     assert "http->SetTimeout(4000);" not in body
-    assert body.count("http->GetStatusCode()") == 1
-    assert "esp_task_wdt_reset();" in body
-    assert body.index("esp_task_wdt_reset();") < body.index('http->Open("GET", url)')
+    assert "http->GetStatusCode()" not in body
+    transfer = read("main/lesson_asset_http_transfer.cc")
+    assert "ResetCurrentTaskWatchdogIfSubscribed();" in transfer
+    assert transfer.index("ResetCurrentTaskWatchdogIfSubscribed();") < transfer.index(
+        'http.Open("GET", url)'
+    )
 
 def test_lesson_asset_pack_sync_reuses_verified_duplicate_bytes_before_network_download():
     mcp_server = read("main/mcp_server.cc")

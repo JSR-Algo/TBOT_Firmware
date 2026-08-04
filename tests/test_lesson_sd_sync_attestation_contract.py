@@ -1,10 +1,13 @@
 from pathlib import Path
+import subprocess
+import textwrap
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "main" / "mcp_server.cc"
 ATTESTATION_SOURCE = ROOT / "main" / "lesson_asset_sync_attestation.cc"
 MAIN_CMAKE = ROOT / "main" / "CMakeLists.txt"
+TRGB_POLICY = ROOT / "main" / "lesson_trgb_size_policy.h"
 
 
 def function_body(text: str, signature: str, offset: int = 0) -> str:
@@ -20,6 +23,12 @@ def function_body(text: str, signature: str, offset: int = 0) -> str:
             if depth == 0:
                 return text[brace : index + 1]
     raise AssertionError(f"unterminated function {signature}")
+
+
+def function_definition(text: str, signature: str) -> str:
+    start = text.index(signature)
+    body = function_body(text, signature)
+    return text[start : text.index(body, start) + len(body)]
 
 
 def sync_body() -> str:
@@ -48,6 +57,7 @@ def test_generic_sync_normalizes_alias_pairs_and_rejects_mismatches():
         source.index("ValidateLessonAssetSyncPackOrThrow(") :
         source.index("void DownloadLessonAssetToVerifiedFile(")
     ]
+    body = sync_body()
 
     assert 'const char* local_path = NormalizedAliasOrThrow(asset, "sdPath", "localPath");' in validation
     assert 'const char* url = NormalizedAliasOrThrow(asset, "onlineUrl", "url");' in validation
@@ -99,9 +109,271 @@ def test_generic_sync_strictly_validates_renderer_v4_derivative_attestation():
     assert "IsOptionalRendererV4AssetMetadata(asset)" in validation
     assert "IsExactRendererV4CompatibilityMetadata" in source
     assert "HasOnlyAllowedJsonFields(metadata, kCompatibilityFields)" in source
-    assert 'std::strcmp(codec->valuestring, "mjpeg") == 0' in source
+    assert 'std::strcmp(codec->valuestring, "mjpeg") != 0' in source
+    assert 'std::strcmp(media_type->valuestring, "video/mp4") != 0' in source
+    assert 'IsExactPositiveIntegerField(metadata, "width", 480)' in source
+    assert 'IsExactPositiveIntegerField(metadata, "height", 320)' in source
+    assert 'IsExactPositiveIntegerField(metadata, "fps", 10)' in source
     assert "cJSON_IsFalse(has_audio)" in source
-    assert "IsBoundedPositiveIntegerField(metadata, \"frameCount\", 900)" in source
+    assert 'IsBoundedPositiveIntegerField(metadata, "frameCount", 900)' in source
+    assert "duration_ms == frame_count * 100" in source
+    assert 'std::strncmp(key->valuestring, "flattenedCinematic.",' in source
+    for phase_id in (
+        "opening",
+        "greet",
+        "teach",
+        "listen",
+        "thinking",
+        "correct",
+        "retry",
+        "celebrate",
+    ):
+        assert f'std::strcmp(phase_id->valuestring, "{phase_id}") == 0' in source
+
+
+def test_renderer_v4_compatibility_rejects_non_exact_profile_and_timing(tmp_path):
+    source = SOURCE.read_text(encoding="utf-8")
+    validator_source = "\n\n".join(
+        function_definition(source, signature)
+        for signature in (
+            "template <size_t N>\nbool HasOnlyAllowedJsonFields",
+            "bool IsBoundedPositiveIntegerField",
+            "bool IsExactPositiveIntegerField",
+            "bool IsExactRendererV4CompatibilityMetadata",
+        )
+    )
+    harness = textwrap.dedent(
+        f"""
+        #include <cstddef>
+        #include <cstdint>
+        #include <cstring>
+
+        enum {{ kFalse = 1, kNumber = 2, kString = 3, kObject = 4 }};
+        struct cJSON {{
+            int type = 0;
+            int valueint = 0;
+            double valuedouble = 0;
+            const char* valuestring = nullptr;
+            const char* string = nullptr;
+            cJSON* child = nullptr;
+            cJSON* next = nullptr;
+        }};
+
+        bool cJSON_IsObject(const cJSON* value) {{ return value && value->type == kObject; }}
+        bool cJSON_IsNumber(const cJSON* value) {{ return value && value->type == kNumber; }}
+        bool cJSON_IsString(const cJSON* value) {{ return value && value->type == kString; }}
+        bool cJSON_IsFalse(const cJSON* value) {{ return value && value->type == kFalse; }}
+        const cJSON* cJSON_GetObjectItem(const cJSON* object, const char* key) {{
+            for (const cJSON* field = object ? object->child : nullptr;
+                 field != nullptr; field = field->next) {{
+                if (field->string && std::strcmp(field->string, key) == 0) return field;
+            }}
+            return nullptr;
+        }}
+        #define cJSON_ArrayForEach(element, array) \\
+            for ((element) = (array)->child; (element) != nullptr; (element) = (element)->next)
+
+        {validator_source}
+
+        bool Accepts(int width, int height, int fps, int duration_ms, int frame_count) {{
+            cJSON fields[7];
+            const char* names[7] = {{
+                "codec", "width", "height", "fps", "durationMs", "frameCount", "hasAudio"
+            }};
+            for (int index = 0; index < 7; ++index) {{
+                fields[index].string = names[index];
+                fields[index].next = index == 6 ? nullptr : &fields[index + 1];
+            }}
+            fields[0].type = kString;
+            fields[0].valuestring = "mjpeg";
+            const int numbers[5] = {{width, height, fps, duration_ms, frame_count}};
+            for (int index = 0; index < 5; ++index) {{
+                fields[index + 1].type = kNumber;
+                fields[index + 1].valueint = numbers[index];
+                fields[index + 1].valuedouble = numbers[index];
+            }}
+            fields[6].type = kFalse;
+            cJSON metadata;
+            metadata.type = kObject;
+            metadata.child = fields;
+            return IsExactRendererV4CompatibilityMetadata(&metadata);
+        }}
+
+        int main() {{
+            if (!Accepts(480, 320, 10, 9500, 95)) return 1;
+            if (Accepts(481, 320, 10, 9500, 95)) return 2;
+            if (Accepts(480, 321, 10, 9500, 95)) return 3;
+            if (Accepts(480, 320, 11, 9500, 95)) return 4;
+            if (Accepts(480, 320, 10, 9500, 94)) return 5;
+            return 0;
+        }}
+        """
+    )
+    executable = tmp_path / "renderer_v4_compatibility_test"
+    subprocess.run(
+        ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-x", "c++", "-", "-o", str(executable)],
+        input=harness,
+        text=True,
+        check=True,
+    )
+    subprocess.run([str(executable)], check=True)
+
+
+def test_renderer_v4_assets_require_exact_flattened_cinematic_phase_key(tmp_path):
+    source = SOURCE.read_text(encoding="utf-8")
+    validator_source = "\n\n".join(
+        function_definition(source, signature)
+        for signature in (
+            "template <size_t N>\nbool HasOnlyAllowedJsonFields",
+            "bool IsBoundedMetadataString",
+            "bool IsOptionalSafeCueToken",
+            "bool IsOptionalLessonPlaybackMode",
+            "bool IsBoundedPositiveIntegerField",
+            "bool IsExactPositiveIntegerField",
+            "bool IsExactRendererV4CompatibilityMetadata",
+            "bool IsRendererV4PhaseId",
+            "bool IsFlattenedCinematicAssetKeyForPhase",
+            "bool IsOptionalRendererV4CueMetadata",
+            "bool IsOptionalRendererV4AssetMetadata",
+        )
+    )
+    harness = textwrap.dedent(
+        f"""
+        #include <cctype>
+        #include <cstddef>
+        #include <cstdint>
+        #include <cstring>
+
+        constexpr size_t kLessonAssetIdentityMaxBytes = 96;
+        constexpr size_t kLessonAssetSyncSha256HexBytes = 64;
+
+        enum {{ kFalse = 1, kNumber = 2, kString = 3, kObject = 4 }};
+        struct cJSON {{
+            int type = 0;
+            int valueint = 0;
+            double valuedouble = 0;
+            const char* valuestring = nullptr;
+            const char* string = nullptr;
+            cJSON* child = nullptr;
+            cJSON* next = nullptr;
+        }};
+
+        bool cJSON_IsObject(const cJSON* value) {{ return value && value->type == kObject; }}
+        bool cJSON_IsNumber(const cJSON* value) {{ return value && value->type == kNumber; }}
+        bool cJSON_IsString(const cJSON* value) {{ return value && value->type == kString; }}
+        bool cJSON_IsFalse(const cJSON* value) {{ return value && value->type == kFalse; }}
+        bool IsExactLowerLessonAssetSha256(const char* value) {{
+            if (value == nullptr || std::strlen(value) != kLessonAssetSyncSha256HexBytes) return false;
+            for (const char* cursor = value; *cursor != '\\0'; ++cursor) {{
+                if (!((*cursor >= '0' && *cursor <= '9') || (*cursor >= 'a' && *cursor <= 'f'))) {{
+                    return false;
+                }}
+            }}
+            return true;
+        }}
+        const cJSON* cJSON_GetObjectItem(const cJSON* object, const char* key) {{
+            for (const cJSON* field = object ? object->child : nullptr;
+                 field != nullptr; field = field->next) {{
+                if (field->string && std::strcmp(field->string, key) == 0) return field;
+            }}
+            return nullptr;
+        }}
+        #define cJSON_ArrayForEach(element, array) \\
+            for ((element) = (array)->child; (element) != nullptr; (element) = (element)->next)
+
+        {validator_source}
+
+        bool Accepts(const char* key_value, const char* phase_value, int duration_ms, int frame_count) {{
+            cJSON metadata_fields[7];
+            const char* metadata_names[7] = {{
+                "codec", "width", "height", "fps", "durationMs", "frameCount", "hasAudio"
+            }};
+            for (int index = 0; index < 7; ++index) {{
+                metadata_fields[index].string = metadata_names[index];
+                metadata_fields[index].next = index == 6 ? nullptr : &metadata_fields[index + 1];
+            }}
+            metadata_fields[0].type = kString;
+            metadata_fields[0].valuestring = "mjpeg";
+            const int numbers[5] = {{480, 320, 10, duration_ms, frame_count}};
+            for (int index = 0; index < 5; ++index) {{
+                metadata_fields[index + 1].type = kNumber;
+                metadata_fields[index + 1].valueint = numbers[index];
+                metadata_fields[index + 1].valuedouble = numbers[index];
+            }}
+            metadata_fields[6].type = kFalse;
+            cJSON metadata;
+            metadata.type = kObject;
+            metadata.child = metadata_fields;
+
+            cJSON asset_fields[5];
+            const char* asset_names[5] = {{
+                "key", "derivativeId", "phaseId", "mediaType", "compatibilityMetadata"
+            }};
+            for (int index = 0; index < 5; ++index) {{
+                asset_fields[index].string = asset_names[index];
+                asset_fields[index].next = index == 4 ? nullptr : &asset_fields[index + 1];
+            }}
+            asset_fields[0].type = kString;
+            asset_fields[0].valuestring = key_value;
+            asset_fields[1].type = kString;
+            asset_fields[1].valuestring =
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+            asset_fields[2].type = kString;
+            asset_fields[2].valuestring = phase_value;
+            asset_fields[3].type = kString;
+            asset_fields[3].valuestring = "video/mp4";
+            asset_fields[4].type = kObject;
+            asset_fields[4].child = metadata_fields;
+            cJSON asset;
+            asset.type = kObject;
+            asset.child = asset_fields;
+            return IsOptionalRendererV4AssetMetadata(&asset);
+        }}
+
+        bool AcceptsTrgb() {{
+            cJSON fields[7];
+            const char* names[7] = {{
+                "key", "derivativeId", "mediaType", "cueId", "effect", "stepKey", "playbackMode"
+            }};
+            const char* values[7] = {{
+                "flattenedCinematic.barn-opening",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "application/vnd.tbot.rgb565-indexed", "barn-opening", "opening", "barn", "once"
+            }};
+            for (int index = 0; index < 7; ++index) {{
+                fields[index].type = kString;
+                fields[index].string = names[index];
+                fields[index].valuestring = values[index];
+                fields[index].next = index == 6 ? nullptr : &fields[index + 1];
+            }}
+            cJSON asset;
+            asset.type = kObject;
+            asset.child = fields;
+            return IsOptionalRendererV4AssetMetadata(&asset);
+        }}
+
+        int main() {{
+            if (!Accepts("flattenedCinematic.opening", "opening", 100, 1)) return 1;
+            if (!Accepts("flattenedCinematic.celebrate", "celebrate", 90000, 900)) return 2;
+            if (Accepts("flattenedCinematic.opening", "greet", 100, 1)) return 3;
+            if (Accepts("lesson.opening", "opening", 100, 1)) return 4;
+            if (Accepts("flattenedCinematic.custom", "custom", 100, 1)) return 5;
+            if (Accepts("flattenedCinematic.opening", "opening", 101, 1)) return 6;
+            if (Accepts("flattenedCinematic.opening", "opening", 0, 0)) return 7;
+            if (Accepts("flattenedCinematic.opening", "opening", 90100, 901)) return 8;
+            if (!AcceptsTrgb()) return 9;
+            return 0;
+        }}
+        """
+    )
+    executable = tmp_path / "renderer_v4_asset_contract_test"
+    subprocess.run(
+        ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-x", "c++", "-", "-o", str(executable)],
+        input=harness,
+        text=True,
+        check=True,
+    )
+    subprocess.run([str(executable)], check=True)
 
 def test_generic_sync_counts_critical_failures_and_activates_only_verified_critical_pack():
     source = SOURCE.read_text(encoding="utf-8")
@@ -121,6 +393,27 @@ def test_generic_sync_counts_critical_failures_and_activates_only_verified_criti
     assert 'CheckedCJsonAddBoolToObject(json.get(), "activated", activation.activated)' in body
     assert '"previousEvicted", activation.previous_evicted' in body
     assert '"errorCode", activation.error_code.c_str()' in body
+
+
+def test_generic_sync_stops_before_opening_later_assets_after_critical_failure():
+    body = sync_body()
+    loop = function_body(body, "for (const auto& asset : validated_assets)")
+
+    runtime_catch_start = loop.index("} catch (const std::runtime_error& error)")
+    generic_catch_start = loop.index("} catch (...)", runtime_catch_start)
+    runtime_catch = loop[runtime_catch_start:generic_catch_start]
+    generic_catch = loop[generic_catch_start:]
+
+    for catch_body in (runtime_catch, generic_catch):
+        failed = catch_body.index("failed += 1;")
+        critical = catch_body.index("if (asset.critical)")
+        critical_failed = catch_body.index("critical_failed += 1", critical)
+        stop = catch_body.index("break;", critical_failed)
+        assert failed < critical < critical_failed < stop
+
+    assert "break;" not in runtime_catch[: runtime_catch.index("if (asset.critical)")]
+    assert "break;" not in generic_catch[: generic_catch.index("if (asset.critical)")]
+
 
 def test_generic_sync_optional_failure_activates_but_attestation_ready_requires_all_assets():
     source = SOURCE.read_text(encoding="utf-8")
@@ -333,9 +626,65 @@ def test_sync_size_policy_rejects_each_file_and_aggregate_before_worker_creation
     assert "IsLessonAssetDeclaredFileSizeAllowed" in validation
     assert "AccumulateLessonAssetDeclaredSize" in validation
     assert "declared_pack_bytes" in validation
+
     preflight = dispatch.index("ValidateLessonAssetSyncPackOrThrow(")
     worker = dispatch.index("StartLessonAssetSyncTask(")
     assert preflight < worker
+
+
+def test_generic_sync_rejects_oversized_packs_before_storage_mutation():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = sync_body()
+    validation = source[
+        source.index("ValidateLessonAssetSyncPackOrThrow(") :
+        source.index("void DownloadLessonAssetToVerifiedFile(")
+    ]
+
+    assert "LessonTrgbPlausibleContainerBytes(declared_size_bytes)" in validation
+    assert "asset.media_type" in body
+    assert "size_t declared_pack_bytes = 0;" in validation
+    assert "IsLessonAssetDeclaredFileSizeAllowed(declared_size_bytes)" in validation
+    assert "AccumulateLessonAssetDeclaredSize(" in validation
+    assert validation.index("declared_pack_bytes = next_declared_pack_bytes;") < validation.index(
+        "validated.push_back"
+    )
+
+
+def test_sync_size_policy_runs_before_worker_creation():
+    source = SOURCE.read_text(encoding="utf-8")
+    dispatch = function_body(source, "void McpServer::DoToolCall(")
+    preflight = dispatch.index("ValidateLessonAssetSyncPackOrThrow(")
+    worker = dispatch.index("StartLessonAssetSyncTask(")
+    assert preflight < worker
+
+def test_generic_sync_trgb_size_policy_is_bounded_and_host_executable(tmp_path):
+    source = SOURCE.read_text(encoding="utf-8")
+    assert '#include "lesson_trgb_size_policy.h"' in source
+    assert "tbot::LessonTrgbPlausibleContainerBytes" in source
+    harness = tmp_path / "trgb_policy.cc"
+    harness.write_text(
+        textwrap.dedent(
+            """
+            #include "lesson_trgb_size_policy.h"
+            int main() {
+                constexpr unsigned long long production = 29186048ULL;
+                if (!tbot::LessonTrgbPlausibleContainerBytes(production)) return 1;
+                if (tbot::LessonTrgbPlausibleContainerBytes(production + 1)) return 2;
+                if (tbot::LessonTrgbPlausibleContainerBytes(64ULL * 1024 * 1024 + 1)) return 3;
+                if (tbot::kLessonTrgbMaxPackBytes != 768ULL * 1024 * 1024) return 4;
+                return 0;
+            }
+            """
+        ),
+        encoding="utf-8",
+    )
+    binary = tmp_path / "trgb_policy"
+    subprocess.run(
+        ["c++", "-std=c++17", "-I", str(ROOT / "main"), str(harness), "-o", str(binary)],
+        check=True,
+    )
+    subprocess.run([str(binary)], check=True)
+
 
 def test_sync_response_has_task10_activation_envelope():
     body = sync_body()
@@ -409,7 +758,7 @@ def test_sample_sync_passes_empty_hil_context_but_generic_uses_canonical_key():
     sample = source[sample_start:generic_start]
     generic = sync_body()
 
-    assert "mutation, nullptr, false, 0, url, dest" in sample
+    assert "mutation, nullptr, false, 0, nullptr, url, dest" in sample
     compact_generic = " ".join(generic.split())
     assert (
         "mutation, cache_key, asset.has_declared_size, asset.declared_size"

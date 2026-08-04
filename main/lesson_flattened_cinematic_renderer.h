@@ -41,6 +41,11 @@ struct LessonFlattenedCinematicAssetConfig {
     const char* media_type = nullptr;
     std::uint16_t width = 0;
     std::uint16_t height = 0;
+    std::uint16_t container_version = 0;
+    std::uint16_t stored_width = 0;
+    std::uint16_t stored_height = 0;
+    const char* orientation = nullptr;
+    std::uint32_t frame_bytes = 0;
 };
 
 struct LessonFlattenedCinematicPhaseConfig {
@@ -58,12 +63,36 @@ struct LessonFlattenedCinematicPhaseConfig {
     std::uint32_t duration_ms = 0;
     std::uint16_t fps = 0;
     std::uint32_t frame_count = 0;
+    bool loop = false;
     LessonFlattenedCinematicAssetConfig asset{};
+};
+
+struct LessonFlattenedCinematicRendererOps {
+    LessonFlattenedCinematicRendererOps() = default;
+    LessonFlattenedCinematicRendererOps(
+        LessonCinematicRendererOps legacy_ops,
+        bool (*begin)(void*),
+        bool (*queue)(void*, const std::uint16_t*, std::uint16_t, std::uint16_t),
+        bool (*wait)(void*, std::uint32_t),
+        void (*end)(void*),
+        bool (*native_open)(void*, const char*, LessonCinematicStreamMetadata*, void**) = nullptr,
+        bool (*bytes)(void*, void*, std::uint64_t*) = nullptr)
+        : legacy(legacy_ops), begin_cinematic(begin), queue_native(queue),
+          wait_native(wait), end_cinematic(end), open_native(native_open), stream_bytes(bytes) {}
+
+    LessonCinematicRendererOps legacy{};
+    bool (*begin_cinematic)(void*) = nullptr;
+    bool (*queue_native)(void*, const std::uint16_t*, std::uint16_t, std::uint16_t) = nullptr;
+    bool (*wait_native)(void*, std::uint32_t) = nullptr;
+    void (*end_cinematic)(void*) = nullptr;
+    bool (*open_native)(void*, const char*, LessonCinematicStreamMetadata*, void**) = nullptr;
+    bool (*stream_bytes)(void*, void*, std::uint64_t*) = nullptr;
 };
 
 class LessonFlattenedCinematicRenderer {
 public:
     explicit LessonFlattenedCinematicRenderer(LessonCinematicRendererOps ops);
+    explicit LessonFlattenedCinematicRenderer(LessonFlattenedCinematicRendererOps ops);
     ~LessonFlattenedCinematicRenderer();
 
     LessonCinematicResponse Prepare(const LessonFlattenedCinematicPhaseConfig& config,
@@ -96,16 +125,42 @@ private:
     LessonCinematicError RenderFrameOn(void* stream, std::uint16_t* framebuffer,
                                        std::size_t frame_index);
     LessonCinematicError OperationError(LessonCinematicError fallback) const;
+    LessonCinematicError PrepareNative(const LessonFlattenedCinematicPhaseConfig& config,
+                                       void* stream,
+                                       const LessonCinematicStreamMetadata& metadata,
+                                       std::uint16_t* first,
+                                       std::uint16_t* second);
+    LessonCinematicError ReadNativeFrame(void* stream, std::size_t frame,
+                                         std::uint16_t* destination,
+                                         std::uint32_t deadline_ms);
+    LessonCinematicError AdvanceNative(std::size_t target_frame);
+    LessonCinematicError StartNativePlayback();
+    bool FinishNativeTransfer(std::uint32_t timeout_ms);
+    bool CleanupNative(std::uint32_t timeout_ms);
     void CloseStream();
     void ReleaseBuffer();
     void Reset();
 
     LessonCinematicRendererOps ops_{};
+    LessonFlattenedCinematicRendererOps flattened_ops_{};
     mutable std::mutex mutex_;
     State state_ = State::kIdle;
     void* stream_ = nullptr;
     LessonCinematicStreamMetadata metadata_{};
     std::uint16_t* framebuffer_ = nullptr;
+    std::uint16_t* native_buffers_[2] = {nullptr, nullptr};
+    std::size_t native_queued_buffer_ = 0;
+    std::size_t native_ready_buffer_ = 1;
+    std::size_t native_ready_frame_ = 0;
+    std::size_t native_next_read_frame_ = 0;
+    bool native_mode_ = false;
+    bool native_owned_ = false;
+    bool native_in_flight_ = false;
+    bool loop_ = false;
+    std::uint32_t native_drops_ = 0;
+    std::uint32_t successful_frames_since_drop_ = 0;
+    bool has_timing_drop_ = false;
+    bool last_tick_dropped_ = false;
     std::string phase_id_;
     std::string cue_id_;
     std::string effect_;
@@ -116,6 +171,7 @@ private:
     std::uint64_t clock_origin_ms_ = 0;
     std::uint64_t paused_at_ms_ = 0;
     std::size_t displayed_frame_ = 0;
+    std::uint64_t displayed_clock_frame_ = 0;
     LessonCinematicResponse last_response_{};
     std::string last_command_;
     std::string last_fingerprint_;

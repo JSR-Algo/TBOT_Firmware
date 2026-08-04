@@ -128,6 +128,9 @@ public:
     void BeginLessonNetworkRenderQuiet();
     void EndLessonNetworkRenderQuiet();
     bool IsLessonNetworkRenderQuiet() const;
+    bool BeginLessonAssetSyncQuiet();
+    void EndLessonAssetSyncQuiet();
+    bool IsLessonAssetSyncQuiet() const { return lesson_asset_sync_quiet_.load(); }
 
     /**
      * Stop listening (event-based, thread-safe)
@@ -211,6 +214,7 @@ private:
     std::atomic<bool> lesson_interactive_listening_active_{false};
     std::atomic<bool> lesson_idle_repaint_suppressed_{false};
     std::atomic<int> lesson_network_render_quiet_{0};
+    std::atomic<bool> lesson_asset_sync_quiet_{false};
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;

@@ -68,6 +68,8 @@ struct FixtureOptions {
     std::uint32_t track_count = 1;
     std::uint32_t timescale = 1000;
     std::uint32_t duration = 200;
+    std::uint32_t movie_timescale = 0;
+    std::uint32_t movie_duration = 0;
     std::uint32_t sample_delta = 100;
     std::uint32_t sample_count = 2;
     std::uint32_t stts_sample_count = 0;
@@ -82,6 +84,7 @@ struct FixtureOptions {
     bool include_stsz = true;
     bool include_offsets = true;
     bool include_edts = false;
+    bool include_identity_edts = false;
     bool include_moof = false;
 };
 
@@ -169,6 +172,19 @@ Bytes MakeTrack(const FixtureOptions& options, std::uint32_t chunk_offset) {
     if (options.include_edts) {
         Bytes edts = Atom("edts", {});
         trak_payload.insert(trak_payload.begin(), edts.begin(), edts.end());
+    } else if (options.include_identity_edts) {
+        Bytes entry;
+        Be32(entry, options.movie_duration == 0 ? options.duration : options.movie_duration);
+        Be32(entry, 0);
+        entry.push_back(0);
+        entry.push_back(1);
+        entry.push_back(0);
+        entry.push_back(0);
+        Bytes elst_payload;
+        Be32(elst_payload, 1);
+        elst_payload.insert(elst_payload.end(), entry.begin(), entry.end());
+        Bytes edts = Atom("edts", Atom("elst", FullBox(0, elst_payload)));
+        trak_payload.insert(trak_payload.begin(), edts.begin(), edts.end());
     }
     return Atom("trak", trak_payload);
 }
@@ -180,8 +196,8 @@ Bytes MakeMp4(const FixtureOptions& options = {}) {
     Bytes ftyp = Atom("ftyp", ftyp_payload);
 
     Bytes mvhd(96, 0);
-    Patch32(mvhd, 8, options.timescale);
-    Patch32(mvhd, 12, options.duration);
+    Patch32(mvhd, 8, options.movie_timescale == 0 ? options.timescale : options.movie_timescale);
+    Patch32(mvhd, 12, options.movie_duration == 0 ? options.duration : options.movie_duration);
     Patch32(mvhd, 92, options.track_count + 1);
 
     Bytes placeholder_track = MakeTrack(options, 0);
@@ -392,6 +408,22 @@ int main() {
     options = {};
     options.include_edts = true;
     ExpectRejected(MakeMp4(options), "edit lists are rejected");
+    options = {};
+    options.sample_entry = "mp4v";
+    options.timescale = 10240;
+    options.duration = 2048;
+    options.sample_delta = 1024;
+    options.movie_timescale = 1000;
+    options.movie_duration = 200;
+    options.include_identity_edts = true;
+    Check(Open(MakeMp4(options), &reader) == tbot::LessonMjpegMp4Status::kOk,
+          "production FFmpeg MJPEG MP4 container opens");
+    Bytes non_jpeg_mp4v = MakeMp4(options);
+    const std::string mdat = "mdat";
+    const auto mdat_pos = std::search(non_jpeg_mp4v.begin(), non_jpeg_mp4v.end(), mdat.begin(), mdat.end());
+    Check(mdat_pos != non_jpeg_mp4v.end(), "production MP4 fixture has media data");
+    non_jpeg_mp4v[static_cast<std::size_t>(mdat_pos - non_jpeg_mp4v.begin()) + 4] = 0;
+    ExpectRejected(non_jpeg_mp4v, "mp4v sample entry without JPEG samples is rejected");
     options = {};
     options.track_count = 2;
     ExpectRejected(MakeMp4(options), "multiple tracks are rejected");

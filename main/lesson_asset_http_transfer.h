@@ -51,7 +51,8 @@ void DownloadLessonAssetHttpBodyToFile(
     std::size_t declared_size,
     const std::string& url,
     const std::string& destination,
-    std::size_t& bytes_out
+    std::size_t& bytes_out,
+    const char* media_type = nullptr
 );
 
 #endif  // LESSON_ASSET_HTTP_TRANSFER_H

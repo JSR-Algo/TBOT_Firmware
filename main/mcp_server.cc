@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cinttypes>
+#include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <cerrno>
@@ -36,6 +37,7 @@
 #include "lesson_asset_download_raii.h"
 #include "lesson_asset_download_staging.h"
 #include "lesson_asset_http_transfer.h"
+#include "lesson_trgb_size_policy.h"
 #include "lesson_asset_sample_url_policy.h"
 #include "lesson_asset_sync_path_policy.h"
 #include <lesson_asset_sync_attestation.h>
@@ -50,6 +52,12 @@
 
 namespace {
 constexpr size_t kMcpToolsListMaxPayloadBytes = 2500;
+
+void ResetCurrentTaskWatchdogIfSubscribed() {
+    if (esp_task_wdt_status(nullptr) == ESP_OK) {
+        (void)esp_task_wdt_reset();
+    }
+}
 
 struct LessonAssetSyncTaskContext {
     McpServer* server;
@@ -92,6 +100,7 @@ bool DownloadLessonAssetToFile(
     const char* cache_key,
     bool has_declared_size,
     size_t declared_size,
+    const char* media_type,
     const std::string& url,
     const std::string& dest_path,
     size_t& bytes_out
@@ -147,6 +156,7 @@ struct ValidatedLessonAsset {
     bool critical;
     bool has_declared_size;
     size_t declared_size;
+    const char* media_type;
 };
 
 struct VerifiedLessonAssetFile {
@@ -271,6 +281,16 @@ bool IsBoundedPositiveIntegerField(
            value->valuedouble == static_cast<double>(value->valueint);
 }
 
+bool IsExactPositiveIntegerField(
+    const cJSON* object,
+    const char* field,
+    int expected
+) {
+    const cJSON* value = cJSON_GetObjectItem(object, field);
+    return cJSON_IsNumber(value) && value->valueint == expected &&
+           value->valuedouble == static_cast<double>(expected);
+}
+
 bool IsExactRendererV4CompatibilityMetadata(const cJSON* metadata) {
     static constexpr const char* kCompatibilityFields[] = {
         "codec", "width", "height", "fps", "durationMs", "frameCount",
@@ -282,19 +302,55 @@ bool IsExactRendererV4CompatibilityMetadata(const cJSON* metadata) {
     }
     const cJSON* codec = cJSON_GetObjectItem(metadata, "codec");
     const cJSON* has_audio = cJSON_GetObjectItem(metadata, "hasAudio");
-    return cJSON_IsString(codec) &&
-           std::strcmp(codec->valuestring, "mjpeg") == 0 &&
-           IsBoundedPositiveIntegerField(metadata, "width", 1920) &&
-           IsBoundedPositiveIntegerField(metadata, "height", 1080) &&
-           IsBoundedPositiveIntegerField(metadata, "fps", 60) &&
-           IsBoundedPositiveIntegerField(metadata, "durationMs", 600000) &&
-           IsBoundedPositiveIntegerField(metadata, "frameCount", 900) &&
-           cJSON_IsFalse(has_audio);
+    if (!cJSON_IsString(codec) ||
+        std::strcmp(codec->valuestring, "mjpeg") != 0 ||
+        !IsExactPositiveIntegerField(metadata, "width", 480) ||
+        !IsExactPositiveIntegerField(metadata, "height", 320) ||
+        !IsExactPositiveIntegerField(metadata, "fps", 10) ||
+        !IsBoundedPositiveIntegerField(metadata, "durationMs", 600000) ||
+        !IsBoundedPositiveIntegerField(metadata, "frameCount", 900) ||
+        !cJSON_IsFalse(has_audio)) {
+        return false;
+    }
+    const std::uint64_t duration_ms = static_cast<std::uint64_t>(
+        cJSON_GetObjectItem(metadata, "durationMs")->valueint);
+    const std::uint64_t frame_count = static_cast<std::uint64_t>(
+        cJSON_GetObjectItem(metadata, "frameCount")->valueint);
+    return duration_ms == frame_count * 100;
+}
+
+bool IsRendererV4PhaseId(const cJSON* phase_id) {
+    return cJSON_IsString(phase_id) &&
+           (std::strcmp(phase_id->valuestring, "opening") == 0 ||
+            std::strcmp(phase_id->valuestring, "greet") == 0 ||
+            std::strcmp(phase_id->valuestring, "teach") == 0 ||
+            std::strcmp(phase_id->valuestring, "listen") == 0 ||
+            std::strcmp(phase_id->valuestring, "thinking") == 0 ||
+            std::strcmp(phase_id->valuestring, "correct") == 0 ||
+            std::strcmp(phase_id->valuestring, "retry") == 0 ||
+            std::strcmp(phase_id->valuestring, "celebrate") == 0);
+}
+
+bool IsFlattenedCinematicAssetKeyForPhase(
+    const cJSON* key,
+    const cJSON* phase_id
+) {
+    static constexpr const char* kFlattenedCinematicPrefix =
+        "flattenedCinematic.";
+    if (!cJSON_IsString(key) || !IsRendererV4PhaseId(phase_id)) {
+        return false;
+    }
+    const size_t prefix_length = std::strlen(kFlattenedCinematicPrefix);
+    return std::strncmp(key->valuestring, "flattenedCinematic.", prefix_length) == 0 &&
+           std::strcmp(
+               key->valuestring + prefix_length, phase_id->valuestring) == 0;
 }
 
 bool IsOptionalRendererV4AssetMetadata(const cJSON* asset) {
+    const cJSON* key = cJSON_GetObjectItem(asset, "key");
     const cJSON* derivative_id = cJSON_GetObjectItem(asset, "derivativeId");
     const cJSON* phase_id = cJSON_GetObjectItem(asset, "phaseId");
+    const cJSON* media_type = cJSON_GetObjectItem(asset, "mediaType");
     const cJSON* compatibility =
         cJSON_GetObjectItem(asset, "compatibilityMetadata");
     const bool cue_present =
@@ -305,14 +361,25 @@ bool IsOptionalRendererV4AssetMetadata(const cJSON* asset) {
     const bool any_present = derivative_id != nullptr || phase_id != nullptr ||
                              compatibility != nullptr || cue_present;
     if (!any_present) return true;
+    const bool trgb = cJSON_IsString(media_type) &&
+        std::strcmp(media_type->valuestring,
+                    "application/vnd.tbot.rgb565-indexed") == 0;
+    if (trgb) {
+        return cJSON_IsString(derivative_id) &&
+            IsExactLowerLessonAssetSha256(derivative_id->valuestring) &&
+            compatibility == nullptr && phase_id == nullptr && cue_present &&
+            IsOptionalRendererV4CueMetadata(asset);
+    }
     if (!cJSON_IsString(derivative_id) ||
         !IsExactLowerLessonAssetSha256(derivative_id->valuestring) ||
+        !cJSON_IsString(media_type) ||
+        std::strcmp(media_type->valuestring, "video/mp4") != 0 ||
         !IsExactRendererV4CompatibilityMetadata(compatibility)) {
         return false;
     }
     const bool phase_valid =
         phase_id != nullptr && !cue_present &&
-        IsOptionalSafeCueToken(asset, "phaseId");
+        IsFlattenedCinematicAssetKeyForPhase(key, phase_id);
     const bool cue_valid =
         phase_id == nullptr && cue_present &&
         IsOptionalRendererV4CueMetadata(asset);
@@ -426,6 +493,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
         const char* sha256 = JsonStringField(asset, "sha256");
         const cJSON* critical = cJSON_GetObjectItem(asset, "critical");
         const cJSON* declared_size = cJSON_GetObjectItem(asset, "size");
+        const char* media_type = JsonStringField(asset, "mediaType");
         if (!HasOnlyAllowedJsonFields(asset, kAssetFields) ||
             !IsBoundedMetadataString(key, kLessonAssetSyncKeyMaxBytes) ||
             !IsBoundedMetadataString(path, kLessonAssetSyncMetadataPathMaxBytes) ||
@@ -443,15 +511,21 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             !IsOptionalRendererV4AssetMetadata(asset)) {
             throw std::runtime_error("lesson asset sync request invalid");
         }
-        size_t parsed_declared_size = 0;
+        const size_t declared_size_bytes = declared_size == nullptr
+            ? 0
+            : static_cast<size_t>(declared_size->valuedouble);
+        const bool trgb = media_type != nullptr &&
+            std::strcmp(media_type, "application/vnd.tbot.rgb565-indexed") == 0;
+        if (trgb && (declared_size == nullptr ||
+                     !tbot::LessonTrgbPlausibleContainerBytes(declared_size_bytes))) {
+            throw std::runtime_error("lesson asset sync request invalid");
+        }
         if (declared_size != nullptr) {
-            parsed_declared_size =
-                static_cast<size_t>(declared_size->valuedouble);
             size_t next_declared_pack_bytes = 0;
-            if (!IsLessonAssetDeclaredFileSizeAllowed(parsed_declared_size) ||
+            if (!IsLessonAssetDeclaredFileSizeAllowed(declared_size_bytes) ||
                 !AccumulateLessonAssetDeclaredSize(
                     declared_pack_bytes,
-                    parsed_declared_size,
+                    declared_size_bytes,
                     next_declared_pack_bytes)) {
                 throw std::runtime_error("lesson asset sync request invalid");
             }
@@ -475,7 +549,8 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             local_path,
             cJSON_IsTrue(critical) != 0,
             declared_size != nullptr,
-            parsed_declared_size,
+            declared_size_bytes,
+            media_type,
         });
     }
     return validated;
@@ -486,6 +561,7 @@ void DownloadLessonAssetToVerifiedFile(
     const char* cache_key,
     bool has_declared_size,
     size_t declared_size,
+    const char* media_type,
     const std::string& url,
     const std::string& dest_path,
     const std::string& sha256,
@@ -499,6 +575,7 @@ void DownloadLessonAssetToVerifiedFile(
         cache_key,
         has_declared_size,
         declared_size,
+        media_type,
         url,
         staging.path(),
         bytes_out);
@@ -533,7 +610,7 @@ void CopyVerifiedLessonAssetFile(
                 throw std::runtime_error("lesson asset local reuse write failed");
             }
             bytes_out += read;
-            esp_task_wdt_reset();
+            ResetCurrentTaskWatchdogIfSubscribed();
         }
         if (read < buffer.size()) {
             if (std::ferror(source.get())) {
@@ -568,6 +645,7 @@ bool DownloadLessonAssetToFile(
     const char* cache_key,
     bool has_declared_size,
     size_t declared_size,
+    const char* media_type,
     const std::string& url,
     const std::string& dest_path,
     size_t& bytes_out
@@ -585,17 +663,6 @@ bool DownloadLessonAssetToFile(
     // Public lesson assets may traverse DNS and a CDN before the body starts.
     // Stay below the task watchdog window while allowing normal Wi-Fi latency.
     http->SetTimeout(6000);
-    esp_task_wdt_reset();
-    if (!http->Open("GET", url)) {
-        throw std::runtime_error("failed to open URL: " + url);
-    }
-    ScopedHttpClose<Http> http_close(http.get());
-    esp_task_wdt_reset();
-    int status = http->GetStatusCode();
-    if (status != 200) {
-        esp_task_wdt_reset();
-        throw std::runtime_error("unexpected status " + std::to_string(status) + " for " + url);
-    }
     DownloadLessonAssetHttpBodyToFile(
         *http,
         cache_key,
@@ -603,7 +670,8 @@ bool DownloadLessonAssetToFile(
         declared_size,
         url,
         dest_path,
-        bytes_out);
+        bytes_out,
+        media_type);
     return true;
 }
 #endif
@@ -1107,7 +1175,7 @@ void McpServer::AddUserOnlyTools() {
                 size_t bytes = 0;
                 try {
                     DownloadLessonAssetToVerifiedFile(
-                        mutation, nullptr, false, 0, url, dest, asset.sha256, bytes);
+                        mutation, nullptr, false, 0, nullptr, url, dest, asset.sha256, bytes);
                 } catch (...) {
                     throw std::runtime_error("lesson asset transfer failed");
                 }
@@ -1210,6 +1278,7 @@ void McpServer::AddUserOnlyTools() {
                                     cache_key,
                                     asset.has_declared_size,
                                     asset.declared_size,
+                                    asset.media_type,
                                     asset.url,
                                     asset.destination,
                                     asset.sha256,
@@ -1236,11 +1305,13 @@ void McpServer::AddUserOnlyTools() {
                         failed += 1;
                         if (asset.critical) {
                             critical_failed += 1;
+                            break;
                         }
                     } catch (...) {
                         failed += 1;
                         if (asset.critical) {
                             critical_failed += 1;
+                            break;
                         }
                     }
                 }
@@ -1607,6 +1678,12 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             return;
         }
 #endif
+        auto& storage = LessonAssetStorageCoordinator::GetInstance();
+        if (storage.HasLessonSession() || storage.HasMutation()) {
+            ESP_LOGW(TAG, "lesson asset sync rejected before worker creation: storage busy");
+            ReplyError(id, "lesson asset sync unavailable while lesson storage is active");
+            return;
+        }
         if (!StartLessonAssetSyncTask(id, *tool_iter, std::move(arguments))) {
             ReplyError(id, "lesson asset sync busy or worker unavailable");
         }
@@ -1657,25 +1734,40 @@ bool McpServer::StartLessonAssetSyncTask(
         return false;
     }
 
+    auto& app = Application::GetInstance();
+    if (!app.ScheduleAndWait([]() {
+            return Application::GetInstance().BeginLessonAssetSyncQuiet();
+        }, 2000)) {
+        lesson_asset_sync_in_flight_.store(false);
+        ESP_LOGW(TAG, "lesson asset sync rejected: application is not safely idle");
+        return false;
+    }
+
     auto* context = new (std::nothrow) LessonAssetSyncTaskContext{
         this, id, tool, std::move(arguments)};
     if (context == nullptr) {
+        app.Schedule([]() {
+            Application::GetInstance().EndLessonAssetSyncQuiet();
+        });
         lesson_asset_sync_in_flight_.store(false);
         ESP_LOGE(TAG, "lesson asset sync context allocation failed");
         return false;
     }
 
-    // TLS/flash work requires an internal stack. Low priority keeps websocket
-    // control frames and the Application task responsive during long SD syncs.
+    // Keep internal RAM available for the HTTPS receive task. This worker only
+    // performs network and SD I/O, so no flash-writing path may overlap it.
     if (xTaskCreateWithCaps(
-            &McpServer::LessonAssetSyncTask,
+            &McpServer::LessonAssetSyncTaskEntry,
             "lesson_sd_sync",
             8192,
             context,
             tskIDLE_PRIORITY + 1,
             nullptr,
-            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         delete context;
+        app.Schedule([]() {
+            Application::GetInstance().EndLessonAssetSyncQuiet();
+        });
         lesson_asset_sync_in_flight_.store(false);
         ESP_LOGE(TAG, "lesson asset sync worker creation failed");
         return false;
@@ -1683,27 +1775,92 @@ bool McpServer::StartLessonAssetSyncTask(
     return true;
 }
 
-void McpServer::LessonAssetSyncTask(void* arg) {
-    std::unique_ptr<LessonAssetSyncTaskContext> context(
-        static_cast<LessonAssetSyncTaskContext*>(arg));
-    McpServer* server = context->server;
+void McpServer::LessonAssetSyncTaskEntry(void* arg) noexcept {
+    LessonAssetSyncTaskBody(arg);
+    abort();
+}
+
+void McpServer::LessonAssetSyncTaskBody(void* arg) noexcept {
+    auto* raw_context = static_cast<LessonAssetSyncTaskContext*>(arg);
+    McpServer* server = raw_context->server;
+    const int response_id = raw_context->id;
+    bool watchdog_registered = false;
 
     try {
-        try {
-            server->ReplyResult(
-                context->id, context->tool->Call(context->arguments));
-        } catch (const std::exception& error) {
-            ESP_LOGE(TAG, "lesson asset sync failed: %s", error.what());
-            server->ReplyError(context->id, error.what());
-        } catch (...) {
-            ESP_LOGE(TAG, "lesson asset sync failed");
-            server->ReplyError(context->id, "lesson asset sync failed");
+        std::unique_ptr<LessonAssetSyncTaskContext> context(raw_context);
+        const esp_err_t watchdog_add_result = esp_task_wdt_add(nullptr);
+        watchdog_registered = watchdog_add_result == ESP_OK;
+        if (!watchdog_registered) {
+            ESP_LOGW(TAG, "lesson asset sync watchdog registration failed: %s",
+                     esp_err_to_name(watchdog_add_result));
         }
-    } catch (...) {
-        ESP_LOGE(TAG, "lesson asset sync response allocation failed");
-    }
 
-    context.reset();
-    server->lesson_asset_sync_in_flight_.store(false);
-    vTaskDeleteWithCaps(nullptr);
+        bool succeeded = false;
+        std::string response;
+        try {
+            try {
+                response = context->tool->Call(context->arguments);
+                succeeded = true;
+            } catch (const std::exception& error) {
+                ESP_LOGE(TAG, "lesson asset sync failed: %s", error.what());
+                response = error.what();
+            } catch (...) {
+                ESP_LOGE(TAG, "lesson asset sync failed");
+                response = "lesson asset sync failed";
+            }
+        } catch (...) {
+            ESP_LOGE(TAG, "lesson asset sync response allocation failed");
+            succeeded = false;
+            response = "sync failed";
+        }
+
+        context.reset();
+        Application::GetInstance().Schedule(
+            [server, response_id, succeeded, response = std::move(response)]() {
+            auto& app = Application::GetInstance();
+            app.EndLessonAssetSyncQuiet();
+            try {
+                if (succeeded) {
+                    server->ReplyResult(response_id, response);
+                } else {
+                    server->ReplyError(response_id, response);
+                }
+            } catch (...) {
+                ESP_LOGE(TAG, "lesson asset sync response publication failed");
+            }
+        });
+        server->lesson_asset_sync_in_flight_.store(false);
+        if (watchdog_registered) {
+            const esp_err_t watchdog_delete_result = esp_task_wdt_delete(nullptr);
+            if (watchdog_delete_result != ESP_OK) {
+                ESP_LOGW(TAG, "lesson asset sync watchdog release failed: %s",
+                         esp_err_to_name(watchdog_delete_result));
+            }
+        }
+        vTaskDeleteWithCaps(nullptr);
+    } catch (...) {
+        ESP_LOGE(TAG, "lesson asset sync worker failed outside tool boundary");
+        try {
+            Application::GetInstance().Schedule([server, response_id]() {
+                auto& app = Application::GetInstance();
+                app.EndLessonAssetSyncQuiet();
+                try {
+                    server->ReplyError(response_id, "lesson asset sync failed");
+                } catch (...) {
+                    ESP_LOGE(TAG, "lesson asset sync failsafe response publication failed");
+                }
+            });
+        } catch (...) {
+            ESP_LOGE(TAG, "lesson asset sync failsafe publication failed");
+        }
+        server->lesson_asset_sync_in_flight_.store(false);
+        if (watchdog_registered) {
+            const esp_err_t watchdog_delete_result = esp_task_wdt_delete(nullptr);
+            if (watchdog_delete_result != ESP_OK) {
+                ESP_LOGW(TAG, "lesson asset sync failsafe watchdog release failed: %s",
+                         esp_err_to_name(watchdog_delete_result));
+            }
+        }
+        vTaskDeleteWithCaps(nullptr);
+    }
 }

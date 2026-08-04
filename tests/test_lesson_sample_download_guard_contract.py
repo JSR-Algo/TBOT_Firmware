@@ -95,7 +95,8 @@ def test_download_resources_and_temp_commit_are_scope_owned():
     )
 
     assert '#include "lesson_asset_download_raii.h"' in body
-    assert "ScopedHttpClose" in mcp_body
+    assert "ScopedHttpClose" in body
+    assert 'http.Open("GET", url)' in body
     assert "ScopedCFile" in body
     assert "ScopedHeapAllocation" in body
     assert "ScopedTempPath" in body

@@ -9,9 +9,12 @@ template <typename HttpType>
 class ScopedHttpClose {
 public:
     explicit ScopedHttpClose(HttpType* http) : http_(http) {}
-    ~ScopedHttpClose() {
+    ~ScopedHttpClose() { Close(); }
+
+    void Close() {
         if (http_ != nullptr) {
             http_->Close();
+            http_ = nullptr;
         }
     }
 

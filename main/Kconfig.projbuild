@@ -37,6 +37,12 @@ config TBOT_LESSON_ASSET_MAX_PACK_BYTES
         Reject a lesson asset pack whose declared file sizes exceed this aggregate
         before creating the background storage worker or starting network I/O.
 
+config TBOT_HIL_CINEMATIC_TELEMETRY
+    bool "Enable cinematic HIL terminal telemetry"
+    default n
+    help
+        Emits parseable HIL_CINE boot and cue_end terminal lines for hardware-in-loop
+        cinematic validation. Keep disabled for production images.
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

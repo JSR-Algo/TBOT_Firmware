@@ -255,13 +255,32 @@ private:
                     mdia = true;
                     return ParseMdia(atom);
                 case FourCc('e', 'd', 't', 's'):
-                    return LessonMjpegMp4Status::kUnsupported;
+                    return ParseEdts(atom);
                 default:
                     return LessonMjpegMp4Status::kUnsupported;
             }
         });
         if (status != LessonMjpegMp4Status::kOk) return status;
         return tkhd && mdia ? LessonMjpegMp4Status::kOk : LessonMjpegMp4Status::kMalformed;
+    }
+
+    LessonMjpegMp4Status ParseEdts(const Atom& edts) {
+        bool have_elst = false;
+        const LessonMjpegMp4Status status = ScanChildren(edts, [&](const Atom& atom) {
+            if (atom.type != FourCc('e', 'l', 's', 't') || have_elst || atom.payload_size != 20) {
+                return LessonMjpegMp4Status::kUnsupported;
+            }
+            std::uint8_t data[20];
+            if (!Read(atom.payload, data, sizeof(data))) return LessonMjpegMp4Status::kIoError;
+            have_elst = true;
+            return data[0] == 0 && Be32(data + 4) == 1 &&
+                    Be32(data + 8) == movie_duration_ && Be32(data + 12) == 0 &&
+                    Be16(data + 16) == 1 && Be16(data + 18) == 0
+                ? LessonMjpegMp4Status::kOk
+                : LessonMjpegMp4Status::kUnsupported;
+        });
+        return status == LessonMjpegMp4Status::kOk && have_elst
+            ? LessonMjpegMp4Status::kOk : LessonMjpegMp4Status::kUnsupported;
     }
 
     LessonMjpegMp4Status ParseMdia(const Atom& mdia) {
@@ -366,7 +385,9 @@ private:
         const std::uint32_t entry_size = Be32(header + 8);
         const std::uint32_t codec = Be32(header + 12);
         if (entry_size < 78 || entry_size > atom.payload_size - 8) return LessonMjpegMp4Status::kMalformed;
-        if (codec != FourCc('j', 'p', 'e', 'g') && codec != FourCc('m', 'j', 'p', 'a')) {
+        mp4v_sample_entry_ = codec == FourCc('m', 'p', '4', 'v');
+        if (codec != FourCc('j', 'p', 'e', 'g') && codec != FourCc('m', 'j', 'p', 'a') &&
+            !mp4v_sample_entry_) {
             return LessonMjpegMp4Status::kUnsupported;
         }
         std::uint8_t dimensions[4];
@@ -486,8 +507,9 @@ private:
         if (!have_stsd_ || !have_stts_ || !have_stsc_ || !have_stsz_ || !have_offsets_) {
             return LessonMjpegMp4Status::kMalformed;
         }
-        if (sample_count_ != stts_sample_count_ || media_timescale_ != movie_timescale_ ||
-            media_duration_ != movie_duration_) {
+        if (sample_count_ != stts_sample_count_ ||
+            static_cast<std::uint64_t>(media_duration_) * movie_timescale_ !=
+                static_cast<std::uint64_t>(movie_duration_) * media_timescale_) {
             return LessonMjpegMp4Status::kMetadataMismatch;
         }
         if (sample_count_ > std::numeric_limits<std::uint64_t>::max() / sample_delta_ ||
@@ -514,6 +536,16 @@ private:
                 if (!Add(offset, size, &end) || offset < mdat_start_ || end > mdat_end_ ||
                     (sample_index != 0 && offset < previous_end)) {
                     return LessonMjpegMp4Status::kMetadataMismatch;
+                }
+                if (mp4v_sample_entry_) {
+                    std::uint8_t markers[4];
+                    if (size < 4 || !Read(offset, markers, 2) || !Read(end - 2, markers + 2, 2)) {
+                        return LessonMjpegMp4Status::kIoError;
+                    }
+                    if (markers[0] != 0xff || markers[1] != 0xd8 ||
+                        markers[2] != 0xff || markers[3] != 0xd9) {
+                        return LessonMjpegMp4Status::kUnsupported;
+                    }
                 }
                 output_->frames_[sample_index] = {offset, size};
                 previous_end = end;
@@ -545,6 +577,7 @@ private:
     bool have_stsc_ = false;
     bool have_stsz_ = false;
     bool have_offsets_ = false;
+    bool mp4v_sample_entry_ = false;
     std::size_t track_count_ = 0;
     std::uint64_t mdat_start_ = 0;
     std::uint64_t mdat_end_ = 0;

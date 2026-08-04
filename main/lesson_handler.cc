@@ -20,6 +20,7 @@
 #include "lesson_layer_state.h"
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_trgb_size_policy.h"
 #include "system_info.h"
 #include "lesson_tvideo_template.h"
 // US-006 image render: the on-device LVGL decoder + draw path. LvglDisplay carries
@@ -976,9 +977,10 @@ bool IsPngImage(const void* data, size_t size) {
 
 constexpr size_t kMaxLessonImageBytes = 512 * 1024;
 constexpr size_t kMaxLessonCinematicFileBytes = 4 * 1024 * 1024;
+constexpr size_t kMaxLessonTrgbFileBytes = tbot::kLessonTrgbMaxFileBytes;
 constexpr size_t kMaxLessonDecodedImageBytes = 480 * 320 * 4;
 constexpr size_t kMaxLessonAssetPackAssets = 64;
-constexpr size_t kMaxLessonAssetPackDeclaredBytes = 16 * 1024 * 1024;
+constexpr size_t kMaxLessonAssetPackDeclaredBytes = tbot::kLessonTrgbMaxPackBytes;
 constexpr int kLessonImageHttpTimeoutMs = 1200;
 constexpr int64_t kLessonRenderElapsedMaxMs = 60000;
 
@@ -1241,9 +1243,23 @@ std::unique_ptr<LvglImage> FetchLessonLocalImage(const char* url) {
 }
 
 size_t LessonAssetFileLimit(const char* media_type) {
-    return media_type != nullptr && std::strcmp(media_type, "video/mp4") == 0
-        ? kMaxLessonCinematicFileBytes
-        : kMaxLessonImageBytes;
+    if (media_type != nullptr && std::strcmp(media_type, "video/mp4") == 0) {
+        return kMaxLessonCinematicFileBytes;
+    }
+    if (media_type != nullptr &&
+        std::strcmp(media_type, "application/vnd.tbot.rgb565-indexed") == 0) {
+        return kMaxLessonTrgbFileBytes;
+    }
+    return kMaxLessonImageBytes;
+}
+
+bool ExpectedTrgbContainerBytes(std::uint64_t frame_count, std::uint64_t frame_bytes,
+                                std::uint64_t* expected) {
+    return tbot::LessonTrgbExpectedContainerBytes(frame_count, frame_bytes, expected);
+}
+
+bool PlausibleTrgbContainerBytes(std::uint64_t bytes) {
+    return tbot::LessonTrgbPlausibleContainerBytes(bytes);
 }
 
 bool LessonLocalFileReady(
@@ -1297,6 +1313,24 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
                  static_cast<size_t>(asset_count) <= kMaxLessonAssetPackAssets;
     std::set<std::string> ready_asset_keys;
     size_t total_declared_size = 0;
+    std::uint64_t expected_trgb_bytes = 0;
+    bool has_expected_trgb_bytes = false;
+    const cJSON* cinematic_phase = Obj(body, "cinematicPhase");
+    const cJSON* cinematic_asset = Obj(cinematic_phase, "asset");
+    const std::string active_trgb_path = LessonLocalPath(Str(cinematic_asset, "sdPath"));
+    double cinematic_frame_count = 0;
+    double cinematic_frame_bytes = 0;
+    if (cinematic_asset != nullptr && Str(cinematic_asset, "mediaType") != nullptr &&
+        std::strcmp(Str(cinematic_asset, "mediaType"),
+                    "application/vnd.tbot.rgb565-indexed") == 0 &&
+        Num(cinematic_phase, "frameCount", cinematic_frame_count) &&
+        Num(cinematic_asset, "frameBytes", cinematic_frame_bytes) &&
+        PositiveIntegerAtMost(cinematic_frame_count, UINT32_MAX) &&
+        PositiveIntegerAtMost(cinematic_frame_bytes, UINT32_MAX)) {
+        has_expected_trgb_bytes = ExpectedTrgbContainerBytes(
+            static_cast<std::uint64_t>(cinematic_frame_count),
+            static_cast<std::uint64_t>(cinematic_frame_bytes), &expected_trgb_bytes);
+    }
     if (ready) {
         const cJSON* asset = nullptr;
         cJSON_ArrayForEach(asset, assets) {
@@ -1324,8 +1358,18 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
             if (has_declared_size) {
                 expected_size = static_cast<size_t>(size_value);
             }
+            const bool trgb_asset = media_type != nullptr &&
+                std::strcmp(media_type, "application/vnd.tbot.rgb565-indexed") == 0;
+            const bool active_trgb_asset = trgb_asset && !active_trgb_path.empty() &&
+                LessonLocalPath(local_path) == active_trgb_path;
+            // checksumOk is the SD SHA attestation prerequisite. The active cue also
+            // binds to prepare metadata; other cues carry independent valid timelines.
             if (asset_key_value.empty() || !asset_verified ||
                 !has_declared_size ||
+                (trgb_asset && (!PlausibleTrgbContainerBytes(expected_size) ||
+                                (active_trgb_asset &&
+                                 (!has_expected_trgb_bytes ||
+                                  expected_size != expected_trgb_bytes)))) ||
                 expected_size > kMaxLessonAssetPackDeclaredBytes - total_declared_size ||
                 !LessonLocalFileReady(
                     local_path, expected_size, LessonAssetFileLimit(media_type)) ||
@@ -1931,6 +1975,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool start_command = command != nullptr && strcmp(command, "start") == 0 &&
             (start_frame || (control_frame && cinematic_v4_v2));
         const char* cinematic_identity = cinematic_v4_v2 ? cue_id : phase_id;
+        const bool cue_identity = cinematic_v4_v2;
+        const char* cinematic_identity_field = cue_identity ? "cueId" : "phaseId";
         double command_sequence_number = 0;
         const bool command_sequence_ok = Num(command_body, "commandSequenceId",
                                               command_sequence_number) &&
@@ -1939,7 +1985,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
             ((prepare_frame && strcmp(command, "prepare") == 0) ||
              (start_command && strcmp(command, "start") == 0) ||
              (stop_frame && strcmp(command, "stop") == 0) ||
-             (control_frame && (strcmp(command, "pause") == 0 ||
+             (control_frame && ((cinematic_v4 && cue_identity &&
+                                 strcmp(command, "start") == 0) ||
+                                strcmp(command, "pause") == 0 ||
                                 strcmp(command, "resume") == 0 ||
                                 strcmp(command, "cancel") == 0)));
         const bool known_identity = cinematic_v4_v2
@@ -2027,6 +2075,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             }
             cJSON* ack_body = CinematicJsonCreateObject();
             cJSON* cinematic = CinematicJsonCreateObject();
+            cJSON* asset_pack_ack = prepare_frame ? BuildAssetPackAck(body) : nullptr;
             const char* event = response.type == tbot::LessonCinematicResponseType::kFrameZeroReady
                 ? "frameZeroReady"
                 : response.type == tbot::LessonCinematicResponseType::kPhaseReady
@@ -2035,7 +2084,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 CinematicJsonAddNumber(ack_body, "acks", static_cast<double>(sequence)) &&
                 CinematicJsonAddString(cinematic, "event", event) &&
                 CinematicJsonAddString(cinematic, "command", command != nullptr ? command : "") &&
-                CinematicJsonAddString(cinematic, cinematic_v4_v2 ? "cueId" : "phaseId",
+                CinematicJsonAddString(cinematic, cinematic_identity_field,
                                        cinematic_identity != nullptr ? cinematic_identity : "") &&
                 CinematicJsonAddNumber(cinematic, "commandSequenceId",
                                        static_cast<double>(command_sequence_id)) &&
@@ -2045,12 +2094,18 @@ void Application::HandleLessonMessage(const cJSON* root) {
             } else if (response.accepted && start_command) {
                 built = built && CinematicJsonAddBool(cinematic, "phaseReady", true);
             }
+            if (built && asset_pack_ack != nullptr) {
+                built = cJSON_AddItemToObject(ack_body, "assetPack", asset_pack_ack);
+                if (built) asset_pack_ack = nullptr;
+            }
             if (!built || !CinematicJsonOperationAllowed() ||
                 !cJSON_AddItemToObject(ack_body, "cinematicPhase", cinematic)) {
+                cJSON_Delete(asset_pack_ack);
                 cJSON_Delete(cinematic);
                 cJSON_Delete(ack_body);
                 return;
             }
+            LogLessonAckEvidence(root, ack_body);
             emit(root, "lesson_ack", ack_body);
         };
 
@@ -2146,26 +2201,50 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 static const std::set<std::string_view> kV2AssetKeys = {
                     "derivativeId", "cueId", "sdPath", "sha256", "bytes",
                     "mediaType", "width", "height"};
+                static const std::set<std::string_view> kV2TrgbAssetKeys = {
+                    "derivativeId", "cueId", "sdPath", "sha256", "bytes", "mediaType",
+                    "containerVersion", "storedWidth", "storedHeight", "orientation",
+                    "frameBytes"};
                 const cJSON* asset = Obj(command_body, "asset");
                 double template_version = 0, duration_ms = 0, fps = 0, frame_count = 0;
                 double bytes = 0, width = 0, height = 0;
+                double container_version = 0, stored_width = 0, stored_height = 0;
+                double frame_bytes = 0;
                 std::string normalized_path = LessonLocalPath(Str(asset, "sdPath"));
                 const char* effect = Str(command_body, "effect");
                 const char* step_key = Str(command_body, "stepKey");
                 const char* playback_mode = Str(command_body, "playbackMode");
+                const bool trgb_asset = cinematic_v4_v2 &&
+                    Str(asset, "mediaType") != nullptr &&
+                    strcmp(Str(asset, "mediaType"),
+                           "application/vnd.tbot.rgb565-indexed") == 0;
+                std::uint64_t expected_trgb_bytes = 0;
                 const bool valid =
                     ExactObjectKeys(command_body,
                                     cinematic_v4_v2 ? kV2PrepareKeys : kV1PrepareKeys) &&
-                    ExactObjectKeys(asset, cinematic_v4_v2 ? kV2AssetKeys : kV1AssetKeys) &&
+                    ExactObjectKeys(asset, trgb_asset ? kV2TrgbAssetKeys
+                                                     : cinematic_v4_v2 ? kV2AssetKeys
+                                                                       : kV1AssetKeys) &&
                     Num(command_body, "templateVersion", template_version) &&
                     Num(command_body, "durationMs", duration_ms) && Num(command_body, "fps", fps) &&
                     Num(command_body, "frameCount", frame_count) && Num(asset, "bytes", bytes) &&
-                    Num(asset, "width", width) && Num(asset, "height", height) &&
                     template_version == cinematic_template_version && fps == 10 &&
-                    width == 480 && height == 320 &&
+                    (trgb_asset
+                        ? Num(asset, "containerVersion", container_version) &&
+                          Num(asset, "storedWidth", stored_width) &&
+                          Num(asset, "storedHeight", stored_height) &&
+                          Num(asset, "frameBytes", frame_bytes) &&
+                          container_version == 1 && stored_width == 320 && stored_height == 480 &&
+                          frame_bytes == 307200 && Str(asset, "orientation") != nullptr &&
+                          strcmp(Str(asset, "orientation"), "panelNativeClockwise") == 0
+                        : Num(asset, "width", width) && Num(asset, "height", height) &&
+                          width == 480 && height == 320 && Str(asset, "mediaType") != nullptr &&
+                          strcmp(Str(asset, "mediaType"), "video/mp4") == 0) &&
                     PositiveIntegerAtMost(duration_ms, UINT32_MAX) &&
                     PositiveIntegerAtMost(frame_count, UINT32_MAX) &&
                     PositiveIntegerAtMost(bytes, static_cast<double>(UINT64_MAX)) &&
+                    static_cast<std::uint64_t>(duration_ms) * 10 ==
+                        static_cast<std::uint64_t>(frame_count) * 1000 &&
                     !normalized_path.empty() &&
                     (cinematic_v4_v2
                         ? phase_id == nullptr && IsSafeCinematicSlug(cue_id) &&
@@ -2173,7 +2252,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             Str(asset, "phaseId") == nullptr &&
                             Str(asset, "cueId") != nullptr &&
                             std::strcmp(Str(asset, "cueId"), cue_id) == 0 &&
-                            ValidV2CinematicEffect(effect, playback_mode, duration_ms)
+                            ValidV2CinematicEffect(effect, playback_mode, duration_ms) &&
+                            (!trgb_asset ||
+                             (ExpectedTrgbContainerBytes(
+                                  static_cast<std::uint64_t>(frame_count),
+                                  static_cast<std::uint64_t>(frame_bytes),
+                                  &expected_trgb_bytes) &&
+                              static_cast<std::uint64_t>(bytes) == expected_trgb_bytes))
                         : cue_id == nullptr && effect == nullptr && step_key == nullptr &&
                             playback_mode == nullptr && Str(asset, "cueId") == nullptr &&
                             Str(asset, "phaseId") != nullptr &&
@@ -2201,6 +2286,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     config.duration_ms = static_cast<std::uint32_t>(duration_ms);
                     config.fps = static_cast<std::uint16_t>(fps);
                     config.frame_count = static_cast<std::uint32_t>(frame_count);
+                    config.loop = trgb_asset &&
+                        strcmp(Str(command_body, "playbackMode"), "loop") == 0;
                     config.asset.derivative_id = Str(asset, "derivativeId");
                     config.asset.phase_id = Str(asset, "phaseId");
                     config.asset.cue_id = Str(asset, "cueId");
@@ -2210,6 +2297,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     config.asset.media_type = Str(asset, "mediaType");
                     config.asset.width = static_cast<std::uint16_t>(width);
                     config.asset.height = static_cast<std::uint16_t>(height);
+                    config.asset.container_version = static_cast<std::uint16_t>(container_version);
+                    config.asset.stored_width = static_cast<std::uint16_t>(stored_width);
+                    config.asset.stored_height = static_cast<std::uint16_t>(stored_height);
+                    config.asset.orientation = Str(asset, "orientation");
+                    config.asset.frame_bytes = static_cast<std::uint32_t>(frame_bytes);
                     const auto reservation = BeginCinematicLessonSession(
                         assignment_id, session_id);
                     if (!reservation.acquired) {

@@ -72,7 +72,7 @@ bool LoadRunningEspBuildIdentity(EspBuildIdentity* identity, std::string* error)
         return SetError(error, "app_sha256_unavailable");
     }
     EspBuildIdentity value;
-    value.hil_profile = TBOT_EMBEDDED_PROFILE;
+    value.hil_profile = kTbotEmbeddedProfileAudit + sizeof("TBOT_EMBEDDED_PROFILE=") - 1;
     value.project_name = descriptor->project_name;
     value.project_version = descriptor->version;
     value.idf_version = descriptor->idf_ver;

@@ -395,13 +395,14 @@ def test_passive_lesson_socket_worker_unavailable_retries_passively():
 
 def test_passive_lesson_reconnect_uses_a_transient_internal_worker_stack():
     source = read("main/application.cc")
-    constructor = function_body(source, "Application::Application")
     passive = function_body(source, "void Application::StartPassiveLessonWebsocket")
     starter = function_body(source, "bool Application::StartOpenChannelWorker")
     worker = function_body(source, "void Application::OpenChannelTask")
+    constructor = function_body(source, "Application::Application")
 
     assert "open_channel_task_buffer" not in source
     assert "open_channel_task_stack" not in source
+    assert "open_channel_queue" not in source
     assert '"lesson_ws"' not in constructor
     assert "xTaskCreateWithCaps(" in starter
     assert "&Application::OpenChannelTask" in starter

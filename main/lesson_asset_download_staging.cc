@@ -11,12 +11,24 @@
 #include <mbedtls/sha256.h>
 #include <mbedtls/version.h>
 
+#if defined(ESP_PLATFORM)
+#include <esp_task_wdt.h>
+#endif
+
 #if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
     defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
 #include "lesson_storage_hil_hooks.h"
 #endif
 
 namespace {
+
+void ResetCurrentTaskWatchdogIfSubscribed() {
+#if defined(ESP_PLATFORM)
+    if (esp_task_wdt_status(nullptr) == ESP_OK) {
+        (void)esp_task_wdt_reset();
+    }
+#endif
+}
 
 #if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
 LessonAssetSha256TestFailure g_sha256_failure = LessonAssetSha256TestFailure::kNone;
@@ -171,6 +183,7 @@ std::string Sha256FileHex(const std::string& path) {
             if (rc != 0) {
                 throw std::runtime_error("failed to update sha256");
             }
+            ResetCurrentTaskWatchdogIfSubscribed();
         }
         if (read < sizeof(buffer)) {
             if (std::ferror(file.get())) {
