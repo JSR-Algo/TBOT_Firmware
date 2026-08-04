@@ -6,6 +6,13 @@
 
 namespace tbot {
 
+// Covers the longest canonical cue and maximum-width numeric fields with safety margin.
+inline constexpr std::size_t kLessonCinematicEvidenceLineCapacity = 1024;
+
+// cue_end heap minima are the lowest current-heap samples observed at cue begin,
+// each Record* boundary, and cue end. lifetime_internal_heap_min remains the
+// allocator's lifetime minimum and is reported separately.
+
 enum class LessonCinematicCueEndReason : std::uint8_t {
     kNatural,
     kStop,

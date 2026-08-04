@@ -45,8 +45,7 @@ struct CueCounters {
     std::uint32_t lifetime_internal_heap_min = 0;
     std::uint32_t internal_heap_min = 0;
     std::uint32_t psram_heap_min = 0;
-    bool heap_minima_recorded = false;
-    bool heap_monitor_active = false;
+    bool heap_sampled = false;
 };
 
 struct BootCounters {
@@ -145,25 +144,22 @@ void CopyToken(char* destination, std::size_t destination_size, const char* sour
     std::snprintf(destination, destination_size, "%s", value);
 }
 
-void StopHeapMonitorLocked() {
+void SampleCueHeapLocked() {
 #if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
-    if (g_cue.heap_monitor_active) {
-        heap_caps_monitor_local_minimum_free_size_stop();
-        g_cue.heap_monitor_active = false;
+    const auto internal_free =
+        static_cast<std::uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    const auto psram_free =
+        static_cast<std::uint32_t>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+    if (!g_cue.heap_sampled || internal_free < g_cue.internal_heap_min) {
+        g_cue.internal_heap_min = internal_free;
     }
-#endif
-}
-
-void RefreshCueHeapMinimaLocked() {
-    if (g_cue.heap_minima_recorded) return;
-#if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
-    g_cue.internal_heap_min = static_cast<std::uint32_t>(
+    if (!g_cue.heap_sampled || psram_free < g_cue.psram_heap_min) {
+        g_cue.psram_heap_min = psram_free;
+    }
+    g_cue.heap_sampled = true;
+    g_cue.lifetime_internal_heap_min = static_cast<std::uint32_t>(
         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
-    g_cue.psram_heap_min = static_cast<std::uint32_t>(
-        heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
-    StopHeapMonitorLocked();
 #endif
-    g_cue.heap_minima_recorded = true;
 }
 
 bool EvidenceRuntimeEnabled() {
@@ -215,7 +211,6 @@ void LessonCinematicEvidenceBeginCue(const char* cue_id, std::uint64_t sequence,
                                      std::uint64_t now_ms) {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    StopHeapMonitorLocked();
     g_cue = {};
     g_cue.active = true;
     CopyToken(g_cue.cue_id, sizeof(g_cue.cue_id), cue_id);
@@ -223,10 +218,7 @@ void LessonCinematicEvidenceBeginCue(const char* cue_id, std::uint64_t sequence,
     g_cue.started_ms = now_ms;
     g_cue.last_queue_ms = now_ms;
 #if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
-    g_cue.lifetime_internal_heap_min = static_cast<std::uint32_t>(
-        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
-    heap_caps_monitor_local_minimum_free_size_start();
-    g_cue.heap_monitor_active = true;
+    SampleCueHeapLocked();
 #else
     g_cue.lifetime_internal_heap_min = g_boot.lifetime_internal_heap_min;
     g_cue.internal_heap_min = g_boot.lifetime_internal_heap_min;
@@ -238,6 +230,7 @@ void LessonCinematicEvidenceRecordFrameQueued(std::uint64_t now_ms) {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) {
+        SampleCueHeapLocked();
         g_cue.last_queue_ms = now_ms;
         g_cue.panel_completion_recorded = false;
     }
@@ -247,6 +240,7 @@ void LessonCinematicEvidenceRecordRead(std::uint64_t read_ms) {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_cue.active) return;
+    SampleCueHeapLocked();
     ++g_cue.read_count;
     if (read_ms >= 70) ++g_cue.read_ge70ms;
     if (read_ms < 70) {
@@ -264,7 +258,9 @@ void LessonCinematicEvidenceRecordRead(std::uint64_t read_ms) {
 void LessonCinematicEvidenceRecordPanelCompletion(std::uint64_t now_ms) {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_cue.active || g_cue.panel_completion_recorded) return;
+    if (!g_cue.active) return;
+    SampleCueHeapLocked();
+    if (g_cue.panel_completion_recorded) return;
     const std::uint64_t basis = g_cue.last_queue_ms != 0 ? g_cue.last_queue_ms : g_cue.started_ms;
     const std::uint64_t latency = now_ms >= basis ? now_ms - basis : 0;
     g_cue.panel_latency_ms =
@@ -275,49 +271,71 @@ void LessonCinematicEvidenceRecordPanelCompletion(std::uint64_t now_ms) {
 void LessonCinematicEvidenceRecordQueueError() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_cue.active) ++g_cue.queue_errors;
+    if (g_cue.active) {
+        SampleCueHeapLocked();
+        ++g_cue.queue_errors;
+    }
 }
 
 void LessonCinematicEvidenceRecordQueueTimeout() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_cue.active) ++g_cue.queue_timeouts;
+    if (g_cue.active) {
+        SampleCueHeapLocked();
+        ++g_cue.queue_timeouts;
+    }
 }
 
 void LessonCinematicEvidenceRecordDmaError() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_cue.active) ++g_cue.dma_errors;
+    if (g_cue.active) {
+        SampleCueHeapLocked();
+        ++g_cue.dma_errors;
+    }
 }
 
 void LessonCinematicEvidenceRecordParserFailure() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_cue.active) ++g_cue.parser_errors;
+    if (g_cue.active) {
+        SampleCueHeapLocked();
+        ++g_cue.parser_errors;
+    }
 }
 
 void LessonCinematicEvidenceRecordHeaderCrcError() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_cue.active) ++g_cue.header_crc_errors;
+    if (g_cue.active) {
+        SampleCueHeapLocked();
+        ++g_cue.header_crc_errors;
+    }
 }
 
 void LessonCinematicEvidenceRecordFrameCrcError() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_cue.active) ++g_cue.frame_crc_errors;
+    if (g_cue.active) {
+        SampleCueHeapLocked();
+        ++g_cue.frame_crc_errors;
+    }
 }
 
 void LessonCinematicEvidenceRecordIoError() {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_cue.active) ++g_cue.io_errors;
+    if (g_cue.active) {
+        SampleCueHeapLocked();
+        ++g_cue.io_errors;
+    }
 }
 
 void LessonCinematicEvidenceRecordLateTick(std::uint32_t missed_periods) {
     if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_cue.active) return;
+    SampleCueHeapLocked();
     ++g_cue.late_ticks;
     g_cue.missed_periods += missed_periods;
 }
@@ -330,7 +348,7 @@ bool LessonCinematicEvidenceFormatCueEnd(LessonCinematicCueEndReason reason,
     if (out == nullptr || out_size == 0) return false;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_cue.active) return false;
-    RefreshCueHeapMinimaLocked();
+    SampleCueHeapLocked();
     const std::uint64_t latency = now_ms >= g_cue.started_ms ? now_ms - g_cue.started_ms : 0;
     const int written = std::snprintf(
         out, out_size,
@@ -370,7 +388,7 @@ void LessonCinematicEvidenceEmitCueEnd(LessonCinematicCueEndReason reason,
                                        LessonCinematicFault fault,
                                        std::uint64_t now_ms) {
     if (!EvidenceRuntimeEnabled()) return;
-    char line[768] = {};
+    char line[kLessonCinematicEvidenceLineCapacity] = {};
     if (!LessonCinematicEvidenceFormatCueEnd(reason, fault, now_ms, line, sizeof(line))) {
         return;
     }
@@ -381,7 +399,6 @@ void LessonCinematicEvidenceEmitCueEnd(LessonCinematicCueEndReason reason,
 
 void LessonCinematicEvidenceResetForTest() {
     std::lock_guard<std::mutex> lock(g_mutex);
-    StopHeapMonitorLocked();
     g_cue = {};
     g_boot = {};
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason), "host");
@@ -405,7 +422,7 @@ void LessonCinematicEvidenceSetCueHeapMinimaForTest(
     g_cue.lifetime_internal_heap_min = lifetime_internal_heap_min;
     g_cue.internal_heap_min = internal_heap_min;
     g_cue.psram_heap_min = psram_heap_min;
-    g_cue.heap_minima_recorded = true;
+    g_cue.heap_sampled = true;
 }
 
 }  // namespace tbot

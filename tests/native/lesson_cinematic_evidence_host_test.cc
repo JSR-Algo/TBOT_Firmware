@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -11,6 +12,7 @@
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
 #include <esp_heap_caps.h>
 #include <esp_random.h>
+#include <esp_rom_sys.h>
 #endif
 
 namespace {
@@ -27,52 +29,85 @@ void Require(bool condition, const char* message) {
 #if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
 
-void TestEspCueHeapMonitorResetsForEveryCue() {
+void TestEspCueHeapMinimumSamplesEveryEvidenceBoundary() {
     HostHilLifetimeInternalHeapMinimum() = 12000;
     HostHilLifetimePsramHeapMinimum() = 4200000;
     HostHilCurrentInternalHeapFree() = 60000;
     HostHilCurrentPsramHeapFree() = 4100000;
-    HostHilHeapMonitorActive() = false;
-    HostHilHeapMonitorStartCalls() = 0;
-    HostHilHeapMonitorStopCalls() = 0;
 
     tbot::LessonCinematicEvidenceResetForTest();
     tbot::LessonCinematicEvidenceBoot();
     tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
-    Require(HostHilHeapMonitorActive(), "first cue starts a local heap minimum monitor");
-    HostHilLocalInternalHeapMinimum() = 21000;
-    char first[768] = {};
+
+    HostHilCurrentInternalHeapFree() = 48000;
+    HostHilCurrentPsramHeapFree() = 4000000;
+    tbot::LessonCinematicEvidenceRecordRead(10);
+    HostHilCurrentInternalHeapFree() = 52000;
+    HostHilCurrentPsramHeapFree() = 4050000;
+    tbot::LessonCinematicEvidenceRecordQueueError();
+    HostHilCurrentInternalHeapFree() = 47000;
+    HostHilCurrentPsramHeapFree() = 3900000;
+
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
-                tbot::LessonCinematicFault::kNone, 200, first, sizeof(first)),
-            "first ESP cue heap line formats");
-    Require(std::string(first).find("internal_heap_min=21000") != std::string::npos,
-            "first ESP cue reports the local heap minimum");
-    Require(std::string(first).find("lifetime_internal_heap_min=12000") != std::string::npos,
-            "first ESP cue keeps the boot/sync lifetime minimum diagnostic separate");
-    Require(!HostHilHeapMonitorActive(), "terminal formatting stops the first cue monitor");
+                tbot::LessonCinematicFault::kNone, 200, line, sizeof(line)),
+            "sampled ESP cue heap line formats");
+    Require(std::string(line).find("internal_heap_min=47000") != std::string::npos,
+            "cue reports the lowest internal heap sampled at evidence boundaries");
+    Require(std::string(line).find("psram_heap_min=3900000") != std::string::npos,
+            "cue reports the lowest PSRAM heap sampled at evidence boundaries");
+    Require(std::string(line).find("lifetime_internal_heap_min=12000") != std::string::npos,
+            "cue preserves the allocator lifetime minimum as a separate diagnostic");
 
     HostHilCurrentInternalHeapFree() = 52000;
+    HostHilCurrentPsramHeapFree() = 4050000;
     tbot::LessonCinematicEvidenceBeginCue("barn-teach", 2, 300);
-    char second[768] = {};
+    char second[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 400, second, sizeof(second)),
-            "second ESP cue heap line formats");
+            "second sampled ESP cue heap line formats");
     Require(std::string(second).find("internal_heap_min=52000") != std::string::npos,
-            "second ESP cue resets its minimum instead of inheriting the first cue");
-    Require(HostHilHeapMonitorStartCalls() == 2, "each ESP cue starts one local monitor");
-    Require(HostHilHeapMonitorStopCalls() == 2, "each ESP cue stops one local monitor");
+            "each cue starts a fresh sampled internal heap minimum");
+    Require(std::string(second).find("psram_heap_min=4050000") != std::string::npos,
+            "each cue starts a fresh sampled PSRAM heap minimum");
+}
+
+void TestEspZeroHeapSampleRemainsVisibleAsTheCueMinimum() {
+    HostHilCurrentInternalHeapFree() = 60000;
+    HostHilCurrentPsramHeapFree() = 4100000;
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceBoot();
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
+
+    HostHilCurrentInternalHeapFree() = 0;
+    tbot::LessonCinematicEvidenceRecordQueueError();
+    HostHilCurrentInternalHeapFree() = 50000;
+
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kFailure,
+                tbot::LessonCinematicFault::kIo, 200, line, sizeof(line)),
+            "zero-heap sampled ESP cue line formats");
+    Require(std::string(line).find("internal_heap_min=0") != std::string::npos,
+            "a sampled zero heap value cannot be replaced by a later recovery sample");
 }
 
 void TestEspBootRepairsAnAllZeroRandomNonceWithOneBoundedRetry() {
     HostEspRandomValue() = 0;
     HostEspRandomCalls() = 0;
+    HostEspRomOutputReset();
 
     tbot::LessonCinematicEvidenceResetForTest();
     tbot::LessonCinematicEvidenceBoot();
+    const std::string boot_line = HostEspRomOutput();
+    Require(boot_line.rfind("CINE_EVIDENCE event=boot ", 0) == 0,
+            "zero-RNG repair remains visible in the emitted boot schema");
+    Require(boot_line.find("boot_nonce=0x0 ") == std::string::npos,
+            "emitted boot evidence never contains a zero nonce");
     tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
-    char line[768] = {};
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 200, line, sizeof(line)),
@@ -83,6 +118,25 @@ void TestEspBootRepairsAnAllZeroRandomNonceWithOneBoundedRetry() {
             "zero RNG receives exactly one bounded two-word retry");
 
     HostEspRandomValue() = 0x1234abcdU;
+}
+
+void TestEspBootEmitsExactReleaseEvidenceSchema() {
+    HostHilLifetimeInternalHeapMinimum() = 12000;
+    HostHilLifetimePsramHeapMinimum() = 4200000;
+    HostEspRandomValue() = 0x1234abcdU;
+    HostEspRandomCalls() = 0;
+    HostEspRomOutputReset();
+
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceBoot();
+
+    Require(std::string(HostEspRomOutput()) ==
+                "CINE_EVIDENCE event=boot boot_nonce=0x1234abcd1234abcd "
+                "reset_reason=poweron lifetime_internal_heap_min=12000 "
+                "psram_heap_min=4200000\n",
+            "ESP boot output matches the exact release evidence schema");
+    Require(HostEspRandomCalls() == 2,
+            "nonzero boot nonce consumes exactly one two-word RNG sample");
 }
 
 #else
@@ -107,7 +161,8 @@ void TestEspDisabledEntryPointsAreNoOps() {
     Require(!tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 6,
-                reinterpret_cast<char*>(static_cast<std::uintptr_t>(1)), 768),
+                reinterpret_cast<char*>(static_cast<std::uintptr_t>(1)),
+                tbot::kLessonCinematicEvidenceLineCapacity),
             "disabled ESP formatting returns before touching caller storage");
     tbot::LessonCinematicEvidenceEmitCueEnd(
         tbot::LessonCinematicCueEndReason::kNatural,
@@ -129,7 +184,7 @@ std::string EmitLine(tbot::LessonCinematicCueEndReason reason) {
     tbot::LessonCinematicEvidenceRecordPanelCompletion(1095);
     tbot::LessonCinematicEvidenceRecordQueueError();
     tbot::LessonCinematicEvidenceRecordLateTick(3);
-    char line[768] = {};
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 reason, tbot::LessonCinematicFault::kNone, 1120, line, sizeof(line)),
             "cue_end line formats into bounded caller storage");
@@ -171,6 +226,35 @@ void TestCueEndLineContainsRequiredCountersAndTerminator() {
             "line terminates with cue_end token");
 }
 
+void TestMaximumWidthCanonicalCueFitsDocumentedLineCapacityWithMargin() {
+    static_assert(tbot::kLessonCinematicEvidenceLineCapacity >= 1024);
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(
+        std::numeric_limits<std::uint64_t>::max(), "unexpected_reset_reason",
+        std::numeric_limits<std::uint32_t>::max(),
+        std::numeric_limits<std::uint32_t>::max());
+    tbot::LessonCinematicEvidenceBeginCue(
+        "barn-to-hay-word-transition", std::numeric_limits<std::uint64_t>::max(), 0);
+    tbot::LessonCinematicEvidenceSetCueHeapMinimaForTest(
+        std::numeric_limits<std::uint32_t>::max(),
+        std::numeric_limits<std::uint32_t>::max(),
+        std::numeric_limits<std::uint32_t>::max());
+    tbot::LessonCinematicEvidenceRecordRead(std::numeric_limits<std::uint64_t>::max());
+    tbot::LessonCinematicEvidenceRecordLateTick(std::numeric_limits<std::uint32_t>::max());
+
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kReplacement,
+                tbot::LessonCinematicFault::kUnexpectedReset,
+                std::numeric_limits<std::uint64_t>::max(), line, sizeof(line)),
+            "maximum-width canonical cue evidence fits bounded line storage");
+    const std::string text = line;
+    Require(text.find("cue=barn-to-hay-word-transition") != std::string::npos,
+            "maximum-width test uses the longest canonical cue id");
+    Require(text.size() + 256 <= tbot::kLessonCinematicEvidenceLineCapacity,
+            "bounded evidence line retains at least 256 bytes of format margin");
+}
+
 void TestPanelCompletionLatencyIsNotOverwrittenWithoutNewQueue() {
     tbot::LessonCinematicEvidenceResetForTest();
     tbot::LessonCinematicEvidenceSetBootForTest(0x1234abcdULL, "poweron", 61000, 4200000);
@@ -178,7 +262,7 @@ void TestPanelCompletionLatencyIsNotOverwrittenWithoutNewQueue() {
     tbot::LessonCinematicEvidenceRecordFrameQueued(1050);
     tbot::LessonCinematicEvidenceRecordPanelCompletion(1062);
     tbot::LessonCinematicEvidenceRecordPanelCompletion(1900);
-    char line[768] = {};
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 2000, line, sizeof(line)),
@@ -193,7 +277,7 @@ void TestCueHeapMinimumResetsForEachCue() {
 
     tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
     tbot::LessonCinematicEvidenceSetCueHeapMinimaForTest(12000, 21000, 4000000);
-    char first[768] = {};
+    char first[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 200, first, sizeof(first)),
@@ -203,7 +287,7 @@ void TestCueHeapMinimumResetsForEachCue() {
 
     tbot::LessonCinematicEvidenceBeginCue("barn-teach", 2, 300);
     tbot::LessonCinematicEvidenceSetCueHeapMinimaForTest(12000, 52000, 4000000);
-    char second[768] = {};
+    char second[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 400, second, sizeof(second)),
@@ -219,7 +303,7 @@ void TestReadAt100msIncrementsExactlyOneHistogramBucket() {
     tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "poweron", 61000, 4200000);
     tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 0);
     tbot::LessonCinematicEvidenceRecordRead(100);
-    char line[768] = {};
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 1, line, sizeof(line)),
@@ -237,7 +321,7 @@ void TestHostActivePathRemainsTestableWhenProductionDisabled() {
     tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "poweron", 1, 1);
     tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 0);
     tbot::LessonCinematicEvidenceRecordRead(1);
-    char line[768] = {};
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(!tbot::LessonCinematicEvidenceEnabled(), "host build reports production disabled");
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
@@ -250,7 +334,7 @@ void TestFaultReasonsAreParseable() {
     tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "watchdog", 1, 2);
     tbot::LessonCinematicEvidenceBeginCue("hay-thinking", 99, 2000);
     tbot::LessonCinematicEvidenceRecordParserFailure();
-    char line[768] = {};
+    char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
     Require(tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kFailure,
                 tbot::LessonCinematicFault::kParser, 2010, line, sizeof(line)),
@@ -283,7 +367,7 @@ void TestCueEndClaimIsExactlyOnceUnderConcurrentFormatters() {
     bool results[16] = {};
     for (std::size_t i = 0; i < std::size(results); ++i) {
         threads.emplace_back([i, &results] {
-            char line[768] = {};
+            char line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
             results[i] = tbot::LessonCinematicEvidenceFormatCueEnd(
                 tbot::LessonCinematicCueEndReason::kNatural,
                 tbot::LessonCinematicFault::kNone, 200 + i, line, sizeof(line));
@@ -306,14 +390,17 @@ int main() {
 #if defined(ESP_PLATFORM)
 #if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
-    TestEspCueHeapMonitorResetsForEveryCue();
+    TestEspCueHeapMinimumSamplesEveryEvidenceBoundary();
+    TestEspZeroHeapSampleRemainsVisibleAsTheCueMinimum();
     TestEspBootRepairsAnAllZeroRandomNonceWithOneBoundedRetry();
+    TestEspBootEmitsExactReleaseEvidenceSchema();
 #else
     TestEspDisabledEntryPointsAreNoOps();
 #endif
 #else
     TestProductionOffByDefault();
     TestCueEndLineContainsRequiredCountersAndTerminator();
+    TestMaximumWidthCanonicalCueFitsDocumentedLineCapacityWithMargin();
     TestPanelCompletionLatencyIsNotOverwrittenWithoutNewQueue();
     TestCueHeapMinimumResetsForEachCue();
     TestReadAt100msIncrementsExactlyOneHistogramBucket();
