@@ -258,7 +258,9 @@ def test_embedded_profile_is_boolean_derived_and_manual_override_is_rejected(tmp
     AUDITOR.audit_profile_configuration(
         "hil", {"CONFIG_TBOT_HIL_STORAGE_FAULTS": "y"}
     )
-    AUDITOR.audit_profile_configuration("production", {})
+    AUDITOR.audit_profile_configuration(
+        "production", {"CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE": "y"}
+    )
     with pytest.raises(AUDITOR.AuditFailure, match="manual profile override forbidden"):
         AUDITOR.audit_profile_configuration(
             "hil",
@@ -277,6 +279,117 @@ def test_embedded_profile_is_boolean_derived_and_manual_override_is_rejected(tmp
     with pytest.raises(AUDITOR.AuditFailure, match="embedded profile literal mismatch"):
         AUDITOR.audit_profile_literals("production", artifacts)
 
+
+def test_production_profile_requires_release_evidence_and_disables_both_hil_flags():
+    expected = {
+        "releaseCinematicEvidence": True,
+        "hilCinematicTelemetry": False,
+        "hilStorageFaults": False,
+    }
+
+    assert AUDITOR.audit_profile_configuration(
+        "production", {"CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE": "y"}
+    ) == expected
+
+    with pytest.raises(AUDITOR.AuditFailure, match="release cinematic evidence"):
+        AUDITOR.audit_profile_configuration("production", {})
+    with pytest.raises(AUDITOR.AuditFailure, match="cinematic telemetry"):
+        AUDITOR.audit_profile_configuration(
+            "production",
+            {
+                "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE": "y",
+                "CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY": "y",
+            },
+        )
+    with pytest.raises(AUDITOR.AuditFailure, match="storage faults"):
+        AUDITOR.audit_profile_configuration(
+            "production",
+            {
+                "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE": "y",
+                "CONFIG_TBOT_HIL_STORAGE_FAULTS": "y",
+            },
+        )
+
+
+def test_storage_hil_profile_does_not_require_release_cinematic_evidence():
+    assert AUDITOR.audit_profile_configuration(
+        "hil", {"CONFIG_TBOT_HIL_STORAGE_FAULTS": "y"}
+    ) == {
+        "releaseCinematicEvidence": False,
+        "hilCinematicTelemetry": False,
+        "hilStorageFaults": True,
+    }
+
+
+def test_manifest_checks_record_release_and_hil_config_state():
+    checks = AUDITOR.manifest_checks(
+        "production",
+        {
+            "releaseCinematicEvidence": True,
+            "hilCinematicTelemetry": False,
+            "hilStorageFaults": False,
+        },
+        "production",
+    )
+
+    assert checks == {
+        "releaseCinematicEvidence": True,
+        "hilCinematicTelemetry": False,
+        "hilStorageFaults": False,
+        "hilConfigEnabled": False,
+        "embeddedProfile": "production",
+        "toolLiterals": "absent",
+        "hilSymbols": "absent",
+        "bannedApis": "absent",
+    }
+
+
+def test_production_artifacts_require_release_evidence_literal_and_symbol(tmp_path):
+    artifacts = {}
+    release_blob = b"CINE_EVIDENCE TBOT_EMBEDDED_PROFILE=production"
+    for name in ("bin", "elf", "map", "mainArchive"):
+        path = tmp_path / name
+        path.write_bytes(release_blob if name != "map" else b"map")
+        artifacts[name] = path
+
+    AUDITOR.audit_literals("production", artifacts)
+    AUDITOR.audit_symbols(
+        "production",
+        "00000000 T tbot::LessonCinematicEvidenceBeginCue\n",
+    )
+
+    artifacts["elf"].write_bytes(b"TBOT_EMBEDDED_PROFILE=production")
+    with pytest.raises(AUDITOR.AuditFailure, match="CINE_EVIDENCE"):
+        AUDITOR.audit_literals("production", artifacts)
+    with pytest.raises(AUDITOR.AuditFailure, match="LessonCinematicEvidence"):
+        AUDITOR.audit_symbols("production", "")
+
+
+@pytest.mark.parametrize(
+    ("legacy_literal", "legacy_symbol"),
+    (
+        ("HIL_CINE", "LessonCinematicHilTelemetryBeginCue"),
+        ("self.lesson_assets.hil.status", "RegisterLessonStorageHilMcpTools"),
+    ),
+)
+def test_production_artifacts_reject_legacy_hil_leakage(
+    tmp_path, legacy_literal, legacy_symbol
+):
+    artifacts = {}
+    for name in ("bin", "elf", "map", "mainArchive"):
+        path = tmp_path / name
+        path.write_bytes(
+            f"CINE_EVIDENCE {legacy_literal} TBOT_EMBEDDED_PROFILE=production".encode()
+        )
+        artifacts[name] = path
+
+    with pytest.raises(AUDITOR.AuditFailure, match="HIL"):
+        AUDITOR.audit_literals("production", artifacts)
+    with pytest.raises(AUDITOR.AuditFailure, match="HIL"):
+        AUDITOR.audit_symbols(
+            "production",
+            f"LessonCinematicEvidenceBeginCue\n{legacy_symbol}\n",
+        )
 
 def test_failed_audit_removes_stale_outputs_before_any_check(tmp_path):
     manifest = tmp_path / AUDITOR.MANIFEST_NAME

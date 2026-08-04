@@ -28,6 +28,10 @@ TOOL_NAMES = (
     "self.lesson_assets.hil.inspect",
 )
 BANNER = "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image"
+RELEASE_CINEMATIC_LITERAL = "CINE_EVIDENCE"
+LEGACY_CINEMATIC_LITERAL = "HIL_CINE"
+RELEASE_CINEMATIC_SYMBOL = "LessonCinematicEvidence"
+LEGACY_CINEMATIC_SYMBOL = "LessonCinematicHilTelemetry"
 HIL_SYMBOLS = (
     "LessonStorageHilController",
     "RegisterLessonStorageHilMcpTools",
@@ -375,19 +379,44 @@ def audit_symbols(profile: str, nm_output: str) -> None:
         present = symbol in nm_output
         require(present == (profile == "hil"),
                 f"HIL symbol profile mismatch: {symbol}")
+    if profile == "production":
+        require(RELEASE_CINEMATIC_SYMBOL in nm_output,
+                f"production artifact missing symbol: {RELEASE_CINEMATIC_SYMBOL}")
+        require(LEGACY_CINEMATIC_SYMBOL not in nm_output,
+                f"production artifact contains HIL symbol: {LEGACY_CINEMATIC_SYMBOL}")
 
 
 def artifact_bytes(artifact: Path | ArtifactSnapshot) -> bytes:
     return artifact.data if isinstance(artifact, ArtifactSnapshot) else read_bytes(artifact)
 
 
-def audit_profile_configuration(profile: str, sdkconfig: dict[str, str]) -> None:
+def audit_profile_configuration(
+    profile: str, sdkconfig: dict[str, str]
+) -> dict[str, bool]:
     require(
         "CONFIG_TBOT_HIL_PROFILE" not in sdkconfig,
         "manual profile override forbidden",
     )
-    enabled = sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y"
-    require(enabled == (profile == "hil"), "CONFIG_TBOT_HIL_STORAGE_FAULTS profile mismatch")
+    checks = {
+        "releaseCinematicEvidence":
+            sdkconfig.get("CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE") == "y",
+        "hilCinematicTelemetry":
+            sdkconfig.get("CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY") == "y",
+        "hilStorageFaults":
+            sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y",
+    }
+    require(
+        checks["hilStorageFaults"] == (profile == "hil"),
+        "HIL storage faults profile mismatch",
+    )
+    if profile == "production":
+        require(checks["releaseCinematicEvidence"],
+                "production release cinematic evidence must be enabled")
+        require(not checks["hilCinematicTelemetry"],
+                "production cinematic telemetry HIL must be disabled")
+        require(not checks["hilStorageFaults"],
+                "production storage faults HIL must be disabled")
+    return checks
 
 
 def audit_profile_literals(
@@ -418,6 +447,30 @@ def audit_literals(profile: str, artifacts: dict[str, Path | ArtifactSnapshot]) 
             required = {"bin", "elf", "mainArchive"}
             require(required.issubset(locations),
                     f"HIL literal missing from artifacts: {literal}")
+    if profile == "production":
+        for name in ("bin", "elf", "mainArchive"):
+            require(
+                RELEASE_CINEMATIC_LITERAL.encode("ascii") in searchable[name],
+                f"production artifact missing {RELEASE_CINEMATIC_LITERAL}: {name}",
+            )
+        legacy = LEGACY_CINEMATIC_LITERAL.encode("ascii")
+        require(
+            not any(legacy in content for content in searchable.values()),
+            f"production artifact contains HIL literal: {LEGACY_CINEMATIC_LITERAL}",
+        )
+
+
+def manifest_checks(
+    profile: str, config_checks: dict[str, bool], embedded_profile: str
+) -> dict[str, bool | str]:
+    return {
+        **config_checks,
+        "hilConfigEnabled": config_checks["hilStorageFaults"],
+        "embeddedProfile": embedded_profile,
+        "toolLiterals": "present" if profile == "hil" else "absent",
+        "hilSymbols": "present" if profile == "hil" else "absent",
+        "bannedApis": "absent",
+    }
 
 
 def defaults_manifest(
@@ -586,8 +639,7 @@ def audit(
     validate_artifact_chronology(artifacts)
     validate_artifact_freshness(artifacts, commit_timestamp)
     sdkconfig = parse_sdkconfig_data(artifacts["sdkconfig"].data)
-    enabled = sdkconfig.get("CONFIG_TBOT_HIL_STORAGE_FAULTS") == "y"
-    audit_profile_configuration(profile, sdkconfig)
+    config_checks = audit_profile_configuration(profile, sdkconfig)
     auxiliary_snapshots: list[ArtifactSnapshot] = []
     defaults = defaults_manifest(
         repo, build_dir, description, profile, auxiliary_snapshots)
@@ -618,13 +670,7 @@ def audit(
             for label, snapshot in artifacts.items()
         },
         "partition": partition,
-        "checks": {
-            "hilConfigEnabled": enabled,
-            "embeddedProfile": embedded_profile,
-            "toolLiterals": "present" if profile == "hil" else "absent",
-            "hilSymbols": "present" if profile == "hil" else "absent",
-            "bannedApis": "absent",
-        },
+        "checks": manifest_checks(profile, config_checks, embedded_profile),
     }
     manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     def verify_inputs() -> None:
