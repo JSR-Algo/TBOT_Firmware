@@ -2219,15 +2219,21 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     strcmp(Str(asset, "mediaType"),
                            "application/vnd.tbot.rgb565-indexed") == 0;
                 std::uint64_t expected_trgb_bytes = 0;
+                const bool has_numeric_fields =
+                    Num(command_body, "templateVersion", template_version) &&
+                    Num(command_body, "durationMs", duration_ms) && Num(command_body, "fps", fps) &&
+                    Num(command_body, "frameCount", frame_count) && Num(asset, "bytes", bytes);
+                const bool numeric_values_valid =
+                    PositiveIntegerAtMost(duration_ms, UINT32_MAX) &&
+                    PositiveIntegerAtMost(frame_count, UINT32_MAX) &&
+                    PositiveIntegerAtMost(bytes, static_cast<double>(UINT64_MAX));
                 const bool valid =
                     ExactObjectKeys(command_body,
                                     cinematic_v4_v2 ? kV2PrepareKeys : kV1PrepareKeys) &&
                     ExactObjectKeys(asset, trgb_asset ? kV2TrgbAssetKeys
                                                      : cinematic_v4_v2 ? kV2AssetKeys
                                                                        : kV1AssetKeys) &&
-                    Num(command_body, "templateVersion", template_version) &&
-                    Num(command_body, "durationMs", duration_ms) && Num(command_body, "fps", fps) &&
-                    Num(command_body, "frameCount", frame_count) && Num(asset, "bytes", bytes) &&
+                    has_numeric_fields &&
                     template_version == cinematic_template_version && fps == 10 &&
                     (trgb_asset
                         ? Num(asset, "containerVersion", container_version) &&
@@ -2240,9 +2246,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         : Num(asset, "width", width) && Num(asset, "height", height) &&
                           width == 480 && height == 320 && Str(asset, "mediaType") != nullptr &&
                           strcmp(Str(asset, "mediaType"), "video/mp4") == 0) &&
-                    PositiveIntegerAtMost(duration_ms, UINT32_MAX) &&
-                    PositiveIntegerAtMost(frame_count, UINT32_MAX) &&
-                    PositiveIntegerAtMost(bytes, static_cast<double>(UINT64_MAX)) &&
+                    numeric_values_valid &&
                     static_cast<std::uint64_t>(duration_ms) * 10 ==
                         static_cast<std::uint64_t>(frame_count) * 1000 &&
                     !normalized_path.empty() &&

@@ -90,7 +90,8 @@ cp main/lesson_asset_storage_coordinator.cc \
     "${BUILD_DIR}/cJSON.o" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 
-"${BUILD_DIR}/lesson_handler_host_test"
+TBOT_TVIDEO_FARM_COMMAND_FIXTURE="${ROOT}/tests/fixtures/tvideo_farm_command_v2.json" \
+    "${BUILD_DIR}/lesson_handler_host_test"
 
 "${GCOVR_BIN}" -r "${ROOT}" \
     --gcov-executable "${LLVM_COV}" \

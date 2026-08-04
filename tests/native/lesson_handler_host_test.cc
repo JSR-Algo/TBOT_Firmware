@@ -1250,6 +1250,13 @@ void test_renderer_v4_numeric_narrowing_rejects_before_renderer_work() {
         require(fake.allocations == 0 && fake.opens == 0 && fake.presents == 0,
                 "unsafe v4 numeric narrowing is rejected before renderer work");
     }
+    Handle(ReplaceOnce(
+        ReplaceOnce(V4PrepareFrame(sequence++), "\"durationMs\":300",
+                    "\"durationMs\":4294967300"),
+        "\"frameCount\":3", "\"frameCount\":42949673"));
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                fake.allocations == 0 && fake.opens == 0,
+            "internally consistent duration above uint32 range is rejected before renderer work");
     require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
             "unsafe v4 numeric narrowing does not acquire an asset lease");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
@@ -1519,6 +1526,64 @@ void test_cinematic_cross_renderer_handoff_releases_old_resources() {
     require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
             "v3 stop releases the handoff asset lease");
     tbot::SetActiveLessonCinematicRenderer(nullptr);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_cinematic_cross_renderer_handoff_fails_closed_without_old_renderer() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake v3_fake;
+    V3RendererFake v4_fake;
+    tbot::LessonCinematicRenderer v3_renderer(
+        {&v3_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::LessonFlattenedCinematicRenderer v4_renderer(
+        {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
+    ActivateV4Renderer(&v4_renderer);
+
+    Handle(V3PrepareFrame(1));
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    Handle(V4PrepareFrame(2));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_SESSION_RELEASE_FAILED" &&
+                !v4_renderer.prepared(),
+            "v3 to v4 handoff fails closed when the old renderer disappears");
+    v3_renderer.DiscardSession();
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+
+    ResetObservable();
+    FreshSession();
+    tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
+    ActivateV4Renderer(&v4_renderer);
+    Handle(V4PrepareFrame(1));
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+    Handle(V3PrepareFrame(2));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_SESSION_RELEASE_FAILED" &&
+                !v3_renderer.prepared(),
+            "v4 to v3 handoff fails closed when the old renderer disappears");
+    v4_renderer.DiscardSession();
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
+void test_renderer_v4_lesson_stop_routes_to_flattened_renderer() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    ActivateV4Renderer(&renderer);
+    Handle(V4V2PrepareFrame(1));
+    Handle(V4Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"cueId\":\"barn-correct\","
+        "\"commandSequenceId\":82}}"));
+    Handle(V4Frame("lesson_stop", 3,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"cueId\":\"barn-correct\","
+        "\"commandSequenceId\":83}}"));
+    require(FrameType(2) == "lesson_ack" && !renderer.prepared() &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "v4 lesson_stop reaches the flattened renderer and releases the session");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
 }
 
@@ -7305,6 +7370,8 @@ int main() {
     test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
     test_cinematic_controls_cannot_cross_renderer_session_identity();
     test_cinematic_cross_renderer_handoff_releases_old_resources();
+    test_cinematic_cross_renderer_handoff_fails_closed_without_old_renderer();
+    test_renderer_v4_lesson_stop_routes_to_flattened_renderer();
     test_cinematic_terminal_waits_for_asset_lease_release();
     test_renderer_v3_exact_typed_ack_lifecycle_and_idempotency();
     test_renderer_v3_controls_reject_v4_only_fields();

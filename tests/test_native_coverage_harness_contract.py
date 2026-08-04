@@ -116,6 +116,8 @@ def test_host_native_lesson_runner_compiles_real_renderer_and_enforces_line_cove
     assert "main/lesson_handler.cc" in script
     assert "tests/native_stubs_lesson" in script
     assert "tests/native/lesson_handler_host_test.cc" in script
+    assert "TBOT_TVIDEO_FARM_COMMAND_FIXTURE" in script
+    assert "tests/fixtures/tvideo_farm_command_v2.json" in script
     assert "-Dfread=HostLessonFread" in script
     assert "--coverage" in script
     assert "--filter '.*lesson_handler\\.cc'" in script
