@@ -1,7 +1,7 @@
 #include "lesson_flattened_cinematic_renderer.h"
 #include "lesson_mjpeg_mp4.h"
 
-#include "lesson_cinematic_hil_telemetry.h"
+#include "lesson_cinematic_evidence.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -210,36 +210,36 @@ bool ValidMetadata(const LessonFlattenedCinematicPhaseConfig& config) {
            config.asset.frame_bytes == 307200;
 }
 
-LessonCinematicHilFault HilFaultForError(LessonCinematicError error) {
+LessonCinematicFault EvidenceFaultForError(LessonCinematicError error) {
     switch (error) {
         case LessonCinematicError::kParserFailed:
-            return LessonCinematicHilFault::kParser;
+            return LessonCinematicFault::kParser;
         case LessonCinematicError::kFileOpen:
         case LessonCinematicError::kFileRead:
         case LessonCinematicError::kSessionMismatch:
-            return LessonCinematicHilFault::kIo;
+            return LessonCinematicFault::kIo;
         case LessonCinematicError::kDecodeTimeout:
-            return LessonCinematicHilFault::kQueueTimeout;
+            return LessonCinematicFault::kQueueTimeout;
         case LessonCinematicError::kPresentFailed:
-            return LessonCinematicHilFault::kDma;
+            return LessonCinematicFault::kDma;
         default:
-            return LessonCinematicHilFault::kNone;
+            return LessonCinematicFault::kNone;
     }
 }
 
-void RecordHilFault(LessonCinematicError error) {
-    switch (HilFaultForError(error)) {
-        case LessonCinematicHilFault::kParser:
-            LessonCinematicHilTelemetryRecordParserFailure();
+void RecordEvidenceFault(LessonCinematicError error) {
+    switch (EvidenceFaultForError(error)) {
+        case LessonCinematicFault::kParser:
+            LessonCinematicEvidenceRecordParserFailure();
             break;
-        case LessonCinematicHilFault::kIo:
-            LessonCinematicHilTelemetryRecordIoError();
+        case LessonCinematicFault::kIo:
+            LessonCinematicEvidenceRecordIoError();
             break;
-        case LessonCinematicHilFault::kDma:
-            LessonCinematicHilTelemetryRecordDmaError();
+        case LessonCinematicFault::kDma:
+            LessonCinematicEvidenceRecordDmaError();
             break;
-        case LessonCinematicHilFault::kQueueTimeout:
-            LessonCinematicHilTelemetryRecordQueueTimeout();
+        case LessonCinematicFault::kQueueTimeout:
+            LessonCinematicEvidenceRecordQueueTimeout();
             break;
         default:
             break;
@@ -336,17 +336,17 @@ bool LessonFlattenedCinematicRenderer::prepared() const {
 
 void LessonFlattenedCinematicRenderer::DiscardSession() {
     std::lock_guard<std::mutex> lock(mutex_);
-    LessonCinematicHilTelemetryEmitCueEnd(
-        LessonCinematicHilCueEndReason::kDiscard, LessonCinematicHilFault::kNone,
+    LessonCinematicEvidenceEmitCueEnd(
+        LessonCinematicCueEndReason::kDiscard, LessonCinematicFault::kNone,
         ops_.monotonic_ms != nullptr ? ops_.monotonic_ms(ops_.context) : 0);
     Reset();
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
-    RecordHilFault(error);
-    LessonCinematicHilTelemetryEmitCueEnd(
-        LessonCinematicHilCueEndReason::kFailure, HilFaultForError(error),
+    RecordEvidenceFault(error);
+    LessonCinematicEvidenceEmitCueEnd(
+        LessonCinematicCueEndReason::kFailure, EvidenceFaultForError(error),
         ops_.monotonic_ms != nullptr ? ops_.monotonic_ms(ops_.context) : 0);
     return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error, cue_id_};
 }
@@ -381,11 +381,11 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id, LessonCinematicError::kStaleCommand);
     }
     if (state_ == State::kPrepared || state_ == State::kRunning || state_ == State::kPaused) {
-        LessonCinematicHilTelemetryEmitCueEnd(
-            LessonCinematicHilCueEndReason::kReplacement, LessonCinematicHilFault::kNone,
+        LessonCinematicEvidenceEmitCueEnd(
+            LessonCinematicCueEndReason::kReplacement, LessonCinematicFault::kNone,
             ops_.monotonic_ms != nullptr ? ops_.monotonic_ms(ops_.context) : 0);
     }
-    LessonCinematicHilTelemetryBeginCue(
+    LessonCinematicEvidenceBeginCue(
         config.template_version == 2 ? config.cue_id : config.phase_id,
         config.command_sequence_id,
         ops_.monotonic_ms != nullptr ? ops_.monotonic_ms(ops_.context) : 0);
@@ -611,8 +611,8 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Stop(
     }
     CloseStream();
     ReleaseBuffer();
-    LessonCinematicHilTelemetryEmitCueEnd(
-        LessonCinematicHilCueEndReason::kStop, LessonCinematicHilFault::kNone,
+    LessonCinematicEvidenceEmitCueEnd(
+        LessonCinematicCueEndReason::kStop, LessonCinematicFault::kNone,
         ops_.monotonic_ms != nullptr ? ops_.monotonic_ms(ops_.context) : 0);
     state_ = State::kIdle;
     last_sequence_ = sequence;
@@ -636,8 +636,8 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Cancel(
     }
     CloseStream();
     ReleaseBuffer();
-    LessonCinematicHilTelemetryEmitCueEnd(
-        LessonCinematicHilCueEndReason::kCancel, LessonCinematicHilFault::kNone,
+    LessonCinematicEvidenceEmitCueEnd(
+        LessonCinematicCueEndReason::kCancel, LessonCinematicFault::kNone,
         ops_.monotonic_ms != nullptr ? ops_.monotonic_ms(ops_.context) : 0);
     state_ = State::kIdle;
     last_sequence_ = sequence;
@@ -684,7 +684,7 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Tick(std::uint64_t now
                  dropped_periods);
 #endif
         clock_origin_ms_ += dropped_periods * 1000 / metadata_.fps;
-        LessonCinematicHilTelemetryRecordLateTick(
+        LessonCinematicEvidenceRecordLateTick(
             dropped_periods > UINT32_MAX ? UINT32_MAX
                                          : static_cast<std::uint32_t>(dropped_periods));
         return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
@@ -702,8 +702,8 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Tick(std::uint64_t now
         }
         state_ = State::kPrepared;
         displayed_frame_ = metadata_.frame_count - 1;
-        LessonCinematicHilTelemetryEmitCueEnd(
-            LessonCinematicHilCueEndReason::kNatural, LessonCinematicHilFault::kNone,
+        LessonCinematicEvidenceEmitCueEnd(
+            LessonCinematicCueEndReason::kNatural, LessonCinematicFault::kNone,
             ops_.monotonic_ms != nullptr ? ops_.monotonic_ms(ops_.context) : now_ms);
         return TickApplied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
     }
@@ -747,7 +747,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::PrepareNative(
     }
     if (!flattened_ops_.queue_native(ops_.context, first, 320, 480)) {
         flattened_ops_.end_cinematic(ops_.context);
-        LessonCinematicHilTelemetryRecordQueueError();
+        LessonCinematicEvidenceRecordQueueError();
         return LessonCinematicError::kPresentFailed;
     }
     native_owned_ = true;
@@ -786,7 +786,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::ReadNativeFrame(
         const std::uint64_t finished = ops_.monotonic_ms(ops_.context);
         if (finished >= started) {
             const std::uint64_t elapsed = finished - started;
-            LessonCinematicHilTelemetryRecordRead(elapsed);
+            LessonCinematicEvidenceRecordRead(elapsed);
             if (elapsed > deadline_ms) {
                 return LessonCinematicError::kDecodeTimeout;
             }
@@ -799,7 +799,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::ReadNativeFrame(
 bool LessonFlattenedCinematicRenderer::FinishNativeTransfer(std::uint32_t timeout_ms) {
     if (!native_in_flight_) return true;
     if (!flattened_ops_.wait_native(ops_.context, timeout_ms)) {
-        LessonCinematicHilTelemetryRecordQueueTimeout();
+        LessonCinematicEvidenceRecordQueueTimeout();
         return false;
     }
     native_in_flight_ = false;
@@ -826,7 +826,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::AdvanceNative(std::size_t
     }
 
     if (!flattened_ops_.queue_native(ops_.context, native_buffers_[native_ready_buffer_], 320, 480)) {
-        LessonCinematicHilTelemetryRecordQueueError();
+        LessonCinematicEvidenceRecordQueueError();
         return LessonCinematicError::kPresentFailed;
     }
     native_in_flight_ = true;
@@ -853,7 +853,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::StartNativePlayback() {
     if (!began || !flattened_ops_.queue_native(
             ops_.context, native_buffers_[0], 320, 480)) {
         if (began) flattened_ops_.end_cinematic(ops_.context);
-        LessonCinematicHilTelemetryRecordQueueError();
+        LessonCinematicEvidenceRecordQueueError();
         return LessonCinematicError::kPresentFailed;
     }
     native_owned_ = true;
@@ -918,7 +918,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrameOn(
     if (ops_.monotonic_ms != nullptr) {
         const std::uint64_t finished = ops_.monotonic_ms(ops_.context);
         if (finished >= started) {
-            LessonCinematicHilTelemetryRecordRead(finished - started);
+            LessonCinematicEvidenceRecordRead(finished - started);
         }
         if (finished >= started && finished - started > read_decode_deadline_ms) {
             return LessonCinematicError::kDecodeTimeout;

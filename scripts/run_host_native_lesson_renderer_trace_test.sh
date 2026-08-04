@@ -27,6 +27,7 @@ cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/l
   -I"${CJSON_DIR}" -c "${CJSON_DIR}/cJSON.c" -o "${BUILD_DIR}/cJSON.o"
 
 "${CXX}" -std=c++17 -O0 -pthread -Wall -Wextra -Werror \
+  -fsanitize=address,undefined -fno-omit-frame-pointer \
   -Wno-unused-variable -Wno-unused-parameter -Wno-unused-lambda-capture \
   -DTBOT_HOST_NATIVE_COVERAGE \
   -DTBOT_LESSON_ASSET_COORDINATOR_TESTING \
@@ -43,7 +44,7 @@ cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/l
   "${ROOT}/main/lesson_tvideo_template.cc" \
   "${ROOT}/main/lesson_cinematic_renderer.cc" \
   "${ROOT}/main/lesson_flattened_cinematic_renderer.cc" \
-  "${ROOT}/main/lesson_cinematic_hil_telemetry.cc" \
+  "${ROOT}/main/lesson_cinematic_evidence.cc" \
   "${ROOT}/main/lesson_chroma_compositor.cc" \
   "${ROOT}/main/json_payload_safety.cc" \
   "${ROOT}/main/sd_fat_session_guard.cc" \

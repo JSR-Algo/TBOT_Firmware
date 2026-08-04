@@ -25,6 +25,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     -I"${CJSON_DIR}" -c "${CJSON_DIR}/cJSON.c" -o "${BUILD_DIR}/cJSON.o"
 
 "${CXX}" -std=c++17 -O0 -g -pthread -Wall -Wextra -Werror \
+    -fsanitize=address,undefined -fno-omit-frame-pointer \
     -Wno-unused-variable -Wno-unused-parameter -Wno-unused-lambda-capture \
     -DTBOT_HOST_NATIVE_COVERAGE \
     -DTBOT_LESSON_ASSET_COORDINATOR_TESTING \
@@ -42,7 +43,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     main/lesson_tvideo_template.cc \
     main/lesson_cinematic_renderer.cc \
     main/lesson_flattened_cinematic_renderer.cc \
-    main/lesson_cinematic_hil_telemetry.cc \
+    main/lesson_cinematic_evidence.cc \
     main/lesson_chroma_compositor.cc \
     main/json_payload_safety.cc \
     main/sd_fat_session_guard.cc \

@@ -5,7 +5,7 @@
 #include "button.h"
 #include "config.h"
 #include "led/single_led.h"
-#include "lesson_cinematic_hil_telemetry.h"
+#include "lesson_cinematic_evidence.h"
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
 #include "physical_sd_identity.h"
 #include "sd_fat_session_guard.h"
@@ -478,7 +478,7 @@ private:
 
     bool QueueLessonCinematicTransport(const std::uint16_t* pixels) {
         while (xSemaphoreTake(lesson_cinematic_done_, 0) == pdTRUE) {}
-        tbot::LessonCinematicHilTelemetryRecordFrameQueued(
+        tbot::LessonCinematicEvidenceRecordFrameQueued(
             static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
         lesson_cinematic_completion_gate_.ArmNextCompletion();
         lesson_cinematic_pending_.store(true, std::memory_order_release);
@@ -495,7 +495,7 @@ private:
         const bool completed =
             xSemaphoreTake(lesson_cinematic_done_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
         if (completed) {
-            tbot::LessonCinematicHilTelemetryRecordPanelCompletion(
+            tbot::LessonCinematicEvidenceRecordPanelCompletion(
                 lesson_cinematic_completion_ms_.load(std::memory_order_acquire));
         }
         return completed;
