@@ -3,7 +3,6 @@ import re
 import sys
 from pathlib import Path
 
-
 PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
 
 
@@ -36,6 +35,9 @@ def main() -> int:
 
     if re.search(r"^CONFIG_TBOT_HIL_STORAGE_FAULTS=y$", sdkconfig, re.MULTILINE):
         failures.append("HIL storage faults must stay disabled for LCDWiki production builds")
+
+    if re.search(r"^CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY=y$", sdkconfig, re.MULTILINE):
+        failures.append("Cinematic HIL telemetry must stay disabled for LCDWiki production builds")
 
     if failures:
         print("LCDWiki production build config gate failed:", file=sys.stderr)

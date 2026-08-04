@@ -2,9 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FIXTURE="${1:-}"
-if [[ -z "${FIXTURE}" || ! -f "${FIXTURE}" ]]; then
-  echo "usage: $0 /absolute/path/to/renderer-v2-manifest.json" >&2
+FIXTURE="${1:-${ROOT}/tests/fixtures/renderer-v2-manifest.json}"
+if [[ ! -f "${FIXTURE}" ]]; then
+  echo "missing renderer trace fixture: ${FIXTURE}" >&2
   exit 2
 fi
 
@@ -43,6 +43,7 @@ cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/l
   "${ROOT}/main/lesson_tvideo_template.cc" \
   "${ROOT}/main/lesson_cinematic_renderer.cc" \
   "${ROOT}/main/lesson_flattened_cinematic_renderer.cc" \
+  "${ROOT}/main/lesson_cinematic_hil_telemetry.cc" \
   "${ROOT}/main/lesson_chroma_compositor.cc" \
   "${ROOT}/main/json_payload_safety.cc" \
   "${ROOT}/main/sd_fat_session_guard.cc" \

@@ -12,6 +12,7 @@
 #if TBOT_NATIVE_COVERAGE
 #else
 #include "application.h"
+#include "lesson_cinematic_hil_telemetry.h"
 #endif
 
 #define TAG "main"
@@ -44,6 +45,8 @@ extern "C" void app_main(void)
 #else
 extern "C" void app_main(void)
 {
+    tbot::LessonCinematicHilTelemetryBoot();
+
     // ESP-IDF's INFO logs include raw station/BLE identifiers. Keep warnings
     // while preventing SSIDs, BSSIDs, MACs, and assigned IPs from reaching
     // production serial logs.

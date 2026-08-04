@@ -2,6 +2,7 @@
 #define MCP_SERVER_H
 
 #include <string>
+#include <atomic>
 #include <vector>
 #include <map>
 #include <functional>
@@ -409,8 +410,12 @@ private:
 
     void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools);
     void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
+    bool StartLessonAssetSyncTask(int id, McpTool* tool, PropertyList arguments);
+    static void LessonAssetSyncTaskEntry(void* arg) noexcept;
+    static void LessonAssetSyncTaskBody(void* arg) noexcept __attribute__((noinline));
 
     std::vector<McpTool*> tools_;
+    std::atomic<bool> lesson_asset_sync_in_flight_{false};
 };
 
 #endif // MCP_SERVER_H

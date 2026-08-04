@@ -83,6 +83,23 @@ def test_lesson_background_uses_cover_scale_not_width_only_fit():
         assert "LessonImageCoverScale(" in body
         assert "256 * width_ / img_dsc->header.w" not in body
 
+
+def test_cinematic_framebuffer_uses_persistent_lvgl_surface_not_direct_spi():
+    source = SOURCE.read_text(encoding="utf-8")
+    header = (ROOT / "main/display/lcd_display.h").read_text(encoding="utf-8")
+    body = function_body(source, "bool LcdDisplay::PresentLessonFramebuffer")
+
+    assert "lesson_cinematic_framebuffer_" in header
+    assert "lesson_cinematic_pixels_" in header
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in body
+    assert "std::make_unique<LvglAllocatedImage>" in body
+    assert "std::memcpy(lesson_cinematic_pixels_, pixels" in body
+    assert "lv_image_set_src(lesson_background_" in body
+    assert "lv_obj_invalidate(lesson_background_)" in body
+    assert "lv_refr_now(display_)" in body
+    assert "esp_lcd_panel_draw_bitmap" not in body
+    assert 'ESP_LOGI(TAG,\n             "cinematic present' not in body
+
 def test_lesson_object_and_robot_overlay_use_safe_composition_layout():
     source = SOURCE.read_text(encoding="utf-8")
 

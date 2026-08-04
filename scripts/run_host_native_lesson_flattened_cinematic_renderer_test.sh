@@ -7,5 +7,6 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
   -fsanitize=address,undefined -fno-omit-frame-pointer -I"${ROOT}/main" \
   "${ROOT}/tests/native/lesson_flattened_cinematic_renderer_test.cc" \
   "${ROOT}/main/lesson_flattened_cinematic_renderer.cc" \
+  "${ROOT}/main/lesson_cinematic_hil_telemetry.cc" \
   -o "${BUILD_DIR}/lesson_flattened_cinematic_renderer_test"
 "${BUILD_DIR}/lesson_flattened_cinematic_renderer_test"

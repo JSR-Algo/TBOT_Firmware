@@ -210,6 +210,10 @@ protected:
     lv_obj_t* preview_image_ = nullptr;
     lv_obj_t* lesson_background_ = nullptr;  // US-006: full-screen, persistent lesson poster
     std::unique_ptr<LvglImage> lesson_background_cached_ = nullptr;
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+    std::unique_ptr<LvglImage> lesson_cinematic_framebuffer_ = nullptr;
+    std::uint16_t* lesson_cinematic_pixels_ = nullptr;
+#endif
     lv_obj_t* lesson_object_ = nullptr;  // US-006: foreground teaching object layer
     std::unique_ptr<LvglImage> lesson_object_cached_ = nullptr;
     lv_obj_t* lesson_robot_overlay_ = nullptr;  // US-006: robot overlay image layer
