@@ -411,7 +411,11 @@ def parse_defined_nm_symbols(nm_output: str) -> list[str]:
     return symbols
 
 
-def has_exact_api(symbols: list[str], api: str) -> bool:
+def has_terminal_api(symbols: list[str], api: str) -> bool:
+    return any(symbol == api or symbol.endswith(f"::{api}") for symbol in symbols)
+
+
+def has_api_family(symbols: list[str], api: str) -> bool:
     return any(
         symbol == api
         or symbol.endswith(f"::{api}")
@@ -428,16 +432,18 @@ def audit_symbols(
     archive_symbols = parse_defined_nm_symbols(archive_nm_output)
     all_symbols = [*elf_symbols, *archive_symbols]
     for api in BANNED_APIS:
-        present = has_exact_api(all_symbols, api) or has_exact_api(all_symbols, f"_{api}")
+        present = has_terminal_api(all_symbols, api) or has_terminal_api(
+            all_symbols, f"_{api}"
+        )
         require(not present,
                 f"banned API symbol present: {api}")
     for symbol in HIL_SYMBOLS:
-        present = has_exact_api(elf_symbols, symbol)
+        present = has_api_family(elf_symbols, symbol)
         require(present == (profile == "hil"),
                 f"HIL symbol profile mismatch: {symbol}")
     if profile == "production":
         for symbol in RELEASE_CINEMATIC_SYMBOLS:
-            require(has_exact_api(elf_symbols, symbol),
+            require(has_terminal_api(elf_symbols, symbol),
                     f"linked ELF missing defined symbol: {symbol}")
         legacy_present = any(
             component.startswith(LEGACY_CINEMATIC_SYMBOL)
@@ -516,6 +522,7 @@ def audit_literals(profile: str, artifacts: dict[str, Path | ArtifactSnapshot]) 
         for name in ("bin", "elf"):
             for marker in RELEASE_CINEMATIC_MARKERS:
                 pattern = rb"(?<![A-Za-z0-9_])" + re.escape(marker.encode("ascii"))
+                pattern += rb"(?=$|[\x00\s])"
                 require(re.search(pattern, searchable[name]) is not None,
                         f"production artifact missing {marker}: {name}")
         legacy = LEGACY_CINEMATIC_LITERAL.encode("ascii")

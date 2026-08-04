@@ -243,6 +243,13 @@ def test_production_symbols_must_be_defined_by_linked_elf_not_archive():
             "00000000 T tbot::LessonCinematicEvidenceEmitCueEndLookalike(int)\n",
             archive_symbols,
         )
+    with pytest.raises(AUDITOR.AuditFailure, match="linked ELF"):
+        AUDITOR.audit_symbols(
+            "production",
+            "00000000 T tbot::LessonCinematicEvidenceBoot::Fake()\n"
+            "00000000 T tbot::LessonCinematicEvidenceEmitCueEnd::Fake()\n",
+            archive_symbols,
+        )
 
 
 def test_production_symbols_reject_forbidden_elf_definitions():
@@ -496,6 +503,8 @@ def test_production_artifacts_require_release_evidence_literal_and_symbol(tmp_pa
     (
         b"NOT_CINE_EVIDENCE event=boot CINE_EVIDENCE event=cue_end",
         b"CINE_EVIDENCE event=boot NOT_CINE_EVIDENCE event=cue_end",
+        b"CINE_EVIDENCE event=bootleg CINE_EVIDENCE event=cue_end",
+        b"CINE_EVIDENCE event=boot CINE_EVIDENCE event=cue_end_fake",
     ),
 )
 def test_production_artifacts_reject_cinematic_marker_lookalikes(tmp_path, lookalike):
