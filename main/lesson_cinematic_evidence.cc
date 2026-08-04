@@ -1,9 +1,18 @@
 #include "lesson_cinematic_evidence.h"
 
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <cinttypes>
+
+#if defined(ESP_PLATFORM)
+#define TBOT_ESP_PLATFORM_BUILD 1
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#else
+#define TBOT_ESP_PLATFORM_BUILD 0
 #include <mutex>
+#endif
 
 #if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
@@ -55,7 +64,63 @@ struct BootCounters {
     std::uint32_t psram_heap_min = 0;
 };
 
-std::mutex g_mutex;
+class EvidenceMutex {
+public:
+    EvidenceMutex() {
+#if TBOT_ESP_PLATFORM_BUILD
+        handle_ = xSemaphoreCreateMutexStatic(&storage_);
+        if (handle_ == nullptr) std::abort();
+#endif
+    }
+
+    void Lock() {
+#if TBOT_ESP_PLATFORM_BUILD
+        const BaseType_t taken = xSemaphoreTake(handle_, portMAX_DELAY);
+        if (taken != pdTRUE) std::abort();
+#else
+        mutex_.lock();
+#endif
+    }
+
+    void Unlock() {
+#if TBOT_ESP_PLATFORM_BUILD
+        const BaseType_t given = xSemaphoreGive(handle_);
+        if (given != pdTRUE) std::abort();
+#else
+        mutex_.unlock();
+#endif
+    }
+
+private:
+    EvidenceMutex(const EvidenceMutex&);
+    EvidenceMutex& operator=(const EvidenceMutex&);
+
+#if TBOT_ESP_PLATFORM_BUILD
+    StaticSemaphore_t storage_{};
+    SemaphoreHandle_t handle_ = nullptr;
+#else
+    std::mutex mutex_;
+#endif
+};
+
+class EvidenceLockGuard {
+public:
+    explicit EvidenceLockGuard(EvidenceMutex& mutex) : mutex_(mutex) {
+        mutex_.Lock();
+    }
+
+    ~EvidenceLockGuard() {
+        mutex_.Unlock();
+    }
+
+private:
+    EvidenceLockGuard(const EvidenceLockGuard&);
+    EvidenceLockGuard& operator=(const EvidenceLockGuard&);
+
+    EvidenceMutex& mutex_;
+};
+
+EvidenceMutex g_mutex;
 CueCounters g_cue;
 BootCounters g_boot;
 
@@ -182,7 +247,7 @@ bool LessonCinematicEvidenceEnabled() {
 
 void LessonCinematicEvidenceBoot() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
 #if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
     g_boot.boot_nonce = GenerateBootNonce();
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason),
@@ -210,7 +275,7 @@ void LessonCinematicEvidenceBoot() {
 void LessonCinematicEvidenceBeginCue(const char* cue_id, std::uint64_t sequence,
                                      std::uint64_t now_ms) {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     g_cue = {};
     g_cue.active = true;
     CopyToken(g_cue.cue_id, sizeof(g_cue.cue_id), cue_id);
@@ -228,7 +293,7 @@ void LessonCinematicEvidenceBeginCue(const char* cue_id, std::uint64_t sequence,
 
 void LessonCinematicEvidenceRecordFrameQueued(std::uint64_t now_ms) {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         g_cue.last_queue_ms = now_ms;
@@ -238,7 +303,7 @@ void LessonCinematicEvidenceRecordFrameQueued(std::uint64_t now_ms) {
 
 void LessonCinematicEvidenceRecordRead(std::uint64_t read_ms) {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (!g_cue.active) return;
     SampleCueHeapLocked();
     ++g_cue.read_count;
@@ -257,7 +322,7 @@ void LessonCinematicEvidenceRecordRead(std::uint64_t read_ms) {
 
 void LessonCinematicEvidenceRecordPanelCompletion(std::uint64_t now_ms) {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (!g_cue.active) return;
     SampleCueHeapLocked();
     if (g_cue.panel_completion_recorded) return;
@@ -270,7 +335,7 @@ void LessonCinematicEvidenceRecordPanelCompletion(std::uint64_t now_ms) {
 
 void LessonCinematicEvidenceRecordQueueError() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         ++g_cue.queue_errors;
@@ -279,7 +344,7 @@ void LessonCinematicEvidenceRecordQueueError() {
 
 void LessonCinematicEvidenceRecordQueueTimeout() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         ++g_cue.queue_timeouts;
@@ -288,7 +353,7 @@ void LessonCinematicEvidenceRecordQueueTimeout() {
 
 void LessonCinematicEvidenceRecordDmaError() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         ++g_cue.dma_errors;
@@ -297,7 +362,7 @@ void LessonCinematicEvidenceRecordDmaError() {
 
 void LessonCinematicEvidenceRecordParserFailure() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         ++g_cue.parser_errors;
@@ -306,7 +371,7 @@ void LessonCinematicEvidenceRecordParserFailure() {
 
 void LessonCinematicEvidenceRecordHeaderCrcError() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         ++g_cue.header_crc_errors;
@@ -315,7 +380,7 @@ void LessonCinematicEvidenceRecordHeaderCrcError() {
 
 void LessonCinematicEvidenceRecordFrameCrcError() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         ++g_cue.frame_crc_errors;
@@ -324,7 +389,7 @@ void LessonCinematicEvidenceRecordFrameCrcError() {
 
 void LessonCinematicEvidenceRecordIoError() {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (g_cue.active) {
         SampleCueHeapLocked();
         ++g_cue.io_errors;
@@ -333,7 +398,7 @@ void LessonCinematicEvidenceRecordIoError() {
 
 void LessonCinematicEvidenceRecordLateTick(std::uint32_t missed_periods) {
     if (!EvidenceRuntimeEnabled()) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (!g_cue.active) return;
     SampleCueHeapLocked();
     ++g_cue.late_ticks;
@@ -346,7 +411,7 @@ bool LessonCinematicEvidenceFormatCueEnd(LessonCinematicCueEndReason reason,
                                          std::size_t out_size) {
     if (!EvidenceRuntimeEnabled()) return false;
     if (out == nullptr || out_size == 0) return false;
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     if (!g_cue.active) return false;
     SampleCueHeapLocked();
     const std::uint64_t latency = now_ms >= g_cue.started_ms ? now_ms - g_cue.started_ms : 0;
@@ -398,7 +463,7 @@ void LessonCinematicEvidenceEmitCueEnd(LessonCinematicCueEndReason reason,
 }
 
 void LessonCinematicEvidenceResetForTest() {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     g_cue = {};
     g_boot = {};
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason), "host");
@@ -408,7 +473,7 @@ void LessonCinematicEvidenceSetBootForTest(std::uint64_t boot_nonce,
                                            const char* reset_reason,
                                            std::uint32_t internal_heap_min,
                                            std::uint32_t psram_heap_min) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     g_boot.boot_nonce = boot_nonce;
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason), reset_reason);
     g_boot.lifetime_internal_heap_min = internal_heap_min;
@@ -418,7 +483,7 @@ void LessonCinematicEvidenceSetBootForTest(std::uint64_t boot_nonce,
 void LessonCinematicEvidenceSetCueHeapMinimaForTest(
     std::uint32_t lifetime_internal_heap_min, std::uint32_t internal_heap_min,
     std::uint32_t psram_heap_min) {
-    std::lock_guard<std::mutex> lock(g_mutex);
+    EvidenceLockGuard lock(g_mutex);
     g_cue.lifetime_internal_heap_min = lifetime_internal_heap_min;
     g_cue.internal_heap_min = internal_heap_min;
     g_cue.psram_heap_min = psram_heap_min;

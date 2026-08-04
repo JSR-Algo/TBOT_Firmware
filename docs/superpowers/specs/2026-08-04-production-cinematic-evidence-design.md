@@ -32,6 +32,8 @@ Native tests prove the release-enabled ESP path uses bounded state, updates cue 
 
 ESP-IDF's local minimum heap monitor was explicitly rejected: its start path allocates a global snapshot array with `heap_caps_malloc`, asserts when that allocation fails, and owns process-global monitor state until stop. Production evidence instead calls the allocation-free current-size query at the defined cue boundaries and keeps the minimum in the collector's existing fixed cue record. These fields are sampled boundary minima, not a claim of continuous per-cue allocator monitoring; the global allocator lifetime minimum remains a separate diagnostic.
 
+The ESP evidence lock is backed by one global `StaticSemaphore_t` initialized exactly once with `xSemaphoreCreateMutexStatic`. Guards use `xSemaphoreTake(..., portMAX_DELAY)` and `xSemaphoreGive`; they do not spin across heap queries or terminal formatting. `std::mutex` is permitted only in the non-ESP host-test branch because ESP-IDF's pthread-backed standard mutex can lazily allocate. The ESP branch must contain no standard/pthread mutex operation or dynamic FreeRTOS mutex creator.
+
 The full ESP-IDF build must pass the existing internal-RAM guardrails and production artifact audit. The image must fit the app partition. Hardware flashing remains locked until the exact production artifact, backend/server/web deployment, and assignment validator gates are all released by the root task.
 
 ## Rollback

@@ -9,20 +9,35 @@ CONTRACT_FILES=(
   "${ROOT}/tests/native_stubs_hil_telemetry/esp_heap_caps.h"
   "${ROOT}/tests/native_stubs_hil_telemetry/esp_random.h"
   "${ROOT}/tests/native_stubs_hil_telemetry/esp_rom_sys.h"
+  "${ROOT}/tests/native_stubs_hil_telemetry/freertos/FreeRTOS.h"
+  "${ROOT}/tests/native_stubs_hil_telemetry/freertos/semphr.h"
 )
 FORBIDDEN_CONTRACT='heap_caps_monitor|heap_monitor|(^|[^[:alnum:]_])(malloc|calloc|realloc|free|new|delete|socket|connect|http|https|websocket|network|mcp)([^[:alnum:]_]|$)'
 if rg -n -i "${FORBIDDEN_CONTRACT}" "${CONTRACT_FILES[@]}"; then
   echo "cinematic evidence collector violates its bounded serial-only contract" >&2
   exit 1
 fi
+"${CXX:-clang++}" -std=c++17 -E -P \
+  -I"${ROOT}/tests/native_stubs_hil_telemetry" -I"${ROOT}/main" \
+  -DESP_PLATFORM -DCONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=1 \
+  -DCONFIG_TBOT_HIL_CINEMATIC_TELEMETRY=0 \
+  "${ROOT}/main/lesson_cinematic_evidence.cc" \
+  -o "${BUILD_DIR}/lesson_cinematic_evidence_esp_enabled.ii"
+if rg -n 'std::mutex|std::lock_guard|pthread_mutex_(init|lock|unlock|destroy|trylock|timedlock)|xSemaphoreCreateMutex\(' \
+    "${BUILD_DIR}/lesson_cinematic_evidence_esp_enabled.ii"; then
+  echo "ESP cinematic evidence path contains a lazy or dynamic mutex API" >&2
+  exit 1
+fi
 "${CXX:-clang++}" -std=c++17 -O0 -g -Wall -Wextra -Werror \
-  -fsanitize=address,undefined -fno-omit-frame-pointer -I"${ROOT}/main" \
+  -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -I"${ROOT}/tests/native_stubs_hil_telemetry" -I"${ROOT}/main" \
   "${ROOT}/tests/native/lesson_cinematic_evidence_host_test.cc" \
   "${ROOT}/main/lesson_cinematic_evidence.cc" \
   -o "${BUILD_DIR}/lesson_cinematic_evidence_test"
 "${BUILD_DIR}/lesson_cinematic_evidence_test"
 "${CXX:-clang++}" -std=c++17 -O0 -g -Wall -Wextra -Werror \
-  -fsanitize=address,undefined -fno-omit-frame-pointer -I"${ROOT}/main" \
+  -fsanitize=address,undefined -fno-omit-frame-pointer \
+  -I"${ROOT}/tests/native_stubs_hil_telemetry" -I"${ROOT}/main" \
   -DESP_PLATFORM -DCONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=0 \
   -DCONFIG_TBOT_HIL_CINEMATIC_TELEMETRY=0 \
   "${ROOT}/tests/native/lesson_cinematic_evidence_host_test.cc" \
@@ -32,7 +47,7 @@ fi
 "${CXX:-clang++}" -std=c++17 -O0 -g -Wall -Wextra -Werror \
   -fsanitize=address,undefined -fno-omit-frame-pointer \
   -I"${ROOT}/tests/native_stubs_hil_telemetry" -I"${ROOT}/main" \
-  -DESP_PLATFORM -DCONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=1 \
+  -DNDEBUG -DESP_PLATFORM -DCONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=1 \
   -DCONFIG_TBOT_HIL_CINEMATIC_TELEMETRY=0 \
   "${ROOT}/tests/native/lesson_cinematic_evidence_host_test.cc" \
   "${ROOT}/main/lesson_cinematic_evidence.cc" \

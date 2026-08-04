@@ -131,7 +131,7 @@ esp_rom_printf("CINE_EVIDENCE event=boot boot_nonce=0x%" PRIx64
                " reset_reason=%s lifetime_internal_heap_min=%u psram_heap_min=%u\n", ...);
 ```
 
-and format cue terminal lines with `CINE_EVIDENCE event=cue_end`. Preserve `CueCounters`, `BootCounters`, `std::mutex`, and `char cue_id[40]`. Define a documented 1,024-byte line-capacity constant and use it for the stack formatting buffer; the maximum-width canonical-cue test must retain at least 256 bytes of margin.
+and format cue terminal lines with `CINE_EVIDENCE event=cue_end`. Preserve `CueCounters`, `BootCounters`, and `char cue_id[40]`. Protect the fixed state on ESP with one globally initialized `StaticSemaphore_t`, `xSemaphoreCreateMutexStatic`, `xSemaphoreTake(..., portMAX_DELAY)`, and `xSemaphoreGive`; use `std::mutex` only in the non-ESP host branch. Do not spin across heap queries or formatting, and do not use a function-local static guard, pthread mutex operation, or dynamic FreeRTOS mutex creator. Define a documented 1,024-byte line-capacity constant and use it for the stack formatting buffer; the maximum-width canonical-cue test must retain at least 256 bytes of margin.
 
 Do not use `heap_caps_monitor_local_minimum_free_size_start/stop`. ESP-IDF 5.5.2 implements that monitor with a process-global snapshot array allocated by `heap_caps_malloc` and asserts if allocation fails. Instead, call `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` and `heap_caps_get_free_size(MALLOC_CAP_SPIRAM)` at `BeginCue`, every existing `Record*` boundary, and cue end, then retain the lowest samples in the fixed cue record. Refresh `lifetime_internal_heap_min` separately with `heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)`. Document and test that `internal_heap_min` and `psram_heap_min` are boundary-sampled minima rather than continuous local-monitor minima. Retain no `new`, `malloc`, container growth, MCP registration, HTTP, WebSocket, or dynamic allocation.
 
@@ -143,7 +143,7 @@ Replace every source-list reference to `lesson_cinematic_hil_telemetry.cc` with 
 
 Run: `bash scripts/run_host_native_lesson_cinematic_evidence_test.sh`
 
-Expected: every variant prints `lesson cinematic evidence tests passed` and exits `0`. Tests must prove minima update across begin/record/end samples, a sampled zero cannot be overwritten by a later recovery sample, no heap-monitor symbol or call exists, the exact boot schema is captured with a nonzero nonce, and maximum-width formatting retains at least 256 bytes in the 1,024-byte buffer.
+Expected: every variant prints `lesson cinematic evidence tests passed` and exits `0`. Tests must prove minima update across begin/record/end samples, a sampled zero cannot be overwritten by a later recovery sample, no heap-monitor symbol or call exists, the exact boot schema is captured with a nonzero nonce, maximum-width formatting retains at least 256 bytes in the 1,024-byte buffer, and the ESP mutex is created once from static storage with balanced blocking take/give operations. A preprocessed ESP static contract must reject `std::mutex`, `std::lock_guard`, pthread mutex operations, and `xSemaphoreCreateMutex()`.
 
 - [ ] **Step 6: Commit the collector replacement**
 

@@ -13,6 +13,7 @@
 #include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <esp_rom_sys.h>
+#include <freertos/semphr.h>
 #endif
 
 namespace {
@@ -28,6 +29,25 @@ void Require(bool condition, const char* message) {
 
 #if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
+
+void TestEspEvidenceMutexUsesOneStaticSemaphore() {
+    Require(HostEvidenceStaticMutexCreateCalls() == 1,
+            "ESP evidence mutex is created exactly once from static storage");
+    const unsigned take_calls = HostEvidenceStaticMutexTakeCalls();
+    const unsigned give_calls = HostEvidenceStaticMutexGiveCalls();
+
+    tbot::LessonCinematicEvidenceResetForTest();
+
+    Require(HostEvidenceStaticMutexTakeCalls() == take_calls + 1,
+            "ESP evidence state locks through the static semaphore");
+    Require(HostEvidenceStaticMutexGiveCalls() == give_calls + 1,
+            "ESP evidence state unlocks through the static semaphore");
+    Require(HostEvidenceStaticMutexLastWait() == portMAX_DELAY,
+            "ESP evidence mutex waits without spinning across formatting or heap queries");
+    Require(HostEvidenceStaticMutexHandle() != nullptr &&
+                !HostEvidenceStaticMutexHandle()->held,
+            "ESP evidence mutex is released after the guarded operation");
+}
 
 void TestEspCueHeapMinimumSamplesEveryEvidenceBoundary() {
     HostHilLifetimeInternalHeapMinimum() = 12000;
@@ -390,6 +410,7 @@ int main() {
 #if defined(ESP_PLATFORM)
 #if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
     CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
+    TestEspEvidenceMutexUsesOneStaticSemaphore();
     TestEspCueHeapMinimumSamplesEveryEvidenceBoundary();
     TestEspZeroHeapSampleRemainsVisibleAsTheCueMinimum();
     TestEspBootRepairsAnAllZeroRandomNonceWithOneBoundedRetry();
