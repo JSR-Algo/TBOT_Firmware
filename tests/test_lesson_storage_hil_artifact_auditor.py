@@ -280,6 +280,43 @@ def test_embedded_profile_is_boolean_derived_and_manual_override_is_rejected(tmp
         AUDITOR.audit_profile_literals("production", artifacts)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"TBOT_EMBEDDED_PROFILE=production-debug",
+        b"TBOT_EMBEDDED_PROFILE=production TBOT_EMBEDDED_PROFILE=development",
+        b"TBOT_EMBEDDED_PROFILE=production TBOT_EMBEDDED_PROFILE=production",
+        b"TBOT_EMBEDDED_PROFILE=",
+        b"no embedded profile",
+    ),
+)
+def test_production_embedded_profile_requires_one_exact_token_per_artifact(
+    tmp_path, payload
+):
+    artifacts = {}
+    for name in ("bin", "elf", "mainArchive"):
+        path = tmp_path / name
+        path.write_bytes(payload)
+        artifacts[name] = path
+
+    with pytest.raises(AUDITOR.AuditFailure, match="embedded profile literal mismatch"):
+        AUDITOR.audit_profile_literals("production", artifacts)
+
+
+def test_hil_embedded_profile_rejects_extra_profile_token(tmp_path):
+    artifacts = {}
+    for name in ("bin", "elf", "mainArchive"):
+        path = tmp_path / name
+        path.write_bytes(
+            b"TBOT_EMBEDDED_PROFILE=task14-hil-v1 "
+            b"TBOT_EMBEDDED_PROFILE=production"
+        )
+        artifacts[name] = path
+
+    with pytest.raises(AUDITOR.AuditFailure, match="embedded profile literal mismatch"):
+        AUDITOR.audit_profile_literals("hil", artifacts)
+
+
 def test_production_profile_requires_release_evidence_and_disables_both_hil_flags():
     expected = {
         "releaseCinematicEvidence": True,

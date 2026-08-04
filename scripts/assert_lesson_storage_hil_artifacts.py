@@ -423,13 +423,16 @@ def audit_profile_literals(
     profile: str, artifacts: dict[str, Path | ArtifactSnapshot]
 ) -> str:
     expected = "task14-hil-v1" if profile == "hil" else "production"
-    forbidden = "production" if profile == "hil" else "task14-hil-v1"
-    expected_literal = f"TBOT_EMBEDDED_PROFILE={expected}".encode("ascii")
-    forbidden_literal = f"TBOT_EMBEDDED_PROFILE={forbidden}".encode("ascii")
+    prefix = b"TBOT_EMBEDDED_PROFILE="
+    expected_token = expected.encode("ascii")
+    token_pattern = re.compile(re.escape(prefix) + rb"([^\x00\s]+)")
     for name in ("bin", "elf", "mainArchive"):
         content = artifact_bytes(artifacts[name])
-        require(expected_literal in content, "embedded profile literal mismatch")
-        require(forbidden_literal not in content, "embedded profile literal mismatch")
+        tokens = token_pattern.findall(content)
+        require(
+            content.count(prefix) == 1 and tokens == [expected_token],
+            f"embedded profile literal mismatch: {name}",
+        )
     return expected
 
 
