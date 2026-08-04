@@ -1,4 +1,4 @@
-#include "lesson_cinematic_hil_telemetry.h"
+#include "lesson_cinematic_evidence.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -7,8 +7,8 @@
 #include <thread>
 #include <vector>
 
-#if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY) && \
-    CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY
+#if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
+    CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
 #include <esp_heap_caps.h>
 #endif
 
@@ -16,14 +16,15 @@ namespace {
 
 void Require(bool condition, const char* message) {
     if (!condition) {
-        std::cerr << "lesson cinematic HIL telemetry test failed: " << message << '\n';
+        std::cerr << "lesson cinematic evidence test failed: " << message << '\n';
         std::exit(1);
     }
 }
 
 #if defined(ESP_PLATFORM)
 
-#if defined(CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY) && CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY
+#if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
+    CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
 
 void TestEspCueHeapMonitorResetsForEveryCue() {
     HostHilLifetimeInternalHeapMinimum() = 12000;
@@ -34,15 +35,15 @@ void TestEspCueHeapMonitorResetsForEveryCue() {
     HostHilHeapMonitorStartCalls() = 0;
     HostHilHeapMonitorStopCalls() = 0;
 
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetryBoot();
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-opening", 1, 100);
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceBoot();
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
     Require(HostHilHeapMonitorActive(), "first cue starts a local heap minimum monitor");
     HostHilLocalInternalHeapMinimum() = 21000;
     char first[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 200, first, sizeof(first)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 200, first, sizeof(first)),
             "first ESP cue heap line formats");
     Require(std::string(first).find("internal_heap_min=21000") != std::string::npos,
             "first ESP cue reports the local heap minimum");
@@ -51,11 +52,11 @@ void TestEspCueHeapMonitorResetsForEveryCue() {
     Require(!HostHilHeapMonitorActive(), "terminal formatting stops the first cue monitor");
 
     HostHilCurrentInternalHeapFree() = 52000;
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-teach", 2, 300);
+    tbot::LessonCinematicEvidenceBeginCue("barn-teach", 2, 300);
     char second[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 400, second, sizeof(second)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 400, second, sizeof(second)),
             "second ESP cue heap line formats");
     Require(std::string(second).find("internal_heap_min=52000") != std::string::npos,
             "second ESP cue resets its minimum instead of inheriting the first cue");
@@ -66,62 +67,62 @@ void TestEspCueHeapMonitorResetsForEveryCue() {
 #else
 
 void TestEspDisabledEntryPointsAreNoOps() {
-    Require(!tbot::LessonCinematicHilTelemetryEnabled(),
+    Require(!tbot::LessonCinematicEvidenceEnabled(),
             "ESP telemetry remains disabled when the Kconfig option is off");
-    tbot::LessonCinematicHilTelemetryBoot();
-    tbot::LessonCinematicHilTelemetryBeginCue(
+    tbot::LessonCinematicEvidenceBoot();
+    tbot::LessonCinematicEvidenceBeginCue(
         reinterpret_cast<const char*>(static_cast<std::uintptr_t>(1)), 1, 1);
-    tbot::LessonCinematicHilTelemetryRecordFrameQueued(2);
-    tbot::LessonCinematicHilTelemetryRecordRead(3);
-    tbot::LessonCinematicHilTelemetryRecordPanelCompletion(4);
-    tbot::LessonCinematicHilTelemetryRecordQueueError();
-    tbot::LessonCinematicHilTelemetryRecordQueueTimeout();
-    tbot::LessonCinematicHilTelemetryRecordDmaError();
-    tbot::LessonCinematicHilTelemetryRecordParserFailure();
-    tbot::LessonCinematicHilTelemetryRecordHeaderCrcError();
-    tbot::LessonCinematicHilTelemetryRecordFrameCrcError();
-    tbot::LessonCinematicHilTelemetryRecordIoError();
-    tbot::LessonCinematicHilTelemetryRecordLateTick(5);
-    Require(!tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 6,
+    tbot::LessonCinematicEvidenceRecordFrameQueued(2);
+    tbot::LessonCinematicEvidenceRecordRead(3);
+    tbot::LessonCinematicEvidenceRecordPanelCompletion(4);
+    tbot::LessonCinematicEvidenceRecordQueueError();
+    tbot::LessonCinematicEvidenceRecordQueueTimeout();
+    tbot::LessonCinematicEvidenceRecordDmaError();
+    tbot::LessonCinematicEvidenceRecordParserFailure();
+    tbot::LessonCinematicEvidenceRecordHeaderCrcError();
+    tbot::LessonCinematicEvidenceRecordFrameCrcError();
+    tbot::LessonCinematicEvidenceRecordIoError();
+    tbot::LessonCinematicEvidenceRecordLateTick(5);
+    Require(!tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 6,
                 reinterpret_cast<char*>(static_cast<std::uintptr_t>(1)), 768),
             "disabled ESP formatting returns before touching caller storage");
-    tbot::LessonCinematicHilTelemetryEmitCueEnd(
-        tbot::LessonCinematicHilCueEndReason::kNatural,
-        tbot::LessonCinematicHilFault::kNone, 6);
+    tbot::LessonCinematicEvidenceEmitCueEnd(
+        tbot::LessonCinematicCueEndReason::kNatural,
+        tbot::LessonCinematicFault::kNone, 6);
 }
 
 #endif
 
 #else
 
-std::string EmitLine(tbot::LessonCinematicHilCueEndReason reason) {
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetrySetBootForTest(0x1234abcdULL, "poweron", 61000, 4200000);
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-opening", 7, 1000);
-    tbot::LessonCinematicHilTelemetrySetCueHeapMinimaForTest(59000, 56000, 4100000);
-    tbot::LessonCinematicHilTelemetryRecordRead(25);
-    tbot::LessonCinematicHilTelemetryRecordRead(71);
-    tbot::LessonCinematicHilTelemetryRecordRead(130);
-    tbot::LessonCinematicHilTelemetryRecordPanelCompletion(1095);
-    tbot::LessonCinematicHilTelemetryRecordQueueError();
-    tbot::LessonCinematicHilTelemetryRecordLateTick(3);
+std::string EmitLine(tbot::LessonCinematicCueEndReason reason) {
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x1234abcdULL, "poweron", 61000, 4200000);
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 7, 1000);
+    tbot::LessonCinematicEvidenceSetCueHeapMinimaForTest(59000, 56000, 4100000);
+    tbot::LessonCinematicEvidenceRecordRead(25);
+    tbot::LessonCinematicEvidenceRecordRead(71);
+    tbot::LessonCinematicEvidenceRecordRead(130);
+    tbot::LessonCinematicEvidenceRecordPanelCompletion(1095);
+    tbot::LessonCinematicEvidenceRecordQueueError();
+    tbot::LessonCinematicEvidenceRecordLateTick(3);
     char line[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                reason, tbot::LessonCinematicHilFault::kNone, 1120, line, sizeof(line)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                reason, tbot::LessonCinematicFault::kNone, 1120, line, sizeof(line)),
             "cue_end line formats into bounded caller storage");
     return line;
 }
 
 void TestProductionOffByDefault() {
-    Require(!tbot::LessonCinematicHilTelemetryEnabled(),
-            "HIL cinematic telemetry is production-off unless compile enabled");
+    Require(!tbot::LessonCinematicEvidenceEnabled(),
+            "cinematic release evidence is production-off unless compile enabled");
 }
 
 void TestCueEndLineContainsRequiredCountersAndTerminator() {
-    const std::string line = EmitLine(tbot::LessonCinematicHilCueEndReason::kNatural);
-    Require(line.rfind("HIL_CINE ", 0) == 0, "line starts with HIL_CINE prefix");
+    const std::string line = EmitLine(tbot::LessonCinematicCueEndReason::kNatural);
+    Require(line.rfind("CINE_EVIDENCE ", 0) == 0, "line starts with CINE_EVIDENCE prefix");
     Require(line.find("event=cue_end") != std::string::npos, "line has cue_end event");
     Require(line.find("cue=barn-opening") != std::string::npos, "line has canonical cue id");
     Require(line.find("reason=natural") != std::string::npos, "line has natural reason");
@@ -150,41 +151,41 @@ void TestCueEndLineContainsRequiredCountersAndTerminator() {
 }
 
 void TestPanelCompletionLatencyIsNotOverwrittenWithoutNewQueue() {
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetrySetBootForTest(0x1234abcdULL, "poweron", 61000, 4200000);
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-opening", 7, 1000);
-    tbot::LessonCinematicHilTelemetryRecordFrameQueued(1050);
-    tbot::LessonCinematicHilTelemetryRecordPanelCompletion(1062);
-    tbot::LessonCinematicHilTelemetryRecordPanelCompletion(1900);
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x1234abcdULL, "poweron", 61000, 4200000);
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 7, 1000);
+    tbot::LessonCinematicEvidenceRecordFrameQueued(1050);
+    tbot::LessonCinematicEvidenceRecordPanelCompletion(1062);
+    tbot::LessonCinematicEvidenceRecordPanelCompletion(1900);
     char line[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 2000, line, sizeof(line)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 2000, line, sizeof(line)),
             "callback latency line formats");
     Require(std::string(line).find("panel_latency_ms=12") != std::string::npos,
             "wait-task latency cannot overwrite callback-derived panel latency");
 }
 
 void TestCueHeapMinimumResetsForEachCue() {
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetrySetBootForTest(0x1ULL, "poweron", 12000, 4200000);
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "poweron", 12000, 4200000);
 
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-opening", 1, 100);
-    tbot::LessonCinematicHilTelemetrySetCueHeapMinimaForTest(12000, 21000, 4000000);
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
+    tbot::LessonCinematicEvidenceSetCueHeapMinimaForTest(12000, 21000, 4000000);
     char first[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 200, first, sizeof(first)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 200, first, sizeof(first)),
             "first cue heap line formats");
     Require(std::string(first).find("internal_heap_min=21000") != std::string::npos,
             "first cue reports its local minimum despite a lower lifetime minimum");
 
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-teach", 2, 300);
-    tbot::LessonCinematicHilTelemetrySetCueHeapMinimaForTest(12000, 52000, 4000000);
+    tbot::LessonCinematicEvidenceBeginCue("barn-teach", 2, 300);
+    tbot::LessonCinematicEvidenceSetCueHeapMinimaForTest(12000, 52000, 4000000);
     char second[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 400, second, sizeof(second)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 400, second, sizeof(second)),
             "second cue heap line formats");
     Require(std::string(second).find("internal_heap_min=52000") != std::string::npos,
             "second cue resets the local minimum instead of inheriting the first cue");
@@ -193,14 +194,14 @@ void TestCueHeapMinimumResetsForEachCue() {
 }
 
 void TestReadAt100msIncrementsExactlyOneHistogramBucket() {
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetrySetBootForTest(0x1ULL, "poweron", 61000, 4200000);
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-opening", 1, 0);
-    tbot::LessonCinematicHilTelemetryRecordRead(100);
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "poweron", 61000, 4200000);
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 0);
+    tbot::LessonCinematicEvidenceRecordRead(100);
     char line[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 1, line, sizeof(line)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 1, line, sizeof(line)),
             "100ms read histogram line formats");
     const std::string text = line;
     Require(text.find("read_count=1") != std::string::npos, "one read increments total once");
@@ -211,27 +212,27 @@ void TestReadAt100msIncrementsExactlyOneHistogramBucket() {
 }
 
 void TestHostActivePathRemainsTestableWhenProductionDisabled() {
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetrySetBootForTest(0x1ULL, "poweron", 1, 1);
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-opening", 1, 0);
-    tbot::LessonCinematicHilTelemetryRecordRead(1);
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "poweron", 1, 1);
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 0);
+    tbot::LessonCinematicEvidenceRecordRead(1);
     char line[768] = {};
-    Require(!tbot::LessonCinematicHilTelemetryEnabled(), "host build reports production disabled");
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 1, line, sizeof(line)),
+    Require(!tbot::LessonCinematicEvidenceEnabled(), "host build reports production disabled");
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 1, line, sizeof(line)),
             "host-only telemetry test path remains active");
 }
 
 void TestFaultReasonsAreParseable() {
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetrySetBootForTest(0x1ULL, "watchdog", 1, 2);
-    tbot::LessonCinematicHilTelemetryBeginCue("hay-thinking", 99, 2000);
-    tbot::LessonCinematicHilTelemetryRecordParserFailure();
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "watchdog", 1, 2);
+    tbot::LessonCinematicEvidenceBeginCue("hay-thinking", 99, 2000);
+    tbot::LessonCinematicEvidenceRecordParserFailure();
     char line[768] = {};
-    Require(tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kFailure,
-                tbot::LessonCinematicHilFault::kParser, 2010, line, sizeof(line)),
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kFailure,
+                tbot::LessonCinematicFault::kParser, 2010, line, sizeof(line)),
             "parser failure line formats");
     const std::string text = line;
     Require(text.find("cue=hay-thinking") != std::string::npos, "parser failure keeps cue");
@@ -241,30 +242,30 @@ void TestFaultReasonsAreParseable() {
 }
 
 void TestReplacementReasonIsParseable() {
-    const std::string replacement = EmitLine(tbot::LessonCinematicHilCueEndReason::kReplacement);
+    const std::string replacement = EmitLine(tbot::LessonCinematicCueEndReason::kReplacement);
     Require(replacement.find("reason=replacement") != std::string::npos,
             "replacement terminal reason is emitted as verifier-parseable text");
 }
 
 void TestStopReasonIsParseable() {
-    const std::string stop = EmitLine(tbot::LessonCinematicHilCueEndReason::kStop);
+    const std::string stop = EmitLine(tbot::LessonCinematicCueEndReason::kStop);
     Require(stop.find("reason=stop") != std::string::npos,
             "stop terminal reason is emitted as verifier-parseable text");
 }
 
 void TestCueEndClaimIsExactlyOnceUnderConcurrentFormatters() {
-    tbot::LessonCinematicHilTelemetryResetForTest();
-    tbot::LessonCinematicHilTelemetrySetBootForTest(0x1ULL, "poweron", 61000, 4200000);
-    tbot::LessonCinematicHilTelemetryBeginCue("barn-opening", 1, 100);
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x1ULL, "poweron", 61000, 4200000);
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
 
     std::vector<std::thread> threads;
     bool results[16] = {};
     for (std::size_t i = 0; i < std::size(results); ++i) {
         threads.emplace_back([i, &results] {
             char line[768] = {};
-            results[i] = tbot::LessonCinematicHilTelemetryFormatCueEnd(
-                tbot::LessonCinematicHilCueEndReason::kNatural,
-                tbot::LessonCinematicHilFault::kNone, 200 + i, line, sizeof(line));
+            results[i] = tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 200 + i, line, sizeof(line));
         });
     }
     for (auto& thread : threads) thread.join();
@@ -282,7 +283,8 @@ void TestCueEndClaimIsExactlyOnceUnderConcurrentFormatters() {
 
 int main() {
 #if defined(ESP_PLATFORM)
-#if defined(CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY) && CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY
+#if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
+    CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
     TestEspCueHeapMonitorResetsForEveryCue();
 #else
     TestEspDisabledEntryPointsAreNoOps();
@@ -299,6 +301,6 @@ int main() {
     TestStopReasonIsParseable();
     TestCueEndClaimIsExactlyOnceUnderConcurrentFormatters();
 #endif
-    std::cout << "lesson cinematic HIL telemetry tests passed\n";
+    std::cout << "lesson cinematic evidence tests passed\n";
     return 0;
 }

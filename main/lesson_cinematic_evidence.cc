@@ -1,19 +1,19 @@
-#include "lesson_cinematic_hil_telemetry.h"
+#include "lesson_cinematic_evidence.h"
 
 #include <cstdio>
 #include <cstring>
 #include <cinttypes>
 #include <mutex>
 
-#if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY) && \
-    CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY
-#define TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED 1
+#if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && \
+    CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
+#define TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED 1
 #include <esp_heap_caps.h>
 #include <esp_random.h>
 #include <esp_rom_sys.h>
 #include <esp_system.h>
 #else
-#define TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED 0
+#define TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED 0
 #endif
 
 namespace tbot {
@@ -60,49 +60,49 @@ std::mutex g_mutex;
 CueCounters g_cue;
 BootCounters g_boot;
 
-const char* ReasonText(LessonCinematicHilCueEndReason reason) {
+const char* ReasonText(LessonCinematicCueEndReason reason) {
     switch (reason) {
-        case LessonCinematicHilCueEndReason::kNatural:
+        case LessonCinematicCueEndReason::kNatural:
             return "natural";
-        case LessonCinematicHilCueEndReason::kStop:
+        case LessonCinematicCueEndReason::kStop:
             return "stop";
-        case LessonCinematicHilCueEndReason::kCancel:
+        case LessonCinematicCueEndReason::kCancel:
             return "cancel";
-        case LessonCinematicHilCueEndReason::kReplacement:
+        case LessonCinematicCueEndReason::kReplacement:
             return "replacement";
-        case LessonCinematicHilCueEndReason::kFailure:
+        case LessonCinematicCueEndReason::kFailure:
             return "failure";
-        case LessonCinematicHilCueEndReason::kDiscard:
+        case LessonCinematicCueEndReason::kDiscard:
             return "discard";
     }
     return "failure";
 }
 
-const char* FaultText(LessonCinematicHilFault fault) {
+const char* FaultText(LessonCinematicFault fault) {
     switch (fault) {
-        case LessonCinematicHilFault::kNone:
+        case LessonCinematicFault::kNone:
             return "none";
-        case LessonCinematicHilFault::kParser:
+        case LessonCinematicFault::kParser:
             return "parser";
-        case LessonCinematicHilFault::kHeaderCrc:
+        case LessonCinematicFault::kHeaderCrc:
             return "header_crc";
-        case LessonCinematicHilFault::kFrameCrc:
+        case LessonCinematicFault::kFrameCrc:
             return "frame_crc";
-        case LessonCinematicHilFault::kIo:
+        case LessonCinematicFault::kIo:
             return "io";
-        case LessonCinematicHilFault::kDma:
+        case LessonCinematicFault::kDma:
             return "dma";
-        case LessonCinematicHilFault::kQueueTimeout:
+        case LessonCinematicFault::kQueueTimeout:
             return "queue_timeout";
-        case LessonCinematicHilFault::kWatchdog:
+        case LessonCinematicFault::kWatchdog:
             return "watchdog";
-        case LessonCinematicHilFault::kUnexpectedReset:
+        case LessonCinematicFault::kUnexpectedReset:
             return "unexpected_reset";
     }
     return "io";
 }
 
-#if TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED
+#if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
 const char* ResetReasonText(esp_reset_reason_t reason) {
     switch (reason) {
         case ESP_RST_POWERON:
@@ -138,7 +138,7 @@ void CopyToken(char* destination, std::size_t destination_size, const char* sour
 }
 
 void StopHeapMonitorLocked() {
-#if TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED
+#if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
     if (g_cue.heap_monitor_active) {
         heap_caps_monitor_local_minimum_free_size_stop();
         g_cue.heap_monitor_active = false;
@@ -148,7 +148,7 @@ void StopHeapMonitorLocked() {
 
 void RefreshCueHeapMinimaLocked() {
     if (g_cue.heap_minima_recorded) return;
-#if TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED
+#if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
     g_cue.internal_heap_min = static_cast<std::uint32_t>(
         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     g_cue.psram_heap_min = static_cast<std::uint32_t>(
@@ -158,9 +158,9 @@ void RefreshCueHeapMinimaLocked() {
     g_cue.heap_minima_recorded = true;
 }
 
-bool TelemetryRuntimeEnabled() {
+bool EvidenceRuntimeEnabled() {
 #ifdef ESP_PLATFORM
-    return TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED;
+    return TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED;
 #else
     return true;
 #endif
@@ -168,18 +168,18 @@ bool TelemetryRuntimeEnabled() {
 
 }  // namespace
 
-bool LessonCinematicHilTelemetryEnabled() {
-#if defined(CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY) && CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY
-    return CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY;
+bool LessonCinematicEvidenceEnabled() {
+#if defined(CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE) && CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE
+    return CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE;
 #else
     return false;
 #endif
 }
 
-void LessonCinematicHilTelemetryBoot() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceBoot() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-#if TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED
+#if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
     g_boot.boot_nonce = (static_cast<std::uint64_t>(esp_random()) << 32) | esp_random();
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason),
               ResetReasonText(esp_reset_reason()));
@@ -187,8 +187,8 @@ void LessonCinematicHilTelemetryBoot() {
         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     g_boot.psram_heap_min = static_cast<std::uint32_t>(
         heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
-    if (LessonCinematicHilTelemetryEnabled()) {
-        esp_rom_printf("HIL_CINE event=boot boot_nonce=0x%" PRIx64 " reset_reason=%s "
+    if (LessonCinematicEvidenceEnabled()) {
+        esp_rom_printf("CINE_EVIDENCE event=boot boot_nonce=0x%" PRIx64 " reset_reason=%s "
                        "lifetime_internal_heap_min=%u psram_heap_min=%u\n",
                        static_cast<std::uint64_t>(g_boot.boot_nonce),
                        g_boot.reset_reason,
@@ -203,9 +203,9 @@ void LessonCinematicHilTelemetryBoot() {
 #endif
 }
 
-void LessonCinematicHilTelemetryBeginCue(const char* cue_id, std::uint64_t sequence,
-                                         std::uint64_t now_ms) {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceBeginCue(const char* cue_id, std::uint64_t sequence,
+                                     std::uint64_t now_ms) {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     StopHeapMonitorLocked();
     g_cue = {};
@@ -214,7 +214,7 @@ void LessonCinematicHilTelemetryBeginCue(const char* cue_id, std::uint64_t seque
     g_cue.sequence = sequence;
     g_cue.started_ms = now_ms;
     g_cue.last_queue_ms = now_ms;
-#if TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED
+#if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
     g_cue.lifetime_internal_heap_min = static_cast<std::uint32_t>(
         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
     heap_caps_monitor_local_minimum_free_size_start();
@@ -226,8 +226,8 @@ void LessonCinematicHilTelemetryBeginCue(const char* cue_id, std::uint64_t seque
 #endif
 }
 
-void LessonCinematicHilTelemetryRecordFrameQueued(std::uint64_t now_ms) {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordFrameQueued(std::uint64_t now_ms) {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) {
         g_cue.last_queue_ms = now_ms;
@@ -235,8 +235,8 @@ void LessonCinematicHilTelemetryRecordFrameQueued(std::uint64_t now_ms) {
     }
 }
 
-void LessonCinematicHilTelemetryRecordRead(std::uint64_t read_ms) {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordRead(std::uint64_t read_ms) {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_cue.active) return;
     ++g_cue.read_count;
@@ -253,8 +253,8 @@ void LessonCinematicHilTelemetryRecordRead(std::uint64_t read_ms) {
     }
 }
 
-void LessonCinematicHilTelemetryRecordPanelCompletion(std::uint64_t now_ms) {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordPanelCompletion(std::uint64_t now_ms) {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_cue.active || g_cue.panel_completion_recorded) return;
     const std::uint64_t basis = g_cue.last_queue_ms != 0 ? g_cue.last_queue_ms : g_cue.started_ms;
@@ -264,61 +264,61 @@ void LessonCinematicHilTelemetryRecordPanelCompletion(std::uint64_t now_ms) {
     g_cue.panel_completion_recorded = true;
 }
 
-void LessonCinematicHilTelemetryRecordQueueError() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordQueueError() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) ++g_cue.queue_errors;
 }
 
-void LessonCinematicHilTelemetryRecordQueueTimeout() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordQueueTimeout() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) ++g_cue.queue_timeouts;
 }
 
-void LessonCinematicHilTelemetryRecordDmaError() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordDmaError() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) ++g_cue.dma_errors;
 }
 
-void LessonCinematicHilTelemetryRecordParserFailure() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordParserFailure() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) ++g_cue.parser_errors;
 }
 
-void LessonCinematicHilTelemetryRecordHeaderCrcError() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordHeaderCrcError() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) ++g_cue.header_crc_errors;
 }
 
-void LessonCinematicHilTelemetryRecordFrameCrcError() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordFrameCrcError() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) ++g_cue.frame_crc_errors;
 }
 
-void LessonCinematicHilTelemetryRecordIoError() {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordIoError() {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_cue.active) ++g_cue.io_errors;
 }
 
-void LessonCinematicHilTelemetryRecordLateTick(std::uint32_t missed_periods) {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceRecordLateTick(std::uint32_t missed_periods) {
+    if (!EvidenceRuntimeEnabled()) return;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_cue.active) return;
     ++g_cue.late_ticks;
     g_cue.missed_periods += missed_periods;
 }
 
-bool LessonCinematicHilTelemetryFormatCueEnd(LessonCinematicHilCueEndReason reason,
-                                             LessonCinematicHilFault fault,
-                                             std::uint64_t now_ms, char* out,
-                                             std::size_t out_size) {
-    if (!TelemetryRuntimeEnabled()) return false;
+bool LessonCinematicEvidenceFormatCueEnd(LessonCinematicCueEndReason reason,
+                                         LessonCinematicFault fault,
+                                         std::uint64_t now_ms, char* out,
+                                         std::size_t out_size) {
+    if (!EvidenceRuntimeEnabled()) return false;
     if (out == nullptr || out_size == 0) return false;
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_cue.active) return false;
@@ -326,7 +326,7 @@ bool LessonCinematicHilTelemetryFormatCueEnd(LessonCinematicHilCueEndReason reas
     const std::uint64_t latency = now_ms >= g_cue.started_ms ? now_ms - g_cue.started_ms : 0;
     const int written = std::snprintf(
         out, out_size,
-        "HIL_CINE event=cue_end cue=%s reason=%s fault=%s seq=%" PRIu64 " latency_ms=%" PRIu64 " "
+        "CINE_EVIDENCE event=cue_end cue=%s reason=%s fault=%s seq=%" PRIu64 " latency_ms=%" PRIu64 " "
         "read_count=%u read_ge70ms=%u read_max_ms=%u read_hist_ms=0:%u,70:%u,100:%u "
         "panel_latency_ms=%u queue_errors=%u queue_timeouts=%u dma_errors=%u "
         "parser_errors=%u header_crc_errors=%u frame_crc_errors=%u io_errors=%u "
@@ -358,20 +358,20 @@ bool LessonCinematicHilTelemetryFormatCueEnd(LessonCinematicHilCueEndReason reas
     return false;
 }
 
-void LessonCinematicHilTelemetryEmitCueEnd(LessonCinematicHilCueEndReason reason,
-                                           LessonCinematicHilFault fault,
-                                           std::uint64_t now_ms) {
-    if (!TelemetryRuntimeEnabled()) return;
+void LessonCinematicEvidenceEmitCueEnd(LessonCinematicCueEndReason reason,
+                                       LessonCinematicFault fault,
+                                       std::uint64_t now_ms) {
+    if (!EvidenceRuntimeEnabled()) return;
     char line[768] = {};
-    if (!LessonCinematicHilTelemetryFormatCueEnd(reason, fault, now_ms, line, sizeof(line))) {
+    if (!LessonCinematicEvidenceFormatCueEnd(reason, fault, now_ms, line, sizeof(line))) {
         return;
     }
-#if TBOT_ESP_HIL_CINEMATIC_TELEMETRY_ENABLED
+#if TBOT_ESP_RELEASE_CINEMATIC_EVIDENCE_ENABLED
     esp_rom_printf("%s\n", line);
 #endif
 }
 
-void LessonCinematicHilTelemetryResetForTest() {
+void LessonCinematicEvidenceResetForTest() {
     std::lock_guard<std::mutex> lock(g_mutex);
     StopHeapMonitorLocked();
     g_cue = {};
@@ -379,10 +379,10 @@ void LessonCinematicHilTelemetryResetForTest() {
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason), "host");
 }
 
-void LessonCinematicHilTelemetrySetBootForTest(std::uint64_t boot_nonce,
-                                               const char* reset_reason,
-                                               std::uint32_t internal_heap_min,
-                                               std::uint32_t psram_heap_min) {
+void LessonCinematicEvidenceSetBootForTest(std::uint64_t boot_nonce,
+                                           const char* reset_reason,
+                                           std::uint32_t internal_heap_min,
+                                           std::uint32_t psram_heap_min) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_boot.boot_nonce = boot_nonce;
     CopyToken(g_boot.reset_reason, sizeof(g_boot.reset_reason), reset_reason);
@@ -390,7 +390,7 @@ void LessonCinematicHilTelemetrySetBootForTest(std::uint64_t boot_nonce,
     g_boot.psram_heap_min = psram_heap_min;
 }
 
-void LessonCinematicHilTelemetrySetCueHeapMinimaForTest(
+void LessonCinematicEvidenceSetCueHeapMinimaForTest(
     std::uint32_t lifetime_internal_heap_min, std::uint32_t internal_heap_min,
     std::uint32_t psram_heap_min) {
     std::lock_guard<std::mutex> lock(g_mutex);
