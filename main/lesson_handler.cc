@@ -39,6 +39,8 @@
 #include <string>
 #include <string_view>
 #include <memory>
+#include <algorithm>
+#include <array>
 #include <set>
 #include <deque>
 #include <map>
@@ -59,6 +61,84 @@
 
 namespace {
 std::atomic<int> g_cinematic_json_fail_after{-1};
+
+struct ReservationRefusalMapping {
+    const char* code;
+    const char* message;
+    const char* reason;
+    bool retryable;
+};
+
+ReservationRefusalMapping MapLessonReservationRefusal(LessonAssetReservationCode code) {
+    switch (code) {
+    case LessonAssetReservationCode::kMutationActive:
+        return {"LESSON_ASSET_MUTATION_ACTIVE", "lesson assets are being updated",
+                "asset_mutation_active", true};
+    case LessonAssetReservationCode::kLessonSessionMismatch:
+    case LessonAssetReservationCode::kLessonSessionActive:
+        return {"LESSON_SESSION_CONFLICT", "another lesson session owns lesson assets",
+                "lesson_session_mismatch", true};
+    case LessonAssetReservationCode::kInvalidIdentity:
+        return {"LESSON_IDENTITY_INVALID", "lesson identity is invalid",
+                "invalid_identity", false};
+    case LessonAssetReservationCode::kGenerationExhausted:
+    case LessonAssetReservationCode::kAcquired:
+        return {"LESSON_RESERVATION_EXHAUSTED", "lesson storage reservation unavailable",
+                "generation_exhausted", false};
+    }
+    return {"LESSON_RESERVATION_EXHAUSTED", "lesson storage reservation unavailable",
+            "generation_exhausted", false};
+}
+
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+std::atomic<int> g_lesson_json_fail_after{-1};
+
+bool LessonJsonOperationAllowed() {
+    int remaining = g_lesson_json_fail_after.load(std::memory_order_relaxed);
+    while (remaining >= 0) {
+        if (remaining == 0) return false;
+        if (g_lesson_json_fail_after.compare_exchange_weak(
+                remaining, remaining - 1, std::memory_order_relaxed)) return true;
+    }
+    return true;
+}
+
+cJSON* LessonJsonCreateObject() {
+    return LessonJsonOperationAllowed() ? cJSON_CreateObject() : nullptr;
+}
+
+cJSON* LessonJsonAddString(cJSON* object, const char* key, const char* value) {
+    return LessonJsonOperationAllowed() ? cJSON_AddStringToObject(object, key, value) : nullptr;
+}
+
+cJSON* LessonJsonAddNumber(cJSON* object, const char* key, double value) {
+    return LessonJsonOperationAllowed() ? cJSON_AddNumberToObject(object, key, value) : nullptr;
+}
+
+cJSON* LessonJsonAddBool(cJSON* object, const char* key, bool value) {
+    return LessonJsonOperationAllowed() ? cJSON_AddBoolToObject(object, key, value) : nullptr;
+}
+
+cJSON* LessonJsonAddNull(cJSON* object, const char* key) {
+    return LessonJsonOperationAllowed() ? cJSON_AddNullToObject(object, key) : nullptr;
+}
+
+cJSON_bool LessonJsonAttachItem(cJSON* object, const char* key, cJSON* item) {
+    return LessonJsonOperationAllowed() ? cJSON_AddItemToObject(object, key, item) : false;
+}
+
+char* LessonJsonPrintUnformatted(const cJSON* item) {
+    return LessonJsonOperationAllowed() ? cJSON_PrintUnformatted(item) : nullptr;
+}
+#else
+#define LessonJsonCreateObject cJSON_CreateObject
+#define LessonJsonAddString cJSON_AddStringToObject
+#define LessonJsonAddNumber cJSON_AddNumberToObject
+#define LessonJsonAddBool cJSON_AddBoolToObject
+#define LessonJsonAddNull cJSON_AddNullToObject
+#define LessonJsonAttachItem cJSON_AddItemToObject
+#define LessonJsonPrintUnformatted cJSON_PrintUnformatted
+#endif
 
 bool CinematicJsonOperationAllowed() {
     int remaining = g_cinematic_json_fail_after.load(std::memory_order_relaxed);
@@ -88,6 +168,13 @@ bool CinematicJsonAddBool(cJSON* object, const char* key, bool value) {
     return CinematicJsonOperationAllowed() &&
            cJSON_AddBoolToObject(object, key, value) != nullptr;
 }
+
+LessonAssetSessionResult BeginCinematicLessonSession(
+    const std::string& assignment_id,
+    const std::string& session_id) {
+    return LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
+        assignment_id, session_id);
+}
 }  // namespace
 
 namespace tbot {
@@ -95,6 +182,18 @@ void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_fai
     g_cinematic_json_fail_after.store(successful_operations_before_failure,
                                       std::memory_order_relaxed);
 }
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+LessonReservationRefusalMapping LessonReservationRefusalMappingForTest(
+    LessonAssetReservationCode code) {
+    const auto mapping = MapLessonReservationRefusal(code);
+    return {mapping.code, mapping.message, mapping.reason, mapping.retryable};
+}
+
+void SetLessonJsonFailAfterForTest(int successful_operations_before_failure) {
+    g_lesson_json_fail_after.store(successful_operations_before_failure,
+                                   std::memory_order_relaxed);
+}
+#endif
 }  // namespace tbot
 
 void AddLessonRendererFeatures(cJSON* features) {
@@ -360,6 +459,20 @@ bool ExactObjectKeys(const cJSON* object, const std::set<std::string_view>& expe
     return count == expected.size();
 }
 
+template <std::size_t N>
+bool ExactObjectKeys(const cJSON* object, const std::array<std::string_view, N>& expected) {
+    if (!cJSON_IsObject(object)) return false;
+    size_t count = 0;
+    for (const cJSON* item = object->child; item != nullptr; item = item->next) {
+        if (item->string == nullptr ||
+            std::find(expected.begin(), expected.end(), std::string_view(item->string)) == expected.end()) {
+            return false;
+        }
+        ++count;
+    }
+    return count == expected.size();
+}
+
 bool ExactPositiveInteger(const cJSON* object, const char* key) {
     double value = 0;
     return Num(object, key, value) && std::isfinite(value) && value > 0 &&
@@ -382,7 +495,7 @@ bool ExactString(const cJSON* object, const char* key, const char* expected) {
 }
 
 bool ValidOpeningEntrance(const cJSON* entrance) {
-    static const std::set<std::string_view> kKeys = {
+    constexpr std::array<std::string_view, 6> kKeys = {
         "preset", "policy", "layoutPreset", "backgroundAssetKey", "robotAssetKey", "fallback",
     };
     const char* layout = Str(entrance, "layoutPreset");
@@ -399,17 +512,18 @@ bool ValidOpeningEntrance(const cJSON* entrance) {
 }
 
 bool ValidVisualStateContract(const cJSON* root, std::uint64_t* visual_generation) {
-    static const std::set<std::string_view> kKeys = {
+    constexpr std::array<std::string_view, 4> kKeys = {
         "state", "overlayKey", "motionPreset", "visualGeneration",
     };
-    static const std::set<std::string_view> kStates = {
+    constexpr std::array<std::string_view, 9> kStates = {
         "teach", "listen", "thinking", "correct", "nearMiss", "incorrect",
         "retry", "celebrate", "completion",
     };
     const cJSON* body = Obj(root, "body");
     const char* state = Str(body, "state");
     return ExactObjectKeys(body, kKeys) && state != nullptr &&
-           kStates.find(state) != kStates.end() && !Blank(Str(body, "overlayKey")) &&
+           std::find(kStates.begin(), kStates.end(), std::string_view(state)) != kStates.end() &&
+           !Blank(Str(body, "overlayKey")) &&
            !Blank(Str(body, "motionPreset")) &&
            ExactUint64(body, "visualGeneration", visual_generation) &&
            IsValidLessonIdentity(Str(root, "stepId"));
@@ -576,11 +690,11 @@ bool ValidTvideoProjection(const cJSON* projection) {
 // lessonVersion a NUMBER on the wire).
 void CopyStr(cJSON* dst, const cJSON* src, const char* k) {
     const char* v = Str(src, k);
-    if (v != nullptr) cJSON_AddStringToObject(dst, k, v);
+    if (v != nullptr) LessonJsonAddString(dst, k, v);
 }
 void CopyNum(cJSON* dst, const cJSON* src, const char* k) {
     double v = 0.0;
-    if (Num(src, k, v)) cJSON_AddNumberToObject(dst, k, v);
+    if (Num(src, k, v)) LessonJsonAddNumber(dst, k, v);
 }
 
 int64_t NowMs() { return static_cast<int64_t>(time(nullptr)) * 1000LL; }
@@ -655,6 +769,19 @@ std::uint64_t NextVisualCompletionNonce() {
     return nonce;
 }
 
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+}  // namespace
+namespace tbot {
+void SetLessonVisualCompletionNonceForTest(std::uint64_t value) {
+    g_visual_completion_nonce.store(value, std::memory_order_relaxed);
+}
+void ClearLessonAckReplayHistoryForTest() {
+    g_session.ack_history.clear();
+}
+}  // namespace tbot
+namespace {
+#endif
+
 void ClearTerminalLessonCursor() {
     // A completed/failed lesson is terminal. The server may reuse the same assignmentId
     // / sessionId for the next sample lesson and restart S->F sequence at 1; clear the
@@ -677,24 +804,24 @@ void ClearTerminalLessonCursor() {
 // sessionId/lessonId/lessonVersion/stepId) is echoed verbatim from the inbound
 // frame; the firmware owns only type/sequence/timestamp/body. `body` is consumed.
 std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON* body) {
-    cJSON* root = cJSON_CreateObject();
+    cJSON* root = LessonJsonCreateObject();
     if (root == nullptr || body == nullptr) {
         cJSON_Delete(root);
         cJSON_Delete(body);
         return "";
     }
-    cJSON_AddStringToObject(root, "type", type);
+    LessonJsonAddString(root, "type", type);
     CopyStr(root, in, "protocolVersion");
     CopyStr(root, in, "assignmentId");
     CopyStr(root, in, "sessionId");
     CopyStr(root, in, "lessonId");
     CopyNum(root, in, "lessonVersion");                 // NUMBER on the wire (D-LV)
     const char* step_id = Str(in, "stepId");            // echoed: "s4" on steps, null on lifecycle
-    if (step_id != nullptr) cJSON_AddStringToObject(root, "stepId", step_id);
-    else                    cJSON_AddNullToObject(root, "stepId");
-    cJSON_AddNumberToObject(root, "sequence", static_cast<double>(fs_seq));
-    cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(NowMs()));
-    if (!cJSON_AddItemToObject(root, "body", body)) {
+    if (step_id != nullptr) LessonJsonAddString(root, "stepId", step_id);
+    else                    LessonJsonAddNull(root, "stepId");
+    LessonJsonAddNumber(root, "sequence", static_cast<double>(fs_seq));
+    LessonJsonAddNumber(root, "timestamp", static_cast<double>(NowMs()));
+    if (!LessonJsonAttachItem(root, "body", body)) {
         cJSON_Delete(body);
         cJSON_Delete(root);
         return "";
@@ -710,7 +837,7 @@ std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON*
         cJSON_Delete(root);
         return "";
     }
-    char* s = cJSON_PrintUnformatted(root);
+    char* s = LessonJsonPrintUnformatted(root);
     std::string out = (s != nullptr) ? std::string(s) : std::string();
     if (s != nullptr) cJSON_free(s);
     cJSON_Delete(root);
@@ -771,13 +898,13 @@ void LogLessonAckEvidence(const cJSON* in, const cJSON* ack_body) {
 }
 
 cJSON* MakeErrorBody(const char* code, const char* message, bool retryable, const char* reason) {
-    cJSON* b = cJSON_CreateObject();
-    cJSON* ctx = cJSON_CreateObject();
-    if (b == nullptr || ctx == nullptr || cJSON_AddStringToObject(b, "code", code) == nullptr ||
-        cJSON_AddStringToObject(b, "message", message) == nullptr ||
-        cJSON_AddBoolToObject(b, "retryable", retryable) == nullptr ||
-        cJSON_AddStringToObject(ctx, "reason", reason) == nullptr ||
-        !cJSON_AddItemToObject(b, "context", ctx)) {
+    cJSON* b = LessonJsonCreateObject();
+    cJSON* ctx = LessonJsonCreateObject();
+    if (b == nullptr || ctx == nullptr || LessonJsonAddString(b, "code", code) == nullptr ||
+        LessonJsonAddString(b, "message", message) == nullptr ||
+        LessonJsonAddBool(b, "retryable", retryable) == nullptr ||
+        LessonJsonAddString(ctx, "reason", reason) == nullptr ||
+        !LessonJsonAttachItem(b, "context", ctx)) {
         cJSON_Delete(ctx);
         cJSON_Delete(b);
         return nullptr;
@@ -1457,42 +1584,61 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
         break;
     }
 
-    cJSON* root = cJSON_CreateObject();
-    cJSON* body = cJSON_CreateObject();
+    cJSON* root = LessonJsonCreateObject();
+    cJSON* body = LessonJsonCreateObject();
     if (root == nullptr || body == nullptr) {
         cJSON_Delete(root);
         cJSON_Delete(body);
         return false;
     }
-    cJSON_AddStringToObject(root, "type", "lesson_ack");
-    cJSON_AddStringToObject(root, "protocolVersion", g_session.pending_protocol_version.c_str());
-    cJSON_AddStringToObject(root, "assignmentId", g_session.assignment_id.c_str());
-    cJSON_AddStringToObject(root, "sessionId", g_session.session_id.c_str());
+    bool built = LessonJsonAddString(root, "type", "lesson_ack") != nullptr &&
+                 LessonJsonAddString(root, "protocolVersion",
+                                     g_session.pending_protocol_version.c_str()) != nullptr &&
+                 LessonJsonAddString(root, "assignmentId", g_session.assignment_id.c_str()) != nullptr &&
+                 LessonJsonAddString(root, "sessionId", g_session.session_id.c_str()) != nullptr;
     if (!g_session.pending_lesson_id.empty()) {
-        cJSON_AddStringToObject(root, "lessonId", g_session.pending_lesson_id.c_str());
+        built = built && LessonJsonAddString(
+            root, "lessonId", g_session.pending_lesson_id.c_str()) != nullptr;
     }
     if (g_session.pending_has_lesson_version) {
-        cJSON_AddNumberToObject(root, "lessonVersion", g_session.pending_lesson_version);
+        built = built && LessonJsonAddNumber(
+            root, "lessonVersion", g_session.pending_lesson_version) != nullptr;
     }
-    if (g_session.pending_step_id.empty()) cJSON_AddNullToObject(root, "stepId");
-    else cJSON_AddStringToObject(root, "stepId", g_session.pending_step_id.c_str());
-    cJSON_AddNumberToObject(root, "sequence", static_cast<double>(++g_session.fs_sequence));
-    cJSON_AddNumberToObject(root, "timestamp", static_cast<double>(NowMs()));
-    cJSON_AddNumberToObject(body, "acks", static_cast<double>(item.server_sequence));
-    cJSON_AddBoolToObject(body, "accepted", accepted);
-    cJSON_AddBoolToObject(body, "degraded", degraded);
-    if (degraded_reason == nullptr) cJSON_AddNullToObject(body, "degradedReason");
-    else cJSON_AddStringToObject(body, "degradedReason", degraded_reason);
-    cJSON_AddNumberToObject(body, "visualGeneration", static_cast<double>(item.visual_generation));
+    const int64_t ack_sequence = g_session.fs_sequence + 1;
+    built = built &&
+            (g_session.pending_step_id.empty()
+                ? LessonJsonAddNull(root, "stepId") != nullptr
+                : LessonJsonAddString(root, "stepId", g_session.pending_step_id.c_str()) != nullptr) &&
+            LessonJsonAddNumber(root, "sequence", static_cast<double>(ack_sequence)) != nullptr &&
+            LessonJsonAddNumber(root, "timestamp", static_cast<double>(NowMs())) != nullptr &&
+            LessonJsonAddNumber(body, "acks", static_cast<double>(item.server_sequence)) != nullptr &&
+            LessonJsonAddBool(body, "accepted", accepted) != nullptr &&
+            LessonJsonAddBool(body, "degraded", degraded) != nullptr &&
+            (degraded_reason == nullptr
+                ? LessonJsonAddNull(body, "degradedReason") != nullptr
+                : LessonJsonAddString(body, "degradedReason", degraded_reason) != nullptr) &&
+            LessonJsonAddNumber(body, "visualGeneration",
+                                static_cast<double>(item.visual_generation)) != nullptr;
+    if (!built) {
+        cJSON_Delete(root);
+        cJSON_Delete(body);
+        return false;
+    }
 
-    char* body_json = cJSON_PrintUnformatted(body);
-    cJSON_AddItemToObject(root, "body", body);
-    char* serialized = cJSON_PrintUnformatted(root);
+    char* body_json = LessonJsonPrintUnformatted(body);
+    if (!LessonJsonAttachItem(root, "body", body)) {
+        if (body_json != nullptr) cJSON_free(body_json);
+        cJSON_Delete(body);
+        cJSON_Delete(root);
+        return false;
+    }
+    char* serialized = LessonJsonPrintUnformatted(root);
     cJSON_Delete(root);
     if (serialized == nullptr) {
         if (body_json != nullptr) cJSON_free(body_json);
         return false;
     }
+    g_session.fs_sequence = ack_sequence;
     *ack_frame = serialized;
     cJSON_free(serialized);
     if (body_json != nullptr) {
@@ -1581,9 +1727,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // down with a frame in flight).
     auto emit = [this](const cJSON* in, const char* frame_type, cJSON* frame_body) {
         if (frame_body == nullptr) return;
-        const int64_t seq = ++g_session.fs_sequence;
+        const int64_t seq = g_session.fs_sequence + 1;
         std::string frame = BuildFrame(in, frame_type, seq, frame_body);
-        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
+        if (protocol_ && !frame.empty()) {
+            g_session.fs_sequence = seq;
+            protocol_->SendLessonFrame(frame);
+        }
     };
     auto emit_isolated_prepare_error = [this](const cJSON* in, cJSON* frame_body) {
         if (frame_body == nullptr) return;
@@ -1671,7 +1820,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         LogLessonAckEvidence(in, body);
         std::string frame = BuildFrame(in, "lesson_ack", 1, body);
-        if (protocol_) protocol_->SendLessonFrame(frame);
+        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
     };
     auto show_lesson_failure_display = [this]() {
         Display* display = Board::GetInstance().GetDisplay();
@@ -2061,8 +2210,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     config.asset.media_type = Str(asset, "mediaType");
                     config.asset.width = static_cast<std::uint16_t>(width);
                     config.asset.height = static_cast<std::uint16_t>(height);
-                    const auto reservation = LessonAssetStorageCoordinator::GetInstance()
-                        .TryBeginLessonSession(assignment_id, session_id);
+                    const auto reservation = BeginCinematicLessonSession(
+                        assignment_id, session_id);
                     if (!reservation.acquired) {
                         response = cinematic_failure_response(
                             tbot::LessonCinematicError::kFileOpen);
@@ -2072,10 +2221,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         response = renderer_v4->Prepare(config, now_ms);
                         if (response.accepted) {
                             complete_cinematic_prepare(response, reservation.generation, true);
-                            if (!response.accepted && !reservation.idempotent) {
-                                LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
-                                    assignment_id, session_id, reservation.generation);
-                            }
                         } else if (!reservation.idempotent) {
                             LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                                 assignment_id, session_id, reservation.generation);
@@ -2140,8 +2285,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             command_sequence_id, phase_id,
                             tbot::LessonCinematicError::kMetadataMismatch};
             } else {
-                const auto reservation = LessonAssetStorageCoordinator::GetInstance()
-                    .TryBeginLessonSession(assignment_id, session_id);
+                const auto reservation = BeginCinematicLessonSession(
+                    assignment_id, session_id);
                 if (!reservation.acquired) {
                     response = {tbot::LessonCinematicResponseType::kFailure, false,
                                 command_sequence_id, phase_id,
@@ -2152,10 +2297,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     response = renderer_v3->Prepare(config, now_ms);
                     if (response.accepted) {
                         complete_cinematic_prepare(response, reservation.generation, false);
-                        if (!response.accepted && !reservation.idempotent) {
-                            LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
-                                assignment_id, session_id, reservation.generation);
-                        }
                     } else if (!reservation.idempotent) {
                         LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                             assignment_id, session_id, reservation.generation);
@@ -2199,9 +2340,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.paused = false;
             if (cinematic_v4) renderer_v4->DiscardSession();
             else renderer_v3->DiscardSession();
-            const bool renderer_released = cinematic_v4 ? !renderer_v4->prepared()
-                                                        : !renderer_v3->prepared();
-            const bool session_released = renderer_released &&
+            const bool session_released =
                 (g_session.lesson_asset_generation == 0 ||
                 LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                     g_session.assignment_id, g_session.session_id,
@@ -2315,38 +2454,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
             LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
                 assignment_id, session_id);
         if (!reservation.acquired) {
-            const char* error_code = "LESSON_RESERVATION_EXHAUSTED";
-            const char* error_message = "lesson storage reservation unavailable";
-            const char* error_reason = "generation_exhausted";
-            bool retryable = false;
-            switch (reservation.code) {
-            case LessonAssetReservationCode::kMutationActive:
-                error_code = "LESSON_ASSET_MUTATION_ACTIVE";
-                error_message = "lesson assets are being updated";
-                error_reason = "asset_mutation_active";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kLessonSessionMismatch:
-            case LessonAssetReservationCode::kLessonSessionActive:
-                error_code = "LESSON_SESSION_CONFLICT";
-                error_message = "another lesson session owns lesson assets";
-                error_reason = "lesson_session_mismatch";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kInvalidIdentity:
-                // Pure envelope validation makes this unreachable in the handler;
-                // retain fail-closed mapping if coordinator validation ever tightens.
-                error_code = "LESSON_IDENTITY_INVALID";  // GCOVR_EXCL_LINE
-                error_message = "lesson identity is invalid";  // GCOVR_EXCL_LINE
-                error_reason = "invalid_identity";  // GCOVR_EXCL_LINE
-                break;  // GCOVR_EXCL_LINE
-            case LessonAssetReservationCode::kGenerationExhausted:
-            case LessonAssetReservationCode::kAcquired:
-                break;
-            }
+            const auto error = MapLessonReservationRefusal(reservation.code);
             emit_isolated_prepare_error(
-                root, MakeErrorBody(error_code, error_message, retryable, error_reason));
-            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s", error_reason);
+                root, MakeErrorBody(error.code, error.message, error.retryable, error.reason));
+            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s", error.reason);
             return;
         }
         prepare_newly_acquired_asset_session = !reservation.idempotent;
@@ -2385,44 +2496,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
 
     if (is_prepare) {
-        const auto reservation =
-            LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(
-                assignment_id, session_id);
-        if (!reservation.acquired) {
-            const char* error_code = "LESSON_RESERVATION_EXHAUSTED";
-            const char* error_message = "lesson storage reservation unavailable";
-            const char* error_reason = "generation_exhausted";
-            bool retryable = false;
-            switch (reservation.code) {
-            case LessonAssetReservationCode::kMutationActive:
-                error_code = "LESSON_ASSET_MUTATION_ACTIVE";
-                error_message = "lesson assets are being updated";
-                error_reason = "asset_mutation_active";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kLessonSessionActive:
-            case LessonAssetReservationCode::kLessonSessionMismatch:
-                error_code = "LESSON_SESSION_CONFLICT";
-                error_message = "another lesson session owns lesson assets";
-                error_reason = "lesson_session_mismatch";
-                retryable = true;
-                break;
-            case LessonAssetReservationCode::kInvalidIdentity:
-                error_code = "LESSON_IDENTITY_INVALID";
-                error_message = "lesson identity is invalid";
-                error_reason = "invalid_identity";
-                break;
-            case LessonAssetReservationCode::kGenerationExhausted:
-            case LessonAssetReservationCode::kAcquired:
-                break;
-            }
-            emit(root, "lesson_error",
-                 MakeErrorBody(error_code, error_message, retryable, error_reason));
-            ESP_LOGW(TAG, "lesson_prepare storage reservation refused reason=%s",
-                     error_reason);
-            return;
-        }
-        g_session.lesson_asset_generation = reservation.generation;
+        g_session.lesson_asset_generation = prepare_asset_generation;
     }
 
     const bool is_start = strcmp(type, "lesson_start") == 0;

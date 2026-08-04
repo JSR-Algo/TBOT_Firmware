@@ -1,6 +1,186 @@
 #ifndef LCD_DISPLAY_H
 #define LCD_DISPLAY_H
 
+#include <cstdint>
+#include <atomic>
+#include <mutex>
+
+class LessonCinematicPanelCompletionGate {
+public:
+    void ArmNextCompletion() {
+        armed_generation_.store(
+            completed_generation_.load(std::memory_order_acquire) + 1,
+            std::memory_order_release);
+    }
+
+    void Disarm() { armed_generation_.store(0, std::memory_order_release); }
+
+    bool OnPanelCompletion() {
+        const std::uint32_t completed =
+            completed_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        std::uint32_t armed = armed_generation_.load(std::memory_order_acquire);
+        return armed != 0 && completed == armed &&
+               armed_generation_.compare_exchange_strong(
+                   armed, 0, std::memory_order_acq_rel, std::memory_order_acquire);
+    }
+
+private:
+    std::atomic<std::uint32_t> completed_generation_{0};
+    std::atomic<std::uint32_t> armed_generation_{0};
+};
+
+class LessonCinematicDisplayTransport {
+public:
+    struct Ops {
+        void* context = nullptr;
+        bool (*begin)(void* context) = nullptr;
+        bool (*queue)(void* context, const std::uint16_t* pixels) = nullptr;
+        bool (*wait)(void* context, std::uint32_t timeout_ms) = nullptr;
+        bool (*end)(void* context) = nullptr;
+    };
+
+    explicit LessonCinematicDisplayTransport(Ops ops) : ops_(ops) {}
+    ~LessonCinematicDisplayTransport() { EndLessonCinematic(); }
+
+    LessonCinematicDisplayTransport(const LessonCinematicDisplayTransport&) = delete;
+    LessonCinematicDisplayTransport& operator=(const LessonCinematicDisplayTransport&) = delete;
+
+    bool BeginLessonCinematic() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (state_ != State::kIdle || ops_.begin == nullptr || ops_.end == nullptr) {
+                return false;
+            }
+            state_ = State::kBeginning;
+            end_requested_ = false;
+        }
+
+        const bool began = ops_.begin(ops_.context);
+        bool finish_end = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!began || end_requested_) {
+                state_ = State::kEnding;
+                finish_end = true;
+            } else {
+                state_ = State::kOwned;
+            }
+        }
+        if (finish_end) FinishEnd(State::kIdle);
+        if (!began) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        return state_ == State::kOwned;
+    }
+
+    bool QueueLessonCinematicFrame(const std::uint16_t* pixels, std::uint16_t width,
+                                   std::uint16_t height) {
+        if (pixels == nullptr || width != 320 || height != 480 || ops_.queue == nullptr) {
+            return false;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (state_ != State::kOwned) return false;
+            state_ = State::kQueueing;
+        }
+
+        const bool queued = ops_.queue(ops_.context, pixels);
+        bool finish_end = false;
+        State fallback = State::kOwned;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            fallback = queued ? State::kInFlight : State::kOwned;
+            if (!queued || end_requested_) {
+                state_ = State::kEnding;
+                finish_end = true;
+            } else {
+                state_ = State::kInFlight;
+            }
+        }
+        if (finish_end) FinishEnd(fallback);
+        if (!queued) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        return state_ == State::kInFlight;
+    }
+
+    bool WaitLessonCinematicFrame(std::uint32_t timeout_ms) {
+        if (ops_.wait == nullptr) return false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (state_ != State::kInFlight) return false;
+            state_ = State::kWaiting;
+        }
+
+        const bool completed = ops_.wait(ops_.context, timeout_ms);
+        bool finish_end = false;
+        State fallback = completed ? State::kOwned : State::kInFlight;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (end_requested_) {
+                state_ = State::kEnding;
+                finish_end = true;
+            } else {
+                state_ = fallback;
+            }
+        }
+        if (finish_end) FinishEnd(fallback);
+        return completed;
+    }
+
+    void EndLessonCinematic() {
+        State fallback = State::kIdle;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            switch (state_) {
+                case State::kIdle:
+                case State::kEnding:
+                    return;
+                case State::kBeginning:
+                case State::kQueueing:
+                case State::kWaiting:
+                    end_requested_ = true;
+                    return;
+                case State::kOwned:
+                    fallback = State::kOwned;
+                    break;
+                case State::kInFlight:
+                    fallback = State::kInFlight;
+                    break;
+            }
+            state_ = State::kEnding;
+        }
+        FinishEnd(fallback);
+    }
+
+private:
+    enum class State {
+        kIdle,
+        kBeginning,
+        kOwned,
+        kQueueing,
+        kInFlight,
+        kWaiting,
+        kEnding,
+    };
+
+    void FinishEnd(State fallback) {
+        const bool released = ops_.end(ops_.context);
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_ = released ? State::kIdle : fallback;
+        end_requested_ = false;
+    }
+
+    Ops ops_;
+    std::mutex mutex_;
+    State state_ = State::kIdle;
+    bool end_requested_ = false;
+};
+
+#ifndef TBOT_LESSON_CINEMATIC_TRANSPORT_ONLY
 #include "lvgl_display.h"
 #include "gif/lvgl_gif.h"
 #include "lesson_renderer_memory_probe.h"
@@ -93,6 +273,11 @@ public:
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) override;
     virtual void SetLessonTeachingWord(const char* text) override;
+    virtual bool BeginLessonCinematic();
+    virtual bool QueueLessonCinematicFrame(const std::uint16_t* pixels, std::uint16_t width,
+                                           std::uint16_t height);
+    virtual bool WaitLessonCinematicFrame(std::uint32_t timeout_ms);
+    virtual void EndLessonCinematic();
     bool PresentLessonFramebuffer(const std::uint16_t* pixels, std::uint16_t width,
                                   std::uint16_t height);
     virtual bool StartLessonRobotEntrance(
@@ -132,5 +317,6 @@ public:
                    int width, int height, int offset_x, int offset_y,
                    bool mirror_x, bool mirror_y, bool swap_xy);
 };
+#endif  // TBOT_LESSON_CINEMATIC_TRANSPORT_ONLY
 
 #endif // LCD_DISPLAY_H

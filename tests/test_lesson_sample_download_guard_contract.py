@@ -3,6 +3,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "main" / "mcp_server.cc"
+LESSON_HANDLER_SOURCE = ROOT / "main" / "lesson_handler.cc"
+
+
+def function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace : index + 1]
+    raise AssertionError(f"unterminated function {signature}")
 
 
 def function_body(text: str, signature: str) -> str:
@@ -105,3 +121,10 @@ def test_mcp_cjson_runner_does_not_hardcode_a_developer_idf_checkout():
     )
     assert "/Users/" not in runner
     assert "IDF_PATH" in runner
+
+
+def test_lesson_prepare_has_single_asset_session_reservation_owner():
+    source = LESSON_HANDLER_SOURCE.read_text(encoding="utf-8")
+    handler_body = function_body(source, "void Application::HandleLessonMessage")
+
+    assert handler_body.count("TryBeginLessonSession(") == 1

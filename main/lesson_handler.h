@@ -10,6 +10,7 @@
 
 struct cJSON;
 class Protocol;
+enum class LessonAssetReservationCode;
 
 // US-006 Slice-01 — additive lesson_* renderer (LANE-FIRMWARE / S10 / CP-6).
 //
@@ -73,6 +74,19 @@ constexpr std::size_t kLessonMessageDataQueueDepth = 16;
 void AddLessonRendererFeatures(cJSON* features);
 namespace tbot {
 void SetLessonCinematicJsonFailAfterForTest(int successful_operations_before_failure);
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+struct LessonReservationRefusalMapping {
+    const char* code;
+    const char* message;
+    const char* reason;
+    bool retryable;
+};
+LessonReservationRefusalMapping LessonReservationRefusalMappingForTest(
+    LessonAssetReservationCode code);
+void SetLessonJsonFailAfterForTest(int successful_operations_before_failure);
+void SetLessonVisualCompletionNonceForTest(std::uint64_t value);
+void ClearLessonAckReplayHistoryForTest();
+#endif
 }
 
 enum class LessonQueueItemKind : std::uint8_t {

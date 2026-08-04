@@ -437,6 +437,21 @@ void LcdDisplay::Unlock() {
     lvgl_port_unlock();
 }
 
+bool LcdDisplay::BeginLessonCinematic() {
+    return false;
+}
+
+bool LcdDisplay::QueueLessonCinematicFrame(const std::uint16_t*, std::uint16_t,
+                                           std::uint16_t) {
+    return false;
+}
+
+bool LcdDisplay::WaitLessonCinematicFrame(std::uint32_t) {
+    return false;
+}
+
+void LcdDisplay::EndLessonCinematic() {}
+
 bool LcdDisplay::PresentLessonFramebuffer(const std::uint16_t* pixels,
                                           std::uint16_t width,
                                           std::uint16_t height) {
