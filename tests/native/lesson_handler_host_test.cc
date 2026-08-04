@@ -1567,6 +1567,34 @@ void test_prepare_assetpack_ready_with_real_file() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_accepts_large_cinematic_without_raising_image_ram_cap() {
+    const char* dir = "/tmp/tbot-host-sd-cinematic/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-cinematic && mkdir -p /tmp/tbot-host-sd-cinematic/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-cinematic/lesson-assets/cinematic.mp4";
+    const size_t file_size = 3 * 1024 * 1024;
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "cinematic asset fixture opens");
+    require(fseek(fp, static_cast<long>(file_size - 1), SEEK_SET) == 0,
+            "cinematic asset fixture seeks");
+    fputc('x', fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"cinematic\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-video-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"cinematic\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"mediaType\":\"video/mp4\","
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/cinematic.mp4\",\"size\":" +
+                          std::to_string(file_size) + "}]}"));
+    require(FrameAssetPackReady(0) == true,
+            "verified cinematic above image RAM cap is ready from SD");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_derives_local_path_from_root_and_key() {
     const char* dir = "/tmp/tbot-host-sd-derived/lesson-assets";
     system("rm -rf /tmp/tbot-host-sd-derived && mkdir -p /tmp/tbot-host-sd-derived/lesson-assets");
@@ -1826,7 +1854,7 @@ void test_prepare_assetpack_rejects_unbounded_count_and_total_size() {
 
     std::string huge_assets;
     const size_t file_size = 512 * 1024;
-    for (int i = 0; i < 9; ++i) {
+    for (int i = 0; i < 33; ++i) {
         std::string name = "huge-" + std::to_string(i) + ".bin";
         std::string path = std::string(dir) + "/" + name;
         FILE* fp = fopen(path.c_str(), "wb");
@@ -5696,6 +5724,7 @@ int main() {
     test_renderer_v2_old_completion_cannot_claim_reused_identity();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
+    test_prepare_assetpack_accepts_large_cinematic_without_raising_image_ram_cap();
     test_prepare_assetpack_derives_local_path_from_root_and_key();
     test_prepare_assetpack_trims_manifest_checksum_for_cache_key();
     test_prepare_assetpack_trims_cache_key_before_ack();

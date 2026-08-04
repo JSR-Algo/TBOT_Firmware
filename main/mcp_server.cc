@@ -50,6 +50,14 @@
 
 namespace {
 constexpr size_t kMcpToolsListMaxPayloadBytes = 2500;
+
+struct LessonAssetSyncTaskContext {
+    McpServer* server;
+    int id;
+    McpTool* tool;
+    PropertyList arguments;
+};
+
 bool IsLessonSnapshotEvidenceCall(
     const std::string& tool_name,
     const cJSON* tool_arguments
@@ -142,8 +150,8 @@ struct ValidatedLessonAsset {
 };
 
 struct VerifiedLessonAssetFile {
-    std::string sha256;
-    std::string destination;
+    const char* sha256;
+    const char* destination;
     size_t size;
 };
 
@@ -209,6 +217,108 @@ bool IsOptionalExactSha256(const cJSON* object, const char* field) {
            (cJSON_IsString(value) && IsExactLowerLessonAssetSha256(value->valuestring));
 }
 
+bool IsOptionalSafeCueToken(const cJSON* object, const char* field) {
+    const cJSON* value = cJSON_GetObjectItem(object, field);
+    if (value == nullptr) return true;
+    if (!cJSON_IsString(value) ||
+        !IsBoundedMetadataString(value->valuestring, kLessonAssetIdentityMaxBytes)) {
+        return false;
+    }
+    for (const unsigned char* cursor =
+             reinterpret_cast<const unsigned char*>(value->valuestring);
+         *cursor != '\0'; ++cursor) {
+        if (!(std::isalnum(*cursor) || *cursor == '.' || *cursor == '_' ||
+              *cursor == '+' || *cursor == '-')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsOptionalLessonPlaybackMode(const cJSON* object, const char* field) {
+    const cJSON* value = cJSON_GetObjectItem(object, field);
+    return value == nullptr ||
+           (cJSON_IsString(value) &&
+            (std::strcmp(value->valuestring, "once") == 0 ||
+             std::strcmp(value->valuestring, "loop") == 0));
+}
+
+bool IsOptionalRendererV4CueMetadata(const cJSON* asset) {
+    const cJSON* cue_id = cJSON_GetObjectItem(asset, "cueId");
+    const cJSON* effect = cJSON_GetObjectItem(asset, "effect");
+    const cJSON* step_key = cJSON_GetObjectItem(asset, "stepKey");
+    const cJSON* playback_mode = cJSON_GetObjectItem(asset, "playbackMode");
+    const bool any_present =
+        cue_id != nullptr || effect != nullptr || step_key != nullptr ||
+        playback_mode != nullptr;
+    if (!any_present) return true;
+    return cue_id != nullptr && effect != nullptr && step_key != nullptr &&
+           playback_mode != nullptr &&
+           IsOptionalSafeCueToken(asset, "cueId") &&
+           IsOptionalSafeCueToken(asset, "effect") &&
+           IsOptionalSafeCueToken(asset, "stepKey") &&
+           IsOptionalLessonPlaybackMode(asset, "playbackMode");
+}
+
+bool IsBoundedPositiveIntegerField(
+    const cJSON* object,
+    const char* field,
+    int maximum
+) {
+    const cJSON* value = cJSON_GetObjectItem(object, field);
+    return cJSON_IsNumber(value) && value->valueint > 0 &&
+           value->valueint <= maximum &&
+           value->valuedouble == static_cast<double>(value->valueint);
+}
+
+bool IsExactRendererV4CompatibilityMetadata(const cJSON* metadata) {
+    static constexpr const char* kCompatibilityFields[] = {
+        "codec", "width", "height", "fps", "durationMs", "frameCount",
+        "hasAudio",
+    };
+    if (!cJSON_IsObject(metadata) ||
+        !HasOnlyAllowedJsonFields(metadata, kCompatibilityFields)) {
+        return false;
+    }
+    const cJSON* codec = cJSON_GetObjectItem(metadata, "codec");
+    const cJSON* has_audio = cJSON_GetObjectItem(metadata, "hasAudio");
+    return cJSON_IsString(codec) &&
+           std::strcmp(codec->valuestring, "mjpeg") == 0 &&
+           IsBoundedPositiveIntegerField(metadata, "width", 1920) &&
+           IsBoundedPositiveIntegerField(metadata, "height", 1080) &&
+           IsBoundedPositiveIntegerField(metadata, "fps", 60) &&
+           IsBoundedPositiveIntegerField(metadata, "durationMs", 600000) &&
+           IsBoundedPositiveIntegerField(metadata, "frameCount", 900) &&
+           cJSON_IsFalse(has_audio);
+}
+
+bool IsOptionalRendererV4AssetMetadata(const cJSON* asset) {
+    const cJSON* derivative_id = cJSON_GetObjectItem(asset, "derivativeId");
+    const cJSON* phase_id = cJSON_GetObjectItem(asset, "phaseId");
+    const cJSON* compatibility =
+        cJSON_GetObjectItem(asset, "compatibilityMetadata");
+    const bool cue_present =
+        cJSON_GetObjectItem(asset, "cueId") != nullptr ||
+        cJSON_GetObjectItem(asset, "effect") != nullptr ||
+        cJSON_GetObjectItem(asset, "stepKey") != nullptr ||
+        cJSON_GetObjectItem(asset, "playbackMode") != nullptr;
+    const bool any_present = derivative_id != nullptr || phase_id != nullptr ||
+                             compatibility != nullptr || cue_present;
+    if (!any_present) return true;
+    if (!cJSON_IsString(derivative_id) ||
+        !IsExactLowerLessonAssetSha256(derivative_id->valuestring) ||
+        !IsExactRendererV4CompatibilityMetadata(compatibility)) {
+        return false;
+    }
+    const bool phase_valid =
+        phase_id != nullptr && !cue_present &&
+        IsOptionalSafeCueToken(asset, "phaseId");
+    const bool cue_valid =
+        phase_id == nullptr && cue_present &&
+        IsOptionalRendererV4CueMetadata(asset);
+    return phase_valid || cue_valid;
+}
+
 const char* NormalizedAliasOrThrow(
     const cJSON* object,
     const char* preferred_field,
@@ -267,7 +377,8 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
     static constexpr const char* kAssetFields[] = {
         "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
         "mediaType", "critical", "layer", "role", "state", "checksumOk",
-        "localPath", "sdPath",
+        "localPath", "sdPath", "cueId", "effect", "stepKey", "playbackMode",
+        "derivativeId", "phaseId", "compatibilityMetadata",
     };
     const char* cache_key = JsonStringField(pack, "cacheKey");
     const char* lesson_id = JsonStringField(pack, "lessonId");
@@ -305,6 +416,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
     lesson_id_out = lesson_id;
     std::vector<ValidatedLessonAsset> validated;
     validated.reserve(static_cast<size_t>(asset_count));
+    size_t declared_pack_bytes = 0;
     const cJSON* asset = nullptr;
     cJSON_ArrayForEach(asset, assets) {
         const char* key = JsonStringField(asset, "key");
@@ -327,8 +439,23 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             !IsOptionalBoundedString(asset, "mediaType", 128) ||
             !IsOptionalBoundedString(asset, "layer", 128) ||
             !IsOptionalBoundedString(asset, "role", 128) ||
-            !IsOptionalBoundedString(asset, "state", 128)) {
+            !IsOptionalBoundedString(asset, "state", 128) ||
+            !IsOptionalRendererV4AssetMetadata(asset)) {
             throw std::runtime_error("lesson asset sync request invalid");
+        }
+        size_t parsed_declared_size = 0;
+        if (declared_size != nullptr) {
+            parsed_declared_size =
+                static_cast<size_t>(declared_size->valuedouble);
+            size_t next_declared_pack_bytes = 0;
+            if (!IsLessonAssetDeclaredFileSizeAllowed(parsed_declared_size) ||
+                !AccumulateLessonAssetDeclaredSize(
+                    declared_pack_bytes,
+                    parsed_declared_size,
+                    next_declared_pack_bytes)) {
+                throw std::runtime_error("lesson asset sync request invalid");
+            }
+            declared_pack_bytes = next_declared_pack_bytes;
         }
         const auto path_result = ValidateLessonAssetSyncPath(cache_key, local_path, key);
         if (path_result.code != LessonAssetSyncPathCode::kValid) {
@@ -348,9 +475,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             local_path,
             cJSON_IsTrue(critical) != 0,
             declared_size != nullptr,
-            declared_size == nullptr
-                ? 0
-                : static_cast<size_t>(declared_size->valuedouble),
+            parsed_declared_size,
         });
     }
     return validated;
@@ -1024,7 +1149,6 @@ void McpServer::AddUserOnlyTools() {
             auto json = MakeCheckedCJsonObject();
             CheckedCJsonAddStringToObject(json.get(), "cacheKey", cache_key);
             const char* manifest_checksum = JsonStringField(pack.get(), "manifestChecksum");
-            auto files = MakeCheckedCJsonArray();
             int downloaded = 0;
             int reused = 0;
             int skipped = 0;
@@ -1046,13 +1170,7 @@ void McpServer::AddUserOnlyTools() {
                 }
 
                 for (const auto& asset : validated_assets) {
-                    auto item = MakeCheckedCJsonObject();
-                    CheckedCJsonAddStringToObject(item.get(), "key", asset.key);
-                    CheckedCJsonAddStringToObject(item.get(), "path", asset.path);
-
                     try {
-                        CheckedCJsonAddStringToObject(
-                            item.get(), "localPath", asset.destination);
                         struct stat existing_stat {};
                         const bool existing_size_matches =
                             !asset.has_declared_size ||
@@ -1064,12 +1182,12 @@ void McpServer::AddUserOnlyTools() {
                         if (existing_size_matches &&
                             VerifyLessonAssetSha256(asset.destination, asset.sha256)) {
                             skipped += 1;
-                            CheckedCJsonAddStringToObject(item.get(), "state", "SKIPPED");
                         } else {
                             size_t bytes = 0;
                             const VerifiedLessonAssetFile* reusable = nullptr;
                             for (const auto& verified_file : verified_asset_files) {
-                                if (verified_file.sha256 == asset.sha256 &&
+                                if (std::strcmp(
+                                        verified_file.sha256, asset.sha256) == 0 &&
                                     (!asset.has_declared_size ||
                                      verified_file.size == asset.declared_size)) {
                                     reusable = &verified_file;
@@ -1086,7 +1204,6 @@ void McpServer::AddUserOnlyTools() {
                                     bytes);
                                 reused += 1;
                                 skipped += 1;
-                                CheckedCJsonAddStringToObject(item.get(), "state", "REUSED");
                             } else {
                                 DownloadLessonAssetToVerifiedFile(
                                     mutation,
@@ -1098,12 +1215,8 @@ void McpServer::AddUserOnlyTools() {
                                     asset.sha256,
                                     bytes);
                                 downloaded += 1;
-                                CheckedCJsonAddStringToObject(
-                                    item.get(), "state", "DOWNLOADED");
                             }
                             total_bytes += bytes;
-                            CheckedCJsonAddNumberToObject(
-                                item.get(), "bytes", static_cast<double>(bytes));
                         }
                         struct stat verified_stat {};
                         if (stat(asset.destination, &verified_stat) != 0 ||
@@ -1124,19 +1237,12 @@ void McpServer::AddUserOnlyTools() {
                         if (asset.critical) {
                             critical_failed += 1;
                         }
-                        CheckedCJsonAddStringToObject(item.get(), "state", "FAILED");
-                        CheckedCJsonAddStringToObject(
-                            item.get(), "error", "asset transfer failed");
                     } catch (...) {
                         failed += 1;
                         if (asset.critical) {
                             critical_failed += 1;
                         }
-                        CheckedCJsonAddStringToObject(item.get(), "state", "FAILED");
-                        CheckedCJsonAddStringToObject(
-                            item.get(), "error", "asset transfer failed");
                     }
-                    CheckedCJsonAddItemToArray(files.get(), std::move(item));
                 }
 
                 const bool all_critical_verified = critical_failed == 0;
@@ -1165,7 +1271,6 @@ void McpServer::AddUserOnlyTools() {
                 json.get(), "errorCode", activation.error_code.c_str());
             CheckedCJsonAddNumberToObject(
                 json.get(), "totalBytes", static_cast<double>(total_bytes));
-            CheckedCJsonAddItemToObject(json.get(), "files", std::move(files));
             return json.release();
         });
 #endif
@@ -1487,7 +1592,28 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         return;
     }
 
-    // Use main thread to call the tool
+    if (tool_name == "self.lesson_assets.sync_to_sd") {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+        const cJSON* asset_pack = cJSON_IsObject(tool_arguments)
+                                      ? cJSON_GetObjectItem(tool_arguments, "assetPack")
+                                      : nullptr;
+        try {
+            const char* cache_key = nullptr;
+            const char* lesson_id = nullptr;
+            (void)ValidateLessonAssetSyncPackOrThrow(
+                asset_pack, cache_key, lesson_id);
+        } catch (const std::exception& error) {
+            ReplyError(id, error.what());
+            return;
+        }
+#endif
+        if (!StartLessonAssetSyncTask(id, *tool_iter, std::move(arguments))) {
+            ReplyError(id, "lesson asset sync busy or worker unavailable");
+        }
+        return;
+    }
+
+    // Use main thread to call short-running tools.
     auto& app = Application::GetInstance();
     app.Schedule([this, id, tool_iter, tool_name, lesson_tool_allowed,
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
@@ -1519,4 +1645,65 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             ReplyError(id, e.what());
         }
     });
+}
+
+bool McpServer::StartLessonAssetSyncTask(
+    int id,
+    McpTool* tool,
+    PropertyList arguments
+) {
+    if (lesson_asset_sync_in_flight_.exchange(true)) {
+        ESP_LOGW(TAG, "lesson asset sync already in flight");
+        return false;
+    }
+
+    auto* context = new (std::nothrow) LessonAssetSyncTaskContext{
+        this, id, tool, std::move(arguments)};
+    if (context == nullptr) {
+        lesson_asset_sync_in_flight_.store(false);
+        ESP_LOGE(TAG, "lesson asset sync context allocation failed");
+        return false;
+    }
+
+    // TLS/flash work requires an internal stack. Low priority keeps websocket
+    // control frames and the Application task responsive during long SD syncs.
+    if (xTaskCreateWithCaps(
+            &McpServer::LessonAssetSyncTask,
+            "lesson_sd_sync",
+            8192,
+            context,
+            tskIDLE_PRIORITY + 1,
+            nullptr,
+            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+        delete context;
+        lesson_asset_sync_in_flight_.store(false);
+        ESP_LOGE(TAG, "lesson asset sync worker creation failed");
+        return false;
+    }
+    return true;
+}
+
+void McpServer::LessonAssetSyncTask(void* arg) {
+    std::unique_ptr<LessonAssetSyncTaskContext> context(
+        static_cast<LessonAssetSyncTaskContext*>(arg));
+    McpServer* server = context->server;
+
+    try {
+        try {
+            server->ReplyResult(
+                context->id, context->tool->Call(context->arguments));
+        } catch (const std::exception& error) {
+            ESP_LOGE(TAG, "lesson asset sync failed: %s", error.what());
+            server->ReplyError(context->id, error.what());
+        } catch (...) {
+            ESP_LOGE(TAG, "lesson asset sync failed");
+            server->ReplyError(context->id, "lesson asset sync failed");
+        }
+    } catch (...) {
+        ESP_LOGE(TAG, "lesson asset sync response allocation failed");
+    }
+
+    context.reset();
+    server->lesson_asset_sync_in_flight_.store(false);
+    vTaskDeleteWithCaps(nullptr);
 }

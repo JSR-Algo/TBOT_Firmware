@@ -806,9 +806,10 @@ bool IsPngImage(const void* data, size_t size) {
 #endif
 
 constexpr size_t kMaxLessonImageBytes = 512 * 1024;
+constexpr size_t kMaxLessonCinematicFileBytes = 4 * 1024 * 1024;
 constexpr size_t kMaxLessonDecodedImageBytes = 480 * 320 * 4;
 constexpr size_t kMaxLessonAssetPackAssets = 64;
-constexpr size_t kMaxLessonAssetPackDeclaredBytes = 4 * 1024 * 1024;
+constexpr size_t kMaxLessonAssetPackDeclaredBytes = 16 * 1024 * 1024;
 constexpr int kLessonImageHttpTimeoutMs = 1200;
 constexpr int64_t kLessonRenderElapsedMaxMs = 60000;
 
@@ -1070,7 +1071,17 @@ std::unique_ptr<LvglImage> FetchLessonLocalImage(const char* url) {
     return DecodeLessonImageBytes(data, content_length, "lesson image file");
 }
 
-bool LessonLocalFileReady(const char* url, size_t expected_size = 0) {
+size_t LessonAssetFileLimit(const char* media_type) {
+    return media_type != nullptr && std::strcmp(media_type, "video/mp4") == 0
+        ? kMaxLessonCinematicFileBytes
+        : kMaxLessonImageBytes;
+}
+
+bool LessonLocalFileReady(
+    const char* url,
+    size_t expected_size = 0,
+    size_t max_file_bytes = kMaxLessonImageBytes
+) {
     std::string path = LessonLocalPath(url);
     if (path.empty()) return false;
     std::string fs_path = LessonPackFileSystemPath(path);
@@ -1079,7 +1090,7 @@ bool LessonLocalFileReady(const char* url, size_t expected_size = 0) {
     bool ready = false;
     if (fseek(fp, 0, SEEK_END) == 0) {
         long file_size = ftell(fp);
-        ready = file_size > 0 && static_cast<size_t>(file_size) <= kMaxLessonImageBytes;
+        ready = file_size > 0 && static_cast<size_t>(file_size) <= max_file_bytes;
         if (ready && expected_size > 0) {
             ready = static_cast<size_t>(file_size) == expected_size;
         }
@@ -1124,6 +1135,7 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
             std::string asset_key_value = asset_key == nullptr ? "" : asset_key;
             TrimAsciiWhitespace(asset_key_value);
             const char* state = Str(asset, "state");
+            const char* media_type = Str(asset, "mediaType");
             const std::string normalized_state = NormalizeAsciiToken(state);
             const cJSON* checksum_ok = cJSON_GetObjectItem(asset, "checksumOk");
             const bool asset_verified =
@@ -1146,7 +1158,8 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
             if (asset_key_value.empty() || !asset_verified ||
                 !has_declared_size ||
                 expected_size > kMaxLessonAssetPackDeclaredBytes - total_declared_size ||
-                !LessonLocalFileReady(local_path, expected_size) ||
+                !LessonLocalFileReady(
+                    local_path, expected_size, LessonAssetFileLimit(media_type)) ||
                 !ready_asset_keys.insert(asset_key_value).second || !manifest_checksum_required ||
                 !cache_key_has_manifest_checksum) {
                 ready = false;
@@ -3209,13 +3222,15 @@ void Application::HandleLessonMessage(const cJSON* root) {
                                           ? kLessonRenderElapsedMaxMs
                                           : render_elapsed_raw_ms;
     SystemInfo::PrintHeapCheckpoint("lesson_render.complete");
+    const size_t render_min_internal =
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     SystemInfo::StopHeapPhaseMonitor();
 
     cJSON* telemetry = cJSON_CreateObject();
     cJSON_AddNumberToObject(telemetry, "internalFreeBytes",
                             static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)));
     cJSON_AddNumberToObject(telemetry, "internalMinimumFreeBytes",
-                            static_cast<double>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)));
+                            static_cast<double>(render_min_internal));
     cJSON_AddNumberToObject(telemetry, "psramFreeBytes",
                             static_cast<double>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
     cJSON_AddNumberToObject(telemetry, "renderElapsedMs", static_cast<double>(render_elapsed_ms));

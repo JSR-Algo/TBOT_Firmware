@@ -27,6 +27,21 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def implemented_layer_bodies(source: str, signature: str) -> list[str]:
+    bodies = []
+    offset = 0
+    while True:
+        try:
+            start = source.index(signature, offset)
+        except ValueError:
+            break
+        body = function_body(source[start:], signature)
+        if "(void)image" not in body:
+            bodies.append(body)
+        offset = start + 1
+    return bodies
+
+
 def test_lesson_background_layer_is_not_hidden_behind_opaque_chat_surfaces():
     source = SOURCE.read_text(encoding="utf-8")
     body = function_body(source, "void LcdDisplay::SetLessonBackground")
@@ -42,7 +57,8 @@ def test_clearing_lesson_background_restores_theme_backgrounds():
     source = SOURCE.read_text(encoding="utf-8")
     body = function_body(source, "void LcdDisplay::SetLessonBackground")
 
-    clear_branch = body[body.index("if (image == nullptr)") : body.index("lesson_background_cached_ = std::move(image)")]
+    clear_start = body.index("if (image == nullptr)")
+    clear_branch = body[clear_start : body.index("return;", clear_start)]
     assert "current_theme_" in clear_branch
     assert "lvgl_theme->background_color()" in clear_branch
     assert "lvgl_theme->chat_background_color()" in clear_branch
@@ -59,15 +75,7 @@ def test_lesson_background_is_persistent_not_preview_timer_based():
 
 def test_lesson_background_uses_cover_scale_not_width_only_fit():
     source = SOURCE.read_text(encoding="utf-8")
-    bodies = []
-    offset = 0
-    while True:
-        try:
-            start = source.index("void LcdDisplay::SetLessonBackground", offset)
-        except ValueError:
-            break
-        bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonBackground"))
-        offset = start + 1
+    bodies = implemented_layer_bodies(source, "void LcdDisplay::SetLessonBackground")
 
     assert "LessonImageCoverScale" in source
     assert len(bodies) >= 2
@@ -85,25 +93,8 @@ def test_lesson_object_and_robot_overlay_use_safe_composition_layout():
     assert "kLessonRobotMaxHeightPercent = 34" in source
     assert "kLessonRobotBottomInsetDivisor = 6" in source
 
-    object_bodies = []
-    overlay_bodies = []
-    offset = 0
-    while True:
-        try:
-            start = source.index("void LcdDisplay::SetLessonObject", offset)
-        except ValueError:
-            break
-        object_bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonObject"))
-        offset = start + 1
-
-    offset = 0
-    while True:
-        try:
-            start = source.index("void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)", offset)
-        except ValueError:
-            break
-        overlay_bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)"))
-        offset = start + 1
+    object_bodies = implemented_layer_bodies(source, "void LcdDisplay::SetLessonObject")
+    overlay_bodies = implemented_layer_bodies(source, "void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)")
 
     assert len(object_bodies) >= 2
     assert len(overlay_bodies) >= 2
@@ -219,15 +210,7 @@ def test_lesson_object_foreground_layer_exists_and_stacks_above_background():
     assert "virtual void SetLessonObject(std::unique_ptr<LvglImage> image)" in base_header
     assert "virtual void SetLessonObject(std::unique_ptr<LvglImage> image) override;" in header
 
-    bodies = []
-    offset = 0
-    while True:
-        try:
-            start = source.index("void LcdDisplay::SetLessonObject", offset)
-        except ValueError:
-            break
-        bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonObject"))
-        offset = start + 1
+    bodies = implemented_layer_bodies(source, "void LcdDisplay::SetLessonObject")
 
     assert len(bodies) >= 2, "both LCD UI variants must implement the foreground lesson object"
     for body in bodies:
@@ -247,15 +230,7 @@ def test_lesson_robot_overlay_layer_exists_and_stacks_above_object():
     assert "virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)" in base_header
     assert "virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;" in header
 
-    bodies = []
-    offset = 0
-    while True:
-        try:
-            start = source.index("void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)", offset)
-        except ValueError:
-            break
-        bodies.append(function_body(source[start:], "void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)"))
-        offset = start + 1
+    bodies = implemented_layer_bodies(source, "void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image)")
 
     assert len(bodies) >= 2, "both LCD UI variants must implement the robot overlay lesson layer"
     for body in bodies:

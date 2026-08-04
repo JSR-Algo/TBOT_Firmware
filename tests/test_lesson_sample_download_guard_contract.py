@@ -5,6 +5,21 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "main" / "mcp_server.cc"
 
 
+def function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace : index + 1]
+    raise AssertionError(f"unterminated function {signature}")
+
+
 def sample_sync_body() -> str:
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index('AddUserOnlyTool("self.lesson_assets.sync_sample_to_sd"')
@@ -57,10 +72,8 @@ def test_sample_manifest_is_fixed_to_server_filename_digest_pairs():
 
 def test_download_resources_and_temp_commit_are_scope_owned():
     source = SOURCE.read_text(encoding="utf-8")
-    mcp_body = source[
-        source.index("bool DownloadLessonAssetToFile(") :
-        source.index("\n}\n}\n\nMcpServer::McpServer", source.index("bool DownloadLessonAssetToFile("))
-    ]
+    start = source.index("bool DownloadLessonAssetToFile(", source.index("void EnsureSampleLessonAssetDir"))
+    mcp_body = function_body(source[start:], "bool DownloadLessonAssetToFile(")
     body = (ROOT / "main" / "lesson_asset_http_transfer.cc").read_text(
         encoding="utf-8"
     )

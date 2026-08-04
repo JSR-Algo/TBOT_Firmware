@@ -38,7 +38,7 @@ def test_goal2_runtime_integration_points_exist_on_canonical_architecture():
     assert "identity_registry.ObserveMountedCard" in board
     assert '#include "esp_build_identity.h"' in websocket
     identity = websocket.index("ReadRunningEspBuildIdentity")
-    set_header = websocket.index("websocket_->SetHeader", identity)
+    set_header = websocket.index("replacement_websocket->SetHeader", identity)
     connect = websocket.index("websocket_->Connect", set_header)
     assert identity < set_header < connect
     assert "RegisterLessonStorageHilMcpTools" in mcp_server
@@ -88,8 +88,8 @@ def test_transport_teardown_abandons_only_the_current_lesson_owner():
     assert "AbandonLessonStorageSession" not in network_error
     assert "callback_protocol" in audio_closed
     passive = audio_closed[audio_closed.index("lesson_runtime_active_.load() && passive_ws_intent_.load()") :]
-    passive = passive[: passive.index("connect_in_flight_.load()")]
-    assert "StartPassiveLessonWebsocket" in passive
+    passive = passive[: passive.index("if (connect_in_flight_.load())")]
+    assert "SchedulePassiveLessonReconnect" in passive
     assert "RequestLessonStorageAbandonment" not in passive
     assert "RequestLessonStorageAbandonment" in audio_closed
     assert "RequestLessonStorageAbandonment" in reset
@@ -124,9 +124,10 @@ def test_incoming_lesson_frame_uses_originating_transport_epoch():
     )
     assert "const std::uint64_t callback_transport_epoch =" in websocket_open
     assert "IncomingJsonTransportEpoch()" in websocket_open
-    assert "[this, callback_transport_epoch]" in websocket_open
+    assert "[this, connection_epoch, callback_transport_epoch]" in websocket_open
     assert "on_incoming_json_(root, callback_transport_epoch);" in websocket_open
-    assert "[this, display](const cJSON* root, std::uint64_t callback_transport_epoch)" in incoming
+    assert "[this, display, is_websocket_protocol](" in incoming
+    assert "const cJSON* root, std::uint64_t callback_transport_epoch" in incoming
     assert "EnqueueLessonMessage(root, callback_transport_epoch);" in incoming
     enqueue = app[app.index("void Application::EnqueueLessonMessage") :]
     enqueue = enqueue[: enqueue.index("void Application::RequestLessonStorageAbandonment")]

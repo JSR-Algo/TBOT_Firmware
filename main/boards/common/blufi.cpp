@@ -1701,12 +1701,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                         continuation_lock.unlock();
                         return;
                     }
-                    continuation_lock.unlock();
                     ESP_LOGI(BLUFI_TAG, "WiFi provisioned; stopping BLE before claim refresh");
                     if (!self->CompleteSuccessfulProvisioningTeardown(
                             "wifi_credentials_connected", provisioning_token)) {
+                        continuation_lock.unlock();
                         return;
                     }
+                    continuation_lock.unlock();
                     self->TryReportProvisioningAuthenticated(
                         "wifi_success_after_ble_teardown", generation);
                     Application::GetInstance().SchedulePendingTbotClaimRefresh(generation);

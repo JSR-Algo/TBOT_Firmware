@@ -21,6 +21,22 @@ config WEBSOCKET_URL
         persisted websocket.url yet. This must be the stable public ESP WebSocket origin
         without query strings, secrets, or ephemeral tunnel hosts.
 
+config TBOT_LESSON_ASSET_MAX_FILE_BYTES
+    int "Maximum lesson asset file size in bytes"
+    range 1 1073741824
+    default 134217728
+    help
+        Reject a declared lesson asset larger than this before starting network I/O.
+        The streaming transfer enforces the same value as a final backstop.
+
+config TBOT_LESSON_ASSET_MAX_PACK_BYTES
+    int "Maximum aggregate lesson asset pack size in bytes"
+    range 1 1073741824
+    default 268435456
+    help
+        Reject a lesson asset pack whose declared file sizes exceed this aggregate
+        before creating the background storage worker or starting network I/O.
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

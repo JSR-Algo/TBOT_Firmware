@@ -64,7 +64,22 @@ def archive_manager_commit(commit: str, destination: Path) -> None:
     archive_path = destination / "manager.tar"
     archive_path.write_bytes(archive)
     with tarfile.open(archive_path) as source:
-        source.extractall(destination / "manager")
+        required = json.loads(FIXTURE.read_text(encoding="utf-8"))["managerFile"]
+        target_root = destination / "manager"
+        for member in source:
+            if member.name != required:
+                continue
+            if not member.isfile() or member.name.startswith("/") or ".." in Path(member.name).parts:
+                raise RuntimeError(f"unsafe manager archive member: {member.name}")
+            payload = source.extractfile(member)
+            if payload is None:
+                raise RuntimeError(f"missing manager archive member: {member.name}")
+            target = target_root / member.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload.read())
+            break
+        if not (target_root / required).is_file():
+            raise RuntimeError(f"missing required manager file: {required}")
 
 
 def test_checker_preserves_the_e13c7eb9_failure_as_a_regression_case():

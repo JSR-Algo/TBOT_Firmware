@@ -7,6 +7,21 @@ ATTESTATION_SOURCE = ROOT / "main" / "lesson_asset_sync_attestation.cc"
 MAIN_CMAKE = ROOT / "main" / "CMakeLists.txt"
 
 
+def function_body(text: str, signature: str, offset: int = 0) -> str:
+    start = text.index(signature, offset)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace : index + 1]
+    raise AssertionError(f"unterminated function {signature}")
+
+
 def sync_body() -> str:
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index('AddUserOnlyTool("self.lesson_assets.sync_to_sd"')
@@ -39,7 +54,8 @@ def test_generic_sync_normalizes_alias_pairs_and_rejects_mismatches():
     assert 'throw std::runtime_error("lesson asset sync request invalid")' in validation
     assert '"sdPath"' in validation
     assert '"onlineUrl"' in validation
-    assert '"localPath", asset.destination' in body
+    assert "asset.destination" in body
+    assert '"localPath", asset.destination' not in body
 
 def test_generic_sync_aliases_must_be_strings_when_present():
     source = SOURCE.read_text(encoding="utf-8")
@@ -52,6 +68,40 @@ def test_generic_sync_aliases_must_be_strings_when_present():
     assert "cJSON_GetObjectItem(object, fallback_field)" in validation
     assert "!cJSON_IsString(preferred)" in validation
     assert "!cJSON_IsString(fallback)" in validation
+
+
+def test_generic_sync_accepts_only_valid_renderer_v4_cue_metadata():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = source[
+        source.index("ValidateLessonAssetSyncPackOrThrow(") :
+        source.index("void DownloadLessonAssetToVerifiedFile(")
+    ]
+
+    for field in ("cueId", "effect", "stepKey", "playbackMode"):
+        assert f'"{field}"' in validation
+    assert "IsOptionalRendererV4AssetMetadata(asset)" in validation
+    assert "IsOptionalRendererV4CueMetadata(asset)" in source
+    assert "IsOptionalSafeCueToken" in source
+    assert "IsOptionalLessonPlaybackMode" in source
+    assert 'std::strcmp(value->valuestring, "once") == 0' in source
+    assert 'std::strcmp(value->valuestring, "loop") == 0' in source
+
+
+def test_generic_sync_strictly_validates_renderer_v4_derivative_attestation():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = source[
+        source.index("ValidateLessonAssetSyncPackOrThrow(") :
+        source.index("void DownloadLessonAssetToVerifiedFile(")
+    ]
+
+    for field in ("derivativeId", "phaseId", "compatibilityMetadata"):
+        assert f'"{field}"' in validation
+    assert "IsOptionalRendererV4AssetMetadata(asset)" in validation
+    assert "IsExactRendererV4CompatibilityMetadata" in source
+    assert "HasOnlyAllowedJsonFields(metadata, kCompatibilityFields)" in source
+    assert 'std::strcmp(codec->valuestring, "mjpeg") == 0' in source
+    assert "cJSON_IsFalse(has_audio)" in source
+    assert "IsBoundedPositiveIntegerField(metadata, \"frameCount\", 900)" in source
 
 def test_generic_sync_counts_critical_failures_and_activates_only_verified_critical_pack():
     source = SOURCE.read_text(encoding="utf-8")
@@ -244,9 +294,9 @@ def test_sync_response_is_checked_and_staging_cleanup_is_scope_bound():
     assert "TBOT_LESSON_ASSET_STAGING_TESTING" in staging_header + staging_source
     assert "!defined(ESP_PLATFORM)" in staging_header + staging_source
     assert "MakeCheckedCJsonObject()" in body
-    assert "MakeCheckedCJsonArray()" in body
-    assert "CheckedCJsonAddItemToArray" in body
     assert "CheckedCJsonAddStringToObject" in body
+    assert "MakeCheckedCJsonArray()" not in body
+    assert '"files"' not in body
     assert '"MCP response allocation failed"' in checked
     assert "std::string(printed.get())" in checked
     assert "argument.set_value<std::string>(CheckedCJsonPrint(value));" in source
@@ -273,6 +323,19 @@ def test_generic_sync_propagates_exact_declared_size_without_making_size_require
     assert "bool has_declared_size" in helper
     assert "size_t declared_size" in helper
     assert "IsOptionalNonNegativeInteger(asset, \"size\")" in validation
+
+
+def test_sync_size_policy_rejects_each_file_and_aggregate_before_worker_creation():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = function_body(source, "ValidateLessonAssetSyncPackOrThrow(")
+    dispatch = function_body(source, "void McpServer::DoToolCall(")
+
+    assert "IsLessonAssetDeclaredFileSizeAllowed" in validation
+    assert "AccumulateLessonAssetDeclaredSize" in validation
+    assert "declared_pack_bytes" in validation
+    preflight = dispatch.index("ValidateLessonAssetSyncPackOrThrow(")
+    worker = dispatch.index("StartLessonAssetSyncTask(")
+    assert preflight < worker
 
 def test_sync_response_has_task10_activation_envelope():
     body = sync_body()
@@ -323,7 +386,7 @@ def test_mcp_delegates_the_real_transfer_loop_to_the_host_tested_unit():
     start = source.index(
         "bool DownloadLessonAssetToFile(", source.index("void EnsureSampleLessonAssetDir")
     )
-    body = source[start : source.index("\n}\n}\n\nMcpServer::McpServer", start)]
+    body = function_body(source, "bool DownloadLessonAssetToFile(", start)
 
     assert '"lesson_asset_http_transfer.cc"' in cmake
     assert "DownloadLessonAssetHttpBodyToFile(" in body

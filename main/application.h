@@ -361,6 +361,7 @@ private:
     void HandleListeningWatchdogTick();
     void ContinueOpenAudioChannel(ListeningMode mode);
     void StartPassiveLessonWebsocket();
+    bool StartOpenChannelWorker(void* context);
     static void OpenChannelTask(void* arg);            // T1: blocking connect, off app task
     void DoResetProtocol();                            // T1: actual reset (worker-safe)
     void ArmConnectWatchdog();                         // SM-3: bound CONNECTING

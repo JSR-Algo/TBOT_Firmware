@@ -62,8 +62,8 @@ def test_mqtt_hello_intentionally_omits_lesson_capability():
     assert 'cJSON_AddStringToObject(root, "transport", "udp");' in mqtt
 
 
-def test_lesson_protocol_dispatch_remains_websocket_only_with_persistent_worker():
-    """The worker is lifecycle infrastructure, while lesson dispatch remains WS-only."""
+def test_lesson_protocol_dispatch_remains_websocket_only_with_transient_worker():
+    """The connect worker exists only while opening a WS, while dispatch stays WS-only."""
     app = read("main/application.cc")
     init = app[app.index("void Application::InitializeProtocol()"): app.index("protocol_->OnConnected")]
     assert "lesson_worker" not in init
@@ -91,7 +91,7 @@ def test_lesson_protocol_dispatch_remains_websocket_only_with_persistent_worker(
     )
 
 
-def test_lesson_worker_reserves_persistent_psram_buffers_with_internal_control_blocks():
+def test_lesson_message_worker_reserves_persistent_psram_buffers_with_internal_control_blocks():
     app = read("main/application.cc")
     constructor = app[app.index("Application::Application()"): app.index("Application::~Application()")]
     destructor = app[app.index("Application::~Application()"): app.index("void Application::EnqueueLessonVisualCompletion")]
@@ -122,3 +122,42 @@ def test_lesson_worker_reserves_persistent_psram_buffers_with_internal_control_b
     queue_free = destructor.index("heap_caps_free(lesson_message_queue_storage)", queue_drain)
     stack_free = destructor.index("heap_caps_free(lesson_message_task_stack)", queue_free)
     assert task_delete < queue_drain < queue_free < stack_free
+
+
+def test_websocket_open_worker_does_not_reserve_an_idle_internal_stack():
+    app = read("main/application.cc")
+    constructor = app[app.index("Application::Application()"): app.index("Application::~Application()")]
+    starter = app[app.index("bool Application::StartOpenChannelWorker"): app.index("void Application::OpenChannelTask")]
+    worker = app[app.index("void Application::OpenChannelTask"): app.index("void Application::ArmConnectWatchdog")]
+
+    assert "open_channel_task_stack" not in app
+    assert "open_channel_task_buffer" not in app
+    assert "open_channel_queue" not in app
+    assert '"lesson_ws"' not in constructor
+    assert "xTaskCreateStatic" not in starter
+    assert "xTaskCreateWithCaps(" in starter
+    assert "&Application::OpenChannelTask" in starter
+    assert "kOpenChannelWorkerStackDepth" in starter
+    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in starter
+    assert "xQueueReceive" not in worker
+    assert "for (;;)" not in worker
+    assert "vTaskDeleteWithCaps(nullptr);" in worker
+
+
+def test_each_channel_open_path_spawns_the_transient_worker_after_intent_is_published():
+    app = read("main/application.cc")
+    passive = app[app.index("void Application::StartPassiveLessonWebsocket"): app.index("void Application::ContinueOpenAudioChannel")]
+    active = app[app.index("void Application::ContinueOpenAudioChannel"): app.index("bool Application::StartOpenChannelWorker")]
+    wake = app[app.index("void Application::ContinueWakeWordInvoke"): app.index("void Application::FinishWakeWordInvoke")]
+
+    for body in (passive, active, wake):
+        context = body.index("auto* ctx = new ConnectContext")
+        spawn = body.index("StartOpenChannelWorker(ctx)", context)
+        failure_cleanup = body.index("delete ctx;", spawn)
+        clear_inflight = body.index("connect_in_flight_.store(false);", failure_cleanup)
+        assert context < spawn < failure_cleanup < clear_inflight
+
+    close = app[app.index("void Application::CloseAudioChannelByIntent"): app.index("void Application::DoResetProtocol")]
+    reset = app[app.index("void Application::ResetProtocol"):]
+    assert "connect_close_deferral_.Request(connect_in_flight_.load())" in close
+    assert "reset_pending_.store(true);" in reset
