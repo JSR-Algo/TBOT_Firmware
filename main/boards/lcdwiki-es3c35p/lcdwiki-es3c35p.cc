@@ -5,6 +5,7 @@
 #include "button.h"
 #include "config.h"
 #include "led/single_led.h"
+#include "lesson_cinematic_hil_telemetry.h"
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
 #include "physical_sd_identity.h"
 #include "sd_fat_session_guard.h"
@@ -35,6 +36,7 @@
 #include <esp_log.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <esp_timer.h>
 #include <esp_vfs_fat.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -422,6 +424,9 @@ private:
         auto* self = static_cast<St77922QspiDisplay*>(context);
         if (self->lesson_cinematic_completion_gate_.OnPanelCompletion() &&
             self->lesson_cinematic_pending_.exchange(false, std::memory_order_acq_rel)) {
+            self->lesson_cinematic_completion_ms_.store(
+                static_cast<std::uint64_t>(xTaskGetTickCountFromISR()) * portTICK_PERIOD_MS,
+                std::memory_order_release);
             BaseType_t higher_priority_task_woken = pdFALSE;
             xSemaphoreGiveFromISR(self->lesson_cinematic_done_, &higher_priority_task_woken);
             return higher_priority_task_woken == pdTRUE;
@@ -473,6 +478,8 @@ private:
 
     bool QueueLessonCinematicTransport(const std::uint16_t* pixels) {
         while (xSemaphoreTake(lesson_cinematic_done_, 0) == pdTRUE) {}
+        tbot::LessonCinematicHilTelemetryRecordFrameQueued(
+            static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
         lesson_cinematic_completion_gate_.ArmNextCompletion();
         lesson_cinematic_pending_.store(true, std::memory_order_release);
         const esp_err_t result = esp_lcd_panel_draw_bitmap(panel_, 0, 0, 320, 480, pixels);
@@ -485,7 +492,13 @@ private:
     }
 
     bool WaitLessonCinematicTransport(std::uint32_t timeout_ms) {
-        return xSemaphoreTake(lesson_cinematic_done_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+        const bool completed =
+            xSemaphoreTake(lesson_cinematic_done_, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+        if (completed) {
+            tbot::LessonCinematicHilTelemetryRecordPanelCompletion(
+                lesson_cinematic_completion_ms_.load(std::memory_order_acquire));
+        }
+        return completed;
     }
 
     bool EndLessonCinematicTransport() {
@@ -511,6 +524,7 @@ private:
 
     SemaphoreHandle_t lesson_cinematic_done_ = nullptr;
     LessonCinematicPanelCompletionGate lesson_cinematic_completion_gate_;
+    std::atomic<std::uint64_t> lesson_cinematic_completion_ms_{0};
     std::atomic<bool> lesson_cinematic_pending_{false};
     bool lesson_cinematic_stopped_ = false;
     LessonCinematicDisplayTransport lesson_cinematic_transport_{{

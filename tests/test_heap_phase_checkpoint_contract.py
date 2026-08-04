@@ -149,6 +149,15 @@ def test_lesson_render_records_a_local_minimum_before_emitting_the_step_ack():
     checkpoint = handler.index(
         'SystemInfo::PrintHeapCheckpoint("lesson_render.complete");', fetch
     )
-    monitor_stop = handler.index("SystemInfo::StopHeapPhaseMonitor();", checkpoint)
+    local_minimum = handler.index(
+        "const size_t render_min_internal =\n"
+        "        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);",
+        checkpoint,
+    )
+    monitor_stop = handler.index("SystemInfo::StopHeapPhaseMonitor();", local_minimum)
+    telemetry = handler.index(
+        'cJSON_AddNumberToObject(telemetry, "internalMinimumFreeBytes"', monitor_stop
+    )
     ack = handler.index("emit_ack(root, sequence, rendered", monitor_stop)
-    assert render_start < monitor_start < fetch < checkpoint < monitor_stop < ack
+    assert "static_cast<double>(render_min_internal)" in handler[telemetry:ack]
+    assert render_start < monitor_start < fetch < checkpoint < local_minimum < monitor_stop < telemetry < ack

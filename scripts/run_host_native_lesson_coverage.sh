@@ -80,6 +80,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     main/lesson_tvideo_template.cc \
     main/lesson_cinematic_renderer.cc \
     main/lesson_flattened_cinematic_renderer.cc \
+    main/lesson_cinematic_hil_telemetry.cc \
     main/lesson_chroma_compositor.cc \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \
     "${BUILD_DIR}/src/lesson_layer_state.cc" \

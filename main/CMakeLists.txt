@@ -49,6 +49,7 @@ set(SOURCES "audio/audio_codec.cc"
             "lesson_rgb565_stream.cc"
             "lesson_chroma_compositor.cc"
             "lesson_cinematic_renderer.cc"
+            "lesson_cinematic_hil_telemetry.cc"
             "lesson_flattened_cinematic_renderer.cc"
             "main.cc"
             )

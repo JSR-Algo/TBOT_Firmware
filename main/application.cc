@@ -49,7 +49,7 @@
 
 static constexpr uint32_t kListenPlaybackDrainTimeoutMs = 650;
 static constexpr uint32_t kSpeakingTimeoutMs = 12000;
-static constexpr uint32_t kTtsStopPlaybackDrainTimeoutMs = 15000;
+static constexpr uint32_t kTtsStopPlaybackDrainTimeoutMs = 2000;
 static constexpr uint32_t kListeningNoSpeechTimeoutMs = 15000;
 static constexpr uint32_t kListeningAutoStopMaxTurnMs = 10000;
 static constexpr uint32_t kListeningMaxTurnMs = 60000;
@@ -90,23 +90,28 @@ static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 static constexpr uint32_t kOpenChannelWorkerStackDepth = 8192;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
-static constexpr uint32_t kLessonMessageWorkerStackDepth = 12288;
+static constexpr uint32_t kLessonMessageWorkerStackDepth = 32768;
+static constexpr uint32_t kLessonMessageWorkerMinimumFreeStackBytes = 4096;
 #endif
 
 namespace {
-DRAM_ATTR StaticTask_t open_channel_task_buffer;
-DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
-static_assert(sizeof(open_channel_task_stack) == kOpenChannelWorkerStackDepth,
-              "ESP-IDF task stack depth must remain byte-sized on ESP32-S3");
-DRAM_ATTR StaticQueue_t open_channel_queue_buffer;
-DRAM_ATTR void* open_channel_queue_storage[1];
-QueueHandle_t open_channel_queue = nullptr;
-TaskHandle_t open_channel_task = nullptr;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 DRAM_ATTR StaticTask_t lesson_message_task_buffer;
 DRAM_ATTR StaticQueue_t lesson_message_queue_buffer;
 StackType_t* lesson_message_task_stack = nullptr;
 uint8_t* lesson_message_queue_storage = nullptr;
+
+void LogLessonWorkerStackWatermark(const char* stage) {
+    const UBaseType_t free_stack_bytes = uxTaskGetStackHighWaterMark(nullptr);
+    if (free_stack_bytes < kLessonMessageWorkerMinimumFreeStackBytes) {
+        ESP_LOGE(TAG, "lesson_worker stack low stage=%s free=%u threshold=%u",
+                 stage, static_cast<unsigned>(free_stack_bytes),
+                 static_cast<unsigned>(kLessonMessageWorkerMinimumFreeStackBytes));
+        return;
+    }
+    ESP_LOGI(TAG, "lesson_worker stack stage=%s free=%u", stage,
+             static_cast<unsigned>(free_stack_bytes));
+}
 #endif
 }  // namespace
 
@@ -136,18 +141,6 @@ static constexpr uint64_t kHeartbeatIntervalUs = 20ULL * 1000000ULL;  // 20s
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
-
-    open_channel_queue =
-        xQueueCreateStatic(1, sizeof(void*), reinterpret_cast<uint8_t*>(open_channel_queue_storage),
-                           &open_channel_queue_buffer);
-    if (open_channel_queue != nullptr) {
-        open_channel_task = xTaskCreateStatic(
-            &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackDepth, this,
-            tskIDLE_PRIORITY + 3, open_channel_task_stack, &open_channel_task_buffer);
-    }
-    if (open_channel_queue == nullptr || open_channel_task == nullptr) {
-        ESP_LOGE(TAG, "Failed to create persistent internal websocket worker");
-    }
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     constexpr uint32_t kLessonWorkerMemoryCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
@@ -414,6 +407,7 @@ void Application::LessonMessageTask(void* arg) {
         }
         if (item.kind != LessonQueueItemKind::kFrame || item.payload == nullptr) continue;
         const size_t payload_bytes = strlen(item.payload);
+        LogLessonWorkerStackWatermark("before_parse");
         LogLessonHeapBoundary("worker.before_parse", payload_bytes);
         cJSON* root = cJSON_Parse(item.payload);
         LogLessonHeapBoundary("worker.after_parse", payload_bytes);
@@ -425,6 +419,7 @@ void Application::LessonMessageTask(void* arg) {
                      cJSON_IsNumber(sequence) ? sequence->valueint : -1);
             SetLessonTransportEpoch(item.transport_epoch);
             self->HandleLessonMessage(root);
+            LogLessonWorkerStackWatermark("after_handle");
             LogLessonHeapBoundary("worker.after_handle", payload_bytes);
             cJSON_Delete(root);
             LogLessonHeapBoundary("worker.after_delete", payload_bytes);
@@ -1836,7 +1831,9 @@ bool Application::FinishClaimActivationAfterLocalAssetsReady() {
     // lesson/nudge WebSocket for claimed idle devices.
     SetDeviceState(kDeviceStateIdle);
     audio_service_.Start();
-    audio_service_.EnableWakeWordDetection(true);
+    if (!lesson_asset_sync_quiet_.load()) {
+        audio_service_.EnableWakeWordDetection(true);
+    }
     StartHeartbeat();
     DispatchDeviceHeartbeat();
     Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::CONNECTED, "link", Lang::Sounds::OGG_SUCCESS);
@@ -3143,7 +3140,9 @@ void Application::InitializeProtocol() {
             ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
             StopHeartbeat();
             if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
-                audio_service_.EnableWakeWordDetection(true);
+                if (!lesson_asset_sync_quiet_.load()) {
+                    audio_service_.EnableWakeWordDetection(true);
+                }
             }
         } else {
             const bool lesson_answer_turn =
@@ -3266,6 +3265,13 @@ void Application::InitializeProtocol() {
         // behavior — defense-in-depth on the shared dispatch path only.
         if (!cJSON_IsString(type)) {
             ESP_LOGW(TAG, "Missing or non-string message type, dropping frame");
+            return;
+        }
+        if (lesson_asset_sync_quiet_.load() &&
+            (strcmp(type->valuestring, "tts") == 0 ||
+             strcmp(type->valuestring, "stt") == 0)) {
+            ESP_LOGI(TAG, "lesson asset sync quiet dropped voice frame type=%s",
+                     type->valuestring);
             return;
         }
         if (strcmp(type->valuestring, "tts") == 0) {
@@ -3896,6 +3902,58 @@ bool Application::IsLessonNetworkRenderQuiet() const {
     return lesson_network_render_quiet_.load() > 0;
 }
 
+bool Application::BeginLessonAssetSyncQuiet() {
+    bool expected = false;
+    if (!lesson_asset_sync_quiet_.compare_exchange_strong(expected, true)) {
+        ESP_LOGW(TAG, "lesson asset sync quiet already active");
+        return false;
+    }
+
+    if (GetDeviceState() != kDeviceStateIdle ||
+        lesson_runtime_active_.load() ||
+        connect_in_flight_.load() ||
+        reset_pending_.load()) {
+        lesson_asset_sync_quiet_.store(false);
+        ESP_LOGW(TAG, "lesson asset sync quiet rejected state=%d lesson=%d connect=%d reset=%d",
+                 static_cast<int>(GetDeviceState()),
+                 lesson_runtime_active_.load() ? 1 : 0,
+                 connect_in_flight_.load() ? 1 : 0,
+                 reset_pending_.load() ? 1 : 0);
+        return false;
+    }
+
+    tts_audio_accepting_.store(false);
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.EnableWakeWordDetection(false);
+    audio_service_.ResetDecoder();
+    while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+    ESP_LOGI(TAG, "lesson asset sync quiet begin");
+    return true;
+}
+
+void Application::EndLessonAssetSyncQuiet() {
+    if (!lesson_asset_sync_quiet_.load()) {
+        return;
+    }
+
+    tts_audio_accepting_.store(false);
+    audio_service_.EnableVoiceProcessing(false);
+    audio_service_.ResetDecoder();
+    while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+    if (!lesson_asset_sync_quiet_.exchange(false)) {
+        return;
+    }
+
+    if (IsDeviceClaimed() && audio_service_.IsRunning() &&
+        GetDeviceState() == kDeviceStateIdle &&
+        !lesson_runtime_active_.load() &&
+        !connect_in_flight_.load() &&
+        !reset_pending_.load()) {
+        audio_service_.EnableWakeWordDetection(true);
+    }
+    ESP_LOGI(TAG, "lesson asset sync quiet end");
+}
+
 void Application::StopListening() {
     const bool lesson_answer_turn =
         lesson_interactive_listen_pending_.load() ||
@@ -4023,8 +4081,7 @@ void Application::StartPassiveLessonWebsocket() {
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
     auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
-    if (open_channel_queue == nullptr || open_channel_task == nullptr ||
-        xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE) {
+    if (!StartOpenChannelWorker(ctx)) {
         delete ctx;
         connect_in_flight_.store(false);
         passive_ws_intent_.store(false);
@@ -4062,8 +4119,9 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         return;
     }
     // SM-1/WSS-1: OpenAudioChannel() blocks (TCP+TLS handshake + server hello,
-    // up to ~20s). Queue it on the persistent worker so the app task keeps draining
-    // audio/VAD/abort/UI without reallocating a large internal stack. connect_generation_
+    // up to ~20s). Run it on a transient worker so the app task keeps draining
+    // audio/VAD/abort/UI without reserving an internal stack while the socket is idle.
+    // connect_generation_
     // invalidates a stale result; the
     // connect watchdog (SM-3) recovers a wedged/black-hole connect.
     reconnect_mode_ = mode;
@@ -4074,8 +4132,7 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     ArmConnectWatchdog();
     passive_ws_intent_.store(false);
     auto* ctx = new ConnectContext{this, mode, gen, std::string(), false, false};
-    if (open_channel_queue == nullptr || open_channel_task == nullptr ||
-        xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE) {
+    if (!StartOpenChannelWorker(ctx)) {
         delete ctx;
         connect_in_flight_.store(false);
         connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
@@ -4085,46 +4142,49 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     }
 }
 
+bool Application::StartOpenChannelWorker(void* context) {
+    return xTaskCreateWithCaps(
+               &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackDepth,
+               context, tskIDLE_PRIORITY + 3, nullptr,
+               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) == pdPASS;
+}
+
 void Application::OpenChannelTask(void* arg) {
-    auto* self = static_cast<Application*>(arg);
-    for (;;) {
-        ConnectContext* ctx = nullptr;
-        if (xQueueReceive(open_channel_queue, &ctx, portMAX_DELAY) != pdTRUE || ctx == nullptr) {
-            continue;
-        }
-        ListeningMode mode = ctx->mode;
-        uint32_t gen = ctx->generation;
-        std::string wake_word = ctx->wake_word;
-        bool wake_word_invoke = ctx->wake_word_invoke;
-        bool passive_preconnect = ctx->passive_preconnect;
-        delete ctx;
+    auto* ctx = static_cast<ConnectContext*>(arg);
+    auto* self = ctx->app;
+    ListeningMode mode = ctx->mode;
+    uint32_t gen = ctx->generation;
+    std::string wake_word = ctx->wake_word;
+    bool wake_word_invoke = ctx->wake_word_invoke;
+    bool passive_preconnect = ctx->passive_preconnect;
+    delete ctx;
 
-        // The ONLY blocking call, now off the app task.
-        bool ok = false;
-        int max_attempts = wake_word_invoke ? kWakeWordAudioChannelOpenMaxAttempts : 1;
-        for (int attempt = 1;
-             self->protocol_ && !self->protocol_->IsAudioChannelOpened() && attempt <= max_attempts;
-             ++attempt) {
-            self->protocol_->SetIncomingJsonTransportEpoch(
-                self->lesson_transport_epoch_gate_.PublishedEpoch());
-            ok = self->protocol_->OpenAudioChannel();
-            if (ok) {
-                break;
-            }
-            if (wake_word_invoke) {
-                ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d", attempt,
-                         kWakeWordAudioChannelOpenMaxAttempts);
-            }
-            if (wake_word_invoke && attempt < max_attempts) {
-                vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
-            }
+    // The ONLY blocking call, now off the app task.
+    bool ok = false;
+    int max_attempts = wake_word_invoke ? kWakeWordAudioChannelOpenMaxAttempts : 1;
+    for (int attempt = 1;
+         self->protocol_ && !self->protocol_->IsAudioChannelOpened() && attempt <= max_attempts;
+         ++attempt) {
+        self->protocol_->SetIncomingJsonTransportEpoch(
+            self->lesson_transport_epoch_gate_.PublishedEpoch());
+        ok = self->protocol_->OpenAudioChannel();
+        if (ok) {
+            break;
         }
-        if (self->protocol_ && self->protocol_->IsAudioChannelOpened()) {
-            ok = true;
+        if (wake_word_invoke) {
+            ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d", attempt,
+                     kWakeWordAudioChannelOpenMaxAttempts);
         }
-        self->connect_in_flight_.store(false);  // worker is done using protocol_
+        if (wake_word_invoke && attempt < max_attempts) {
+            vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
+        }
+    }
+    if (self->protocol_ && self->protocol_->IsAudioChannelOpened()) {
+        ok = true;
+    }
+    self->connect_in_flight_.store(false);  // worker is done using protocol_
 
-        self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
+    self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect]() {
             self->CancelConnectWatchdog();
             if (self->reboot_pending_.exchange(false)) {
                 self->reset_pending_.store(false);
@@ -4180,15 +4240,17 @@ void Application::OpenChannelTask(void* arg) {
                         self->DispatchDeviceHeartbeat();
                         self->SetListeningMode(kListeningModeManualStop);
                     } else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load()) {
-                        const std::string deferred_wake_word = self->deferred_wake_word_;
-                        self->deferred_wake_word_.clear();
-                        if (!deferred_wake_word.empty()) {
-                            ESP_LOGI(TAG, "passive_lesson_deferred_wake_resumed");
-                            self->FinishWakeWordInvoke(deferred_wake_word);
-                        } else {
-                            self->audio_service_.EnableWakeWordDetection(true);
-                            ESP_LOGI(TAG, "passive_lesson_wake_word_rearmed running=%d",
-                                     self->audio_service_.IsWakeWordRunning() ? 1 : 0);
+                        if (!self->lesson_asset_sync_quiet_.load()) {
+                            const std::string deferred_wake_word = self->deferred_wake_word_;
+                            self->deferred_wake_word_.clear();
+                            if (!deferred_wake_word.empty()) {
+                                ESP_LOGI(TAG, "passive_lesson_deferred_wake_resumed");
+                                self->FinishWakeWordInvoke(deferred_wake_word);
+                            } else {
+                                self->audio_service_.EnableWakeWordDetection(true);
+                                ESP_LOGI(TAG, "passive_lesson_wake_word_rearmed running=%d",
+                                         self->audio_service_.IsWakeWordRunning() ? 1 : 0);
+                            }
                         }
                     }
                 } else if (wake_word_invoke) {
@@ -4265,8 +4327,8 @@ void Application::OpenChannelTask(void* arg) {
                     xEventGroupSetBits(self->event_group_, MAIN_EVENT_ERROR);
                 }
             }
-        });
-    }
+    });
+    vTaskDeleteWithCaps(nullptr);
 }
 
 void Application::ArmConnectWatchdog() {
@@ -4441,6 +4503,11 @@ void Application::HandleReconnectTick() {
         return;
     }
     if (reconnect_passive_.exchange(false)) {
+        if (lesson_asset_sync_quiet_.load()) {
+            ESP_LOGI(TAG, "lesson asset sync quiet deferred passive reconnect");
+            SchedulePassiveLessonReconnect();
+            return;
+        }
         if (protocol_->IsAudioChannelOpened()) {
             passive_reconnect_attempt_ = 0;
             return;
@@ -4475,6 +4542,11 @@ void Application::HandleReconnectTick() {
         StartPassiveLessonWebsocket();
         return;
     }
+    if (lesson_asset_sync_quiet_.load()) {
+        ESP_LOGI(TAG, "lesson asset sync quiet deferred voice reconnect");
+        ScheduleReconnect(reconnect_mode_, reconnect_resume_listening_.load());
+        return;
+    }
     if (lesson_runtime_active_.load()) {
         ESP_LOGI(TAG, "lesson reconnect ignored");
         reconnect_attempt_ = 0;
@@ -4502,6 +4574,11 @@ void Application::HandleReconnectTick() {
 
 void Application::HandleStartListeningEvent() {
     auto state = GetDeviceState();
+    if (lesson_asset_sync_quiet_.load()) {
+        ESP_LOGI(TAG, "lesson asset sync quiet ignored start listening state=%d",
+                 static_cast<int>(state));
+        return;
+    }
     const bool lesson_answer_turn =
         lesson_interactive_listen_pending_.load() ||
         lesson_interactive_listening_active_.load();
@@ -4608,6 +4685,10 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    if (lesson_asset_sync_quiet_.load()) {
+        ESP_LOGI(TAG, "lesson asset sync quiet ignored wake word");
+        return;
+    }
     if (!protocol_) {
         return;
     }
@@ -4697,8 +4778,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         ArmConnectWatchdog();
         passive_ws_intent_.store(false);
         auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
-        if (open_channel_queue == nullptr || open_channel_task == nullptr ||
-            xQueueSend(open_channel_queue, &ctx, 0) != pdTRUE) {
+        if (!StartOpenChannelWorker(ctx)) {
             delete ctx;
             connect_in_flight_.store(false);
             connect_attempt_active_.store(false);  // WSS-8: no worker -> cycle ended
@@ -4918,7 +4998,8 @@ void Application::HandleStateChangedEvent() {
             // lessons (wake word -> talk) work normally. A fresh claim confirm
             // enables wake-word explicitly (see ConfirmPendingTbotClaim) so audio
             // comes up without a reboot.
-            if (IsDeviceClaimed() && !connect_in_flight_.load()) {
+            if (IsDeviceClaimed() && !connect_in_flight_.load() &&
+                !lesson_asset_sync_quiet_.load()) {
                 audio_service_.EnableWakeWordDetection(true);
             } else {
                 audio_service_.EnableWakeWordDetection(false);
@@ -5333,6 +5414,10 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {
+    if (lesson_asset_sync_quiet_.load()) {
+        ESP_LOGI(TAG, "lesson asset sync quiet ignored direct wake");
+        return;
+    }
     if (!protocol_) {
         return;
     }

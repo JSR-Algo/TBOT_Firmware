@@ -12,8 +12,10 @@
 #include <font_awesome.h>
 #include <esp_log.h>
 #include <esp_err.h>
+#include <esp_heap_caps.h>
 #include <esp_lvgl_port.h>
 #include <esp_psram.h>
+#include <esp_timer.h>
 #include <cstring>
 #include <new>
 #include <src/misc/cache/lv_cache.h>
@@ -455,11 +457,47 @@ void LcdDisplay::EndLessonCinematic() {}
 bool LcdDisplay::PresentLessonFramebuffer(const std::uint16_t* pixels,
                                           std::uint16_t width,
                                           std::uint16_t height) {
-    if (pixels == nullptr || panel_ == nullptr || width != width_ || height != height_) {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+    if (pixels == nullptr || display_ == nullptr || lesson_background_ == nullptr ||
+        width != width_ || height != height_) {
         return false;
     }
     DisplayLockGuard lock(this);
-    return esp_lcd_panel_draw_bitmap(panel_, 0, 0, width, height, pixels) == ESP_OK;
+    const std::size_t framebuffer_bytes =
+        static_cast<std::size_t>(width) * height * sizeof(std::uint16_t);
+    if (lesson_cinematic_framebuffer_ == nullptr) {
+        void* storage = heap_caps_malloc(
+            framebuffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (storage == nullptr) {
+            ESP_LOGE(TAG, "Failed to allocate persistent cinematic LVGL surface");
+            return false;
+        }
+        lesson_cinematic_pixels_ = static_cast<std::uint16_t*>(storage);
+        lesson_cinematic_framebuffer_ = std::make_unique<LvglAllocatedImage>(
+            storage, framebuffer_bytes, width, height, width * sizeof(std::uint16_t),
+            LV_COLOR_FORMAT_RGB565);
+    }
+    std::memcpy(lesson_cinematic_pixels_, pixels, framebuffer_bytes);
+    const lv_img_dsc_t* image = lesson_cinematic_framebuffer_->image_dsc();
+    lv_image_set_src(lesson_background_, image);
+    lv_image_set_scale(lesson_background_, LessonImageCoverScale(
+        static_cast<int>(image->header.w), static_cast<int>(image->header.h), width_, height_));
+    lv_obj_align(lesson_background_, LV_ALIGN_CENTER, 0, 0);
+    if (container_ != nullptr) lv_obj_set_style_bg_opa(container_, LV_OPA_TRANSP, 0);
+    if (content_ != nullptr) lv_obj_set_style_bg_opa(content_, LV_OPA_TRANSP, 0);
+    lv_obj_remove_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+    if (top_bar_ != nullptr) lv_obj_move_foreground(top_bar_);
+    if (status_bar_ != nullptr) lv_obj_move_foreground(status_bar_);
+    if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
+    lv_obj_invalidate(lesson_background_);
+    lv_refr_now(display_);
+    return true;
+#else
+    (void)pixels;
+    (void)width;
+    (void)height;
+    return false;
+#endif
 }
 
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE

@@ -332,6 +332,54 @@ std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
         asset_extra + "}}}" );
 }
 
+std::string V4V2BarnCuePrepareFrame(int seq, std::uint64_t command_sequence_id = 171,
+                                    const std::string& body_extra = "") {
+    return V4Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"flattenedMjpegCinematic\",\"templateVersion\":2,"
+        "\"cueId\":\"barn-opening\",\"effect\":\"opening\",\"stepKey\":\"barn\","
+        "\"playbackMode\":\"once\",\"durationMs\":9500,\"fps\":10,\"frameCount\":95,"
+        "\"asset\":{\"derivativeId\":\"9d699633809f46d1a75ae772c25c74335da329416b8e48b56b6a089b48b6ef31\","
+        "\"cueId\":\"barn-opening\",\"sdPath\":\"sd://tbot/lesson-assets/flattenedCinematic.barn-opening\","
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"bytes\":123456,\"mediaType\":\"video/mp4\",\"width\":480,\"height\":320}}" +
+        body_extra + "}");
+}
+
+std::string V4TrgbPrepareFrame(int seq, std::uint64_t command_sequence_id = 271,
+                               const std::string& asset_extra = "",
+                               const std::string& body_extra = "") {
+    return V4Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"flattenedMjpegCinematic\",\"templateVersion\":2,"
+        "\"cueId\":\"barn-opening\",\"effect\":\"opening\",\"stepKey\":\"barn\","
+        "\"playbackMode\":\"once\",\"durationMs\":9500,\"fps\":10,\"frameCount\":95,"
+        "\"asset\":{\"derivativeId\":\"9d699633809f46d1a75ae772c25c74335da329416b8e48b56b6a089b48b6ef31\","
+        "\"cueId\":\"barn-opening\",\"sdPath\":\"sd://tbot/lesson-assets/barn-opening.trgb\","
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"bytes\":29186048,\"mediaType\":\"application/vnd.tbot.rgb565-indexed\","
+        "\"containerVersion\":1,\"storedWidth\":320,\"storedHeight\":480,"
+        "\"orientation\":\"panelNativeClockwise\",\"frameBytes\":307200" +
+        asset_extra + "}}" + body_extra + "}");
+}
+
+std::string V4V2BarnCueCommandFrame(const char* type, const char* command, int seq,
+                                    std::uint64_t command_sequence_id,
+                                    const std::string& extra_body = "") {
+    const std::string command_body = std::string("{\"command\":\"") + command +
+        "\",\"cueId\":\"barn-opening\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) + extra_body + "}";
+    if (std::string(type) == "lesson_cinematic_control") {
+        return V4Frame(type, seq, command_body);
+    }
+    return V4Frame(type, seq,
+        std::string("{\"cinematicPhase\":") + command_body + "}");
+}
+
 std::string WithSession(std::string frame, const std::string& session_id) {
     const std::string current = std::string("\"sessionId\":\"") + SID() + "\"";
     const std::string replacement = std::string("\"sessionId\":\"") + session_id + "\"";
@@ -639,6 +687,7 @@ struct V3RendererFake {
     tbot::LessonCinematicError operation_error = tbot::LessonCinematicError::kNone;
     std::uint64_t monotonic_ms = 0;
     std::uint64_t monotonic_step_ms = 0;
+    bool trgb_open = false;
 };
 
 void* V3Allocate(void* context, std::size_t size) {
@@ -656,10 +705,15 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     auto* fake = static_cast<V3RendererFake*>(context);
     if (fake->fail_open) return false;
     fake->opened_paths.emplace_back(path);
+    fake->trgb_open = std::string(path).find(".trgb") != std::string::npos;
+    const bool barn_opening = std::string(path).find("barn-opening") != std::string::npos;
     const bool background = std::string(path).find("background") != std::string::npos ||
         std::string(path).find("flattenedCinematic") != std::string::npos;
-    *metadata = {static_cast<std::uint16_t>(background ? 480 : 2),
-                 static_cast<std::uint16_t>(background ? 320 : 2), 10, 3, 300, 64};
+    *metadata = {static_cast<std::uint16_t>(fake->trgb_open ? 320 : background ? 480 : 2),
+                 static_cast<std::uint16_t>(fake->trgb_open ? 480 : background ? 320 : 2), 10,
+                 static_cast<std::uint32_t>(fake->trgb_open ? 95 : barn_opening ? 95 : 3),
+                 static_cast<std::uint32_t>(fake->trgb_open ? 9500 : barn_opening ? 9500 : 300),
+                 static_cast<std::uint32_t>(fake->trgb_open ? 307200 : 64)};
     *handle = reinterpret_cast<void*>(static_cast<std::uintptr_t>(++fake->opens));
     return true;
 }
@@ -667,12 +721,70 @@ void V3Close(void* context, void*) { ++static_cast<V3RendererFake*>(context)->cl
 bool V3Decode(void* context, void*, std::size_t, std::uint8_t* destination, std::size_t capacity,
               std::uint16_t* width, std::uint16_t* height, std::size_t* stride) {
     if (static_cast<V3RendererFake*>(context)->fail_decode) return false;
+    const bool trgb = static_cast<V3RendererFake*>(context)->trgb_open;
     const bool background = capacity >= 480u * 320u * 2u;
-    *width = background ? 480 : 2;
-    *height = background ? 320 : 2;
+    *width = trgb ? 320 : background ? 480 : 2;
+    *height = trgb ? 480 : background ? 320 : 2;
     *stride = static_cast<std::size_t>(*width) * 2;
     std::memset(destination, 0, *stride * *height);
     return true;
+}
+bool V4Begin(void*) { return true; }
+bool V4Queue(void*, const std::uint16_t*, std::uint16_t width, std::uint16_t height) {
+    return width == 320 && height == 480;
+}
+bool V4Wait(void*, std::uint32_t) { return true; }
+void V4End(void*) {}
+bool V4StreamBytes(void* context, void*, std::uint64_t* bytes) {
+    *bytes = static_cast<V3RendererFake*>(context)->trgb_open ? 29186048 : 0;
+    return true;
+}
+bool V3Present(void* context, const std::uint16_t*, std::uint16_t, std::uint16_t,
+               std::size_t);
+
+void test_renderer_v4_trgb_exact_asset_contract() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        tbot::LessonFlattenedCinematicRendererOps{
+            {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present},
+            V4Begin, V4Queue, V4Wait, V4End, nullptr, V4StreamBytes});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+
+    Handle(V4TrgbPrepareFrame(1));
+    require(FrameType(0) == "lesson_ack" && fake.opens == 1 && fake.allocations == 2,
+            "handler accepts the exact TRGB contract and routes it to the renderer");
+    Handle(V4V2BarnCueCommandFrame("lesson_cinematic_control", "cancel", 2, 272,
+                                   ",\"reason\":\"testCleanup\""));
+
+    const std::vector<std::pair<std::string, std::string>> invalid = {
+        {"\"containerVersion\":1,", ""},
+        {"\"containerVersion\":1", "\"containerVersion\":2"},
+        {"\"storedWidth\":320", "\"storedWidth\":480"},
+        {"\"storedHeight\":480", "\"storedHeight\":320"},
+        {"\"orientation\":\"panelNativeClockwise\"", "\"orientation\":\"landscape\""},
+        {"\"frameBytes\":307200", "\"frameBytes\":1"},
+        {"\"durationMs\":9500", "\"durationMs\":9501"},
+    };
+    int sequence = 3;
+    for (const auto& replacement : invalid) {
+        ResetObservable();
+        FreshSession();
+        const int opens_before = fake.opens;
+        const int frame_sequence = sequence++;
+        Handle(ReplaceOnce(V4TrgbPrepareFrame(frame_sequence, 300 + frame_sequence),
+                           replacement.first, replacement.second));
+        require(FrameType(0) == "lesson_error" && fake.opens == opens_before,
+                "handler rejects missing/wrong TRGB metadata before renderer work");
+    }
+    ResetObservable();
+    FreshSession();
+    const int opens_before_extra = fake.opens;
+    Handle(V4TrgbPrepareFrame(20, 420, ",\"width\":480"));
+    require(FrameType(0) == "lesson_error" && fake.opens == opens_before_extra,
+            "TRGB exact-key validation rejects legacy dimensions");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
 }
 bool V3Present(void* context, const std::uint16_t*, std::uint16_t, std::uint16_t,
                std::size_t) {
@@ -698,6 +810,14 @@ void test_cinematic_rejects_unsupported_frames_and_accepts_all_late_phases() {
                 FrameBodyStr(0, nullptr, "code") == "CINEMATIC_COMMAND_UNSUPPORTED" &&
                 FrameBodyStr(0, "context", "reason") == "command",
             "cinematic renderer rejects unsupported frame types with the stable command error");
+
+    ResetObservable();
+    FreshSession();
+    Handle(V4Frame("lesson_step", 1, "{}"));
+    require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_COMMAND_UNSUPPORTED" &&
+                FrameBodyStr(0, "context", "reason") == "command",
+            "renderer-v4 rejects legacy lesson_step with the stable command error");
 
     V3RendererFake fake;
     tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
@@ -762,7 +882,7 @@ void test_cinematic_renderer_failures_use_stable_error_mapping() {
         fake.fail_allocate = failure.mode == FailureMode::kAllocate;
         fake.fail_decode = failure.mode == FailureMode::kDecode;
         fake.fail_present = failure.mode == FailureMode::kPresent;
-        fake.monotonic_step_ms = failure.mode == FailureMode::kTimeout ? 101 : 0;
+        fake.monotonic_step_ms = failure.mode == FailureMode::kTimeout ? 501 : 0;
         tbot::LessonFlattenedCinematicRenderer renderer(
             {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present,
              V3LastError, failure.mode == FailureMode::kTimeout ? V3MonotonicMs : nullptr});
@@ -923,6 +1043,125 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
             "malformed v4 command returns the typed metadata error");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
     tbot::SetLessonFlattenedCinematicRendererCapabilityReady(false);
+}
+
+void test_renderer_v4_accepts_template_v2_cue_identity_prepare_and_controls() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+
+    Handle(V4V2BarnCuePrepareFrame(1));
+    require(fake.opened_paths == std::vector<std::string>({
+                "/sdcard/tbot/lesson-assets/flattenedCinematic.barn-opening"}),
+            "v4 template v2 barn cue routes its single SD asset by cueId");
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady" &&
+                FrameBodyStr(0, "cinematicPhase", "cueId") == "barn-opening",
+            "v4 template v2 prepare ACK echoes cueId instead of phaseId");
+
+    Handle(V4V2BarnCueCommandFrame("lesson_cinematic_control", "start", 2, 172));
+    require(FrameType(1) == "lesson_ack" &&
+                FrameBodyStr(1, "cinematicPhase", "event") == "phaseReady" &&
+                FrameBodyStr(1, "cinematicPhase", "cueId") == "barn-opening",
+            "v4 template v2 production control-start applies by cueId");
+    Handle(V4V2BarnCueCommandFrame("lesson_cinematic_control", "pause", 3, 173));
+    require(FrameType(2) == "lesson_ack", "v4 template v2 pause applies by cueId");
+    Handle(V4V2BarnCueCommandFrame("lesson_cinematic_control", "resume", 4, 174,
+                                   ",\"clockRebaseSequenceId\":174"));
+    require(FrameType(3) == "lesson_ack", "v4 template v2 resume applies by cueId");
+    Handle(V4V2BarnCueCommandFrame("lesson_cinematic_control", "cancel", 5, 175,
+                                   ",\"reason\":\"testCleanup\""));
+    require(FrameType(4) == "lesson_ack", "v4 template v2 cancel applies by cueId");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "v4 template v2 terminal cue control releases the asset lease");
+
+    ResetObservable();
+    FreshSession();
+    const std::string ready_file_name = "tbot-v4-combined-prepare-ack.bin";
+    const std::string manifest_checksum = "abcdef1234567890";
+    const std::string cache_key = "tvideo-v7-" + manifest_checksum;
+    Handle(V4V2BarnCuePrepareFrame(
+        1, 181, ReadyAssetPackExtra(cache_key, manifest_checksum, ready_file_name)));
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady" &&
+                FrameHasAssetPack(0) && FrameAssetPackReady(0) &&
+                FrameBodyStr(0, "assetPack", "cacheKey") == cache_key,
+            "v4 cinematic prepare ACK carries frame-zero readiness and SD-pack attestation together");
+    Handle(V4V2BarnCueCommandFrame("lesson_cinematic_control", "cancel", 2, 182,
+                                   ",\"reason\":\"testCleanup\""));
+    RemoveReadyAssetPackFixture(ready_file_name);
+
+    const int opens_before_stale_duration = fake.opens;
+    ResetObservable();
+    FreshSession();
+    Handle(ReplaceOnce(V4V2BarnCuePrepareFrame(6, 181),
+                       "\"durationMs\":9500", "\"durationMs\":9400"));
+    require(FrameType(0) == "lesson_error" && fake.opens == opens_before_stale_duration,
+            "v4 template v2 rejects stale effect duration before renderer open");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_renderer_v4_accepts_external_flattened_cue_metadata_matrix() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+
+    const int opens_before_invalid_slug = fake.opens;
+    Handle(ReplaceOnce(V4V2BarnCuePrepareFrame(1, 201),
+                       "\"stepKey\":\"barn\"", "\"stepKey\":\"barn_name\""));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.opens == opens_before_invalid_slug,
+            "external flattened cue rejects a non-slug stepKey before renderer work");
+
+    struct CueMetadataCase {
+        const char* effect;
+        const char* playback_mode;
+        int duration_ms;
+    };
+    const std::vector<CueMetadataCase> cues = {
+        {"greet", "loop", 1200},
+        {"teach", "once", 2600},
+        {"listen", "loop", 1300},
+        {"thinking", "loop", 1300},
+        {"correct", "once", 600},
+        {"retry-level-1", "once", 1200},
+        {"retry-level-2", "once", 1400},
+        {"retry-level-3", "once", 1600},
+        {"celebrate", "once", 3000},
+        {"word-transition", "once", 1100},
+    };
+    int sequence = 2;
+    std::uint64_t command_sequence_id = 202;
+    for (const CueMetadataCase& cue : cues) {
+        ResetObservable();
+        FreshSession();
+        std::string frame = V4V2BarnCuePrepareFrame(sequence++, command_sequence_id++);
+        frame = ReplaceOnce(frame, "\"effect\":\"opening\"",
+                            std::string("\"effect\":\"") + cue.effect + "\"");
+        frame = ReplaceOnce(frame, "\"playbackMode\":\"once\"",
+                            std::string("\"playbackMode\":\"") + cue.playback_mode + "\"");
+        frame = ReplaceOnce(frame, "\"durationMs\":9500",
+                            "\"durationMs\":" + std::to_string(cue.duration_ms));
+        frame = ReplaceOnce(frame, "\"frameCount\":95",
+                            "\"frameCount\":" + std::to_string(cue.duration_ms / 100));
+
+        const int opens_before = fake.opens;
+        Handle(frame);
+        require(FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                    fake.opens == opens_before + 1,
+                "known external flattened cue metadata reaches renderer file validation");
+    }
+    require(fake.opens == static_cast<int>(cues.size()),
+            "every known external flattened cue effect passes handler metadata validation");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
 }
 
 void test_renderer_v4_numeric_narrowing_rejects_before_renderer_work() {
@@ -2348,6 +2587,160 @@ void test_prepare_assetpack_ready_with_real_file() {
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
 
+void test_prepare_assetpack_accepts_large_cinematic_without_raising_image_ram_cap() {
+    const char* dir = "/tmp/tbot-host-sd-cinematic/lesson-assets";
+    system("rm -rf /tmp/tbot-host-sd-cinematic && mkdir -p /tmp/tbot-host-sd-cinematic/lesson-assets");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    const char* path = "/tmp/tbot-host-sd-cinematic/lesson-assets/cinematic.mp4";
+    const size_t file_size = 3 * 1024 * 1024;
+    FILE* fp = fopen(path, "wb");
+    require(fp != nullptr, "cinematic asset fixture opens");
+    require(fseek(fp, static_cast<long>(file_size - 1), SEEK_SET) == 0,
+            "cinematic asset fixture seeks");
+    fputc('x', fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"cinematic\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-video-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"cinematic\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"mediaType\":\"video/mp4\","
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/cinematic.mp4\",\"size\":" +
+                          std::to_string(file_size) + "}]}"));
+    require(FrameAssetPackReady(0) == true,
+            "verified cinematic above image RAM cap is ready from SD");
+
+    const char* oversized_path = "/tmp/tbot-host-sd-cinematic/lesson-assets/oversized.mp4";
+    const size_t oversized_file_size = 4 * 1024 * 1024 + 1;
+    fp = fopen(oversized_path, "wb");
+    require(fp != nullptr, "oversized cinematic asset fixture opens");
+    require(fseek(fp, static_cast<long>(oversized_file_size - 1), SEEK_SET) == 0,
+            "oversized cinematic asset fixture seeks");
+    fputc('x', fp);
+    fclose(fp);
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1, ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+                          "\"criticalAssets\":[{\"key\":\"oversized\"}],"
+                          "\"assetPack\":{\"cacheKey\":\"ck-video-abcdef1234567890\",\"assets\":["
+                          "{\"key\":\"oversized\",\"state\":\"READY\",\"checksumOk\":true,"
+                          "\"mediaType\":\"video/mp4\","
+                          "\"localPath\":\"sd://sdcard/tbot/lesson-assets/oversized.mp4\",\"size\":" +
+                          std::to_string(oversized_file_size) + "}]}"));
+    require(FrameAssetPackReady(0) == false,
+            "verified cinematic above the 4 MiB MP4 cap is not ready from SD");
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
+void test_prepare_assetpack_accepts_exact_production_trgb_pack_and_rejects_oversize() {
+    const char* dir = "/tmp/tbot-host-sd-trgb/lesson-assets";
+    require(system("rm -rf /tmp/tbot-host-sd-trgb && mkdir -p /tmp/tbot-host-sd-trgb/lesson-assets") == 0,
+            "TRGB asset directory is staged");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", dir, 1);
+    auto TrgbBytes = [](size_t frames) {
+        const size_t data_offset = (64 + frames * 16 + 511) & ~static_cast<size_t>(511);
+        return data_offset + frames * 307200;
+    };
+    const size_t frame_counts[] = {95, 6, 13, 30};
+    std::string assets;
+    for (int index = 0; index < 19; ++index) {
+        const size_t frames = frame_counts[index % 4];
+        const size_t cue_bytes = TrgbBytes(frames);
+        const std::string name = index == 0
+            ? "barn-opening.trgb" : "cue-" + std::to_string(index) + ".trgb";
+        const std::string path = std::string(dir) + "/" + name;
+        FILE* fp = fopen(path.c_str(), "wb");
+        require(fp != nullptr && fseek(fp, static_cast<long>(cue_bytes - 1), SEEK_SET) == 0,
+                "mixed-duration sparse TRGB fixture opens");
+        fputc('x', fp);
+        fclose(fp);
+        if (!assets.empty()) assets += ',';
+        assets += "{\"key\":\"cue-" + std::to_string(index) +
+            "\",\"state\":\"READY\",\"checksumOk\":true,"
+            "\"mediaType\":\"application/vnd.tbot.rgb565-indexed\","
+            "\"localPath\":\"sd://sdcard/tbot/lesson-assets/" + name +
+            "\",\"size\":" + std::to_string(cue_bytes) + "}";
+    }
+    for (int index = 0; index < 8; ++index) {
+        const std::string name = "static-" + std::to_string(index) + ".png";
+        const std::string path = std::string(dir) + "/" + name;
+        FILE* fp = fopen(path.c_str(), "wb");
+        require(fp != nullptr && fwrite("static", 1, 6, fp) == 6,
+                "static pack fixture writes");
+        fclose(fp);
+        assets += ",{\"key\":\"static-" + std::to_string(index) +
+            "\",\"state\":\"READY\",\"checksumOk\":true,"
+            "\"localPath\":\"sd://sdcard/tbot/lesson-assets/" + name +
+            "\",\"size\":6}";
+    }
+    const std::string pack =
+        ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"trgb-abcdef1234567890\",\"assets\":[" +
+        assets + "]}";
+
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        tbot::LessonFlattenedCinematicRendererOps{
+            {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present},
+            V4Begin, V4Queue, V4Wait, V4End, nullptr, V4StreamBytes});
+    tbot::SetActiveLessonFlattenedCinematicRenderer(&renderer);
+    Handle(V4TrgbPrepareFrame(1, 501, "", pack));
+    require(FrameType(0) == "lesson_ack" && FrameAssetPackReady(0),
+            "mixed 6/13/30/95-frame TRGB cues plus eight static assets pass independently");
+    Handle(V4V2BarnCueCommandFrame("lesson_cinematic_control", "cancel", 2, 502,
+                                   ",\"reason\":\"testCleanup\""));
+
+    const char* oversized_name = "oversized.trgb";
+    const std::string oversized_path = std::string(dir) + "/" + oversized_name;
+    constexpr size_t kOversizedBytes = 64U * 1024U * 1024U + 1U;
+    FILE* fp = fopen(oversized_path.c_str(), "wb");
+    require(fp != nullptr && fseek(fp, static_cast<long>(kOversizedBytes - 1), SEEK_SET) == 0,
+            "oversized sparse TRGB fixture opens");
+    fputc('x', fp);
+    fclose(fp);
+    const std::string oversized_pack =
+        ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"trgb-abcdef1234567890\",\"assets\":[{"
+        "\"key\":\"oversized\",\"state\":\"READY\",\"checksumOk\":true,"
+        "\"mediaType\":\"application/vnd.tbot.rgb565-indexed\","
+        "\"localPath\":\"sd://sdcard/tbot/lesson-assets/oversized.trgb\",\"size\":" +
+        std::to_string(kOversizedBytes) + "}]}";
+    ResetObservable();
+    FreshSession();
+    Handle(V4TrgbPrepareFrame(3, 503, "", oversized_pack));
+    require(FrameType(0) == "lesson_error" || !FrameAssetPackReady(0),
+            "oversized or layout-inconsistent TRGB asset is rejected");
+
+    const size_t unaligned_bytes = TrgbBytes(13) + 1;
+    const std::string unaligned_path = std::string(dir) + "/unaligned.trgb";
+    fp = fopen(unaligned_path.c_str(), "wb");
+    require(fp != nullptr && fseek(fp, static_cast<long>(unaligned_bytes - 1), SEEK_SET) == 0,
+            "unaligned sparse TRGB fixture opens");
+    fputc('x', fp);
+    fclose(fp);
+    const std::string unaligned_pack =
+        ",\"manifestRef\":{\"manifestChecksum\":\"abcdef1234567890\"},"
+        "\"assetPack\":{\"cacheKey\":\"trgb-abcdef1234567890\",\"assets\":[{"
+        "\"key\":\"unaligned\",\"state\":\"READY\",\"checksumOk\":true,"
+        "\"mediaType\":\"application/vnd.tbot.rgb565-indexed\","
+        "\"localPath\":\"sd://sdcard/tbot/lesson-assets/unaligned.trgb\",\"size\":" +
+        std::to_string(unaligned_bytes) + "}]}";
+    ResetObservable();
+    FreshSession();
+    Handle(V4TrgbPrepareFrame(4, 504, "", unaligned_pack));
+    require(FrameType(0) == "lesson_error" || !FrameAssetPackReady(0),
+            "sector-unaligned TRGB size is rejected independently");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 void test_prepare_assetpack_derives_local_path_from_root_and_key() {
     const char* dir = "/tmp/tbot-host-sd-derived/lesson-assets";
     system("rm -rf /tmp/tbot-host-sd-derived && mkdir -p /tmp/tbot-host-sd-derived/lesson-assets");
@@ -2607,7 +3000,7 @@ void test_prepare_assetpack_rejects_unbounded_count_and_total_size() {
 
     std::string huge_assets;
     const size_t file_size = 512 * 1024;
-    for (int i = 0; i < 9; ++i) {
+    for (int i = 0; i < 33; ++i) {
         std::string name = "huge-" + std::to_string(i) + ".bin";
         std::string path = std::string(dir) + "/" + name;
         FILE* fp = fopen(path.c_str(), "wb");
@@ -2630,8 +3023,8 @@ void test_prepare_assetpack_rejects_unbounded_count_and_total_size() {
                           "\"assetPack\":{\"cacheKey\":\"ck-total-abcdef1234567890\",\"assets\":[" +
                           huge_assets + "]}"));
     require(FrameHasAssetPack(0), "oversized-total assetPack still returns correlated ack");
-    require(FrameAssetPackReady(0) == false,
-            "assetPack above aggregate declared byte budget is not ready");
+    require(FrameAssetPackReady(0) == true,
+            "bounded legacy image packs remain valid under the production TRGB aggregate budget");
 
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
 }
@@ -6617,6 +7010,7 @@ void test_layer_install_timeout_degrades_without_committing_layer_state() {
 }  // namespace
 
 int main() {
+    test_renderer_v4_trgb_exact_asset_contract();
     test_envelope_guards();
     test_prepare_basic();
     test_renderer_v2_capability_shape_and_exact_tokens();
@@ -6625,6 +7019,8 @@ int main() {
     test_cinematic_renderer_failures_use_stable_error_mapping();
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v4_capability_and_exact_single_asset_routing();
+    test_renderer_v4_accepts_template_v2_cue_identity_prepare_and_controls();
+    test_renderer_v4_accepts_external_flattened_cue_metadata_matrix();
     test_renderer_v4_numeric_narrowing_rejects_before_renderer_work();
     test_renderer_v4_fresh_prepare_resets_session_sequence_stream();
     test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
@@ -6659,6 +7055,8 @@ int main() {
     test_renderer_v2_stale_visual_callback_and_non_lvgl_degraded_completion();
     test_prepare_assetpack_not_ready_branches();
     test_prepare_assetpack_ready_with_real_file();
+    test_prepare_assetpack_accepts_large_cinematic_without_raising_image_ram_cap();
+    test_prepare_assetpack_accepts_exact_production_trgb_pack_and_rejects_oversize();
     test_prepare_assetpack_derives_local_path_from_root_and_key();
     test_prepare_assetpack_trims_manifest_checksum_for_cache_key();
     test_prepare_assetpack_trims_cache_key_before_ack();

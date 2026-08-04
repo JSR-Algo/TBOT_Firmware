@@ -58,7 +58,7 @@ def test_lesson_frames_are_serialized_off_websocket_receive_stack():
     assert "QueueHandle_t lesson_message_queue_" in header
     assert "static void LessonMessageTask(void* arg);" in header
     assert "void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);" in header
-    assert "kLessonMessageWorkerStackDepth = 12288" in app
+    assert "kLessonMessageWorkerStackDepth = 32768" in app
     assert 'xTaskCreateStatic(\n            &Application::LessonMessageTask, "lesson_worker"' in constructor
     assert "kLessonMessageWorkerStackDepth, this" in constructor
     assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in constructor
@@ -69,6 +69,17 @@ def test_lesson_frames_are_serialized_off_websocket_receive_stack():
     worker = app[app.index("void Application::LessonMessageTask") : app.index("bool Application::SetDeviceState")]
     assert "xQueueReceive" in worker
     assert "HandleLessonMessage(root);" in worker
+
+
+def test_lesson_worker_logs_stack_watermark_around_each_frame():
+    app = read("main/application.cc")
+    worker = app[app.index("void Application::LessonMessageTask") : app.index("bool Application::SetDeviceState")]
+
+    assert "kLessonMessageWorkerMinimumFreeStackBytes = 4096" in app
+    assert 'LogLessonWorkerStackWatermark("before_parse")' in worker
+    assert 'LogLessonWorkerStackWatermark("after_handle")' in worker
+    assert "uxTaskGetStackHighWaterMark(nullptr)" in app
+    assert 'ESP_LOGE(TAG, "lesson_worker stack low' in app
 
 
 def test_lesson_worker_queue_full_drop_is_nonblocking_and_frees_payload():
@@ -353,7 +364,8 @@ def test_prepare_ack_reports_sd_asset_pack_readiness_from_local_files():
     assert 'Str(pack, "cacheKey")' in helper
     assert 'cJSON_GetObjectItem(pack, "assets")' in helper
     assert 'Str(asset, "localPath")' in helper
-    assert "LessonLocalFileReady(local_path, expected_size)" in helper
+    assert "LessonLocalFileReady(" in helper
+    assert "LessonAssetFileLimit(media_type)" in helper
     assert 'cJSON_AddBoolToObject(out, "ready", ready)' in helper
     assert 'cJSON_AddStringToObject(out, "cacheKey", cache_key_value.c_str())' in helper
 
@@ -363,12 +375,31 @@ def test_prepare_ack_validates_sd_asset_pack_file_size_when_declared():
     helper = h[helper_start : h.index("// US-006 image render", helper_start)]
 
     assert 'Num(asset, "size", size_value)' in helper
-    assert "LessonLocalFileReady(local_path, expected_size)" in helper
+    assert "LessonLocalFileReady(" in helper
+    assert "LessonAssetFileLimit(media_type)" in helper
 
     readiness_start = h.index("bool LessonLocalFileReady")
     readiness = h[readiness_start : h.index("cJSON* BuildAssetPackAck", readiness_start)]
     assert "expected_size" in readiness
     assert "static_cast<size_t>(file_size) == expected_size" in readiness
+
+
+def test_prepare_ack_keeps_image_ram_cap_separate_from_cinematic_sd_file_cap():
+    h = read("main/lesson_handler.cc")
+    helper_start = h.index("cJSON* BuildAssetPackAck")
+    helper = h[helper_start : h.index("// US-006 image render", helper_start)]
+    readiness_start = h.index("bool LessonLocalFileReady")
+    readiness = h[readiness_start : helper_start]
+
+    assert "kMaxLessonImageBytes = 512 * 1024" in h
+    assert "kMaxLessonCinematicFileBytes" in h
+    assert "kMaxLessonTrgbFileBytes = tbot::kLessonTrgbMaxFileBytes" in h
+    assert "kMaxLessonAssetPackDeclaredBytes = tbot::kLessonTrgbMaxPackBytes" in h
+    assert "PlausibleTrgbContainerBytes" in helper
+    assert 'Str(asset, "mediaType")' in helper
+    assert "LessonAssetFileLimit(media_type)" in helper
+    assert "size_t max_file_bytes" in readiness
+    assert "static_cast<size_t>(file_size) <= max_file_bytes" in readiness
 
 def test_prepare_ack_requires_declared_positive_sd_asset_pack_file_size():
     h = read("main/lesson_handler.cc")
