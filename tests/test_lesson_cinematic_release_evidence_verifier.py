@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -122,10 +123,34 @@ def run_verifier(path: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_module_verifier(path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "scripts.lesson_cinematic_release_evidence_verify",
+            str(path),
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def test_release_evidence_verifier_accepts_five_fresh_ordered_passes(tmp_path):
     path, _manifest = make_evidence(tmp_path)
 
     result = run_verifier(path)
+
+    assert result.returncode == 0, result.stderr
+    assert "verified 5 consecutive cinematic release evidence passes" in result.stdout
+
+
+def test_release_evidence_verifier_supports_module_execution(tmp_path):
+    path, _manifest = make_evidence(tmp_path)
+
+    result = run_module_verifier(path)
 
     assert result.returncode == 0, result.stderr
     assert "verified 5 consecutive cinematic release evidence passes" in result.stdout
@@ -149,6 +174,74 @@ def test_release_evidence_verifier_rejects_legacy_hil_cine_only_runs(tmp_path):
     assert result.returncode != 0
     assert "expected exactly one CINE_EVIDENCE boot, found 0" in result.stderr
     assert "boot nonces must be distinct and nonzero across all five runs" in result.stderr
+
+
+def test_release_evidence_verifier_rejects_duplicate_field_bundle_bypass(tmp_path):
+    path, manifest = make_evidence(tmp_path)
+    serial_log = Path(manifest["runs"][0]["serialLog"])
+    serial_text = serial_log.read_text(encoding="utf-8")
+    serial_text = serial_text.replace(
+        "boot_nonce=0x1", "boot_nonce=0xdead boot_nonce=0x1"
+    )
+    serial_text = serial_text.replace(
+        "fault=none", "fault=parser fault=none", 1
+    ).replace("queue_errors=0", "queue_errors=9 queue_errors=0", 1)
+    serial_log.write_text(serial_text, encoding="utf-8")
+    manifest["runs"][0]["serialSha256"] = sha256(serial_log)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = run_verifier(path)
+
+    assert result.returncode != 0
+    assert "duplicate field boot_nonce" in result.stderr
+    assert "duplicate field fault" in result.stderr
+    assert "duplicate field queue_errors" in result.stderr
+
+
+def test_release_evidence_verifier_rejects_same_binary_readback_path(tmp_path):
+    path, manifest = make_evidence(tmp_path)
+    binary = Path(manifest["flash"]["binary"])
+    manifest["flash"]["readbackBinary"] = str(binary)
+    manifest["flash"]["readbackArgs"][3] = str(binary)
+    transcript = Path(manifest["flash"]["readbackTranscript"])
+    transcript.write_text(
+        f"esptool.py read_flash 0x20000 {binary.stat().st_size} {binary}\n",
+        encoding="utf-8",
+    )
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = run_verifier(path)
+
+    assert result.returncode != 0
+    assert "app binary and readback must be distinct files" in result.stderr
+
+
+def test_release_evidence_verifier_rejects_symlink_readback_alias(tmp_path):
+    path, manifest = make_evidence(tmp_path)
+    binary = Path(manifest["flash"]["binary"])
+    readback = Path(manifest["flash"]["readbackBinary"])
+    readback.unlink()
+    readback.symlink_to(binary)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = run_verifier(path)
+
+    assert result.returncode != 0
+    assert "app binary and readback must be distinct files" in result.stderr
+
+
+def test_release_evidence_verifier_rejects_hardlink_readback_alias(tmp_path):
+    path, manifest = make_evidence(tmp_path)
+    binary = Path(manifest["flash"]["binary"])
+    readback = Path(manifest["flash"]["readbackBinary"])
+    readback.unlink()
+    os.link(binary, readback)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = run_verifier(path)
+
+    assert result.returncode != 0
+    assert "app binary and readback must be distinct files" in result.stderr
 
 
 def test_evidence_verifier_rejects_missing_fifth_pass(tmp_path):

@@ -80,14 +80,63 @@ NUMERIC_FIELDS = [
 ]
 
 
-def parse_fields(line: str) -> dict[str, str]:
+def parse_fields(
+    line: str, line_no: int, problems: list[str]
+) -> dict[str, str] | None:
+    tokens = line.strip().split()
+    if not tokens or tokens[0] != "CINE_EVIDENCE":
+        problems.append(f"line {line_no}: malformed CINE_EVIDENCE prefix")
+        return None
     fields: dict[str, str] = {}
-    for token in line.strip().split():
+    bare_tokens: list[str] = []
+    valid = True
+    for token in tokens[1:]:
         if "=" not in token:
+            bare_tokens.append(token)
             continue
         key, value = token.split("=", 1)
+        if not key or not value:
+            problems.append(f"line {line_no}: malformed evidence token {token!r}")
+            valid = False
+            continue
+        if key in fields:
+            problems.append(f"line {line_no}: duplicate field {key}")
+            valid = False
+            continue
         fields[key] = value
-    return fields
+
+    event = fields.get("event")
+    if event not in {"boot", "cue_end"}:
+        problems.append(f"line {line_no}: event must be exactly boot or cue_end")
+        valid = False
+    expected_bare_tokens = ["cue_end"] if event == "cue_end" else []
+    if bare_tokens != expected_bare_tokens:
+        for token in bare_tokens:
+            problems.append(f"line {line_no}: malformed evidence token {token!r}")
+        if event == "cue_end" and "cue_end" not in bare_tokens:
+            problems.append(
+                f"line {line_no}: cue_end line missing terminal cue_end token"
+            )
+        valid = False
+    elif event == "cue_end" and tokens[-1] != "cue_end":
+        problems.append(f"line {line_no}: cue_end token must be terminal")
+        valid = False
+    return fields if valid else None
+
+
+def parse_evidence_lines(
+    lines: list[str], problems: list[str]
+) -> list[tuple[int, str, dict[str, str]]]:
+    parsed: list[tuple[int, str, dict[str, str]]] = []
+    for line_no, line in enumerate(lines, 1):
+        if line.startswith("HIL_CINE "):
+            problems.append(f"line {line_no}: legacy evidence prefix is forbidden")
+        if not line.startswith("CINE_EVIDENCE "):
+            continue
+        fields = parse_fields(line, line_no, problems)
+        if fields is not None:
+            parsed.append((line_no, line, fields))
+    return parsed
 
 
 def parse_uint(fields: dict[str, str], field: str, line_no: int, problems: list[str]) -> int | None:
@@ -149,18 +198,19 @@ def verify(path: Path, *, min_internal_heap: int, min_psram_heap: int) -> list[s
     problems: list[str] = []
     counts = {cue: 0 for cue in CANONICAL_CUES}
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    evidence_lines = parse_evidence_lines(lines, problems)
     cue_end_lines = [
-        (line_no, line)
-        for line_no, line in enumerate(lines, 1)
-        if line.startswith("CINE_EVIDENCE ") and " event=cue_end " in f" {line} "
+        (line_no, line, fields)
+        for line_no, line, fields in evidence_lines
+        if fields["event"] == "cue_end"
     ]
-    cue_order = [parse_fields(line).get("cue") for _line_no, line in cue_end_lines]
+    cue_order = [fields.get("cue") for _line_no, _line, fields in cue_end_lines]
     if cue_order != CANONICAL_CUES:
         problems.append("cue_end order does not match canonical sequence")
     boot_lines = [
-        (line_no, parse_fields(line))
-        for line_no, line in enumerate(lines, 1)
-        if line.startswith("CINE_EVIDENCE ") and " event=boot " in f" {line} "
+        (line_no, fields)
+        for line_no, _line, fields in evidence_lines
+        if fields["event"] == "boot"
     ]
     if len(boot_lines) != 1:
         problems.append(
@@ -180,10 +230,7 @@ def verify(path: Path, *, min_internal_heap: int, min_psram_heap: int) -> list[s
     if len(boot_nonces) != 1:
         problems.append(f"expected one nonzero boot_nonce in boot lines, found {sorted(boot_nonces)}")
     boot_nonce = next(iter(boot_nonces), None)
-    for line_no, line in cue_end_lines:
-        if not line.endswith("cue_end"):
-            problems.append(f"line {line_no}: cue_end line missing terminal cue_end token")
-        fields = parse_fields(line)
+    for line_no, _line, fields in cue_end_lines:
         cue = fields.get("cue")
         if cue not in counts:
             problems.append(f"line {line_no}: unexpected cue {cue!r}")

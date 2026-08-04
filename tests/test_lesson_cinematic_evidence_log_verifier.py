@@ -96,6 +96,85 @@ def test_verifier_rejects_legacy_hil_cine_only_log(tmp_path):
     assert "cue_end order does not match canonical sequence" in result.stderr
 
 
+def test_verifier_rejects_legacy_line_coexisting_with_valid_evidence(tmp_path):
+    log_path = tmp_path / "mixed_legacy_and_release.log"
+    log_path.write_text(
+        boot()
+        + "".join(line(cue) for cue in CANONICAL_CUES)
+        + f"{LEGACY_PREFIX} event=cue_end cue=forged\n",
+        encoding="utf-8",
+    )
+
+    result = run_verifier(log_path)
+
+    assert result.returncode != 0
+    assert "legacy evidence prefix is forbidden" in result.stderr
+
+
+def test_verifier_rejects_duplicate_evidence_fields(tmp_path):
+    log_path = tmp_path / "duplicate_fields.log"
+    forged_boot = boot().replace(
+        "boot_nonce=0x1", "boot_nonce=0xdead boot_nonce=0x1"
+    )
+    forged_cues = "".join(line(cue) for cue in CANONICAL_CUES).replace(
+        "fault=none", "fault=parser fault=none", 1
+    ).replace("queue_errors=0", "queue_errors=9 queue_errors=0", 1)
+    log_path.write_text(forged_boot + forged_cues, encoding="utf-8")
+
+    result = run_verifier(log_path)
+
+    assert result.returncode != 0
+    assert "duplicate field boot_nonce" in result.stderr
+    assert "duplicate field fault" in result.stderr
+    assert "duplicate field queue_errors" in result.stderr
+
+
+def test_verifier_rejects_malformed_bare_token(tmp_path):
+    log_path = tmp_path / "malformed_token.log"
+    forged = line(CANONICAL_CUES[0]).replace(
+        "fault=none", "malformed-token fault=none"
+    )
+    log_path.write_text(
+        boot() + forged + "".join(line(cue) for cue in CANONICAL_CUES[1:]),
+        encoding="utf-8",
+    )
+
+    result = run_verifier(log_path)
+
+    assert result.returncode != 0
+    assert "malformed evidence token 'malformed-token'" in result.stderr
+
+
+def test_verifier_requires_cue_end_terminal_token_to_be_last(tmp_path):
+    log_path = tmp_path / "nonterminal_cue_end.log"
+    forged = line(CANONICAL_CUES[0]).replace(
+        " reset_reason=poweron cue_end", " cue_end reset_reason=poweron"
+    )
+    log_path.write_text(
+        boot() + forged + "".join(line(cue) for cue in CANONICAL_CUES[1:]),
+        encoding="utf-8",
+    )
+
+    result = run_verifier(log_path)
+
+    assert result.returncode != 0
+    assert "cue_end token must be terminal" in result.stderr
+
+
+def test_verifier_rejects_duplicate_or_unknown_event(tmp_path):
+    log_path = tmp_path / "invalid_event.log"
+    forged_boot = boot().replace("event=boot", "event=unknown event=boot")
+    log_path.write_text(
+        forged_boot + "".join(line(cue) for cue in CANONICAL_CUES),
+        encoding="utf-8",
+    )
+
+    result = run_verifier(log_path)
+
+    assert result.returncode != 0
+    assert "duplicate field event" in result.stderr
+
+
 def test_verifier_accepts_fault_free_loop_cues_ended_by_replacement_or_stop(tmp_path):
     log_path = tmp_path / "loop_replaced.log"
     reasons = {

@@ -13,7 +13,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lesson_cinematic_evidence_log_verify import verify as verify_cinematic_log
+if __package__:
+    from .lesson_cinematic_evidence_log_verify import (
+        parse_boot_nonce,
+        parse_evidence_lines,
+        verify as verify_cinematic_log,
+    )
+else:
+    from lesson_cinematic_evidence_log_verify import (
+        parse_boot_nonce,
+        parse_evidence_lines,
+        verify as verify_cinematic_log,
+    )
 
 SCHEMA = "lesson-cinematic-hil-evidence.v1"
 LIVE_IDENTITY = (
@@ -38,7 +49,6 @@ MEMORY_FAILURE = re.compile(
     r"[^\n]*(?:fail|error|nullptr|null|enomem))"
 )
 RENDERER_DEGRADED = re.compile(r"(?i)\b(?:fallback|degraded)\b")
-BOOT_NONCE = re.compile(r"\bboot_nonce=(0x[0-9a-fA-F]+)\b")
 
 
 def _resolve(base: Path, raw: Any) -> Path:
@@ -96,6 +106,16 @@ def _check_flash(manifest: dict[str, Any], base: Path, problems: list[str]) -> d
     app_hash = _sha256(binary) if binary.is_file() else None
 
     readback = _canonical(_resolve(base, flash.get("readbackBinary")))
+    same_file = binary == readback
+    if binary.is_file() and readback.is_file():
+        binary_stat = binary.stat()
+        readback_stat = readback.stat()
+        same_file = same_file or (
+            binary_stat.st_dev == readback_stat.st_dev
+            and binary_stat.st_ino == readback_stat.st_ino
+        )
+    if same_file:
+        problems.append("app binary and readback must be distinct files")
     if not readback.is_file():
         problems.append(f"missing app readback binary: {readback}")
     else:
@@ -262,20 +282,23 @@ def verify(manifest_path: Path) -> list[str]:
             ):
                 problems.append(f"{label}: {problem}")
             serial_lines = serial_log.read_text(encoding="utf-8", errors="replace").splitlines()
-            boot_index = next(
-                (
-                    i
-                    for i, line in enumerate(serial_lines)
-                    if line.startswith("CINE_EVIDENCE event=boot ")
-                ),
-                -1,
-            )
+            parsed_lines = parse_evidence_lines(serial_lines, [])
+            parsed_boots = [
+                (line_no, fields)
+                for line_no, _line, fields in parsed_lines
+                if fields["event"] == "boot"
+            ]
+            boot_index = parsed_boots[0][0] - 1 if len(parsed_boots) == 1 else -1
             post_boot = "\n".join(serial_lines[boot_index + 1 :]).lower()
             if any(signature in post_boot for signature in RESET_SIGNATURES):
                 problems.append(f"{label}: post-boot reset signature detected")
-            boot_match = BOOT_NONCE.search(serial_lines[boot_index]) if boot_index >= 0 else None
-            if boot_match is not None:
-                boot_nonces.add(int(boot_match.group(1), 16))
+            if len(parsed_boots) == 1:
+                nonce_problems: list[str] = []
+                parsed_nonce = parse_boot_nonce(
+                    parsed_boots[0][1], parsed_boots[0][0], nonce_problems
+                )
+                if parsed_nonce is not None:
+                    boot_nonces.add(parsed_nonce)
             serial_text = "\n".join(serial_lines)
             if MEMORY_FAILURE.search(serial_text):
                 problems.append(f"{label}: memory allocation failure signature detected")
