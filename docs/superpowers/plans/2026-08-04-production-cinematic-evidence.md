@@ -4,7 +4,7 @@
 
 **Goal:** Make the exact production LCDWiki firmware emit bounded `CINE_EVIDENCE` boot and 19-cue terminal evidence while keeping every HIL, fault-injection, MCP, and network evidence surface disabled.
 
-**Architecture:** Replace the HIL-named cinematic collector with one production-safe collector compiled only by `CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE`. Keep the existing single boot record, single cue record, fixed-width counters, fixed stack formatting buffer, renderer/panel hooks, and heap monitor lifecycle; rename all public C++ APIs and serial prefixes. Update the production config gate, log/evidence verifiers, artifact contracts, build manifest evidence, and host tests so release builds require evidence-on plus HIL-off.
+**Architecture:** Replace the HIL-named cinematic collector with one production-safe collector compiled only by `CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE`. Keep the existing single boot record, single cue record, fixed-width counters, fixed 1,024-byte stack formatting buffer, and renderer/panel hooks. Sample current internal heap and PSRAM without allocation at cue begin, every existing `Record*` boundary, and cue end; retain the minimum samples in fixed cue state while reporting the allocator lifetime internal-heap minimum separately. Rename all public C++ APIs and serial prefixes. Update the production config gate, log/evidence verifiers, artifact contracts, build manifest evidence, and host tests so release builds require evidence-on plus HIL-off.
 
 **Tech Stack:** C++17, ESP-IDF 5.5.2, Kconfig, Python 3/Pytest, native clang++ ASan/UBSan runners, ESP-IDF production build and artifact audit.
 
@@ -131,7 +131,9 @@ esp_rom_printf("CINE_EVIDENCE event=boot boot_nonce=0x%" PRIx64
                " reset_reason=%s lifetime_internal_heap_min=%u psram_heap_min=%u\n", ...);
 ```
 
-and format cue terminal lines with `CINE_EVIDENCE event=cue_end`. Preserve `CueCounters`, `BootCounters`, `std::mutex`, `char cue_id[40]`, `char line[768]`, one heap monitor start/stop per cue, no `new`, `malloc`, container growth, MCP registration, HTTP, WebSocket, or dynamic allocation.
+and format cue terminal lines with `CINE_EVIDENCE event=cue_end`. Preserve `CueCounters`, `BootCounters`, `std::mutex`, and `char cue_id[40]`. Define a documented 1,024-byte line-capacity constant and use it for the stack formatting buffer; the maximum-width canonical-cue test must retain at least 256 bytes of margin.
+
+Do not use `heap_caps_monitor_local_minimum_free_size_start/stop`. ESP-IDF 5.5.2 implements that monitor with a process-global snapshot array allocated by `heap_caps_malloc` and asserts if allocation fails. Instead, call `heap_caps_get_free_size(MALLOC_CAP_INTERNAL)` and `heap_caps_get_free_size(MALLOC_CAP_SPIRAM)` at `BeginCue`, every existing `Record*` boundary, and cue end, then retain the lowest samples in the fixed cue record. Refresh `lifetime_internal_heap_min` separately with `heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)`. Document and test that `internal_heap_min` and `psram_heap_min` are boundary-sampled minima rather than continuous local-monitor minima. Retain no `new`, `malloc`, container growth, MCP registration, HTTP, WebSocket, or dynamic allocation.
 
 - [ ] **Step 4: Update build and coverage source lists**
 
@@ -141,7 +143,7 @@ Replace every source-list reference to `lesson_cinematic_hil_telemetry.cc` with 
 
 Run: `bash scripts/run_host_native_lesson_cinematic_evidence_test.sh`
 
-Expected: every variant prints `lesson cinematic evidence tests passed` and exits `0`.
+Expected: every variant prints `lesson cinematic evidence tests passed` and exits `0`. Tests must prove minima update across begin/record/end samples, a sampled zero cannot be overwritten by a later recovery sample, no heap-monitor symbol or call exists, the exact boot schema is captured with a nonzero nonce, and maximum-width formatting retains at least 256 bytes in the 1,024-byte buffer.
 
 - [ ] **Step 6: Commit the collector replacement**
 

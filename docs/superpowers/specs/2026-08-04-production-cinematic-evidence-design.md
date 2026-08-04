@@ -14,9 +14,9 @@ The release channel emits lines beginning with `CINE_EVIDENCE`. Public firmware 
 
 At boot, the collector records a random nonzero boot nonce, reset reason, lifetime internal-heap minimum, and PSRAM minimum, then emits one `CINE_EVIDENCE event=boot` line.
 
-The flattened cinematic renderer starts a bounded cue record with cue identity, sequence, and monotonic start time. Existing renderer and panel boundaries record SD read latency, queue completion, parser/CRC/I/O/DMA/timeout faults, late ticks, and missed periods. Each terminal cue transition emits one `CINE_EVIDENCE event=cue_end` line containing the existing fixed-width counters, cue-scoped internal-heap minimum, lifetime minimum, PSRAM minimum, boot nonce, and reset reason.
+The flattened cinematic renderer starts a bounded cue record with cue identity, sequence, and monotonic start time. Existing renderer and panel boundaries record SD read latency, queue completion, parser/CRC/I/O/DMA/timeout faults, late ticks, and missed periods. The collector samples current internal heap and PSRAM at cue begin, every existing `Record*` boundary, and cue end, retaining the lowest sampled value for each cue in fixed state. Each terminal cue transition emits one `CINE_EVIDENCE event=cue_end` line containing the existing fixed-width counters, these cue-scoped boundary-sampled heap minima, the allocator's separate lifetime internal-heap minimum, boot nonce, and reset reason.
 
-The collector retains one boot record and one cue record only. It performs no dynamic allocation and uses the existing bounded stack buffer for terminal formatting.
+The collector retains one boot record and one cue record only. It performs no dynamic allocation and uses a fixed 1,024-byte stack buffer for terminal formatting. Native maximum-width formatting tests require at least 256 bytes of unused margin after the longest canonical cue and maximum-width numeric fields are formatted.
 
 ## Verification Contracts
 
@@ -28,7 +28,9 @@ The production artifact auditor requires release cinematic evidence enabled whil
 
 ## Resource And Safety Gates
 
-Native tests prove the release-enabled ESP path uses bounded state, starts and stops the cue-scoped heap monitor once per cue, emits the exact release prefix, and leaves the disabled configuration as a no-op. Static contracts reject dynamic allocation and network/tool registration in the evidence module.
+Native tests prove the release-enabled ESP path uses bounded state, updates cue minima across allocation-free boundary samples, emits the exact boot and cue release schemas, fits maximum-width output in the fixed buffer with the required margin, and leaves the disabled configuration as a no-op. Static contracts reject heap-monitor APIs, dynamic allocation, and network/tool registration in the evidence module.
+
+ESP-IDF's local minimum heap monitor was explicitly rejected: its start path allocates a global snapshot array with `heap_caps_malloc`, asserts when that allocation fails, and owns process-global monitor state until stop. Production evidence instead calls the allocation-free current-size query at the defined cue boundaries and keeps the minimum in the collector's existing fixed cue record. These fields are sampled boundary minima, not a claim of continuous per-cue allocator monitoring; the global allocator lifetime minimum remains a separate diagnostic.
 
 The full ESP-IDF build must pass the existing internal-RAM guardrails and production artifact audit. The image must fit the app partition. Hardware flashing remains locked until the exact production artifact, backend/server/web deployment, and assignment validator gates are all released by the root task.
 
