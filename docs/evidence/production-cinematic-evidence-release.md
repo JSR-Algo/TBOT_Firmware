@@ -12,6 +12,9 @@ satisfy this record.
 - Project: `xiaozhi`
 - Embedded profile: `TBOT_EMBEDDED_PROFILE=production`
 - Release evidence: `CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y`
+- Immutable LCDWiki defaults chain: release evidence is enabled in
+  `sdkconfig.defaults.local`; the shared defaults remain unchanged, and Kconfig
+  restricts the option to LCDWiki ESP32-S3 builds.
 - Legacy cinematic HIL: disabled
 - Storage-fault HIL: disabled
 - Required artifact evidence: `CINE_EVIDENCE` literal and
@@ -29,12 +32,17 @@ satisfy this record.
   release flag, release literal/symbol, or reject legacy cinematic leakage.
 - GREEN command:
   `python3 -m pytest -q tests/test_lesson_storage_hil_artifact_auditor.py tests/test_lcdwiki_es3c35p_board.py`
-- GREEN result: `61 passed in 0.79s`
+- Initial GREEN result: `61 passed in 0.79s`
+- Review-hardening GREEN result: `79 passed in 0.56s`. This includes exact
+  embedded-profile tokens, canonical/unique critical sdkconfig booleans,
+  linked-ELF defined-symbol evidence, boot/cue marker boundaries, and the
+  immutable direct defaults chain.
 - Python syntax check:
   `python3 -m py_compile scripts/assert_lesson_storage_hil_artifacts.py scripts/assert_lcdwiki_prod_config.py`
 - Current checked-in `sdkconfig` gate: expected failure because it predates the
-  approved release-evidence config. The exact LCDWiki production build must
-  regenerate resolved `sdkconfig` and pass the gate before artifact audit.
+  approved release-evidence config. The immutable direct defaults chain is now
+  fixed; the exact LCDWiki production build must regenerate resolved
+  `sdkconfig` and pass the gate before artifact audit.
 - No full ESP-IDF build was performed for this task.
 - No flash or reset was performed.
 

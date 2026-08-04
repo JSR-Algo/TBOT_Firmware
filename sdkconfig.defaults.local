@@ -1,4 +1,6 @@
 CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
+# Production-only serial evidence is board-scoped by Kconfig to LCDWiki ESP32-S3.
+CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y
 # Stable backend bootstrap seed. The OTA response returns the final websocket.url.
 CONFIG_OTA_URL="https://esp.tjbot.vn/tbot/ota/"
 CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"

@@ -14,6 +14,53 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(AUDITOR)
 
 
+def canonical_critical_config(release="n", cinematic_hil="n", storage_hil="n"):
+    values = {
+        "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE": release,
+        "CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY": cinematic_hil,
+        "CONFIG_TBOT_HIL_STORAGE_FAULTS": storage_hil,
+    }
+    return "\n".join(
+        key + "=y" if value == "y" else f"# {key} is not set"
+        for key, value in values.items()
+    ) + "\n"
+
+
+def test_parse_sdkconfig_requires_canonical_critical_booleans():
+    parsed = AUDITOR.parse_sdkconfig_data(
+        (canonical_critical_config(release="y") + "CONFIG_OTHER=quoted\n").encode()
+    )
+
+    assert parsed["CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE"] == "y"
+    assert parsed["CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY"] == "n"
+    assert parsed["CONFIG_TBOT_HIL_STORAGE_FAULTS"] == "n"
+    assert parsed["CONFIG_OTHER"] == "quoted"
+
+
+@pytest.mark.parametrize(
+    "critical_lines",
+    (
+        "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y\n"
+        "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y\n",
+        "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y\n"
+        "# CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE is not set\n",
+        "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=n\n",
+        'CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE="y"\n',
+        "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE =y\n",
+        "#CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE is not set\n",
+    ),
+)
+def test_parse_sdkconfig_rejects_duplicate_or_malformed_critical_boolean(
+    critical_lines,
+):
+    remaining = canonical_critical_config().replace(
+        "# CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE is not set\n", ""
+    )
+
+    with pytest.raises(AUDITOR.AuditFailure, match="sdkconfig boolean"):
+        AUDITOR.parse_sdkconfig_data((critical_lines + remaining).encode())
+
+
 def test_parse_size_and_partition_metrics(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -49,12 +96,12 @@ def test_literal_and_symbol_profiles_are_inverse(tmp_path):
     with pytest.raises(AUDITOR.AuditFailure):
         AUDITOR.audit_literals("production", artifacts)
 
-    symbols = "\n".join(AUDITOR.HIL_SYMBOLS)
+    symbols = "\n".join(f"00000000 T tbot::{name}()" for name in AUDITOR.HIL_SYMBOLS)
     AUDITOR.audit_symbols("hil", symbols)
     with pytest.raises(AUDITOR.AuditFailure):
         AUDITOR.audit_symbols("production", symbols)
     with pytest.raises(AUDITOR.AuditFailure):
-        AUDITOR.audit_symbols("hil", symbols + "\n U openat\n")
+        AUDITOR.audit_symbols("hil", symbols + "\n00000000 T openat\n")
 
 
 def test_resolve_nm_rejects_compiler_sibling_from_untrusted_build_metadata(
@@ -167,11 +214,49 @@ def test_literal_and_nm_checks_use_the_same_pinned_archive_bytes(tmp_path):
     AUDITOR.audit_literals("hil", artifacts)
 
     nm = tmp_path / "xtensa-esp32s3-elf-nm"
-    nm.write_text("#!/bin/sh\ncat \"$2\"\n", encoding="utf-8")
+    nm.write_text("#!/bin/sh\ncat \"$3\"\n", encoding="utf-8")
     nm.chmod(nm.stat().st_mode | stat.S_IXUSR)
     nm_snapshot = AUDITOR.snapshot_artifact(tmp_path, nm, "nmExecutable")
     output = AUDITOR.run_nm_on_snapshot(nm_snapshot, snapshot, tmp_path)
     assert output.encode("ascii") == original
+
+
+def test_production_symbols_must_be_defined_by_linked_elf_not_archive():
+    archive_symbols = (
+        "00000000 T tbot::LessonCinematicEvidenceBoot()\n"
+        "00000000 T tbot::LessonCinematicEvidenceEmitCueEnd(int)\n"
+    )
+
+    with pytest.raises(AUDITOR.AuditFailure, match="linked ELF"):
+        AUDITOR.audit_symbols("production", "", archive_symbols)
+    with pytest.raises(AUDITOR.AuditFailure, match="linked ELF"):
+        AUDITOR.audit_symbols(
+            "production",
+            "         U tbot::LessonCinematicEvidenceBoot()\n"
+            "         U tbot::LessonCinematicEvidenceEmitCueEnd(int)\n",
+            archive_symbols,
+        )
+    with pytest.raises(AUDITOR.AuditFailure, match="linked ELF"):
+        AUDITOR.audit_symbols(
+            "production",
+            "00000000 T tbot::NotLessonCinematicEvidenceBoot()\n"
+            "00000000 T tbot::LessonCinematicEvidenceEmitCueEndLookalike(int)\n",
+            archive_symbols,
+        )
+
+
+def test_production_symbols_reject_forbidden_elf_definitions():
+    required = (
+        "00000000 T tbot::LessonCinematicEvidenceBoot()\n"
+        "00000000 T tbot::LessonCinematicEvidenceEmitCueEnd(int)\n"
+    )
+    with pytest.raises(AUDITOR.AuditFailure, match="HIL symbol"):
+        AUDITOR.audit_symbols(
+            "production",
+            required + "00000000 T tbot::LessonCinematicHilTelemetryBoot()\n",
+        )
+    with pytest.raises(AUDITOR.AuditFailure, match="banned API"):
+        AUDITOR.audit_symbols("production", required + "00000000 T openat\n")
 
 
 def test_verify_source_state_rechecks_head_and_cleanliness(monkeypatch, tmp_path):
@@ -383,7 +468,10 @@ def test_manifest_checks_record_release_and_hil_config_state():
 
 def test_production_artifacts_require_release_evidence_literal_and_symbol(tmp_path):
     artifacts = {}
-    release_blob = b"CINE_EVIDENCE TBOT_EMBEDDED_PROFILE=production"
+    release_blob = (
+        b"CINE_EVIDENCE event=boot CINE_EVIDENCE event=cue_end "
+        b"TBOT_EMBEDDED_PROFILE=production"
+    )
     for name in ("bin", "elf", "map", "mainArchive"):
         path = tmp_path / name
         path.write_bytes(release_blob if name != "map" else b"map")
@@ -392,7 +480,8 @@ def test_production_artifacts_require_release_evidence_literal_and_symbol(tmp_pa
     AUDITOR.audit_literals("production", artifacts)
     AUDITOR.audit_symbols(
         "production",
-        "00000000 T tbot::LessonCinematicEvidenceBeginCue\n",
+        "00000000 T tbot::LessonCinematicEvidenceBoot()\n"
+        "00000000 T tbot::LessonCinematicEvidenceEmitCueEnd(int)\n",
     )
 
     artifacts["elf"].write_bytes(b"TBOT_EMBEDDED_PROFILE=production")
@@ -400,6 +489,24 @@ def test_production_artifacts_require_release_evidence_literal_and_symbol(tmp_pa
         AUDITOR.audit_literals("production", artifacts)
     with pytest.raises(AUDITOR.AuditFailure, match="LessonCinematicEvidence"):
         AUDITOR.audit_symbols("production", "")
+
+
+@pytest.mark.parametrize(
+    "lookalike",
+    (
+        b"NOT_CINE_EVIDENCE event=boot CINE_EVIDENCE event=cue_end",
+        b"CINE_EVIDENCE event=boot NOT_CINE_EVIDENCE event=cue_end",
+    ),
+)
+def test_production_artifacts_reject_cinematic_marker_lookalikes(tmp_path, lookalike):
+    artifacts = {}
+    for name in ("bin", "elf", "map", "mainArchive"):
+        path = tmp_path / name
+        path.write_bytes(lookalike)
+        artifacts[name] = path
+
+    with pytest.raises(AUDITOR.AuditFailure, match="CINE_EVIDENCE"):
+        AUDITOR.audit_literals("production", artifacts)
 
 
 @pytest.mark.parametrize(
@@ -416,7 +523,10 @@ def test_production_artifacts_reject_legacy_hil_leakage(
     for name in ("bin", "elf", "map", "mainArchive"):
         path = tmp_path / name
         path.write_bytes(
-            f"CINE_EVIDENCE {legacy_literal} TBOT_EMBEDDED_PROFILE=production".encode()
+            (
+                "CINE_EVIDENCE event=boot CINE_EVIDENCE event=cue_end "
+                f"{legacy_literal} TBOT_EMBEDDED_PROFILE=production"
+            ).encode()
         )
         artifacts[name] = path
 
@@ -425,7 +535,9 @@ def test_production_artifacts_reject_legacy_hil_leakage(
     with pytest.raises(AUDITOR.AuditFailure, match="HIL"):
         AUDITOR.audit_symbols(
             "production",
-            f"LessonCinematicEvidenceBeginCue\n{legacy_symbol}\n",
+            "00000000 T tbot::LessonCinematicEvidenceBoot()\n"
+            "00000000 T tbot::LessonCinematicEvidenceEmitCueEnd(int)\n"
+            f"00000000 T tbot::{legacy_symbol}()\n",
         )
 
 def test_failed_audit_removes_stale_outputs_before_any_check(tmp_path):

@@ -30,7 +30,14 @@ TOOL_NAMES = (
 BANNER = "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image"
 RELEASE_CINEMATIC_LITERAL = "CINE_EVIDENCE"
 LEGACY_CINEMATIC_LITERAL = "HIL_CINE"
-RELEASE_CINEMATIC_SYMBOL = "LessonCinematicEvidence"
+RELEASE_CINEMATIC_MARKERS = (
+    "CINE_EVIDENCE event=boot",
+    "CINE_EVIDENCE event=cue_end",
+)
+RELEASE_CINEMATIC_SYMBOLS = (
+    "LessonCinematicEvidenceBoot",
+    "LessonCinematicEvidenceEmitCueEnd",
+)
 LEGACY_CINEMATIC_SYMBOL = "LessonCinematicHilTelemetry"
 HIL_SYMBOLS = (
     "LessonStorageHilController",
@@ -42,6 +49,11 @@ HIL_SYMBOLS = (
     "InspectLessonStorageHilStorage",
 )
 BANNED_APIS = ("lstat", "openat", "fstatat", "fdopendir", "unlinkat")
+CRITICAL_BOOLEAN_CONFIGS = (
+    "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE",
+    "CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY",
+    "CONFIG_TBOT_HIL_STORAGE_FAULTS",
+)
 GIT_HEAD_COMMAND = "git rev-parse HEAD"
 GIT_STATUS_COMMAND = "git status --porcelain"
 GIT_COMMIT_TIME_COMMAND = "git show -s --format=%ct HEAD"
@@ -126,12 +138,30 @@ def parse_sdkconfig(path: Path) -> dict[str, str]:
 
 def parse_sdkconfig_data(data: bytes) -> dict[str, str]:
     values: dict[str, str] = {}
+    critical_seen: set[str] = set()
     for raw_line in data.decode("utf-8").splitlines():
         line = raw_line.strip()
+        critical = next(
+            (key for key in CRITICAL_BOOLEAN_CONFIGS if key in line), None
+        )
+        if critical is not None:
+            require(critical not in critical_seen,
+                    f"duplicate sdkconfig boolean: {critical}")
+            if line == f"{critical}=y":
+                values[critical] = "y"
+            elif line == f"# {critical} is not set":
+                values[critical] = "n"
+            else:
+                raise AuditFailure(f"malformed sdkconfig boolean: {critical}")
+            critical_seen.add(critical)
+            continue
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
         values[key] = value.strip().strip('"')
+    missing = set(CRITICAL_BOOLEAN_CONFIGS) - critical_seen
+    if missing:
+        raise AuditFailure(f"missing sdkconfig boolean: {sorted(missing)[0]}")
     return values
 
 
@@ -370,19 +400,51 @@ def resolve_nm(explicit_nm: str | None = None) -> ArtifactSnapshot:
     return validate_nm_executable(matches[-1], trusted_root)
 
 
-def audit_symbols(profile: str, nm_output: str) -> None:
+def parse_defined_nm_symbols(nm_output: str) -> list[str]:
+    symbols: list[str] = []
+    pattern = re.compile(r"^\s*(?:[0-9a-fA-F]+\s+)?([A-Za-z])\s+(.+?)\s*$")
+    for line in nm_output.splitlines():
+        match = pattern.match(line)
+        if match is None or match.group(1).upper() == "U":
+            continue
+        symbols.append(match.group(2).split("(", 1)[0].strip())
+    return symbols
+
+
+def has_exact_api(symbols: list[str], api: str) -> bool:
+    return any(
+        symbol == api
+        or symbol.endswith(f"::{api}")
+        or f"::{api}::" in symbol
+        or symbol.startswith(f"{api}::")
+        for symbol in symbols
+    )
+
+
+def audit_symbols(
+    profile: str, elf_nm_output: str, archive_nm_output: str = ""
+) -> None:
+    elf_symbols = parse_defined_nm_symbols(elf_nm_output)
+    archive_symbols = parse_defined_nm_symbols(archive_nm_output)
+    all_symbols = [*elf_symbols, *archive_symbols]
     for api in BANNED_APIS:
-        pattern = rf"(?:^|\s)_?{re.escape(api)}(?:$|\s)"
-        require(not re.search(pattern, nm_output, re.MULTILINE),
+        present = has_exact_api(all_symbols, api) or has_exact_api(all_symbols, f"_{api}")
+        require(not present,
                 f"banned API symbol present: {api}")
     for symbol in HIL_SYMBOLS:
-        present = symbol in nm_output
+        present = has_exact_api(elf_symbols, symbol)
         require(present == (profile == "hil"),
                 f"HIL symbol profile mismatch: {symbol}")
     if profile == "production":
-        require(RELEASE_CINEMATIC_SYMBOL in nm_output,
-                f"production artifact missing symbol: {RELEASE_CINEMATIC_SYMBOL}")
-        require(LEGACY_CINEMATIC_SYMBOL not in nm_output,
+        for symbol in RELEASE_CINEMATIC_SYMBOLS:
+            require(has_exact_api(elf_symbols, symbol),
+                    f"linked ELF missing defined symbol: {symbol}")
+        legacy_present = any(
+            component.startswith(LEGACY_CINEMATIC_SYMBOL)
+            for symbol in all_symbols
+            for component in symbol.split("::")
+        )
+        require(not legacy_present,
                 f"production artifact contains HIL symbol: {LEGACY_CINEMATIC_SYMBOL}")
 
 
@@ -451,11 +513,11 @@ def audit_literals(profile: str, artifacts: dict[str, Path | ArtifactSnapshot]) 
             require(required.issubset(locations),
                     f"HIL literal missing from artifacts: {literal}")
     if profile == "production":
-        for name in ("bin", "elf", "mainArchive"):
-            require(
-                RELEASE_CINEMATIC_LITERAL.encode("ascii") in searchable[name],
-                f"production artifact missing {RELEASE_CINEMATIC_LITERAL}: {name}",
-            )
+        for name in ("bin", "elf"):
+            for marker in RELEASE_CINEMATIC_MARKERS:
+                pattern = rb"(?<![A-Za-z0-9_])" + re.escape(marker.encode("ascii"))
+                require(re.search(pattern, searchable[name]) is not None,
+                        f"production artifact missing {marker}: {name}")
         legacy = LEGACY_CINEMATIC_LITERAL.encode("ascii")
         require(
             not any(legacy in content for content in searchable.values()),
@@ -506,16 +568,19 @@ def defaults_manifest(
 
 
 def run_nm_on_snapshot(
-    nm: ArtifactSnapshot, archive: ArtifactSnapshot, repo: Path
+    nm: ArtifactSnapshot, artifact: ArtifactSnapshot, repo: Path
 ) -> str:
-    descriptor, temp_name = tempfile.mkstemp(prefix="lesson-hil-main-", suffix=".a")
+    suffix = artifact.path.suffix or ".artifact"
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix=f"lesson-audit-{artifact.label}-", suffix=suffix
+    )
     try:
         with os.fdopen(descriptor, "wb") as output:
-            output.write(archive.data)
+            output.write(artifact.data)
             output.flush()
             os.fsync(output.fileno())
         verify_artifact_snapshot(nm)
-        return run([str(nm.path), "-C", temp_name], repo)
+        return run([str(nm.path), "-C", "--defined-only", temp_name], repo)
     finally:
         verify_artifact_snapshot(nm)
         try:
@@ -648,8 +713,10 @@ def audit(
         repo, build_dir, description, profile, auxiliary_snapshots)
     nm_snapshot = resolve_nm(nm_argument)
     auxiliary_snapshots.append(nm_snapshot)
-    nm_output = run_nm_on_snapshot(nm_snapshot, artifacts["mainArchive"], repo)
-    audit_symbols(profile, nm_output)
+    elf_nm_output = run_nm_on_snapshot(nm_snapshot, artifacts["elf"], repo)
+    archive_nm_output = run_nm_on_snapshot(
+        nm_snapshot, artifacts["mainArchive"], repo)
+    audit_symbols(profile, elf_nm_output, archive_nm_output)
     audit_literals(profile, artifacts)
     embedded_profile = audit_profile_literals(profile, artifacts)
     partition = app_partition_metrics(

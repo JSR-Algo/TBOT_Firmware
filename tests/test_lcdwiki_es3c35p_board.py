@@ -126,6 +126,22 @@ def test_lcdwiki_enables_release_cinematic_evidence():
     assert "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y" in sdkconfig
 
 
+def test_lcdwiki_direct_defaults_chain_enables_release_evidence_without_hil():
+    base = read("sdkconfig.defaults")
+    esp32s3 = read("sdkconfig.defaults.esp32s3")
+    local = read("sdkconfig.defaults.local")
+    direct_chain = "\n".join((base, esp32s3, local))
+    kconfig = read("main/Kconfig.projbuild")
+
+    assert local.count("CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y") == 1
+    assert "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y" in direct_chain
+    assert "CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY=y" not in direct_chain
+    assert "CONFIG_TBOT_HIL_STORAGE_FAULTS=y" not in direct_chain
+    assert "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y" not in base
+    assert "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y" not in esp32s3
+    assert "depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P" in kconfig
+
+
 def test_lcdwiki_es3c35p_prod_gate_rejects_missing_release_cinematic_evidence(tmp_path):
     sdkconfig = tmp_path / "sdkconfig.es3c35p-no-release-evidence"
     sdkconfig.write_text(
