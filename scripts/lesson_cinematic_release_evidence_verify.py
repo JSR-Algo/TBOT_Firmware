@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline verifier for a five-pass cinematic HIL evidence bundle."""
+"""Offline verifier for a five-pass cinematic release evidence bundle."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lesson_cinematic_hil_log_verify import verify as verify_cinematic_log
+from lesson_cinematic_evidence_log_verify import verify as verify_cinematic_log
 
 SCHEMA = "lesson-cinematic-hil-evidence.v1"
 LIVE_IDENTITY = (
@@ -263,7 +263,11 @@ def verify(manifest_path: Path) -> list[str]:
                 problems.append(f"{label}: {problem}")
             serial_lines = serial_log.read_text(encoding="utf-8", errors="replace").splitlines()
             boot_index = next(
-                (i for i, line in enumerate(serial_lines) if line.startswith("HIL_CINE event=boot ")),
+                (
+                    i
+                    for i, line in enumerate(serial_lines)
+                    if line.startswith("CINE_EVIDENCE event=boot ")
+                ),
                 -1,
             )
             post_boot = "\n".join(serial_lines[boot_index + 1 :]).lower()
@@ -309,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         for problem in problems:
             print(problem, file=sys.stderr)
         return 1
-    print("verified 5 consecutive cinematic HIL passes")
+    print("verified 5 consecutive cinematic release evidence passes")
     return 0
 
 

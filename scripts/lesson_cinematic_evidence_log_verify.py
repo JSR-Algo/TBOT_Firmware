@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify firmware cinematic HIL telemetry logs."""
+"""Verify firmware production cinematic evidence logs."""
 
 from __future__ import annotations
 
@@ -152,7 +152,7 @@ def verify(path: Path, *, min_internal_heap: int, min_psram_heap: int) -> list[s
     cue_end_lines = [
         (line_no, line)
         for line_no, line in enumerate(lines, 1)
-        if line.startswith("HIL_CINE ") and " event=cue_end " in f" {line} "
+        if line.startswith("CINE_EVIDENCE ") and " event=cue_end " in f" {line} "
     ]
     cue_order = [parse_fields(line).get("cue") for _line_no, line in cue_end_lines]
     if cue_order != CANONICAL_CUES:
@@ -160,12 +160,14 @@ def verify(path: Path, *, min_internal_heap: int, min_psram_heap: int) -> list[s
     boot_lines = [
         (line_no, parse_fields(line))
         for line_no, line in enumerate(lines, 1)
-        if line.startswith("HIL_CINE ") and " event=boot " in f" {line} "
+        if line.startswith("CINE_EVIDENCE ") and " event=boot " in f" {line} "
     ]
     if len(boot_lines) != 1:
-        problems.append(f"expected exactly one HIL_CINE boot, found {len(boot_lines)}")
+        problems.append(
+            f"expected exactly one CINE_EVIDENCE boot, found {len(boot_lines)}"
+        )
     if not boot_lines:
-        problems.append("missing HIL_CINE boot")
+        problems.append("missing CINE_EVIDENCE boot")
     boot_nonces: set[int] = set()
     for line_no, fields in boot_lines:
         parsed_nonce = parse_boot_nonce(fields, line_no, problems)

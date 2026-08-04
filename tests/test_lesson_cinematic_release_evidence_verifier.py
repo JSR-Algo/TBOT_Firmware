@@ -6,10 +6,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from test_lesson_cinematic_hil_log_verifier import CANONICAL_CUES, boot, line
+from test_lesson_cinematic_evidence_log_verifier import (
+    CANONICAL_CUES,
+    LEGACY_PREFIX,
+    boot,
+    line,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "lesson_cinematic_hil_evidence_verify.py"
+SCRIPT = ROOT / "scripts" / "lesson_cinematic_release_evidence_verify.py"
 
 
 def sha256(path: Path) -> str:
@@ -117,13 +122,33 @@ def run_verifier(path: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_evidence_verifier_accepts_five_fresh_ordered_passes(tmp_path):
+def test_release_evidence_verifier_accepts_five_fresh_ordered_passes(tmp_path):
     path, _manifest = make_evidence(tmp_path)
 
     result = run_verifier(path)
 
     assert result.returncode == 0, result.stderr
-    assert "verified 5 consecutive cinematic HIL passes" in result.stdout
+    assert "verified 5 consecutive cinematic release evidence passes" in result.stdout
+
+
+def test_release_evidence_verifier_rejects_legacy_hil_cine_only_runs(tmp_path):
+    path, manifest = make_evidence(tmp_path)
+    for run in manifest["runs"]:
+        serial_log = Path(run["serialLog"])
+        serial_log.write_text(
+            serial_log.read_text(encoding="utf-8").replace(
+                "CINE_EVIDENCE", LEGACY_PREFIX
+            ),
+            encoding="utf-8",
+        )
+        run["serialSha256"] = sha256(serial_log)
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = run_verifier(path)
+
+    assert result.returncode != 0
+    assert "expected exactly one CINE_EVIDENCE boot, found 0" in result.stderr
+    assert "boot nonces must be distinct and nonzero across all five runs" in result.stderr
 
 
 def test_evidence_verifier_rejects_missing_fifth_pass(tmp_path):

@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "scripts" / "lesson_cinematic_hil_log_verify.py"
+SCRIPT = ROOT / "scripts" / "lesson_cinematic_evidence_log_verify.py"
 
 
 CANONICAL_CUES = [
@@ -36,10 +36,12 @@ LOOP_CUES = {
     "hay-thinking",
 }
 
+LEGACY_PREFIX = "HIL" "_CINE"
+
 
 def boot(*, internal_heap_min: int = 60000) -> str:
     return (
-        "HIL_CINE event=boot boot_nonce=0x1 reset_reason=poweron "
+        "CINE_EVIDENCE event=boot boot_nonce=0x1 reset_reason=poweron "
         f"lifetime_internal_heap_min={internal_heap_min} psram_heap_min=4200000\n"
     )
 
@@ -57,7 +59,7 @@ def line(
     read_hist_ms: str = "0:1,70:0,100:0",
 ) -> str:
     return (
-        "HIL_CINE event=cue_end "
+        "CINE_EVIDENCE event=cue_end "
         f"cue={cue} reason={reason} fault={fault} seq=1 latency_ms=100 "
         f"read_count={read_count} read_ge70ms={read_ge70ms} read_max_ms={read_max_ms} "
         f"read_hist_ms={read_hist_ms} "
@@ -77,6 +79,21 @@ def run_verifier(log_path: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         check=False,
     )
+
+
+def test_verifier_rejects_legacy_hil_cine_only_log(tmp_path):
+    log_path = tmp_path / "legacy_hil_cine.log"
+    legacy = (boot() + "".join(line(cue) for cue in CANONICAL_CUES)).replace(
+        "CINE_EVIDENCE", LEGACY_PREFIX
+    )
+    log_path.write_text(legacy, encoding="utf-8")
+
+    result = run_verifier(log_path)
+
+    assert result.returncode != 0
+    assert "verified 0 cue_end lines" not in result.stdout
+    assert "expected exactly one CINE_EVIDENCE boot, found 0" in result.stderr
+    assert "cue_end order does not match canonical sequence" in result.stderr
 
 
 def test_verifier_accepts_fault_free_loop_cues_ended_by_replacement_or_stop(tmp_path):
