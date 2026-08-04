@@ -1,4 +1,5 @@
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_mjpeg_mp4.h"
 
 #include <atomic>
 #include <cstring>
@@ -8,7 +9,6 @@
 #ifdef ESP_PLATFORM
 #include "display/lcd_display.h"
 #include "display/lvgl_display/jpg/jpeg_to_image.h"
-#include "lesson_mjpeg_mp4.h"
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #endif
@@ -21,6 +21,10 @@ std::atomic<LessonFlattenedCinematicRenderer*> g_active_renderer{nullptr};
 std::atomic<bool> g_timer_route_v4{false};
 std::mutex g_active_renderer_mutex;
 
+constexpr std::size_t kFlattenedFramebufferBytes =
+    static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
+constexpr std::size_t kFlattenedDecoderWorkspaceReserveBytes = 128u * 1024u;
+
 void AppendFingerprint(std::string& destination, const char* value) {
     const std::string_view text = value != nullptr ? std::string_view(value) : std::string_view();
     destination += std::to_string(text.size());
@@ -29,19 +33,33 @@ void AppendFingerprint(std::string& destination, const char* value) {
     destination += ';';
 }
 
-std::string ControlFingerprint(const char* command, const char* phase_id) {
+std::string ControlFingerprint(const char* command, const char* identity) {
     std::string value;
     AppendFingerprint(value, command);
-    AppendFingerprint(value, phase_id);
+    AppendFingerprint(value, identity);
+    return value;
+}
+
+std::string V2ControlFingerprint(const char* command, const char* cue_id,
+                                 const char* effect, const char* step_key,
+                                 LessonCinematicPlaybackMode playback_mode) {
+    std::string value = ControlFingerprint(command, cue_id);
+    AppendFingerprint(value, effect);
+    AppendFingerprint(value, step_key);
+    value += playback_mode == LessonCinematicPlaybackMode::kLoop ? "loop" : "once";
     return value;
 }
 
 std::string PrepareFingerprint(const LessonFlattenedCinematicPhaseConfig& config) {
-    std::string value = ControlFingerprint("prepare", config.phase_id);
+    std::string value = config.template_version == 2
+        ? V2ControlFingerprint("prepare", config.cue_id, config.effect, config.step_key,
+                               config.playback_mode)
+        : ControlFingerprint("prepare", config.phase_id);
     AppendFingerprint(value, config.renderer_id);
     AppendFingerprint(value, config.template_id);
     AppendFingerprint(value, config.asset.derivative_id);
     AppendFingerprint(value, config.asset.phase_id);
+    if (config.template_version == 2) AppendFingerprint(value, config.asset.cue_id);
     AppendFingerprint(value, config.asset.sd_path);
     AppendFingerprint(value, config.asset.sha256);
     AppendFingerprint(value, config.asset.media_type);
@@ -71,17 +89,89 @@ bool LocalPath(const char* path) {
            std::strchr(path, '#') == nullptr && std::strchr(path, '@') == nullptr;
 }
 
+bool SafeSlug(const char* value) {
+    if (value == nullptr || value[0] == '\0') return false;
+    bool previous_dash = true;
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        const bool alpha = *cursor >= 'a' && *cursor <= 'z';
+        const bool digit = *cursor >= '0' && *cursor <= '9';
+        if (alpha || digit) {
+            previous_dash = false;
+        } else if (*cursor == '-' && !previous_dash && cursor[1] != '\0') {
+            previous_dash = true;
+        } else {
+            return false;
+        }
+    }
+    return !previous_dash;
+}
+
+bool KnownV1Phase(const char* phase_id) {
+    static constexpr const char* kPhases[] = {
+        "opening", "greet", "teach", "listen", "thinking", "correct", "retry",
+        "celebrate",
+    };
+    if (phase_id == nullptr) return false;
+    for (const char* phase : kPhases) {
+        if (std::strcmp(phase_id, phase) == 0) return true;
+    }
+    return false;
+}
+
+struct V2EffectContract {
+    const char* effect;
+    LessonCinematicPlaybackMode playback_mode;
+    std::uint32_t duration_ms;
+};
+
+const V2EffectContract* FindV2Effect(const char* effect) {
+    static constexpr V2EffectContract kEffects[] = {
+        {"opening", LessonCinematicPlaybackMode::kOnce, 9500},
+        {"greet", LessonCinematicPlaybackMode::kLoop, 1200},
+        {"teach", LessonCinematicPlaybackMode::kOnce, 2600},
+        {"listen", LessonCinematicPlaybackMode::kLoop, 1300},
+        {"thinking", LessonCinematicPlaybackMode::kLoop, 1300},
+        {"correct", LessonCinematicPlaybackMode::kOnce, 600},
+        {"retry-level-1", LessonCinematicPlaybackMode::kOnce, 1200},
+        {"retry-level-2", LessonCinematicPlaybackMode::kOnce, 1400},
+        {"retry-level-3", LessonCinematicPlaybackMode::kOnce, 1600},
+        {"celebrate", LessonCinematicPlaybackMode::kOnce, 3000},
+        {"word-transition", LessonCinematicPlaybackMode::kOnce, 1100},
+    };
+    if (effect == nullptr) return nullptr;
+    for (const auto& contract : kEffects) {
+        if (std::strcmp(effect, contract.effect) == 0) return &contract;
+    }
+    return nullptr;
+}
+
 bool ExactContract(const LessonFlattenedCinematicPhaseConfig& config) {
-    return config.renderer_id != nullptr && config.template_id != nullptr &&
-           std::strcmp(config.renderer_id, kLessonRendererV4) == 0 &&
-           std::strcmp(config.template_id, kLessonFlattenedMjpegCinematicTemplate) == 0 &&
-           config.template_version == 1;
+    if (config.renderer_id == nullptr || config.template_id == nullptr ||
+        std::strcmp(config.renderer_id, kLessonRendererV4) != 0 ||
+        std::strcmp(config.template_id, kLessonFlattenedMjpegCinematicTemplate) != 0) {
+        return false;
+    }
+    return config.template_version == 1 || config.template_version == 2;
 }
 
 bool ValidMetadata(const LessonFlattenedCinematicPhaseConfig& config) {
-    return config.phase_id != nullptr && config.phase_id[0] != '\0' &&
-           config.asset.phase_id != nullptr &&
-           std::strcmp(config.asset.phase_id, config.phase_id) == 0 &&
+    bool identity_ok = false;
+    if (config.template_version == 1) {
+        identity_ok = KnownV1Phase(config.phase_id) &&
+            config.cue_id == nullptr && config.effect == nullptr && config.step_key == nullptr &&
+            config.playback_mode == LessonCinematicPlaybackMode::kOnce &&
+            config.asset.phase_id != nullptr && config.asset.cue_id == nullptr &&
+            std::strcmp(config.asset.phase_id, config.phase_id) == 0;
+    } else {
+        const auto* effect = FindV2Effect(config.effect);
+        identity_ok = config.phase_id == nullptr && config.asset.phase_id == nullptr &&
+            SafeSlug(config.cue_id) && SafeSlug(config.step_key) &&
+            config.asset.cue_id != nullptr &&
+            std::strcmp(config.asset.cue_id, config.cue_id) == 0 && effect != nullptr &&
+            effect->playback_mode == config.playback_mode &&
+            effect->duration_ms == config.duration_ms;
+    }
+    return identity_ok &&
            LowerHexSha256(config.asset.derivative_id) && LowerHexSha256(config.asset.sha256) &&
            config.asset.bytes > 0 &&
            config.asset.media_type != nullptr &&
@@ -99,6 +189,36 @@ bool LessonFlattenedCinematicRendererCapabilityReady() {
     return g_capability_ready.load(std::memory_order_acquire);
 }
 
+bool ProbeLessonFlattenedCinematicReplacementCapacity(
+    const LessonFlattenedCinematicCapacityOps& ops) {
+    if (ops.allocate == nullptr || ops.release == nullptr ||
+        ops.prepare_decoder_workspace == nullptr ||
+        ops.destroy_decoder_workspace == nullptr) {
+        return false;
+    }
+    void* first_framebuffer = ops.allocate(ops.context, kFlattenedFramebufferBytes);
+    void* second_framebuffer = first_framebuffer != nullptr
+        ? ops.allocate(ops.context, kFlattenedFramebufferBytes) : nullptr;
+    void* jpeg_input = second_framebuffer != nullptr
+        ? ops.allocate(ops.context, kLessonMjpegMp4MaxSampleBytes) : nullptr;
+    const bool workspace_attempted = jpeg_input != nullptr;
+    const bool workspace_ready = workspace_attempted &&
+        ops.prepare_decoder_workspace(ops.context, kFlattenedDecoderWorkspaceReserveBytes);
+    if (workspace_attempted) {
+        ops.destroy_decoder_workspace(ops.context, kFlattenedDecoderWorkspaceReserveBytes);
+    }
+    if (jpeg_input != nullptr) {
+        ops.release(ops.context, jpeg_input, kLessonMjpegMp4MaxSampleBytes);
+    }
+    if (second_framebuffer != nullptr) {
+        ops.release(ops.context, second_framebuffer, kFlattenedFramebufferBytes);
+    }
+    if (first_framebuffer != nullptr) {
+        ops.release(ops.context, first_framebuffer, kFlattenedFramebufferBytes);
+    }
+    return workspace_ready;
+}
+
 void SetLessonFlattenedCinematicRendererCapabilityReady(bool ready) {
     g_capability_ready.store(ready, std::memory_order_release);
 }
@@ -106,7 +226,7 @@ void SetLessonFlattenedCinematicRendererCapabilityReady(bool ready) {
 void SetActiveLessonFlattenedCinematicRenderer(LessonFlattenedCinematicRenderer* renderer) {
     std::lock_guard<std::mutex> lock(g_active_renderer_mutex);
     g_active_renderer.store(renderer, std::memory_order_release);
-    SetLessonFlattenedCinematicRendererCapabilityReady(renderer != nullptr && renderer->initialized());
+    SetLessonFlattenedCinematicRendererCapabilityReady(false);
 }
 
 LessonFlattenedCinematicRenderer* ActiveLessonFlattenedCinematicRenderer() {
@@ -153,12 +273,17 @@ void LessonFlattenedCinematicRenderer::DiscardSession() {
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
-    return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};
+    return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error, cue_id_};
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Applied(
     LessonCinematicResponseType type, std::uint64_t sequence) const {
-    return {type, true, sequence, phase_id_, LessonCinematicError::kNone};
+    return {type, true, sequence, phase_id_, LessonCinematicError::kNone, cue_id_};
+}
+
+LessonCinematicResponse LessonFlattenedCinematicRenderer::TickApplied(
+    LessonCinematicResponseType type, std::uint64_t sequence) const {
+    return {type, true, sequence, "", LessonCinematicError::kNone, ""};
 }
 
 LessonCinematicError LessonFlattenedCinematicRenderer::OperationError(
@@ -172,8 +297,12 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Prepare(
     const LessonFlattenedCinematicPhaseConfig& config, std::uint64_t) {
     std::lock_guard<std::mutex> lock(mutex_);
     const std::string fingerprint = PrepareFingerprint(config);
-    if (config.command_sequence_id == last_sequence_ && last_response_.accepted) {
+    if (!config.new_session && config.command_sequence_id == last_sequence_ &&
+        last_response_.accepted) {
         if (last_command_ == "prepare" && last_fingerprint_ == fingerprint) return last_response_;
+        return Failure(config.command_sequence_id, LessonCinematicError::kStaleCommand);
+    }
+    if (!config.new_session && config.command_sequence_id < last_sequence_) {
         return Failure(config.command_sequence_id, LessonCinematicError::kStaleCommand);
     }
     if (!initialized() || !ExactContract(config)) {
@@ -186,10 +315,8 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
 
-    constexpr std::size_t kFramebufferBytes =
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
     std::uint16_t* candidate_framebuffer =
-        static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kFramebufferBytes));
+        static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kFlattenedFramebufferBytes));
     if (candidate_framebuffer == nullptr) {
         return Failure(config.command_sequence_id, LessonCinematicError::kInsufficientPsram);
     }
@@ -220,7 +347,12 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Prepare(
     stream_ = candidate_stream;
     metadata_ = candidate_metadata;
     framebuffer_ = candidate_framebuffer;
-    phase_id_ = config.phase_id;
+    phase_id_ = config.phase_id != nullptr ? config.phase_id : "";
+    cue_id_ = config.cue_id != nullptr ? config.cue_id : "";
+    effect_ = config.effect != nullptr ? config.effect : "";
+    step_key_ = config.step_key != nullptr ? config.step_key : "";
+    template_version_ = config.template_version;
+    playback_mode_ = config.playback_mode;
     state_ = State::kPrepared;
     displayed_frame_ = 0;
     last_sequence_ = config.command_sequence_id;
@@ -231,23 +363,28 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Prepare(
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::ValidateControl(
-    std::uint64_t sequence, const char* phase_id, const char* command) const {
+    std::uint64_t sequence, const char* identity, const char* command) const {
+    const std::string fingerprint = template_version_ == 2
+        ? V2ControlFingerprint(command, identity, effect_.c_str(), step_key_.c_str(),
+                               playback_mode_)
+        : ControlFingerprint(command, identity);
     if (sequence == last_sequence_ && last_response_.accepted) {
-        if (last_command_ == command && last_fingerprint_ == ControlFingerprint(command, phase_id)) {
+        if (last_command_ == command && last_fingerprint_ == fingerprint) {
             return last_response_;
         }
         return Failure(sequence, LessonCinematicError::kStaleCommand);
     }
-    if (sequence < last_sequence_ || phase_id == nullptr || phase_id_ != phase_id) {
+    const std::string& active_identity = template_version_ == 2 ? cue_id_ : phase_id_;
+    if (sequence < last_sequence_ || identity == nullptr || active_identity != identity) {
         return Failure(sequence, LessonCinematicError::kStaleCommand);
     }
     return Applied(LessonCinematicResponseType::kCommandApplied, sequence);
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Start(
-    std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
+    std::uint64_t sequence, const char* identity, std::uint64_t now_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id, "start");
+    const auto valid = ValidateControl(sequence, identity, "start");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kPrepared) return Failure(sequence, LessonCinematicError::kInvalidState);
     if (displayed_frame_ != 0) {
@@ -265,14 +402,17 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Start(
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kPhaseReady, sequence);
     last_command_ = "start";
-    last_fingerprint_ = ControlFingerprint("start", phase_id);
+    last_fingerprint_ = template_version_ == 2
+        ? V2ControlFingerprint("start", identity, effect_.c_str(), step_key_.c_str(),
+                               playback_mode_)
+        : ControlFingerprint("start", identity);
     return last_response_;
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Pause(
-    std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
+    std::uint64_t sequence, const char* identity, std::uint64_t now_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id, "pause");
+    const auto valid = ValidateControl(sequence, identity, "pause");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kRunning) return Failure(sequence, LessonCinematicError::kInvalidState);
     state_ = State::kPaused;
@@ -280,14 +420,17 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Pause(
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
     last_command_ = "pause";
-    last_fingerprint_ = ControlFingerprint("pause", phase_id);
+    last_fingerprint_ = template_version_ == 2
+        ? V2ControlFingerprint("pause", identity, effect_.c_str(), step_key_.c_str(),
+                               playback_mode_)
+        : ControlFingerprint("pause", identity);
     return last_response_;
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Resume(
-    std::uint64_t sequence, const char* phase_id, std::uint64_t now_ms) {
+    std::uint64_t sequence, const char* identity, std::uint64_t now_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id, "resume");
+    const auto valid = ValidateControl(sequence, identity, "resume");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kPaused) return Failure(sequence, LessonCinematicError::kInvalidState);
     clock_origin_ms_ += now_ms - paused_at_ms_;
@@ -295,14 +438,17 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Resume(
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
     last_command_ = "resume";
-    last_fingerprint_ = ControlFingerprint("resume", phase_id);
+    last_fingerprint_ = template_version_ == 2
+        ? V2ControlFingerprint("resume", identity, effect_.c_str(), step_key_.c_str(),
+                               playback_mode_)
+        : ControlFingerprint("resume", identity);
     return last_response_;
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Stop(
-    std::uint64_t sequence, const char* phase_id) {
+    std::uint64_t sequence, const char* identity) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id, "stop");
+    const auto valid = ValidateControl(sequence, identity, "stop");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     CloseStream();
     ReleaseBuffer();
@@ -310,14 +456,17 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Stop(
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
     last_command_ = "stop";
-    last_fingerprint_ = ControlFingerprint("stop", phase_id);
+    last_fingerprint_ = template_version_ == 2
+        ? V2ControlFingerprint("stop", identity, effect_.c_str(), step_key_.c_str(),
+                               playback_mode_)
+        : ControlFingerprint("stop", identity);
     return last_response_;
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Cancel(
-    std::uint64_t sequence, const char* phase_id) {
+    std::uint64_t sequence, const char* identity) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto valid = ValidateControl(sequence, phase_id, "cancel");
+    const auto valid = ValidateControl(sequence, identity, "cancel");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     CloseStream();
     ReleaseBuffer();
@@ -325,35 +474,53 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Cancel(
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
     last_command_ = "cancel";
-    last_fingerprint_ = ControlFingerprint("cancel", phase_id);
+    last_fingerprint_ = template_version_ == 2
+        ? V2ControlFingerprint("cancel", identity, effect_.c_str(), step_key_.c_str(),
+                               playback_mode_)
+        : ControlFingerprint("cancel", identity);
     return last_response_;
 }
 
 LessonCinematicResponse LessonFlattenedCinematicRenderer::Tick(std::uint64_t now_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_ == State::kPaused) {
-        return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
+        return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
     if (state_ != State::kRunning) return Failure(last_sequence_, LessonCinematicError::kInvalidState);
     const std::uint64_t elapsed = now_ms >= clock_origin_ms_ ? now_ms - clock_origin_ms_ : 0;
-    const std::uint64_t frame = elapsed * metadata_.fps / 1000;
-    if (frame >= metadata_.frame_count) {
+    const std::uint64_t absolute_frame = elapsed * metadata_.fps / 1000;
+    if (template_version_ == 2 && playback_mode_ == LessonCinematicPlaybackMode::kLoop) {
+        const std::size_t frame = static_cast<std::size_t>(absolute_frame % metadata_.frame_count);
+        if (frame == displayed_frame_) {
+            return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
+        }
+        const auto error = RenderFrame(frame);
+        if (error != LessonCinematicError::kNone) {
+            CloseStream();
+            ReleaseBuffer();
+            state_ = State::kFailed;
+            return Failure(last_sequence_, error);
+        }
+        displayed_frame_ = frame;
+        return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
+    }
+    if (absolute_frame >= metadata_.frame_count) {
         state_ = State::kPrepared;
         displayed_frame_ = metadata_.frame_count - 1;
-        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+        return TickApplied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
     }
-    if (frame == displayed_frame_) {
-        return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
+    if (absolute_frame == displayed_frame_) {
+        return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
-    const auto error = RenderFrame(static_cast<std::size_t>(frame));
+    const auto error = RenderFrame(static_cast<std::size_t>(absolute_frame));
     if (error != LessonCinematicError::kNone) {
         CloseStream();
         ReleaseBuffer();
         state_ = State::kFailed;
         return Failure(last_sequence_, error);
     }
-    displayed_frame_ = static_cast<std::size_t>(frame);
-    return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
+    displayed_frame_ = static_cast<std::size_t>(absolute_frame);
+    return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
 }
 
 LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrame(std::size_t frame_index) {
@@ -365,13 +532,12 @@ LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrameOn(
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     std::size_t stride = 0;
-    constexpr std::size_t kFramebufferBytes =
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
     constexpr std::uint64_t kReadDecodeDeadlineMs = 100;
     const std::uint64_t started = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : 0;
     if (!ops_.decode(ops_.context, stream, frame_index,
-                     reinterpret_cast<std::uint8_t*>(framebuffer), kFramebufferBytes,
+                     reinterpret_cast<std::uint8_t*>(framebuffer),
+                     kFlattenedFramebufferBytes,
                      &width, &height, &stride)) {
         return OperationError(LessonCinematicError::kDecodeFailed);
     }
@@ -425,6 +591,10 @@ struct ProductionFlattenedRendererContext {
     LessonCinematicError last_error = LessonCinematicError::kNone;
 };
 
+struct ProductionCapacityProbeContext {
+    jpeg_reusable_decoder_t decoder{};
+};
+
 std::unique_ptr<ProductionFlattenedRendererContext> g_production_context;
 std::unique_ptr<LessonFlattenedCinematicRenderer> g_production_renderer;
 
@@ -443,6 +613,26 @@ void* ProductionAllocate(void*, std::size_t size) {
 }
 
 void ProductionFree(void*, void* pointer) { heap_caps_free(pointer); }
+
+void* ProductionCapacityAllocate(void*, std::size_t size) {
+    return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
+void ProductionCapacityRelease(void*, void* pointer, std::size_t) {
+    heap_caps_free(pointer);
+}
+
+bool ProductionCapacityPrepareDecoder(void* raw, std::size_t) {
+    auto* context = static_cast<ProductionCapacityProbeContext*>(raw);
+    return context != nullptr && jpeg_reusable_decoder_prepare_workspace(
+        &context->decoder, kLessonCinematicWidth, kLessonCinematicHeight,
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == ESP_OK;
+}
+
+void ProductionCapacityDestroyDecoder(void* raw, std::size_t) {
+    auto* context = static_cast<ProductionCapacityProbeContext*>(raw);
+    if (context != nullptr) jpeg_reusable_decoder_destroy(&context->decoder);
+}
 
 bool ProductionOpen(void* raw, const char* path, LessonCinematicStreamMetadata* metadata,
                     void** handle) {
@@ -557,26 +747,22 @@ std::uint64_t ProductionMonotonicMs(void*) {
 
 bool InitializeProductionLessonFlattenedCinematicRenderer(::LcdDisplay* display) {
 #ifdef ESP_PLATFORM
+    SetLessonFlattenedCinematicRendererCapabilityReady(false);
     constexpr std::size_t kRequiredPsram =
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2 +
-        kLessonMjpegMp4MaxSampleBytes + 128 * 1024;
-    if (display == nullptr || heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kRequiredPsram) {
+        2 * kFlattenedFramebufferBytes + kLessonMjpegMp4MaxSampleBytes +
+        kFlattenedDecoderWorkspaceReserveBytes;
+    constexpr std::size_t kLargestRequiredAllocation =
+        kLessonMjpegMp4MaxSampleBytes > kFlattenedFramebufferBytes
+            ? kLessonMjpegMp4MaxSampleBytes : kFlattenedFramebufferBytes;
+    if (display == nullptr || heap_caps_get_free_size(MALLOC_CAP_SPIRAM) < kRequiredPsram ||
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < kLargestRequiredAllocation) {
         return false;
     }
-    void* framebuffer_probe = heap_caps_malloc(
-        static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    void* jpeg_probe = heap_caps_malloc(kLessonMjpegMp4MaxSampleBytes,
-                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    jpeg_reusable_decoder_t decoder_probe{};
-    const bool decoder_ready = jpeg_reusable_decoder_prepare_workspace(
-        &decoder_probe, kLessonCinematicWidth, kLessonCinematicHeight,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == ESP_OK;
-    const bool ready = framebuffer_probe != nullptr && jpeg_probe != nullptr && decoder_ready;
-    if (framebuffer_probe != nullptr) heap_caps_free(framebuffer_probe);
-    if (jpeg_probe != nullptr) heap_caps_free(jpeg_probe);
-    jpeg_reusable_decoder_destroy(&decoder_probe);
-    if (!ready) return false;
+    ProductionCapacityProbeContext capacity_context;
+    const LessonFlattenedCinematicCapacityOps capacity_ops{
+        &capacity_context, ProductionCapacityAllocate, ProductionCapacityRelease,
+        ProductionCapacityPrepareDecoder, ProductionCapacityDestroyDecoder};
+    if (!ProbeLessonFlattenedCinematicReplacementCapacity(capacity_ops)) return false;
     g_production_context = std::make_unique<ProductionFlattenedRendererContext>();
     g_production_context->display = display;
     g_production_renderer = std::make_unique<LessonFlattenedCinematicRenderer>(
@@ -584,6 +770,7 @@ bool InitializeProductionLessonFlattenedCinematicRenderer(::LcdDisplay* display)
             ProductionFree, ProductionOpen, ProductionClose, ProductionDecode,
             ProductionPresent, ProductionLastError, ProductionMonotonicMs});
     SetActiveLessonFlattenedCinematicRenderer(g_production_renderer.get());
+    SetLessonFlattenedCinematicRendererCapabilityReady(g_production_renderer->initialized());
     return LessonFlattenedCinematicRendererCapabilityReady();
 #else
     (void)display;

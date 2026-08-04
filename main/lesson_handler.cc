@@ -151,6 +151,47 @@ bool Blank(const char* value) {
     }
     return true;
 }
+bool IsSafeCinematicSlug(const char* value) {
+    if (value == nullptr || value[0] == '\0') return false;
+    bool previous_dash = true;
+    for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+        const bool alpha = *cursor >= 'a' && *cursor <= 'z';
+        const bool digit = *cursor >= '0' && *cursor <= '9';
+        if (alpha || digit) {
+            previous_dash = false;
+        } else if (*cursor == '-' && !previous_dash && cursor[1] != '\0') {
+            previous_dash = true;
+        } else {
+            return false;
+        }
+    }
+    return !previous_dash;
+}
+
+bool ValidV2CinematicEffect(const char* effect, const char* playback_mode,
+                            double duration_ms) {
+    struct Contract {
+        const char* effect;
+        const char* playback_mode;
+        double duration_ms;
+    };
+    static constexpr Contract kContracts[] = {
+        {"opening", "once", 9500}, {"greet", "loop", 1200},
+        {"teach", "once", 2600}, {"listen", "loop", 1300},
+        {"thinking", "loop", 1300}, {"correct", "once", 600},
+        {"retry-level-1", "once", 1200}, {"retry-level-2", "once", 1400},
+        {"retry-level-3", "once", 1600}, {"celebrate", "once", 3000},
+        {"word-transition", "once", 1100},
+    };
+    if (effect == nullptr || playback_mode == nullptr) return false;
+    for (const auto& contract : kContracts) {
+        if (std::strcmp(effect, contract.effect) == 0) {
+            return std::strcmp(playback_mode, contract.playback_mode) == 0 &&
+                   duration_ms == contract.duration_ms;
+        }
+    }
+    return false;
+}
 bool IsValidLessonIdentity(const char* value) {
     if (value == nullptr) return false;
     const size_t length = strlen(value);
@@ -570,6 +611,7 @@ struct LessonSession {
     bool        tvideo_entrance_consumed = false;
     bool        renderer_v2 = false;
     std::string cinematic_renderer_id;
+    std::uint16_t cinematic_template_version = 0;
     bool        opening_entrance_consumed = false;
     bool        entrance_active = false;
     std::uint64_t visual_generation = 0;
@@ -1725,35 +1767,59 @@ void Application::HandleLessonMessage(const cJSON* root) {
             ? Obj(body, "cinematicPhase") : body;
         const char* command = Str(command_body, "command");
         const char* phase_id = Str(command_body, "phaseId");
+        const char* cue_id = Str(command_body, "cueId");
+        double prepare_template_version_number = 0;
+        const bool prepare_template_version_ok = !prepare_frame || !cinematic_v4 ||
+            (Num(command_body, "templateVersion", prepare_template_version_number) &&
+             std::isfinite(prepare_template_version_number) &&
+             std::trunc(prepare_template_version_number) == prepare_template_version_number &&
+             (prepare_template_version_number == 1 || prepare_template_version_number == 2));
+        const std::uint16_t cinematic_template_version = cinematic_v3 ? 1
+            : prepare_frame && prepare_template_version_ok
+                ? static_cast<std::uint16_t>(prepare_template_version_number)
+                : g_session.cinematic_template_version;
+        const bool cinematic_v4_v2 = cinematic_v4 && cinematic_template_version == 2;
+        const bool start_command = command != nullptr && strcmp(command, "start") == 0 &&
+            (start_frame || (control_frame && cinematic_v4_v2));
+        const char* cinematic_identity = cinematic_v4_v2 ? cue_id : phase_id;
         double command_sequence_number = 0;
         const bool command_sequence_ok = Num(command_body, "commandSequenceId",
                                               command_sequence_number) &&
             PositiveIntegerAtMost(command_sequence_number, kMaxJsonSafeInteger);
         const bool command_matches_frame = command != nullptr &&
             ((prepare_frame && strcmp(command, "prepare") == 0) ||
-             (start_frame && strcmp(command, "start") == 0) ||
+             (start_command && strcmp(command, "start") == 0) ||
              (stop_frame && strcmp(command, "stop") == 0) ||
              (control_frame && (strcmp(command, "pause") == 0 ||
                                 strcmp(command, "resume") == 0 ||
                                 strcmp(command, "cancel") == 0)));
-        const bool known_phase = phase_id != nullptr &&
-            (strcmp(phase_id, "opening") == 0 || strcmp(phase_id, "greet") == 0 ||
-             strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0 ||
-             strcmp(phase_id, "thinking") == 0 || strcmp(phase_id, "correct") == 0 ||
-             strcmp(phase_id, "retry") == 0 || strcmp(phase_id, "celebrate") == 0);
+        const bool known_identity = cinematic_v4_v2
+            ? phase_id == nullptr && IsSafeCinematicSlug(cue_id)
+            : cue_id == nullptr && phase_id != nullptr &&
+                (strcmp(phase_id, "opening") == 0 || strcmp(phase_id, "greet") == 0 ||
+                 strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0 ||
+                 strcmp(phase_id, "thinking") == 0 || strcmp(phase_id, "correct") == 0 ||
+                 strcmp(phase_id, "retry") == 0 || strcmp(phase_id, "celebrate") == 0);
         bool cinematic_command_shape_ok = true;
         if (!prepare_frame) {
-            static const std::set<std::string_view> kBasicControlKeys = {
+            static const std::set<std::string_view> kV1BasicControlKeys = {
                 "command", "phaseId", "commandSequenceId"};
-            static const std::set<std::string_view> kResumeKeys = {
+            static const std::set<std::string_view> kV1ResumeKeys = {
                 "command", "phaseId", "commandSequenceId", "clockRebaseSequenceId"};
-            static const std::set<std::string_view> kCancelKeys = {
+            static const std::set<std::string_view> kV1CancelKeys = {
                 "command", "phaseId", "commandSequenceId", "reason"};
+            static const std::set<std::string_view> kV2BasicControlKeys = {
+                "command", "cueId", "commandSequenceId"};
+            static const std::set<std::string_view> kV2ResumeKeys = {
+                "command", "cueId", "commandSequenceId", "clockRebaseSequenceId"};
+            static const std::set<std::string_view> kV2CancelKeys = {
+                "command", "cueId", "commandSequenceId", "reason"};
             const auto& expected = cinematic_v4 && command != nullptr &&
                     strcmp(command, "resume") == 0
-                ? kResumeKeys
+                ? (cinematic_v4_v2 ? kV2ResumeKeys : kV1ResumeKeys)
                 : cinematic_v4 && command != nullptr && strcmp(command, "cancel") == 0
-                    ? kCancelKeys : kBasicControlKeys;
+                    ? (cinematic_v4_v2 ? kV2CancelKeys : kV1CancelKeys)
+                    : (cinematic_v4_v2 ? kV2BasicControlKeys : kV1BasicControlKeys);
             cinematic_command_shape_ok = ExactObjectKeys(command_body, expected);
         }
         bool control_values_ok = true;
@@ -1770,6 +1836,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         const std::uint64_t command_sequence_id = command_sequence_ok
             ? static_cast<std::uint64_t>(command_sequence_number) : 0;
+        auto cinematic_failure_response = [&](tbot::LessonCinematicError error) {
+            tbot::LessonCinematicResponse failure{
+                tbot::LessonCinematicResponseType::kFailure, false,
+                command_sequence_id, cinematic_v4_v2 ? "" :
+                    (cinematic_identity != nullptr ? cinematic_identity : ""), error};
+            if (cinematic_v4_v2 && cinematic_identity != nullptr) {
+                failure.cue_id = cinematic_identity;
+            }
+            return failure;
+        };
 
         auto cinematic_error_name = [](tbot::LessonCinematicError error) {
             switch (error) {
@@ -1810,13 +1886,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 CinematicJsonAddNumber(ack_body, "acks", static_cast<double>(sequence)) &&
                 CinematicJsonAddString(cinematic, "event", event) &&
                 CinematicJsonAddString(cinematic, "command", command != nullptr ? command : "") &&
-                CinematicJsonAddString(cinematic, "phaseId", phase_id != nullptr ? phase_id : "") &&
+                CinematicJsonAddString(cinematic, cinematic_v4_v2 ? "cueId" : "phaseId",
+                                       cinematic_identity != nullptr ? cinematic_identity : "") &&
                 CinematicJsonAddNumber(cinematic, "commandSequenceId",
                                        static_cast<double>(command_sequence_id)) &&
                 CinematicJsonAddBool(cinematic, "accepted", true);
             if (response.accepted && prepare_frame) {
                 built = built && CinematicJsonAddBool(cinematic, "frameZeroReady", true);
-            } else if (response.accepted && start_frame) {
+            } else if (response.accepted && start_command) {
                 built = built && CinematicJsonAddBool(cinematic, "phaseReady", true);
             }
             if (!built || !CinematicJsonOperationAllowed() ||
@@ -1842,14 +1919,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
         tbot::LessonFlattenedCinematicRenderer* renderer_v4 =
             tbot::ActiveLessonFlattenedCinematicRenderer();
         const bool renderer_available = cinematic_v3 ? renderer_v3 != nullptr
-                                                     : renderer_v4 != nullptr;
-        if (!command_matches_frame || !known_phase || !command_sequence_ok ||
-            !cinematic_command_shape_ok || !control_values_ok || !renderer_available) {
-            emit_cinematic_ack({tbot::LessonCinematicResponseType::kFailure, false,
-                                command_sequence_id, phase_id != nullptr ? phase_id : "",
-                                !renderer_available
-                                    ? tbot::LessonCinematicError::kUnsupportedContract
-                                    : tbot::LessonCinematicError::kMetadataMismatch});
+            : renderer_v4 != nullptr &&
+                tbot::LessonFlattenedCinematicRendererCapabilityReady();
+        if (!command_matches_frame || !known_identity || !prepare_template_version_ok ||
+            !command_sequence_ok || !cinematic_command_shape_ok || !control_values_ok ||
+            !renderer_available) {
+            emit_cinematic_ack(cinematic_failure_response(
+                !renderer_available ? tbot::LessonCinematicError::kUnsupportedContract
+                                    : tbot::LessonCinematicError::kMetadataMismatch));
             return;
         }
 
@@ -1870,6 +1947,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.lesson_asset_generation = generation;
             g_session.last_in_sequence = sequence;
             g_session.cinematic_renderer_id = protocol_version;
+            g_session.cinematic_template_version = cinematic_template_version;
             g_session.prepared = true;
             g_session.running = false;
             g_session.paused = false;
@@ -1895,10 +1973,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 if (!old_renderer_released) {
                     if (route_v4) renderer_v4->DiscardSession();
                     else renderer_v3->DiscardSession();
-                    prepare_response = {
-                        tbot::LessonCinematicResponseType::kFailure, false,
-                        command_sequence_id, phase_id,
-                        tbot::LessonCinematicError::kSessionReleaseFailed};
+                    prepare_response = cinematic_failure_response(
+                        tbot::LessonCinematicError::kSessionReleaseFailed);
                     return;
                 }
             }
@@ -1908,43 +1984,77 @@ void Application::HandleLessonMessage(const cJSON* root) {
         tbot::LessonCinematicResponse response;
         if (prepare_frame) {
             if (cinematic_v4) {
-                static const std::set<std::string_view> kPrepareKeys = {
+                static const std::set<std::string_view> kV1PrepareKeys = {
                     "command", "commandSequenceId", "templateId", "templateVersion",
                     "phaseId", "durationMs", "fps", "frameCount", "asset"};
-                static const std::set<std::string_view> kAssetKeys = {
+                static const std::set<std::string_view> kV1AssetKeys = {
                     "derivativeId", "phaseId", "sdPath", "sha256", "bytes",
+                    "mediaType", "width", "height"};
+                static const std::set<std::string_view> kV2PrepareKeys = {
+                    "command", "commandSequenceId", "templateId", "templateVersion",
+                    "cueId", "effect", "stepKey", "playbackMode", "durationMs", "fps",
+                    "frameCount", "asset"};
+                static const std::set<std::string_view> kV2AssetKeys = {
+                    "derivativeId", "cueId", "sdPath", "sha256", "bytes",
                     "mediaType", "width", "height"};
                 const cJSON* asset = Obj(command_body, "asset");
                 double template_version = 0, duration_ms = 0, fps = 0, frame_count = 0;
                 double bytes = 0, width = 0, height = 0;
                 std::string normalized_path = LessonLocalPath(Str(asset, "sdPath"));
-                const bool valid = ExactObjectKeys(command_body, kPrepareKeys) &&
-                    ExactObjectKeys(asset, kAssetKeys) &&
+                const char* effect = Str(command_body, "effect");
+                const char* step_key = Str(command_body, "stepKey");
+                const char* playback_mode = Str(command_body, "playbackMode");
+                const bool valid =
+                    ExactObjectKeys(command_body,
+                                    cinematic_v4_v2 ? kV2PrepareKeys : kV1PrepareKeys) &&
+                    ExactObjectKeys(asset, cinematic_v4_v2 ? kV2AssetKeys : kV1AssetKeys) &&
                     Num(command_body, "templateVersion", template_version) &&
                     Num(command_body, "durationMs", duration_ms) && Num(command_body, "fps", fps) &&
                     Num(command_body, "frameCount", frame_count) && Num(asset, "bytes", bytes) &&
                     Num(asset, "width", width) && Num(asset, "height", height) &&
-                    template_version == 1 && fps == 10 && width == 480 && height == 320 &&
+                    template_version == cinematic_template_version && fps == 10 &&
+                    width == 480 && height == 320 &&
                     PositiveIntegerAtMost(duration_ms, UINT32_MAX) &&
                     PositiveIntegerAtMost(frame_count, UINT32_MAX) &&
                     PositiveIntegerAtMost(bytes, static_cast<double>(UINT64_MAX)) &&
-                    !normalized_path.empty();
+                    !normalized_path.empty() &&
+                    (cinematic_v4_v2
+                        ? phase_id == nullptr && IsSafeCinematicSlug(cue_id) &&
+                            IsSafeCinematicSlug(step_key) &&
+                            Str(asset, "phaseId") == nullptr &&
+                            Str(asset, "cueId") != nullptr &&
+                            std::strcmp(Str(asset, "cueId"), cue_id) == 0 &&
+                            ValidV2CinematicEffect(effect, playback_mode, duration_ms)
+                        : cue_id == nullptr && effect == nullptr && step_key == nullptr &&
+                            playback_mode == nullptr && Str(asset, "cueId") == nullptr &&
+                            Str(asset, "phaseId") != nullptr &&
+                            std::strcmp(Str(asset, "phaseId"), phase_id) == 0);
                 if (!valid) {
-                    response = {tbot::LessonCinematicResponseType::kFailure, false,
-                                command_sequence_id, phase_id,
-                                tbot::LessonCinematicError::kMetadataMismatch};
+                    response = cinematic_failure_response(
+                        tbot::LessonCinematicError::kMetadataMismatch);
                 } else {
                     tbot::LessonFlattenedCinematicPhaseConfig config{};
                     config.renderer_id = protocol_version;
                     config.template_id = Str(command_body, "templateId");
                     config.template_version = static_cast<std::uint16_t>(template_version);
                     config.phase_id = phase_id;
+                    config.cue_id = cue_id;
+                    config.effect = effect;
+                    config.step_key = step_key;
+                    config.playback_mode = playback_mode != nullptr &&
+                            std::strcmp(playback_mode, "loop") == 0
+                        ? tbot::LessonCinematicPlaybackMode::kLoop
+                        : tbot::LessonCinematicPlaybackMode::kOnce;
+                    config.new_session = !g_session.prepared ||
+                        g_session.assignment_id != assignment_id ||
+                        g_session.session_id != session_id;
                     config.command_sequence_id = command_sequence_id;
                     config.duration_ms = static_cast<std::uint32_t>(duration_ms);
                     config.fps = static_cast<std::uint16_t>(fps);
                     config.frame_count = static_cast<std::uint32_t>(frame_count);
                     config.asset.derivative_id = Str(asset, "derivativeId");
                     config.asset.phase_id = Str(asset, "phaseId");
+                    config.asset.cue_id = Str(asset, "cueId");
                     config.asset.sd_path = normalized_path.c_str();
                     config.asset.sha256 = Str(asset, "sha256");
                     config.asset.bytes = static_cast<std::uint64_t>(bytes);
@@ -1954,9 +2064,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     const auto reservation = LessonAssetStorageCoordinator::GetInstance()
                         .TryBeginLessonSession(assignment_id, session_id);
                     if (!reservation.acquired) {
-                        response = {tbot::LessonCinematicResponseType::kFailure, false,
-                                    command_sequence_id, phase_id,
-                                    tbot::LessonCinematicError::kFileOpen};
+                        response = cinematic_failure_response(
+                            tbot::LessonCinematicError::kFileOpen);
                     } else {
                         tbot::ConfigureProductionLessonFlattenedCinematicSession(
                             assignment_id, session_id, reservation.generation);
@@ -2054,8 +2163,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 }
             }
             }
-        } else if (start_frame) {
-            response = cinematic_v4 ? renderer_v4->Start(command_sequence_id, phase_id, now_ms)
+        } else if (start_command) {
+            response = cinematic_v4 ? renderer_v4->Start(command_sequence_id,
+                                                          cinematic_identity, now_ms)
                                     : renderer_v3->Start(command_sequence_id, phase_id, now_ms);
             if (response.accepted) {
                 g_session.running = true;
@@ -2063,18 +2173,22 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 SetLessonRuntimeActive(true);
             }
         } else if (control_frame && strcmp(command, "pause") == 0) {
-            response = cinematic_v4 ? renderer_v4->Pause(command_sequence_id, phase_id, now_ms)
+            response = cinematic_v4 ? renderer_v4->Pause(command_sequence_id,
+                                                          cinematic_identity, now_ms)
                                     : renderer_v3->Pause(command_sequence_id, phase_id, now_ms);
             if (response.accepted) g_session.paused = true;
         } else if (control_frame && strcmp(command, "resume") == 0) {
-            response = cinematic_v4 ? renderer_v4->Resume(command_sequence_id, phase_id, now_ms)
+            response = cinematic_v4 ? renderer_v4->Resume(command_sequence_id,
+                                                           cinematic_identity, now_ms)
                                     : renderer_v3->Resume(command_sequence_id, phase_id, now_ms);
             if (response.accepted) g_session.paused = false;
         } else if (control_frame) {
-            response = cinematic_v4 ? renderer_v4->Cancel(command_sequence_id, phase_id)
+            response = cinematic_v4 ? renderer_v4->Cancel(command_sequence_id,
+                                                           cinematic_identity)
                                     : renderer_v3->Cancel(command_sequence_id, phase_id);
         } else {
-            response = cinematic_v4 ? renderer_v4->Stop(command_sequence_id, phase_id)
+            response = cinematic_v4 ? renderer_v4->Stop(command_sequence_id,
+                                                         cinematic_identity)
                                     : renderer_v3->Stop(command_sequence_id, phase_id);
         }
         const bool terminal_command = stop_frame ||
@@ -2095,9 +2209,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
             if (session_released) {
                 g_session = LessonSession{};
             } else {
-                response = {tbot::LessonCinematicResponseType::kFailure, false,
-                            command_sequence_id, phase_id,
-                            tbot::LessonCinematicError::kSessionReleaseFailed};
+                response = cinematic_failure_response(
+                    tbot::LessonCinematicError::kSessionReleaseFailed);
             }
         }
         emit_cinematic_ack(response);

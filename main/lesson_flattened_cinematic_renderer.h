@@ -18,9 +18,23 @@ inline constexpr char kLessonFlattenedMjpegCinematicTemplate[] =
 bool LessonFlattenedCinematicRendererCapabilityReady();
 void SetLessonFlattenedCinematicRendererCapabilityReady(bool ready);
 
+struct LessonFlattenedCinematicCapacityOps {
+    void* context = nullptr;
+    void* (*allocate)(void*, std::size_t) = nullptr;
+    void (*release)(void*, void*, std::size_t) = nullptr;
+    bool (*prepare_decoder_workspace)(void*, std::size_t) = nullptr;
+    void (*destroy_decoder_workspace)(void*, std::size_t) = nullptr;
+};
+
+bool ProbeLessonFlattenedCinematicReplacementCapacity(
+    const LessonFlattenedCinematicCapacityOps& ops);
+
+enum class LessonCinematicPlaybackMode : std::uint8_t { kOnce, kLoop };
+
 struct LessonFlattenedCinematicAssetConfig {
     const char* derivative_id = nullptr;
     const char* phase_id = nullptr;
+    const char* cue_id = nullptr;
     const char* sd_path = nullptr;
     const char* sha256 = nullptr;
     std::uint64_t bytes = 0;
@@ -34,6 +48,12 @@ struct LessonFlattenedCinematicPhaseConfig {
     const char* template_id = nullptr;
     std::uint16_t template_version = 0;
     const char* phase_id = nullptr;
+    const char* cue_id = nullptr;
+    const char* effect = nullptr;
+    const char* step_key = nullptr;
+    LessonCinematicPlaybackMode playback_mode = LessonCinematicPlaybackMode::kOnce;
+    // A fresh owner may restart sequencing, but only commits it after frame zero succeeds.
+    bool new_session = false;
     std::uint64_t command_sequence_id = 0;
     std::uint32_t duration_ms = 0;
     std::uint16_t fps = 0;
@@ -48,14 +68,14 @@ public:
 
     LessonCinematicResponse Prepare(const LessonFlattenedCinematicPhaseConfig& config,
                                     std::uint64_t now_ms);
-    LessonCinematicResponse Start(std::uint64_t command_sequence_id, const char* phase_id,
+    LessonCinematicResponse Start(std::uint64_t command_sequence_id, const char* identity,
                                   std::uint64_t now_ms);
-    LessonCinematicResponse Pause(std::uint64_t command_sequence_id, const char* phase_id,
+    LessonCinematicResponse Pause(std::uint64_t command_sequence_id, const char* identity,
                                   std::uint64_t now_ms);
-    LessonCinematicResponse Resume(std::uint64_t command_sequence_id, const char* phase_id,
+    LessonCinematicResponse Resume(std::uint64_t command_sequence_id, const char* identity,
                                    std::uint64_t now_ms);
-    LessonCinematicResponse Stop(std::uint64_t command_sequence_id, const char* phase_id);
-    LessonCinematicResponse Cancel(std::uint64_t command_sequence_id, const char* phase_id);
+    LessonCinematicResponse Stop(std::uint64_t command_sequence_id, const char* identity);
+    LessonCinematicResponse Cancel(std::uint64_t command_sequence_id, const char* identity);
     LessonCinematicResponse Tick(std::uint64_t now_ms);
 
     bool initialized() const;
@@ -68,7 +88,9 @@ private:
     LessonCinematicResponse Failure(std::uint64_t sequence, LessonCinematicError error) const;
     LessonCinematicResponse Applied(LessonCinematicResponseType type,
                                     std::uint64_t sequence) const;
-    LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* phase_id,
+    LessonCinematicResponse TickApplied(LessonCinematicResponseType type,
+                                        std::uint64_t sequence) const;
+    LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* identity,
                                             const char* command) const;
     LessonCinematicError RenderFrame(std::size_t frame_index);
     LessonCinematicError RenderFrameOn(void* stream, std::uint16_t* framebuffer,
@@ -85,6 +107,11 @@ private:
     LessonCinematicStreamMetadata metadata_{};
     std::uint16_t* framebuffer_ = nullptr;
     std::string phase_id_;
+    std::string cue_id_;
+    std::string effect_;
+    std::string step_key_;
+    std::uint16_t template_version_ = 0;
+    LessonCinematicPlaybackMode playback_mode_ = LessonCinematicPlaybackMode::kOnce;
     std::uint64_t last_sequence_ = 0;
     std::uint64_t clock_origin_ms_ = 0;
     std::uint64_t paused_at_ms_ = 0;
