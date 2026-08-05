@@ -402,6 +402,42 @@ void TestCueEndClaimIsExactlyOnceUnderConcurrentFormatters() {
     Require(formatted == 1, "exactly one concurrent terminal formatter claims the cue");
 }
 
+void TestStaleTerminalCallAfterNaturalCompletionEmitsNoDuplicateCueEnd() {
+    tbot::LessonCinematicEvidenceResetForTest();
+    tbot::LessonCinematicEvidenceSetBootForTest(0x2ULL, "poweron", 61000, 4200000);
+    tbot::LessonCinematicEvidenceBeginCue("barn-opening", 1, 100);
+
+    char natural_line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 200, natural_line, sizeof(natural_line)),
+            "cue's own natural completion claims the terminal event");
+
+    // Simulates a resume/reconnect-adjacent stale Stop/Cancel arriving for a cue
+    // that already completed naturally: the renderer's g_cue.active latch must
+    // prevent a second cue_end line for the same cue, regardless of call order.
+    char stale_stop_line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
+    Require(!tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kStop,
+                tbot::LessonCinematicFault::kNone, 250, stale_stop_line,
+                sizeof(stale_stop_line)),
+            "stale stop after natural completion does not re-claim the same cue");
+    Require(stale_stop_line[0] == '\0',
+            "rejected stale terminal call leaves caller storage untouched");
+
+    // The next cue (e.g. after a resume advances to the following cue) must
+    // still get its own exactly-one cue_end claim.
+    tbot::LessonCinematicEvidenceBeginCue("barn-teach", 2, 300);
+    char next_cue_line[tbot::kLessonCinematicEvidenceLineCapacity] = {};
+    Require(tbot::LessonCinematicEvidenceFormatCueEnd(
+                tbot::LessonCinematicCueEndReason::kNatural,
+                tbot::LessonCinematicFault::kNone, 400, next_cue_line,
+                sizeof(next_cue_line)),
+            "next cue after a resumed session still claims its own terminal event");
+    Require(std::string(next_cue_line).find("cue=barn-teach") != std::string::npos,
+            "next cue's terminal line is attributed to the new cue, not the old one");
+}
+
 #endif
 
 }  // namespace
@@ -430,6 +466,7 @@ int main() {
     TestReplacementReasonIsParseable();
     TestStopReasonIsParseable();
     TestCueEndClaimIsExactlyOnceUnderConcurrentFormatters();
+    TestStaleTerminalCallAfterNaturalCompletionEmitsNoDuplicateCueEnd();
 #endif
     std::cout << "lesson cinematic evidence tests passed\n";
     return 0;
