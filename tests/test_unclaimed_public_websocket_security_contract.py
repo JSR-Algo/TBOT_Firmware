@@ -22,6 +22,29 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def websocket_callback_span(source: str, callback: str) -> tuple[int, int]:
+    open_start = source.index("bool WebsocketProtocol::OpenAudioChannel")
+    for receiver in ("candidate_websocket", "websocket_"):
+        needle = f"{receiver}->{callback}"
+        start = source.find(needle, open_start)
+        if start >= 0:
+            break
+    else:
+        raise AssertionError(f"missing websocket {callback} callback")
+    end = source.find("});", start)
+    if end < 0:
+        raise AssertionError(f"unterminated websocket {callback} callback")
+    return start, end + len("});")
+
+
+def websocket_on_data_body(source: str) -> str:
+    start, _ = websocket_callback_span(source, "OnData")
+    disconnected_start, _ = websocket_callback_span(source, "OnDisconnected")
+    if start >= disconnected_start:
+        raise AssertionError("websocket OnData callback must be installed before OnDisconnected")
+    return source[start:disconnected_start]
+
+
 def test_unclaimed_public_websocket_has_explicit_fail_closed_lesson_mode():
     header = read("main/protocols/websocket_protocol.h")
     source = read("main/protocols/websocket_protocol.cc")
@@ -80,10 +103,7 @@ def test_unclaimed_public_websocket_permits_only_exact_lesson_sync_mcp_call():
 
 def test_unclaimed_public_websocket_drops_forbidden_realtime_and_mcp_frames_before_app_dispatch():
     source = read("main/protocols/websocket_protocol.cc")
-    on_data = source[
-        source.index("websocket_->OnData") :
-        source.index("websocket_->OnDisconnected", source.index("websocket_->OnData"))
-    ]
+    on_data = websocket_on_data_body(source)
     public_gate = on_data[
         on_data.index("if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson)") :
         on_data.index("if (strncmp(type->valuestring", on_data.index("if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson)"))
@@ -105,10 +125,7 @@ def test_unclaimed_public_websocket_drops_forbidden_realtime_and_mcp_frames_befo
 
 def test_unclaimed_public_websocket_drops_binary_before_audio_dispatch():
     source = read("main/protocols/websocket_protocol.cc")
-    on_data = source[
-        source.index("websocket_->OnData") :
-        source.index("websocket_->OnDisconnected", source.index("websocket_->OnData"))
-    ]
+    on_data = websocket_on_data_body(source)
     binary_branch = on_data[
         on_data.index("if (binary)") :
         on_data.index("} else {", on_data.index("if (binary)"))
@@ -126,10 +143,7 @@ def test_unclaimed_public_websocket_drops_binary_before_audio_dispatch():
 
 def test_unclaimed_public_websocket_deletes_json_root_on_allow_and_reject_paths():
     source = read("main/protocols/websocket_protocol.cc")
-    on_data = source[
-        source.index("websocket_->OnData") :
-        source.index("websocket_->OnDisconnected", source.index("websocket_->OnData"))
-    ]
+    on_data = websocket_on_data_body(source)
     public_gate = on_data[
         on_data.index("if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson)") :
         on_data.index("if (strncmp(type->valuestring", on_data.index("if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson)"))
