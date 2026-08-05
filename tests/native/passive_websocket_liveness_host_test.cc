@@ -31,9 +31,9 @@ int main() {
                  "probe must not fire before the interval") ||
         !Require(liveness.Poll(3000) == PassiveWebsocketLiveness::Action::kSendPing,
                  "probe must fire at the interval") ||
-        !Require(liveness.Poll(6999) == PassiveWebsocketLiveness::Action::kNone,
-                 "pong wait must remain bounded without firing early") ||
-        !Require(liveness.Poll(7000) == PassiveWebsocketLiveness::Action::kTimedOut,
+        !Require(liveness.Poll(12999) == PassiveWebsocketLiveness::Action::kNone,
+                 "loaded-device pong wait must not fire before the grace deadline") ||
+        !Require(liveness.Poll(13000) == PassiveWebsocketLiveness::Action::kTimedOut,
                  "missing pong must time out at the deadline")) {
         return 1;
     }

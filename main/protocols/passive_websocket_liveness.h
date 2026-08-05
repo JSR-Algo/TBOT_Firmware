@@ -47,7 +47,9 @@ public:
 
 private:
     static constexpr uint32_t kPingIntervalMs = 2000;
-    static constexpr uint32_t kPongTimeoutMs = 4000;
+    // Passive lesson sync can load the LCD/SD path enough that the server's JSON
+    // pong arrives near the old 4s edge; keep the probe tolerant but bounded.
+    static constexpr uint32_t kPongTimeoutMs = 10000;
 
     std::atomic<uint32_t> last_ping_ms_{0};
     std::atomic<bool> awaiting_pong_{false};

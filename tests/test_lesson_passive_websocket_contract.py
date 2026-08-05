@@ -170,6 +170,10 @@ def test_passive_lesson_socket_tick_sends_ws_only_liveness_without_voice_or_http
     assert "kDeviceStateWifiConfiguring" in liveness
     assert "kDeviceStateAudioTesting" in liveness
     assert "SchedulePassiveLessonReconnect();" in liveness
+    assert "protocol_->CloseAudioChannel();" in liveness
+    assert liveness.index("protocol_->CloseAudioChannel();") < liveness.index(
+        "SchedulePassiveLessonReconnect();"
+    )
     assert "StartHeartbeat" not in liveness
     assert "DispatchDeviceHeartbeat" not in liveness
     assert "SetListeningMode" not in liveness

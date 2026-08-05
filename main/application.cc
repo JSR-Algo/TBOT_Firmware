@@ -908,6 +908,7 @@ void Application::Run() {
                 !protocol_->MaintainPassiveLiveness()) {
                 ESP_LOGW(TAG, "passive_lesson_ws_liveness_failed -> passive backoff");
                 backend_offline_.store(true);
+                protocol_->CloseAudioChannel();
                 SchedulePassiveLessonReconnect();
                 passive_liveness_failed = true;
             }
