@@ -655,7 +655,14 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Tick(std::uint64_t now
     if (state_ == State::kPaused) {
         return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
-    if (state_ != State::kRunning) return Failure(last_sequence_, LessonCinematicError::kInvalidState);
+    if (state_ != State::kRunning) {
+        if (state_ == State::kFailed && native_mode_) {
+            // Bounded per-tick retry: drains a DMA transfer that was in flight when a
+            // decode timeout quarantined it, without blocking this tick for long.
+            CleanupNative(1);
+        }
+        return Failure(last_sequence_, LessonCinematicError::kInvalidState);
+    }
     const std::uint64_t elapsed = now_ms >= clock_origin_ms_ ? now_ms - clock_origin_ms_ : 0;
     const std::uint64_t absolute_frame = elapsed * metadata_.fps / 1000;
     const bool loops = loop_ ||
@@ -864,7 +871,13 @@ LessonCinematicError LessonFlattenedCinematicRenderer::StartNativePlayback() {
     native_next_read_frame_ = metadata_.frame_count > 1 ? 2 : 1;
     if (metadata_.frame_count > 1) {
         error = ReadNativeFrame(stream_, 1, native_buffers_[1], 100);
-        if (error != LessonCinematicError::kNone) return error;
+        if (error != LessonCinematicError::kNone) {
+            if (FinishNativeTransfer(100)) {
+                flattened_ops_.end_cinematic(ops_.context);
+                native_owned_ = false;
+            }
+            return error;
+        }
     }
     displayed_frame_ = 0;
     displayed_clock_frame_ = 0;
