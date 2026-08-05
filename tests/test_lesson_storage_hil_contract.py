@@ -188,13 +188,13 @@ def test_sync_staging_corruption_is_typed_bounded_and_fail_closed_elsewhere():
     assert "RunLessonStorageHilStagingCheckpoint(" in staging
 
 
-def test_sync_commit_checkpoints_are_guarded_and_use_direct_atomic_replacement():
+def test_sync_commit_checkpoints_are_guarded_and_use_fatfs_safe_backup_swap_replacement():
     source = read("main/lesson_asset_download_staging.cc")
     checksum = source.index("kBeforeChecksumVerify")
     verify = source.index("VerifyLessonAssetSha256(staging.path()")
     sync = source.index("FlushAndSyncFile(staging.path())", verify)
     commit_checkpoint = source.index("kBeforeCommitRename", sync)
-    replacement = source.index("std::rename(staging.path().c_str(), destination.c_str())")
+    replacement = source.index("RenamePath(staging.path(), destination)")
     commit_body = source[
         source.index("void CommitVerifiedLessonAssetDownload(") :
         source.index("#if defined(TBOT_LESSON_ASSET_STAGING_TESTING)", replacement)
@@ -203,9 +203,14 @@ def test_sync_commit_checkpoints_are_guarded_and_use_direct_atomic_replacement()
     assert checksum < verify < sync < commit_checkpoint < replacement
     assert "CONFIG_TBOT_HIL_STORAGE_FAULTS" in source
     assert "TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING" in source
-    assert "replace_failed = true" in source[commit_checkpoint:replacement]
-    assert "std::rename(destination.c_str(), backup.c_str())" not in commit_body
-    assert "std::rename(backup.c_str(), destination.c_str())" not in commit_body
+    assert "checkpoint_failed = true" in source[commit_checkpoint:replacement]
+    # FATFS rename() does not overwrite an existing destination, so an
+    # existing destination must be moved aside to `.backup` before the
+    # verified staging file is promoted, with a best-effort restore on
+    # failure. Direct-overwrite rename() over an existing destination would
+    # silently fail to replace corrupt/stale cached assets on FATFS.
+    assert "RenamePath(destination, backup)" in commit_body
+    assert "RenamePath(backup, destination)" in commit_body
 
 
 def test_fixture_surface_has_fixed_root_and_checked_mutation_lease():

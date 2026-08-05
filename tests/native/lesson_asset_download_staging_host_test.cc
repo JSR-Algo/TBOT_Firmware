@@ -225,10 +225,17 @@ void TestInterruptedReplacementRecoversOnNextAttempt() {
     } catch (const std::runtime_error&) {
     }
     SetLessonAssetStagingFsTestFailure(LessonAssetStagingFsTestFailure::kNone);
-    Expect(Read(destination) == "known-good",
-           "interruption seam made destination unreadable");
+    // A crash right after the destination was moved aside to `.backup` (but
+    // before the verified staging file was promoted) leaves the destination
+    // path vacated and the last-known-good bytes parked in `.backup`. That is
+    // the truthful on-disk state after a real power loss at that point.
+    Expect(!fs::exists(destination),
+           "interruption seam left destination present alongside backup");
+    Expect(fs::exists(backup_path),
+           "interruption seam did not preserve last-known-good as backup");
+    Expect(Read(backup_path) == "known-good",
+           "interruption seam corrupted preserved backup content");
     Expect(!fs::exists(staging_path), "interruption seam left staged file");
-    Expect(!fs::exists(backup_path), "interruption seam created backup");
 
     {
         LessonAssetDownloadStagingFile next_attempt(destination);
@@ -241,6 +248,7 @@ void TestInterruptedReplacementRecoversOnNextAttempt() {
 
 void TestFailedRestoreLeavesTruthfulRecoverableState() {
     const std::string destination = std::string(kRoot) + "/restore-failure.png";
+    const std::string backup_path = destination + ".backup";
     Write(destination, "known-good");
     bool threw = false;
     try {
@@ -255,18 +263,96 @@ void TestFailedRestoreLeavesTruthfulRecoverableState() {
     }
     SetLessonAssetStagingFsTestFailure(LessonAssetStagingFsTestFailure::kNone);
     Expect(threw, "failed restore did not throw");
-    Expect(Read(destination) == "known-good",
-           "failed restore made destination unreadable");
-    Expect(!fs::exists(destination + ".backup"),
-           "failed restore left backup state");
+    // When both promotion and the best-effort restore fail, the code must not
+    // fabricate success: destination stays vacated and the last-known-good
+    // bytes remain recoverable from `.backup` on the next attempt.
+    Expect(!fs::exists(destination),
+           "failed restore falsely reported a readable destination");
+    Expect(fs::exists(backup_path),
+           "failed restore lost the last-known-good backup");
+    Expect(Read(backup_path) == "known-good",
+           "failed restore corrupted the last-known-good backup");
     Expect(!fs::exists(destination + ".download"),
            "failed restore left unverified staging state");
 
     LessonAssetDownloadStagingFile next_attempt(destination);
     Expect(Read(destination) == "known-good",
            "next attempt did not recover after a failed restore");
-    Expect(!fs::exists(destination + ".backup"),
+    Expect(!fs::exists(backup_path),
            "successful recovery left backup file");
+}
+
+void TestExistingDestinationReplacedUnderFatFsNoOverwriteRename() {
+    const std::string destination = std::string(kRoot) + "/fatfs-no-overwrite.png";
+    Write(destination, "corrupt-or-stale");
+    SetLessonAssetStagingFsTestMode(
+        LessonAssetStagingFsTestMode::kFatFsNoOverwriteRename);
+    {
+        LessonAssetDownloadStagingFile staging(destination);
+        Write(staging.path(), "replacement");
+        CommitVerifiedLessonAssetDownload(
+            staging, nullptr, destination, HostSha256("replacement"));
+    }
+    SetLessonAssetStagingFsTestMode(LessonAssetStagingFsTestMode::kNone);
+    Expect(Read(destination) == "replacement",
+           "FATFS no-overwrite rename must still replace an existing destination");
+    Expect(!fs::exists(destination + ".download"),
+           "FATFS no-overwrite replacement left staging file");
+    Expect(!fs::exists(destination + ".backup"),
+           "FATFS no-overwrite replacement left backup file");
+}
+
+void TestMissingDestinationCommitsUnderFatFsNoOverwriteRename() {
+    const std::string destination = std::string(kRoot) + "/fatfs-missing.png";
+    SetLessonAssetStagingFsTestMode(
+        LessonAssetStagingFsTestMode::kFatFsNoOverwriteRename);
+    {
+        LessonAssetDownloadStagingFile staging(destination);
+        Write(staging.path(), "first-download");
+        CommitVerifiedLessonAssetDownload(
+            staging, nullptr, destination, HostSha256("first-download"));
+    }
+    SetLessonAssetStagingFsTestMode(LessonAssetStagingFsTestMode::kNone);
+    Expect(Read(destination) == "first-download",
+           "first download must commit under FATFS no-overwrite rename");
+    Expect(!fs::exists(destination + ".backup"),
+           "first download under FATFS no-overwrite rename created a backup");
+}
+
+void TestRepeatedRetriesEventuallySucceedUnderFatFsNoOverwriteRename() {
+    const std::string destination = std::string(kRoot) + "/fatfs-retry.png";
+    const std::string backup_path = destination + ".backup";
+    Write(destination, "corrupt-attempt-0");
+    SetLessonAssetStagingFsTestMode(
+        LessonAssetStagingFsTestMode::kFatFsNoOverwriteRename);
+
+    try {
+        LessonAssetDownloadStagingFile staging(destination);
+        Write(staging.path(), "replacement");
+        SetLessonAssetStagingFsTestFailure(
+            LessonAssetStagingFsTestFailure::kInterruptAfterBackupRename);
+        CommitVerifiedLessonAssetDownload(
+            staging, nullptr, destination, HostSha256("replacement"));
+    } catch (const std::runtime_error&) {
+    }
+    SetLessonAssetStagingFsTestFailure(LessonAssetStagingFsTestFailure::kNone);
+    Expect(!fs::exists(destination),
+           "retry fixture: crash must leave destination vacated");
+    Expect(fs::exists(backup_path), "retry fixture: crash must preserve backup");
+
+    {
+        LessonAssetDownloadStagingFile staging(destination);
+        Expect(Read(destination) == "corrupt-attempt-0",
+               "retry did not recover last-known-good before replacing");
+        Write(staging.path(), "replacement");
+        CommitVerifiedLessonAssetDownload(
+            staging, nullptr, destination, HostSha256("replacement"));
+    }
+    SetLessonAssetStagingFsTestMode(LessonAssetStagingFsTestMode::kNone);
+    Expect(Read(destination) == "replacement",
+           "retry under FATFS no-overwrite rename did not eventually replace destination");
+    Expect(!fs::exists(backup_path), "retry left backup file");
+    Expect(!fs::exists(destination + ".download"), "retry left staging file");
 }
 
 void TestSuccessfulReplacementCleansBackupAndStaging() {
@@ -373,6 +459,9 @@ int main() {
     TestReplacementRenameFailureRestoresLastKnownGood();
     TestInterruptedReplacementRecoversOnNextAttempt();
     TestFailedRestoreLeavesTruthfulRecoverableState();
+    TestExistingDestinationReplacedUnderFatFsNoOverwriteRename();
+    TestMissingDestinationCommitsUnderFatFsNoOverwriteRename();
+    TestRepeatedRetriesEventuallySucceedUnderFatFsNoOverwriteRename();
     TestSuccessfulReplacementCleansBackupAndStaging();
     TestCorruptStagingUsesNormalChecksumFailure();
     TestPreCommitFaultRestoresOldDestination();

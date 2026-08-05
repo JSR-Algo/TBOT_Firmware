@@ -33,6 +33,7 @@ void ResetCurrentTaskWatchdogIfSubscribed() {
 #if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
 LessonAssetSha256TestFailure g_sha256_failure = LessonAssetSha256TestFailure::kNone;
 LessonAssetStagingFsTestFailure g_fs_failure = LessonAssetStagingFsTestFailure::kNone;
+LessonAssetStagingFsTestMode g_fs_mode = LessonAssetStagingFsTestMode::kNone;
 
 bool ShouldInject(LessonAssetSha256TestFailure failure) {
     return g_sha256_failure == failure;
@@ -85,6 +86,17 @@ void RemoveFileIfPresent(const std::string& path, const char* error_message) {
     }
 }
 
+int RenamePath(const std::string& from, const std::string& to) {
+#if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
+    if (g_fs_mode == LessonAssetStagingFsTestMode::kFatFsNoOverwriteRename &&
+        !PathIsMissing(to)) {
+        errno = EEXIST;
+        return -1;
+    }
+#endif
+    return std::rename(from.c_str(), to.c_str());
+}
+
 void RecoverInterruptedReplacement(const std::string& destination) {
     const std::string backup = destination + ".backup";
     if (PathIsMissing(backup)) return;
@@ -99,7 +111,7 @@ void RecoverInterruptedReplacement(const std::string& destination) {
     if (!PathIsMissing(destination)) {
         throw std::runtime_error("lesson asset destination blocks backup recovery");
     }
-    if (std::rename(backup.c_str(), destination.c_str()) != 0) {
+    if (RenamePath(backup, destination) != 0) {
         throw std::runtime_error("failed to recover lesson asset backup");
     }
 }
@@ -274,29 +286,73 @@ void CommitVerifiedLessonAssetDownload(
         throw std::runtime_error("lesson asset destination is not a regular file");
     }
 
+    const std::string backup = destination + ".backup";
+
 #if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
-    bool replace_failed =
+    const bool force_promote_failure =
         ShouldInject(LessonAssetStagingFsTestFailure::kReplaceRename) ||
-        ShouldInject(LessonAssetStagingFsTestFailure::kRestoreRename) ||
+        ShouldInject(LessonAssetStagingFsTestFailure::kRestoreRename);
+    const bool force_restore_failure =
+        ShouldInject(LessonAssetStagingFsTestFailure::kRestoreRename);
+    const bool crash_after_backup =
         ShouldInject(LessonAssetStagingFsTestFailure::kInterruptAfterBackupRename);
 #else
-    bool replace_failed = false;
+    const bool force_promote_failure = false;
+    const bool force_restore_failure = false;
+    const bool crash_after_backup = false;
 #endif
-#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
-    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
-    if (RunLessonStorageHilCheckpoint(
-            cache_key,
-            LessonStorageHilOperation::kSync,
-            LessonStorageHilCheckpoint::kBeforeCommitRename,
-            0,
-            0) != LessonStorageHilHookOutcome::kContinue) {
-        replace_failed = true;
+
+    // FATFS rename() does not overwrite an existing destination (unlike POSIX
+    // rename()), so an existing destination is first moved aside to `backup`.
+    // The verified staging file is then promoted onto the now-vacant
+    // destination path. If promotion fails, `backup` is moved back so a
+    // partially-replaced or missing destination never survives a failed
+    // commit.
+    if (destination_exists) {
+        if (RenamePath(destination, backup) != 0) {
+            throw std::runtime_error("lesson asset commit failed");
+        }
     }
-#endif
-    if (replace_failed || std::rename(staging.path().c_str(), destination.c_str()) != 0) {
+
+    if (crash_after_backup) {
+        // Simulates a power loss after the backup swap lands but before
+        // promotion is attempted. Recovery happens on the next staging
+        // attempt via RecoverInterruptedReplacement.
         throw std::runtime_error("lesson asset commit failed");
     }
-    staging.Disarm();
+
+    bool promote_failed = force_promote_failure;
+    if (!promote_failed) {
+        bool checkpoint_failed = false;
+#if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
+    defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
+        if (RunLessonStorageHilCheckpoint(
+                cache_key,
+                LessonStorageHilOperation::kSync,
+                LessonStorageHilCheckpoint::kBeforeCommitRename,
+                0,
+                0) != LessonStorageHilHookOutcome::kContinue) {
+            checkpoint_failed = true;
+        }
+#endif
+        promote_failed =
+            checkpoint_failed || RenamePath(staging.path(), destination) != 0;
+    }
+
+    if (!promote_failed) {
+        if (destination_exists) {
+            RemoveFileIfPresent(backup, "failed to clean lesson asset backup");
+        }
+        staging.Disarm();
+        return;
+    }
+
+    if (destination_exists) {
+        // Best-effort restore: if this also fails, `backup` is left in place
+        // so the next attempt recovers it via RecoverInterruptedReplacement.
+        (void)(force_restore_failure || RenamePath(backup, destination) != 0);
+    }
+    throw std::runtime_error("lesson asset commit failed");
 }
 
 #if defined(TBOT_LESSON_ASSET_STAGING_TESTING) && !defined(ESP_PLATFORM)
@@ -307,5 +363,9 @@ void SetLessonAssetSha256TestFailure(LessonAssetSha256TestFailure failure) {
 
 void SetLessonAssetStagingFsTestFailure(LessonAssetStagingFsTestFailure failure) {
     g_fs_failure = failure;
+}
+
+void SetLessonAssetStagingFsTestMode(LessonAssetStagingFsTestMode mode) {
+    g_fs_mode = mode;
 }
 #endif

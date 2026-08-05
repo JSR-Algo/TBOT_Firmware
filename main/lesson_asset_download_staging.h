@@ -53,6 +53,13 @@ enum class LessonAssetStagingFsTestFailure {
 };
 
 void SetLessonAssetStagingFsTestFailure(LessonAssetStagingFsTestFailure failure);
+
+enum class LessonAssetStagingFsTestMode {
+    kNone,
+    kFatFsNoOverwriteRename,
+};
+
+void SetLessonAssetStagingFsTestMode(LessonAssetStagingFsTestMode mode);
 #endif
 
 #endif  // LESSON_ASSET_DOWNLOAD_STAGING_H
