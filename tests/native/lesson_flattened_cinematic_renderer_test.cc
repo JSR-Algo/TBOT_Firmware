@@ -62,6 +62,7 @@ struct FakeRuntime {
     bool open_trgb = false;
     std::uint64_t opened_bytes = 922112;
     bool bad_native_dimensions = false;
+    int fail_decode_at_index = -1;
 };
 
 struct FakeCapacity {
@@ -156,6 +157,10 @@ bool Decode(void* raw, void*, std::size_t index, std::uint8_t* destination,
             std::size_t* stride) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
     if (fake.fail_decode) return false;
+    if (fake.fail_decode_at_index >= 0 &&
+        index == static_cast<std::size_t>(fake.fail_decode_at_index)) {
+        return false;
+    }
     Require(destination != reinterpret_cast<const std::uint8_t*>(fake.dma_owned),
             "reader never overwrites a DMA-owned buffer");
     fake.now_ms += fake.decode_duration_ms;
@@ -811,6 +816,59 @@ void TestTrgbReplayValidatesNativePrefetchAndDeadline() {
             "TRGB replay start enforces read/decode deadline");
 }
 
+void TestStartNativePlaybackReplayPrefetchFailureRelinquishesDmaOwnership() {
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(NativeOps(&fake));
+    Require(renderer.Prepare(TrgbConfig(), 0).accepted &&
+                renderer.Start(42, "barn-opening", 0).accepted,
+            "replay prefetch-failure fixture starts");
+    Require(renderer.Tick(100).accepted && renderer.Tick(200).accepted &&
+                renderer.Tick(300).accepted,
+            "replay prefetch-failure fixture completes first pass");
+    Require(fake.begins == 1 && fake.ends == 1,
+            "natural completion returns DMA ownership exactly once");
+
+    fake.fail_decode_at_index = 1;
+    const auto response = renderer.Start(43, "barn-opening", 300);
+    Require(response.error == tbot::LessonCinematicError::kFileRead,
+            "replay second-frame prefetch failure keeps its typed read error");
+    Require(fake.dma_owned == nullptr,
+            "a failed replay prefetch drains the in-flight frame-zero DMA transfer");
+    Require(fake.begins == 2 && fake.ends == 2,
+            "a failed replay prefetch relinquishes LVGL/DMA ownership like PrepareNative does");
+
+    fake.fail_decode_at_index = -1;
+    Require(renderer.Stop(44, "barn-opening").accepted,
+            "renderer recovers cleanly via stop after a failed replay prefetch");
+    Require(fake.ends == 2,
+            "recovery stop does not double-release ownership already relinquished on failure");
+}
+
+void TestTickDecodeTimeoutQuarantineRecoversOnSubsequentTicks() {
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(NativeOps(&fake));
+    Require(renderer.Prepare(TrgbConfig(), 0).accepted &&
+                renderer.Start(42, "barn-opening", 0).accepted,
+            "decode-timeout recovery fixture starts");
+    fake.wait_completes = false;
+    Require(renderer.Tick(100).error == tbot::LessonCinematicError::kDecodeTimeout,
+            "DMA wait timeout fails the cue and is typed");
+    Require(fake.frees == 0 && fake.closes == 0 && fake.ends == 0,
+            "the failing tick itself still quarantines rather than freeing an in-flight buffer");
+
+    Require(renderer.Tick(110).error == tbot::LessonCinematicError::kInvalidState,
+            "a failed cue reports invalid state on further ticks");
+    Require(fake.frees == 0 && fake.closes == 0 && fake.ends == 0,
+            "recovery does not free buffers while the DMA transfer may still be in flight");
+
+    fake.wait_completes = true;
+    Require(renderer.Tick(120).error == tbot::LessonCinematicError::kInvalidState,
+            "recovery tick keeps reporting the failed cue as invalid state");
+    Require(fake.frees == 2 && fake.closes == 1 && fake.ends == 1,
+            "Tick provides a bounded cleanup/recovery path once the DMA transfer completes, "
+            "without requiring an explicit stop/cancel/discard");
+}
+
 }  // namespace
 
 int main() {
@@ -829,6 +887,8 @@ int main() {
     TestTemplateV2RejectsUnsafeOrInexactMetadata();
     TestReplacementCapabilityRequiresPeakLiveResourcesAndCleansProbe();
     TestTrgbReplayValidatesNativePrefetchAndDeadline();
+    TestStartNativePlaybackReplayPrefetchFailureRelinquishesDmaOwnership();
+    TestTickDecodeTimeoutQuarantineRecoversOnSubsequentTicks();
     std::cout << "lesson_flattened_cinematic_renderer tests passed\n";
     return 0;
 }
