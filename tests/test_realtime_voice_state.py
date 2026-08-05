@@ -673,7 +673,7 @@ def test_websocket_open_resets_idle_timer_before_hello_send():
     assert "last_incoming_time_ = std::chrono::steady_clock::now();" in open_body
     reset_idx = open_body.index("last_incoming_time_ = std::chrono::steady_clock::now();")
     create_idx = open_body.index("auto replacement_websocket = network->CreateWebSocket(1);")
-    hello_idx = open_body.index("if (!SendText(message))")
+    hello_idx = open_body.index("if (!replacement_websocket->Send(message))")
 
     assert reset_idx < create_idx < hello_idx
 

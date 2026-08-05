@@ -29,6 +29,21 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def websocket_callback_body(source: str, callback: str) -> str:
+    open_start = source.index("bool WebsocketProtocol::OpenAudioChannel")
+    for receiver in ("candidate_websocket", "websocket_"):
+        needle = f"{receiver}->{callback}"
+        start = source.find(needle, open_start)
+        if start >= 0:
+            break
+    else:
+        raise AssertionError(f"missing websocket {callback} callback")
+    end = source.find("});", start)
+    if end < 0:
+        raise AssertionError(f"unterminated websocket {callback} callback")
+    return source[start : end + len("});")]
+
+
 def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
     source = read("main/application.cc")
     header = read("main/application.h")
@@ -220,11 +235,7 @@ def test_websocket_passive_liveness_uses_privacy_safe_json_ping_and_consumes_pon
     assert "token_" not in maintain
     assert "device_id" not in maintain
 
-    open_start = source.index("bool WebsocketProtocol::OpenAudioChannel")
-    on_data = source[
-        source.index("websocket_->OnData", open_start) :
-        source.index("websocket_->OnDisconnected", open_start)
-    ]
+    on_data = websocket_callback_body(source, "OnData")
     assert 'strcmp(type->valuestring, "pong") == 0' in on_data
     assert "passive_liveness_.OnPong" in on_data
     pong_branch = on_data[on_data.index('strcmp(type->valuestring, "pong") == 0') :]
@@ -234,11 +245,7 @@ def test_websocket_passive_liveness_uses_privacy_safe_json_ping_and_consumes_pon
 def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_config_dispatch():
     protocol = read("main/protocols/protocol.h")
     source = read("main/protocols/websocket_protocol.cc")
-    open_start = source.index("bool WebsocketProtocol::OpenAudioChannel")
-    on_data = source[
-        source.index("websocket_->OnData", open_start) :
-        source.index("websocket_->OnDisconnected", open_start)
-    ]
+    on_data = websocket_callback_body(source, "OnData")
 
     assert "std::atomic<bool> error_occurred_" in protocol
     lease = on_data.index("inbound_gate_.Acquire(connection_epoch)")
@@ -258,13 +265,14 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     open_channel = function_body(source, "bool WebsocketProtocol::OpenAudioChannel")
     assert "inbound_gate_.BeginConnectionMutation()" in open_channel
     mutation = open_channel.index("inbound_gate_.BeginConnectionMutation()")
+    on_data_install = open_channel.index("candidate_websocket->OnData")
+    connect = open_channel.index("replacement_websocket->Connect(connect_url.c_str())")
+    hello_wait = open_channel.index("xEventGroupWaitBits")
     replace = open_channel.index("websocket_ = std::move(replacement_websocket)")
-    on_data_install = open_channel.index("websocket_->OnData", replace)
-    mutation_scope_end = open_channel.index("}\n\n    ESP_LOGI(TAG, \"Connecting", on_data_install)
-    assert mutation < replace < on_data_install < mutation_scope_end
+    assert mutation < on_data_install < connect < hello_wait < replace
     assert "connection_mutation.epoch()" in open_channel[mutation:replace]
-    assert "[this, connection_epoch]" in open_channel
-    disconnect = open_channel[open_channel.index("websocket_->OnDisconnected") :]
+    assert "[this, connection_epoch, callback_transport_epoch, hello_signal]" in open_channel
+    disconnect = websocket_callback_body(source, "OnDisconnected")
     assert "inbound_gate_.Acquire(connection_epoch)" in disconnect
     assert "disconnect_lease.IsCurrentEpoch()" in disconnect
     stale = disconnect[disconnect.index("const bool current_connection") :]
@@ -532,8 +540,29 @@ def test_passive_lesson_socket_watchdog_timeout_retries_passively_from_idle():
 
     assert "passive_lesson_connect_watchdog_timeout -> passive backoff" in passive_branch
     assert "backend_offline_.store(true);" in passive_branch
+    assert "connect_in_flight_.store(false);" in passive_branch
+    assert passive_branch.index("connect_in_flight_.store(false);") < passive_branch.index(
+        "SchedulePassiveLessonReconnect();"
+    )
     assert "SchedulePassiveLessonReconnect();" in passive_branch
     assert "ScheduleReconnect" not in passive_branch
+
+
+def test_websocket_candidate_is_not_published_until_connect_and_hello_finish():
+    source = read("main/protocols/websocket_protocol.cc")
+    open_channel = function_body(source, "bool WebsocketProtocol::OpenAudioChannel")
+
+    assert "replacement_websocket->Connect(connect_url.c_str())" in open_channel
+    assert "replacement_websocket->Send(message)" in open_channel
+    assert "SendText(message)" not in open_channel
+
+    create = open_channel.index("auto replacement_websocket = network->CreateWebSocket(1);")
+    connect = open_channel.index("replacement_websocket->Connect(connect_url.c_str())")
+    hello_wait = open_channel.index("xEventGroupWaitBits")
+    publish = open_channel.index("websocket_ = std::move(replacement_websocket);")
+    opened_callback = open_channel.index("on_audio_channel_opened_()")
+
+    assert create < connect < hello_wait < publish < opened_callback
 
 def test_passive_lesson_socket_watchdog_during_answer_turn_retries_passively():
     source = read("main/application.cc")
@@ -554,6 +583,10 @@ def test_passive_lesson_socket_watchdog_during_answer_turn_retries_passively():
     ]
     assert "passive_ws_intent_.store(false);" in lesson_timeout
     assert "display->SetStatus(Lang::Strings::PLEASE_WAIT);" in lesson_timeout
+    assert "connect_in_flight_.store(false);" in lesson_timeout
+    assert lesson_timeout.index("connect_in_flight_.store(false);") < lesson_timeout.index(
+        "SchedulePassiveLessonReconnect();"
+    )
     assert "SchedulePassiveLessonReconnect();" in lesson_timeout
     before_retry = lesson_timeout[: lesson_timeout.index("SchedulePassiveLessonReconnect();")]
     assert "lesson_interactive_listen_generation_.fetch_add(1);" not in before_retry

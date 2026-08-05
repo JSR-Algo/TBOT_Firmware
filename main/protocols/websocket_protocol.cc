@@ -17,10 +17,27 @@
 
 #include <cstdio>
 #include <inttypes.h>
+#include <memory>
 #include <esp_random.h>
 #include <esp_timer.h>
 
 #define TAG "WS"
+
+namespace {
+struct ServerHelloSignal {
+    ServerHelloSignal() {
+        handle = xEventGroupCreate();
+    }
+
+    ~ServerHelloSignal() {
+        if (handle != nullptr) {
+            vEventGroupDelete(handle);
+        }
+    }
+
+    EventGroupHandle_t handle = nullptr;
+};
+}  // namespace
 
 static bool IsUrlUnreserved(char ch) {
     return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
@@ -357,14 +374,22 @@ bool WebsocketProtocol::OpenAudioChannel() {
     ESP_LOGI(TAG, "Websocket auth identity: device_id_empty=%d client_id_empty=%d token_empty=%d",
              device_id.empty(), client_id.empty(), token.empty());
 
+    auto hello_signal = std::make_shared<ServerHelloSignal>();
+    if (hello_signal->handle == nullptr) {
+        ESP_LOGE(TAG, "Failed to create websocket hello synchronization");
+        return false;
+    }
+
+    uint32_t connection_epoch = 0;
     {
         auto connection_mutation = inbound_gate_.BeginConnectionMutation();
-        const uint32_t connection_epoch = connection_mutation.epoch();
+        connection_epoch = connection_mutation.epoch();
         error_occurred_ = false;
         close_state_.ResetForConnection();
-        websocket_ = std::move(replacement_websocket);
+    }
 
-        websocket_->OnData([this, connection_epoch, callback_transport_epoch](const char* data, size_t len, bool binary) {
+    WebSocket* candidate_websocket = replacement_websocket.get();
+    candidate_websocket->OnData([this, connection_epoch, callback_transport_epoch, hello_signal](const char* data, size_t len, bool binary) {
         auto inbound_lease = inbound_gate_.Acquire(connection_epoch);
         if (!inbound_lease || error_occurred_) {
             ESP_LOGD(TAG, "ws_stale_inbound_dropped");
@@ -443,7 +468,11 @@ bool WebsocketProtocol::OpenAudioChannel() {
             auto type = cJSON_GetObjectItem(root, "type");
             if (cJSON_IsString(type)) {
                 if (strcmp(type->valuestring, "hello") == 0) {
-                    ParseServerHello(root);
+                    if (ParseServerHello(root)) {
+                        xEventGroupSetBits(
+                            hello_signal->handle,
+                            WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+                    }
                 } else if (strcmp(type->valuestring, "pong") == 0) {
                     passive_liveness_.OnPong(
                         static_cast<uint32_t>(esp_timer_get_time() / 1000));
@@ -478,47 +507,62 @@ bool WebsocketProtocol::OpenAudioChannel() {
             cJSON_Delete(root);
         }
         last_incoming_time_ = std::chrono::steady_clock::now();
-        });
+    });
 
-        websocket_->OnDisconnected([this, connection_epoch]() {
-            auto disconnect_lease = inbound_gate_.Acquire(connection_epoch);
-            // A replaced socket may synchronously invoke this callback from its
-            // destructor. Only the current epoch may dereference websocket_.
-            const bool current_connection = disconnect_lease.IsCurrentEpoch();
-            if (!current_connection) {
-                ESP_LOGD(TAG, "stale_ws_disconnect_dropped");
-                return;
-            }
-            int err_code = websocket_ != nullptr ? websocket_->GetLastError() : -1;
-            ESP_LOGW(TAG, "ws_disconnect err_code=%d idle_timeout=%d",
-                     err_code, IsTimeout() ? 1 : 0);
-            NotifyAudioChannelClosedOnce();
-        });
-    }
+    candidate_websocket->OnDisconnected([this, connection_epoch, candidate_websocket]() {
+        auto disconnect_lease = inbound_gate_.Acquire(connection_epoch);
+        // A replaced socket may synchronously invoke this callback from its
+        // destructor. Only the current epoch may dereference websocket_.
+        const bool current_connection = disconnect_lease.IsCurrentEpoch();
+        if (!current_connection) {
+            ESP_LOGD(TAG, "stale_ws_disconnect_dropped");
+            return;
+        }
+        int err_code = candidate_websocket != nullptr ? candidate_websocket->GetLastError() : -1;
+        ESP_LOGW(TAG, "ws_disconnect err_code=%d idle_timeout=%d",
+                 err_code, IsTimeout() ? 1 : 0);
+        NotifyAudioChannelClosedOnce();
+    });
 
     ESP_LOGI(TAG, "Connecting to websocket server with protocol version %d", version_);
-    if (!websocket_->Connect(connect_url.c_str())) {
-        ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", websocket_->GetLastError());
+    if (!replacement_websocket->Connect(connect_url.c_str())) {
+        ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", replacement_websocket->GetLastError());
+        if (connection_epoch != inbound_gate_.CurrentEpoch()) {
+            return false;
+        }
         SetError(Lang::Strings::SERVER_NOT_CONNECTED);
         return false;
     }
 
     // Send hello message to describe the client
     auto message = GetHelloMessage();
-    if (!SendText(message)) {
+    if (!replacement_websocket->Send(message)) {
+        ESP_LOGE(TAG, "Failed to send text frame bytes=%u", (unsigned)message.size());
+        if (connection_epoch != inbound_gate_.CurrentEpoch()) {
+            return false;
+        }
+        SetError(Lang::Strings::SERVER_ERROR);
         return false;
     }
 
     // Wait for server hello
-    EventBits_t bits = xEventGroupWaitBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
+    EventBits_t bits = xEventGroupWaitBits(hello_signal->handle, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
+        if (connection_epoch != inbound_gate_.CurrentEpoch()) {
+            return false;
+        }
         SetError(Lang::Strings::SERVER_TIMEOUT);
+        return false;
+    }
+    if (connection_epoch != inbound_gate_.CurrentEpoch() || error_occurred_) {
         return false;
     }
 
     passive_liveness_.OnOpened(
         static_cast<uint32_t>(esp_timer_get_time() / 1000));
+
+    websocket_ = std::move(replacement_websocket);
 
     if (on_audio_channel_opened_ != nullptr) {
         on_audio_channel_opened_();
@@ -560,14 +604,14 @@ std::string WebsocketProtocol::GetHelloMessage() {
     return message;
 }
 
-void WebsocketProtocol::ParseServerHello(const cJSON* root) {
+bool WebsocketProtocol::ParseServerHello(const cJSON* root) {
     auto transport = cJSON_GetObjectItem(root, "transport");
     // cJSON_IsString guards both the missing-key (null node) and wrong-type
     // (number/null JSON -> valuestring==NULL) cases; strcmp(NULL, ...) faulted before
     // (deep-audit). Don't log the raw valuestring (it may be NULL).
     if (!cJSON_IsString(transport) || strcmp(transport->valuestring, "websocket") != 0) {
         ESP_LOGE(TAG, "Unsupported or invalid transport in server hello");
-        return;
+        return false;
     }
 
     auto session_id = cJSON_GetObjectItem(root, "session_id");
@@ -603,4 +647,5 @@ void WebsocketProtocol::ParseServerHello(const cJSON* root) {
     }
 
     xEventGroupSetBits(event_group_handle_, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
+    return true;
 }

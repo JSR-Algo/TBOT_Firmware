@@ -4363,8 +4363,9 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
         return;  // connect already resolved
     }
     // Invalidate the still-running worker's eventual result, recover to Idle and
-    // schedule a backoff retry. connect_in_flight_ may still be true (worker
-    // blocked); HandleReconnectTick re-defers until it clears.
+    // schedule a backoff retry. WebsocketProtocol keeps each open candidate
+    // private until it has connected and received hello, so a timed-out passive
+    // worker can no longer own reconnect forever.
     ++connect_generation_;
     if (passive_ws_intent_.load()) {
         deferred_wake_word_.clear();
@@ -4377,6 +4378,7 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
             passive_ws_intent_.store(false);
             online_intent_.store(false);
             connect_attempt_active_.store(false);
+            connect_in_flight_.store(false);
             auto display = Board::GetInstance().GetDisplay();
             display->SetStatus(Lang::Strings::PLEASE_WAIT);
             lesson_idle_repaint_suppressed_.store(true);
@@ -4388,6 +4390,8 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
         }
         ESP_LOGW(TAG, "passive_lesson_connect_watchdog_timeout -> passive backoff");
         backend_offline_.store(true);
+        connect_in_flight_.store(false);
+        connect_attempt_active_.store(false);
         SchedulePassiveLessonReconnect();
         return;
     }

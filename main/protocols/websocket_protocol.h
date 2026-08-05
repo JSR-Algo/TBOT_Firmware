@@ -52,7 +52,7 @@ private:
     ConnectionCloseState close_state_;
 
     void RefreshSettings();
-    void ParseServerHello(const cJSON* root);
+    bool ParseServerHello(const cJSON* root);
     bool IsAllowedUnclaimedPublicLessonMessage(const cJSON* root) const;
     bool SendText(const std::string& text) override;
     void SetError(const std::string& message) override;
