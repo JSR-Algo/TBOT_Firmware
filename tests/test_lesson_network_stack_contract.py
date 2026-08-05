@@ -43,11 +43,5 @@ def test_websocket_open_worker_has_tls_stack_headroom():
     source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
 
     assert f"kOpenChannelWorkerStackDepth = {MIN_WEBSOCKET_OPEN_STACK_BYTES}" in source
-    starter = source[
-        source.index("bool Application::StartOpenChannelWorker") :
-        source.index("void Application::OpenChannelTask")
-    ]
-    assert "xTaskCreateWithCaps(" in starter
-    assert "kOpenChannelWorkerStackDepth" in starter
-    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in starter
-    assert "open_channel_task_stack" not in source
+    assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
+    assert "xTaskCreateStatic(" in source

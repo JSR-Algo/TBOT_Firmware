@@ -62,8 +62,8 @@ def test_mqtt_hello_intentionally_omits_lesson_capability():
     assert 'cJSON_AddStringToObject(root, "transport", "udp");' in mqtt
 
 
-def test_lesson_protocol_dispatch_remains_websocket_only_with_transient_worker():
-    """The connect worker exists only while opening a WS, while dispatch stays WS-only."""
+def test_lesson_protocol_dispatch_remains_websocket_only_with_persistent_worker():
+    """The reconnect worker is lifecycle infrastructure, while dispatch stays WS-only."""
     app = read("main/application.cc")
     init = app[app.index("void Application::InitializeProtocol()"): app.index("protocol_->OnConnected")]
     assert "lesson_worker" not in init
@@ -124,27 +124,26 @@ def test_lesson_message_worker_reserves_persistent_psram_buffers_with_internal_c
     assert task_delete < queue_drain < queue_free < stack_free
 
 
-def test_websocket_open_worker_does_not_reserve_an_idle_internal_stack():
+def test_websocket_open_worker_reserves_one_reusable_internal_stack():
     app = read("main/application.cc")
     constructor = app[app.index("Application::Application()"): app.index("Application::~Application()")]
     starter = app[app.index("bool Application::StartOpenChannelWorker"): app.index("void Application::OpenChannelTask")]
     worker = app[app.index("void Application::OpenChannelTask"): app.index("void Application::ArmConnectWatchdog")]
 
-    assert "open_channel_task_stack" not in app
-    assert "open_channel_task_buffer" not in app
-    assert "open_channel_queue" not in app
-    assert '"lesson_ws"' not in constructor
-    assert "xTaskCreateStatic" not in starter
-    assert "xTaskCreateWithCaps(" in starter
-    assert "&Application::OpenChannelTask" in starter
-    assert "kOpenChannelWorkerStackDepth" in starter
-    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in starter
-    assert "xQueueReceive" not in worker
-    assert "for (;;)" not in worker
-    assert "vTaskDeleteWithCaps(nullptr);" in worker
+    assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in app
+    assert "DRAM_ATTR StaticTask_t open_channel_task_buffer;" in app
+    assert "DRAM_ATTR StaticQueue_t open_channel_queue_buffer;" in app
+    assert "DRAM_ATTR void* open_channel_queue_storage[1];" in app
+    assert '"lesson_ws"' in constructor
+    assert "xTaskCreateStatic" in constructor
+    assert "xTaskCreateWithCaps(" not in starter
+    assert "xQueueSend(open_channel_queue" in starter
+    assert "xQueueReceive(open_channel_queue" in worker
+    assert "for (;;)" in worker
+    assert "vTaskDeleteWithCaps(nullptr);" not in worker
 
 
-def test_each_channel_open_path_spawns_the_transient_worker_after_intent_is_published():
+def test_each_channel_open_path_queues_the_persistent_worker_after_intent_is_published():
     app = read("main/application.cc")
     passive = app[app.index("void Application::StartPassiveLessonWebsocket"): app.index("void Application::ContinueOpenAudioChannel")]
     active = app[app.index("void Application::ContinueOpenAudioChannel"): app.index("bool Application::StartOpenChannelWorker")]

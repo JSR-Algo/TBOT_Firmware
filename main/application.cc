@@ -95,6 +95,13 @@ static constexpr uint32_t kLessonMessageWorkerMinimumFreeStackBytes = 4096;
 #endif
 
 namespace {
+DRAM_ATTR StaticTask_t open_channel_task_buffer;
+DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
+DRAM_ATTR StaticQueue_t open_channel_queue_buffer;
+DRAM_ATTR void* open_channel_queue_storage[1];
+QueueHandle_t open_channel_queue = nullptr;
+TaskHandle_t open_channel_task = nullptr;
+
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 DRAM_ATTR StaticTask_t lesson_message_task_buffer;
 DRAM_ATTR StaticQueue_t lesson_message_queue_buffer;
@@ -141,6 +148,18 @@ static constexpr uint64_t kHeartbeatIntervalUs = 20ULL * 1000000ULL;  // 20s
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
+
+    open_channel_queue =
+        xQueueCreateStatic(1, sizeof(void*), reinterpret_cast<uint8_t*>(open_channel_queue_storage),
+                           &open_channel_queue_buffer);
+    if (open_channel_queue != nullptr) {
+        open_channel_task = xTaskCreateStatic(
+            &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackDepth, this,
+            tskIDLE_PRIORITY + 3, open_channel_task_stack, &open_channel_task_buffer);
+    }
+    if (open_channel_queue == nullptr || open_channel_task == nullptr) {
+        ESP_LOGE(TAG, "Failed to create persistent internal websocket worker");
+    }
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     constexpr uint32_t kLessonWorkerMemoryCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
@@ -4120,9 +4139,9 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
         return;
     }
     // SM-1/WSS-1: OpenAudioChannel() blocks (TCP+TLS handshake + server hello,
-    // up to ~20s). Run it on a transient worker so the app task keeps draining
-    // audio/VAD/abort/UI without reserving an internal stack while the socket is idle.
-    // connect_generation_ invalidates a stale result; the
+    // up to ~20s). Queue it on the persistent worker so reconnects do not depend
+    // on finding a fresh contiguous 8KB internal heap block. connect_generation_
+    // invalidates a stale result; the
     // connect watchdog (SM-3) recovers a wedged/black-hole connect.
     reconnect_mode_ = mode;
     online_intent_.store(true);  // we want an open channel -> reconnect on unexpected drop
@@ -4143,21 +4162,26 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 }
 
 bool Application::StartOpenChannelWorker(void* context) {
-    return xTaskCreateWithCaps(
-               &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackDepth,
-               context, tskIDLE_PRIORITY + 3, nullptr,
-               MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) == pdPASS;
+    if (open_channel_queue == nullptr || open_channel_task == nullptr) {
+        return false;
+    }
+    void* queued_context = context;
+    return xQueueSend(open_channel_queue, &queued_context, 0) == pdTRUE;
 }
 
 void Application::OpenChannelTask(void* arg) {
-    auto* ctx = static_cast<ConnectContext*>(arg);
-    auto* self = ctx->app;
-    ListeningMode mode = ctx->mode;
-    uint32_t gen = ctx->generation;
-    std::string wake_word = ctx->wake_word;
-    bool wake_word_invoke = ctx->wake_word_invoke;
-    bool passive_preconnect = ctx->passive_preconnect;
-    delete ctx;
+    auto* self = static_cast<Application*>(arg);
+    for (;;) {
+        ConnectContext* ctx = nullptr;
+        if (xQueueReceive(open_channel_queue, &ctx, portMAX_DELAY) != pdTRUE || ctx == nullptr) {
+            continue;
+        }
+        ListeningMode mode = ctx->mode;
+        uint32_t gen = ctx->generation;
+        std::string wake_word = ctx->wake_word;
+        bool wake_word_invoke = ctx->wake_word_invoke;
+        bool passive_preconnect = ctx->passive_preconnect;
+        delete ctx;
 
     // The ONLY blocking call, now off the app task.
     bool ok = false;
@@ -4327,8 +4351,8 @@ void Application::OpenChannelTask(void* arg) {
                     xEventGroupSetBits(self->event_group_, MAIN_EVENT_ERROR);
                 }
             }
-    });
-    vTaskDeleteWithCaps(nullptr);
+        });
+    }
 }
 
 void Application::ArmConnectWatchdog() {

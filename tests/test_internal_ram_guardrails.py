@@ -28,31 +28,23 @@ def test_esp32s3_malloc_prefers_psram_for_allocations_over_512_bytes():
     assert "CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=2048" not in sdkconfig
 
 
-def test_websocket_open_requests_allocate_one_transient_internal_dram_stack():
+def test_websocket_open_requests_share_one_persistent_internal_dram_stack():
     source = read("main/application.cc")
     constructor = function_body(
         source,
         "Application::Application",
         "Application::~Application",
     )
-    starter = function_body(
-        source,
-        "bool Application::StartOpenChannelWorker",
-        "void Application::OpenChannelTask",
-    )
-
-    assert constructor.count("xTaskCreateStatic(") == 1
-    assert "&Application::OpenChannelTask" not in constructor
-    assert '"lesson_ws"' not in constructor
+    assert constructor.count("xTaskCreateStatic(") == 2
+    assert "&Application::OpenChannelTask" in constructor
+    assert '"lesson_ws"' in constructor
     assert "&Application::LessonMessageTask" in constructor
     assert '"lesson_worker"' in constructor
-    assert "open_channel_queue" not in source
-    assert "open_channel_task_stack" not in source
-    assert "xTaskCreateWithCaps(" in starter
-    assert "&Application::OpenChannelTask" in starter
-    assert "kOpenChannelWorkerStackDepth" in starter
-    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in starter
-    assert "MALLOC_CAP_SPIRAM" not in starter
+    assert "xQueueCreateStatic(1, sizeof(void*)" in " ".join(constructor.split())
+    assert "DRAM_ATTR StaticQueue_t open_channel_queue_buffer;" in source
+    assert "DRAM_ATTR void* open_channel_queue_storage[1];" in source
+    assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
+    assert "xTaskCreateWithCaps" not in constructor
 
     for signature, next_signature in [
         (
@@ -84,7 +76,7 @@ def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
     open_body = function_body(
         websocket,
         "bool WebsocketProtocol::OpenAudioChannel",
-        "void WebsocketProtocol::ParseServerHello",
+        "bool WebsocketProtocol::ParseServerHello",
     )
     refresh_body = function_body(
         websocket,
@@ -99,7 +91,7 @@ def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
     assert "settings.GetInt(" in refresh_body
 
 
-def test_websocket_open_worker_releases_its_stack_after_each_attempt():
+def test_websocket_open_worker_stays_alive_for_reconnect_reuse():
     source = read("main/application.cc")
     worker_body = function_body(
         source,
@@ -107,25 +99,26 @@ def test_websocket_open_worker_releases_its_stack_after_each_attempt():
         "void Application::ArmConnectWatchdog",
     )
 
-    assert "for (;;)" not in worker_body
-    assert "xQueueReceive" not in worker_body
-    assert "vTaskDeleteWithCaps(nullptr);" in worker_body
+    assert "for (;;)" in worker_body
+    assert "xQueueReceive(open_channel_queue" in worker_body
+    assert "portMAX_DELAY" in worker_body
+    assert "vTaskDeleteWithCaps(nullptr);" not in worker_body
 
 
-def test_passive_lesson_websocket_keeps_full_transient_internal_stack_size():
+def test_passive_lesson_websocket_keeps_full_persistent_internal_stack_size():
     source = read("main/application.cc")
-    starter = function_body(
+    constructor = function_body(
         source,
-        "bool Application::StartOpenChannelWorker",
-        "void Application::OpenChannelTask",
+        "Application::Application",
+        "Application::~Application",
     )
 
     assert "kOpenChannelWorkerStackDepth = 8192" in source
-    assert "open_channel_task_stack" not in source
+    assert "open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
     assert "kOpenChannelWorkerStackDepth = 6144" not in source
     assert "kOpenChannelWorkerStackDepth = 4096" not in source
-    assert "xTaskCreateWithCaps(" in starter
-    assert "&Application::OpenChannelTask" in starter
+    assert "xTaskCreateStatic(" in constructor
+    assert "&Application::OpenChannelTask" in constructor
 
 
 def test_transient_http_workers_use_internal_dram_stacks():

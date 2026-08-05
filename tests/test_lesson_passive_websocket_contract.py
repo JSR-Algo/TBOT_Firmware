@@ -405,24 +405,23 @@ def test_passive_lesson_socket_worker_unavailable_retries_passively():
     assert "SchedulePassiveLessonReconnect();" in failure
 
 
-def test_passive_lesson_reconnect_uses_a_transient_internal_worker_stack():
+def test_passive_lesson_reconnect_uses_a_persistent_internal_worker_stack():
     source = read("main/application.cc")
     passive = function_body(source, "void Application::StartPassiveLessonWebsocket")
     starter = function_body(source, "bool Application::StartOpenChannelWorker")
     worker = function_body(source, "void Application::OpenChannelTask")
     constructor = function_body(source, "Application::Application")
 
-    assert "open_channel_task_buffer" not in source
-    assert "open_channel_task_stack" not in source
-    assert "open_channel_queue" not in source
-    assert '"lesson_ws"' not in constructor
-    assert "xTaskCreateWithCaps(" in starter
-    assert "&Application::OpenChannelTask" in starter
-    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in starter
+    assert "DRAM_ATTR StaticTask_t open_channel_task_buffer;" in source
+    assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
+    assert "DRAM_ATTR StaticQueue_t open_channel_queue_buffer;" in source
+    assert '"lesson_ws"' in constructor
+    assert "xTaskCreateWithCaps(" not in starter
+    assert "xQueueSend(open_channel_queue" in starter
     assert "xTaskCreate" not in passive
     assert "StartOpenChannelWorker(ctx)" in passive
-    assert "xQueueReceive" not in worker
-    assert "vTaskDeleteWithCaps(nullptr);" in worker
+    assert "xQueueReceive(open_channel_queue" in worker
+    assert "vTaskDeleteWithCaps(nullptr);" not in worker
 
 
 def test_network_disconnect_defers_channel_close_until_connect_worker_exits():
