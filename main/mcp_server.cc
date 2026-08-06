@@ -1302,12 +1302,16 @@ void McpServer::AddUserOnlyTools() {
                         if (std::strcmp(error.what(), kMcpResponseAllocationError) == 0) {
                             throw;
                         }
+                        ESP_LOGW(TAG, "lesson asset sync failed key=%s critical=%d: %s",
+                                 asset.key, asset.critical ? 1 : 0, error.what());
                         failed += 1;
                         if (asset.critical) {
                             critical_failed += 1;
                             break;
                         }
                     } catch (...) {
+                        ESP_LOGW(TAG, "lesson asset sync failed key=%s critical=%d: unknown error",
+                                 asset.key, asset.critical ? 1 : 0);
                         failed += 1;
                         if (asset.critical) {
                             critical_failed += 1;

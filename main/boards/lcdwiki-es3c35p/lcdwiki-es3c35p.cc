@@ -452,13 +452,20 @@ private:
     }
 
     bool BeginLessonCinematicTransport() {
-        if (display_ == nullptr || panel_ == nullptr || lesson_cinematic_done_ == nullptr ||
-            !Lock(1000)) {
+        if (display_ == nullptr || panel_ == nullptr || lesson_cinematic_done_ == nullptr) {
+            ESP_LOGW(TAG, "cinematic begin failed: display=%d panel=%d done=%d",
+                     display_ != nullptr, panel_ != nullptr, lesson_cinematic_done_ != nullptr);
+            return false;
+        }
+        if (!Lock(1000)) {
+            ESP_LOGW(TAG, "cinematic begin failed: LVGL lock timeout");
             return false;
         }
 
         const esp_err_t stop_result = lvgl_port_stop();
         if (stop_result != ESP_OK) {
+            ESP_LOGW(TAG, "cinematic begin failed: lvgl_port_stop %s",
+                     esp_err_to_name(stop_result));
             Unlock();
             return false;
         }
@@ -467,6 +474,13 @@ private:
         const esp_err_t barrier_result =
             esp_lcd_panel_io_tx_param(panel_io_, -1, nullptr, 0);
         if (barrier_result != ESP_OK) {
+            // Resume LVGL before bailing: the port is already stopped here, and
+            // returning without resuming leaves the UI frozen for good (the
+            // renderer only calls End* after a successful Begin*).
+            ESP_LOGW(TAG, "cinematic begin failed: panel barrier %s",
+                     esp_err_to_name(barrier_result));
+            ESP_ERROR_CHECK_WITHOUT_ABORT(lvgl_port_resume());
+            lesson_cinematic_stopped_ = false;
             Unlock();
             return false;
         }
@@ -599,7 +613,14 @@ private:
             .data6_io_num = GPIO_NUM_NC,
             .data7_io_num = GPIO_NUM_NC,
             .data_io_default_level = false,
-            .max_transfer_sz = DISPLAY_WIDTH * 80 * static_cast<int>(sizeof(uint16_t)),
+            // Must fit a whole lesson cinematic frame in ONE transfer: the
+            // renderer hands the panel a full 320x480 RGB565 buffer (307200 B)
+            // via esp_lcd_panel_draw_bitmap. The old 80-line budget (51200 B)
+            // made every queue attempt fail with "spi transmit (queue) color
+            // failed" -> CINEMATIC_PRESENT_FAILED before any frame rendered.
+            // LVGL's own partial-buffer flushes are smaller and unaffected.
+            .max_transfer_sz =
+                DISPLAY_WIDTH * DISPLAY_HEIGHT * static_cast<int>(sizeof(uint16_t)),
             .flags = 0,
             .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
             .intr_flags = 0,
@@ -615,6 +636,11 @@ private:
         esp_lcd_panel_io_spi_config_t io_config = ST77922_PANEL_IO_QSPI_CONFIG(
             DISPLAY_CS_PIN, nullptr, nullptr);
         io_config.pclk_hz = kLcdQspiClockHz;
+        // Lesson cinematic frames are decoded into PSRAM (MALLOC_CAP_SPIRAM).
+        // Without this flag the driver never sets SPI_TRANS_DMA_USE_PSRAM, so
+        // spi_device_queue_trans rejects the buffer ("spi transmit (queue)
+        // color failed") and every frame fails with CINEMATIC_PRESENT_FAILED.
+        io_config.flags.psram_dma_direct = 1;
         ESP_LOGI(TAG, "ST77922 QSPI clock: %d Hz", (int)io_config.pclk_hz);
         ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi(DISPLAY_SPI_HOST, &io_config, &panel_io));
 
