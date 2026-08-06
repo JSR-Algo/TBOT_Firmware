@@ -921,6 +921,15 @@ void Application::Run() {
                 IsDeviceClaimed() &&
                 protocol_ != nullptr &&
                 !connect_in_flight_.load() &&
+                // Do NOT tear down the passive WS while a lesson SD asset sync is
+                // in flight: hashing the ~116MB pack starves the WS receive task so
+                // server pongs miss the 10s window, but the connection is fine and
+                // the server keeps it open. Killing it here aborts the sync and
+                // starts an endless reconnect/re-sync loop. The timer is reset in
+                // EndLessonAssetSyncQuiet() so liveness resumes cleanly afterward.
+                // (Short-circuits before MaintainPassiveLiveness so no ping/pong
+                // state is mutated during the sync.)
+                !IsLessonAssetSyncQuiet() &&
                 passive_state != kDeviceStateWifiConfiguring &&
                 passive_state != kDeviceStateAudioTesting &&
                 protocol_->IsAudioChannelOpened() &&
@@ -3962,6 +3971,14 @@ void Application::EndLessonAssetSyncQuiet() {
     while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
     if (!lesson_asset_sync_quiet_.exchange(false)) {
         return;
+    }
+
+    // Passive-liveness polling was suspended during the sync (see the
+    // IsLessonAssetSyncQuiet() gate in the CLOCK_TICK handler). Reset the ping
+    // timer so it does not immediately fire a stale pong-timeout now that the WS
+    // receive path is free again.
+    if (protocol_ != nullptr) {
+        protocol_->ResetPassiveLiveness();
     }
 
     if (IsDeviceClaimed() && audio_service_.IsRunning() &&

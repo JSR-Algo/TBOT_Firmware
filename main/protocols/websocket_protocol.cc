@@ -260,6 +260,14 @@ bool WebsocketProtocol::MaintainPassiveLiveness() {
     return true;
 }
 
+void WebsocketProtocol::ResetPassiveLiveness() {
+    // Restart the ping/pong timer with a clean slate. Called when a lesson SD
+    // asset sync ends: during the sync the WS receive path is starved (the robot
+    // is hashing the pack), so pongs cannot be read and the timer would otherwise
+    // fire a stale timeout the moment liveness polling resumes.
+    passive_liveness_.OnOpened(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+}
+
 void WebsocketProtocol::SetError(const std::string& message) {
     inbound_gate_.FailCurrent();
     Protocol::SetError(message);

@@ -29,6 +29,7 @@ public:
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
     bool MaintainPassiveLiveness() override;
+    void ResetPassiveLiveness() override;
     void CompleteDeferredClose(uint32_t connection_epoch) override;
     void SetUnclaimedPublicLessonOnly(bool enabled);
 

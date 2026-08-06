@@ -93,6 +93,11 @@ public:
     // Maintains a passive WebSocket without starting voice or HTTP heartbeat
     // intent. Non-WebSocket transports have no passive liveness work.
     virtual bool MaintainPassiveLiveness() { return true; }
+    // Resets the passive-liveness ping/pong timer. Used after a long lesson SD
+    // asset sync legitimately blocks the WS receive path (pongs cannot be read in
+    // time), so the timer must restart fresh instead of firing a stale timeout.
+    // No-op for non-WebSocket transports.
+    virtual void ResetPassiveLiveness() {}
     virtual void CompleteDeferredClose(uint32_t connection_epoch) {
         (void)connection_epoch;
     }

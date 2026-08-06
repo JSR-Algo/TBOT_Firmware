@@ -59,3 +59,10 @@ CONFIG_FATFS_LFN_HEAP=y
 # log/flash qua cong USB nhu cu) de giai phong GPIO43/44 cho robot UART.
 # CONFIG_ESP_CONSOLE_UART_DEFAULT is not set
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# CINEMATIC-EVIDENCE CRASH FIX (2026-08-06): nano-newlib printf mangles %llu/%llx
+# (PRIu64/PRIx64) -> garbage "lu" output AND a varargs desync that null-derefs in
+# LessonCinematicEvidenceFormatCueEnd's snprintf on the cinematic failure path
+# (Guru Meditation LoadProhibited, EXCVADDR=0). Use full newlib formatting so the
+# 64-bit conversions work correctly. Fits the app partition (was 9% free at nano).
+# CONFIG_NEWLIB_NANO_FORMAT is not set

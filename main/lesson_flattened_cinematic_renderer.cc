@@ -747,7 +747,15 @@ LessonCinematicError LessonFlattenedCinematicRenderer::RenderFrame(std::size_t f
 LessonCinematicError LessonFlattenedCinematicRenderer::PrepareNative(
     const LessonFlattenedCinematicPhaseConfig&, void* stream,
     const LessonCinematicStreamMetadata& metadata, std::uint16_t* first, std::uint16_t* second) {
-    LessonCinematicError error = ReadNativeFrame(stream, 0, first, 100);
+    // Cold-read grace for the one-time prepare reads: the first native TRGB frame
+    // read includes SD card wake-up + file-open seek + the 307 KB uncompressed
+    // RGB565 transfer, measured at ~284ms on hardware. The old 100ms deadline made
+    // frame 0 return kDecodeTimeout every time -> Prepare failed -> the cinematic
+    // never rendered (CINEMATIC_DECODE_TIMEOUT). Prepare is not real-time, so give
+    // it the same cold-read budget the MP4 path already uses for frame zero.
+    // (Playback in AdvanceNative keeps its tight 100ms/frame real-time deadline.)
+    constexpr std::uint32_t kNativePrepareReadDeadlineMs = 500;
+    LessonCinematicError error = ReadNativeFrame(stream, 0, first, kNativePrepareReadDeadlineMs);
     if (error != LessonCinematicError::kNone) return error;
     if (!flattened_ops_.begin_cinematic(ops_.context)) {
         return LessonCinematicError::kPresentFailed;
@@ -764,7 +772,7 @@ LessonCinematicError LessonFlattenedCinematicRenderer::PrepareNative(
     native_ready_frame_ = metadata.frame_count > 1 ? 1 : 0;
     native_next_read_frame_ = metadata.frame_count > 1 ? 2 : 1;
     if (metadata.frame_count > 1) {
-        error = ReadNativeFrame(stream, 1, second, 100);
+        error = ReadNativeFrame(stream, 1, second, kNativePrepareReadDeadlineMs);
         if (error != LessonCinematicError::kNone) {
             if (FinishNativeTransfer(100)) {
                 flattened_ops_.end_cinematic(ops_.context);
