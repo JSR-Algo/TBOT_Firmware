@@ -2,6 +2,7 @@
 #include "lesson_mjpeg_mp4.h"
 
 #include "lesson_cinematic_evidence.h"
+#include "lesson_storage_hil_u64_format.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -687,8 +688,8 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Tick(std::uint64_t now
         const std::uint64_t dropped_periods = absolute_frame - displayed_clock_frame_;
 #ifdef ESP_PLATFORM
         ESP_LOGW("LessonCinematic",
-                 "TRGB timing degraded; retaining frame and rebasing %" PRIu64 " periods",
-                 dropped_periods);
+                 "TRGB timing degraded; retaining frame and rebasing %s periods",
+                 FormatLessonStorageHilUint64(dropped_periods).c_str());
 #endif
         clock_origin_ms_ += dropped_periods * 1000 / metadata_.fps;
         LessonCinematicEvidenceRecordLateTick(
@@ -1165,10 +1166,12 @@ void ProductionClose(void* raw, void* handle) {
     }
     if (context->frames_read != 0 || context->frames_queued != 0) {
         ESP_LOGI("LessonCinematic",
-                 "aggregate frames_read=%u read_crc_ms=%" PRIu64
-                 " frames_queued=%u queue_ms=%" PRIu64 " psram_free=%u",
-                 static_cast<unsigned>(context->frames_read), context->aggregate_read_ms,
-                 static_cast<unsigned>(context->frames_queued), context->aggregate_queue_ms,
+                 "aggregate frames_read=%u read_crc_ms=%s"
+                 " frames_queued=%u queue_ms=%s psram_free=%u",
+                 static_cast<unsigned>(context->frames_read),
+                 FormatLessonStorageHilUint64(context->aggregate_read_ms).c_str(),
+                 static_cast<unsigned>(context->frames_queued),
+                 FormatLessonStorageHilUint64(context->aggregate_queue_ms).c_str(),
                  static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
         context->aggregate_read_ms = 0;
         context->aggregate_queue_ms = 0;

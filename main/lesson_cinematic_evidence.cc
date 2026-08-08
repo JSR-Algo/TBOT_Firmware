@@ -1,4 +1,5 @@
 #include "lesson_cinematic_evidence.h"
+#include "lesson_storage_hil_u64_format.h"
 
 #include <cstdlib>
 #include <cstdio>
@@ -257,9 +258,11 @@ void LessonCinematicEvidenceBoot() {
     g_boot.psram_heap_min = static_cast<std::uint32_t>(
         heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM));
     if (LessonCinematicEvidenceEnabled()) {
-        esp_rom_printf("CINE_EVIDENCE event=boot boot_nonce=0x%" PRIx64 " reset_reason=%s "
+        // esp_rom_printf has no 64-bit conversion at all, independent of the
+        // newlib format setting, so this one was never correct as %PRIx64.
+        esp_rom_printf("CINE_EVIDENCE event=boot boot_nonce=0x%s reset_reason=%s "
                        "lifetime_internal_heap_min=%u psram_heap_min=%u\n",
-                       static_cast<std::uint64_t>(g_boot.boot_nonce),
+                       FormatLessonStorageHilUint64Hex(g_boot.boot_nonce).c_str(),
                        g_boot.reset_reason,
                        static_cast<unsigned>(g_boot.lifetime_internal_heap_min),
                        static_cast<unsigned>(g_boot.psram_heap_min));
@@ -417,17 +420,17 @@ bool LessonCinematicEvidenceFormatCueEnd(LessonCinematicCueEndReason reason,
     const std::uint64_t latency = now_ms >= g_cue.started_ms ? now_ms - g_cue.started_ms : 0;
     const int written = std::snprintf(
         out, out_size,
-        "CINE_EVIDENCE event=cue_end cue=%s reason=%s fault=%s seq=%" PRIu64 " latency_ms=%" PRIu64 " "
+        "CINE_EVIDENCE event=cue_end cue=%s reason=%s fault=%s seq=%s latency_ms=%s "
         "read_count=%u read_ge70ms=%u read_max_ms=%u read_hist_ms=0:%u,70:%u,100:%u "
         "panel_latency_ms=%u queue_errors=%u queue_timeouts=%u dma_errors=%u "
         "parser_errors=%u header_crc_errors=%u frame_crc_errors=%u io_errors=%u "
         "watchdog_faults=%u unexpected_reset_faults=%u "
         "late_ticks=%u missed_periods=%u internal_heap_min=%u "
         "lifetime_internal_heap_min=%u psram_heap_min=%u "
-        "boot_nonce=0x%" PRIx64 " reset_reason=%s cue_end",
+        "boot_nonce=0x%s reset_reason=%s cue_end",
         g_cue.cue_id, ReasonText(reason), FaultText(fault),
-        static_cast<std::uint64_t>(g_cue.sequence),
-        static_cast<std::uint64_t>(latency), static_cast<unsigned>(g_cue.read_count),
+        FormatLessonStorageHilUint64(g_cue.sequence).c_str(),
+        FormatLessonStorageHilUint64(latency).c_str(), static_cast<unsigned>(g_cue.read_count),
         static_cast<unsigned>(g_cue.read_ge70ms), static_cast<unsigned>(g_cue.read_max_ms),
         static_cast<unsigned>(g_cue.read_hist[0]), static_cast<unsigned>(g_cue.read_hist[1]),
         static_cast<unsigned>(g_cue.read_hist[2]), static_cast<unsigned>(g_cue.panel_latency_ms),
@@ -441,7 +444,7 @@ bool LessonCinematicEvidenceFormatCueEnd(LessonCinematicCueEndReason reason,
         static_cast<unsigned>(g_cue.internal_heap_min),
         static_cast<unsigned>(g_cue.lifetime_internal_heap_min),
         static_cast<unsigned>(g_cue.psram_heap_min),
-        static_cast<std::uint64_t>(g_boot.boot_nonce), g_boot.reset_reason);
+        FormatLessonStorageHilUint64Hex(g_boot.boot_nonce).c_str(), g_boot.reset_reason);
     if (written > 0 && static_cast<std::size_t>(written) < out_size) {
         g_cue.active = false;
         return true;

@@ -1,5 +1,6 @@
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_storage_hil_u64_format.h"
 
 #include <algorithm>
 #include <atomic>
@@ -297,8 +298,8 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
             // Task 7 defines only command-correlated ACKs. Phase completion is internal:
             // the renderer returns to prepared while the server remains the lifecycle owner.
             if (response.type == LessonCinematicResponseType::kPhaseComplete) {
-                ESP_LOGI("LessonCinematic", "phase complete at command sequence %" PRIu64,
-                         response.command_sequence_id);
+                ESP_LOGI("LessonCinematic", "phase complete at command sequence %s",
+                         FormatLessonStorageHilUint64(response.command_sequence_id).c_str());
             } else if (!response.accepted &&
                        response.error != LessonCinematicError::kInvalidState) {
                 ESP_LOGW("LessonCinematic", "timer tick failed: %u",
