@@ -1863,13 +1863,37 @@ bool Blufi::start_wifi_scan() {
         return false;
     }
 
-    // Get current WiFi mode
-    wifi_mode_t current_mode;
-    esp_err_t err = esp_wifi_get_mode(&current_mode);
+    // The WiFi driver can still be uninitialized here: a robot that entered BLE
+    // setup before doing any station work has no driver yet, and esp_wifi_get_mode()
+    // then fails with ESP_ERR_WIFI_NOT_INIT while leaving current_mode untouched.
+    auto& wifi_manager = WifiManager::GetInstance();
+    if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
+        ESP_LOGE(BLUFI_TAG, "Failed to initialize WifiManager before scan");
+        m_scan_in_progress = false;
+        return false;
+    }
 
-    if (current_mode == WIFI_MODE_AP) {
-        // If in AP mode, temporarily switch to APSTA to allow scanning
-        ESP_LOGI(BLUFI_TAG, "WiFi in AP mode");
+    // Get current WiFi mode. Seeded to WIFI_MODE_NULL so a failed read falls into
+    // the "needs station mode" branch instead of reading an uninitialized value.
+    wifi_mode_t current_mode = WIFI_MODE_NULL;
+    esp_err_t err = esp_wifi_get_mode(&current_mode);
+    if (err != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "Failed to read WiFi mode before scan: %s", esp_err_to_name(err));
+        current_mode = WIFI_MODE_NULL;
+    }
+
+    if (current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA) {
+        // Ensure WiFi driver is started (may have been stopped during config mode transition)
+        err = esp_wifi_start();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
+            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi before scan: %s", esp_err_to_name(err));
+            m_scan_in_progress = false;
+            return false;
+        }
+    } else {
+        // AP-only or not-yet-configured (WIFI_MODE_NULL). Scanning needs station
+        // mode, so switch and (re)start the driver before scanning.
+        ESP_LOGI(BLUFI_TAG, "Switching WiFi to STA for scan (mode=%d)", current_mode);
         err = esp_wifi_set_mode(WIFI_MODE_STA);
         if (err != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
@@ -1878,34 +1902,16 @@ bool Blufi::start_wifi_scan() {
         }
         // Need to restart WiFi for mode change to take effect
         err = esp_wifi_start();
-        if (err != ESP_OK) {
+        if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
             ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after mode switch: %s", esp_err_to_name(err));
             m_scan_in_progress = false;
             return false;
         }
-        // Start scan
-        err = esp_wifi_scan_start(NULL, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-    } else if (current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA) {
-        // Ensure WiFi driver is started (may have been stopped during config mode transition)
-        err = esp_wifi_start();
-        if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi before scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        err = esp_wifi_scan_start(NULL, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-    } else {
-        ESP_LOGE(BLUFI_TAG, "Unexpected WiFi mode: %d", current_mode);
+    }
+
+    err = esp_wifi_scan_start(NULL, false);
+    if (err != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
         m_scan_in_progress = false;
         return false;
     }
@@ -1916,7 +1922,9 @@ bool Blufi::start_wifi_scan() {
 
 void Blufi::_send_wifi_list() {
     if (m_ap_records.empty()) {
-        ESP_LOGW(BLUFI_TAG, "No AP records available, sending WiFi scan fail");
+        // Reason 1 of 2 for WIFI_SCAN_FAIL: the scan ran to completion but the
+        // environment produced nothing we can report.
+        ESP_LOGW(BLUFI_TAG, "WiFi scan fail reason=scan_completed_without_ap_records");
         esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
         return;
     }
@@ -2264,6 +2272,10 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             m_scan_should_save_ssid = true;
             m_send_list_after_scan = true;
             if (!start_wifi_scan()) {
+                // Reason 2 of 2 for WIFI_SCAN_FAIL: the scan never started, so the
+                // phone is answered immediately instead of waiting for a scan-done
+                // event that will not arrive.
+                ESP_LOGW(BLUFI_TAG, "WiFi scan fail reason=scan_start_failed");
                 m_send_list_after_scan = false;
                 esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
             }

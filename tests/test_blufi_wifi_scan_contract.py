@@ -109,3 +109,55 @@ def test_wifi_station_does_not_consume_blufi_owned_scan_results():
     assert "!this_->scan_in_progress_" in handler
     assert handler.index("!this_->scan_in_progress_") < handler.index("HandleScanResult();")
     assert "Ignoring WiFi scan done event not owned by WifiStation" in handler
+
+
+def test_blufi_scan_handles_uninitialized_wifi_driver_instead_of_reading_a_stale_mode():
+    """A robot that enters BLE setup before any station work has no WiFi driver.
+
+    esp_wifi_get_mode() then fails and leaves `current_mode` untouched. Reading it
+    anyway fell through to the "unexpected mode" branch and answered the phone with
+    WIFI_SCAN_FAIL, so the app showed an empty network list.
+    """
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::start_wifi_scan")
+
+    # The mode variable is seeded, so a failed read is never observed uninitialized.
+    assert "wifi_mode_t current_mode = WIFI_MODE_NULL;" in body
+    # The return of esp_wifi_get_mode is checked, not discarded.
+    assert "esp_err_t err = esp_wifi_get_mode(&current_mode);" in body
+    assert body.index("esp_wifi_get_mode(&current_mode)") < body.index("if (err != ESP_OK)")
+    # The driver is brought up before the mode is read at all.
+    assert "wifi_manager.IsInitialized() && !wifi_manager.Initialize()" in body
+    # Anchor on the call, not the bare name — the name also appears in comments.
+    assert body.index("wifi_manager.Initialize()") < body.index("esp_wifi_get_mode(&current_mode)")
+    # No branch rejects a mode outright any more: anything that is not already
+    # station-capable is switched to STA rather than failing the scan.
+    assert "Unexpected WiFi mode" not in body
+
+
+def test_blufi_scan_switches_non_station_modes_to_sta_before_scanning():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::start_wifi_scan")
+
+    assert "current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA" in body
+    assert "esp_wifi_set_mode(WIFI_MODE_STA)" in body
+    # A single scan_start covers both branches, and it runs after the mode work.
+    assert body.count("esp_wifi_scan_start(NULL, false)") == 1
+    assert body.index("esp_wifi_set_mode(WIFI_MODE_STA)") < body.index("esp_wifi_scan_start(NULL, false)")
+    # An already-started driver is not treated as a failure on either path.
+    assert body.count("err != ESP_OK && err != ESP_ERR_WIFI_STATE") == 2
+
+
+def test_blufi_wifi_scan_fail_paths_log_distinguishable_reasons():
+    """Both WIFI_SCAN_FAIL senders look identical to the phone, so the firmware log
+    is the only way to tell "scan produced nothing" from "scan never started"."""
+    source = read("main/boards/common/blufi.cpp")
+    send_list = function_body(source, "void Blufi::_send_wifi_list")
+    handler = function_body(source, "void Blufi::_handle_event")
+    get_list = handler[handler.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") : handler.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")]
+
+    assert "WiFi scan fail reason=scan_completed_without_ap_records" in send_list
+    assert send_list.index("reason=scan_completed_without_ap_records") < send_list.index("esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL)")
+
+    assert "WiFi scan fail reason=scan_start_failed" in get_list
+    assert get_list.index("reason=scan_start_failed") < get_list.index("esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL)")
