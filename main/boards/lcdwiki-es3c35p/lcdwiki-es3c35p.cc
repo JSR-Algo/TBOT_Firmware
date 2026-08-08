@@ -613,14 +613,18 @@ private:
             .data6_io_num = GPIO_NUM_NC,
             .data7_io_num = GPIO_NUM_NC,
             .data_io_default_level = false,
-            // Must fit a whole lesson cinematic frame in ONE transfer: the
-            // renderer hands the panel a full 320x480 RGB565 buffer (307200 B)
-            // via esp_lcd_panel_draw_bitmap. The old 80-line budget (51200 B)
-            // made every queue attempt fail with "spi transmit (queue) color
-            // failed" -> CINEMATIC_PRESENT_FAILED before any frame rendered.
-            // LVGL's own partial-buffer flushes are smaller and unaffected.
-            .max_transfer_sz =
-                DISPLAY_WIDTH * DISPLAY_HEIGHT * static_cast<int>(sizeof(uint16_t)),
+            // A whole cinematic frame does NOT have to fit in one transfer:
+            // panel_io_spi_tx_color() splits any color buffer into chunks of
+            // spi_trans_max_bytes, holds CS across them with
+            // SPI_TRANS_CS_KEEP_ACTIVE, and fires the done callback only on the
+            // last one -- and ST77922_PANEL_IO_QSPI_CONFIG gives us a 10-deep
+            // transaction queue for the 4 chunks a 307200 B frame needs here.
+            // What actually fixed "spi transmit (queue) color failed" was the
+            // psram_dma_direct flag below; sizing the bus for a full frame was
+            // incidental and cost 1452 bytes of MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA
+            // heap (measured), which starved the BLE controller during BluFi
+            // provisioning until it could no longer send its Wi-Fi list.
+            .max_transfer_sz = DISPLAY_WIDTH * 80 * static_cast<int>(sizeof(uint16_t)),
             .flags = 0,
             .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
             .intr_flags = 0,
