@@ -1982,7 +1982,9 @@ void Blufi::_send_wifi_list() {
     // the driver-result cache first so those allocations see a contiguous heap.
     std::vector<wifi_ap_record_t>().swap(m_ap_records);
     m_ap_records_updated_us = 0;
+    LogBlufiHeapSnapshot("before_send_wifi_list");
     esp_err_t err = esp_blufi_send_wifi_list(blufi_ap_count, blufi_ap_list.data());
+    LogBlufiHeapSnapshot("after_send_wifi_list");
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to dispatch WiFi list: %s", esp_err_to_name(err));
     }
@@ -2041,6 +2043,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
     switch (event) {
         case ESP_BLUFI_EVENT_INIT_FINISH:
             ESP_LOGI(BLUFI_TAG, "BLUFI init finish");
+            LogBlufiHeapSnapshot("blufi_init_finish");
             {
                 static const std::string device_name = GetBlufiDeviceName();
                 ESP_LOGI(BLUFI_TAG, "BLUFI advertising started");
@@ -2067,6 +2070,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 break;
             }
             ESP_LOGI(BLUFI_TAG, "BLUFI ble connect");
+            LogBlufiHeapSnapshot("ble_connect");
             m_ble_is_connected = true;
             // A successful client connect proves re-advertising still works, so
             // clear the re-advertise cap. This makes the cap count CONSECUTIVE
