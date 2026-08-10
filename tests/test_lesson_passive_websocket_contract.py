@@ -162,10 +162,9 @@ def test_passive_lesson_socket_tick_sends_ws_only_liveness_without_voice_or_http
     assert "virtual bool MaintainPassiveLiveness()" in protocol
     assert "passive_ws_intent_.load()" in clock_body
     assert "protocol_->MaintainPassiveLiveness()" in clock_body
-    liveness = clock_body[
-        clock_body.index("protocol_->MaintainPassiveLiveness()") - 500 :
-        clock_body.index("protocol_->MaintainPassiveLiveness()") + 500
-    ]
+    liveness_start = clock_body.index("bool passive_liveness_failed")
+    liveness_end = clock_body.index("if (!passive_liveness_failed", liveness_start)
+    liveness = clock_body[liveness_start:liveness_end]
     assert "!connect_in_flight_.load()" in liveness
     assert "kDeviceStateWifiConfiguring" in liveness
     assert "kDeviceStateAudioTesting" in liveness
