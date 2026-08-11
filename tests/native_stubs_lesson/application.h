@@ -117,7 +117,7 @@ public:
         auto items = std::move(lesson_visual_queue);
         lesson_visual_queue.clear();
         for (const auto& item : items) {
-            DispatchLessonVisualCompletion(item, protocol_.get());
+            DispatchLessonVisualCompletion(item, protocol_.get(), &robot_uart_);
         }
     }
     uint32_t BeginLessonInteractiveListeningRequest() { return ++lesson_interactive_listen_generation; }
