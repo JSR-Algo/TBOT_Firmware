@@ -1,5 +1,6 @@
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_layered_cinematic_renderer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -291,9 +292,11 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
         .callback = [](void*) {
             const std::uint64_t now_ms =
                 static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
-            const auto response = LessonCinematicTimerRoutesV4()
-                ? TickActiveLessonFlattenedCinematicRenderer(now_ms)
-                : TickActiveLessonCinematicRenderer(now_ms);
+            const auto response = LessonCinematicTimerRoutesV5()
+                ? TickActiveLessonLayeredCinematicRenderer(now_ms)
+                : LessonCinematicTimerRoutesV4()
+                    ? TickActiveLessonFlattenedCinematicRenderer(now_ms)
+                    : TickActiveLessonCinematicRenderer(now_ms);
             // Task 7 defines only command-correlated ACKs. Phase completion is internal:
             // the renderer returns to prepared while the server remains the lifecycle owner.
             if (response.type == LessonCinematicResponseType::kPhaseComplete) {
@@ -317,10 +320,22 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
     }
     SetActiveLessonCinematicRenderer(g_production_renderer.get());
     InitializeProductionLessonFlattenedCinematicRenderer(display);
+    InitializeProductionLessonLayeredCinematicRenderer();
     return LessonCinematicRendererCapabilityReady();
 #else
     (void)display;
     return false;
+#endif
+}
+
+LessonCinematicRendererOps ProductionLessonCinematicRendererOps() {
+#ifdef ESP_PLATFORM
+    if (g_production_context == nullptr) return {};
+    return {g_production_context.get(), ProductionAllocate, ProductionFree, ProductionOpen,
+            ProductionClose, ProductionDecode, ProductionPresent, ProductionLastError,
+            ProductionMonotonicMs};
+#else
+    return {};
 #endif
 }
 
@@ -349,6 +364,7 @@ void ShutdownProductionLessonCinematicRenderer() {
         g_production_context->frame_timer = nullptr;
     }
     ShutdownProductionLessonFlattenedCinematicRenderer();
+    ShutdownProductionLessonLayeredCinematicRenderer();
     g_production_renderer.reset();
     g_production_context.reset();
 #endif

@@ -25,6 +25,7 @@
 #include "lesson_handler.h"
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_layered_cinematic_renderer.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
 #include "system_info.h"
@@ -316,6 +317,42 @@ std::string V4Frame(const char* type, int seq, const std::string& body) {
            "\",\"protocolVersion\":\"teebot-lesson-renderer.v4\",\"assignmentId\":\"" +
            AID() + "\",\"sessionId\":\"" + SID() + "\",\"sequence\":" +
            std::to_string(seq) + ",\"body\":" + body + "}";
+}
+
+std::string V5Frame(const char* type, int seq, const std::string& body) {
+    return std::string("{\"type\":\"") + type +
+           "\",\"protocolVersion\":\"teebot-lesson-renderer.v5\",\"assignmentId\":\"" +
+           AID() + "\",\"sessionId\":\"" + SID() + "\",\"sequence\":" +
+           std::to_string(seq) + ",\"body\":" + body + "}";
+}
+
+std::string V5PrepareFrame(int seq, std::uint64_t command_sequence_id = 91) {
+    const std::string hash(64, 'a');
+    return V5Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"layeredCinematic\",\"templateVersion\":1,"
+        "\"phaseId\":\"flyIn\",\"durationMs\":300,\"fps\":10,\"frameCount\":3,"
+        "\"playbackMode\":\"once\",\"layers\":["
+        "{\"layer\":\"background\",\"slot\":\"backgroundScene\","
+        "\"mediaKind\":\"image\",\"mediaType\":\"image/jpeg\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/background.jpg\",\"sha256\":\"" + hash +
+        "\",\"bytes\":1234,\"width\":480,\"height\":320,"
+        "\"rect\":{\"x\":0,\"y\":0,\"width\":480,\"height\":320},\"fit\":\"cover\"},"
+        "{\"layer\":\"teachingObject\",\"slot\":\"teachingObject\","
+        "\"mediaKind\":\"image\",\"mediaType\":\"image/png\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/object.png\",\"sha256\":\"" + hash +
+        "\",\"bytes\":234,\"width\":2,\"height\":2,"
+        "\"rect\":{\"x\":10,\"y\":10,\"width\":2,\"height\":2},\"fit\":\"contain\"},"
+        "{\"layer\":\"robotOverlay\",\"slot\":\"robotOverlay\","
+        "\"mediaKind\":\"video\",\"mediaType\":\"video/mp4\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/robot.mp4\",\"sha256\":\"" + hash +
+        "\",\"bytes\":3456,\"width\":2,\"height\":2,"
+        "\"rect\":{\"x\":20,\"y\":20,\"width\":2,\"height\":2},"
+        "\"codec\":\"mjpeg\",\"hasAudio\":false,"
+        "\"chromaKey\":{\"keyColor\":\"#00ff00\",\"tolerance\":20,\"featherPx\":1}}]}}"
+    );
 }
 
 std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
@@ -713,6 +750,9 @@ struct V3RendererFake {
     std::uint64_t monotonic_ms = 0;
     std::uint64_t monotonic_step_ms = 0;
     bool trgb_open = false;
+    int jpeg_decodes = 0;
+    int png_decodes = 0;
+    int video_decodes = 0;
 };
 
 void* V3Allocate(void* context, std::size_t size) {
@@ -756,13 +796,39 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
 void V3Close(void* context, void*) { ++static_cast<V3RendererFake*>(context)->closes; }
 bool V3Decode(void* context, void*, std::size_t, std::uint8_t* destination, std::size_t capacity,
               std::uint16_t* width, std::uint16_t* height, std::size_t* stride) {
-    if (static_cast<V3RendererFake*>(context)->fail_decode) return false;
-    const bool trgb = static_cast<V3RendererFake*>(context)->trgb_open;
+    auto* fake = static_cast<V3RendererFake*>(context);
+    if (fake->fail_decode) return false;
+    ++fake->video_decodes;
+    const bool trgb = fake->trgb_open;
     const bool background = capacity >= 480u * 320u * 2u;
     *width = trgb ? 320 : background ? 480 : 2;
     *height = trgb ? 480 : background ? 320 : 2;
     *stride = static_cast<std::size_t>(*width) * 2;
     std::memset(destination, 0, *stride * *height);
+    return true;
+}
+bool V5DecodeJpeg(void* context, const char*, std::uint16_t* destination,
+                  std::size_t capacity, std::uint16_t* width,
+                  std::uint16_t* height, std::size_t* stride) {
+    auto* fake = static_cast<V3RendererFake*>(context);
+    if (fake->fail_decode || capacity < 480u * 320u) return false;
+    ++fake->jpeg_decodes;
+    *width = 480;
+    *height = 320;
+    *stride = 480;
+    std::fill(destination, destination + 480u * 320u, 0x1234);
+    return true;
+}
+bool V5DecodePng(void* context, const char*, std::uint8_t* destination,
+                 std::size_t capacity, std::uint16_t* width,
+                 std::uint16_t* height, std::size_t* stride) {
+    auto* fake = static_cast<V3RendererFake*>(context);
+    if (fake->fail_decode || capacity < 16) return false;
+    ++fake->png_decodes;
+    *width = 2;
+    *height = 2;
+    *stride = 8;
+    std::fill(destination, destination + 16, 0xff);
     return true;
 }
 bool V4Begin(void*) { return true; }
@@ -1001,6 +1067,77 @@ void ActivateV4Renderer(tbot::LessonFlattenedCinematicRenderer* renderer) {
     tbot::SetActiveLessonFlattenedCinematicRenderer(renderer);
     tbot::SetLessonFlattenedCinematicRendererCapabilityReady(renderer != nullptr &&
                                                               renderer->initialized());
+}
+
+void test_renderer_v5_capability_exact_layers_and_lifecycle() {
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    cJSON* features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    char* encoded = cJSON_PrintUnformatted(features);
+    require(encoded != nullptr && std::string(encoded).find("teebot-lesson-renderer.v5") ==
+                                      std::string::npos,
+            "renderer v5 is absent until the layered renderer is initialized");
+    cJSON_free(encoded);
+    cJSON_Delete(features);
+
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    encoded = cJSON_PrintUnformatted(features);
+    require(encoded != nullptr &&
+                std::string(encoded).find("teebot-lesson-renderer.v5") != std::string::npos &&
+                std::string(encoded).find("\"lessonRendererV5\":{\"layeredCinematic\":true,"
+                                          "\"sdAssetPack\":true}") != std::string::npos,
+            "initialized renderer advertises the exact v5 capability shape");
+    cJSON_free(encoded);
+    cJSON_Delete(features);
+
+    ResetObservable();
+    FreshSession();
+    Handle(V5PrepareFrame(1));
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady" &&
+                FrameBodyStr(0, "cinematicPhase", "phaseId") == "flyIn",
+            "v5 prepare returns the typed frame-zero ACK for the requested effect");
+    require(fake.jpeg_decodes == 1 && fake.png_decodes == 1 &&
+                fake.video_decodes == 1 && fake.opens == 1 && fake.presents == 1,
+            "v5 prepare decodes both static images once and only frame zero from Robot video");
+
+    Handle(V5Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"flyIn\","
+        "\"commandSequenceId\":92}}"));
+    require(FrameType(1) == "lesson_ack" &&
+                FrameBodyStr(1, "cinematicPhase", "event") == "phaseReady",
+            "v5 start routes to the layered renderer");
+    Handle(V5Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"pause\",\"phaseId\":\"flyIn\",\"commandSequenceId\":93}"));
+    require(FrameType(2) == "lesson_ack", "v5 pause routes to the layered renderer");
+    Handle(V5Frame("lesson_cinematic_control", 4,
+        "{\"command\":\"resume\",\"phaseId\":\"flyIn\",\"commandSequenceId\":94,"
+        "\"clockRebaseSequenceId\":94}"));
+    require(FrameType(3) == "lesson_ack", "v5 resume routes to the layered renderer");
+    Handle(V5Frame("lesson_stop", 5,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"flyIn\","
+        "\"commandSequenceId\":95}}"));
+    require(FrameType(4) == "lesson_ack" && fake.closes == 1 && fake.frees == 4,
+            "v5 stop releases the Robot stream and all four bounded buffers");
+
+    ResetObservable();
+    FreshSession();
+    const int opens_before = fake.opens;
+    Handle(ReplaceOnce(V5PrepareFrame(6, 96),
+                       "\"mediaKind\":\"video\",\"mediaType\":\"video/mp4\"",
+                       "\"mediaKind\":\"image\",\"mediaType\":\"video/mp4\""));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.opens == opens_before,
+            "v5 rejects a still-image Robot layer before renderer IO");
+
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
 }
 
 void test_renderer_v4_capability_and_exact_single_asset_routing() {
@@ -7428,6 +7565,7 @@ int main() {
     test_cinematic_rejects_unsupported_frames_and_accepts_all_late_phases();
     test_cinematic_renderer_failures_use_stable_error_mapping();
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
+    test_renderer_v5_capability_exact_layers_and_lifecycle();
     test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v4_accepts_template_v2_cue_identity_prepare_and_controls();
     test_renderer_v4_accepts_external_flattened_cue_metadata_matrix();

@@ -162,6 +162,7 @@ LessonCinematicRenderer* ActiveLessonCinematicRenderer();
 LessonCinematicResponse TickActiveLessonCinematicRenderer(std::uint64_t now_ms);
 std::uint64_t LessonCinematicCompletedSequence();
 bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display);
+LessonCinematicRendererOps ProductionLessonCinematicRendererOps();
 void ConfigureProductionLessonCinematicSession(const std::string& assignment_id,
                                                 const std::string& session_id,
                                                 std::uint64_t generation);
