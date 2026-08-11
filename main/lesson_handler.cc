@@ -730,6 +730,8 @@ struct LessonSession {
     bool        opening_entrance_consumed = false;
     bool        entrance_active = false;
     std::uint64_t visual_generation = 0;
+    std::uint64_t visual_motion_generation = 0;
+    bool        visual_motion_degraded = false;
     std::uint64_t pending_visual_nonce = 0;
     std::uint64_t current_transport_epoch = 0;
     int64_t     pending_server_sequence = 0;
@@ -1626,6 +1628,11 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
         degraded_reason = StableVisualDegradedReason(item.degraded_reason);
         if (degraded_reason == nullptr) degraded_reason = "unsupportedContract";
         break;
+    }
+    if (accepted && g_session.visual_motion_generation == item.visual_generation &&
+        g_session.visual_motion_degraded && !degraded) {
+        degraded = true;
+        degraded_reason = "reducedMotion";
     }
 
     cJSON* root = LessonJsonCreateObject();
@@ -2753,7 +2760,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         // Defense in depth: every fresh manifest starts disabled. Only the explicit
         // runtime control boolean can arm lesson motion for this session.
-        g_session.motion_presets_enabled = !renderer_v2 && cJSON_IsTrue(motion_enabled);
+        g_session.motion_presets_enabled = cJSON_IsTrue(motion_enabled);
         g_session.renderer_v2 = renderer_v2;
         g_session.verified_asset_paths = verified_asset_paths;
         g_session.prepared = true;
@@ -3045,6 +3052,23 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 false,
                 "unsupportedContract"));
             return;
+        }
+        if (requested_generation > g_session.visual_motion_generation) {
+            const char* motion_preset = Str(body, "motionPreset");
+            g_session.visual_motion_generation = requested_generation;
+            g_session.visual_motion_degraded =
+                !g_session.motion_presets_enabled ||
+                DispatchLessonMotionPreset(robot_uart_, motion_preset) ==
+                    LessonMotionResult::kDegraded;
+            ESP_LOGI(TAG,
+                     "visual_motion_preset outcome=%s assignmentId=%s sessionId=%s "
+                     "stepId=%s visualGeneration=%llu",
+                     g_session.visual_motion_degraded ? "degraded" : "applied",
+                     assignment_id, session_id,
+                     Str(root, "stepId") != nullptr ? Str(root, "stepId") : "-",
+                     static_cast<unsigned long long>(requested_generation));
+        } else if (requested_generation < g_session.visual_motion_generation) {
+            g_session.visual_motion_degraded = true;
         }
         g_session.entrance_active = false;
         const std::uint64_t visual_callback_token =

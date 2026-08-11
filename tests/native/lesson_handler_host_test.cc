@@ -2123,6 +2123,51 @@ void test_renderer_v2_valid_visual_state_contract_enqueues_static_completion() {
             "valid renderer-v2 visual state completion emits the correlated ACK");
 }
 
+void test_renderer_v2_visual_motion_is_allowlisted_once_per_generation() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(V2PrepareFrame(1));
+    Handle(V2StartFrame(2, ValidV2OpeningEntrance()));
+    display.CompleteEntrance();
+    App().DrainLessonVisualQueue();
+    App().robot_uart_.calls.clear();
+
+    Handle(V2VisualFrameWithStepId(3, "valid-step", 2));
+    const std::vector<std::string> encourage_calls = {
+        "both_arms_raise", "head_center"};
+    require(App().robot_uart_.calls == encourage_calls,
+            "renderer-v2 visual motion executes through the fixed preset dispatcher");
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(!FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "applied renderer-v2 visual motion keeps the visual ACK green");
+
+    Handle(V2VisualFrameWithStepId(4, "valid-step", 2));
+    require(App().robot_uart_.calls == encourage_calls,
+            "a retried visual generation does not execute motion twice");
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+
+    std::string unknown = V2VisualFrameWithStepId(5, "valid-step", 3);
+    const auto preset = unknown.find("encourage");
+    require(preset != std::string::npos, "visual fixture contains the authored preset");
+    unknown.replace(preset, std::strlen("encourage"), "rawSweep");
+    Handle(unknown);
+    require(App().robot_uart_.calls == encourage_calls,
+            "unknown renderer-v2 motion never reaches raw robot commands");
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(FrameBodyBool(Sent().size() - 1, "degraded", false) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "reducedMotion",
+            "unknown renderer-v2 motion is visible as a degraded visual ACK");
+    require(DispatchLessonMotionPreset(App().robot_uart_, "rest") ==
+                LessonMotionResult::kApplied,
+            "renderer-v2 visual motion test leaves no pending auto-rest timer");
+}
+
 void test_renderer_v2_contracts_reject_unexpected_and_duplicate_keys() {
     ResetObservable();
     FreshSession();
@@ -7352,6 +7397,9 @@ void test_layer_install_timeout_degrades_without_committing_layer_state() {
 }  // namespace
 
 int main() {
+    test_safe_motion_presets_and_auto_rest();
+    test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
+    test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
     test_renderer_v4_trgb_exact_asset_contract();
     test_envelope_guards();
     test_prepare_basic();
@@ -7495,9 +7543,6 @@ int main() {
     test_flashed_poster_without_draw_is_not_drawn();
     test_remaining_reachable_branches();
     test_protocol_null_send_skip();
-    test_safe_motion_presets_and_auto_rest();
-    test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
-    test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
     test_step_reads_only_body_motion_present_and_motion_degrades_ack();
     test_motion_runtime_control_defaults_disabled_and_resets_per_manifest();
     test_step_evidence_telemetry_and_privacy_safe_logs();
@@ -7505,6 +7550,7 @@ int main() {
     test_ack_replay_window_handles_delayed_and_expired_duplicates();
     test_duplicate_prepare_replays_cached_ack_summary_when_history_is_unavailable();
     test_layer_install_timeout_degrades_without_committing_layer_state();
+    test_renderer_v2_visual_motion_is_allowlisted_once_per_generation();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }
