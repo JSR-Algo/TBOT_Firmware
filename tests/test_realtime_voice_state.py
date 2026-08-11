@@ -2242,7 +2242,9 @@ def test_lesson_asset_pack_sync_reuses_verified_duplicate_bytes_before_network_d
     )
     reuse_start = body.index("if (reusable != nullptr)")
     reuse_end = body.index("} else {", reuse_start)
-    assert "skipped += 1;" in body[reuse_start:reuse_end]
+    reuse_body = body[reuse_start:reuse_end]
+    assert "reused += 1;" in reuse_body
+    assert "skipped += 1;" not in reuse_body
     assert '"reusedCount"' in body
 
 def test_sample_lesson_asset_sync_does_not_mkdir_sd_mount_point():
