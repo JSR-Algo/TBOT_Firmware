@@ -1,11 +1,41 @@
 #include "lesson_layered_cinematic_renderer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <memory>
 #include <string_view>
 
 namespace tbot {
+#ifdef ESP_PLATFORM
+bool DecodeLessonLayeredJpeg(const char* path, std::uint16_t* destination,
+                             std::size_t capacity, std::uint16_t* width,
+                             std::uint16_t* height, std::size_t* stride_pixels);
+bool DecodeLessonLayeredPng(const char* path, std::uint8_t* destination,
+                            std::size_t capacity, std::uint16_t* width,
+                            std::uint16_t* height, std::size_t* stride);
+#endif
 namespace {
+
+std::atomic<bool> g_layered_capability_ready{false};
+std::atomic<bool> g_timer_routes_v5{false};
+std::atomic<LessonLayeredCinematicRenderer*> g_active_layered_renderer{nullptr};
+std::mutex g_active_layered_mutex;
+#ifdef ESP_PLATFORM
+std::unique_ptr<LessonLayeredCinematicRenderer> g_production_layered_renderer;
+
+bool ProductionDecodeJpeg(void*, const char* path, std::uint16_t* destination,
+                          std::size_t capacity, std::uint16_t* width,
+                          std::uint16_t* height, std::size_t* stride_pixels) {
+    return DecodeLessonLayeredJpeg(path, destination, capacity, width, height, stride_pixels);
+}
+
+bool ProductionDecodePng(void*, const char* path, std::uint8_t* destination,
+                         std::size_t capacity, std::uint16_t* width,
+                         std::uint16_t* height, std::size_t* stride) {
+    return DecodeLessonLayeredPng(path, destination, capacity, width, height, stride);
+}
+#endif
 
 constexpr std::size_t kScreenPixels =
     static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight;
@@ -101,6 +131,12 @@ bool LessonLayeredCinematicRenderer::initialized() const {
            ops_.present != nullptr;
 }
 
+bool LessonLayeredCinematicRenderer::prepared() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_ == State::kPrepared || state_ == State::kRunning ||
+           state_ == State::kPaused;
+}
+
 LessonCinematicResponse LessonLayeredCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
     return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};
@@ -176,7 +212,10 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     if (robot_metadata_.width == 0 || robot_metadata_.height == 0 ||
         robot_metadata_.width > 240 || robot_metadata_.height > 240 ||
         (robot_metadata_.fps != 10 && robot_metadata_.fps != 15) ||
-        robot_metadata_.frame_count == 0 || robot_metadata_.duration_ms == 0) {
+        robot_metadata_.frame_count == 0 || robot_metadata_.duration_ms == 0 ||
+        robot_metadata_.fps != config.fps ||
+        robot_metadata_.frame_count != config.frame_count ||
+        robot_metadata_.duration_ms != config.duration_ms) {
         Release();
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
@@ -361,6 +400,78 @@ void LessonLayeredCinematicRenderer::DiscardSession() {
     std::lock_guard<std::mutex> lock(mutex_);
     Release();
     state_ = State::kIdle;
+}
+
+bool LessonLayeredCinematicRendererCapabilityReady() {
+    return g_layered_capability_ready.load(std::memory_order_acquire);
+}
+
+void SetActiveLessonLayeredCinematicRenderer(LessonLayeredCinematicRenderer* renderer) {
+    std::lock_guard<std::mutex> lock(g_active_layered_mutex);
+    g_active_layered_renderer.store(renderer, std::memory_order_release);
+    g_layered_capability_ready.store(
+        renderer != nullptr && renderer->initialized(), std::memory_order_release);
+}
+
+LessonLayeredCinematicRenderer* ActiveLessonLayeredCinematicRenderer() {
+    return g_active_layered_renderer.load(std::memory_order_acquire);
+}
+
+LessonCinematicResponse TickActiveLessonLayeredCinematicRenderer(std::uint64_t now_ms) {
+    std::lock_guard<std::mutex> lock(g_active_layered_mutex);
+    auto* renderer = g_active_layered_renderer.load(std::memory_order_acquire);
+    if (renderer == nullptr) {
+        return {LessonCinematicResponseType::kFailure, false, 0, "",
+                LessonCinematicError::kInvalidState};
+    }
+    return renderer->Tick(now_ms);
+}
+
+void SetLessonCinematicTimerRouteV5(bool enabled) {
+    g_timer_routes_v5.store(enabled, std::memory_order_release);
+}
+
+bool LessonCinematicTimerRoutesV5() {
+    return g_timer_routes_v5.load(std::memory_order_acquire);
+}
+
+bool InitializeProductionLessonLayeredCinematicRenderer() {
+#ifdef ESP_PLATFORM
+    const auto legacy = ProductionLessonCinematicRendererOps();
+    if (legacy.allocate == nullptr || legacy.free == nullptr || legacy.open == nullptr ||
+        legacy.close == nullptr || legacy.decode == nullptr || legacy.present == nullptr) {
+        return false;
+    }
+    g_production_layered_renderer = std::make_unique<LessonLayeredCinematicRenderer>(
+        LessonLayeredCinematicRendererOps{
+            legacy.context, legacy.allocate, legacy.free, ProductionDecodeJpeg,
+            ProductionDecodePng, legacy.open, legacy.close, legacy.decode, legacy.present,
+            legacy.last_error, legacy.monotonic_ms});
+    SetActiveLessonLayeredCinematicRenderer(g_production_layered_renderer.get());
+    return LessonLayeredCinematicRendererCapabilityReady();
+#else
+    return false;
+#endif
+}
+
+void ConfigureProductionLessonLayeredCinematicSession(const std::string& assignment_id,
+                                                       const std::string& session_id,
+                                                       std::uint64_t generation) {
+#ifdef ESP_PLATFORM
+    ConfigureProductionLessonCinematicSession(assignment_id, session_id, generation);
+#else
+    (void)assignment_id;
+    (void)session_id;
+    (void)generation;
+#endif
+}
+
+void ShutdownProductionLessonLayeredCinematicRenderer() {
+    SetActiveLessonLayeredCinematicRenderer(nullptr);
+    g_timer_routes_v5.store(false, std::memory_order_release);
+#ifdef ESP_PLATFORM
+    g_production_layered_renderer.reset();
+#endif
 }
 
 }  // namespace tbot

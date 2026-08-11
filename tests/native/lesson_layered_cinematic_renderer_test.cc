@@ -131,6 +131,9 @@ tbot::LessonLayeredCinematicPhaseConfig Config() {
     config.template_id = "layeredCinematic";
     config.phase_id = "teach";
     config.command_sequence_id = 7;
+    config.duration_ms = 300;
+    config.fps = 10;
+    config.frame_count = 3;
     config.playback_mode = tbot::LessonLayeredPlaybackMode::kOnce;
     config.background.sd_path = "/sd/background.jpg";
     config.background.rect = {0, 0, 480, 320};

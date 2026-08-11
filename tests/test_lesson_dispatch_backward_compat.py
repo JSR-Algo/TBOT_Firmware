@@ -131,6 +131,25 @@ def test_hello_features_advertises_lesson_capability_additively():
     assert 'cJSON_AddStringToObject(features, "renderer", kLessonRendererName);' in ws
 
 
+def test_renderer_v5_is_additive_and_preserves_v1_through_v4_contracts():
+    handler = read("main/lesson_handler.cc")
+    header = read("main/lesson_layered_cinematic_renderer.h")
+
+    assert 'kLessonRendererV5[] = "teebot-lesson-renderer.v5"' in header
+    assert 'kLessonLayeredCinematicTemplate[] = "layeredCinematic"' in header
+    assert 'cJSON_CreateString(kLessonRendererV1)' in handler
+    assert 'cJSON_CreateString(kLessonRendererV2)' in handler
+    assert 'cJSON_CreateString(tbot::kLessonRendererV3)' in handler
+    assert 'cJSON_CreateString(tbot::kLessonRendererV4)' in handler
+    assert 'cJSON_CreateString(tbot::kLessonRendererV5)' in handler
+    assert handler.index('cJSON_CreateString(tbot::kLessonRendererV3)') < handler.index(
+        'cJSON_CreateString(tbot::kLessonRendererV4)'
+    ) < handler.index('cJSON_CreateString(tbot::kLessonRendererV5)')
+    assert '"lessonRendererV5"' in handler
+    assert '"layeredCinematic"' in handler
+    assert '"sdAssetPack"' in handler
+
+
 def test_additive_lesson_sender_does_not_alter_protected_send_text():
     proto_h = read("main/protocols/protocol.h")
     proto_cc = read("main/protocols/protocol.cc")

@@ -25,6 +25,9 @@ struct LessonLayeredCinematicPhaseConfig {
     const char* template_id = nullptr;
     const char* phase_id = nullptr;
     std::uint64_t command_sequence_id = 0;
+    std::uint32_t duration_ms = 0;
+    std::uint16_t fps = 0;
+    std::uint32_t frame_count = 0;
     LessonLayeredPlaybackMode playback_mode = LessonLayeredPlaybackMode::kOnce;
     LessonLayeredImageConfig background{};
     LessonLayeredImageConfig teaching_object{};
@@ -67,6 +70,7 @@ public:
     LessonCinematicResponse Tick(std::uint64_t now_ms);
     void DiscardSession();
     bool initialized() const;
+    bool prepared() const;
 
 private:
     enum class State : std::uint8_t { kIdle, kPrepared, kRunning, kPaused, kFailed };
@@ -103,6 +107,18 @@ private:
     LessonCinematicResponse last_response_{};
     std::string last_command_;
 };
+
+bool LessonLayeredCinematicRendererCapabilityReady();
+void SetActiveLessonLayeredCinematicRenderer(LessonLayeredCinematicRenderer* renderer);
+LessonLayeredCinematicRenderer* ActiveLessonLayeredCinematicRenderer();
+LessonCinematicResponse TickActiveLessonLayeredCinematicRenderer(std::uint64_t now_ms);
+void SetLessonCinematicTimerRouteV5(bool enabled);
+bool LessonCinematicTimerRoutesV5();
+bool InitializeProductionLessonLayeredCinematicRenderer();
+void ConfigureProductionLessonLayeredCinematicSession(const std::string& assignment_id,
+                                                       const std::string& session_id,
+                                                       std::uint64_t generation);
+void ShutdownProductionLessonLayeredCinematicRenderer();
 
 }  // namespace tbot
 

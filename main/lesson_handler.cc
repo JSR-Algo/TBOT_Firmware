@@ -21,6 +21,7 @@
 #include "lesson_layer_state.h"
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
+#include "lesson_layered_cinematic_renderer.h"
 #include "lesson_trgb_size_policy.h"
 #include "system_info.h"
 #include "lesson_tvideo_template.h"
@@ -210,6 +211,9 @@ void AddLessonRendererFeatures(cJSON* features) {
     if (tbot::LessonFlattenedCinematicRendererCapabilityReady()) {
         cJSON_AddItemToArray(renderers, cJSON_CreateString(tbot::kLessonRendererV4));
     }
+    if (tbot::LessonLayeredCinematicRendererCapabilityReady()) {
+        cJSON_AddItemToArray(renderers, cJSON_CreateString(tbot::kLessonRendererV5));
+    }
     cJSON_AddItemToObject(features, "renderer", renderers);
 
     cJSON* renderer_v2 = cJSON_CreateObject();
@@ -229,6 +233,12 @@ void AddLessonRendererFeatures(cJSON* features) {
         cJSON_AddBoolToObject(renderer_v4, "flattenedMjpegCinematic", true);
         cJSON_AddBoolToObject(renderer_v4, "sdAssetPack", true);
         cJSON_AddItemToObject(features, "lessonRendererV4", renderer_v4);
+    }
+    if (tbot::LessonLayeredCinematicRendererCapabilityReady()) {
+        cJSON* renderer_v5 = cJSON_CreateObject();
+        cJSON_AddBoolToObject(renderer_v5, "layeredCinematic", true);
+        cJSON_AddBoolToObject(renderer_v5, "sdAssetPack", true);
+        cJSON_AddItemToObject(features, "lessonRendererV5", renderer_v5);
     }
 }
 
@@ -1572,6 +1582,70 @@ std::unique_ptr<LvglImage> FetchLessonImage(const char* url) {
 
 }  // namespace
 
+#ifdef ESP_PLATFORM
+namespace tbot {
+
+bool DecodeLessonLayeredJpeg(const char* path, std::uint16_t* destination,
+                             std::size_t capacity, std::uint16_t* width,
+                             std::uint16_t* height, std::size_t* stride_pixels) {
+    if (path == nullptr || destination == nullptr || width == nullptr || height == nullptr ||
+        stride_pixels == nullptr) return false;
+    const std::string source = path[0] == '/' ? std::string("file://") + path : path;
+    auto image = FetchLessonImage(source.c_str());
+    const lv_img_dsc_t* descriptor = image != nullptr ? image->image_dsc() : nullptr;
+    if (descriptor == nullptr || descriptor->header.cf != LV_COLOR_FORMAT_RGB565 ||
+        descriptor->header.w != kLessonCinematicWidth ||
+        descriptor->header.h != kLessonCinematicHeight ||
+        descriptor->header.stride < descriptor->header.w * 2 ||
+        capacity < static_cast<std::size_t>(descriptor->header.w) * descriptor->header.h * 2) {
+        return false;
+    }
+    for (std::size_t y = 0; y < descriptor->header.h; ++y) {
+        std::memcpy(destination + y * descriptor->header.w,
+                    descriptor->data + y * descriptor->header.stride,
+                    descriptor->header.w * 2);
+    }
+    *width = static_cast<std::uint16_t>(descriptor->header.w);
+    *height = static_cast<std::uint16_t>(descriptor->header.h);
+    *stride_pixels = descriptor->header.w;
+    return true;
+}
+
+bool DecodeLessonLayeredPng(const char* path, std::uint8_t* destination,
+                            std::size_t capacity, std::uint16_t* width,
+                            std::uint16_t* height, std::size_t* stride) {
+    if (path == nullptr || destination == nullptr || width == nullptr || height == nullptr ||
+        stride == nullptr) return false;
+    const std::string source = path[0] == '/' ? std::string("file://") + path : path;
+    auto image = FetchLessonImage(source.c_str());
+    const lv_img_dsc_t* descriptor = image != nullptr ? image->image_dsc() : nullptr;
+    if (descriptor == nullptr || descriptor->header.cf != LV_COLOR_FORMAT_ARGB8888 ||
+        descriptor->header.w == 0 || descriptor->header.h == 0 ||
+        descriptor->header.w > 240 || descriptor->header.h > 240 ||
+        descriptor->header.stride < descriptor->header.w * 4 ||
+        capacity < static_cast<std::size_t>(descriptor->header.w) * descriptor->header.h * 4) {
+        return false;
+    }
+    const std::size_t output_stride = descriptor->header.w * 4;
+    for (std::size_t y = 0; y < descriptor->header.h; ++y) {
+        const std::uint8_t* input = descriptor->data + y * descriptor->header.stride;
+        std::uint8_t* output = destination + y * output_stride;
+        for (std::size_t x = 0; x < descriptor->header.w; ++x) {
+            output[x * 4] = input[x * 4 + 2];
+            output[x * 4 + 1] = input[x * 4 + 1];
+            output[x * 4 + 2] = input[x * 4];
+            output[x * 4 + 3] = input[x * 4 + 3];
+        }
+    }
+    *width = static_cast<std::uint16_t>(descriptor->header.w);
+    *height = static_cast<std::uint16_t>(descriptor->header.h);
+    *stride = output_stride;
+    return true;
+}
+
+}  // namespace tbot
+#endif
+
 void SetLessonTransportEpoch(std::uint64_t transport_epoch) {
     g_session.current_transport_epoch = transport_epoch;
 }
@@ -1982,7 +2056,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         strcmp(protocol_version, tbot::kLessonRendererV3) == 0;
     const bool cinematic_v4 = protocol_version != nullptr &&
         strcmp(protocol_version, tbot::kLessonRendererV4) == 0;
-    if (cinematic_v3 || cinematic_v4) {
+    const bool cinematic_v5 = protocol_version != nullptr &&
+        strcmp(protocol_version, tbot::kLessonRendererV5) == 0;
+    if (cinematic_v3 || cinematic_v4 || cinematic_v5) {
         const bool prepare_frame = strcmp(type, "lesson_prepare") == 0;
         const bool start_frame = strcmp(type, "lesson_start") == 0;
         const bool stop_frame = strcmp(type, "lesson_stop") == 0;
@@ -1999,11 +2075,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const char* phase_id = Str(command_body, "phaseId");
         const char* cue_id = Str(command_body, "cueId");
         double prepare_template_version_number = 0;
-        const bool prepare_template_version_ok = !prepare_frame || !cinematic_v4 ||
+        const bool prepare_template_version_ok = !prepare_frame || (!cinematic_v4 && !cinematic_v5) ||
             (Num(command_body, "templateVersion", prepare_template_version_number) &&
              std::isfinite(prepare_template_version_number) &&
              std::trunc(prepare_template_version_number) == prepare_template_version_number &&
-             (prepare_template_version_number == 1 || prepare_template_version_number == 2));
+             (cinematic_v5 ? prepare_template_version_number == 1
+                           : prepare_template_version_number == 1 ||
+                             prepare_template_version_number == 2));
         const std::uint16_t cinematic_template_version = cinematic_v3 ? 1
             : prepare_frame && prepare_template_version_ok
                 ? static_cast<std::uint16_t>(prepare_template_version_number)
@@ -2029,6 +2107,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
                                 strcmp(command, "cancel") == 0)));
         const bool known_identity = cinematic_v4_v2
             ? phase_id == nullptr && IsSafeCinematicSlug(cue_id)
+            : cinematic_v5
+                ? cue_id == nullptr && phase_id != nullptr &&
+                    (strcmp(phase_id, "flyIn") == 0 || strcmp(phase_id, "walk") == 0 ||
+                     strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0 ||
+                     strcmp(phase_id, "thinking") == 0 ||
+                     strcmp(phase_id, "celebrate") == 0 || strcmp(phase_id, "exit") == 0)
             : cue_id == nullptr && phase_id != nullptr &&
                 (strcmp(phase_id, "opening") == 0 || strcmp(phase_id, "greet") == 0 ||
                  strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0 ||
@@ -2048,22 +2132,22 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 "command", "cueId", "commandSequenceId", "clockRebaseSequenceId"};
             static const std::set<std::string_view> kV2CancelKeys = {
                 "command", "cueId", "commandSequenceId", "reason"};
-            const auto& expected = cinematic_v4 && command != nullptr &&
+            const auto& expected = (cinematic_v4 || cinematic_v5) && command != nullptr &&
                     strcmp(command, "resume") == 0
                 ? (cinematic_v4_v2 ? kV2ResumeKeys : kV1ResumeKeys)
-                : cinematic_v4 && command != nullptr && strcmp(command, "cancel") == 0
+                : (cinematic_v4 || cinematic_v5) && command != nullptr && strcmp(command, "cancel") == 0
                     ? (cinematic_v4_v2 ? kV2CancelKeys : kV1CancelKeys)
                     : (cinematic_v4_v2 ? kV2BasicControlKeys : kV1BasicControlKeys);
             cinematic_command_shape_ok = ExactObjectKeys(command_body, expected);
         }
         bool control_values_ok = true;
-        if (cinematic_v4 && !prepare_frame && command != nullptr &&
+        if ((cinematic_v4 || cinematic_v5) && !prepare_frame && command != nullptr &&
             strcmp(command, "resume") == 0) {
             double rebase_sequence = 0;
             control_values_ok = Num(command_body, "clockRebaseSequenceId", rebase_sequence) &&
                 PositiveIntegerAtMost(rebase_sequence, kMaxJsonSafeInteger) &&
                 rebase_sequence == command_sequence_number;
-        } else if (cinematic_v4 && !prepare_frame && command != nullptr &&
+        } else if ((cinematic_v4 || cinematic_v5) && !prepare_frame && command != nullptr &&
                    strcmp(command, "cancel") == 0) {
             const char* reason = Str(command_body, "reason");
             control_values_ok = reason != nullptr && !Blank(reason) && std::strlen(reason) <= 64;
@@ -2159,9 +2243,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
         tbot::LessonCinematicRenderer* renderer_v3 = tbot::ActiveLessonCinematicRenderer();
         tbot::LessonFlattenedCinematicRenderer* renderer_v4 =
             tbot::ActiveLessonFlattenedCinematicRenderer();
+        tbot::LessonLayeredCinematicRenderer* renderer_v5 =
+            tbot::ActiveLessonLayeredCinematicRenderer();
         const bool renderer_available = cinematic_v3 ? renderer_v3 != nullptr
-            : renderer_v4 != nullptr &&
-                tbot::LessonFlattenedCinematicRendererCapabilityReady();
+            : cinematic_v4 ? renderer_v4 != nullptr &&
+                tbot::LessonFlattenedCinematicRendererCapabilityReady()
+            : renderer_v5 != nullptr && tbot::LessonLayeredCinematicRendererCapabilityReady();
         if (!command_matches_frame || !known_identity || !prepare_template_version_ok ||
             !command_sequence_ok || !cinematic_command_shape_ok || !control_values_ok ||
             !renderer_available) {
@@ -2195,7 +2282,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
         };
         auto complete_cinematic_prepare = [&](tbot::LessonCinematicResponse& prepare_response,
                                               std::uint64_t generation,
-                                              bool route_v4) {
+                                              bool route_v4,
+                                              bool route_v5) {
             if (!prepare_response.accepted) return;
             const bool renderer_handoff = g_session.prepared &&
                 !g_session.cinematic_renderer_id.empty() &&
@@ -2210,21 +2298,154 @@ void Application::HandleLessonMessage(const cJSON* root) {
                            renderer_v4 != nullptr) {
                     renderer_v4->DiscardSession();
                     old_renderer_released = !renderer_v4->prepared();
+                } else if (g_session.cinematic_renderer_id == tbot::kLessonRendererV5 &&
+                           renderer_v5 != nullptr) {
+                    renderer_v5->DiscardSession();
+                    old_renderer_released = !renderer_v5->prepared();
                 }
                 if (!old_renderer_released) {
-                    if (route_v4) renderer_v4->DiscardSession();
+                    if (route_v5) renderer_v5->DiscardSession();
+                    else if (route_v4) renderer_v4->DiscardSession();
                     else renderer_v3->DiscardSession();
                     prepare_response = cinematic_failure_response(
                         tbot::LessonCinematicError::kSessionReleaseFailed);
                     return;
                 }
             }
+            tbot::SetLessonCinematicTimerRouteV5(route_v5);
             tbot::SetLessonCinematicTimerRouteV4(route_v4);
             commit_cinematic_prepare_session(generation);
         };
         tbot::LessonCinematicResponse response;
         if (prepare_frame) {
-            if (cinematic_v4) {
+            if (cinematic_v5) {
+                static const std::set<std::string_view> kPrepareKeys = {
+                    "command", "commandSequenceId", "templateId", "templateVersion",
+                    "phaseId", "durationMs", "fps", "frameCount", "playbackMode", "layers"};
+                static const std::set<std::string_view> kImageLayerKeys = {
+                    "layer", "slot", "mediaKind", "mediaType", "sdPath", "sha256",
+                    "bytes", "width", "height", "rect", "fit"};
+                static const std::set<std::string_view> kRobotLayerKeys = {
+                    "layer", "slot", "mediaKind", "mediaType", "sdPath", "sha256",
+                    "bytes", "width", "height", "rect", "codec", "hasAudio", "chromaKey"};
+                const cJSON* layers = cJSON_GetObjectItem(command_body, "layers");
+                double duration_ms = 0, fps = 0, frame_count = 0;
+                const char* playback_mode = Str(command_body, "playbackMode");
+                bool valid = ExactObjectKeys(command_body, kPrepareKeys) &&
+                    Num(command_body, "durationMs", duration_ms) &&
+                    Num(command_body, "fps", fps) && Num(command_body, "frameCount", frame_count) &&
+                    PositiveIntegerAtMost(duration_ms, UINT32_MAX) &&
+                    (fps == 10 || fps == 15) && PositiveIntegerAtMost(frame_count, UINT32_MAX) &&
+                    static_cast<std::uint64_t>(duration_ms) * static_cast<std::uint64_t>(fps) ==
+                        static_cast<std::uint64_t>(frame_count) * 1000 &&
+                    playback_mode != nullptr &&
+                    (strcmp(playback_mode, "once") == 0 || strcmp(playback_mode, "loop") == 0) &&
+                    cJSON_IsArray(layers) && cJSON_GetArraySize(layers) == 3;
+                tbot::LessonLayeredCinematicPhaseConfig config{};
+                config.renderer_id = protocol_version;
+                config.template_id = Str(command_body, "templateId");
+                config.phase_id = phase_id;
+                config.command_sequence_id = command_sequence_id;
+                config.duration_ms = static_cast<std::uint32_t>(duration_ms);
+                config.fps = static_cast<std::uint16_t>(fps);
+                config.frame_count = static_cast<std::uint32_t>(frame_count);
+                config.playback_mode = playback_mode != nullptr && strcmp(playback_mode, "loop") == 0
+                    ? tbot::LessonLayeredPlaybackMode::kLoop
+                    : tbot::LessonLayeredPlaybackMode::kOnce;
+                std::array<std::string, 3> normalized_paths;
+                static constexpr const char* kLayers[3] = {
+                    "background", "teachingObject", "robotOverlay"};
+                static constexpr const char* kSlots[3] = {
+                    "backgroundScene", "teachingObject", "robotOverlay"};
+                static constexpr const char* kMediaKinds[3] = {"image", "image", "video"};
+                static constexpr const char* kMediaTypes[3] = {
+                    "image/jpeg", "image/png", "video/mp4"};
+                for (int index = 0; valid && index < 3; ++index) {
+                    const cJSON* layer = cJSON_GetArrayItem(layers, index);
+                    const cJSON* rect = Obj(layer, "rect");
+                    double x = 0, y = 0, rect_width = 0, rect_height = 0, bytes = 0;
+                    double media_width = 0, media_height = 0;
+                    valid = ExactObjectKeys(layer, index == 2 ? kRobotLayerKeys : kImageLayerKeys) &&
+                        Str(layer, "layer") != nullptr && strcmp(Str(layer, "layer"), kLayers[index]) == 0 &&
+                        Str(layer, "slot") != nullptr && strcmp(Str(layer, "slot"), kSlots[index]) == 0 &&
+                        Str(layer, "mediaKind") != nullptr &&
+                            strcmp(Str(layer, "mediaKind"), kMediaKinds[index]) == 0 &&
+                        Str(layer, "mediaType") != nullptr &&
+                            strcmp(Str(layer, "mediaType"), kMediaTypes[index]) == 0 &&
+                        IsSha256(Str(layer, "sha256")) && Num(layer, "bytes", bytes) &&
+                        PositiveIntegerAtMost(bytes, UINT32_MAX) &&
+                        Num(layer, "width", media_width) && Num(layer, "height", media_height) &&
+                        PositiveIntegerAtMost(media_width, index == 0 ? 480 : 240) &&
+                        PositiveIntegerAtMost(media_height, index == 0 ? 320 : 240) &&
+                        Num(rect, "x", x) && Num(rect, "y", y) &&
+                        Num(rect, "width", rect_width) && Num(rect, "height", rect_height) &&
+                        std::trunc(x) == x && std::trunc(y) == y &&
+                        std::trunc(rect_width) == rect_width &&
+                        std::trunc(rect_height) == rect_height && x >= 0 && y >= 0 &&
+                        rect_width > 0 && rect_height > 0 &&
+                        x + rect_width <= tbot::kLessonCinematicWidth &&
+                        y + rect_height <= tbot::kLessonCinematicHeight;
+                    normalized_paths[index] = LessonLocalPath(Str(layer, "sdPath"));
+                    valid = valid && !normalized_paths[index].empty();
+                    const tbot::LessonCinematicRect parsed_rect = {
+                        static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
+                        static_cast<std::uint16_t>(rect_width),
+                        static_cast<std::uint16_t>(rect_height)};
+                    if (index == 0) {
+                        valid = valid && Str(layer, "fit") != nullptr &&
+                            strcmp(Str(layer, "fit"), "cover") == 0 &&
+                            media_width == 480 && media_height == 320 &&
+                            parsed_rect.x == 0 && parsed_rect.y == 0 &&
+                            parsed_rect.width == 480 && parsed_rect.height == 320;
+                        config.background = {normalized_paths[index].c_str(), parsed_rect};
+                    } else if (index == 1) {
+                        valid = valid && Str(layer, "fit") != nullptr &&
+                            strcmp(Str(layer, "fit"), "contain") == 0;
+                        config.teaching_object = {normalized_paths[index].c_str(), parsed_rect};
+                    } else {
+                        const cJSON* chroma = Obj(layer, "chromaKey");
+                        const char* key_color = Str(chroma, "keyColor");
+                        double tolerance = 0, feather = 0;
+                        valid = valid && Str(layer, "codec") != nullptr &&
+                            strcmp(Str(layer, "codec"), "mjpeg") == 0 &&
+                            cJSON_IsFalse(cJSON_GetObjectItem(layer, "hasAudio")) &&
+                            ExactObjectKeys(chroma, std::set<std::string_view>{
+                                "keyColor", "tolerance", "featherPx"}) &&
+                            key_color != nullptr && strlen(key_color) == 7 && key_color[0] == '#' &&
+                            Num(chroma, "tolerance", tolerance) && tolerance >= 0 && tolerance <= 255 &&
+                            Num(chroma, "featherPx", feather) && feather >= 0 && feather <= 4;
+                        unsigned rgb = 0;
+                        valid = valid && sscanf(key_color + 1, "%06x", &rgb) == 1;
+                        config.robot.sd_path = normalized_paths[index].c_str();
+                        config.robot.rect = parsed_rect;
+                        config.robot.chroma = {{
+                            static_cast<std::uint8_t>((rgb >> 16) & 0xff),
+                            static_cast<std::uint8_t>((rgb >> 8) & 0xff),
+                            static_cast<std::uint8_t>(rgb & 0xff)},
+                            static_cast<std::uint8_t>(tolerance),
+                            static_cast<std::uint8_t>(feather)};
+                    }
+                }
+                if (!valid) {
+                    response = cinematic_failure_response(
+                        tbot::LessonCinematicError::kMetadataMismatch);
+                } else {
+                    const auto reservation = BeginCinematicLessonSession(assignment_id, session_id);
+                    if (!reservation.acquired) {
+                        response = cinematic_failure_response(tbot::LessonCinematicError::kFileOpen);
+                    } else {
+                        tbot::ConfigureProductionLessonLayeredCinematicSession(
+                            assignment_id, session_id, reservation.generation);
+                        response = renderer_v5->Prepare(config, now_ms);
+                        if (response.accepted) {
+                            complete_cinematic_prepare(response, reservation.generation, false, true);
+                        } else if (!reservation.idempotent) {
+                            LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                                assignment_id, session_id, reservation.generation);
+                        }
+                    }
+                }
+            } else if (cinematic_v4) {
                 static const std::set<std::string_view> kV1PrepareKeys = {
                     "command", "commandSequenceId", "templateId", "templateVersion",
                     "phaseId", "durationMs", "fps", "frameCount", "asset"};
@@ -2353,7 +2574,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             assignment_id, session_id, reservation.generation);
                         response = renderer_v4->Prepare(config, now_ms);
                         if (response.accepted) {
-                            complete_cinematic_prepare(response, reservation.generation, true);
+                            complete_cinematic_prepare(response, reservation.generation, true, false);
                         } else if (!reservation.idempotent) {
                             LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                                 assignment_id, session_id, reservation.generation);
@@ -2429,7 +2650,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         assignment_id, session_id, reservation.generation);
                     response = renderer_v3->Prepare(config, now_ms);
                     if (response.accepted) {
-                        complete_cinematic_prepare(response, reservation.generation, false);
+                        complete_cinematic_prepare(response, reservation.generation, false, false);
                     } else if (!reservation.idempotent) {
                         LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
                             assignment_id, session_id, reservation.generation);
@@ -2438,32 +2659,35 @@ void Application::HandleLessonMessage(const cJSON* root) {
             }
             }
         } else if (start_command) {
-            response = cinematic_v4 ? renderer_v4->Start(command_sequence_id,
-                                                          cinematic_identity, now_ms)
-                                    : renderer_v3->Start(command_sequence_id, phase_id, now_ms);
+            response = cinematic_v5 ? renderer_v5->Start(command_sequence_id, phase_id, now_ms)
+                : cinematic_v4 ? renderer_v4->Start(command_sequence_id,
+                                                     cinematic_identity, now_ms)
+                               : renderer_v3->Start(command_sequence_id, phase_id, now_ms);
             if (response.accepted) {
                 g_session.running = true;
                 g_session.paused = false;
                 SetLessonRuntimeActive(true);
             }
         } else if (control_frame && strcmp(command, "pause") == 0) {
-            response = cinematic_v4 ? renderer_v4->Pause(command_sequence_id,
-                                                          cinematic_identity, now_ms)
-                                    : renderer_v3->Pause(command_sequence_id, phase_id, now_ms);
+            response = cinematic_v5 ? renderer_v5->Pause(command_sequence_id, phase_id, now_ms)
+                : cinematic_v4 ? renderer_v4->Pause(command_sequence_id,
+                                                     cinematic_identity, now_ms)
+                               : renderer_v3->Pause(command_sequence_id, phase_id, now_ms);
             if (response.accepted) g_session.paused = true;
         } else if (control_frame && strcmp(command, "resume") == 0) {
-            response = cinematic_v4 ? renderer_v4->Resume(command_sequence_id,
-                                                           cinematic_identity, now_ms)
-                                    : renderer_v3->Resume(command_sequence_id, phase_id, now_ms);
+            response = cinematic_v5 ? renderer_v5->Resume(command_sequence_id, phase_id, now_ms)
+                : cinematic_v4 ? renderer_v4->Resume(command_sequence_id,
+                                                      cinematic_identity, now_ms)
+                               : renderer_v3->Resume(command_sequence_id, phase_id, now_ms);
             if (response.accepted) g_session.paused = false;
         } else if (control_frame) {
-            response = cinematic_v4 ? renderer_v4->Cancel(command_sequence_id,
-                                                           cinematic_identity)
-                                    : renderer_v3->Cancel(command_sequence_id, phase_id);
+            response = cinematic_v5 ? renderer_v5->Cancel(command_sequence_id, phase_id)
+                : cinematic_v4 ? renderer_v4->Cancel(command_sequence_id, cinematic_identity)
+                               : renderer_v3->Cancel(command_sequence_id, phase_id);
         } else {
-            response = cinematic_v4 ? renderer_v4->Stop(command_sequence_id,
-                                                         cinematic_identity)
-                                    : renderer_v3->Stop(command_sequence_id, phase_id);
+            response = cinematic_v5 ? renderer_v5->Stop(command_sequence_id, phase_id)
+                : cinematic_v4 ? renderer_v4->Stop(command_sequence_id, cinematic_identity)
+                               : renderer_v3->Stop(command_sequence_id, phase_id);
         }
         const bool terminal_command = stop_frame ||
             (control_frame && strcmp(command, "cancel") == 0);
@@ -2471,7 +2695,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
             SetLessonRuntimeActive(false);
             g_session.running = false;
             g_session.paused = false;
-            if (cinematic_v4) renderer_v4->DiscardSession();
+            if (cinematic_v5) renderer_v5->DiscardSession();
+            else if (cinematic_v4) renderer_v4->DiscardSession();
             else renderer_v3->DiscardSession();
             const bool session_released =
                 (g_session.lesson_asset_generation == 0 ||
