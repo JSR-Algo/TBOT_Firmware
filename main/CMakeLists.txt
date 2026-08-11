@@ -51,6 +51,7 @@ set(SOURCES "audio/audio_codec.cc"
             "lesson_cinematic_renderer.cc"
             "lesson_cinematic_evidence.cc"
             "lesson_flattened_cinematic_renderer.cc"
+            "lesson_layered_cinematic_renderer.cc"
             "main.cc"
             )
 
