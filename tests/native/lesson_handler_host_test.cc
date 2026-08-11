@@ -2163,6 +2163,16 @@ void test_renderer_v2_visual_motion_is_allowlisted_once_per_generation() {
                 FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
                     "reducedMotion",
             "unknown renderer-v2 motion is visible as a degraded visual ACK");
+
+    Handle(V2VisualFrameWithStepId(6, "valid-step", 2));
+    require(App().robot_uart_.calls == encourage_calls,
+            "an older visual generation never repeats renderer-v2 motion");
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(FrameBodyBool(Sent().size() - 1, "degraded", false) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "reducedMotion",
+            "an older visual generation is acknowledged as reduced motion");
     require(DispatchLessonMotionPreset(App().robot_uart_, "rest") ==
                 LessonMotionResult::kApplied,
             "renderer-v2 visual motion test leaves no pending auto-rest timer");

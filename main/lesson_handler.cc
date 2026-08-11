@@ -1629,8 +1629,7 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
         if (degraded_reason == nullptr) degraded_reason = "unsupportedContract";
         break;
     }
-    if (accepted && g_session.visual_motion_generation == item.visual_generation &&
-        g_session.visual_motion_degraded && !degraded) {
+    if (accepted && g_session.visual_motion_degraded && !degraded) {
         degraded = true;
         degraded_reason = "reducedMotion";
     }
