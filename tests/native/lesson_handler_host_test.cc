@@ -2137,10 +2137,12 @@ void test_renderer_v2_visual_motion_is_allowlisted_once_per_generation() {
     Handle(V2VisualFrameWithStepId(3, "valid-step", 2));
     const std::vector<std::string> encourage_calls = {
         "both_arms_raise", "head_center"};
-    require(App().robot_uart_.calls == encourage_calls,
-            "renderer-v2 visual motion executes through the fixed preset dispatcher");
+    require(App().robot_uart_.calls.empty(),
+            "renderer-v2 motion waits for successful visual application");
     display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
     App().DrainLessonVisualQueue();
+    require(App().robot_uart_.calls == encourage_calls,
+            "renderer-v2 visual motion executes through the fixed preset dispatcher");
     require(!FrameBodyBool(Sent().size() - 1, "degraded", true),
             "applied renderer-v2 visual motion keeps the visual ACK green");
 
@@ -2150,7 +2152,24 @@ void test_renderer_v2_visual_motion_is_allowlisted_once_per_generation() {
     display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
     App().DrainLessonVisualQueue();
 
-    std::string unknown = V2VisualFrameWithStepId(5, "valid-step", 3);
+    Handle(V2VisualFrameWithStepId(5, "valid-step", 1));
+    require(App().robot_uart_.calls == encourage_calls,
+            "an older visual generation never repeats renderer-v2 motion");
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(FrameBodyBool(Sent().size() - 1, "degraded", false) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "reducedMotion",
+            "an older visual generation is acknowledged as reduced motion");
+
+    Handle(V2VisualFrameWithStepId(6, "valid-step", 2));
+    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
+    App().DrainLessonVisualQueue();
+    require(App().robot_uart_.calls == encourage_calls &&
+                !FrameBodyBool(Sent().size() - 1, "degraded", true),
+            "a stale generation cannot poison the applied generation ACK");
+
+    std::string unknown = V2VisualFrameWithStepId(7, "valid-step", 3);
     const auto preset = unknown.find("encourage");
     require(preset != std::string::npos, "visual fixture contains the authored preset");
     unknown.replace(preset, std::strlen("encourage"), "rawSweep");
@@ -2164,15 +2183,6 @@ void test_renderer_v2_visual_motion_is_allowlisted_once_per_generation() {
                     "reducedMotion",
             "unknown renderer-v2 motion is visible as a degraded visual ACK");
 
-    Handle(V2VisualFrameWithStepId(6, "valid-step", 2));
-    require(App().robot_uart_.calls == encourage_calls,
-            "an older visual generation never repeats renderer-v2 motion");
-    display.CompleteVisualState(LessonVisualApplyResult::kApplied, nullptr);
-    App().DrainLessonVisualQueue();
-    require(FrameBodyBool(Sent().size() - 1, "degraded", false) &&
-                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
-                    "reducedMotion",
-            "an older visual generation is acknowledged as reduced motion");
     require(DispatchLessonMotionPreset(App().robot_uart_, "rest") ==
                 LessonMotionResult::kApplied,
             "renderer-v2 visual motion test leaves no pending auto-rest timer");

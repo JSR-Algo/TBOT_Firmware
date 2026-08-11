@@ -10,6 +10,7 @@
 
 struct cJSON;
 class Protocol;
+class RobotUart;
 enum class LessonAssetReservationCode;
 
 // US-006 Slice-01 — additive lesson_* renderer (LANE-FIRMWARE / S10 / CP-6).
@@ -216,8 +217,10 @@ private:
 
 void SetLessonTransportEpoch(std::uint64_t transport_epoch);
 void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch);
-bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_frame);
-bool DispatchLessonVisualCompletion(const LessonQueueItem& item, Protocol* protocol);
+bool AcceptLessonVisualCompletion(
+    const LessonQueueItem& item, std::string* ack_frame, RobotUart* robot_uart = nullptr);
+bool DispatchLessonVisualCompletion(
+    const LessonQueueItem& item, Protocol* protocol, RobotUart* robot_uart = nullptr);
 
 // The only render profile this firmware (lcdwiki-es3c35p) implements (plan §7).
 constexpr char kLessonProfileEspTft[]   = "espTft";

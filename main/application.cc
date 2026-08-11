@@ -421,7 +421,7 @@ void Application::LessonMessageTask(void* arg) {
         }
         if (item.kind == LessonQueueItemKind::kVisualCompleted ||
             item.kind == LessonQueueItemKind::kVisualTimedOut) {
-            DispatchLessonVisualCompletion(item, self->protocol_.get());
+            DispatchLessonVisualCompletion(item, self->protocol_.get(), &self->robot_uart_);
             continue;
         }
         if (item.kind != LessonQueueItemKind::kFrame || item.payload == nullptr) continue;

@@ -14,6 +14,7 @@
 #include "assets/lang_config.h"
 #include "protocol.h"
 #include "lesson_handler.h"
+#include <cinttypes>
 #include "lesson_tvideo_template.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
@@ -732,6 +733,9 @@ struct LessonSession {
     std::uint64_t visual_generation = 0;
     std::uint64_t visual_motion_generation = 0;
     bool        visual_motion_degraded = false;
+    bool        pending_visual_motion_new_generation = false;
+    bool        pending_visual_motion_degraded = false;
+    std::string pending_visual_motion_preset;
     std::uint64_t pending_visual_nonce = 0;
     std::uint64_t current_transport_epoch = 0;
     int64_t     pending_server_sequence = 0;
@@ -1585,9 +1589,13 @@ void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch) {
     g_session.pending_has_lesson_version = false;
     g_session.pending_step_id.clear();
     g_session.pending_ack = false;
+    g_session.pending_visual_motion_new_generation = false;
+    g_session.pending_visual_motion_degraded = false;
+    g_session.pending_visual_motion_preset.clear();
 }
 
-bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_frame) {
+bool AcceptLessonVisualCompletion(
+    const LessonQueueItem& item, std::string* ack_frame, RobotUart* robot_uart) {
     if (ack_frame == nullptr) return false;
     ack_frame->clear();
     if ((item.kind != LessonQueueItemKind::kVisualCompleted &&
@@ -1607,9 +1615,11 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
     bool accepted = false;
     bool degraded = false;
     const char* degraded_reason = nullptr;
-    switch (item.kind == LessonQueueItemKind::kVisualTimedOut
-                ? LessonVisualCompletionResult::kPhaseTimeout
-                : item.completion_result) {
+    const LessonVisualCompletionResult completion_result =
+        item.kind == LessonQueueItemKind::kVisualTimedOut
+            ? LessonVisualCompletionResult::kPhaseTimeout
+            : item.completion_result;
+    switch (completion_result) {
     case LessonVisualCompletionResult::kApplied:
         accepted = true;
         break;
@@ -1629,7 +1639,24 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
         if (degraded_reason == nullptr) degraded_reason = "unsupportedContract";
         break;
     }
-    if (accepted && g_session.visual_motion_degraded && !degraded) {
+    if (accepted && completion_result == LessonVisualCompletionResult::kApplied &&
+        g_session.pending_visual_motion_new_generation && robot_uart != nullptr) {
+        g_session.visual_motion_generation = item.visual_generation;
+        g_session.visual_motion_degraded =
+            !g_session.motion_presets_enabled ||
+            DispatchLessonMotionPreset(
+                *robot_uart, g_session.pending_visual_motion_preset.c_str()) ==
+                LessonMotionResult::kDegraded;
+        g_session.pending_visual_motion_degraded = g_session.visual_motion_degraded;
+        ESP_LOGI(TAG,
+                 "visual_motion_preset outcome=%s assignmentId=%s sessionId=%s "
+                 "stepId=%s visualGeneration=%" PRIu64,
+                 g_session.visual_motion_degraded ? "degraded" : "applied",
+                 g_session.assignment_id.c_str(), g_session.session_id.c_str(),
+                 g_session.pending_step_id.empty() ? "-" : g_session.pending_step_id.c_str(),
+                 item.visual_generation);
+    }
+    if (accepted && g_session.pending_visual_motion_degraded && !degraded) {
         degraded = true;
         degraded_reason = "reducedMotion";
     }
@@ -1709,13 +1736,17 @@ bool AcceptLessonVisualCompletion(const LessonQueueItem& item, std::string* ack_
     g_session.pending_lesson_version = 0;
     g_session.pending_has_lesson_version = false;
     g_session.pending_step_id.clear();
+    g_session.pending_visual_motion_new_generation = false;
+    g_session.pending_visual_motion_degraded = false;
+    g_session.pending_visual_motion_preset.clear();
     return true;
 }
 
-bool DispatchLessonVisualCompletion(const LessonQueueItem& item, Protocol* protocol) {
+bool DispatchLessonVisualCompletion(
+    const LessonQueueItem& item, Protocol* protocol, RobotUart* robot_uart) {
     if (protocol == nullptr) return false;
     std::string ack_frame;
-    if (!AcceptLessonVisualCompletion(item, &ack_frame)) return false;
+    if (!AcceptLessonVisualCompletion(item, &ack_frame, robot_uart)) return false;
     return protocol->SendLessonFrame(ack_frame);
 }
 
@@ -3052,23 +3083,18 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 "unsupportedContract"));
             return;
         }
-        if (requested_generation > g_session.visual_motion_generation) {
-            const char* motion_preset = Str(body, "motionPreset");
-            g_session.visual_motion_generation = requested_generation;
-            g_session.visual_motion_degraded =
-                !g_session.motion_presets_enabled ||
-                DispatchLessonMotionPreset(robot_uart_, motion_preset) ==
-                    LessonMotionResult::kDegraded;
-            ESP_LOGI(TAG,
-                     "visual_motion_preset outcome=%s assignmentId=%s sessionId=%s "
-                     "stepId=%s visualGeneration=%llu",
-                     g_session.visual_motion_degraded ? "degraded" : "applied",
-                     assignment_id, session_id,
-                     Str(root, "stepId") != nullptr ? Str(root, "stepId") : "-",
-                     static_cast<unsigned long long>(requested_generation));
-        } else if (requested_generation < g_session.visual_motion_generation) {
-            g_session.visual_motion_degraded = true;
-        }
+        g_session.pending_visual_motion_new_generation =
+            requested_generation > g_session.visual_motion_generation;
+        g_session.pending_visual_motion_degraded =
+            requested_generation < g_session.visual_motion_generation ||
+            (requested_generation == g_session.visual_motion_generation &&
+             g_session.visual_motion_degraded) ||
+            (g_session.pending_visual_motion_new_generation &&
+             !g_session.motion_presets_enabled);
+        g_session.pending_visual_motion_preset =
+            g_session.pending_visual_motion_new_generation
+                ? Str(body, "motionPreset")
+                : "";
         g_session.entrance_active = false;
         const std::uint64_t visual_callback_token =
             g_visual_callback_token.fetch_add(1, std::memory_order_acq_rel) + 1;
