@@ -109,9 +109,9 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
 
     begin = function_body(app_source, "bool Application::BeginLessonAssetSyncQuiet")
     for guard in (
-        "GetDeviceState() != kDeviceStateIdle",
         "lesson_runtime_active_.load()",
         "connect_in_flight_.load()",
+        "reset_pending_.load()",
     ):
         assert guard in begin
     assert "tts_audio_accepting_.store(false)" in begin
@@ -147,6 +147,36 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
     )
     assert worker.index("EndLessonAssetSyncQuiet") < worker.index("ReplyResult")
     assert worker.index("EndLessonAssetSyncQuiet") < worker.index("ReplyError")
+
+
+def test_sync_quiet_admits_only_idle_or_voice_silent_passive_listening():
+    source = read("main/application.cc")
+    begin = function_body(source, "bool Application::BeginLessonAssetSyncQuiet")
+
+    assert "const DeviceState state = GetDeviceState();" in begin
+    assert "const bool passive_listening" in begin
+    assert "state == kDeviceStateListening" in begin
+    assert "!IsVoiceDetected()" in begin
+    assert "state != kDeviceStateIdle && !passive_listening" in begin
+
+    passive = begin[
+        begin.index("if (passive_listening)") :
+        begin.index("tts_audio_accepting_.store(false)")
+    ]
+    required = (
+        "lesson_idle_repaint_suppressed_.store(true)",
+        "protocol_->SendStopListening()",
+        "listening_started_ms_.store(0)",
+        "last_listening_activity_ms_.store(0)",
+        "audio_service_.EnableVoiceProcessing(false)",
+        "audio_service_.EnableWakeWordDetection(false)",
+        "SetDeviceState(kDeviceStateIdle)",
+    )
+    for statement in required:
+        assert statement in passive
+    assert passive.index("protocol_->SendStopListening()") < passive.index(
+        "SetDeviceState(kDeviceStateIdle)"
+    )
 
 
 def test_sync_quiet_blocks_voice_transitions_but_not_mcp_dispatch():
