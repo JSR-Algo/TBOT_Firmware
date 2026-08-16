@@ -1,8 +1,12 @@
-# T5.4 Passive Listening SD Sync Quiet RED Evidence
+# T5.4 Passive Listening SD Sync Quiet Verification Evidence
 
 **Date:** 2026-08-16
 
-## Live Failure Signature
+**Status:** DONE_WITH_CONCERNS - focused and native verification plus the
+LCDWiki production build pass; the repository-wide pytest command is blocked
+by a pre-existing host dependency collection error, and live CP-7 remains open.
+
+## Pre-Fix Live Failure Signature
 
 ```text
 lesson asset sync quiet rejected state=5 lesson=0 connect=0 reset=0
@@ -12,9 +16,9 @@ SD_SYNC_REALTIME_BUSY_TIMEOUT state=LISTENING
 
 ## Approved Root Cause And Design
 
-The ESP server considers voice-silent passive realtime `LISTENING` safe for SD
-sync, while firmware `BeginLessonAssetSyncQuiet()` currently rejects every
-non-idle device state. The approved correction is documented in
+At RED capture time, the ESP server considered voice-silent passive realtime
+`LISTENING` safe for SD sync while firmware `BeginLessonAssetSyncQuiet()`
+rejected every non-idle device state. The approved correction is documented in
 [Passive Listening SD Sync Quiet Design](../../superpowers/specs/2026-08-16-passive-listening-sd-sync-quiet-design.md).
 
 ## Focused RED Regression
@@ -40,9 +44,11 @@ FAILED tests/test_lesson_sd_sync_worker_contract.py::test_sync_quiet_admits_only
 AssertionError: assert 'const DeviceState state = GetDeviceState();' in begin
 ```
 
-The current production function lacks the required `passive_listening`
-admission and `IsVoiceDetected()` safety check. This is RED evidence only: no
-production fix exists yet, and no CP-7 completion claim is made.
+The pre-fix production function lacked the required `passive_listening`
+admission and `IsVoiceDetected()` safety check. This section records the RED
+state before the implementation commits below; it does not describe the
+current branch source. At RED capture time no production fix existed, and no
+CP-7 completion claim was made.
 
 ## Implementation Commits
 
@@ -54,8 +60,11 @@ production fix exists yet, and no CP-7 completion claim is made.
   disables voice/wake processing, and enters idle before SD sync work (19
   insertions, 3 deletions).
 
-The implementation tip verified below was
-`7b5477e56eeda4ad73af8c89c2c14d62a7596a8a`.
+The product implementation SHA verified below is
+`7b5477e56eeda4ad73af8c89c2c14d62a7596a8a`. The first evidence commit was
+`cad06006035a45e0a27772a45d8b0fffe96bb33b`; the corrected evidence commit is
+this commit and is reported in the handoff. Documentation-only evidence commits
+are distinct from the product implementation SHA.
 
 ## Focused Verification
 
@@ -111,9 +120,44 @@ INTERNALERROR> SystemExit: 32512
 4 errors in 1.31s
 ```
 
-This failure occurs in an ignored managed dependency before project test
-execution and is caused by the missing host `doxygen` tool, not by either T5.4
-commit. The prescribed focused project suites and native checks above pass.
+### Clean-Main Baseline
+
+The preferred clean-main helper command was run first:
+
+```bash
+cd /Users/manhhodinh/Documents/TBOT
+bash lesson-prod/scripts/verify-on-main.sh \
+  /Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware -- \
+  python3 -m pytest -q
+```
+
+At main `98d74f7321f4f96c006a428b7199b4108d8f71a9`, that dependency-empty
+temporary worktree exited 2 after 1.33s with three different collection errors
+because `TBOT_ESP32_SERVER_REPO` was unset. It did not reach the managed LVGL
+collector, so this first attempt was not a comparable baseline (`real 2.35s`).
+
+A private detached main worktree was then populated with the same
+`managed_components` dependency tree and run with the canonical manager path,
+the same shell PATH, and the same Python 3.14.6 host interpreter:
+
+```bash
+git -C /Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware \
+  worktree add --detach "$baseline_repo" main
+cp -cR \
+  /Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware/.worktrees/t54-face-motion-guard/managed_components \
+  "$baseline_repo/managed_components"
+cd "$baseline_repo"
+TBOT_ESP32_SERVER_REPO=/Users/manhhodinh/Documents/TBOT/robot/esp32-server \
+  python3 -m pytest -q
+```
+
+Comparable main result: exit 3 after 1.25s (`real 1.45s`), with the same four
+errors, missing `/bin/sh: doxygen: command not found`, and
+`INTERNALERROR> SystemExit: 32512` in the LVGL `gen_json` collector. The private
+worktree was removed after the run. This matching clean-main baseline establishes
+that the repository-wide collection failure predates and is not caused by the
+T5.4 commits. The prescribed focused project suites and native checks above
+pass.
 
 ## LCDWiki Production Build
 
@@ -138,7 +182,21 @@ export PATH="/usr/bin:$PATH"
 ./build-lcdwiki.sh --no-flash
 ```
 
-Result: exit 0 (`real 118.45s`). The build wrapper's board hard-gate reported:
+The original verification build (`real 118.45s`, SHA-256
+`823b81bef95525f2eca38a2acbc865fbd3476e08eb49f18b5dc65bf7f1439936`)
+was later superseded by the frozen rebuild below; that prior hash is stale and
+must not be used.
+
+After the clean-main baseline, the branch was rebuilt from exact source HEAD
+`cad06006035a45e0a27772a45d8b0fffe96bb33b` with the same command and ESP-IDF
+Python 3.9 environment:
+
+```bash
+export PATH="/usr/bin:$PATH"
+./build-lcdwiki.sh --no-flash
+```
+
+Result: exit 0 (`real 125.44s`). The build wrapper's board hard-gate reported:
 
 ```text
 OK: LCDWiki ES3C35P board confirmed in sdkconfig.
@@ -152,15 +210,40 @@ Production config auditor command:
 python3 scripts/assert_lcdwiki_prod_config.py sdkconfig
 ```
 
-Result: exit 0, `LCDWiki production build config OK` (`real 0.02s`).
+Result: exit 0, `LCDWiki production build config OK` (`real 0.06s`).
 
-Artifact:
+Artifact metadata commands, run after the auditor and with no later build:
 
-```text
-path: build/xiaozhi.bin
-size: 3775680 bytes
-sha256: 823b81bef95525f2eca38a2acbc865fbd3476e08eb49f18b5dc65bf7f1439936
+```bash
+stat -f 'ARTIFACT_SIZE=%z bytes' build/xiaozhi.bin
+stat -f 'ARTIFACT_MTIME=%Sm' -t '%Y-%m-%dT%H:%M:%S%z' build/xiaozhi.bin
+shasum -a 256 build/xiaozhi.bin
 ```
 
-No firmware was flashed. No live hardware CP-7 claim is made; that remains a
-separate device-level verification step.
+Frozen branch artifact, recorded immediately after the config auditor:
+
+```text
+source HEAD: cad06006035a45e0a27772a45d8b0fffe96bb33b
+path: /Users/manhhodinh/Documents/TBOT/robot/TBOT-Firmware/.worktrees/t54-face-motion-guard/build/xiaozhi.bin
+size: 3775680 bytes
+mtime: 2026-08-16T15:59:21+0700
+sha256: 7ad59999f7b30bb8ba6625f3307c12d63ba0b39c210a5847cdeeeeecd1bfdb3a
+recorded: 2026-08-16T15:59:23+0700
+```
+
+This branch artifact is verification-only. The final flash must use a newly
+built and audited main artifact after merge. No firmware was flashed, and no
+live hardware CP-7 claim is made; that remains a separate device-level
+verification step.
+
+## Repository Hygiene
+
+Command:
+
+```bash
+git diff --check
+```
+
+Result: exit 0 with no output. Before the evidence correction commit,
+`git status --short` showed only this owned evidence file; the post-commit clean
+status and corrected evidence commit SHA are reported in the handoff.
