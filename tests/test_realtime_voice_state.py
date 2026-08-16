@@ -2909,6 +2909,27 @@ def test_lesson_interactive_cancel_stops_active_child_mic_without_idle_repaint()
     assert "if (!suppress_lesson_idle_repaint)" in lesson_idle
     assert lesson_idle.index("if (!suppress_lesson_idle_repaint)") < lesson_idle.index("audio_service_.EnableVoiceProcessing(false);")
 
+
+def test_terminal_lesson_idle_suppression_rearms_wake_without_repainting_face():
+    app_cc = read("main/application.cc")
+
+    state_changed = app_cc[
+        app_cc.index("void Application::HandleStateChangedEvent()") :
+        app_cc.index("void Application::Schedule(std::function", app_cc.index("void Application::HandleStateChangedEvent()"))
+    ]
+    idle = state_changed[state_changed.index("case kDeviceStateIdle:") : state_changed.index("case kDeviceStateConnecting:")]
+    suppressed = idle[
+        idle.index("if (suppress_lesson_idle_repaint)") :
+        idle.index("// ONLINE", idle.index("if (suppress_lesson_idle_repaint)"))
+    ]
+
+    assert "display->SetEmotion" not in suppressed
+    assert "IsDeviceClaimed()" in suppressed
+    assert "!connect_in_flight_.load()" in suppressed
+    assert "!lesson_asset_sync_quiet_.load()" in suppressed
+    assert "audio_service_.EnableWakeWordDetection(true);" in suppressed
+
+
 def test_lesson_interactive_cancel_recovers_cold_open_connecting_state():
     app_cc = read("main/application.cc")
 

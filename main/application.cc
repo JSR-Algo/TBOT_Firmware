@@ -5036,7 +5036,12 @@ void Application::HandleStateChangedEvent() {
                 listening_started_ms_.store(0);
                 last_listening_activity_ms_.store(0);
                 audio_service_.EnableVoiceProcessing(false);
-                audio_service_.EnableWakeWordDetection(false);
+                if (IsDeviceClaimed() && !connect_in_flight_.load() &&
+                    !lesson_asset_sync_quiet_.load()) {
+                    audio_service_.EnableWakeWordDetection(true);
+                } else {
+                    audio_service_.EnableWakeWordDetection(false);
+                }
                 break;
             }
             // ONLINE (or OFFLINE_RETRY / a claim overlay) per the mapper.
