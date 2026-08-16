@@ -2059,6 +2059,23 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool cinematic_v5 = protocol_version != nullptr &&
         strcmp(protocol_version, tbot::kLessonRendererV5) == 0;
     if (cinematic_v3 || cinematic_v4 || cinematic_v5) {
+        auto claim_cinematic_display = [this]() {
+            Display* display = Board::GetInstance().GetDisplay();
+            LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+            if (lvgl_display == nullptr) return;
+            Schedule([lvgl_display]() { lvgl_display->SetLessonMode(true); });
+        };
+        auto release_cinematic_display = [this]() {
+            Display* display = Board::GetInstance().GetDisplay();
+            LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+            if (lvgl_display == nullptr) return;
+            Schedule([lvgl_display]() {
+                lvgl_display->SetLessonBackground(nullptr);
+                lvgl_display->SetLessonObject(nullptr);
+                lvgl_display->SetLessonRobotOverlay(nullptr);
+                lvgl_display->SetLessonMode(false);
+            });
+        };
         const bool prepare_frame = strcmp(type, "lesson_prepare") == 0;
         const bool start_frame = strcmp(type, "lesson_start") == 0;
         const bool stop_frame = strcmp(type, "lesson_stop") == 0;
@@ -2667,6 +2684,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 g_session.running = true;
                 g_session.paused = false;
                 SetLessonRuntimeActive(true);
+                claim_cinematic_display();
             }
         } else if (control_frame && strcmp(command, "pause") == 0) {
             response = cinematic_v5 ? renderer_v5->Pause(command_sequence_id, phase_id, now_ms)
@@ -2695,6 +2713,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (response.accepted && terminal_command) {
             Application::GetInstance().BeginLessonTerminalAudioQuiet();
             SetLessonRuntimeActive(false);
+            release_cinematic_display();
             g_session.running = false;
             g_session.paused = false;
             if (cinematic_v5) renderer_v5->DiscardSession();
