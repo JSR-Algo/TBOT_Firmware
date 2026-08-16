@@ -400,6 +400,38 @@ def test_lesson_mode_keeps_conversation_emotions_behind_lesson_scene():
     assert "lv_obj_move_foreground(lesson_caption_bar_)" in thinking_branch
 
 
+def test_cinematic_renderer_claims_lesson_display_mode_before_playback():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+    cinematic = body[
+        body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)") :
+        body.index("const bool is_prepare", body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)"))
+    ]
+
+    assert "claim_cinematic_display" in cinematic
+    start_accepted = cinematic[
+        cinematic.index("if (response.accepted) {", cinematic.index("} else if (start_command)")) :
+        cinematic.index("}", cinematic.index("if (response.accepted) {", cinematic.index("} else if (start_command)")))
+    ]
+    assert "claim_cinematic_display();" in start_accepted
+
+
+def test_cinematic_renderer_releases_lesson_display_mode_at_terminal_command():
+    source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleLessonMessage")
+    cinematic = body[
+        body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)") :
+        body.index("const bool is_prepare", body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)"))
+    ]
+
+    assert "release_cinematic_display" in cinematic
+    terminal = cinematic[
+        cinematic.index("if (response.accepted && terminal_command)") :
+        cinematic.index("emit_cinematic_ack(response)")
+    ]
+    assert "release_cinematic_display();" in terminal
+
+
 def test_failed_emotion_gif_load_falls_back_to_neutral_face():
     source = SOURCE.read_text(encoding="utf-8")
     body = function_body(source, "void LcdDisplay::SetEmotion")
