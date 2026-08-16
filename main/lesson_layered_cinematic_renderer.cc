@@ -400,6 +400,13 @@ void LessonLayeredCinematicRenderer::DiscardSession() {
     std::lock_guard<std::mutex> lock(mutex_);
     Release();
     state_ = State::kIdle;
+    phase_id_.clear();
+    last_sequence_ = 0;
+    clock_origin_ms_ = 0;
+    paused_at_ms_ = 0;
+    displayed_frame_ = 0;
+    last_response_ = {};
+    last_command_.clear();
 }
 
 bool LessonLayeredCinematicRendererCapabilityReady() {
