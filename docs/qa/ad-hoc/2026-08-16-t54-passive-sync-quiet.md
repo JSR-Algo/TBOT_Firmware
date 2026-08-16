@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-16
 
-**Status:** DONE_WITH_CONCERNS - focused and native verification plus the
-LCDWiki production build pass; the repository-wide pytest command is blocked
-by a pre-existing host dependency collection error, and live CP-7 remains open.
+**Status:** IN_PROGRESS - firmware branch verification is complete;
+repository-wide pytest has a baseline host-doxygen collection gap; flash and
+live CP-7 are pending.
 
 ## Pre-Fix Live Failure Signature
 
