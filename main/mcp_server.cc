@@ -78,6 +78,18 @@ bool IsLessonSnapshotEvidenceCall(
     return cJSON_IsTrue(allow_during_lesson);
 }
 
+bool IsLessonMotionToolName(const std::string& tool_name) {
+    return tool_name == "self.robot.left_arm_raise" ||
+           tool_name == "self.robot.right_arm_raise" ||
+           tool_name == "self.robot.left_arm_lower" ||
+           tool_name == "self.robot.right_arm_lower" ||
+           tool_name == "self.robot.both_arms_raise" ||
+           tool_name == "self.robot.both_arms_lower" ||
+           tool_name == "self.robot.head_turn_left" ||
+           tool_name == "self.robot.head_turn_right" ||
+           tool_name == "self.robot.head_center";
+}
+
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 constexpr size_t kLessonAssetSyncMaxAssets = 64;
 constexpr const char* kLessonAssetPackRoot = "/sdcard/tbot/lesson-assets/";
@@ -1618,6 +1630,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
         tool_name == "self.lesson_assets.evict_cache_key";
     const bool lesson_tool_allowed =
         is_lesson_cache_evict ||
+        IsLessonMotionToolName(tool_name) ||
         IsLessonSnapshotEvidenceCall(tool_name, tool_arguments);
     if (!lesson_tool_allowed &&
         Application::GetInstance().IsLessonRuntimeActive()) {

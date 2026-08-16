@@ -204,11 +204,26 @@ void TestTypedFailuresAndLoopPlayback() {
     Require(fake.last_frame == 1, "loop phase wraps Robot frame index");
 }
 
+void TestDiscardSessionAllowsSequenceRestart() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "first lesson prepares");
+    Require(renderer.Start(8, "teach", 0).accepted, "first lesson starts");
+    Require(renderer.Stop(9, "teach").accepted, "first lesson stops");
+
+    renderer.DiscardSession();
+    auto next = Config();
+    next.command_sequence_id = 1;
+    Require(renderer.Prepare(next, 0).accepted,
+            "new lesson may restart its command sequence after session discard");
+}
+
 }  // namespace
 
 int main() {
     TestStaticLayersDecodeOnceAndRobotOwnsClock();
     TestTypedFailuresAndLoopPlayback();
+    TestDiscardSessionAllowsSequenceRestart();
     std::cout << "lesson_layered_cinematic_renderer tests passed\n";
     return 0;
 }

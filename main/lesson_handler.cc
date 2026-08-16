@@ -2691,7 +2691,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         const bool terminal_command = stop_frame ||
             (control_frame && strcmp(command, "cancel") == 0);
+        bool reset_cinematic_session_after_ack = false;
         if (response.accepted && terminal_command) {
+            Application::GetInstance().BeginLessonTerminalAudioQuiet();
             SetLessonRuntimeActive(false);
             g_session.running = false;
             g_session.paused = false;
@@ -2704,13 +2706,15 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     g_session.assignment_id, g_session.session_id,
                     g_session.lesson_asset_generation));
             if (session_released) {
-                g_session = LessonSession{};
+                // Keep the F->S counter alive until the terminal ACK is built.
+                reset_cinematic_session_after_ack = true;
             } else {
                 response = cinematic_failure_response(
                     tbot::LessonCinematicError::kSessionReleaseFailed);
             }
         }
         emit_cinematic_ack(response);
+        if (reset_cinematic_session_after_ack) g_session = LessonSession{};
         return;
     }
 
@@ -3238,6 +3242,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     }
     if (strcmp(type, "lesson_stop") == 0) {
         InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
+        Application::GetInstance().BeginLessonTerminalAudioQuiet();
         const char* stop_reason = Str(body, "reason");
         const std::string normalized_stop_reason = NormalizeAsciiToken(stop_reason);
         const bool stop_cancelled = normalized_stop_reason == "CANCELLED";

@@ -242,6 +242,34 @@ def test_lesson_runtime_allows_only_explicit_snapshot_before_scheduling():
     assert "Application::GetInstance().IsLessonRuntimeActive()" in before_schedule
 
 
+def test_lesson_runtime_allows_only_fixed_server_owned_motion_tools():
+    mcp_cc = read("main/mcp_server.cc")
+
+    assert "bool IsLessonMotionToolName(" in mcp_cc
+    helper_start = mcp_cc.index("bool IsLessonMotionToolName(")
+    helper_end = mcp_cc.index("\n}", helper_start)
+    helper = mcp_cc[helper_start:helper_end]
+    expected = {
+        "self.robot.left_arm_raise",
+        "self.robot.right_arm_raise",
+        "self.robot.left_arm_lower",
+        "self.robot.right_arm_lower",
+        "self.robot.both_arms_raise",
+        "self.robot.both_arms_lower",
+        "self.robot.head_turn_left",
+        "self.robot.head_turn_right",
+        "self.robot.head_center",
+    }
+    for tool_name in expected:
+        assert f'tool_name == "{tool_name}"' in helper
+    assert "set_percent" not in helper
+    assert "set_angle" not in helper
+
+    start = mcp_cc.index("void McpServer::DoToolCall")
+    before_schedule = mcp_cc[start : mcp_cc.index("app.Schedule(", start)]
+    assert "IsLessonMotionToolName(tool_name)" in before_schedule
+
+
 def test_lesson_snapshot_allowance_is_rechecked_after_scheduling():
     mcp_cc = read("main/mcp_server.cc")
 
@@ -1232,6 +1260,41 @@ def test_lesson_runtime_tts_stop_continue_listening_ignores_non_answer_turn():
     assert "SetDeviceState(kDeviceStateIdle);" in lesson_guard
     assert "protocol_->SendStartListening" not in lesson_guard
     assert "audio_service_.EnableVoiceProcessing(true);" not in lesson_guard
+
+
+def test_lesson_terminal_stop_quarantines_late_tts_continue_before_runtime_deactivates():
+    app_h = read("main/application.h")
+    app_cc = read("main/application.cc")
+    lesson_handler = read("main/lesson_handler.cc")
+
+    assert "lesson_terminal_audio_quiet_" in app_h
+
+    stop_branch = lesson_handler[
+        lesson_handler.index('if (strcmp(type, "lesson_stop") == 0)') :
+        lesson_handler.index('if (strcmp(type, "lesson_error") == 0)')
+    ]
+    quiet_idx = stop_branch.index("BeginLessonTerminalAudioQuiet();")
+    inactive_idx = stop_branch.index("SetLessonRuntimeActive(false);")
+    assert quiet_idx < inactive_idx
+
+    tts_stop = app_cc[
+        app_cc.index('strcmp(state->valuestring, "stop") == 0') :
+        app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)')
+    ]
+    scheduled = tts_stop[tts_stop.index("Schedule([this") :]
+    quiet_guard = scheduled[
+        scheduled.index("if (lesson_terminal_audio_quiet_.load())") :
+        scheduled.index("if (lesson_runtime_active_.load() && !lesson_interactive_turn)")
+    ]
+    assert "SetDeviceState(kDeviceStateIdle);" in quiet_guard
+    assert "protocol_->SendStartListening" not in quiet_guard
+    assert "audio_service_.EnableVoiceProcessing(true);" not in quiet_guard
+
+    setter = app_cc[
+        app_cc.index("void Application::SetLessonRuntimeActive(bool active)") :
+        app_cc.index("bool Application::IsLessonRuntimeActive() const")
+    ]
+    assert "lesson_terminal_audio_quiet_.store(false);" in setter
 
 def test_lesson_tts_stop_treats_active_child_listening_as_answer_turn():
     app_cc = read("main/application.cc")
@@ -2845,6 +2908,27 @@ def test_lesson_interactive_cancel_stops_active_child_mic_without_idle_repaint()
     lesson_idle = idle[idle.index("if (lesson_runtime_active_.load())") :]
     assert "if (!suppress_lesson_idle_repaint)" in lesson_idle
     assert lesson_idle.index("if (!suppress_lesson_idle_repaint)") < lesson_idle.index("audio_service_.EnableVoiceProcessing(false);")
+
+
+def test_terminal_lesson_idle_suppression_rearms_wake_without_repainting_face():
+    app_cc = read("main/application.cc")
+
+    state_changed = app_cc[
+        app_cc.index("void Application::HandleStateChangedEvent()") :
+        app_cc.index("void Application::Schedule(std::function", app_cc.index("void Application::HandleStateChangedEvent()"))
+    ]
+    idle = state_changed[state_changed.index("case kDeviceStateIdle:") : state_changed.index("case kDeviceStateConnecting:")]
+    suppressed = idle[
+        idle.index("if (suppress_lesson_idle_repaint)") :
+        idle.index("// ONLINE", idle.index("if (suppress_lesson_idle_repaint)"))
+    ]
+
+    assert "display->SetEmotion" not in suppressed
+    assert "IsDeviceClaimed()" in suppressed
+    assert "!connect_in_flight_.load()" in suppressed
+    assert "!lesson_asset_sync_quiet_.load()" in suppressed
+    assert "audio_service_.EnableWakeWordDetection(true);" in suppressed
+
 
 def test_lesson_interactive_cancel_recovers_cold_open_connecting_state():
     app_cc = read("main/application.cc")

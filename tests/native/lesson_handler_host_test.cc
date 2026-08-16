@@ -1123,8 +1123,11 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
     Handle(V5Frame("lesson_stop", 5,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"flyIn\","
         "\"commandSequenceId\":95}}"));
-    require(FrameType(4) == "lesson_ack" && fake.closes == 1 && fake.frees == 4,
+    require(FrameType(4) == "lesson_ack" && FrameSeq(4) == 5 &&
+                fake.closes == 1 && fake.frees == 4,
             "v5 stop releases the Robot stream and all four bounded buffers");
+    require(App().lesson_terminal_audio_quiet,
+            "v5 stop quarantines late TTS before releasing lesson mode");
 
     ResetObservable();
     FreshSession();
@@ -4022,6 +4025,8 @@ void test_start_stop_error_lifecycle() {
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\","
            "\"sequence\":3,\"body\":{}}");
     require(FrameType(2) == "lesson_ack", "stop acks");
+    require(App().lesson_terminal_audio_quiet,
+            "stop quarantines late lesson TTS before releasing the runtime");
     require(App().cancel_listen_calls >= 1, "stop cancels interactive listening");
     require(!disp.background_calls.empty() && disp.background_calls.back() == false,
             "stop clears background layer");

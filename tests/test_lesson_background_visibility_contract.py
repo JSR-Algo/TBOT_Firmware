@@ -376,16 +376,26 @@ def test_lesson_mode_hides_face_without_emoji_box_in_wechat_layout():
     assert "lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN)" in active_branch
     assert "lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN)" in active_branch
 
-def test_lesson_listening_thinking_face_reappears_over_lesson_scene():
+def test_lesson_mode_keeps_conversation_emotions_behind_lesson_scene():
     source = SOURCE.read_text(encoding="utf-8")
+    header = (ROOT / "main/display/lcd_display.h").read_text(encoding="utf-8")
+    mode_body = function_body(source, "void LcdDisplay::SetLessonMode")
     body = function_body(source, "void LcdDisplay::SetEmotion")
 
+    assert "std::atomic<bool> lesson_mode_active_" in header
+    assert "lesson_mode_active_ = active" in mode_body
+    assert "if (lesson_mode_active_)" in body
     assert 'strcmp(emotion, "thinking") == 0' in body
     thinking_branch = body[body.index('strcmp(emotion, "thinking") == 0') :]
 
-    assert "emoji_box_ != nullptr" in thinking_branch
-    assert "lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN)" in thinking_branch
-    assert "lv_obj_move_foreground(emoji_box_)" in thinking_branch
+    guard_index = body.index("if (lesson_mode_active_)")
+    thinking_index = body.index('strcmp(emotion, "thinking") == 0')
+    assert guard_index < thinking_index
+    guard_return = body.index("return;", guard_index) + len("return;")
+    guard_branch = body[guard_index:guard_return]
+    assert "return;" in guard_branch
+    assert "gif_controller_" not in guard_branch
+    assert "lv_obj_" not in guard_branch
     assert "lesson_caption_bar_ != nullptr" in thinking_branch
     assert "lv_obj_move_foreground(lesson_caption_bar_)" in thinking_branch
 

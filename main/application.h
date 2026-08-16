@@ -123,6 +123,7 @@ public:
     void PrepareLessonInteractiveListening();
     void PrepareLessonInteractiveListening(uint32_t generation);
     void CancelLessonInteractiveListening();
+    void BeginLessonTerminalAudioQuiet();
     void SetLessonRuntimeActive(bool active);
     bool IsLessonRuntimeActive() const;
     void BeginLessonNetworkRenderQuiet();
@@ -209,6 +210,7 @@ private:
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     std::atomic<bool> lesson_runtime_active_{false};
+    std::atomic<bool> lesson_terminal_audio_quiet_{false};
     std::atomic<uint32_t> lesson_interactive_listen_generation_{0};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
     std::atomic<bool> lesson_interactive_listening_active_{false};

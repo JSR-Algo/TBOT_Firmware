@@ -3378,6 +3378,13 @@ void Application::InitializeProtocol() {
                     const bool lesson_interactive_turn =
                         lesson_interactive_listen_pending_.load() ||
                         lesson_interactive_listening_active_.load();
+                    if (lesson_terminal_audio_quiet_.load()) {
+                        ESP_LOGI(TAG, "terminal lesson tts stop continue ignored state=%d",
+                                 static_cast<int>(GetDeviceState()));
+                        lesson_idle_repaint_suppressed_.store(true);
+                        SetDeviceState(kDeviceStateIdle);
+                        return;
+                    }
                     if (lesson_runtime_active_.load() && !lesson_interactive_turn) {
                         ESP_LOGI(TAG, "lesson tts stop continue ignored state=%d",
                                  static_cast<int>(GetDeviceState()));
@@ -3894,6 +3901,9 @@ void Application::CancelLessonInteractiveListening() {
 
 void Application::SetLessonRuntimeActive(bool active) {
     lesson_runtime_active_.store(active);
+    if (active) {
+        lesson_terminal_audio_quiet_.store(false);
+    }
     if (!active) {
         lesson_interactive_listen_generation_.fetch_add(1);
         lesson_interactive_listen_pending_.store(false);
@@ -3906,6 +3916,10 @@ void Application::SetLessonRuntimeActive(bool active) {
         }
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+}
+
+void Application::BeginLessonTerminalAudioQuiet() {
+    lesson_terminal_audio_quiet_.store(true);
 }
 
 bool Application::IsLessonRuntimeActive() const {
@@ -3938,19 +3952,35 @@ bool Application::BeginLessonAssetSyncQuiet() {
         return false;
     }
 
-    if (GetDeviceState() != kDeviceStateIdle ||
+    const DeviceState state = GetDeviceState();
+    const bool passive_listening =
+        state == kDeviceStateListening && !IsVoiceDetected();
+    if ((state != kDeviceStateIdle && !passive_listening) ||
         lesson_runtime_active_.load() ||
         connect_in_flight_.load() ||
         reset_pending_.load()) {
         lesson_asset_sync_quiet_.store(false);
-        ESP_LOGW(TAG, "lesson asset sync quiet rejected state=%d lesson=%d connect=%d reset=%d",
-                 static_cast<int>(GetDeviceState()),
+        ESP_LOGW(TAG,
+                 "lesson asset sync quiet rejected state=%d voice=%d lesson=%d connect=%d reset=%d",
+                 static_cast<int>(state),
+                 IsVoiceDetected() ? 1 : 0,
                  lesson_runtime_active_.load() ? 1 : 0,
                  connect_in_flight_.load() ? 1 : 0,
                  reset_pending_.load() ? 1 : 0);
         return false;
     }
 
+    if (passive_listening) {
+        lesson_idle_repaint_suppressed_.store(true);
+        if (protocol_) {
+            protocol_->SendStopListening();
+        }
+        listening_started_ms_.store(0);
+        last_listening_activity_ms_.store(0);
+        audio_service_.EnableVoiceProcessing(false);
+        audio_service_.EnableWakeWordDetection(false);
+        SetDeviceState(kDeviceStateIdle);
+    }
     tts_audio_accepting_.store(false);
     audio_service_.EnableVoiceProcessing(false);
     audio_service_.EnableWakeWordDetection(false);
@@ -5022,7 +5052,12 @@ void Application::HandleStateChangedEvent() {
                 listening_started_ms_.store(0);
                 last_listening_activity_ms_.store(0);
                 audio_service_.EnableVoiceProcessing(false);
-                audio_service_.EnableWakeWordDetection(false);
+                if (IsDeviceClaimed() && !connect_in_flight_.load() &&
+                    !lesson_asset_sync_quiet_.load()) {
+                    audio_service_.EnableWakeWordDetection(true);
+                } else {
+                    audio_service_.EnableWakeWordDetection(false);
+                }
                 break;
             }
             // ONLINE (or OFFLINE_RETRY / a claim overlay) per the mapper.

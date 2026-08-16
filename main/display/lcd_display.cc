@@ -1935,6 +1935,7 @@ bool LcdDisplay::ApplyLessonVisualState(
 // layers become the whole scene.
 void LcdDisplay::SetLessonMode(bool active) {
     DisplayLockGuard lock(this);
+    lesson_mode_active_ = active;
     if (emoji_box_ == nullptr && emoji_image_ == nullptr && emoji_label_ == nullptr) {
         return;
     }
@@ -1996,6 +1997,10 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         }
         return;
     }
+
+    // SetLessonMode() already hid and stopped the face once. Conversation-state
+    // updates during a lesson must not touch LVGL or resurrect that surface.
+    if (lesson_mode_active_) return;
 
     auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
     auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;

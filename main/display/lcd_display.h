@@ -250,6 +250,7 @@ protected:
     esp_timer_handle_t preview_timer_ = nullptr;
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
+    std::atomic<bool> lesson_mode_active_{false};
 
     void InitializeLcdThemes();
     void CancelLessonRobotEntranceLocked();
