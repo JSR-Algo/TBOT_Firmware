@@ -3355,6 +3355,8 @@ void Application::InitializeProtocol() {
                     cJSON_IsBool(continue_listening) && !cJSON_IsTrue(continue_listening) &&
                     cJSON_IsString(listen_mode) &&
                     strcmp(listen_mode->valuestring, "manual") == 0;
+                const std::uint64_t stopped_audio_generation =
+                    static_cast<std::uint64_t>(speaking_generation_.load()) + 1;
                 if (is_interrupt) {
                     // Barge-in: cut NOW instead of draining. Bump+publish the
                     // generation so any in-flight frame is gen-gated (Patch 3.3),
@@ -3372,18 +3374,32 @@ void Application::InitializeProtocol() {
                 // User reported: "phản hồi không ổn định chưa trả lời hết cầu
                 // chuyển sang đang lắng nghe". Normal stops rely on natural queue
                 // drain; only the interrupt branch above cuts early.
-                Schedule([this, force_continue_listening, force_realtime_listen, explicit_stop_listening]() {
+                Schedule([this, force_continue_listening, force_realtime_listen,
+                          explicit_stop_listening, stopped_audio_generation]() {
                     ++speaking_generation_;
                     last_speaking_activity_ms_.store(0);
                     const bool lesson_interactive_turn =
                         lesson_interactive_listen_pending_.load() ||
                         lesson_interactive_listening_active_.load();
-                    if (lesson_terminal_audio_quiet_.load()) {
-                        ESP_LOGI(TAG, "terminal lesson tts stop continue ignored state=%d",
+                    const std::uint64_t terminal_audio_generation =
+                        lesson_terminal_audio_generation_.exchange(0);
+                    if (terminal_audio_generation == stopped_audio_generation) {
+                        ESP_LOGI(TAG,
+                                 "terminal lesson tts stop matched generation_hi=%lu generation_lo=%lu state=%d",
+                                 static_cast<unsigned long>(stopped_audio_generation >> 32),
+                                 static_cast<unsigned long>(stopped_audio_generation),
                                  static_cast<int>(GetDeviceState()));
                         lesson_idle_repaint_suppressed_.store(true);
                         SetDeviceState(kDeviceStateIdle);
                         return;
+                    }
+                    if (terminal_audio_generation != 0) {
+                        ESP_LOGI(TAG,
+                                 "stale terminal lesson tts stop ignored terminal_hi=%lu terminal_lo=%lu stopped_hi=%lu stopped_lo=%lu",
+                                 static_cast<unsigned long>(terminal_audio_generation >> 32),
+                                 static_cast<unsigned long>(terminal_audio_generation),
+                                 static_cast<unsigned long>(stopped_audio_generation >> 32),
+                                 static_cast<unsigned long>(stopped_audio_generation));
                     }
                     if (lesson_runtime_active_.load() && !lesson_interactive_turn) {
                         ESP_LOGI(TAG, "lesson tts stop continue ignored state=%d",
@@ -3902,7 +3918,7 @@ void Application::CancelLessonInteractiveListening() {
 void Application::SetLessonRuntimeActive(bool active) {
     lesson_runtime_active_.store(active);
     if (active) {
-        lesson_terminal_audio_quiet_.store(false);
+        lesson_terminal_audio_generation_.store(0);
     }
     if (!active) {
         lesson_interactive_listen_generation_.fetch_add(1);
@@ -3919,7 +3935,8 @@ void Application::SetLessonRuntimeActive(bool active) {
 }
 
 void Application::BeginLessonTerminalAudioQuiet() {
-    lesson_terminal_audio_quiet_.store(true);
+    lesson_terminal_audio_generation_.store(
+        static_cast<std::uint64_t>(speaking_generation_.load()) + 1);
 }
 
 bool Application::IsLessonRuntimeActive() const {
