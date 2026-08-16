@@ -154,9 +154,11 @@ def test_sync_quiet_admits_only_idle_or_voice_silent_passive_listening():
     begin = function_body(source, "bool Application::BeginLessonAssetSyncQuiet")
 
     assert "const DeviceState state = GetDeviceState();" in begin
-    assert "const bool passive_listening" in begin
-    assert "state == kDeviceStateListening" in begin
-    assert "!IsVoiceDetected()" in begin
+    compact_begin = "".join(begin.split())
+    assert (
+        "constboolpassive_listening="
+        "state==kDeviceStateListening&&!IsVoiceDetected();"
+    ) in compact_begin
     assert "state != kDeviceStateIdle && !passive_listening" in begin
 
     passive = begin[
@@ -172,11 +174,8 @@ def test_sync_quiet_admits_only_idle_or_voice_silent_passive_listening():
         "audio_service_.EnableWakeWordDetection(false)",
         "SetDeviceState(kDeviceStateIdle)",
     )
-    for statement in required:
-        assert statement in passive
-    assert passive.index("protocol_->SendStopListening()") < passive.index(
-        "SetDeviceState(kDeviceStateIdle)"
-    )
+    positions = tuple(passive.index(statement) for statement in required)
+    assert positions == tuple(sorted(positions))
 
 
 def test_sync_quiet_blocks_voice_transitions_but_not_mcp_dispatch():
