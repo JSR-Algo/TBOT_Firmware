@@ -3952,19 +3952,35 @@ bool Application::BeginLessonAssetSyncQuiet() {
         return false;
     }
 
-    if (GetDeviceState() != kDeviceStateIdle ||
+    const DeviceState state = GetDeviceState();
+    const bool passive_listening =
+        state == kDeviceStateListening && !IsVoiceDetected();
+    if ((state != kDeviceStateIdle && !passive_listening) ||
         lesson_runtime_active_.load() ||
         connect_in_flight_.load() ||
         reset_pending_.load()) {
         lesson_asset_sync_quiet_.store(false);
-        ESP_LOGW(TAG, "lesson asset sync quiet rejected state=%d lesson=%d connect=%d reset=%d",
-                 static_cast<int>(GetDeviceState()),
+        ESP_LOGW(TAG,
+                 "lesson asset sync quiet rejected state=%d voice=%d lesson=%d connect=%d reset=%d",
+                 static_cast<int>(state),
+                 IsVoiceDetected() ? 1 : 0,
                  lesson_runtime_active_.load() ? 1 : 0,
                  connect_in_flight_.load() ? 1 : 0,
                  reset_pending_.load() ? 1 : 0);
         return false;
     }
 
+    if (passive_listening) {
+        lesson_idle_repaint_suppressed_.store(true);
+        if (protocol_) {
+            protocol_->SendStopListening();
+        }
+        listening_started_ms_.store(0);
+        last_listening_activity_ms_.store(0);
+        audio_service_.EnableVoiceProcessing(false);
+        audio_service_.EnableWakeWordDetection(false);
+        SetDeviceState(kDeviceStateIdle);
+    }
     tts_audio_accepting_.store(false);
     audio_service_.EnableVoiceProcessing(false);
     audio_service_.EnableWakeWordDetection(false);
