@@ -210,7 +210,7 @@ private:
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     std::atomic<bool> lesson_runtime_active_{false};
-    std::atomic<bool> lesson_terminal_audio_quiet_{false};
+    std::atomic<std::uint64_t> lesson_terminal_audio_generation_{0};
     std::atomic<uint32_t> lesson_interactive_listen_generation_{0};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
     std::atomic<bool> lesson_interactive_listening_active_{false};
