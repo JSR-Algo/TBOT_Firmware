@@ -3378,6 +3378,13 @@ void Application::InitializeProtocol() {
                     const bool lesson_interactive_turn =
                         lesson_interactive_listen_pending_.load() ||
                         lesson_interactive_listening_active_.load();
+                    if (lesson_terminal_audio_quiet_.load()) {
+                        ESP_LOGI(TAG, "terminal lesson tts stop continue ignored state=%d",
+                                 static_cast<int>(GetDeviceState()));
+                        lesson_idle_repaint_suppressed_.store(true);
+                        SetDeviceState(kDeviceStateIdle);
+                        return;
+                    }
                     if (lesson_runtime_active_.load() && !lesson_interactive_turn) {
                         ESP_LOGI(TAG, "lesson tts stop continue ignored state=%d",
                                  static_cast<int>(GetDeviceState()));
@@ -3894,6 +3901,9 @@ void Application::CancelLessonInteractiveListening() {
 
 void Application::SetLessonRuntimeActive(bool active) {
     lesson_runtime_active_.store(active);
+    if (active) {
+        lesson_terminal_audio_quiet_.store(false);
+    }
     if (!active) {
         lesson_interactive_listen_generation_.fetch_add(1);
         lesson_interactive_listen_pending_.store(false);
@@ -3906,6 +3916,10 @@ void Application::SetLessonRuntimeActive(bool active) {
         }
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+}
+
+void Application::BeginLessonTerminalAudioQuiet() {
+    lesson_terminal_audio_quiet_.store(true);
 }
 
 bool Application::IsLessonRuntimeActive() const {

@@ -42,6 +42,7 @@ public:
         last_abort_reason = kAbortReasonNone;
         device_state = kDeviceStateIdle;
         lesson_runtime_active = false;
+        lesson_terminal_audio_quiet = false;
         lesson_network_render_quiet = 0;
         schedule_calls = 0;
         defer_scheduled_callbacks = false;
@@ -66,6 +67,7 @@ public:
     AbortReason last_abort_reason = kAbortReasonNone;
     DeviceState device_state = kDeviceStateIdle;
     bool lesson_runtime_active = false;
+    bool lesson_terminal_audio_quiet = false;
     int lesson_network_render_quiet = 0;
     int schedule_calls = 0;
     bool defer_scheduled_callbacks = false;
@@ -135,7 +137,11 @@ public:
         last_abort_reason = reason;
         device_state = kDeviceStateIdle;
     }
-    void SetLessonRuntimeActive(bool active) { lesson_runtime_active = active; }
+    void BeginLessonTerminalAudioQuiet() { lesson_terminal_audio_quiet = true; }
+    void SetLessonRuntimeActive(bool active) {
+        lesson_runtime_active = active;
+        if (active) lesson_terminal_audio_quiet = false;
+    }
     void PlaySound(const std::string_view& sound) {
         play_sound_calls++;
         last_sound = std::string(sound);

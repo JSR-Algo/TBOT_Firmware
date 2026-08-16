@@ -1261,6 +1261,41 @@ def test_lesson_runtime_tts_stop_continue_listening_ignores_non_answer_turn():
     assert "protocol_->SendStartListening" not in lesson_guard
     assert "audio_service_.EnableVoiceProcessing(true);" not in lesson_guard
 
+
+def test_lesson_terminal_stop_quarantines_late_tts_continue_before_runtime_deactivates():
+    app_h = read("main/application.h")
+    app_cc = read("main/application.cc")
+    lesson_handler = read("main/lesson_handler.cc")
+
+    assert "lesson_terminal_audio_quiet_" in app_h
+
+    stop_branch = lesson_handler[
+        lesson_handler.index('if (strcmp(type, "lesson_stop") == 0)') :
+        lesson_handler.index('if (strcmp(type, "lesson_error") == 0)')
+    ]
+    quiet_idx = stop_branch.index("BeginLessonTerminalAudioQuiet();")
+    inactive_idx = stop_branch.index("SetLessonRuntimeActive(false);")
+    assert quiet_idx < inactive_idx
+
+    tts_stop = app_cc[
+        app_cc.index('strcmp(state->valuestring, "stop") == 0') :
+        app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)')
+    ]
+    scheduled = tts_stop[tts_stop.index("Schedule([this") :]
+    quiet_guard = scheduled[
+        scheduled.index("if (lesson_terminal_audio_quiet_.load())") :
+        scheduled.index("if (lesson_runtime_active_.load() && !lesson_interactive_turn)")
+    ]
+    assert "SetDeviceState(kDeviceStateIdle);" in quiet_guard
+    assert "protocol_->SendStartListening" not in quiet_guard
+    assert "audio_service_.EnableVoiceProcessing(true);" not in quiet_guard
+
+    setter = app_cc[
+        app_cc.index("void Application::SetLessonRuntimeActive(bool active)") :
+        app_cc.index("bool Application::IsLessonRuntimeActive() const")
+    ]
+    assert "lesson_terminal_audio_quiet_.store(false);" in setter
+
 def test_lesson_tts_stop_treats_active_child_listening_as_answer_turn():
     app_cc = read("main/application.cc")
 
