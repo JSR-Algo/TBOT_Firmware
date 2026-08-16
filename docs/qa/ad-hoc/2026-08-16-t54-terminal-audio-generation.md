@@ -171,13 +171,18 @@ bash lesson-prod/scripts/gate.sh \
   lesson-prod/t54-terminal-audio-generation
 ```
 
-Result:
+Initial result before committing this evidence update:
 
 ```text
 GATE PASS: t54-terminal-audio-generation VERIFIED
 RED@base 790ce6671c0715973cfdaf2a53ee061c0e35c31f rc=1
 GREEN@tip a6a36cdaf398314fc8be1914485bcfbc1786306c rc=0
 ```
+
+The same command was then re-run after the evidence commit, with the branch
+`HEAD` as the GREEN tip. It again returned `GATE PASS` with `RED@base rc=1` and
+`GREEN@tip rc=0`; the immutable exact SHA is recorded by the generated campaign
+`GATE_LOG.md` row rather than embedded recursively into its own commit.
 
 Merge, frozen-main artifact creation, flash, post-lesson microphone proof, and
 CP-7 remain pending and are not claimed here.
