@@ -242,6 +242,34 @@ def test_lesson_runtime_allows_only_explicit_snapshot_before_scheduling():
     assert "Application::GetInstance().IsLessonRuntimeActive()" in before_schedule
 
 
+def test_lesson_runtime_allows_only_fixed_server_owned_motion_tools():
+    mcp_cc = read("main/mcp_server.cc")
+
+    assert "bool IsLessonMotionToolName(" in mcp_cc
+    helper_start = mcp_cc.index("bool IsLessonMotionToolName(")
+    helper_end = mcp_cc.index("\n}", helper_start)
+    helper = mcp_cc[helper_start:helper_end]
+    expected = {
+        "self.robot.left_arm_raise",
+        "self.robot.right_arm_raise",
+        "self.robot.left_arm_lower",
+        "self.robot.right_arm_lower",
+        "self.robot.both_arms_raise",
+        "self.robot.both_arms_lower",
+        "self.robot.head_turn_left",
+        "self.robot.head_turn_right",
+        "self.robot.head_center",
+    }
+    for tool_name in expected:
+        assert f'tool_name == "{tool_name}"' in helper
+    assert "set_percent" not in helper
+    assert "set_angle" not in helper
+
+    start = mcp_cc.index("void McpServer::DoToolCall")
+    before_schedule = mcp_cc[start : mcp_cc.index("app.Schedule(", start)]
+    assert "IsLessonMotionToolName(tool_name)" in before_schedule
+
+
 def test_lesson_snapshot_allowance_is_rechecked_after_scheduling():
     mcp_cc = read("main/mcp_server.cc")
 

@@ -1935,6 +1935,7 @@ bool LcdDisplay::ApplyLessonVisualState(
 // layers become the whole scene.
 void LcdDisplay::SetLessonMode(bool active) {
     DisplayLockGuard lock(this);
+    lesson_mode_active_ = active;
     if (emoji_box_ == nullptr && emoji_image_ == nullptr && emoji_label_ == nullptr) {
         return;
     }
@@ -1995,6 +1996,17 @@ void LcdDisplay::SetEmotion(const char* emotion) {
             ESP_LOGW(TAG, "SetEmotion('%s') failed: emoji_image_ is nullptr (SetupUI() was called but emoji image not created)", emotion);
         }
         return;
+    }
+
+    {
+        DisplayLockGuard lock(this);
+        if (lesson_mode_active_) {
+            if (gif_controller_) gif_controller_->Stop();
+            if (emoji_box_ != nullptr) lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
+            if (emoji_image_ != nullptr) lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
+            if (emoji_label_ != nullptr) lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
+            return;
+        }
     }
 
     auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
