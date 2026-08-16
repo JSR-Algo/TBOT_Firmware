@@ -1998,16 +1998,9 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         return;
     }
 
-    {
-        DisplayLockGuard lock(this);
-        if (lesson_mode_active_) {
-            if (gif_controller_) gif_controller_->Stop();
-            if (emoji_box_ != nullptr) lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
-            if (emoji_image_ != nullptr) lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);
-            if (emoji_label_ != nullptr) lv_obj_add_flag(emoji_label_, LV_OBJ_FLAG_HIDDEN);
-            return;
-        }
-    }
+    // SetLessonMode() already hid and stopped the face once. Conversation-state
+    // updates during a lesson must not touch LVGL or resurrect that surface.
+    if (lesson_mode_active_) return;
 
     auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
     auto image = emoji_collection != nullptr ? emoji_collection->GetEmojiImage(emotion) : nullptr;

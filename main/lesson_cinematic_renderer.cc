@@ -18,6 +18,9 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 #endif
 
 namespace tbot {
@@ -134,6 +137,9 @@ struct ProductionRendererContext {
     std::uint8_t* jpeg_input = nullptr;
     std::size_t jpeg_input_capacity = kLessonMjpegMp4MaxSampleBytes;
     esp_timer_handle_t frame_timer = nullptr;
+    TaskHandle_t frame_task = nullptr;
+    SemaphoreHandle_t frame_task_stopped = nullptr;
+    std::atomic<bool> stop_frame_task{false};
     LessonCinematicError last_error = LessonCinematicError::kNone;
 };
 
@@ -253,6 +259,45 @@ bool ProductionPresent(void* raw, const std::uint16_t* pixels, std::uint16_t wid
            context->display->PresentLessonFramebuffer(pixels, width, height);
 }
 
+void ProductionRendererTimerCallback(void* raw) {
+    auto* context = static_cast<ProductionRendererContext*>(raw);
+    if (context != nullptr && context->frame_task != nullptr &&
+        !context->stop_frame_task.load(std::memory_order_acquire)) {
+        xTaskNotifyGive(context->frame_task);
+    }
+}
+
+void ProductionRendererTask(void* raw) {
+    auto* context = static_cast<ProductionRendererContext*>(raw);
+    while (context != nullptr) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if (context->stop_frame_task.load(std::memory_order_acquire)) break;
+
+        const std::uint64_t now_ms =
+            static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+        const auto response = LessonCinematicTimerRoutesV5()
+            ? TickActiveLessonLayeredCinematicRenderer(now_ms)
+            : LessonCinematicTimerRoutesV4()
+                ? TickActiveLessonFlattenedCinematicRenderer(now_ms)
+                : TickActiveLessonCinematicRenderer(now_ms);
+        if (response.type == LessonCinematicResponseType::kPhaseComplete) {
+            ESP_LOGI("LessonCinematic",
+                     "phase complete at command sequence %" PRIu64 " stack_min=%u",
+                     response.command_sequence_id,
+                     static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
+        } else if (!response.accepted &&
+                   response.error != LessonCinematicError::kInvalidState) {
+            ESP_LOGW("LessonCinematic", "renderer tick failed: %u",
+                     static_cast<unsigned>(response.error));
+        }
+    }
+
+    if (context != nullptr && context->frame_task_stopped != nullptr) {
+        xSemaphoreGive(context->frame_task_stopped);
+    }
+    vTaskDeleteWithCaps(nullptr);
+}
+
 }  // namespace
 #endif
 
@@ -288,27 +333,18 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
         g_production_context.get(), ProductionAllocate, ProductionFree, ProductionOpen,
         ProductionClose, ProductionDecode, ProductionPresent, ProductionLastError,
         ProductionMonotonicMs});
+    g_production_context->frame_task_stopped = xSemaphoreCreateBinary();
+    if (g_production_context->frame_task_stopped == nullptr ||
+        xTaskCreateWithCaps(ProductionRendererTask, "lesson_cinematic", 32 * 1024,
+                            g_production_context.get(), tskIDLE_PRIORITY + 2,
+                            &g_production_context->frame_task,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        ShutdownProductionLessonCinematicRenderer();
+        return false;
+    }
     const esp_timer_create_args_t timer_args = {
-        .callback = [](void*) {
-            const std::uint64_t now_ms =
-                static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
-            const auto response = LessonCinematicTimerRoutesV5()
-                ? TickActiveLessonLayeredCinematicRenderer(now_ms)
-                : LessonCinematicTimerRoutesV4()
-                    ? TickActiveLessonFlattenedCinematicRenderer(now_ms)
-                    : TickActiveLessonCinematicRenderer(now_ms);
-            // Task 7 defines only command-correlated ACKs. Phase completion is internal:
-            // the renderer returns to prepared while the server remains the lifecycle owner.
-            if (response.type == LessonCinematicResponseType::kPhaseComplete) {
-                ESP_LOGI("LessonCinematic", "phase complete at command sequence %" PRIu64,
-                         response.command_sequence_id);
-            } else if (!response.accepted &&
-                       response.error != LessonCinematicError::kInvalidState) {
-                ESP_LOGW("LessonCinematic", "timer tick failed: %u",
-                         static_cast<unsigned>(response.error));
-            }
-        },
-        .arg = nullptr,
+        .callback = ProductionRendererTimerCallback,
+        .arg = g_production_context.get(),
         .dispatch_method = ESP_TIMER_TASK,
         .name = "lesson_cinematic",
         .skip_unhandled_events = true,
@@ -357,12 +393,28 @@ void ConfigureProductionLessonCinematicSession(const std::string& assignment_id,
 
 void ShutdownProductionLessonCinematicRenderer() {
 #ifdef ESP_PLATFORM
-    SetActiveLessonCinematicRenderer(nullptr);
     if (g_production_context != nullptr && g_production_context->frame_timer != nullptr) {
         esp_timer_stop(g_production_context->frame_timer);
         esp_timer_delete(g_production_context->frame_timer);
         g_production_context->frame_timer = nullptr;
     }
+    if (g_production_context != nullptr && g_production_context->frame_task != nullptr) {
+        g_production_context->stop_frame_task.store(true, std::memory_order_release);
+        xTaskNotifyGive(g_production_context->frame_task);
+        if (g_production_context->frame_task_stopped == nullptr ||
+            xSemaphoreTake(g_production_context->frame_task_stopped,
+                           pdMS_TO_TICKS(1000)) != pdTRUE) {
+            ESP_LOGE("LessonCinematic", "renderer task stop timed out");
+            vTaskDeleteWithCaps(g_production_context->frame_task);
+        }
+        g_production_context->frame_task = nullptr;
+    }
+    if (g_production_context != nullptr &&
+        g_production_context->frame_task_stopped != nullptr) {
+        vSemaphoreDelete(g_production_context->frame_task_stopped);
+        g_production_context->frame_task_stopped = nullptr;
+    }
+    SetActiveLessonCinematicRenderer(nullptr);
     ShutdownProductionLessonFlattenedCinematicRenderer();
     ShutdownProductionLessonLayeredCinematicRenderer();
     g_production_renderer.reset();
