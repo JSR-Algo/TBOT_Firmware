@@ -191,7 +191,9 @@ private:
     void SendStationConnectFailureReport();
     void ScheduleStationConnectFallback();
     void _send_wifi_list();
-    void ScheduleWifiListSend(uint32_t expected_generation);
+    void ScheduleWifiListSend(uint32_t expected_generation,
+                              uint64_t expected_ble_session_state,
+                              uint64_t expected_ble_connection_epoch);
     void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
@@ -261,6 +263,8 @@ private:
     std::atomic<bool> m_wifi_connect_task_started{false};
     std::atomic<uint32_t> setup_generation_{0};
     std::atomic<uint64_t> ble_session_state_{0};
+    // Never reset at reconnect: distinguishes clients within one setup generation.
+    std::atomic<uint64_t> ble_connection_epoch_{0};
     std::atomic<uint32_t> ssid_transaction_id_{0};
     std::mutex provisioning_finalization_mutex_;
     esp_blufi_extra_info_t m_sta_conn_info{};

@@ -78,6 +78,39 @@ def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_re
     assert "m_ble_is_connected" in helper
 
 
+def test_blufi_deferred_wifi_list_is_bound_to_exact_ble_connection():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    helper = function_body(source, "void Blufi::ScheduleWifiListSend")
+    connect = source[
+        source.index("case ESP_BLUFI_EVENT_BLE_CONNECT") :
+        source.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT")
+    ]
+    disconnect = source[
+        source.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT") :
+        source.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST")
+    ]
+
+    assert "uint64_t expected_ble_session_state" in header
+    assert "uint64_t expected_ble_connection_epoch" in header
+    assert "ble_connection_epoch_" in header
+    assert "ble_session_state_.load(std::memory_order_acquire)" in handler
+    assert "ble_connection_epoch_.load(std::memory_order_acquire)" in handler
+    assert "expected_ble_session_state" in helper
+    assert "expected_ble_connection_epoch" in helper
+    assert "current_ble_session_state != expected_ble_session_state" in helper
+    assert "DecodeBleSessionPhase(expected_ble_session_state)" in helper
+    assert "DecodeBleSessionPhase(current_ble_session_state)" in helper
+    assert helper.count("BleSessionPhase::kConnected") >= 2
+    assert "current_ble_connection_epoch != expected_ble_connection_epoch" in helper
+    assert "ble_connection_epoch_.fetch_add(1" in connect
+    assert "provisioning_finalization_mutex_" in handler
+    assert "provisioning_finalization_mutex_" in connect
+    assert "provisioning_finalization_mutex_" in disconnect
+    assert "m_send_list_after_scan = false;" in disconnect
+
+
 def test_blufi_wifi_scan_handler_registration_is_single_owner_and_unregistered_on_deinit():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")

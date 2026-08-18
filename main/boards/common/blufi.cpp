@@ -1987,21 +1987,37 @@ void Blufi::_send_wifi_list() {
     }
 }
 
-void Blufi::ScheduleWifiListSend(uint32_t expected_generation) {
-    Application::GetInstance().Schedule([this, expected_generation]() {
-        const bool current = RunIfSetupGenerationCurrent(expected_generation, [this]() {
-            if (!m_ble_is_connected) {
+void Blufi::ScheduleWifiListSend(uint32_t expected_generation,
+                                 uint64_t expected_ble_session_state,
+                                 uint64_t expected_ble_connection_epoch) {
+    Application::GetInstance().Schedule(
+        [this, expected_generation, expected_ble_session_state,
+         expected_ble_connection_epoch]() {
+            const bool current = RunIfSetupGenerationCurrent(
+                expected_generation,
+                [this, expected_ble_session_state, expected_ble_connection_epoch]() {
+                    const uint64_t current_ble_session_state =
+                        ble_session_state_.load(std::memory_order_acquire);
+                    const uint64_t current_ble_connection_epoch =
+                        ble_connection_epoch_.load(std::memory_order_acquire);
+                    if (!m_ble_is_connected ||
+                        current_ble_session_state != expected_ble_session_state ||
+                        DecodeBleSessionPhase(expected_ble_session_state) !=
+                            BleSessionPhase::kConnected ||
+                        DecodeBleSessionPhase(current_ble_session_state) !=
+                            BleSessionPhase::kConnected ||
+                        current_ble_connection_epoch != expected_ble_connection_epoch) {
+                        std::vector<wifi_ap_record_t>().swap(m_ap_records);
+                        m_ap_records_updated_us = 0;
+                        return;
+                    }
+                    _send_wifi_list();
+                });
+            if (!current) {
                 std::vector<wifi_ap_record_t>().swap(m_ap_records);
                 m_ap_records_updated_us = 0;
-                return;
             }
-            _send_wifi_list();
         });
-        if (!current) {
-            std::vector<wifi_ap_record_t>().swap(m_ap_records);
-            m_ap_records_updated_us = 0;
-        }
-    });
 }
 
 void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
@@ -2048,12 +2064,25 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
             }
         }
 
-        const bool send_list_after_scan = self->m_send_list_after_scan;
-        const uint32_t expected_generation = self->setup_generation_.load();
-        self->m_scan_in_progress = false;
-        self->m_send_list_after_scan = false;
+        bool send_list_after_scan = false;
+        uint32_t expected_generation = 0;
+        uint64_t expected_ble_session_state = 0;
+        uint64_t expected_ble_connection_epoch = 0;
+        {
+            std::lock_guard<std::mutex> session_lock(
+                self->provisioning_finalization_mutex_);
+            send_list_after_scan = self->m_send_list_after_scan;
+            expected_generation = self->setup_generation_.load();
+            expected_ble_session_state =
+                self->ble_session_state_.load(std::memory_order_acquire);
+            expected_ble_connection_epoch =
+                self->ble_connection_epoch_.load(std::memory_order_acquire);
+            self->m_scan_in_progress = false;
+            self->m_send_list_after_scan = false;
+        }
         if (send_list_after_scan) {
-            self->ScheduleWifiListSend(expected_generation);
+            self->ScheduleWifiListSend(expected_generation, expected_ble_session_state,
+                                       expected_ble_connection_epoch);
         }
     }
 }
@@ -2072,23 +2101,27 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             ESP_LOGI(BLUFI_TAG, "BLUFI deinit finish");
             break;
         case ESP_BLUFI_EVENT_BLE_CONNECT: {
-            uint64_t expected_state = ble_session_state_.load(std::memory_order_acquire);
-            if (DecodeBleSessionPhase(expected_state) != BleSessionPhase::kAccepting) {
-                ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect while host is stopping");
-                break;
-            }
-            const uint32_t connection_generation =
-                DecodeBleSessionGeneration(expected_state);
-            const uint64_t connected_state = EncodeBleSessionState(
-                connection_generation, BleSessionPhase::kConnected);
-            if (!ble_session_state_.compare_exchange_strong(
-                    expected_state, connected_state,
-                    std::memory_order_acq_rel, std::memory_order_acquire)) {
-                ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect invalidated by host transition");
-                break;
+            {
+                std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
+                uint64_t expected_state = ble_session_state_.load(std::memory_order_acquire);
+                if (DecodeBleSessionPhase(expected_state) != BleSessionPhase::kAccepting) {
+                    ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect while host is stopping");
+                    break;
+                }
+                const uint32_t connection_generation =
+                    DecodeBleSessionGeneration(expected_state);
+                const uint64_t connected_state = EncodeBleSessionState(
+                    connection_generation, BleSessionPhase::kConnected);
+                if (!ble_session_state_.compare_exchange_strong(
+                        expected_state, connected_state,
+                        std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect invalidated by host transition");
+                    break;
+                }
+                ble_connection_epoch_.fetch_add(1, std::memory_order_acq_rel);
+                m_ble_is_connected = true;
             }
             ESP_LOGI(BLUFI_TAG, "BLUFI ble connect");
-            m_ble_is_connected = true;
             // A successful client connect proves re-advertising still works, so
             // clear the re-advertise cap. This makes the cap count CONSECUTIVE
             // failed auto-readvertises (a flapping peer that never connects),
@@ -2101,19 +2134,24 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             break;
         }
         case ESP_BLUFI_EVENT_BLE_DISCONNECT: {
-            uint64_t connected_state = ble_session_state_.load(std::memory_order_acquire);
             bool owns_session = false;
             uint32_t disconnected_generation = 0;
-            if (DecodeBleSessionPhase(connected_state) == BleSessionPhase::kConnected) {
-                disconnected_generation = DecodeBleSessionGeneration(connected_state);
-                const uint64_t disconnected_state = EncodeBleSessionState(
-                    disconnected_generation, BleSessionPhase::kDisconnected);
-                owns_session = ble_session_state_.compare_exchange_strong(
-                    connected_state, disconnected_state,
-                    std::memory_order_acq_rel, std::memory_order_acquire);
+            {
+                std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
+                uint64_t connected_state =
+                    ble_session_state_.load(std::memory_order_acquire);
+                if (DecodeBleSessionPhase(connected_state) == BleSessionPhase::kConnected) {
+                    disconnected_generation = DecodeBleSessionGeneration(connected_state);
+                    const uint64_t disconnected_state = EncodeBleSessionState(
+                        disconnected_generation, BleSessionPhase::kDisconnected);
+                    owns_session = ble_session_state_.compare_exchange_strong(
+                        connected_state, disconnected_state,
+                        std::memory_order_acq_rel, std::memory_order_acquire);
+                }
+                m_ble_is_connected = false;
+                m_send_list_after_scan = false;
             }
             ESP_LOGI(BLUFI_TAG, "BLUFI ble disconnect");
-            m_ble_is_connected = false;
             _security_deinit();
             if (!m_provisioned) {
                 // Only restart advertising if the hard-timeout has NOT fired.
