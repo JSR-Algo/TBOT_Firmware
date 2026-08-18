@@ -78,6 +78,8 @@ static constexpr int kBlufiSuccessReportDeliveryGraceMs = 750;
 static constexpr int kBlufiSuccessReportEnqueueAttempts = 3;
 static constexpr int kBlufiSuccessReportRetryBackoffMs = 100;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
+static constexpr uint16_t kMaxBlufiWifiScanCandidates = 8;
+static constexpr uint16_t kBlufiPassiveScanTimeMs = 120;
 
 enum class BleSessionPhase : uint64_t {
     kStopping = 0,
@@ -1863,6 +1865,11 @@ bool Blufi::start_wifi_scan() {
         return false;
     }
 
+    wifi_scan_config_t scan_config{};
+    scan_config.show_hidden = false;
+    scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+    scan_config.scan_time.passive = kBlufiPassiveScanTimeMs;
+
     // Get current WiFi mode
     wifi_mode_t current_mode;
     esp_err_t err = esp_wifi_get_mode(&current_mode);
@@ -1884,7 +1891,7 @@ bool Blufi::start_wifi_scan() {
             return false;
         }
         // Start scan
-        err = esp_wifi_scan_start(NULL, false);
+        err = esp_wifi_scan_start(&scan_config, false);
         if (err != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
             m_scan_in_progress = false;
@@ -1898,7 +1905,7 @@ bool Blufi::start_wifi_scan() {
             m_scan_in_progress = false;
             return false;
         }
-        err = esp_wifi_scan_start(NULL, false);
+        err = esp_wifi_scan_start(&scan_config, false);
         if (err != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
             m_scan_in_progress = false;
@@ -1980,6 +1987,23 @@ void Blufi::_send_wifi_list() {
     }
 }
 
+void Blufi::ScheduleWifiListSend(uint32_t expected_generation) {
+    Application::GetInstance().Schedule([this, expected_generation]() {
+        const bool current = RunIfSetupGenerationCurrent(expected_generation, [this]() {
+            if (!m_ble_is_connected) {
+                std::vector<wifi_ap_record_t>().swap(m_ap_records);
+                m_ap_records_updated_us = 0;
+                return;
+            }
+            _send_wifi_list();
+        });
+        if (!current) {
+            std::vector<wifi_ap_record_t>().swap(m_ap_records);
+            m_ap_records_updated_us = 0;
+        }
+    });
+}
+
 void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
                                      void* event_data) {
     Blufi* self = static_cast<Blufi*>(arg);
@@ -1997,10 +2021,12 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
 
         if (ap_num == 0) {
             ESP_LOGW(BLUFI_TAG, "No APs found");
+            esp_wifi_clear_ap_list();
             self->m_ap_records.clear();
             self->m_ap_records_updated_us = 0;
         } else {
             if (self->m_scan_should_save_ssid) {
+                ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);
                 self->m_ap_records.resize(ap_num);
                 esp_err_t err = esp_wifi_scan_get_ap_records(&ap_num, self->m_ap_records.data());
                 if (err != ESP_OK) {
@@ -2009,6 +2035,7 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
                     self->m_ap_records.clear();
                     self->m_ap_records_updated_us = 0;
                 } else {
+                    esp_wifi_clear_ap_list();
                     self->m_ap_records.resize(ap_num);
                     self->m_ap_records_updated_us = esp_timer_get_time();
 
@@ -2020,11 +2047,13 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
                 esp_wifi_clear_ap_list();
             }
         }
+
+        const bool send_list_after_scan = self->m_send_list_after_scan;
+        const uint32_t expected_generation = self->setup_generation_.load();
         self->m_scan_in_progress = false;
-        // Dispatch a pending GET_WIFI_LIST response if one is waiting on this scan.
-        if (self->m_send_list_after_scan) {
-            self->m_send_list_after_scan = false;
-            self->_send_wifi_list();
+        self->m_send_list_after_scan = false;
+        if (send_list_after_scan) {
+            self->ScheduleWifiListSend(expected_generation);
         }
     }
 }

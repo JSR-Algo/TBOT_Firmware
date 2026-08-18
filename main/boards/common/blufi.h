@@ -191,6 +191,7 @@ private:
     void SendStationConnectFailureReport();
     void ScheduleStationConnectFallback();
     void _send_wifi_list();
+    void ScheduleWifiListSend(uint32_t expected_generation);
     void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
