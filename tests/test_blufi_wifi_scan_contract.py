@@ -39,6 +39,40 @@ def test_blufi_wifi_scan_done_handler_is_registered_for_sta_mode_scans():
     assert "bool EnsureWifiScanEventHandlerRegistered();" in header
 
 
+def test_blufi_wifi_scan_is_passive_to_preserve_internal_dma_heap():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::start_wifi_scan")
+
+    assert "wifi_scan_config_t scan_config" in body
+    assert "scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE" in body
+    assert "scan_config.scan_time.passive" in body
+    assert "esp_wifi_scan_start(&scan_config, false)" in body
+    assert "esp_wifi_scan_start(NULL, false)" not in body
+
+
+def test_blufi_wifi_scan_caps_application_owned_candidates():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "void Blufi::_wifi_scan_event_handler")
+
+    cap = "std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates)"
+    assert "kMaxBlufiWifiScanCandidates" in source
+    assert cap in body
+    assert body.index(cap) < body.index("m_ap_records.resize")
+
+
+def test_blufi_wifi_list_dispatch_is_deferred_until_scan_callback_returns():
+    source = read("main/boards/common/blufi.cpp")
+    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+
+    assert "ScheduleWifiListSend" in handler
+    assert "_send_wifi_list();" not in handler
+
+    helper = function_body(source, "void Blufi::ScheduleWifiListSend")
+    assert "Application::GetInstance().Schedule" in helper
+    assert "RunIfSetupGenerationCurrent" in helper
+    assert "m_ble_is_connected" in helper
+
+
 def test_blufi_wifi_scan_handler_registration_is_single_owner_and_unregistered_on_deinit():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
