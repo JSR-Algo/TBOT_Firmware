@@ -78,6 +78,8 @@ static constexpr int kBlufiSuccessReportDeliveryGraceMs = 750;
 static constexpr int kBlufiSuccessReportEnqueueAttempts = 3;
 static constexpr int kBlufiSuccessReportRetryBackoffMs = 100;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
+static constexpr uint16_t kMaxBlufiWifiScanCandidates = 8;
+static constexpr uint16_t kBlufiPassiveScanTimeMs = 120;
 
 enum class BleSessionPhase : uint64_t {
     kStopping = 0,
@@ -445,6 +447,8 @@ esp_err_t Blufi::_init_impl() {
     ble_readvertise_count_ = 0;  // fresh setup window -> reset the re-adv cap
     m_scan_should_save_ssid = true;
     m_wifi_connect_task_started.store(false);
+    m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
+    m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
 
     auto& wifi_manager = WifiManager::GetInstance();
     if (wifi_manager.IsInitialized() && wifi_manager.IsConfigMode()) {
@@ -533,6 +537,8 @@ esp_err_t Blufi::_deinit_impl() {
     }
     m_scan_in_progress = false;
     m_send_list_after_scan = false;
+    m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
+    m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
 
     if (host_active_) {
         const esp_err_t host_error = _host_deinit();
@@ -614,6 +620,8 @@ esp_err_t Blufi::RestartForSetup() {
     m_provisioned = false;
     m_scan_in_progress = false;
     m_send_list_after_scan = false;
+    m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
+    m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
     m_scan_should_save_ssid = true;
     std::vector<wifi_ap_record_t>().swap(m_ap_records);
     m_ap_records_updated_us = 0;
@@ -1863,6 +1871,11 @@ bool Blufi::start_wifi_scan() {
         return false;
     }
 
+    wifi_scan_config_t scan_config{};
+    scan_config.show_hidden = false;
+    scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
+    scan_config.scan_time.passive = kBlufiPassiveScanTimeMs;
+
     // Get current WiFi mode
     wifi_mode_t current_mode;
     esp_err_t err = esp_wifi_get_mode(&current_mode);
@@ -1884,7 +1897,7 @@ bool Blufi::start_wifi_scan() {
             return false;
         }
         // Start scan
-        err = esp_wifi_scan_start(NULL, false);
+        err = esp_wifi_scan_start(&scan_config, false);
         if (err != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
             m_scan_in_progress = false;
@@ -1898,7 +1911,7 @@ bool Blufi::start_wifi_scan() {
             m_scan_in_progress = false;
             return false;
         }
-        err = esp_wifi_scan_start(NULL, false);
+        err = esp_wifi_scan_start(&scan_config, false);
         if (err != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
             m_scan_in_progress = false;
@@ -1914,7 +1927,7 @@ bool Blufi::start_wifi_scan() {
     return true;
 }
 
-void Blufi::_send_wifi_list() {
+void Blufi::_send_wifi_list(std::vector<wifi_ap_record_t> m_ap_records) {
     if (m_ap_records.empty()) {
         ESP_LOGW(BLUFI_TAG, "No AP records available, sending WiFi scan fail");
         esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
@@ -1973,11 +1986,48 @@ void Blufi::_send_wifi_list() {
     // esp_blufi_send_wifi_list() performs two more internal allocations. Free
     // the driver-result cache first so those allocations see a contiguous heap.
     std::vector<wifi_ap_record_t>().swap(m_ap_records);
-    m_ap_records_updated_us = 0;
     esp_err_t err = esp_blufi_send_wifi_list(blufi_ap_count, blufi_ap_list.data());
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to dispatch WiFi list: %s", esp_err_to_name(err));
     }
+}
+
+void Blufi::ScheduleWifiListSend(uint32_t expected_generation,
+                                 uint64_t expected_ble_session_state,
+                                 uint64_t expected_ble_connection_epoch,
+                                 uint64_t expected_wifi_list_dispatch_epoch,
+                                 std::vector<wifi_ap_record_t> ap_records) {
+    Application::GetInstance().Schedule(
+        [this, expected_generation, expected_ble_session_state,
+         expected_ble_connection_epoch, expected_wifi_list_dispatch_epoch,
+         ap_records = std::move(ap_records)]() mutable {
+            RunIfSetupGenerationCurrent(
+                expected_generation,
+                [this, expected_ble_session_state, expected_ble_connection_epoch,
+                 expected_wifi_list_dispatch_epoch, &ap_records]() {
+                    const uint64_t current_ble_session_state =
+                        ble_session_state_.load(std::memory_order_acquire);
+                    const uint64_t current_ble_connection_epoch =
+                        ble_connection_epoch_.load(std::memory_order_acquire);
+                    const uint64_t current_wifi_list_dispatch_epoch =
+                        m_wifi_list_dispatch_pending_epoch_.load(std::memory_order_acquire);
+                    if (!m_ble_is_connected ||
+                        current_ble_session_state != expected_ble_session_state ||
+                        DecodeBleSessionPhase(expected_ble_session_state) !=
+                            BleSessionPhase::kConnected ||
+                        DecodeBleSessionPhase(current_ble_session_state) !=
+                            BleSessionPhase::kConnected ||
+                        current_ble_connection_epoch != expected_ble_connection_epoch ||
+                        current_wifi_list_dispatch_epoch != expected_wifi_list_dispatch_epoch) {
+                        return;
+                    }
+                    _send_wifi_list(std::move(ap_records));
+                });
+            uint64_t owned_dispatch_epoch = expected_wifi_list_dispatch_epoch;
+            m_wifi_list_dispatch_pending_epoch_.compare_exchange_strong(
+                owned_dispatch_epoch, 0,
+                std::memory_order_acq_rel, std::memory_order_acquire);
+        });
 }
 
 void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
@@ -1997,10 +2047,12 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
 
         if (ap_num == 0) {
             ESP_LOGW(BLUFI_TAG, "No APs found");
+            esp_wifi_clear_ap_list();
             self->m_ap_records.clear();
             self->m_ap_records_updated_us = 0;
         } else {
             if (self->m_scan_should_save_ssid) {
+                ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);
                 self->m_ap_records.resize(ap_num);
                 esp_err_t err = esp_wifi_scan_get_ap_records(&ap_num, self->m_ap_records.data());
                 if (err != ESP_OK) {
@@ -2009,6 +2061,7 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
                     self->m_ap_records.clear();
                     self->m_ap_records_updated_us = 0;
                 } else {
+                    esp_wifi_clear_ap_list();
                     self->m_ap_records.resize(ap_num);
                     self->m_ap_records_updated_us = esp_timer_get_time();
 
@@ -2020,11 +2073,39 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
                 esp_wifi_clear_ap_list();
             }
         }
-        self->m_scan_in_progress = false;
-        // Dispatch a pending GET_WIFI_LIST response if one is waiting on this scan.
-        if (self->m_send_list_after_scan) {
+
+        bool send_list_after_scan = false;
+        uint32_t expected_generation = 0;
+        uint64_t expected_ble_session_state = 0;
+        uint64_t expected_ble_connection_epoch = 0;
+        uint64_t expected_wifi_list_dispatch_epoch = 0;
+        std::vector<wifi_ap_record_t> owned_ap_records;
+        {
+            std::lock_guard<std::mutex> session_lock(
+                self->provisioning_finalization_mutex_);
+            send_list_after_scan = self->m_send_list_after_scan;
+            expected_generation = self->setup_generation_.load();
+            expected_ble_session_state =
+                self->ble_session_state_.load(std::memory_order_acquire);
+            expected_ble_connection_epoch =
+                self->ble_connection_epoch_.load(std::memory_order_acquire);
+            if (send_list_after_scan) {
+                owned_ap_records.swap(self->m_ap_records);
+                self->m_ap_records_updated_us = 0;
+                expected_wifi_list_dispatch_epoch =
+                    self->m_wifi_list_dispatch_epoch_.fetch_add(
+                        1, std::memory_order_acq_rel) + 1;
+                self->m_wifi_list_dispatch_pending_epoch_.store(
+                    expected_wifi_list_dispatch_epoch, std::memory_order_release);
+            }
+            self->m_scan_in_progress = false;
             self->m_send_list_after_scan = false;
-            self->_send_wifi_list();
+        }
+        if (send_list_after_scan) {
+            self->ScheduleWifiListSend(expected_generation, expected_ble_session_state,
+                                       expected_ble_connection_epoch,
+                                       expected_wifi_list_dispatch_epoch,
+                                       std::move(owned_ap_records));
         }
     }
 }
@@ -2043,23 +2124,27 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             ESP_LOGI(BLUFI_TAG, "BLUFI deinit finish");
             break;
         case ESP_BLUFI_EVENT_BLE_CONNECT: {
-            uint64_t expected_state = ble_session_state_.load(std::memory_order_acquire);
-            if (DecodeBleSessionPhase(expected_state) != BleSessionPhase::kAccepting) {
-                ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect while host is stopping");
-                break;
-            }
-            const uint32_t connection_generation =
-                DecodeBleSessionGeneration(expected_state);
-            const uint64_t connected_state = EncodeBleSessionState(
-                connection_generation, BleSessionPhase::kConnected);
-            if (!ble_session_state_.compare_exchange_strong(
-                    expected_state, connected_state,
-                    std::memory_order_acq_rel, std::memory_order_acquire)) {
-                ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect invalidated by host transition");
-                break;
+            {
+                std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
+                uint64_t expected_state = ble_session_state_.load(std::memory_order_acquire);
+                if (DecodeBleSessionPhase(expected_state) != BleSessionPhase::kAccepting) {
+                    ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect while host is stopping");
+                    break;
+                }
+                const uint32_t connection_generation =
+                    DecodeBleSessionGeneration(expected_state);
+                const uint64_t connected_state = EncodeBleSessionState(
+                    connection_generation, BleSessionPhase::kConnected);
+                if (!ble_session_state_.compare_exchange_strong(
+                        expected_state, connected_state,
+                        std::memory_order_acq_rel, std::memory_order_acquire)) {
+                    ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect invalidated by host transition");
+                    break;
+                }
+                ble_connection_epoch_.fetch_add(1, std::memory_order_acq_rel);
+                m_ble_is_connected = true;
             }
             ESP_LOGI(BLUFI_TAG, "BLUFI ble connect");
-            m_ble_is_connected = true;
             // A successful client connect proves re-advertising still works, so
             // clear the re-advertise cap. This makes the cap count CONSECUTIVE
             // failed auto-readvertises (a flapping peer that never connects),
@@ -2072,19 +2157,26 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             break;
         }
         case ESP_BLUFI_EVENT_BLE_DISCONNECT: {
-            uint64_t connected_state = ble_session_state_.load(std::memory_order_acquire);
             bool owns_session = false;
             uint32_t disconnected_generation = 0;
-            if (DecodeBleSessionPhase(connected_state) == BleSessionPhase::kConnected) {
-                disconnected_generation = DecodeBleSessionGeneration(connected_state);
-                const uint64_t disconnected_state = EncodeBleSessionState(
-                    disconnected_generation, BleSessionPhase::kDisconnected);
-                owns_session = ble_session_state_.compare_exchange_strong(
-                    connected_state, disconnected_state,
-                    std::memory_order_acq_rel, std::memory_order_acquire);
+            {
+                std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
+                uint64_t connected_state =
+                    ble_session_state_.load(std::memory_order_acquire);
+                if (DecodeBleSessionPhase(connected_state) == BleSessionPhase::kConnected) {
+                    disconnected_generation = DecodeBleSessionGeneration(connected_state);
+                    const uint64_t disconnected_state = EncodeBleSessionState(
+                        disconnected_generation, BleSessionPhase::kDisconnected);
+                    owns_session = ble_session_state_.compare_exchange_strong(
+                        connected_state, disconnected_state,
+                        std::memory_order_acq_rel, std::memory_order_acquire);
+                }
+                m_ble_is_connected = false;
+                m_send_list_after_scan = false;
+                m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
+                m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
             }
             ESP_LOGI(BLUFI_TAG, "BLUFI ble disconnect");
-            m_ble_is_connected = false;
             _security_deinit();
             if (!m_provisioned) {
                 // Only restart advertising if the hard-timeout has NOT fired.
@@ -2241,6 +2333,10 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
         }
         case ESP_BLUFI_EVENT_GET_WIFI_LIST: {
             ESP_LOGI(BLUFI_TAG, "BLUFI get wifi list");
+            if (m_wifi_list_dispatch_pending_epoch_.load(std::memory_order_acquire) != 0) {
+                ESP_LOGI(BLUFI_TAG, "WiFi list dispatch already pending");
+                break;
+            }
             // Case 1: a scan is already in flight (init scan or refresh scan started by
             // the previous _send_wifi_list()). Defer the response to its done handler
             // instead of blocking the BluFi task.
@@ -2251,7 +2347,9 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             }
             // Case 2: cache is populated and fresh. Respond immediately.
             if (!m_ap_records.empty() && IsWifiScanCacheFresh()) {
-                _send_wifi_list();
+                auto ap_records = std::move(m_ap_records);
+                m_ap_records_updated_us = 0;
+                _send_wifi_list(std::move(ap_records));
                 break;
             }
             // Case 3: no fresh cache (e.g. driver was stopped during a

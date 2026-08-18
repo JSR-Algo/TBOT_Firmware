@@ -190,7 +190,12 @@ private:
     void StartStationConnectFromCredentials(const char* reason);
     void SendStationConnectFailureReport();
     void ScheduleStationConnectFallback();
-    void _send_wifi_list();
+    void _send_wifi_list(std::vector<wifi_ap_record_t> ap_records);
+    void ScheduleWifiListSend(uint32_t expected_generation,
+                              uint64_t expected_ble_session_state,
+                              uint64_t expected_ble_connection_epoch,
+                              uint64_t expected_wifi_list_dispatch_epoch,
+                              std::vector<wifi_ap_record_t> ap_records);
     void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
@@ -260,6 +265,8 @@ private:
     std::atomic<bool> m_wifi_connect_task_started{false};
     std::atomic<uint32_t> setup_generation_{0};
     std::atomic<uint64_t> ble_session_state_{0};
+    // Never reset at reconnect: distinguishes clients within one setup generation.
+    std::atomic<uint64_t> ble_connection_epoch_{0};
     std::atomic<uint32_t> ssid_transaction_id_{0};
     std::mutex provisioning_finalization_mutex_;
     esp_blufi_extra_info_t m_sta_conn_info{};
@@ -295,4 +302,7 @@ private:
     // available or a scan is already in flight; cleared by the scan-done
     // handler after dispatching the response.
     bool m_send_list_after_scan = false;
+    std::atomic<uint64_t> m_wifi_list_dispatch_epoch_{0};
+    // Zero means no queued response; otherwise this is the owning dispatch token.
+    std::atomic<uint64_t> m_wifi_list_dispatch_pending_epoch_{0};
 };
