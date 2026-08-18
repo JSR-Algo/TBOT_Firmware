@@ -111,6 +111,54 @@ def test_blufi_deferred_wifi_list_is_bound_to_exact_ble_connection():
     assert "m_send_list_after_scan = false;" in disconnect
 
 
+def test_blufi_wifi_list_retry_waits_for_owned_deferred_dispatch():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    event_body = function_body(source, "void Blufi::_handle_event")
+    get_list = event_body[
+        event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
+        event_body.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")
+    ]
+
+    assert "m_wifi_list_dispatch_pending_epoch_" in header
+    pending_check = get_list.index("m_wifi_list_dispatch_pending_epoch_")
+    assert pending_check < get_list.index("if (m_scan_in_progress)")
+    assert pending_check < get_list.index("IsWifiScanCacheFresh()")
+    assert pending_check < get_list.index("m_ap_records.clear();")
+
+    assert "std::vector<wifi_ap_record_t> owned_ap_records" in handler
+    transfer = "owned_ap_records.swap(self->m_ap_records);"
+    assert transfer in handler
+    assert handler.index(transfer) < handler.index("self->m_scan_in_progress = false;")
+    assert "std::move(owned_ap_records)" in handler
+
+
+def test_blufi_stale_deferred_dispatch_only_destroys_its_owned_records():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    helper = function_body(source, "void Blufi::ScheduleWifiListSend")
+    restart = function_body(source, "esp_err_t Blufi::RestartForSetup")
+    event_body = function_body(source, "void Blufi::_handle_event")
+    disconnect = event_body[
+        event_body.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT") :
+        event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST")
+    ]
+
+    assert "uint64_t expected_wifi_list_dispatch_epoch" in header
+    assert "std::vector<wifi_ap_record_t> ap_records" in header
+    assert "m_wifi_list_dispatch_epoch_" in header
+    assert "m_wifi_list_dispatch_pending_epoch_" in header
+    assert "expected_wifi_list_dispatch_epoch" in helper
+    assert "current_wifi_list_dispatch_epoch != expected_wifi_list_dispatch_epoch" in helper
+    assert "compare_exchange_strong" in helper
+    assert "_send_wifi_list(std::move(ap_records))" in helper
+    assert "swap(m_ap_records)" not in helper
+    assert "m_ap_records.clear()" not in helper
+    assert "m_wifi_list_dispatch_epoch_.fetch_add(1" in restart
+    assert "m_wifi_list_dispatch_epoch_.fetch_add(1" in disconnect
+
+
 def test_blufi_wifi_scan_handler_registration_is_single_owner_and_unregistered_on_deinit():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
@@ -143,7 +191,8 @@ def test_blufi_wifi_list_requests_refresh_stale_cached_scan_results():
     assert "IsWifiScanCacheFresh()" in header
     assert "IsWifiScanCacheFresh()" in source
     assert "!m_ap_records.empty() && IsWifiScanCacheFresh()" in get_list
-    assert get_list.index("!m_ap_records.empty() && IsWifiScanCacheFresh()") < get_list.index("_send_wifi_list();")
+    fresh_idx = get_list.index("!m_ap_records.empty() && IsWifiScanCacheFresh()")
+    assert "_send_wifi_list(" in get_list[fresh_idx:]
     assert "m_ap_records.clear();" in get_list
 
 def test_blufi_init_resets_wifi_scan_cache_capture_without_starting_eager_scan():
