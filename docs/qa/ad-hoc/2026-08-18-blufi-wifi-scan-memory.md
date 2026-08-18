@@ -2,10 +2,9 @@
 
 ## Scope
 
-This record covers the `fix/blufi-wifi-scan-memory` branch through implementation
-commit `4d838612d6df7486faccdb011f1a3b9cfdf1ed15`. It verifies the source-contract
-regressions, the scoped provisioning gate, and an LCDWiki ES3C35P no-flash build.
-Physical flashing and the Android Wi-Fi scan/provisioning flow remain pending.
+This record covers the BluFi scan/provisioning memory fix merged into the local
+`main` worktree. It verifies source-contract regressions, the scoped provisioning
+gate, an ESP32-S3 production build, and the complete Android/robot hardware flow.
 
 ## Root-Cause Evidence
 
@@ -22,6 +21,13 @@ token, device-identifier, or account values, showed:
 The outgoing result list was already capped and its C++ record vector was released
 before notification. The remaining low-memory overlap was active scan work, driver
 result ownership, and BluFi notification allocation occurring in the same window.
+
+Physical testing then exposed a second stage after scan delivery. Deinitializing
+and recreating Wi-Fi under an active GATT session starved BLE, while preserving the
+driver allowed scanning but left too little DMA memory for Wi-Fi probe/auth frames.
+The final fix stops only the Wi-Fi radio between scans and sizes Bluedroid/controller
+features for one legacy GATT-server peripheral connection. Unused BLE 5, SMP, GATT
+client, scanner, DTM, multi-connection, and extra controller activities are disabled.
 
 ## Commits Under Test
 
@@ -138,7 +144,7 @@ python3 -m pytest -q \
   tests/test_tbot_connect_runtime_fsm_contract.py
 ```
 
-Result: exit `0`; `203 passed in 0.37s`.
+Final result on local `main`: exit `0`; `208 passed in 1.00s`.
 
 ## LCDWiki Production Build
 
@@ -164,27 +170,43 @@ The build emitted one non-fatal `-Wunused-but-set-variable` warning for
 configuration was changed; generated `sdkconfig`, `dependencies.lock`,
 `managed_components`, language output, and `build` content remain ignored.
 
-## Hardware Checklist - PENDING
+## Hardware Verification - COMPLETE
 
-- [ ] **PENDING:** Verify the intended ESP32-S3 serial target and Android device.
-- [ ] **PENDING:** Flash the exact merged-main artifact and verify flash hashes.
-- [ ] **PENDING:** Run the Android `Doi Wi-Fi` flow and receive a robot-scanned list.
-- [ ] **PENDING:** Select the target network without manual SSID fallback.
-- [ ] **PENDING:** Complete the following DH/AES BluFi connection without robot reset.
-- [ ] **PENDING:** Confirm credentials are accepted and the robot reconnects.
-- [ ] **PENDING:** Confirm serial output has no scan allocation, BLE allocation, or
-  BluFi security-timeout evidence during the physical flow.
-- [ ] **PENDING:** Confirm the mobile device page reports the robot online.
+- [x] Verified the attached ESP32-S3 serial target and Android device.
+- [x] Flashed the final local-main application image; esptool verified its hash.
+- [x] Reset the prior claim/Wi-Fi state and paired the robot to the new account.
+- [x] Received robot-scanned Wi-Fi lists repeatedly without manual SSID fallback.
+- [x] Cancelled the Wi-Fi screen, reconnected without robot reset, and scanned again.
+- [x] Rapidly requested rescan twice; one guarded scan completed and returned results.
+- [x] Completed DH/AES, credential delivery, Wi-Fi association, DHCP, BLE teardown,
+  cloud authentication, and account assignment.
+- [x] Re-entered Wi-Fi change mode after provisioning, repeated cancel/reconnect and
+  rescan, then restored the robot to an online Wi-Fi connection.
+- [x] Confirmed no `heap_alloc_failed`, `BLE_INIT: Malloc failed`, or BluFi security
+  timeout in the successful final flows.
 
-No firmware was flashed and no live Wi-Fi scan or provisioning success is claimed
-by this branch-verification record.
+Final hardware telemetry before Wi-Fi-list dispatch showed roughly 14.7-15.4 KiB
+free internal DMA with a 12 KiB largest DMA block. The original failing flow had
+less than 0.5 KiB free DMA and a largest block below 0.2 KiB. The final station join
+received an IP and emitted `connected to WiFi` while BluFi was still able to report
+success and tear down cleanly.
+
+All credential, network, token, account, device, MAC, and IP values are intentionally
+redacted from this record.
+
+## Broad Test Note
+
+The repository-wide `python3 -m pytest -q tests` run produced `1229 passed, 7 failed`.
+Four failures are unrelated WebSocket source-contract expectations against existing
+code, and three parity-checker tests cannot start because `node` is absent from the
+current shell. The BluFi/provisioning scoped gate above is fully green.
 
 ## Self-Review
 
 - No credential, SSID, token, account, device identifier, or other secret value is
   present.
-- No incomplete evidence marker is presented as completed evidence.
+- Hardware claims above are backed by the final flashed image and live serial/app
+  observations from this session.
 - Automated and build results are limited to the exact commands and branch HEAD
   recorded here.
-- Hardware validation is explicitly pending; there is no flash or live-scan claim.
 - `git diff --check` is required to pass before this record is committed.

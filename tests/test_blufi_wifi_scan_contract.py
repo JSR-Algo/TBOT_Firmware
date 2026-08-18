@@ -46,12 +46,75 @@ def test_blufi_wifi_scan_is_passive_to_preserve_internal_dma_heap():
 
     assert "wifi_scan_config_t scan_config" in body
     assert "scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE" in body
-    assert "scan_config.scan_time.passive" in body
+    assert "scan_config.scan_time.passive = WIFI_PASSIVE_SCAN_DEFAULT_TIME" in body
     scan_start_first_args = re.findall(r"esp_wifi_scan_start\(\s*([^,]+),", body)
     assert scan_start_first_args
     assert all(arg.strip() == "&scan_config" for arg in scan_start_first_args)
     assert "esp_wifi_scan_start(NULL, false)" not in body
     assert "esp_wifi_scan_start(nullptr, false)" not in body
+
+
+def test_blufi_stops_idle_wifi_radio_before_allocating_ble_list_buffers():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "void Blufi::_send_wifi_list")
+
+    stop_guard = body.index("!WifiManager::GetInstance().IsConnected()")
+    stop_wifi = body.index("WifiManager::GetInstance().StopRadio()", stop_guard)
+    send_list = body.index("esp_err_t err = esp_blufi_send_wifi_list")
+
+    assert stop_guard < stop_wifi < send_list
+    assert "Deinitialize()" not in body
+
+
+def test_wifi_manager_stop_radio_releases_runtime_buffers_without_deinitializing_driver():
+    source = read("components/esp-wifi-connect/wifi_manager.cc")
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    body = function_body(source, "bool WifiManager::StopRadio")
+
+    assert "bool StopRadio();" in header
+    assert "station_->Stop()" in body
+    assert "config_ap_->Stop()" in body
+    assert "esp_wifi_stop()" in body
+    assert "esp_wifi_deinit()" not in body
+    assert "station_.reset()" not in body
+    assert "config_ap_.reset()" not in body
+    assert "initialized_ = false" not in body
+
+
+def test_esp32s3_blufi_build_disables_unused_ble_features_to_preserve_dma_heap():
+    defaults = read("sdkconfig.defaults.esp32s3")
+
+    assert "CONFIG_BT_BLE_50_FEATURES_SUPPORTED=n" in defaults
+    assert "CONFIG_BT_BLE_SMP_ENABLE=n" in defaults
+    assert "CONFIG_BT_BLE_42_DTM_TEST_EN=n" in defaults
+    assert "CONFIG_BT_BLE_42_FEATURES_SUPPORTED=y" in defaults
+    assert "CONFIG_BT_BLE_42_ADV_EN=y" in defaults
+
+
+def test_esp32s3_blufi_build_is_sized_for_one_peripheral_connection():
+    defaults = read("sdkconfig.defaults.esp32s3")
+
+    assert "CONFIG_BT_GATTC_ENABLE=n" in defaults
+    # Bluedroid reserves GAP and GATT profiles before registering BluFi.
+    assert "CONFIG_BT_GATT_MAX_SR_PROFILES=3" in defaults
+    assert "CONFIG_BT_GATT_MAX_SR_ATTRIBUTES=16" in defaults
+    assert "CONFIG_BT_ACL_CONNECTIONS=1" in defaults
+    assert "CONFIG_BT_MULTI_CONNECTION_ENBALE=n" in defaults
+    assert "CONFIG_BT_CTRL_BLE_MAX_ACT=2" in defaults
+    assert "CONFIG_BT_CTRL_DTM_ENABLE=n" in defaults
+    assert "CONFIG_BT_CTRL_BLE_SCAN=n" in defaults
+    assert "CONFIG_BT_CTRL_BLE_SECURITY_ENABLE=n" in defaults
+
+
+def test_blufi_scan_reinitializes_wifi_after_list_dispatch_teardown():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::start_wifi_scan")
+
+    initialize = body.index("wifi_manager.Initialize()")
+    get_mode = body.index("esp_wifi_get_mode")
+    null_mode = body.index("current_mode == WIFI_MODE_NULL")
+
+    assert initialize < get_mode < null_mode
 
 
 def test_blufi_wifi_scan_caps_application_owned_candidates():

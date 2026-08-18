@@ -101,6 +101,36 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
     return true;
 }
 
+bool WifiManager::StopRadio() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!initialized_) {
+        return true;
+    }
+
+    if (station_active_ && station_) {
+        station_->Stop();
+        station_active_ = false;
+    }
+    if (config_mode_active_ && config_ap_) {
+        config_ap_->Stop();
+        config_mode_active_ = false;
+    }
+
+    // Provisioning scans start the radio directly through esp_wifi_* and are
+    // not reflected by station_active_/config_mode_active_. Stop the radio to
+    // release its DMA buffers while keeping the initialized driver available
+    // for a later BLE rescan without another large esp_wifi_init allocation.
+    const esp_err_t stop_ret = esp_wifi_stop();
+    if (stop_ret != ESP_OK && stop_ret != ESP_ERR_WIFI_NOT_INIT) {
+        ESP_LOGW(TAG, "WiFi radio stop returned: %s", esp_err_to_name(stop_ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "WiFi radio stopped; driver remains initialized");
+    return true;
+}
+
 bool WifiManager::IsInitialized() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return initialized_;

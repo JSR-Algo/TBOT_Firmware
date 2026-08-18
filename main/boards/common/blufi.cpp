@@ -79,7 +79,6 @@ static constexpr int kBlufiSuccessReportEnqueueAttempts = 3;
 static constexpr int kBlufiSuccessReportRetryBackoffMs = 100;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
 static constexpr uint16_t kMaxBlufiWifiScanCandidates = 8;
-static constexpr uint16_t kBlufiPassiveScanTimeMs = 120;
 
 enum class BleSessionPhase : uint64_t {
     kStopping = 0,
@@ -1871,16 +1870,48 @@ bool Blufi::start_wifi_scan() {
         return false;
     }
 
+    auto& wifi_manager = WifiManager::GetInstance();
+    if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
+        ESP_LOGE(BLUFI_TAG, "Failed to initialize WiFi manager for scan");
+        m_scan_in_progress = false;
+        return false;
+    }
+
     wifi_scan_config_t scan_config{};
     scan_config.show_hidden = false;
     scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
-    scan_config.scan_time.passive = kBlufiPassiveScanTimeMs;
+    scan_config.scan_time.passive = WIFI_PASSIVE_SCAN_DEFAULT_TIME;
 
     // Get current WiFi mode
-    wifi_mode_t current_mode;
+    wifi_mode_t current_mode = WIFI_MODE_NULL;
     esp_err_t err = esp_wifi_get_mode(&current_mode);
+    if (err != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Failed to get WiFi mode: %s", esp_err_to_name(err));
+        m_scan_in_progress = false;
+        return false;
+    }
 
-    if (current_mode == WIFI_MODE_AP) {
+    if (current_mode == WIFI_MODE_NULL) {
+        ESP_LOGI(BLUFI_TAG, "WiFi driver reinitialized for provisioning scan");
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
+            m_scan_in_progress = false;
+            return false;
+        }
+        err = esp_wifi_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after reinit: %s", esp_err_to_name(err));
+            m_scan_in_progress = false;
+            return false;
+        }
+        err = esp_wifi_scan_start(&scan_config, false);
+        if (err != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
+            m_scan_in_progress = false;
+            return false;
+        }
+    } else if (current_mode == WIFI_MODE_AP) {
         // If in AP mode, temporarily switch to APSTA to allow scanning
         ESP_LOGI(BLUFI_TAG, "WiFi in AP mode");
         err = esp_wifi_set_mode(WIFI_MODE_STA);
@@ -1986,6 +2017,18 @@ void Blufi::_send_wifi_list(std::vector<wifi_ap_record_t> m_ap_records) {
     // esp_blufi_send_wifi_list() performs two more internal allocations. Free
     // the driver-result cache first so those allocations see a contiguous heap.
     std::vector<wifi_ap_record_t>().swap(m_ap_records);
+
+    // Config-mode scanning temporarily starts the Wi-Fi radio. Stop it before
+    // BluFi allocates its BTC/GATT notification buffers; otherwise the list
+    // response can exhaust the small internal DMA heap shared by Wi-Fi and
+    // Bluetooth. Keep the driver initialized so a later BLE rescan only needs
+    // esp_wifi_start(), not another large allocation while GATT is active.
+    if (!WifiManager::GetInstance().IsConnected()) {
+        if (!WifiManager::GetInstance().StopRadio()) {
+            ESP_LOGW(BLUFI_TAG, "Failed to stop idle WiFi radio before list dispatch");
+        }
+    }
+    LogBlufiHeapSnapshot("wifi_list_before_dispatch");
     esp_err_t err = esp_blufi_send_wifi_list(blufi_ap_count, blufi_ap_list.data());
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to dispatch WiFi list: %s", esp_err_to_name(err));
