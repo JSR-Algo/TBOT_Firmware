@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,21 +47,25 @@ def test_blufi_wifi_scan_is_passive_to_preserve_internal_dma_heap():
     assert "wifi_scan_config_t scan_config" in body
     assert "scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE" in body
     assert "scan_config.scan_time.passive" in body
-    assert "esp_wifi_scan_start(&scan_config, false)" in body
+    scan_start_first_args = re.findall(r"esp_wifi_scan_start\(\s*([^,]+),", body)
+    assert scan_start_first_args
+    assert all(arg.strip() == "&scan_config" for arg in scan_start_first_args)
     assert "esp_wifi_scan_start(NULL, false)" not in body
+    assert "esp_wifi_scan_start(nullptr, false)" not in body
 
 
 def test_blufi_wifi_scan_caps_application_owned_candidates():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
-    cap = "std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates)"
+    cap = "ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);"
     assert "kMaxBlufiWifiScanCandidates" in source
     assert cap in body
-    assert body.index(cap) < body.index("m_ap_records.resize")
+    assert body.index(cap) < body.index("m_ap_records.resize(ap_num)")
+    assert body.index(cap) < body.index("esp_wifi_scan_get_ap_records(&ap_num")
 
 
-def test_blufi_wifi_list_dispatch_is_deferred_until_scan_callback_returns():
+def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_returns():
     source = read("main/boards/common/blufi.cpp")
     handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
