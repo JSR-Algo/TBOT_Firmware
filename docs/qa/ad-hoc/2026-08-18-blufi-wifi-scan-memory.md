@@ -2,8 +2,8 @@
 
 ## Scope
 
-This record covers the `fix/blufi-wifi-scan-memory` branch through firmware commit
-`c6d2249131d1a6984f13941d6eddc4da0f01b626`. It verifies the source-contract
+This record covers the `fix/blufi-wifi-scan-memory` branch through implementation
+commit `4d838612d6df7486faccdb011f1a3b9cfdf1ed15`. It verifies the source-contract
 regressions, the scoped provisioning gate, and an LCDWiki ES3C35P no-flash build.
 Physical flashing and the Android Wi-Fi scan/provisioning flow remain pending.
 
@@ -30,6 +30,7 @@ result ownership, and BluFi notification allocation occurring in the same window
 ca5b683e49badc0a5d84b638fbb3746872eaa80f test(blufi): tighten scan memory contracts
 fbdde44164ca6ab938fa89a51ff11c0fea3b251a fix(blufi): defer passive Wi-Fi scan delivery
 c6d2249131d1a6984f13941d6eddc4da0f01b626 fix(blufi): bind deferred scan to BLE session
+4d838612d6df7486faccdb011f1a3b9cfdf1ed15 fix(blufi): own deferred Wi-Fi scan results
 ```
 
 ## Task 1 RED
@@ -72,7 +73,7 @@ python3 -m pytest -q \
   tests/test_provisioning_log_redaction.py
 ```
 
-Result: exit `0`; `124 passed in 0.08s`.
+Result: exit `0`; `126 passed in 0.08s`.
 
 The implementation uses an explicit bounded passive scan, caps driver-result
 retrieval, clears the driver AP list, releases scan ownership before scheduling,
@@ -93,6 +94,36 @@ state, and exact connection epoch all to match; disconnect also clears the pendi
 send flag. A stale queued list is discarded and its cached records are released
 rather than crossing into a replacement connection.
 
+## Deferred-Result Ownership Race Review
+
+Review after the connection-epoch fix found a second race in the first deferred
+implementation. The queued callback still accessed the shared `m_ap_records`
+member. A repeated list request could start or consume newer scan state before the
+queued response ran, and an invalidated stale callback could clear records now
+owned by a newer request. Session identity prevented cross-client delivery, but it
+did not establish exclusive ownership of the result vector or serialize retries
+behind the queued dispatch.
+
+The ownership regression was verified by running the current focused tests against
+the prior `c6d2249` production files:
+
+```text
+2 failed, 124 passed; exit 1
+test_blufi_wifi_list_retry_waits_for_owned_deferred_dispatch
+test_blufi_stale_deferred_dispatch_only_destroys_its_owned_records
+```
+
+Commit `4d838612d6df7486faccdb011f1a3b9cfdf1ed15` fixes the race by transferring
+the completed scan vector out of shared state and moving it into the deferred
+callback. A monotonic dispatch epoch
+and pending-dispatch token reject retries while that owned response is queued and
+invalidate it on disconnect, restart, init, or deinit. The callback can destroy
+only its captured vector; it no longer clears or sends whatever records happen to
+be in `m_ap_records` when it eventually runs. Review confirmed that the pending
+token is cleared with compare-and-exchange only by its owning dispatch and that
+the existing setup-generation, BLE-session-state, and BLE-connection-epoch gates
+remain required before send.
+
 ## Scoped Automated Gate
 
 Command:
@@ -107,7 +138,7 @@ python3 -m pytest -q \
   tests/test_tbot_connect_runtime_fsm_contract.py
 ```
 
-Result: exit `0`; `201 passed in 0.16s`.
+Result: exit `0`; `203 passed in 0.37s`.
 
 ## LCDWiki Production Build
 
@@ -123,9 +154,9 @@ Result: exit `0`.
 board guard: OK: LCDWiki ES3C35P board confirmed in sdkconfig.
 build result: DONE: built + verified LCDWiki image (skipped flash; --no-flash).
 artifact: build/xiaozhi.bin
-artifact size: 3777760 bytes (0x39a4e0; approximately 3689 KiB)
-smallest app partition free: 0x55b20 bytes (9%)
-SHA-256: 20c24539c10e8ba024f8529bc0bf248c2f1c2ae179ae061bb2730ff068006393
+artifact size: 3778752 bytes (0x39a8c0)
+smallest app partition free: 0x55740 bytes (8%)
+SHA-256: 7479cdea7fe0f1778a19b1a82dd1f633f3e7da2bef48ee8e2a6c65bfaa071964
 ```
 
 The build emitted one non-fatal `-Wunused-but-set-variable` warning for
@@ -152,7 +183,7 @@ by this branch-verification record.
 
 - No credential, SSID, token, account, device identifier, or other secret value is
   present.
-- No placeholder evidence is presented as completed evidence.
+- No incomplete evidence marker is presented as completed evidence.
 - Automated and build results are limited to the exact commands and branch HEAD
   recorded here.
 - Hardware validation is explicitly pending; there is no flash or live-scan claim.
