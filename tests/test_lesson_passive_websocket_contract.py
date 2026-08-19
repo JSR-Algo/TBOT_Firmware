@@ -222,6 +222,9 @@ def test_passive_liveness_failure_has_one_reconnect_owner_even_if_disconnect_arr
     lesson_branch = closed[lesson_branch_start:lesson_branch_end]
     assert "PassiveReconnectHasOwner(" in lesson_branch
     assert "connect_in_flight_.load()" in lesson_branch
+    assert lesson_branch.index("RequestLessonStorageAbandonment();") < lesson_branch.index(
+        "SchedulePassiveLessonReconnect();"
+    )
 
 
 def test_websocket_passive_liveness_uses_privacy_safe_json_ping_and_consumes_pong():

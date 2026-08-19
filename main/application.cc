@@ -16,6 +16,7 @@
 #include "tbot_connect_mapper.h"
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_heap_probe.h"
+#include "lesson_asset_storage_coordinator.h"
 #endif
 #include "passive_reconnect_policy.h"
 #include "protocol_lifetime_token.h"
@@ -384,6 +385,8 @@ void Application::LessonMessageTask(void* arg) {
     auto* self = static_cast<Application*>(arg);
     LessonQueueItem item;
     const auto drain_terminal = [self]() {
+        constexpr int kLessonStorageAbandonMaxAttempts = 4;
+        constexpr uint32_t kLessonStorageAbandonRetryDelayMs = 10;
         if (!self->lesson_terminal_control_.WorkerShouldDrain()) {
             return false;
         }
@@ -399,7 +402,20 @@ void Application::LessonMessageTask(void* arg) {
                 break;
             }
         }
-        self->AbandonLessonStorageSession();
+        bool released = false;
+        for (int attempt = 0; attempt < kLessonStorageAbandonMaxAttempts; ++attempt) {
+            if (self->AbandonLessonStorageSession()) {
+                released = true;
+                break;
+            }
+            if (attempt + 1 < kLessonStorageAbandonMaxAttempts) {
+                vTaskDelay(pdMS_TO_TICKS(kLessonStorageAbandonRetryDelayMs));
+            }
+        }
+        if (!released) {
+            LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+            self->AbandonLessonStorageSession();
+        }
         return true;
     };
     for (;;) {
@@ -784,6 +800,7 @@ void Application::Run() {
             // reconnect keeps slow-period retrying for recovered endpoints.
             if (lesson_runtime_active_.load()) {
                 ESP_LOGI(TAG, "lesson error suppressed: %s", last_error_message_.c_str());
+                RequestLessonStorageAbandonment();
                 lesson_interactive_listen_generation_.fetch_add(1);
                 lesson_interactive_listen_pending_.store(false);
                 lesson_interactive_listening_active_.store(false);
@@ -3207,6 +3224,7 @@ void Application::InitializeProtocol() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this, callback_protocol]() {
             if (protocol_.get() != callback_protocol) return;
+            RequestLessonStorageAbandonment();
             auto display = Board::GetInstance().GetDisplay();
             if (!lesson_runtime_active_.load()) {
                 display->SetChatMessage("system", "");
@@ -3221,6 +3239,7 @@ void Application::InitializeProtocol() {
             }
             if (lesson_runtime_active_.load() && passive_ws_intent_.load()) {
                 while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+                RequestLessonStorageAbandonment();
                 if (PassiveReconnectHasOwner(reconnect_passive_.load(),
                                              connect_in_flight_.load())) {
                     ESP_LOGI(TAG, "lesson passive_liveness_reconnect_pending");

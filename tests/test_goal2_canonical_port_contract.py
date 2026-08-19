@@ -90,7 +90,9 @@ def test_transport_teardown_abandons_only_the_current_lesson_owner():
     passive = audio_closed[audio_closed.index("lesson_runtime_active_.load() && passive_ws_intent_.load()") :]
     passive = passive[: passive.index("if (connect_in_flight_.load())")]
     assert "SchedulePassiveLessonReconnect" in passive
-    assert "RequestLessonStorageAbandonment" not in passive
+    assert passive.index("RequestLessonStorageAbandonment") < passive.index(
+        "SchedulePassiveLessonReconnect"
+    )
     assert "RequestLessonStorageAbandonment" in audio_closed
     assert "RequestLessonStorageAbandonment" in reset
     assert "RequestLessonStorageAbandonment" in disconnected

@@ -142,6 +142,7 @@ public:
         lesson_runtime_active = active;
         if (active) lesson_terminal_audio_quiet = false;
     }
+    bool IsLessonRuntimeActive() const { return lesson_runtime_active; }
     void PlaySound(const std::string_view& sound) {
         play_sound_calls++;
         last_sound = std::string(sound);
