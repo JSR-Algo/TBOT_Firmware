@@ -120,6 +120,30 @@ def test_lcdwiki_es3c35p_reference_sdkconfig_passes_prod_gate(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_lcdwiki_es3c35p_prod_gate_rejects_nonproduction_websocket_seed(tmp_path):
+    sdkconfig = tmp_path / "sdkconfig.es3c35p-websocket"
+    sdkconfig.write_text(
+        lcdwiki_reference_sdkconfig().replace(
+            'CONFIG_WEBSOCKET_URL="wss://esp.tjbot.vn/tbot/v1/"',
+            'CONFIG_WEBSOCKET_URL="wss://preview.example/tbot/v1/"',
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/assert_lcdwiki_prod_config.py"),
+            str(sdkconfig),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "WebSocket URL must be" in result.stderr
+
+
 def test_lcdwiki_enables_release_cinematic_evidence():
     sdkconfig = lcdwiki_reference_sdkconfig()
 

@@ -39,7 +39,7 @@ def test_goal2_runtime_integration_points_exist_on_canonical_architecture():
     assert '#include "esp_build_identity.h"' in websocket
     identity = websocket.index("ReadRunningEspBuildIdentity")
     set_header = websocket.index("replacement_websocket->SetHeader", identity)
-    connect = websocket.index("websocket_->Connect", set_header)
+    connect = websocket.index("replacement_websocket->Connect", set_header)
     assert identity < set_header < connect
     assert "RegisterLessonStorageHilMcpTools" in mcp_server
     assert "TBOT_HIL_STORAGE_FAULTS_ENABLED non-production-image" in application
@@ -90,7 +90,9 @@ def test_transport_teardown_abandons_only_the_current_lesson_owner():
     passive = audio_closed[audio_closed.index("lesson_runtime_active_.load() && passive_ws_intent_.load()") :]
     passive = passive[: passive.index("if (connect_in_flight_.load())")]
     assert "SchedulePassiveLessonReconnect" in passive
-    assert "RequestLessonStorageAbandonment" not in passive
+    assert passive.index("RequestLessonStorageAbandonment") < passive.index(
+        "SchedulePassiveLessonReconnect"
+    )
     assert "RequestLessonStorageAbandonment" in audio_closed
     assert "RequestLessonStorageAbandonment" in reset
     assert "RequestLessonStorageAbandonment" in disconnected
@@ -124,7 +126,12 @@ def test_incoming_lesson_frame_uses_originating_transport_epoch():
     )
     assert "const std::uint64_t callback_transport_epoch =" in websocket_open
     assert "IncomingJsonTransportEpoch()" in websocket_open
-    assert "[this, connection_epoch, callback_transport_epoch]" in websocket_open
+    on_data = websocket_open[websocket_open.index("candidate_websocket->OnData([") :]
+    capture = on_data[: on_data.index("](")]
+    assert "this" in capture
+    assert "connection_epoch" in capture
+    assert "callback_transport_epoch" in capture
+    assert "hello_signal" in capture
     assert "on_incoming_json_(root, callback_transport_epoch);" in websocket_open
     assert "[this, display, is_websocket_protocol](" in incoming
     assert "const cJSON* root, std::uint64_t callback_transport_epoch" in incoming

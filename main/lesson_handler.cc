@@ -773,6 +773,12 @@ struct LessonSession {
     std::deque<AckReplay> ack_history;
 };
 LessonSession g_session;
+struct PendingLessonStorageRelease {
+    std::string assignment_id;
+    std::string session_id;
+    std::uint64_t generation = 0;
+};
+PendingLessonStorageRelease g_pending_storage_release;
 LessonLayerState g_layer_state;
 std::atomic<std::uint64_t> g_visual_callback_token{0};
 std::atomic<std::uint64_t> g_visual_completion_nonce{0};
@@ -1828,26 +1834,70 @@ bool DispatchLessonVisualCompletion(
 // espTft lesson_step. Additive: never reached for the 8 legacy types, the voice
 // path, or the MCP arm tools.
 bool Application::AbandonLessonStorageSession() {
-    if (g_session.lesson_asset_generation == 0) return false;
     const std::string assignment_id = g_session.assignment_id;
     const std::string session_id = g_session.session_id;
     const std::uint64_t generation = g_session.lesson_asset_generation;
-    if (!LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
-            assignment_id, session_id, generation)) {
-        return false;
+    const std::string renderer_id = g_session.cinematic_renderer_id;
+    const bool had_lesson_owner = generation != 0 || g_session.prepared || g_session.running ||
+        g_session.paused || !renderer_id.empty() || IsLessonRuntimeActive();
+
+    // Renderer file handles retain exact-generation read leases. Discard them
+    // before ending the owner so transport teardown cannot leave SD mutation
+    // blocked by the renderer it is trying to abandon.
+    if (renderer_id == tbot::kLessonRendererV5) {
+        if (auto* renderer = tbot::ActiveLessonLayeredCinematicRenderer()) {
+            renderer->DiscardSession();
+        }
+        tbot::SetLessonCinematicTimerRouteV5(false);
+    } else if (renderer_id == tbot::kLessonRendererV4) {
+        if (auto* renderer = tbot::ActiveLessonFlattenedCinematicRenderer()) {
+            renderer->DiscardSession();
+        }
+        tbot::SetLessonCinematicTimerRouteV4(false);
+    } else if (renderer_id == tbot::kLessonRendererV3) {
+        if (auto* renderer = tbot::ActiveLessonCinematicRenderer()) {
+            renderer->DiscardSession();
+        }
     }
-    if (g_session.assignment_id == assignment_id &&
+
+    if (g_pending_storage_release.generation == 0 && generation != 0) {
+        g_pending_storage_release = {assignment_id, session_id, generation};
+    }
+
+    if (had_lesson_owner && g_session.assignment_id == assignment_id &&
         g_session.session_id == session_id &&
         g_session.lesson_asset_generation == generation) {
-        g_session.lesson_asset_generation = 0;
-        g_session.running = false;
-        g_session.paused = false;
-        g_session.prepared = false;
-        ClearTerminalLessonCursor();
         CancelLessonInteractiveListening();
         SetLessonRuntimeActive(false);
+        g_layer_state.ClearAll();
+        g_session = LessonSession{};
+
+        Display* display = Board::GetInstance().GetDisplay();
+        LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+        if (display != nullptr) {
+            Schedule([display, lvgl_display]() {
+                if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
+                if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonRobotOverlay(nullptr);
+                if (lvgl_display) lvgl_display->SetLessonTeachingWord("");
+                if (lvgl_display) lvgl_display->SetLessonMode(false);
+                display->SetLessonCaption("");
+                display->ClearChatMessages();
+            });
+        }
     }
-    return true;
+
+    if (g_pending_storage_release.generation == 0) return false;
+    auto& coordinator = LessonAssetStorageCoordinator::GetInstance();
+    const bool ended = coordinator.EndLessonSession(
+        g_pending_storage_release.assignment_id,
+        g_pending_storage_release.session_id,
+        g_pending_storage_release.generation);
+    if (ended || !coordinator.HasLessonSession()) {
+        g_pending_storage_release = PendingLessonStorageRelease{};
+    }
+    return ended;
 }
 
 void Application::HandleLessonMessage(const cJSON* root) {

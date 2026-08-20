@@ -7105,6 +7105,93 @@ void test_abandon_lesson_storage_session_noop_failure_and_success() {
             "storage mutation can acquire immediately after successful abandon");
 }
 
+void test_renderer_v5_transport_abandon_releases_lesson_mode_and_storage() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+
+    Handle(V5PrepareFrame(1));
+    Handle(V5Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"flyIn\","
+        "\"commandSequenceId\":92}}"));
+    require(App().lesson_runtime_active && renderer.prepared(),
+            "renderer-v5 step owns lesson mode before transport loss");
+    require(!display.lesson_mode_calls.empty() && display.lesson_mode_calls.back(),
+            "renderer-v5 step hides the normal conversation face");
+    App().BeginLessonTerminalAudioQuiet();
+
+    require(App().AbandonLessonStorageSession(),
+            "current transport abandonment releases the renderer-v5 owner");
+    require(!App().lesson_runtime_active,
+            "transport abandonment clears the firmware lesson-mode latch");
+    require(!renderer.prepared() && fake.closes == 1 && fake.frees == 4,
+            "transport abandonment discards renderer-v5 resources");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "transport abandonment releases storage ownership");
+    require(!display.background_calls.empty() && !display.background_calls.back() &&
+                !display.object_calls.empty() && !display.object_calls.back() &&
+                !display.overlay_calls.empty() && !display.overlay_calls.back(),
+            "transport abandonment clears all lesson layers");
+    require(!display.lesson_mode_calls.empty() && !display.lesson_mode_calls.back(),
+            "transport abandonment restores the normal conversation face");
+    require(App().lesson_terminal_audio_quiet,
+            "transport abandonment preserves late terminal TTS quarantine");
+    auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation),
+            "normal MCP and SD mutation reacquires immediately after cleanup");
+
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    Board::GetInstance().display_ = nullptr;
+}
+
+void test_renderer_v5_transport_abandon_retries_storage_after_reader_release() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+
+    Handle(V5PrepareFrame(1));
+    auto owner = LessonAssetStorageCoordinator::GetInstance().TryBeginLessonSession(AID(), SID());
+    require(owner.acquired && owner.idempotent,
+            "renderer-v5 disconnect retry test owns the prepared asset session");
+    auto retained = LessonAssetStorageCoordinator::GetInstance().TryRetainLessonSession(
+        AID(), SID(), owner.generation);
+    require(static_cast<bool>(retained),
+            "renderer-v5 disconnect retry test holds a blocking read lease");
+
+    require(!App().AbandonLessonStorageSession(),
+            "transport abandonment reports the temporarily blocked exact release");
+    require(!App().lesson_runtime_active && !renderer.prepared(),
+            "blocked storage release still clears renderer and runtime ownership immediately");
+    require(!display.lesson_mode_calls.empty() && !display.lesson_mode_calls.back(),
+            "blocked storage release still restores the normal conversation face");
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "blocked storage release retains coordinator ownership for an exact retry");
+
+    retained = {};
+    require(App().AbandonLessonStorageSession(),
+            "transport abandonment retries the retained exact storage identity");
+    require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "retry releases storage ownership after the blocking reader exits");
+    auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+    require(static_cast<bool>(mutation),
+            "normal MCP and SD mutation reacquires after the bounded cleanup retry");
+
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    Board::GetInstance().display_ = nullptr;
+}
+
 void test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release() {
     ResetObservable();
     FreshSession();
@@ -7639,6 +7726,8 @@ int main() {
     test_republished_not_ready_candidate_uses_isolated_stream();
     test_lesson_asset_reservation_retained_across_runtime_and_terminal_release();
     test_abandon_lesson_storage_session_noop_failure_and_success();
+    test_renderer_v5_transport_abandon_releases_lesson_mode_and_storage();
+    test_renderer_v5_transport_abandon_retries_storage_after_reader_release();
     test_lesson_asset_reservation_foreign_and_stale_terminal_cannot_release();
     test_prepare_reject_preserves_active_lesson_scene();
     test_version_profile_gate();

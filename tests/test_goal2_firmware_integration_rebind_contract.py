@@ -50,10 +50,9 @@ def test_exact_rebased_source_and_test_destinations_exist():
     )
     assert all((ROOT / destination).is_file() for destination in destinations)
     runner = read("scripts/run_goal2_firmware_rebind_full_python.sh")
-    assert "CONFIG_JD_USE_ROM=y" in runner
+    assert "CONFIG_JD_USE_ROM=y" not in runner
+    assert 'SDKCONFIG="${ROOT}/sdkconfig"' not in runner
     assert "trap cleanup EXIT INT TERM" in runner
-    assert 'cp -p "${SDKCONFIG}" "${SDKCONFIG_BACKUP}"' in runner
-    assert 'rm -f "${SDKCONFIG}"' in runner
     assert "python3 -m pytest -q" in runner
     assert "worktree changed during full Python gate" in runner
     assert "stat -f" not in runner
@@ -78,7 +77,7 @@ def test_websocket_emits_build_identity_on_canonical_transport_before_connect():
     assert '#include "esp_build_identity.h"' in source
     identity = source.index("ReadRunningEspBuildIdentity")
     set_header = source.index("replacement_websocket->SetHeader", identity)
-    connect = source.index("websocket_->Connect", set_header)
+    connect = source.index("replacement_websocket->Connect", set_header)
     assert identity < set_header < connect
 
 

@@ -14,7 +14,7 @@ DECODER_SOURCE = ROOT / "main/display/lvgl_display/jpg/jpeg_to_image.c"
 DECODER_HEADER = ROOT / "main/display/lvgl_display/jpg/jpeg_to_image.h"
 ENCODER_SOURCE = ROOT / "main/display/lvgl_display/jpg/image_to_jpeg.cpp"
 COMPONENT_MANIFEST = ROOT / "main/idf_component.yml"
-SDKCONFIG = ROOT / "sdkconfig"
+DECODER_KCONFIG = ROOT / "managed_components/espressif__esp_jpeg/Kconfig"
 ROM_BUILD_VERIFY = ROOT / "scripts/verify_rom_jpeg_build.sh"
 
 
@@ -90,10 +90,14 @@ def test_rom_decoder_component_is_direct_and_new_jpeg_remains_encoder_only():
     decoder = DECODER_SOURCE.read_text(encoding="utf-8")
     encoder = ENCODER_SOURCE.read_text(encoding="utf-8")
     manifest = COMPONENT_MANIFEST.read_text(encoding="utf-8")
-    sdkconfig = SDKCONFIG.read_text(encoding="utf-8")
+    decoder_kconfig = DECODER_KCONFIG.read_text(encoding="utf-8")
+    rom_config = decoder_kconfig.split("config JD_USE_ROM", 1)[1].split(
+        "config JD_SZBUF", 1
+    )[0]
 
     assert "espressif/esp_jpeg: 1.3.1" in manifest
-    assert "CONFIG_JD_USE_ROM=y" in sdkconfig
+    assert "depends on ESP_ROM_HAS_JPEG_DECODE" in rom_config
+    assert "default y" in rom_config
     assert "jpeg_dec_open" not in decoder
     assert "jpeg_dec_process" not in decoder
     assert '#include "esp_jpeg_enc.h"' in encoder

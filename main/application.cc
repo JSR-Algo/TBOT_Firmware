@@ -16,6 +16,7 @@
 #include "tbot_connect_mapper.h"
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_heap_probe.h"
+#include "lesson_asset_storage_coordinator.h"
 #endif
 #include "passive_reconnect_policy.h"
 #include "protocol_lifetime_token.h"
@@ -384,6 +385,8 @@ void Application::LessonMessageTask(void* arg) {
     auto* self = static_cast<Application*>(arg);
     LessonQueueItem item;
     const auto drain_terminal = [self]() {
+        constexpr int kLessonStorageAbandonMaxAttempts = 4;
+        constexpr uint32_t kLessonStorageAbandonRetryDelayMs = 10;
         if (!self->lesson_terminal_control_.WorkerShouldDrain()) {
             return false;
         }
@@ -399,7 +402,20 @@ void Application::LessonMessageTask(void* arg) {
                 break;
             }
         }
-        self->AbandonLessonStorageSession();
+        bool released = false;
+        for (int attempt = 0; attempt < kLessonStorageAbandonMaxAttempts; ++attempt) {
+            if (self->AbandonLessonStorageSession()) {
+                released = true;
+                break;
+            }
+            if (attempt + 1 < kLessonStorageAbandonMaxAttempts) {
+                vTaskDelay(pdMS_TO_TICKS(kLessonStorageAbandonRetryDelayMs));
+            }
+        }
+        if (!released) {
+            LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+            self->AbandonLessonStorageSession();
+        }
         return true;
     };
     for (;;) {
@@ -784,6 +800,7 @@ void Application::Run() {
             // reconnect keeps slow-period retrying for recovered endpoints.
             if (lesson_runtime_active_.load()) {
                 ESP_LOGI(TAG, "lesson error suppressed: %s", last_error_message_.c_str());
+                RequestLessonStorageAbandonment();
                 lesson_interactive_listen_generation_.fetch_add(1);
                 lesson_interactive_listen_pending_.store(false);
                 lesson_interactive_listening_active_.store(false);
@@ -3207,6 +3224,7 @@ void Application::InitializeProtocol() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this, callback_protocol]() {
             if (protocol_.get() != callback_protocol) return;
+            RequestLessonStorageAbandonment();
             auto display = Board::GetInstance().GetDisplay();
             if (!lesson_runtime_active_.load()) {
                 display->SetChatMessage("system", "");
@@ -3221,6 +3239,7 @@ void Application::InitializeProtocol() {
             }
             if (lesson_runtime_active_.load() && passive_ws_intent_.load()) {
                 while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+                RequestLessonStorageAbandonment();
                 if (PassiveReconnectHasOwner(reconnect_passive_.load(),
                                              connect_in_flight_.load())) {
                     ESP_LOGI(TAG, "lesson passive_liveness_reconnect_pending");
@@ -3346,15 +3365,12 @@ void Application::InitializeProtocol() {
                 auto reason = cJSON_GetObjectItem(root, "reason");
                 bool is_interrupt = cJSON_IsString(reason) &&
                                     strcmp(reason->valuestring, "interrupt") == 0;
-                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
-                bool force_continue_listening = cJSON_IsTrue(continue_listening);
-                auto listen_mode = cJSON_GetObjectItem(root, "listen_mode");
-                bool force_realtime_listen = cJSON_IsString(listen_mode) &&
-                                             strcmp(listen_mode->valuestring, "realtime") == 0;
-                bool explicit_stop_listening =
-                    cJSON_IsBool(continue_listening) && !cJSON_IsTrue(continue_listening) &&
-                    cJSON_IsString(listen_mode) &&
-                    strcmp(listen_mode->valuestring, "manual") == 0;
+                auto drain_id = cJSON_GetObjectItem(root, "drainId");
+                std::string tts_drain_id;
+                if (cJSON_IsString(drain_id) &&
+                    strlen(drain_id->valuestring) <= 64) {
+                    tts_drain_id = drain_id->valuestring;
+                }
                 const std::uint64_t stopped_audio_generation =
                     static_cast<std::uint64_t>(speaking_generation_.load()) + 1;
                 if (is_interrupt) {
@@ -3367,6 +3383,15 @@ void Application::InitializeProtocol() {
                     ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lu%03lu",
                              t_recv_sec, t_recv_ms);
                 }
+                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
+                bool force_continue_listening = cJSON_IsTrue(continue_listening);
+                auto listen_mode = cJSON_GetObjectItem(root, "listen_mode");
+                bool force_realtime_listen = cJSON_IsString(listen_mode) &&
+                                             strcmp(listen_mode->valuestring, "realtime") == 0;
+                bool explicit_stop_listening =
+                    cJSON_IsBool(continue_listening) && !cJSON_IsTrue(continue_listening) &&
+                    cJSON_IsString(listen_mode) &&
+                    strcmp(listen_mode->valuestring, "manual") == 0;
                 // NOTE: for a NORMAL end-of-turn stop we deliberately do NOT
                 // ResetDecoder — that cut the final 200-500ms of every response
                 // because the server sends `tts state=stop` immediately after
@@ -3375,9 +3400,21 @@ void Application::InitializeProtocol() {
                 // chuyển sang đang lắng nghe". Normal stops rely on natural queue
                 // drain; only the interrupt branch above cuts early.
                 Schedule([this, force_continue_listening, force_realtime_listen,
-                          explicit_stop_listening, stopped_audio_generation]() {
+                          explicit_stop_listening, stopped_audio_generation,
+                          is_interrupt, tts_drain_id]() {
                     ++speaking_generation_;
                     last_speaking_activity_ms_.store(0);
+                    if (!is_interrupt && !tts_drain_id.empty()) {
+                        const bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(
+                            kTtsStopPlaybackDrainTimeoutMs);
+                        if (playback_drained) {
+                            if (protocol_) protocol_->SendTtsDrainAck(tts_drain_id);
+                        } else {
+                            ESP_LOGW(TAG,
+                                     "tts_stop_playback_drain_timeout timeout_ms=%lu action=drain_ack",
+                                     static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                        }
+                    }
                     const bool lesson_interactive_turn =
                         lesson_interactive_listen_pending_.load() ||
                         lesson_interactive_listening_active_.load();

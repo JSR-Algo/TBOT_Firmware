@@ -90,6 +90,21 @@ void Protocol::SendMcpMessage(const std::string& payload) {
     SendText(message);
 }
 
+void Protocol::SendTtsDrainAck(const std::string& drain_id) {
+    cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) return;
+    cJSON_AddStringToObject(root, "type", "tts_ack");
+    cJSON_AddStringToObject(root, "state", "stop");
+    cJSON_AddStringToObject(root, "drainId", drain_id.c_str());
+    cJSON_AddStringToObject(root, "session_id", session_id_.c_str());
+    char* encoded = cJSON_PrintUnformatted(root);
+    if (encoded != nullptr) {
+        SendText(encoded);
+        cJSON_free(encoded);
+    }
+    cJSON_Delete(root);
+}
+
 bool Protocol::SendLessonFrame(const std::string& frame) {
     // US-006 Slice-01: the lesson frame is already a complete envelope (built by
     // lesson_handler.cc); send it verbatim. Additive — does not touch the voice/MCP

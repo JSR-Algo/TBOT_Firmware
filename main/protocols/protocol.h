@@ -107,6 +107,7 @@ public:
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    void SendTtsDrainAck(const std::string& drain_id);
     // US-006 Slice-01: send a pre-built lesson_* control frame (a complete envelope)
     // over the realtime channel. Additive PUBLIC sender — SendText is protected.
     // Inherited unchanged by both the WebSocket and MQTT transports.

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
+PRODUCTION_WEBSOCKET_URL = "wss://esp.tjbot.vn/tbot/v1/"
 
 
 def main() -> int:
@@ -20,6 +21,13 @@ def main() -> int:
 
     if not re.search(rf'^CONFIG_OTA_URL="{re.escape(PRODUCTION_OTA_URL)}"$', sdkconfig, re.MULTILINE):
         failures.append(f'CONFIG_OTA_URL must be "{PRODUCTION_OTA_URL}" for production robot bootstrap')
+
+    if not re.search(
+        rf'^CONFIG_WEBSOCKET_URL="{re.escape(PRODUCTION_WEBSOCKET_URL)}"$',
+        sdkconfig,
+        re.MULTILINE,
+    ):
+        failures.append(f'WebSocket URL must be "{PRODUCTION_WEBSOCKET_URL}" for production robot sessions')
 
     if re.search(r"^CONFIG_MBEDTLS_HARDWARE_AES=y$", sdkconfig, re.MULTILINE):
         failures.append("Hardware AES must stay disabled for LCDWiki production builds")

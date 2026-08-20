@@ -85,3 +85,13 @@ def test_periodic_sys_metrics_emits_stable_audio_stack_fields():
         "psram_free_b=%u",
     ):
         assert field in log
+
+
+def test_opus_worker_stack_uses_the_measured_named_budget():
+    header = read("main/audio/audio_service.h")
+    source = read("main/audio/audio_service.cc")
+
+    assert "former 24 KiB allocation reported 16.9 KiB unused" in header
+    assert "kOpusCodecTaskStackBytes = 12 * 1024" in header
+    assert '"opus_codec", kOpusCodecTaskStackBytes' in source
+    assert "2048 * 12" not in source
