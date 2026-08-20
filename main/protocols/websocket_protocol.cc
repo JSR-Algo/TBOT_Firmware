@@ -594,6 +594,7 @@ std::string WebsocketProtocol::GetHelloMessage() {
     // Absence == no support; the ESP Server MUST NOT send lesson_prepare to firmware
     // that did not advertise this. Purely additive — does not disturb aec/mcp/voice.
     cJSON_AddBoolToObject(features, "lesson", true);
+    cJSON_AddBoolToObject(features, "lessonAudioDrainAck", true);
     cJSON_AddStringToObject(features, "renderer", kLessonRendererName);
     AddLessonRendererFeatures(features);
 #endif

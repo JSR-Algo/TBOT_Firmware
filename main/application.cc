@@ -3365,6 +3365,12 @@ void Application::InitializeProtocol() {
                 auto reason = cJSON_GetObjectItem(root, "reason");
                 bool is_interrupt = cJSON_IsString(reason) &&
                                     strcmp(reason->valuestring, "interrupt") == 0;
+                auto drain_id = cJSON_GetObjectItem(root, "drainId");
+                std::string tts_drain_id;
+                if (cJSON_IsString(drain_id) &&
+                    strlen(drain_id->valuestring) <= 64) {
+                    tts_drain_id = drain_id->valuestring;
+                }
                 const std::uint64_t stopped_audio_generation =
                     static_cast<std::uint64_t>(speaking_generation_.load()) + 1;
                 if (is_interrupt) {
@@ -3394,9 +3400,21 @@ void Application::InitializeProtocol() {
                 // chuyển sang đang lắng nghe". Normal stops rely on natural queue
                 // drain; only the interrupt branch above cuts early.
                 Schedule([this, force_continue_listening, force_realtime_listen,
-                          explicit_stop_listening, stopped_audio_generation]() {
+                          explicit_stop_listening, stopped_audio_generation,
+                          is_interrupt, tts_drain_id]() {
                     ++speaking_generation_;
                     last_speaking_activity_ms_.store(0);
+                    if (!is_interrupt && !tts_drain_id.empty()) {
+                        const bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(
+                            kTtsStopPlaybackDrainTimeoutMs);
+                        if (playback_drained) {
+                            if (protocol_) protocol_->SendTtsDrainAck(tts_drain_id);
+                        } else {
+                            ESP_LOGW(TAG,
+                                     "tts_stop_playback_drain_timeout timeout_ms=%lu action=drain_ack",
+                                     static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                        }
+                    }
                     const bool lesson_interactive_turn =
                         lesson_interactive_listen_pending_.load() ||
                         lesson_interactive_listening_active_.load();
