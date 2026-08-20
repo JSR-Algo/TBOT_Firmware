@@ -3365,15 +3365,6 @@ void Application::InitializeProtocol() {
                 auto reason = cJSON_GetObjectItem(root, "reason");
                 bool is_interrupt = cJSON_IsString(reason) &&
                                     strcmp(reason->valuestring, "interrupt") == 0;
-                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
-                bool force_continue_listening = cJSON_IsTrue(continue_listening);
-                auto listen_mode = cJSON_GetObjectItem(root, "listen_mode");
-                bool force_realtime_listen = cJSON_IsString(listen_mode) &&
-                                             strcmp(listen_mode->valuestring, "realtime") == 0;
-                bool explicit_stop_listening =
-                    cJSON_IsBool(continue_listening) && !cJSON_IsTrue(continue_listening) &&
-                    cJSON_IsString(listen_mode) &&
-                    strcmp(listen_mode->valuestring, "manual") == 0;
                 const std::uint64_t stopped_audio_generation =
                     static_cast<std::uint64_t>(speaking_generation_.load()) + 1;
                 if (is_interrupt) {
@@ -3386,6 +3377,15 @@ void Application::InitializeProtocol() {
                     ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lu%03lu",
                              t_recv_sec, t_recv_ms);
                 }
+                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
+                bool force_continue_listening = cJSON_IsTrue(continue_listening);
+                auto listen_mode = cJSON_GetObjectItem(root, "listen_mode");
+                bool force_realtime_listen = cJSON_IsString(listen_mode) &&
+                                             strcmp(listen_mode->valuestring, "realtime") == 0;
+                bool explicit_stop_listening =
+                    cJSON_IsBool(continue_listening) && !cJSON_IsTrue(continue_listening) &&
+                    cJSON_IsString(listen_mode) &&
+                    strcmp(listen_mode->valuestring, "manual") == 0;
                 // NOTE: for a NORMAL end-of-turn stop we deliberately do NOT
                 // ResetDecoder — that cut the final 200-500ms of every response
                 // because the server sends `tts state=stop` immediately after

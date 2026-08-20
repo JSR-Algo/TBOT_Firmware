@@ -127,6 +127,10 @@ struct AudioTaskStackHighWaterMarks {
 
 class AudioService {
 public:
+    // Telemetry on the former 24 KiB allocation reported 16.9 KiB unused
+    // (~7.1 KiB peak use), so 12 KiB retains ~4.9 KiB measured headroom.
+    static constexpr uint32_t kOpusCodecTaskStackBytes = 12 * 1024;
+
     AudioService();
     ~AudioService();
 

@@ -199,7 +199,7 @@ void AudioService::Start() {
             audio_service->opus_codec_task_handle_ = nullptr;
         }
         vTaskDelete(NULL);
-    }, "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+    }, "opus_codec", kOpusCodecTaskStackBytes, this, 2, &opus_codec_task_handle_);
 }
 
 AudioTaskStackHighWaterMarks AudioService::GetTaskStackHighWaterMarks() {
