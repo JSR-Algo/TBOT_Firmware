@@ -994,11 +994,11 @@ std::string BuildLessonEmbodiedAck(
     cJSON* root = cJSON_CreateObject();
     cJSON* body = cJSON_CreateObject();
     cJSON* embodied = cJSON_CreateObject();
-    if (root == nullptr || body == nullptr || embodied == nullptr) {
-        cJSON_Delete(root);
-        cJSON_Delete(body);
-        cJSON_Delete(embodied);
-        return "";
+    if (root == nullptr || body == nullptr || embodied == nullptr) {  // GCOVR_EXCL_LINE
+        cJSON_Delete(root);  // GCOVR_EXCL_LINE: cJSON allocator fault injection is not isolated per builder.
+        cJSON_Delete(body);  // GCOVR_EXCL_LINE: same defensive partial-allocation cleanup.
+        cJSON_Delete(embodied);  // GCOVR_EXCL_LINE: same defensive partial-allocation cleanup.
+        return "";  // GCOVR_EXCL_LINE: device OOM fallback; host cannot target this builder safely.
     }
     cJSON_AddStringToObject(root, "type", "lesson_ack");
     cJSON_AddStringToObject(root, "assignmentId", assignment_id);
@@ -1027,7 +1027,7 @@ const char* EmbodiedOutcome(LessonEmbodiedMotionResult result) {
     case LessonEmbodiedMotionResult::kDegraded: return "degraded";
     case LessonEmbodiedMotionResult::kRejected: return "rejected";
     }
-    return "rejected";
+    return "rejected";  // GCOVR_EXCL_LINE: exhaustive LessonEmbodiedMotionResult defense.
 }
 
 void ClearActiveLessonEmbodiedAction() {

@@ -880,6 +880,264 @@ void test_embodied_action_fail_closed_capability_focus_and_timer_failure() {
     Board::GetInstance().display_ = nullptr;
 }
 
+void CompleteEmbodiedAction() {
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+}
+
+void test_embodied_software_journeys_16_through_20() {
+    // Journey 16: authored left/right focus stays aligned with the safe physical preset.
+    ResetObservable();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    int sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "alignment-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "alignment-step", "journey-16-left", 1));
+    require(std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.left.choice" &&
+                App().robot_uart_.calls ==
+                    std::vector<std::string>({"head_percent:25", "left_percent:45", "right_percent:0"}),
+            "journey 16 keeps left focus and motion aligned");
+    Handle(EmbodiedActionFrame(sequence + 2, "alignment-step", "journey-16-right", 2,
+                               "PRESENT_RIGHT", "focus.right.choice"));
+    require(std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.right.choice" &&
+                App().robot_uart_.calls.size() == 9 &&
+                App().robot_uart_.calls[6] == "head_percent:75" &&
+                App().robot_uart_.calls[7] == "left_percent:0" &&
+                App().robot_uart_.calls[8] == "right_percent:45",
+            "journey 16 keeps right focus and motion aligned after safe supersession");
+    CompleteEmbodiedAction();
+
+    // Journey 17: a lost terminal ACK keeps the action consumed and never replays motion.
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "lost-ack-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    const std::string lost_ack_action =
+        EmbodiedActionFrame(sequence + 1, "lost-ack-step", "journey-17", 1);
+    Handle(lost_ack_action);
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    HostEspFireTimer();
+    App().protocol_.reset();
+    App().DrainLessonEmbodiedQueue();
+    const auto calls_after_lost_ack = App().robot_uart_.calls;
+    App().protocol_ = std::make_unique<Protocol>();
+    Handle(lost_ack_action);
+    require(App().robot_uart_.calls == calls_after_lost_ack && Sent().empty(),
+            "journey 17 does not replay physical motion when a terminal ACK is lost");
+    Handle(EmbodiedCancelFrame(sequence + 2, "lost-ack-step", "journey-17", 1));
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == 1 && FrameBodyNum(0, "acks") == sequence + 2,
+            "journey 17 remains recoverable through an exact cancel after ACK loss");
+
+    // Journey 18: opening the child's assessment window cancels motion before listening.
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "barge-source", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "barge-source", "journey-18", 1));
+    const auto barge_stale_callback = HostEspQueueTimerCallback();
+    const size_t calls_before_barge = App().robot_uart_.calls.size();
+    Handle(StepFrame(sequence + 2, "barge-listen", "http://x/p2.jpg", "http://x/o2.jpg",
+                     "http://x/r2.jpg", ",\"completionClass\":\"interactive\",\"prompt\":\"What do you see?\""));
+    require(App().robot_uart_.calls.size() == calls_before_barge + 3 &&
+                App().prepare_listen_calls > 0,
+            "journey 18 restores rest before opening child listening");
+    const size_t frames_after_barge = Sent().size();
+    HostEspInvokeQueuedCallback(barge_stale_callback);
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == frames_after_barge,
+            "journey 18 suppresses the cancelled action callback during child listening");
+
+    // Journey 19: emotional sharing uses the calm supportive face and bounded pose.
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "calm-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "calm-step", "journey-19", 1,
+                               "COMFORT_CALM", "focus.center.primary"));
+    require(display.last_emotion == "relaxed" &&
+                std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.center.primary" &&
+                App().robot_uart_.calls ==
+                    std::vector<std::string>({"head_percent:50", "left_percent:10", "right_percent:10"}),
+            "journey 19 applies the calm supportive face and bounded pose");
+    CompleteEmbodiedAction();
+
+    // Journey 20: reduced motion completes with face/focus only and a settled degraded ACK.
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "reduced-journey", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    tbot::SetLessonCourseModeCapabilityForTest(true, true);
+    const size_t reduced_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "reduced-journey", "journey-20", 1,
+                               "LISTEN_STILL", "focus.center.primary"));
+    require(App().robot_uart_.calls.empty() && display.last_emotion == "relaxed",
+            "journey 20 reduced motion uses face and focus without servo commands");
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(FrameBodyStr(reduced_before, "embodiedAction", "outcome") == "degraded" &&
+                FrameEmbodiedBool(reduced_before, "returnedToRest", false),
+            "journey 20 completes with a settled degraded ACK");
+    tbot::SetLessonCourseModeCapabilityForTest(true, false);
+    Board::GetInstance().display_ = nullptr;
+}
+
+void test_embodied_lifecycle_failure_and_teardown_paths() {
+    ResetObservable();
+    FreshSession();
+    Handle(EmbodiedActionFrame(1, "not-running", "outside-session", 1));
+    require(Sent().empty() && App().robot_uart_.calls.empty(),
+            "embodied action outside a running lesson is ignored");
+
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    int sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "assessment-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"interactive\",\"prompt\":\"Your turn\""));
+    const size_t assessment_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "assessment-step", "assessment-open", 1));
+    require(Sent().size() == assessment_before + 1 &&
+                FrameBodyStr(assessment_before, "embodiedAction", "outcome") == "rejected" &&
+                App().robot_uart_.calls.empty(),
+            "assessment-open action is rejected without physical motion");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "no-face-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Board::GetInstance().display_ = nullptr;
+    const size_t no_face_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "no-face-step", "no-face", 1));
+    CompleteEmbodiedAction();
+    require(FrameBodyStr(no_face_before, "embodiedAction", "outcome") == "degraded",
+            "missing face surface degrades an otherwise responsive servo action");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "hold-failure", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    const size_t hold_failure_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "hold-failure", "hold-failure", 1));
+    App().robot_uart_.left_ok = false;
+    HostEspTimerStartOk() = false;
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(FrameBodyStr(hold_failure_before, "embodiedAction", "outcome") == "rejected" &&
+                !FrameEmbodiedBool(hold_failure_before, "returnedToRest", true),
+            "restore plus settle-timer failure rejects without a false rest claim");
+    HostEspTimerStartOk() = true;
+
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "cancel-failure", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    const size_t cancel_failure_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "cancel-failure", "cancel-failure", 1));
+    App().robot_uart_.right_ok = false;
+    HostEspTimerStartOk() = false;
+    Handle(EmbodiedCancelFrame(sequence + 2, "cancel-failure", "cancel-failure", 1));
+    require(FrameBodyStr(cancel_failure_before, "embodiedAction", "outcome") == "rejected" &&
+                FrameBodyNum(cancel_failure_before, "acks") == sequence + 2,
+            "cancel restoration/timer failure emits one allowed rejected terminal ACK");
+    HostEspTimerStartOk() = true;
+
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "teardown-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "teardown-step", "pause-action", 1));
+    const size_t pause_calls = App().robot_uart_.calls.size();
+    Handle(PauseFrame(sequence + 2));
+    require(App().robot_uart_.calls.size() == pause_calls + 3,
+            "pause teardown restores the active pose");
+    Handle(ResumeFrame(sequence + 3));
+    Handle(EmbodiedActionFrame(sequence + 4, "teardown-step", "stop-action", 2));
+    const size_t stop_calls = App().robot_uart_.calls.size();
+    Handle(StopFrame(sequence + 5));
+    require(App().robot_uart_.calls.size() == stop_calls + 3 && !App().lesson_runtime_active,
+            "stop teardown restores rest and closes lesson authority");
+    Board::GetInstance().display_ = nullptr;
+}
+
+void test_embodied_ledger_mastery_cap_and_no_return_settle() {
+    ResetObservable();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    int sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "ledger-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "ledger-step", "ledger-action", 1));
+    CompleteEmbodiedAction();
+
+    Handle(PrepareFrame(sequence + 2,
+                        ",\"runtimeControls\":{\"motionPresetsEnabled\":true}"));
+    Handle(StartFrame(sequence + 3));
+    Handle(StepFrame(sequence + 4, "ledger-step-2", "http://x/p2.jpg", "http://x/o2.jpg",
+                     "http://x/r2.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    const size_t stale_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 5, "ledger-step-2", "ledger-stale", 1));
+    require(Sent().size() == stale_before + 1 &&
+                FrameBodyStr(stale_before, "embodiedAction", "outcome") == "rejected" &&
+                App().robot_uart_.calls.size() == 6,
+            "same-session restart restores the action-generation ledger without replaying motion");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "mastery-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    for (int generation = 1; generation <= 2; ++generation) {
+        Handle(EmbodiedActionFrame(sequence + generation, "mastery-step",
+                                   "mastery-" + std::to_string(generation), generation,
+                                   "CELEBRATE_MASTERY", "focus.center.primary"));
+        CompleteEmbodiedAction();
+    }
+    const size_t mastery_calls = App().robot_uart_.calls.size();
+    const size_t capped_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 3, "mastery-step", "mastery-3", 3,
+                               "CELEBRATE_MASTERY", "focus.center.primary"));
+    require(App().robot_uart_.calls.size() == mastery_calls,
+            "third high-energy mastery celebration is reduced instead of moving servos");
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(FrameBodyStr(capped_before, "embodiedAction", "outcome") == "degraded" &&
+                FrameEmbodiedBool(capped_before, "returnedToRest", false),
+            "mastery energy cap completes safely as an already-rested degraded action");
+
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "rest-warm-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    const size_t rest_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "rest-warm-step", "rest-warm", 1,
+                               "REST_WARM", "focus.center.primary"));
+    require(App().robot_uart_.calls ==
+                std::vector<std::string>({"head_percent:50", "left_percent:0", "right_percent:0"}),
+            "REST_WARM resolves directly to the bounded rest pose");
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(FrameBodyStr(rest_before, "embodiedAction", "outcome") == "applied" &&
+                FrameEmbodiedBool(rest_before, "returnedToRest", false),
+            "no-return REST_WARM completes after settle without a redundant restore command");
+    Board::GetInstance().display_ = nullptr;
+}
+
 // ==========================================================================
 // 2. Prepare + assetPack ack ladder
 // ==========================================================================
@@ -1319,6 +1577,8 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
 
     ResetObservable();
     FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
     Handle(V5PrepareFrame(1));
     require(FrameType(0) == "lesson_ack" &&
                 FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady" &&
@@ -1349,6 +1609,9 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
             "v5 stop releases the Robot stream and all four bounded buffers");
     require(App().lesson_terminal_audio_quiet,
             "v5 stop quarantines late TTS before releasing lesson mode");
+    require(!display.lesson_mode_calls.empty() && !display.lesson_mode_calls.back() &&
+                !display.background_calls.empty() && !display.background_calls.back(),
+            "v5 stop releases the cinematic display surface and layers");
 
     ResetObservable();
     FreshSession();
@@ -1360,6 +1623,7 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
                 FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
                 fake.opens == opens_before,
             "v5 rejects a still-image Robot layer before renderer IO");
+    Board::GetInstance().display_ = nullptr;
 
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
 }
@@ -1891,6 +2155,79 @@ void test_cinematic_cross_renderer_handoff_releases_old_resources() {
             "v3 stop releases the handoff asset lease");
     tbot::SetActiveLessonCinematicRenderer(nullptr);
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_layered_cinematic_coverage_boundaries() {
+    V3RendererFake v5_fake;
+    V3RendererFake v4_fake;
+    tbot::LessonLayeredCinematicRenderer v5_renderer(
+        {&v5_fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::LessonFlattenedCinematicRenderer v4_renderer(
+        {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&v5_renderer);
+    ActivateV4Renderer(&v4_renderer);
+
+    for (const char* phase : {"teach", "listen", "thinking", "celebrate"}) {
+        ResetObservable();
+        FreshSession();
+        Handle(ReplaceOnce(V5PrepareFrame(1), "\"phaseId\":\"flyIn\"",
+                           std::string("\"phaseId\":\"") + phase + "\""));
+        require(FrameType(0) == "lesson_ack",
+                "every frozen middle v5 phase identity reaches layered prepare");
+        Handle(V5Frame("lesson_stop", 2,
+            std::string("{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"") +
+            phase + "\",\"commandSequenceId\":92}}"));
+    }
+
+    ResetObservable();
+    FreshSession();
+    {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        require(static_cast<bool>(mutation), "v5 reservation-refusal fixture holds mutation lease");
+        Handle(V5PrepareFrame(1));
+        require(FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "CINEMATIC_SD_PATH_MISSING",
+                "v5 reservation refusal maps to the stable path error before renderer work");
+    }
+
+    ResetObservable();
+    FreshSession();
+    v5_fake.fail_open = true;
+    Handle(V5PrepareFrame(1));
+    require(FrameType(0) == "lesson_error" &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "rejected v5 prepare releases its newly acquired storage reservation");
+    v5_fake.fail_open = false;
+
+    ResetObservable();
+    FreshSession();
+    Handle(V5PrepareFrame(1));
+    Handle(V4PrepareFrame(2));
+    require(FrameType(1) == "lesson_ack" && !v5_renderer.prepared() && v4_renderer.prepared(),
+            "v5 to v4 handoff releases the layered renderer before committing v4");
+    Handle(V4Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":72,"
+        "\"reason\":\"testCleanup\"}"));
+
+    ResetObservable();
+    FreshSession();
+    tbot::LessonCinematicRenderer v3_renderer(
+        {&v4_fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&v3_renderer);
+    Handle(V3PrepareFrame(1));
+    require(App().AbandonLessonStorageSession() && !v3_renderer.prepared(),
+            "transport abandonment discards an active v3 renderer");
+
+    ResetObservable();
+    FreshSession();
+    Handle(V4PrepareFrame(1));
+    require(App().AbandonLessonStorageSession() && !v4_renderer.prepared(),
+            "transport abandonment discards an active v4 renderer");
+
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
 }
 
 void test_cinematic_cross_renderer_handoff_fails_closed_without_old_renderer() {
@@ -7874,6 +8211,9 @@ int main() {
     test_embodied_action_reduced_motion_and_partial_servo_degrade();
     test_embodied_action_cancel_duplicate_and_supersession_are_safe();
     test_embodied_action_fail_closed_capability_focus_and_timer_failure();
+    test_embodied_software_journeys_16_through_20();
+    test_embodied_lifecycle_failure_and_teardown_paths();
+    test_embodied_ledger_mastery_cap_and_no_return_settle();
     test_safe_motion_presets_and_auto_rest();
     test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
     test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
@@ -7896,6 +8236,7 @@ int main() {
     test_renderer_v4_failed_same_session_reprepare_keeps_session_playable();
     test_cinematic_controls_cannot_cross_renderer_session_identity();
     test_cinematic_cross_renderer_handoff_releases_old_resources();
+    test_layered_cinematic_coverage_boundaries();
     test_cinematic_cross_renderer_handoff_fails_closed_without_old_renderer();
     test_renderer_v4_lesson_stop_routes_to_flattened_renderer();
     test_cinematic_terminal_waits_for_asset_lease_release();
