@@ -43,6 +43,9 @@ jobs:
             tests/test_wifi_board_provisioning.py \
             tests/test_wifi_provisioning_brand.py -q
 
+      - name: Run lesson-production regression suite
+        run: bash tests/lesson-production/run.sh
+
   prepare:
     name: Determine variants to build
     runs-on: ubuntu-latest
