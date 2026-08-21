@@ -11,13 +11,17 @@ HANDOFF_FIXTURE_RELATIVE = Path(
 )
 
 
+def _find_enclosing_firmware_root(path: Path) -> Path:
+    for parent in (path, *path.parents):
+        if parent.name == "TBOT-Firmware":
+            return parent
+    raise FileNotFoundError("path is not inside the TBOT-Firmware repository")
+
+
 def _task02_fixture_candidates(firmware_root: Path) -> list[Path]:
-    """Return only the canonical ESP sibling for enclosing firmware repositories."""
-    return [
-        parent.parent / "esp32-server" / HANDOFF_FIXTURE_RELATIVE
-        for parent in (firmware_root, *firmware_root.parents)
-        if parent.name == "TBOT-Firmware"
-    ]
+    """Return only the canonical ESP sibling for the enclosing firmware repository."""
+    repository_root = _find_enclosing_firmware_root(firmware_root)
+    return [repository_root.parent / "esp32-server" / HANDOFF_FIXTURE_RELATIVE]
 
 
 def _find_task02_fixture(firmware_root: Path) -> Path:
@@ -37,12 +41,13 @@ HANDOFF_FIXTURE = _find_task02_fixture(ROOT)
 def test_task02_fixture_discovery_supports_main_and_worktree_layouts():
     firmware_root = Path("/workspace/robot/TBOT-Firmware")
     expected = firmware_root.parent / "esp32-server" / HANDOFF_FIXTURE_RELATIVE
+    assert _find_enclosing_firmware_root(firmware_root) == firmware_root
     assert _task02_fixture_candidates(firmware_root) == [expected]
-    assert _task02_fixture_candidates(
-        firmware_root / ".worktrees/course-mode-task-03"
-    ) == [expected]
+    worktree_root = firmware_root / ".worktrees/course-mode-task-03"
+    assert _find_enclosing_firmware_root(worktree_root) == firmware_root
+    assert _task02_fixture_candidates(worktree_root) == [expected]
 
-    owning_root = next(parent for parent in ROOT.parents if parent.name == "TBOT-Firmware")
+    owning_root = _find_enclosing_firmware_root(ROOT)
     assert _find_task02_fixture(owning_root) == HANDOFF_FIXTURE
 
 
