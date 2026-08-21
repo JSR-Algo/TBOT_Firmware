@@ -11,10 +11,12 @@
 #include "protocol.h"
 #include "robot_uart.h"
 #include "lesson_handler.h"
+#include "lesson_embodied_action.h"
 
 #include <cJSON.h>
 
 #include <functional>
+#include <cstdio>
 #include <memory>
 #include <cstdint>
 #include <string_view>
@@ -50,6 +52,8 @@ public:
         schedule_wait_starts_before_timeout = false;
         deferred_callbacks.clear();
         lesson_visual_queue.clear();
+        lesson_embodied_queue.clear();
+        lesson_runtime_generation = 0;
         lesson_interactive_listen_generation = 0;
         play_sound_calls = 0;
         last_sound = "";
@@ -75,6 +79,8 @@ public:
     bool schedule_wait_starts_before_timeout = false;
     std::vector<std::function<void()>> deferred_callbacks;
     std::vector<LessonQueueItem> lesson_visual_queue;
+    std::vector<LessonQueueItem> lesson_embodied_queue;
+    std::uint64_t lesson_runtime_generation = 0;
     uint32_t lesson_interactive_listen_generation = 0;
     int play_sound_calls = 0;
     std::string last_sound;
@@ -122,6 +128,27 @@ public:
             DispatchLessonVisualCompletion(item, protocol_.get(), &robot_uart_);
         }
     }
+    void EnqueueLessonEmbodiedCompletion(
+        LessonQueueItemKind kind, std::uint64_t transport_epoch,
+        const char* assignment_id, const char* session_id, const char* step_id,
+        const char* action_id, std::uint64_t action_generation,
+        std::uint64_t embodied_nonce) {
+        LessonQueueItem item{};
+        item.kind = kind;
+        item.transport_epoch = transport_epoch;
+        std::snprintf(item.assignment_id, sizeof(item.assignment_id), "%s", assignment_id);
+        std::snprintf(item.session_id, sizeof(item.session_id), "%s", session_id);
+        std::snprintf(item.step_id, sizeof(item.step_id), "%s", step_id);
+        std::snprintf(item.action_id, sizeof(item.action_id), "%s", action_id);
+        item.action_generation = action_generation;
+        item.embodied_nonce = embodied_nonce;
+        lesson_embodied_queue.push_back(item);
+    }
+    void DrainLessonEmbodiedQueue() {
+        auto items = std::move(lesson_embodied_queue);
+        lesson_embodied_queue.clear();
+        for (const auto& item : items) DispatchLessonEmbodiedCompletion(item, protocol_.get());
+    }
     uint32_t BeginLessonInteractiveListeningRequest() { return ++lesson_interactive_listen_generation; }
     void PrepareLessonInteractiveListening() { prepare_listen_calls++; }
     void PrepareLessonInteractiveListening(uint32_t generation) {
@@ -139,10 +166,36 @@ public:
     }
     void BeginLessonTerminalAudioQuiet() { lesson_terminal_audio_quiet = true; }
     void SetLessonRuntimeActive(bool active) {
+        if (active != lesson_runtime_active) {
+            lesson_runtime_generation++;
+            if (lesson_runtime_generation == 0) lesson_runtime_generation = 1;
+        }
         lesson_runtime_active = active;
         if (active) lesson_terminal_audio_quiet = false;
     }
     bool IsLessonRuntimeActive() const { return lesson_runtime_active; }
+    LessonRuntimeToken GetLessonRuntimeToken() const {
+        return lesson_runtime_active ? LessonRuntimeToken{lesson_runtime_generation}
+                                     : LessonRuntimeToken{};
+    }
+    LessonEmbodiedMotionResult ApplyLessonEmbodiedPreset(
+        const LessonRuntimeToken& token, const LessonEmbodiedPreset& preset) {
+        if (!lesson_runtime_active || token.runtime_generation != lesson_runtime_generation) {
+            return LessonEmbodiedMotionResult::kRejected;
+        }
+        return ApplyLessonEmbodiedPresetCommands(
+            preset,
+            [this](int p) { return robot_uart_.SendHeadSetPercent(p); },
+            [this](int p) { return robot_uart_.SendLeftArmSetPercent(p); },
+            [this](int p) { return robot_uart_.SendRightArmSetPercent(p); });
+    }
+    LessonEmbodiedMotionResult CancelLessonEmbodiedAction(const LessonRuntimeToken& token) {
+        return RestoreLessonRestPose(token);
+    }
+    LessonEmbodiedMotionResult RestoreLessonRestPose(const LessonRuntimeToken& token) {
+        return ApplyLessonEmbodiedPreset(
+            token, ResolveLessonEmbodiedPreset(LessonEmbodiedIntent::kRestWarm));
+    }
     void PlaySound(const std::string_view& sound) {
         play_sound_calls++;
         last_sound = std::string(sound);

@@ -47,6 +47,11 @@ inline esp_err_t esp_timer_stop(esp_timer_handle_t timer) {
     if (timer) timer->armed = false;
     return ESP_OK;
 }
+inline esp_err_t esp_timer_delete(esp_timer_handle_t timer) {
+    if (HostEspLastTimer() == timer) HostEspLastTimer() = nullptr;
+    delete timer;
+    return ESP_OK;
+}
 inline esp_err_t esp_timer_start_once(esp_timer_handle_t timer, uint64_t) {
     if (!HostEspTimerStartOk()) return -1;
     timer->armed = true;

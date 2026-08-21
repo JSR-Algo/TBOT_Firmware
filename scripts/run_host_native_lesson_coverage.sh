@@ -49,6 +49,7 @@ mkdir -p "${BUILD_DIR}/src"
 # first for quoted includes). The .cc is copied byte-for-byte, never modified, so the
 # coverage we measure is of the REAL source. gcovr maps it back via the original path.
 cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
+cp main/lesson_embodied_action.cc "${BUILD_DIR}/src/lesson_embodied_action.cc"
 cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
 cp main/lesson_layer_state.cc "${BUILD_DIR}/src/lesson_layer_state.cc"
 cp main/lesson_asset_storage_coordinator.cc \
@@ -77,9 +78,11 @@ cp main/lesson_asset_storage_coordinator.cc \
     -Imain/protocols \
     tests/native/lesson_handler_host_test.cc \
     "${BUILD_DIR}/src/lesson_handler.cc" \
+    "${BUILD_DIR}/src/lesson_embodied_action.cc" \
     main/lesson_tvideo_template.cc \
     main/lesson_cinematic_renderer.cc \
     main/lesson_flattened_cinematic_renderer.cc \
+    main/lesson_layered_cinematic_renderer.cc \
     main/lesson_cinematic_evidence.cc \
     main/lesson_chroma_compositor.cc \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \

@@ -312,6 +312,47 @@ void Application::EnqueueLessonVisualCompletion(
 #endif
 }
 
+void Application::EnqueueLessonEmbodiedCompletion(
+    LessonQueueItemKind kind,
+    std::uint64_t transport_epoch,
+    const char* assignment_id,
+    const char* session_id,
+    const char* step_id,
+    const char* action_id,
+    std::uint64_t action_generation,
+    std::uint64_t embodied_nonce
+) {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+    if ((kind != LessonQueueItemKind::kEmbodiedHoldCompleted &&
+         kind != LessonQueueItemKind::kEmbodiedSettled) ||
+        lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
+        return;
+    }
+    LessonQueueItem item{};
+    item.kind = kind;
+    item.transport_epoch = transport_epoch;
+    item.action_generation = action_generation;
+    item.embodied_nonce = embodied_nonce;
+    std::snprintf(item.assignment_id, sizeof(item.assignment_id), "%s", assignment_id);
+    std::snprintf(item.session_id, sizeof(item.session_id), "%s", session_id);
+    std::snprintf(item.step_id, sizeof(item.step_id), "%s", step_id);
+    std::snprintf(item.action_id, sizeof(item.action_id), "%s", action_id);
+    if (!lesson_queue_data_admission_.TryAcquire()) return;
+    if (xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
+        lesson_queue_data_admission_.Release();
+    }
+#else
+    (void)kind;
+    (void)transport_epoch;
+    (void)assignment_id;
+    (void)session_id;
+    (void)step_id;
+    (void)action_id;
+    (void)action_generation;
+    (void)embodied_nonce;
+#endif
+}
+
 void Application::EnqueueLessonMessage(
     const cJSON* root,
     std::uint64_t transport_epoch
@@ -438,6 +479,11 @@ void Application::LessonMessageTask(void* arg) {
         if (item.kind == LessonQueueItemKind::kVisualCompleted ||
             item.kind == LessonQueueItemKind::kVisualTimedOut) {
             DispatchLessonVisualCompletion(item, self->protocol_.get(), &self->robot_uart_);
+            continue;
+        }
+        if (item.kind == LessonQueueItemKind::kEmbodiedHoldCompleted ||
+            item.kind == LessonQueueItemKind::kEmbodiedSettled) {
+            DispatchLessonEmbodiedCompletion(item, self->protocol_.get());
             continue;
         }
         if (item.kind != LessonQueueItemKind::kFrame || item.payload == nullptr) continue;

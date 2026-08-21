@@ -95,6 +95,8 @@ enum class LessonQueueItemKind : std::uint8_t {
     kAbandonTransport,
     kVisualCompleted,
     kVisualTimedOut,
+    kEmbodiedHoldCompleted,
+    kEmbodiedSettled,
 };
 
 enum class LessonVisualCompletionResult : std::uint8_t {
@@ -119,6 +121,9 @@ struct LessonQueueItem {
     char assignment_id[kIdentityBytes] = {};
     char session_id[kIdentityBytes] = {};
     char step_id[kIdentityBytes] = {};
+    char action_id[kIdentityBytes] = {};
+    std::uint64_t action_generation = 0;
+    std::uint64_t embodied_nonce = 0;
     char degraded_reason[kReasonBytes] = {};
     LessonVisualCompletionResult completion_result = LessonVisualCompletionResult::kRejected;
 };
@@ -221,6 +226,14 @@ bool AcceptLessonVisualCompletion(
     const LessonQueueItem& item, std::string* ack_frame, RobotUart* robot_uart = nullptr);
 bool DispatchLessonVisualCompletion(
     const LessonQueueItem& item, Protocol* protocol, RobotUart* robot_uart = nullptr);
+bool DispatchLessonEmbodiedCompletion(const LessonQueueItem& item, Protocol* protocol);
+
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+namespace tbot {
+void SetLessonCourseModeCapabilityForTest(bool ready, bool reduced_motion);
+const char* LessonEmbodiedVisualFocusForTest();
+}
+#endif
 
 // The only render profile this firmware (lcdwiki-es3c35p) implements (plan §7).
 constexpr char kLessonProfileEspTft[]   = "espTft";

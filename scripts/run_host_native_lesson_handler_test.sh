@@ -16,6 +16,7 @@ fi
 cd "${ROOT}"
 mkdir -p "${BUILD_DIR}/src"
 cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
+cp main/lesson_embodied_action.cc "${BUILD_DIR}/src/lesson_embodied_action.cc"
 cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
 cp main/lesson_layer_state.cc "${BUILD_DIR}/src/lesson_layer_state.cc"
 cp main/lesson_asset_storage_coordinator.cc \
@@ -37,6 +38,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     -Imain/protocols \
     tests/native/lesson_handler_host_test.cc \
     "${BUILD_DIR}/src/lesson_handler.cc" \
+    "${BUILD_DIR}/src/lesson_embodied_action.cc" \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \
     "${BUILD_DIR}/src/lesson_layer_state.cc" \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \

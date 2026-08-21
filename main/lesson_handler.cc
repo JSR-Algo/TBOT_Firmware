@@ -18,6 +18,7 @@
 #include "lesson_tvideo_template.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
+#include "lesson_embodied_action.h"
 #include "lesson_layer_state.h"
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
@@ -48,6 +49,7 @@
 #include <deque>
 #include <map>
 #include <atomic>
+#include <vector>
 
 #include <cJSON.h>
 #include <esp_err.h>
@@ -64,6 +66,9 @@
 
 namespace {
 std::atomic<int> g_cinematic_json_fail_after{-1};
+std::atomic<bool> g_course_mode_ready{true};
+std::atomic<bool> g_course_mode_reduced_motion{false};
+std::atomic<int> g_embodied_focus_for_test{0};
 
 struct ReservationRefusalMapping {
     const char* code;
@@ -196,6 +201,17 @@ void SetLessonJsonFailAfterForTest(int successful_operations_before_failure) {
     g_lesson_json_fail_after.store(successful_operations_before_failure,
                                    std::memory_order_relaxed);
 }
+void SetLessonCourseModeCapabilityForTest(bool ready, bool reduced_motion) {
+    g_course_mode_ready.store(ready, std::memory_order_release);
+    g_course_mode_reduced_motion.store(reduced_motion, std::memory_order_release);
+}
+const char* LessonEmbodiedVisualFocusForTest() {
+    switch (g_embodied_focus_for_test.load(std::memory_order_acquire)) {
+    case 1: return "focus.left.choice";
+    case 2: return "focus.right.choice";
+    default: return "focus.center.primary";
+    }
+}
 #endif
 }  // namespace tbot
 
@@ -240,6 +256,21 @@ void AddLessonRendererFeatures(cJSON* features) {
         cJSON_AddBoolToObject(renderer_v5, "sdAssetPack", true);
         cJSON_AddItemToObject(features, "lessonRendererV5", renderer_v5);
     }
+
+    if (!g_course_mode_ready.load(std::memory_order_acquire)) return;
+    cJSON* course_mode = cJSON_CreateObject();
+    cJSON_AddNumberToObject(course_mode, "version", 2);
+    cJSON_AddBoolToObject(course_mode, "embodiedActions", true);
+    cJSON_AddBoolToObject(
+        course_mode, "reducedMotion",
+        g_course_mode_reduced_motion.load(std::memory_order_acquire));
+    cJSON* faces = cJSON_CreateArray();
+    cJSON_AddItemToArray(faces, cJSON_CreateString("neutral"));
+    cJSON_AddItemToArray(faces, cJSON_CreateString("happy"));
+    cJSON_AddItemToArray(faces, cJSON_CreateString("thinking"));
+    cJSON_AddItemToArray(faces, cJSON_CreateString("relaxed"));
+    cJSON_AddItemToObject(course_mode, "faces", faces);
+    cJSON_AddItemToObject(features, "lessonCourseMode", course_mode);
 }
 
 namespace {
@@ -755,6 +786,22 @@ struct LessonSession {
     bool        pending_has_lesson_version = false;
     std::string pending_step_id;
     bool        pending_ack = false;
+    std::string current_step_id;
+    bool        assessment_window_open = false;
+    std::uint64_t last_action_generation = 0;
+    std::set<std::string> consumed_action_ids;
+    std::string active_action_id;
+    std::string active_action_step_id;
+    std::uint64_t active_action_generation = 0;
+    std::uint64_t active_action_nonce = 0;
+    std::int64_t active_action_sequence = 0;
+    LessonRuntimeToken active_action_token;
+    LessonEmbodiedMotionResult active_action_result = LessonEmbodiedMotionResult::kRejected;
+    std::uint32_t active_settle_ms = 0;
+    bool active_action_reduced_motion = false;
+    bool active_restore_confirmed = false;
+    std::string active_visual_focus = "focus.center.primary";
+    unsigned mastery_celebrations = 0;
     std::map<std::string, std::string> verified_asset_paths;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
     // processed inbound sequence, so a duplicate re-ack can REPLAY the prior ack body
@@ -773,6 +820,24 @@ struct LessonSession {
     std::deque<AckReplay> ack_history;
 };
 LessonSession g_session;
+struct LessonEmbodiedLedger {
+    std::string assignment_id;
+    std::string session_id;
+    std::uint64_t last_generation = 0;
+    std::set<std::string> consumed_action_ids;
+    unsigned mastery_celebrations = 0;
+};
+LessonEmbodiedLedger g_embodied_ledger;
+void RestoreLessonEmbodiedLedger(const char* assignment_id, const char* session_id) {
+    if (g_embodied_ledger.assignment_id == assignment_id &&
+        g_embodied_ledger.session_id == session_id) {
+        g_session.last_action_generation = g_embodied_ledger.last_generation;
+        g_session.consumed_action_ids = g_embodied_ledger.consumed_action_ids;
+        g_session.mastery_celebrations = g_embodied_ledger.mastery_celebrations;
+        return;
+    }
+    g_embodied_ledger = LessonEmbodiedLedger{};
+}
 struct PendingLessonStorageRelease {
     std::string assignment_id;
     std::string session_id;
@@ -782,6 +847,55 @@ PendingLessonStorageRelease g_pending_storage_release;
 LessonLayerState g_layer_state;
 std::atomic<std::uint64_t> g_visual_callback_token{0};
 std::atomic<std::uint64_t> g_visual_completion_nonce{0};
+std::atomic<std::uint64_t> g_embodied_completion_nonce{0};
+
+struct EmbodiedTimerContext {
+    LessonQueueItemKind kind;
+    std::uint64_t transport_epoch;
+    std::string assignment_id;
+    std::string session_id;
+    std::string step_id;
+    std::string action_id;
+    std::uint64_t action_generation;
+    std::uint64_t nonce;
+    esp_timer_handle_t timer = nullptr;
+};
+
+void LessonEmbodiedTimerCallback(void* raw) {
+    std::unique_ptr<EmbodiedTimerContext> context(
+        static_cast<EmbodiedTimerContext*>(raw));
+    Application::GetInstance().EnqueueLessonEmbodiedCompletion(
+        context->kind, context->transport_epoch,
+        context->assignment_id.c_str(), context->session_id.c_str(),
+        context->step_id.c_str(), context->action_id.c_str(),
+        context->action_generation, context->nonce);
+    if (context->timer != nullptr) esp_timer_delete(context->timer);
+}
+
+bool ArmLessonEmbodiedTimer(LessonQueueItemKind kind, std::uint32_t delay_ms) {
+    auto context = std::make_unique<EmbodiedTimerContext>();
+    context->kind = kind;
+    context->transport_epoch = g_session.current_transport_epoch;
+    context->assignment_id = g_session.assignment_id;
+    context->session_id = g_session.session_id;
+    context->step_id = g_session.active_action_step_id;
+    context->action_id = g_session.active_action_id;
+    context->action_generation = g_session.active_action_generation;
+    context->nonce = g_session.active_action_nonce;
+    esp_timer_create_args_t args{};
+    args.callback = LessonEmbodiedTimerCallback;
+    args.arg = context.get();
+    args.dispatch_method = ESP_TIMER_TASK;
+    args.name = "lesson_embodied";
+    if (esp_timer_create(&args, &context->timer) != ESP_OK) return false;
+    if (esp_timer_start_once(
+            context->timer, static_cast<std::uint64_t>(delay_ms) * 1000ULL) != ESP_OK) {
+        esp_timer_delete(context->timer);
+        return false;
+    }
+    context.release();
+    return true;
+}
 
 std::uint64_t NextVisualCompletionNonce() {
     std::uint64_t nonce =
@@ -865,6 +979,78 @@ std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON*
     if (s != nullptr) cJSON_free(s);
     cJSON_Delete(root);
     return out;
+}
+
+std::string BuildLessonEmbodiedAck(
+    std::int64_t outbound_sequence,
+    std::int64_t acked_sequence,
+    const char* assignment_id,
+    const char* session_id,
+    const char* step_id,
+    const char* action_id,
+    std::uint64_t action_generation,
+    const char* outcome,
+    bool returned_to_rest) {
+    cJSON* root = cJSON_CreateObject();
+    cJSON* body = cJSON_CreateObject();
+    cJSON* embodied = cJSON_CreateObject();
+    if (root == nullptr || body == nullptr || embodied == nullptr) {
+        cJSON_Delete(root);
+        cJSON_Delete(body);
+        cJSON_Delete(embodied);
+        return "";
+    }
+    cJSON_AddStringToObject(root, "type", "lesson_ack");
+    cJSON_AddStringToObject(root, "assignmentId", assignment_id);
+    cJSON_AddStringToObject(root, "sessionId", session_id);
+    cJSON_AddStringToObject(root, "stepId", step_id);
+    cJSON_AddNumberToObject(root, "sequence", static_cast<double>(outbound_sequence));
+    cJSON_AddNumberToObject(body, "acks", static_cast<double>(acked_sequence));
+    cJSON_AddStringToObject(embodied, "actionId", action_id);
+    cJSON_AddNumberToObject(
+        embodied, "actionGeneration",
+        static_cast<double>(action_generation));
+    cJSON_AddStringToObject(embodied, "outcome", outcome);
+    cJSON_AddBoolToObject(embodied, "returnedToRest", returned_to_rest);
+    cJSON_AddItemToObject(body, "embodiedAction", embodied);
+    cJSON_AddItemToObject(root, "body", body);
+    char* encoded = cJSON_PrintUnformatted(root);
+    std::string frame = encoded != nullptr ? encoded : "";
+    cJSON_free(encoded);
+    cJSON_Delete(root);
+    return frame;
+}
+
+const char* EmbodiedOutcome(LessonEmbodiedMotionResult result) {
+    switch (result) {
+    case LessonEmbodiedMotionResult::kApplied: return "applied";
+    case LessonEmbodiedMotionResult::kDegraded: return "degraded";
+    case LessonEmbodiedMotionResult::kRejected: return "rejected";
+    }
+    return "rejected";
+}
+
+void ClearActiveLessonEmbodiedAction() {
+    g_session.active_action_id.clear();
+    g_session.active_action_step_id.clear();
+    g_session.active_action_generation = 0;
+    g_session.active_action_nonce = 0;
+    g_session.active_action_sequence = 0;
+    g_session.active_action_token = {};
+    g_session.active_action_result = LessonEmbodiedMotionResult::kRejected;
+    g_session.active_settle_ms = 0;
+    g_session.active_action_reduced_motion = false;
+    g_session.active_restore_confirmed = false;
+}
+
+bool CancelAndRestoreActiveLessonEmbodiedAction() {
+    if (g_session.active_action_id.empty()) return true;
+    ++g_session.active_action_nonce;
+    const auto restored = Application::GetInstance().CancelLessonEmbodiedAction(
+        g_session.active_action_token);
+    const bool returned_to_rest = restored != LessonEmbodiedMotionResult::kRejected;
+    ClearActiveLessonEmbodiedAction();
+    return returned_to_rest;
 }
 
 const char* CanonicalRobotState(const char* value) {
@@ -1830,6 +2016,53 @@ bool DispatchLessonVisualCompletion(
     return protocol->SendLessonFrame(ack_frame);
 }
 
+bool DispatchLessonEmbodiedCompletion(const LessonQueueItem& item, Protocol* protocol) {
+    if ((item.kind != LessonQueueItemKind::kEmbodiedHoldCompleted &&
+         item.kind != LessonQueueItemKind::kEmbodiedSettled) ||
+        item.transport_epoch != g_session.current_transport_epoch ||
+        item.embodied_nonce == 0 ||
+        item.embodied_nonce != g_session.active_action_nonce ||
+        item.action_generation != g_session.active_action_generation ||
+        g_session.assignment_id != item.assignment_id ||
+        g_session.session_id != item.session_id ||
+        g_session.active_action_step_id != item.step_id ||
+        g_session.active_action_id != item.action_id) {
+        return false;
+    }
+
+    if (item.kind == LessonQueueItemKind::kEmbodiedHoldCompleted) {
+        const auto restore = Application::GetInstance().RestoreLessonRestPose(
+            g_session.active_action_token);
+        g_session.active_restore_confirmed = restore != LessonEmbodiedMotionResult::kRejected;
+        if (restore != LessonEmbodiedMotionResult::kApplied &&
+            g_session.active_action_result == LessonEmbodiedMotionResult::kApplied) {
+            g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
+        }
+        if (!ArmLessonEmbodiedTimer(
+                LessonQueueItemKind::kEmbodiedSettled, g_session.active_settle_ms)) {
+            g_session.active_action_result = LessonEmbodiedMotionResult::kRejected;
+            g_session.active_restore_confirmed = false;
+        } else {
+            return true;
+        }
+    }
+
+    if (protocol == nullptr) return false;
+    const std::int64_t outbound_sequence = g_session.fs_sequence + 1;
+    const bool returned_to_rest =
+        g_session.active_action_reduced_motion || g_session.active_restore_confirmed;
+    const std::string ack = BuildLessonEmbodiedAck(
+        outbound_sequence, g_session.active_action_sequence,
+        g_session.assignment_id.c_str(), g_session.session_id.c_str(),
+        g_session.active_action_step_id.c_str(), g_session.active_action_id.c_str(),
+        g_session.active_action_generation,
+        EmbodiedOutcome(g_session.active_action_result), returned_to_rest);
+    if (ack.empty() || !protocol->SendLessonFrame(ack)) return false;
+    g_session.fs_sequence = outbound_sequence;
+    ClearActiveLessonEmbodiedAction();
+    return true;
+}
+
 // Sub-dispatch the slice subset (lesson_prepare/start/step/stop) and render ONE
 // espTft lesson_step. Additive: never reached for the 8 legacy types, the voice
 // path, or the MCP arm tools.
@@ -1868,6 +2101,7 @@ bool Application::AbandonLessonStorageSession() {
         g_session.session_id == session_id &&
         g_session.lesson_asset_generation == generation) {
         CancelLessonInteractiveListening();
+        CancelAndRestoreActiveLessonEmbodiedAction();
         SetLessonRuntimeActive(false);
         g_layer_state.ClearAll();
         g_session = LessonSession{};
@@ -2068,6 +2302,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
+        CancelAndRestoreActiveLessonEmbodiedAction();
         Application::GetInstance().SetLessonRuntimeActive(false);
         g_session.running = false;
         g_session.paused = false;
@@ -2080,6 +2315,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
     auto clear_stale_lesson_for_fresh_prepare = [this](bool show_waiting_state) {
         InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
         Application::GetInstance().CancelLessonInteractiveListening();
+        CancelAndRestoreActiveLessonEmbodiedAction();
         Application::GetInstance().SetLessonRuntimeActive(false);
         ClearTerminalLessonCursor();
         Display* display = Board::GetInstance().GetDisplay();
@@ -2101,6 +2337,173 @@ void Application::HandleLessonMessage(const cJSON* root) {
             });
         }
     };
+
+    const bool is_embodied_action = strcmp(type, "lesson_embodied_action") == 0;
+    const bool is_embodied_cancel = strcmp(type, "lesson_embodied_cancel") == 0;
+    if (is_embodied_action || is_embodied_cancel) {
+        if (g_session.assignment_id != assignment_id || g_session.session_id != session_id ||
+            !g_session.prepared || !g_session.running || g_session.paused ||
+            g_session.current_step_id.empty()) {
+            return;
+        }
+        LessonEmbodiedParseContext context{
+            g_session.assignment_id.c_str(),
+            g_session.session_id.c_str(),
+            g_session.current_step_id.c_str(),
+            g_session.last_action_generation,
+            g_session.assessment_window_open,
+        };
+        auto emit_embodied_rejected = [&]() {
+            const cJSON* action_body = Obj(root, "body");
+            const char* rejected_action_id = Str(action_body, "actionId");
+            double rejected_generation = 0.0;
+            if (rejected_action_id == nullptr ||
+                !Num(action_body, "actionGeneration", rejected_generation) ||
+                !std::isfinite(rejected_generation) || rejected_generation <= 0.0 ||
+                std::trunc(rejected_generation) != rejected_generation) {
+                return;
+            }
+            const std::int64_t outbound_sequence = g_session.fs_sequence + 1;
+            const std::string ack = BuildLessonEmbodiedAck(
+                outbound_sequence, sequence, assignment_id, session_id,
+                Str(root, "stepId"), rejected_action_id,
+                static_cast<std::uint64_t>(rejected_generation), "rejected", false);
+            if (protocol_ != nullptr && !ack.empty() && protocol_->SendLessonFrame(ack)) {
+                g_session.fs_sequence = outbound_sequence;
+            }
+        };
+        if (is_embodied_cancel) {
+            LessonEmbodiedCancel cancel;
+            if (!ParseLessonEmbodiedCancelFrame(root, context, &cancel) ||
+                cancel.action_id != g_session.active_action_id ||
+                cancel.action_generation != g_session.active_action_generation) {
+                return;
+            }
+            const auto restored = Application::GetInstance().CancelLessonEmbodiedAction(
+                g_session.active_action_token);
+            if (restored != LessonEmbodiedMotionResult::kApplied &&
+                g_session.active_action_result == LessonEmbodiedMotionResult::kApplied) {
+                g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
+            }
+            g_session.active_restore_confirmed =
+                restored != LessonEmbodiedMotionResult::kRejected;
+            if (!ArmLessonEmbodiedTimer(
+                    LessonQueueItemKind::kEmbodiedSettled, g_session.active_settle_ms)) {
+                g_session.active_action_result = LessonEmbodiedMotionResult::kRejected;
+                g_session.active_restore_confirmed = false;
+                LessonQueueItem completion{};
+                completion.kind = LessonQueueItemKind::kEmbodiedSettled;
+                completion.transport_epoch = g_session.current_transport_epoch;
+                completion.action_generation = g_session.active_action_generation;
+                completion.embodied_nonce = g_session.active_action_nonce;
+                std::snprintf(completion.assignment_id, sizeof(completion.assignment_id), "%s",
+                              g_session.assignment_id.c_str());
+                std::snprintf(completion.session_id, sizeof(completion.session_id), "%s",
+                              g_session.session_id.c_str());
+                std::snprintf(completion.step_id, sizeof(completion.step_id), "%s",
+                              g_session.active_action_step_id.c_str());
+                std::snprintf(completion.action_id, sizeof(completion.action_id), "%s",
+                              g_session.active_action_id.c_str());
+                DispatchLessonEmbodiedCompletion(completion, protocol_.get());
+            }
+            g_session.last_in_sequence = sequence;
+            return;
+        }
+
+        LessonEmbodiedAction action;
+        LessonEmbodiedParseError parse_error = LessonEmbodiedParseError::kNone;
+        const char* inbound_action_id = Str(Obj(root, "body"), "actionId");
+        if (inbound_action_id != nullptr &&
+            g_session.active_action_id == inbound_action_id) {
+            return;
+        }
+        if (!ParseLessonEmbodiedActionFrame(root, context, &action, &parse_error) ||
+            sequence <= g_session.last_in_sequence ||
+            g_session.consumed_action_ids.count(action.action_id) != 0) {
+            emit_embodied_rejected();
+            return;
+        }
+        if (!g_session.active_action_id.empty()) {
+            CancelAndRestoreActiveLessonEmbodiedAction();
+        }
+        g_session.last_in_sequence = sequence;
+        g_session.last_action_generation = action.action_generation;
+        g_session.consumed_action_ids.insert(action.action_id);
+        g_embodied_ledger.assignment_id = g_session.assignment_id;
+        g_embodied_ledger.session_id = g_session.session_id;
+        g_embodied_ledger.last_generation = g_session.last_action_generation;
+        g_embodied_ledger.consumed_action_ids = g_session.consumed_action_ids;
+        g_session.active_action_id = action.action_id;
+        g_session.active_action_step_id = action.step_id;
+        g_session.active_action_generation = action.action_generation;
+        g_session.active_action_sequence = static_cast<std::int64_t>(action.sequence);
+        g_session.active_action_nonce =
+            g_embodied_completion_nonce.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (g_session.active_action_nonce == 0) g_session.active_action_nonce = 1;
+        g_session.active_action_token = Application::GetInstance().GetLessonRuntimeToken();
+        g_session.active_visual_focus = LessonVisualFocusRegionWireName(action.visual_focus_region);
+        g_embodied_focus_for_test.store(
+            action.visual_focus_region == LessonVisualFocusRegion::kLeftChoice ? 1
+                : action.visual_focus_region == LessonVisualFocusRegion::kRightChoice ? 2 : 0,
+            std::memory_order_release);
+
+        const LessonEmbodiedPreset& preset = ResolveLessonEmbodiedPreset(action.intent);
+        g_session.active_settle_ms = preset.settle_before_listen_ms;
+        const bool mastery_capped = action.intent == LessonEmbodiedIntent::kCelebrateMastery &&
+                                    g_session.mastery_celebrations >= 2;
+        if (action.intent == LessonEmbodiedIntent::kCelebrateMastery && !mastery_capped) {
+            ++g_session.mastery_celebrations;
+            g_embodied_ledger.mastery_celebrations = g_session.mastery_celebrations;
+        }
+        g_session.active_action_reduced_motion =
+            g_course_mode_reduced_motion.load(std::memory_order_acquire) ||
+            !g_session.motion_presets_enabled || mastery_capped;
+        Display* embodied_display = Board::GetInstance().GetDisplay();
+        if (embodied_display != nullptr) {
+            Schedule([embodied_display, face = std::string(preset.face)]() {
+                embodied_display->SetEmotion(face.c_str());
+            });
+        }
+        if (g_session.active_action_reduced_motion) {
+            g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
+            g_session.active_restore_confirmed = true;
+        } else {
+            g_session.active_action_result = Application::GetInstance().ApplyLessonEmbodiedPreset(
+                g_session.active_action_token, preset);
+            if (embodied_display == nullptr &&
+                g_session.active_action_result == LessonEmbodiedMotionResult::kApplied) {
+                g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
+            }
+            g_session.active_restore_confirmed = !preset.return_to_rest &&
+                g_session.active_action_result != LessonEmbodiedMotionResult::kRejected;
+        }
+        const LessonQueueItemKind phase =
+            g_session.active_action_reduced_motion || !preset.return_to_rest
+                ? LessonQueueItemKind::kEmbodiedSettled
+                : LessonQueueItemKind::kEmbodiedHoldCompleted;
+        const std::uint32_t delay_ms = phase == LessonQueueItemKind::kEmbodiedSettled
+                                           ? preset.settle_before_listen_ms
+                                           : preset.hold_ms;
+        if (!ArmLessonEmbodiedTimer(phase, delay_ms)) {
+            g_session.active_action_result = LessonEmbodiedMotionResult::kRejected;
+            g_session.active_restore_confirmed = false;
+            LessonQueueItem completion{};
+            completion.kind = LessonQueueItemKind::kEmbodiedSettled;
+            completion.transport_epoch = g_session.current_transport_epoch;
+            completion.action_generation = g_session.active_action_generation;
+            completion.embodied_nonce = g_session.active_action_nonce;
+            std::snprintf(completion.assignment_id, sizeof(completion.assignment_id), "%s",
+                          g_session.assignment_id.c_str());
+            std::snprintf(completion.session_id, sizeof(completion.session_id), "%s",
+                          g_session.session_id.c_str());
+            std::snprintf(completion.step_id, sizeof(completion.step_id), "%s",
+                          g_session.active_action_step_id.c_str());
+            std::snprintf(completion.action_id, sizeof(completion.action_id), "%s",
+                          g_session.active_action_id.c_str());
+            DispatchLessonEmbodiedCompletion(completion, protocol_.get());
+        }
+        return;
+    }
 
     const bool cinematic_v3 = protocol_version != nullptr &&
         strcmp(protocol_version, tbot::kLessonRendererV3) == 0;
@@ -2337,6 +2740,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 g_session = LessonSession{};
                 g_session.assignment_id = assignment_id;
                 g_session.session_id = session_id;
+                RestoreLessonEmbodiedLedger(assignment_id, session_id);
                 g_session.current_transport_epoch = frame_transport_epoch;
             }
             g_session.lesson_asset_generation = generation;
@@ -3046,6 +3450,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session = LessonSession{};
             g_session.assignment_id = assignment_id;
             g_session.session_id = session_id;
+            RestoreLessonEmbodiedLedger(assignment_id, session_id);
             g_session.lesson_asset_generation = prepare_asset_generation;
             g_session.current_transport_epoch = frame_transport_epoch;
             g_session.last_in_sequence = sequence;
@@ -3080,6 +3485,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session = LessonSession{};
         g_session.assignment_id = assignment_id;
         g_session.session_id = session_id;
+        RestoreLessonEmbodiedLedger(assignment_id, session_id);
         g_session.lesson_asset_generation = prepare_asset_generation;
         g_session.current_transport_epoch = frame_transport_epoch;
         g_session.last_in_sequence = sequence;
@@ -3252,6 +3658,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.paused = true;
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
+        CancelAndRestoreActiveLessonEmbodiedAction();
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
@@ -3334,10 +3741,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
                                                            : Lang::Sounds::OGG_SUCCESS;
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
+        CancelAndRestoreActiveLessonEmbodiedAction();
         Application::GetInstance().SetLessonRuntimeActive(false);
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
+        g_embodied_ledger = LessonEmbodiedLedger{};
         g_layer_state.ClearAll();
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
         end_lesson_asset_session();
@@ -3482,6 +3891,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // =====================  lesson_step (render s4 "model")  ====================
     const char* lesson_id = Str(root, "lessonId");
     const char* step_id = Str(root, "stepId");
+    g_session.current_step_id = step_id != nullptr ? step_id : "";
+    g_session.assessment_window_open = false;
     double lesson_version = -1.0;
     Num(root, "lessonVersion", lesson_version);
     ESP_LOGI(TAG,
@@ -3919,9 +4330,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool has_visible_child_prompt = has_caption_prompt && !caption.empty();
     const bool should_listen = !passive && has_visible_content && has_visible_child_prompt;
     if (!should_listen) {
+        g_session.assessment_window_open = false;
         Application::GetInstance().CancelLessonInteractiveListening();
     }
     if (should_listen) {
+        CancelAndRestoreActiveLessonEmbodiedAction();
+        g_session.assessment_window_open = true;
         const uint32_t listen_generation =
             Application::GetInstance().BeginLessonInteractiveListeningRequest();
         ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",

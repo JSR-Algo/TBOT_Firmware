@@ -207,6 +207,15 @@ public:
         LessonVisualCompletionResult result,
         const char* degraded_reason = nullptr,
         std::uint64_t visual_nonce = 0);
+    void EnqueueLessonEmbodiedCompletion(
+        LessonQueueItemKind kind,
+        std::uint64_t transport_epoch,
+        const char* assignment_id,
+        const char* session_id,
+        const char* step_id,
+        const char* action_id,
+        std::uint64_t action_generation,
+        std::uint64_t embodied_nonce);
 
 private:
     Application();

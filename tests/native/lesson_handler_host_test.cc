@@ -162,6 +162,31 @@ std::string FrameBodyStr(size_t i, const char* obj, const char* key) {
     cJSON_Delete(f);
     return out;
 }
+bool FrameEmbodiedBool(size_t i, const char* key, bool fallback) {
+    cJSON* frame = cJSON_Parse(Sent()[i].c_str());
+    cJSON* body = cJSON_GetObjectItem(frame, "body");
+    cJSON* embodied = body ? cJSON_GetObjectItem(body, "embodiedAction") : nullptr;
+    cJSON* value = embodied ? cJSON_GetObjectItem(embodied, key) : nullptr;
+    const bool out = cJSON_IsBool(value) ? cJSON_IsTrue(value) : fallback;
+    cJSON_Delete(frame);
+    return out;
+}
+bool FrameHasExactEmbodiedAckSchema(size_t i) {
+    cJSON* frame = cJSON_Parse(Sent()[i].c_str());
+    cJSON* body = frame ? cJSON_GetObjectItem(frame, "body") : nullptr;
+    cJSON* embodied = body ? cJSON_GetObjectItem(body, "embodiedAction") : nullptr;
+    const bool exact = frame && body && embodied && cJSON_GetArraySize(frame) == 6 &&
+        cJSON_GetArraySize(body) == 2 && cJSON_GetArraySize(embodied) == 4 &&
+        cJSON_GetObjectItem(frame, "type") && cJSON_GetObjectItem(frame, "assignmentId") &&
+        cJSON_GetObjectItem(frame, "sessionId") && cJSON_GetObjectItem(frame, "stepId") &&
+        cJSON_GetObjectItem(frame, "sequence") &&
+        cJSON_GetObjectItem(embodied, "actionId") &&
+        cJSON_GetObjectItem(embodied, "actionGeneration") &&
+        cJSON_GetObjectItem(embodied, "outcome") &&
+        cJSON_GetObjectItem(embodied, "returnedToRest");
+    cJSON_Delete(frame);
+    return exact;
+}
 // assetPack.ready inside an ack body.
 bool FrameAssetPackReady(size_t i) {
     cJSON* f = cJSON_Parse(Sent()[i].c_str());
@@ -529,6 +554,26 @@ std::string ResumeFrame(int seq) {
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
            SID() + "\"," + "\"sequence\":" + std::to_string(seq) + ",\"body\":{}}";
 }
+std::string EmbodiedActionFrame(int seq, const std::string& step_id,
+                                const std::string& action_id, int generation,
+                                const char* intent = "PRESENT_LEFT",
+                                const char* focus = "focus.left.choice") {
+    return std::string("{\"type\":\"lesson_embodied_action\",\"assignmentId\":\"") +
+           AID() + "\",\"sessionId\":\"" + SID() + "\",\"stepId\":\"" + step_id +
+           "\",\"sequence\":" + std::to_string(seq) +
+           ",\"body\":{\"actionId\":\"" + action_id +
+           "\",\"actionGeneration\":" + std::to_string(generation) +
+           ",\"intent\":\"" + intent + "\",\"visualFocusRegion\":\"" + focus +
+           "\",\"listenWindowPolicy\":\"complete_before_listening\"}}";
+}
+std::string EmbodiedCancelFrame(int seq, const std::string& step_id,
+                                const std::string& action_id, int generation) {
+    return std::string("{\"type\":\"lesson_embodied_cancel\",\"assignmentId\":\"") +
+           AID() + "\",\"sessionId\":\"" + SID() + "\",\"stepId\":\"" + step_id +
+           "\",\"sequence\":" + std::to_string(seq) +
+           ",\"body\":{\"actionId\":\"" + action_id +
+           "\",\"actionGeneration\":" + std::to_string(generation) + "}}";
+}
 std::string ErrorFrame(int seq) {
     return std::string("{\"type\":\"lesson_error\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -665,6 +710,160 @@ void test_envelope_guards() {
     require(Sent().empty(), "missing sequence emits nothing");
 }
 
+void test_embodied_action_capability_and_async_terminal_ack() {
+    ResetObservable();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+
+    cJSON* features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    cJSON* capability = cJSON_GetObjectItem(features, "lessonCourseMode");
+    require(cJSON_IsObject(capability), "course mode capability is advertised after initialization");
+    require(cJSON_GetObjectItem(capability, "version")->valueint == 2,
+            "course mode capability pins version 2");
+    require(cJSON_IsTrue(cJSON_GetObjectItem(capability, "embodiedActions")),
+            "course mode capability advertises embodied actions");
+    cJSON_Delete(features);
+
+    const int sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "cat-meaning-left-right-01", "http://x/p.jpg",
+                     "http://x/o.jpg", "http://x/r.jpg",
+                     ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    const size_t before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "cat-meaning-left-right-01",
+                               "session:present-left:1", 1));
+    require(Sent().size() == before, "embodied action waits asynchronously for hold and rest");
+    require(display.last_emotion == "neutral", "embodied action applies its supportive face");
+    require(App().robot_uart_.calls.size() == 3, "embodied action dispatches one safe servo preset");
+    HostEspFireTimer();
+    require(Sent().size() == before, "timer callback only enqueues onto lesson worker");
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == before, "hold completion restores before settle ACK");
+    HostEspFireTimer();
+    require(Sent().size() == before, "settle timer also emits no Protocol frame directly");
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == before + 1, "embodied action emits one terminal ACK after settle");
+    require(FrameBodyNum(before, "acks") == sequence + 1,
+            "embodied terminal ACK echoes the server sequence");
+    require(FrameBodyStr(before, "embodiedAction", "actionId") == "session:present-left:1",
+            "embodied terminal ACK echoes action identity");
+    require(FrameBodyStr(before, "embodiedAction", "outcome") == "applied",
+            "embodied terminal ACK uses an allowed firmware outcome");
+    require(FrameHasExactEmbodiedAckSchema(before),
+            "embodied terminal ACK has the frozen closed schema");
+    require(FrameEmbodiedBool(before, "returnedToRest", false),
+            "embodied terminal ACK confirms rest only after settle");
+    Board::GetInstance().display_ = nullptr;
+}
+
+void test_embodied_action_reduced_motion_and_partial_servo_degrade() {
+    ResetObservable();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    int sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "reduced-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    tbot::SetLessonCourseModeCapabilityForTest(true, true);
+    const size_t before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "reduced-step", "reduced:1", 1));
+    require(App().robot_uart_.calls.empty(), "reduced motion never dispatches a servo command");
+    require(display.last_emotion == "neutral", "reduced motion still applies the named face");
+    HostEspFireTimer();
+    require(Sent().size() == before, "reduced settle callback only enqueues");
+    App().DrainLessonEmbodiedQueue();
+    require(FrameBodyStr(before, "embodiedAction", "outcome") == "degraded",
+            "reduced motion ACK is degraded");
+    require(FrameEmbodiedBool(before, "returnedToRest", false),
+            "reduced motion is already at rest when terminal ACK is emitted");
+    tbot::SetLessonCourseModeCapabilityForTest(true, false);
+    Board::GetInstance().display_ = nullptr;
+
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "partial-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    App().robot_uart_.left_ok = false;
+    const size_t partial_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "partial-step", "partial:1", 1));
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(FrameBodyStr(partial_before, "embodiedAction", "outcome") == "degraded",
+            "one-servo failure degrades without failing the lesson");
+    Board::GetInstance().display_ = nullptr;
+}
+
+void test_embodied_action_cancel_duplicate_and_supersession_are_safe() {
+    ResetObservable();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    int sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "lifecycle-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    const size_t before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "lifecycle-step", "lifecycle:1", 1));
+    const auto stale_callback = HostEspQueueTimerCallback();
+    Handle(EmbodiedActionFrame(sequence + 2, "lifecycle-step", "lifecycle:2", 2,
+                               "PRESENT_RIGHT", "focus.right.choice"));
+    require(App().robot_uart_.calls.size() == 9,
+            "newer action restores the old pose before applying replacement");
+    HostEspInvokeQueuedCallback(stale_callback);
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == before, "superseded timer output is suppressed without ACK");
+
+    Handle(EmbodiedCancelFrame(sequence + 3, "lifecycle-step", "lifecycle:2", 2));
+    require(Sent().size() == before, "matching cancel waits for the settle interval");
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == before + 1 &&
+                FrameBodyStr(before, "embodiedAction", "outcome") == "applied",
+            "matching cancel terminates with an allowed applied ACK after rest");
+
+    const size_t after_cancel = Sent().size();
+    Handle(EmbodiedCancelFrame(sequence + 4, "lifecycle-step", "unknown", 99));
+    require(Sent().size() == after_cancel,
+            "unknown cancel is an idempotent no-op without motion or ACK");
+    Handle(EmbodiedActionFrame(sequence + 5, "lifecycle-step", "lifecycle:1", 3));
+    require(Sent().size() == after_cancel + 1 &&
+                FrameBodyStr(after_cancel, "embodiedAction", "outcome") == "rejected",
+            "consumed action identity is rejected instead of replaying motion");
+    Board::GetInstance().display_ = nullptr;
+}
+
+void test_embodied_action_fail_closed_capability_focus_and_timer_failure() {
+    tbot::SetLessonCourseModeCapabilityForTest(false, false);
+    cJSON* features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    require(cJSON_GetObjectItem(features, "lessonCourseMode") == nullptr,
+            "course mode capability is absent until the complete path is ready");
+    cJSON_Delete(features);
+    tbot::SetLessonCourseModeCapabilityForTest(true, false);
+
+    ResetObservable();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    const int sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "focus-step", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg",
+                     ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    HostEspTimerStartOk() = false;
+    const size_t before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "focus-step", "timer-failure:1", 1));
+    require(std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.left.choice",
+            "handler applies the exact authored focus anchor without text inference");
+    require(Sent().size() == before + 1 &&
+                FrameBodyStr(before, "embodiedAction", "outcome") == "rejected" &&
+                !FrameEmbodiedBool(before, "returnedToRest", true),
+            "timer failure rejects without falsely confirming physical rest");
+    HostEspTimerStartOk() = true;
+    Board::GetInstance().display_ = nullptr;
+}
+
 // ==========================================================================
 // 2. Prepare + assetPack ack ladder
 // ==========================================================================
@@ -702,7 +901,10 @@ void test_renderer_v2_capability_shape_and_exact_tokens() {
                 "{\"lesson\":true,\"renderer\":[\"teebot-lesson-renderer.v1\","
                 "\"teebot-lesson-renderer.v2\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
-                "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true}}",
+                "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
+                "\"lessonCourseMode\":{\"version\":2,\"embodiedActions\":true,"
+                "\"reducedMotion\":false,\"faces\":[\"neutral\",\"happy\","
+                "\"thinking\",\"relaxed\"]}}",
             "hello advertises both renderer tokens and structured v2 ownership");
     cJSON_free(encoded);
     cJSON_Delete(features);
@@ -728,7 +930,10 @@ void test_renderer_v3_capability_is_fail_closed_until_initialized() {
                 "\"teebot-lesson-renderer.v3\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
-                "\"lessonRendererV3\":{\"directMp4Cinematic\":true,\"sdAssetPack\":true}}",
+                "\"lessonRendererV3\":{\"directMp4Cinematic\":true,\"sdAssetPack\":true},"
+                "\"lessonCourseMode\":{\"version\":2,\"embodiedActions\":true,"
+                "\"reducedMotion\":false,\"faces\":[\"neutral\",\"happy\","
+                "\"thinking\",\"relaxed\"]}}",
             "initialized renderer advertises exact Task-7 v3 capability booleans");
     cJSON_free(encoded);
     cJSON_Delete(features);
@@ -1154,7 +1359,10 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
                 "\"teebot-lesson-renderer.v4\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
-                "\"lessonRendererV4\":{\"flattenedMjpegCinematic\":true,\"sdAssetPack\":true}}",
+                "\"lessonRendererV4\":{\"flattenedMjpegCinematic\":true,\"sdAssetPack\":true},"
+                "\"lessonCourseMode\":{\"version\":2,\"embodiedActions\":true,"
+                "\"reducedMotion\":false,\"faces\":[\"neutral\",\"happy\","
+                "\"thinking\",\"relaxed\"]}}",
             "hello advertises exact v4 feature only when v4 production capability is ready");
     cJSON_free(encoded);
     cJSON_Delete(features);
@@ -7646,6 +7854,10 @@ void test_layer_install_timeout_degrades_without_committing_layer_state() {
 }  // namespace
 
 int main() {
+    test_embodied_action_capability_and_async_terminal_ack();
+    test_embodied_action_reduced_motion_and_partial_servo_degrade();
+    test_embodied_action_cancel_duplicate_and_supersession_are_safe();
+    test_embodied_action_fail_closed_capability_focus_and_timer_failure();
     test_safe_motion_presets_and_auto_rest();
     test_motion_unknown_raw_failures_and_stale_rest_are_nonfatal_degrades();
     test_queued_old_timer_callback_cannot_rest_a_new_pose_early();
