@@ -231,7 +231,6 @@ bool DispatchLessonEmbodiedCompletion(const LessonQueueItem& item, Protocol* pro
 #ifdef TBOT_HOST_NATIVE_COVERAGE
 namespace tbot {
 void SetLessonCourseModeCapabilityForTest(bool ready, bool reduced_motion);
-const char* LessonEmbodiedVisualFocusForTest();
 }
 #endif
 

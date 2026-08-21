@@ -870,8 +870,9 @@ void test_embodied_action_fail_closed_capability_focus_and_timer_failure() {
     HostEspTimerStartOk() = false;
     const size_t before = Sent().size();
     Handle(EmbodiedActionFrame(sequence + 1, "focus-step", "timer-failure:1", 1));
-    require(std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.left.choice",
-            "handler applies the exact authored focus anchor without text inference");
+    require(std::find(display.lesson_focus_calls.begin(), display.lesson_focus_calls.end(),
+                      "focus.left.choice") != display.lesson_focus_calls.end(),
+            "production display applies the exact authored focus anchor without text inference");
     require(Sent().size() == before + 1 &&
                 FrameBodyStr(before, "embodiedAction", "outcome") == "rejected" &&
                 !FrameEmbodiedBool(before, "returnedToRest", true),
@@ -896,19 +897,22 @@ void test_embodied_software_journeys_16_through_20() {
     Handle(StepFrame(sequence, "alignment-step", "http://x/p.jpg", "http://x/o.jpg",
                      "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
     Handle(EmbodiedActionFrame(sequence + 1, "alignment-step", "journey-16-left", 1));
-    require(std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.left.choice" &&
+    require(!display.lesson_focus_calls.empty() &&
+                display.lesson_focus_calls.back() == "focus.left.choice" &&
                 App().robot_uart_.calls ==
                     std::vector<std::string>({"head_percent:25", "left_percent:45", "right_percent:0"}),
             "journey 16 keeps left focus and motion aligned");
     Handle(EmbodiedActionFrame(sequence + 2, "alignment-step", "journey-16-right", 2,
                                "PRESENT_RIGHT", "focus.right.choice"));
-    require(std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.right.choice" &&
+    require(display.lesson_focus_calls.back() == "focus.right.choice" &&
                 App().robot_uart_.calls.size() == 9 &&
                 App().robot_uart_.calls[6] == "head_percent:75" &&
                 App().robot_uart_.calls[7] == "left_percent:0" &&
                 App().robot_uart_.calls[8] == "right_percent:45",
             "journey 16 keeps right focus and motion aligned after safe supersession");
     CompleteEmbodiedAction();
+    require(display.lesson_focus_calls.back().empty(),
+            "terminal completion clears the production focus cue");
 
     // Journey 17: a lost terminal ACK keeps the action consumed and never replays motion.
     ResetObservable();
@@ -947,13 +951,71 @@ void test_embodied_software_journeys_16_through_20() {
     Handle(StepFrame(sequence + 2, "barge-listen", "http://x/p2.jpg", "http://x/o2.jpg",
                      "http://x/r2.jpg", ",\"completionClass\":\"interactive\",\"prompt\":\"What do you see?\""));
     require(App().robot_uart_.calls.size() == calls_before_barge + 3 &&
-                App().prepare_listen_calls > 0,
-            "journey 18 restores rest before opening child listening");
+                App().prepare_listen_calls == 0,
+            "journey 18 keeps assessed listening closed while restore settles");
     const size_t frames_after_barge = Sent().size();
     HostEspInvokeQueuedCallback(barge_stale_callback);
     App().DrainLessonEmbodiedQueue();
-    require(Sent().size() == frames_after_barge,
-            "journey 18 suppresses the cancelled action callback during child listening");
+    require(Sent().size() == frames_after_barge && App().prepare_listen_calls == 0,
+            "journey 18 suppresses the cancelled hold callback while restore settles");
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == frames_after_barge + 1 &&
+                FrameEmbodiedBool(frames_after_barge, "returnedToRest", false) &&
+                App().prepare_listen_calls == 1,
+            "journey 18 opens assessed listening once after terminal rest ACK and settle");
+
+    // A lifecycle transition invalidates both the pending assessed-listen request and
+    // the restore timer nonce; neither can reopen the mic after pause.
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "barge-pause-source", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "barge-pause-source", "journey-18-pause", 1));
+    Handle(StepFrame(sequence + 2, "barge-pause-listen", "http://x/p2.jpg", "http://x/o2.jpg",
+                     "http://x/r2.jpg", ",\"completionClass\":\"interactive\",\"prompt\":\"Your turn\""));
+    const auto stale_restore_callback = HostEspQueueTimerCallback();
+    Handle(PauseFrame(sequence + 3));
+    HostEspInvokeQueuedCallback(stale_restore_callback);
+    App().DrainLessonEmbodiedQueue();
+    require(App().prepare_listen_calls == 0,
+            "journey 18 pause invalidates pending assessed listening and restore nonce");
+
+    // A partial rest command degrades the action but never opens assessed listening.
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "barge-failed-source", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "barge-failed-source", "journey-18-failed", 1));
+    App().robot_uart_.right_ok = false;
+    const size_t failed_restore_before = Sent().size();
+    Handle(StepFrame(sequence + 2, "barge-failed-listen", "http://x/p2.jpg", "http://x/o2.jpg",
+                     "http://x/r2.jpg", ",\"completionClass\":\"interactive\",\"prompt\":\"Your turn\""));
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == failed_restore_before + 2 &&
+                !FrameEmbodiedBool(Sent().size() - 1, "returnedToRest", true) &&
+                App().prepare_listen_calls == 0,
+            "journey 18 partial restore ACK keeps assessed listening closed");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "barge-timer-source", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    Handle(EmbodiedActionFrame(sequence + 1, "barge-timer-source", "journey-18-timer", 1));
+    HostEspTimerStartOk() = false;
+    const size_t failed_timer_before = Sent().size();
+    Handle(StepFrame(sequence + 2, "barge-timer-listen", "http://x/p2.jpg", "http://x/o2.jpg",
+                     "http://x/r2.jpg", ",\"completionClass\":\"interactive\",\"prompt\":\"Your turn\""));
+    require(Sent().size() == failed_timer_before + 2 &&
+                FrameBodyStr(Sent().size() - 1, "embodiedAction", "outcome") == "rejected" &&
+                !FrameEmbodiedBool(Sent().size() - 1, "returnedToRest", true) &&
+                App().prepare_listen_calls == 0,
+            "journey 18 restore timer failure rejects and keeps assessed listening closed");
+    HostEspTimerStartOk() = true;
 
     // Journey 19: emotional sharing uses the calm supportive face and bounded pose.
     ResetObservable();
@@ -964,7 +1026,7 @@ void test_embodied_software_journeys_16_through_20() {
     Handle(EmbodiedActionFrame(sequence + 1, "calm-step", "journey-19", 1,
                                "COMFORT_CALM", "focus.center.primary"));
     require(display.last_emotion == "relaxed" &&
-                std::string(tbot::LessonEmbodiedVisualFocusForTest()) == "focus.center.primary" &&
+                display.lesson_focus_calls.back() == "focus.center.primary" &&
                 App().robot_uart_.calls ==
                     std::vector<std::string>({"head_percent:50", "left_percent:10", "right_percent:10"}),
             "journey 19 applies the calm supportive face and bounded pose");
@@ -982,6 +1044,8 @@ void test_embodied_software_journeys_16_through_20() {
                                "LISTEN_STILL", "focus.center.primary"));
     require(App().robot_uart_.calls.empty() && display.last_emotion == "relaxed",
             "journey 20 reduced motion uses face and focus without servo commands");
+    require(display.lesson_focus_calls.back() == "focus.center.primary",
+            "journey 20 reduced motion still applies the authored production focus cue");
     HostEspFireTimer();
     App().DrainLessonEmbodiedQueue();
     require(FrameBodyStr(reduced_before, "embodiedAction", "outcome") == "degraded" &&
@@ -1135,6 +1199,21 @@ void test_embodied_ledger_mastery_cap_and_no_return_settle() {
     require(FrameBodyStr(rest_before, "embodiedAction", "outcome") == "applied" &&
                 FrameEmbodiedBool(rest_before, "returnedToRest", false),
             "no-return REST_WARM completes after settle without a redundant restore command");
+
+    ResetObservable();
+    Board::GetInstance().display_ = &display;
+    sequence = OpenMotionEnabledSession();
+    Handle(StepFrame(sequence, "listen-still-partial", "http://x/p.jpg", "http://x/o.jpg",
+                     "http://x/r.jpg", ",\"completionClass\":\"passive\",\"prompt\":\"Ready\""));
+    App().robot_uart_.left_ok = false;
+    const size_t partial_rest_before = Sent().size();
+    Handle(EmbodiedActionFrame(sequence + 1, "listen-still-partial", "listen-still-partial", 1,
+                               "LISTEN_STILL", "focus.center.primary"));
+    HostEspFireTimer();
+    App().DrainLessonEmbodiedQueue();
+    require(FrameBodyStr(partial_rest_before, "embodiedAction", "outcome") == "degraded" &&
+                !FrameEmbodiedBool(partial_rest_before, "returnedToRest", true),
+            "partial no-return rest preset never claims confirmed rest");
     Board::GetInstance().display_ = nullptr;
 }
 

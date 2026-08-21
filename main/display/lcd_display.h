@@ -242,6 +242,7 @@ protected:
     lv_obj_t* lesson_caption_label_ = nullptr;
     lv_obj_t* lesson_word_pill_ = nullptr;
     lv_obj_t* lesson_word_label_ = nullptr;
+    lv_obj_t* lesson_focus_cue_ = nullptr;
     lv_obj_t* emoji_label_ = nullptr;
     lv_obj_t* emoji_image_ = nullptr;
     std::unique_ptr<LvglGif> gif_controller_ = nullptr;
@@ -278,6 +279,8 @@ public:
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) override;
     virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) override;
     virtual void SetLessonTeachingWord(const char* text) override;
+    virtual void SetLessonVisualFocus(LessonVisualFocusRegion region) override;
+    virtual void ClearLessonVisualFocus() override;
     virtual bool BeginLessonCinematic();
     virtual bool QueueLessonCinematicFrame(const std::uint16_t* pixels, std::uint16_t width,
                                            std::uint16_t height);

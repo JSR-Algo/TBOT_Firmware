@@ -36,6 +36,9 @@ constexpr int kLessonCaptionWidthPercent = 92;
 constexpr int kLessonCaptionLabelWidthPercent = 86;
 constexpr int kLessonCaptionMaxHeightPercent = 24;
 constexpr int kLessonCaptionBottomInsetDivisor = 60;
+constexpr int kLessonFocusReferenceWidth = 480;
+constexpr int kLessonFocusReferenceHeight = 320;
+constexpr int kLessonFocusCueSize = 64;
 constexpr uint32_t kLessonRobotAnimationTickMs = 16;
 constexpr uint32_t kLessonRobotAnimationTimeoutMs = 6000;
 constexpr size_t kLessonRobotAnimationMinInternalHeapBytes = 24 * 1024;
@@ -76,6 +79,21 @@ int LessonImageCoverScale(int image_width, int image_height, int target_width, i
     const int scale_w = 256 * target_width / image_width;
     const int scale_h = 256 * target_height / image_height;
     return std::max(1, std::max(scale_w, scale_h));
+}
+
+lv_obj_t* CreateLessonFocusCue(lv_obj_t* screen) {
+    lv_obj_t* cue = lv_obj_create(screen);
+    lv_obj_set_size(cue, kLessonFocusCueSize, kLessonFocusCueSize);
+    lv_obj_set_style_radius(cue, kLessonFocusCueSize / 2, 0);
+    lv_obj_set_style_bg_opa(cue, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cue, 4, 0);
+    lv_obj_set_style_border_color(cue, lv_color_hex(0xFFD43B), 0);
+    lv_obj_set_style_shadow_width(cue, 10, 0);
+    lv_obj_set_style_shadow_color(cue, lv_color_hex(0xFFF2A8), 0);
+    lv_obj_set_style_shadow_opa(cue, LV_OPA_50, 0);
+    lv_obj_clear_flag(cue, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(cue, LV_OBJ_FLAG_HIDDEN);
+    return cue;
 }
 #endif
 }  // namespace
@@ -554,6 +572,8 @@ void LcdDisplay::SetupUI() {
     lesson_robot_overlay_ = lv_image_create(screen);
     lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
+
+    lesson_focus_cue_ = CreateLessonFocusCue(screen);
 
     const auto word_pill = LessonWordPillGeometry(width_, height_);
     lesson_word_pill_ = lv_obj_create(screen);
@@ -1219,6 +1239,8 @@ void LcdDisplay::SetupUI() {
     lv_obj_align(lesson_robot_overlay_, LV_ALIGN_BOTTOM_LEFT, 0, 0);
     lv_obj_add_flag(lesson_robot_overlay_, LV_OBJ_FLAG_HIDDEN);
 
+    lesson_focus_cue_ = CreateLessonFocusCue(screen);
+
     const auto word_pill = LessonWordPillGeometry(width_, height_);
     lesson_word_pill_ = lv_obj_create(screen);
     lv_obj_set_pos(lesson_word_pill_, word_pill.x, word_pill.y);
@@ -1685,6 +1707,27 @@ void LcdDisplay::SetLessonTeachingWord(const char* text) {
     lv_obj_move_foreground(lesson_word_pill_);
 }
 
+void LcdDisplay::SetLessonVisualFocus(LessonVisualFocusRegion region) {
+    DisplayLockGuard lock(this);
+    if (lesson_focus_cue_ == nullptr) return;
+    int reference_x = 67;
+    const int reference_y = 215;
+    if (region == LessonVisualFocusRegion::kRightChoice) reference_x = 366;
+    const int x = reference_x * width_ / kLessonFocusReferenceWidth;
+    const int y = reference_y * height_ / kLessonFocusReferenceHeight;
+    lv_obj_set_pos(lesson_focus_cue_, x - kLessonFocusCueSize / 2,
+                   y - kLessonFocusCueSize / 2);
+    lv_obj_remove_flag(lesson_focus_cue_, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(lesson_focus_cue_);
+}
+
+void LcdDisplay::ClearLessonVisualFocus() {
+    DisplayLockGuard lock(this);
+    if (lesson_focus_cue_ != nullptr) {
+        lv_obj_add_flag(lesson_focus_cue_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 bool LcdDisplay::StartLessonRobotEntrance(
     const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) {
     LessonVisualCompletion deferred_completion = std::move(completion);
@@ -1936,6 +1979,9 @@ bool LcdDisplay::ApplyLessonVisualState(
 void LcdDisplay::SetLessonMode(bool active) {
     DisplayLockGuard lock(this);
     lesson_mode_active_ = active;
+    if (!active && lesson_focus_cue_ != nullptr) {
+        lv_obj_add_flag(lesson_focus_cue_, LV_OBJ_FLAG_HIDDEN);
+    }
     if (emoji_box_ == nullptr && emoji_image_ == nullptr && emoji_label_ == nullptr) {
         return;
     }
@@ -1961,6 +2007,8 @@ void LcdDisplay::SetLessonMode(bool active) {
 #else
 void LcdDisplay::SetLessonCaption(const char* content) { (void)content; }
 void LcdDisplay::SetLessonTeachingWord(const char* text) { (void)text; }
+void LcdDisplay::SetLessonVisualFocus(LessonVisualFocusRegion region) { (void)region; }
+void LcdDisplay::ClearLessonVisualFocus() {}
 bool LcdDisplay::StartLessonRobotEntrance(
     const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) {
     (void)plan;

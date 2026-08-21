@@ -2,6 +2,7 @@
 #define LVGL_DISPLAY_H
 
 #include "display.h"
+#include "lesson_embodied_action.h"
 #include "lvgl_image.h"
 
 #include <lvgl.h>
@@ -71,6 +72,8 @@ public:
     virtual void SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) {}
     virtual void SetLessonRobotOverlayBounds(int left, int top, int width, int height) {}
     virtual void SetLessonTeachingWord(const char* text) {}
+    virtual void SetLessonVisualFocus(LessonVisualFocusRegion region) { (void)region; }
+    virtual void ClearLessonVisualFocus() {}
     virtual bool StartLessonRobotEntrance(
         const LessonRobotEntrancePlan&, LessonVisualCompletion completion) {
         if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");

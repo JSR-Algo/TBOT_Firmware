@@ -68,7 +68,6 @@ namespace {
 std::atomic<int> g_cinematic_json_fail_after{-1};
 std::atomic<bool> g_course_mode_ready{true};
 std::atomic<bool> g_course_mode_reduced_motion{false};
-std::atomic<int> g_embodied_focus_for_test{0};
 
 struct ReservationRefusalMapping {
     const char* code;
@@ -204,13 +203,6 @@ void SetLessonJsonFailAfterForTest(int successful_operations_before_failure) {
 void SetLessonCourseModeCapabilityForTest(bool ready, bool reduced_motion) {
     g_course_mode_ready.store(ready, std::memory_order_release);
     g_course_mode_reduced_motion.store(reduced_motion, std::memory_order_release);
-}
-const char* LessonEmbodiedVisualFocusForTest() {
-    switch (g_embodied_focus_for_test.load(std::memory_order_acquire)) {
-    case 1: return "focus.left.choice";
-    case 2: return "focus.right.choice";
-    default: return "focus.center.primary";
-    }
 }
 #endif
 }  // namespace tbot
@@ -800,7 +792,8 @@ struct LessonSession {
     std::uint32_t active_settle_ms = 0;
     bool active_action_reduced_motion = false;
     bool active_restore_confirmed = false;
-    std::string active_visual_focus = "focus.center.primary";
+    std::uint32_t pending_assessed_listen_generation = 0;
+    std::string pending_assessed_listen_step_id;
     unsigned mastery_celebrations = 0;
     std::map<std::string, std::string> verified_asset_paths;
     // FW-LESSON-02: the (rendered, degraded) of the ack we emitted for the last
@@ -1031,6 +1024,13 @@ const char* EmbodiedOutcome(LessonEmbodiedMotionResult result) {
 }
 
 void ClearActiveLessonEmbodiedAction() {
+    Display* display = Board::GetInstance().GetDisplay();
+    LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+    if (lvgl_display != nullptr) {
+        Application::GetInstance().Schedule([lvgl_display]() {
+            lvgl_display->ClearLessonVisualFocus();
+        });
+    }
     g_session.active_action_id.clear();
     g_session.active_action_step_id.clear();
     g_session.active_action_generation = 0;
@@ -1043,14 +1043,58 @@ void ClearActiveLessonEmbodiedAction() {
     g_session.active_restore_confirmed = false;
 }
 
+void InvalidatePendingAssessedListen() {
+    g_session.pending_assessed_listen_generation = 0;
+    g_session.pending_assessed_listen_step_id.clear();
+}
+
 bool CancelAndRestoreActiveLessonEmbodiedAction() {
+    InvalidatePendingAssessedListen();
     if (g_session.active_action_id.empty()) return true;
     ++g_session.active_action_nonce;
     const auto restored = Application::GetInstance().CancelLessonEmbodiedAction(
         g_session.active_action_token);
-    const bool returned_to_rest = restored != LessonEmbodiedMotionResult::kRejected;
+    const bool returned_to_rest = restored == LessonEmbodiedMotionResult::kApplied;
     ClearActiveLessonEmbodiedAction();
     return returned_to_rest;
+}
+
+bool RestoreActiveLessonEmbodiedActionBeforeAssessedListen(
+    std::uint32_t listen_generation, const char* listen_step_id, Protocol* protocol) {
+    if (g_session.active_action_id.empty()) return false;
+    g_session.pending_assessed_listen_generation = listen_generation;
+    g_session.pending_assessed_listen_step_id = listen_step_id != nullptr ? listen_step_id : "";
+    const auto restored = Application::GetInstance().CancelLessonEmbodiedAction(
+        g_session.active_action_token);
+    if (restored != LessonEmbodiedMotionResult::kApplied &&
+        g_session.active_action_result == LessonEmbodiedMotionResult::kApplied) {
+        g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
+    }
+    g_session.active_restore_confirmed = restored == LessonEmbodiedMotionResult::kApplied;
+    g_session.active_action_nonce =
+        g_embodied_completion_nonce.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (g_session.active_action_nonce == 0) g_session.active_action_nonce = 1;
+    if (ArmLessonEmbodiedTimer(
+            LessonQueueItemKind::kEmbodiedSettled, g_session.active_settle_ms)) {
+        return true;
+    }
+    g_session.active_action_result = LessonEmbodiedMotionResult::kRejected;
+    g_session.active_restore_confirmed = false;
+    LessonQueueItem completion{};
+    completion.kind = LessonQueueItemKind::kEmbodiedSettled;
+    completion.transport_epoch = g_session.current_transport_epoch;
+    completion.action_generation = g_session.active_action_generation;
+    completion.embodied_nonce = g_session.active_action_nonce;
+    std::snprintf(completion.assignment_id, sizeof(completion.assignment_id), "%s",
+                  g_session.assignment_id.c_str());
+    std::snprintf(completion.session_id, sizeof(completion.session_id), "%s",
+                  g_session.session_id.c_str());
+    std::snprintf(completion.step_id, sizeof(completion.step_id), "%s",
+                  g_session.active_action_step_id.c_str());
+    std::snprintf(completion.action_id, sizeof(completion.action_id), "%s",
+                  g_session.active_action_id.c_str());
+    ::DispatchLessonEmbodiedCompletion(completion, protocol);
+    return true;
 }
 
 const char* CanonicalRobotState(const char* value) {
@@ -2033,7 +2077,7 @@ bool DispatchLessonEmbodiedCompletion(const LessonQueueItem& item, Protocol* pro
     if (item.kind == LessonQueueItemKind::kEmbodiedHoldCompleted) {
         const auto restore = Application::GetInstance().RestoreLessonRestPose(
             g_session.active_action_token);
-        g_session.active_restore_confirmed = restore != LessonEmbodiedMotionResult::kRejected;
+        g_session.active_restore_confirmed = restore == LessonEmbodiedMotionResult::kApplied;
         if (restore != LessonEmbodiedMotionResult::kApplied &&
             g_session.active_action_result == LessonEmbodiedMotionResult::kApplied) {
             g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
@@ -2059,7 +2103,19 @@ bool DispatchLessonEmbodiedCompletion(const LessonQueueItem& item, Protocol* pro
         EmbodiedOutcome(g_session.active_action_result), returned_to_rest);
     if (ack.empty() || !protocol->SendLessonFrame(ack)) return false;
     g_session.fs_sequence = outbound_sequence;
+    const std::uint32_t listen_generation = g_session.pending_assessed_listen_generation;
+    const std::string listen_step_id = g_session.pending_assessed_listen_step_id;
+    InvalidatePendingAssessedListen();
     ClearActiveLessonEmbodiedAction();
+    if (listen_generation != 0 && returned_to_rest && g_session.running && !g_session.paused &&
+        g_session.current_step_id == listen_step_id) {
+        g_session.assessment_window_open = true;
+        Application::GetInstance().Schedule([listen_generation]() {
+            Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
+        });
+    } else if (listen_generation != 0) {
+        Application::GetInstance().CancelLessonInteractiveListening();
+    }
     return true;
 }
 
@@ -2387,7 +2443,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
             }
             g_session.active_restore_confirmed =
-                restored != LessonEmbodiedMotionResult::kRejected;
+                restored == LessonEmbodiedMotionResult::kApplied;
             g_session.active_action_sequence = static_cast<std::int64_t>(cancel.sequence);
             g_session.active_action_nonce =
                 g_embodied_completion_nonce.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -2446,12 +2502,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_embodied_completion_nonce.fetch_add(1, std::memory_order_acq_rel) + 1;
         if (g_session.active_action_nonce == 0) g_session.active_action_nonce = 1;
         g_session.active_action_token = Application::GetInstance().GetLessonRuntimeToken();
-        g_session.active_visual_focus = LessonVisualFocusRegionWireName(action.visual_focus_region);
-        g_embodied_focus_for_test.store(
-            action.visual_focus_region == LessonVisualFocusRegion::kLeftChoice ? 1
-                : action.visual_focus_region == LessonVisualFocusRegion::kRightChoice ? 2 : 0,
-            std::memory_order_release);
-
         const LessonEmbodiedPreset& preset = ResolveLessonEmbodiedPreset(action.intent);
         g_session.active_settle_ms = preset.settle_before_listen_ms;
         const bool mastery_capped = action.intent == LessonEmbodiedIntent::kCelebrateMastery &&
@@ -2464,9 +2514,15 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_course_mode_reduced_motion.load(std::memory_order_acquire) ||
             !g_session.motion_presets_enabled || mastery_capped;
         Display* embodied_display = Board::GetInstance().GetDisplay();
+        LvglDisplay* embodied_lvgl_display = dynamic_cast<LvglDisplay*>(embodied_display);
         if (embodied_display != nullptr) {
-            Schedule([embodied_display, face = std::string(preset.face)]() {
+            Schedule([embodied_display, embodied_lvgl_display,
+                      face = std::string(preset.face),
+                      focus = action.visual_focus_region]() {
                 embodied_display->SetEmotion(face.c_str());
+                if (embodied_lvgl_display != nullptr) {
+                    embodied_lvgl_display->SetLessonVisualFocus(focus);
+                }
             });
         }
         if (g_session.active_action_reduced_motion) {
@@ -2475,12 +2531,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
         } else {
             g_session.active_action_result = Application::GetInstance().ApplyLessonEmbodiedPreset(
                 g_session.active_action_token, preset);
-            if (embodied_display == nullptr &&
+            if (embodied_lvgl_display == nullptr &&
                 g_session.active_action_result == LessonEmbodiedMotionResult::kApplied) {
                 g_session.active_action_result = LessonEmbodiedMotionResult::kDegraded;
             }
             g_session.active_restore_confirmed = !preset.return_to_rest &&
-                g_session.active_action_result != LessonEmbodiedMotionResult::kRejected;
+                g_session.active_action_result == LessonEmbodiedMotionResult::kApplied;
         }
         const LessonQueueItemKind phase =
             g_session.active_action_reduced_motion || !preset.return_to_rest
@@ -4336,18 +4392,24 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool should_listen = !passive && has_visible_content && has_visible_child_prompt;
     if (!should_listen) {
         g_session.assessment_window_open = false;
+        InvalidatePendingAssessedListen();
         Application::GetInstance().CancelLessonInteractiveListening();
     }
     if (should_listen) {
-        CancelAndRestoreActiveLessonEmbodiedAction();
-        g_session.assessment_window_open = true;
         const uint32_t listen_generation =
             Application::GetInstance().BeginLessonInteractiveListeningRequest();
-        ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",
-                 step_id != nullptr ? step_id : "?");
-        Schedule([listen_generation]() {
-            Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
-        });
+        // Close physical listening until rest/settle completes, while immediately
+        // reserving assessment authority so no new embodied action can start.
+        g_session.assessment_window_open = true;
+        if (!RestoreActiveLessonEmbodiedActionBeforeAssessedListen(
+                listen_generation, step_id, protocol_.get())) {
+            g_session.assessment_window_open = true;
+            ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",
+                     step_id != nullptr ? step_id : "?");
+            Schedule([listen_generation]() {
+                Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
+            });
+        }
     }
     ESP_LOGI(TAG, "lesson_step rendered stepId=%s passive=%d degraded=%d renderElapsedMs=%ld",
              step_id != nullptr ? step_id : "?", passive, degraded,
