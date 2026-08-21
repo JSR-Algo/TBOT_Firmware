@@ -15,6 +15,18 @@ CONTRACT_PATH = FIXTURE_DIR / "course-mode-pilot-cat-ball.json"
 LAYOUT_PATH = FIXTURE_DIR / "renderer-v4-visual-layout.json"
 CONTRACT_CHECKSUM = "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264"
 LAYOUT_CHECKSUM = "e61b56d1f8219a86c7f3986e7d5c70b91f512286604b5b206ef11e2c989d275c"
+CONTRACT_FILE_SHA256 = "05e18ae61aee0660c653a9386854552a23f90c8a1f8cfb9e7ff4e15d1d277470"
+LAYOUT_FILE_SHA256 = "031e69b82c33da87f5ec63c21cb1e756549b802e6a8bd567a1b76f51e4f77dc5"
+CHECKSUM_RULES = {
+    "algorithm": "SHA-256",
+    "canonicalization": "tbot-json-c14n.v1",
+    "encoding": "UTF-8",
+    "unicodeNormalization": "NFC",
+    "objectKeyOrder": "lexicographic",
+    "arrayOrder": "preserved",
+    "whitespace": "none",
+    "excludedJsonPointers": ["/contractChecksum"],
+}
 EVIDENCE_NAMES = [
     "NOT_STARTED", "EXPOSED", "UNDERSTOOD", "SUPPORTED_SPEECH",
     "INDEPENDENT_RECALL", "TRANSFERRED", "MASTERED_TODAY", "REVIEW_NEEDED",
@@ -78,6 +90,7 @@ def validate_contract(document: dict[str, Any], expected_checksum: str = CONTRAC
     assert document["schemaVersion"] == 1
     assert document["contractVersion"] == "courseCompanion.v2.contract.v1"
     assert document["contractChecksum"] == expected_checksum == checksum(document)
+    assert document["checksumRules"] == CHECKSUM_RULES
     assert document["fixtureId"] == "course-mode-pilot-cat-ball"
     assert document["preset"] == {"presetId": "courseCompanion", "presetVersion": 2}
     assert document["lesson"] == {
@@ -102,6 +115,13 @@ def validate_contract(document: dict[str, Any], expected_checksum: str = CONTRAC
         ("primary", "animals.cat", "cat", ["con mèo"]),
         ("optional_secondary", "toys.ball", "ball", ["quả bóng"]),
     ]
+    for target in document["targets"]:
+        exact_keys(target, {"targetId", "targetWord", "role", "vietnameseMeanings", "activityIds"})
+    assert document["targets"][0]["activityIds"] == [
+        "cat-discover-center-01", "cat-meaning-left-right-01", "cat-recall-visual-02",
+        "cat-transfer-scene-01", "cat-delayed-recall-01",
+    ]
+    assert document["targets"][1]["activityIds"] == ["ball-discover-center-01"]
     activity_ids = {activity["activityId"] for activity in document["activities"]}
     assert activity_ids == {
         "cat-discover-center-01", "cat-meaning-left-right-01", "cat-recall-visual-02",
@@ -151,13 +171,16 @@ def validate_layout(document: dict[str, Any], expected_checksum: str = LAYOUT_CH
         "canvas", "layerOrder", "layers", "collisionLimits", "captionSafeArea", "focusAnchors",
         "listeningCue", "reducedMotion", "mirroring",
     })
+    assert document["schemaVersion"] == 1
     assert document["contractVersion"] == "renderer-v4.course-mode-layout.v1"
     assert document["contractChecksum"] == expected_checksum == checksum(document)
+    assert document["checksumRules"] == CHECKSUM_RULES
     assert document["rendererId"] == "teebot-lesson-renderer.v4"
     assert document["canvas"] == {"width": 480, "height": 320}
     assert document["layerOrder"] == [
         "background", "teachingObject", "robotOverlay", "transientFocusCue",
     ]
+    assert set(document["layers"]) == set(document["layerOrder"])
     for index, name in enumerate(document["layerOrder"]):
         layer = document["layers"][name]
         exact_keys(layer, {"zIndex", "bounds"})
@@ -168,8 +191,28 @@ def validate_layout(document: dict[str, Any], expected_checksum: str = LAYOUT_CH
     robot = document["layers"]["robotOverlay"]["bounds"]
     assert teaching == {"x": 20, "y": 168, "width": 95, "height": 95}
     assert robot == {"x": 118, "y": 160, "width": 150, "height": 150}
+    assert document["collisionLimits"] == {
+        "robotTeachingObjectMaxOverlapPixels": 0,
+        "minimumHorizontalGapPixels": 3,
+    }
     assert overlap(teaching, robot) == 0
     assert robot["x"] - (teaching["x"] + teaching["width"]) >= document["collisionLimits"]["minimumHorizontalGapPixels"]
+    exact_keys(document["captionSafeArea"], {"x", "y", "width", "height"})
+    assert document["captionSafeArea"] == {"x": 16, "y": 16, "width": 448, "height": 52}
+    exact_keys(document["listeningCue"], {"bounds", "minimumTextHeightPixels", "textKey"})
+    exact_keys(document["listeningCue"]["bounds"], {"x", "y", "width", "height"})
+    assert document["listeningCue"] == {
+        "bounds": {"x": 282, "y": 168, "width": 182, "height": 52},
+        "minimumTextHeightPixels": 24,
+        "textKey": "course_mode.listening",
+    }
+    assert document["focusAnchors"] == {
+        "focus.center.primary": {"x": 67, "y": 215},
+        "focus.left.choice": {"x": 67, "y": 215},
+        "focus.right.choice": {"x": 366, "y": 215},
+    }
+    for anchor in document["focusAnchors"].values():
+        exact_keys(anchor, {"x", "y"})
     assert inside(document["captionSafeArea"], document["canvas"])
     assert inside(document["listeningCue"]["bounds"], document["canvas"])
     assert overlap(document["listeningCue"]["bounds"], teaching) == 0
@@ -186,6 +229,8 @@ def validate_layout(document: dict[str, Any], expected_checksum: str = LAYOUT_CH
 
 
 def test_canonical_course_mode_fixture_is_strict_and_checksum_pinned() -> None:
+    assert hashlib.sha256(CONTRACT_PATH.read_bytes()).hexdigest() == CONTRACT_FILE_SHA256
+    assert hashlib.sha256(LAYOUT_PATH.read_bytes()).hexdigest() == LAYOUT_FILE_SHA256
     validate_contract(load(CONTRACT_PATH))
 
 
@@ -196,6 +241,18 @@ def test_canonical_course_mode_fixture_is_strict_and_checksum_pinned() -> None:
     lambda value: value["activities"][2]["answerPolicy"].update({"targetTextVisible": True}),
 ])
 def test_contract_mutations_fail_closed(mutation) -> None:
+    value = load(CONTRACT_PATH)
+    mutation(value)
+    value["contractChecksum"] = checksum(value)
+    with pytest.raises(AssertionError):
+        validate_contract(value, value["contractChecksum"])
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda value: value["targets"][0].update({"unknownKey": True}),
+    lambda value: value["checksumRules"].update({"unknownKey": True}),
+])
+def test_nested_contract_schema_mutations_fail_closed(mutation) -> None:
     value = load(CONTRACT_PATH)
     mutation(value)
     value["contractChecksum"] = checksum(value)
@@ -216,6 +273,22 @@ def test_renderer_v4_static_composition_and_mutations() -> None:
         drifted["contractChecksum"] = checksum(drifted)
         with pytest.raises(AssertionError):
             validate_layout(drifted, drifted["contractChecksum"])
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda value: value.update({"schemaVersion": 99}),
+    lambda value: value["layers"].update({"unexpectedLayer": copy.deepcopy(value["layers"]["background"])}),
+    lambda value: value["collisionLimits"].update({"robotTeachingObjectMaxOverlapPixels": 999}),
+    lambda value: value["captionSafeArea"].update({"unknownKey": True}),
+    lambda value: value["focusAnchors"]["focus.center.primary"].update({"unknownKey": True}),
+    lambda value: value["listeningCue"].update({"unknownKey": True}),
+])
+def test_nested_layout_schema_mutations_fail_closed(mutation) -> None:
+    value = load(LAYOUT_PATH)
+    mutation(value)
+    value["contractChecksum"] = checksum(value)
+    with pytest.raises(AssertionError):
+        validate_layout(value, value["contractChecksum"])
 
 
 def test_renderer_v1_and_existing_manifest_checksum_fixture_are_unchanged() -> None:
