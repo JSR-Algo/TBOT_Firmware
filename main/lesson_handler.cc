@@ -2360,6 +2360,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             if (rejected_action_id == nullptr ||
                 !Num(action_body, "actionGeneration", rejected_generation) ||
                 !std::isfinite(rejected_generation) || rejected_generation <= 0.0 ||
+                rejected_generation > 9007199254740991.0 ||
                 std::trunc(rejected_generation) != rejected_generation) {
                 return;
             }
@@ -2387,6 +2388,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             }
             g_session.active_restore_confirmed =
                 restored != LessonEmbodiedMotionResult::kRejected;
+            g_session.active_action_sequence = static_cast<std::int64_t>(cancel.sequence);
             g_session.active_action_nonce =
                 g_embodied_completion_nonce.fetch_add(1, std::memory_order_acq_rel) + 1;
             if (g_session.active_action_nonce == 0) g_session.active_action_nonce = 1;

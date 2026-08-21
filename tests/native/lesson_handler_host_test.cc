@@ -824,6 +824,8 @@ void test_embodied_action_cancel_duplicate_and_supersession_are_safe() {
     require(Sent().size() == before + 1 &&
                 FrameBodyStr(before, "embodiedAction", "outcome") == "applied",
             "matching cancel terminates with an allowed applied ACK after rest");
+    require(FrameBodyNum(before, "acks") == sequence + 3,
+            "matching cancel ACK echoes the cancel frame sequence");
     HostEspInvokeQueuedCallback(replaced_hold_callback);
     App().DrainLessonEmbodiedQueue();
     require(Sent().size() == before + 1,
@@ -837,6 +839,15 @@ void test_embodied_action_cancel_duplicate_and_supersession_are_safe() {
     require(Sent().size() == after_cancel + 1 &&
                 FrameBodyStr(after_cancel, "embodiedAction", "outcome") == "rejected",
             "consumed action identity is rejected instead of replaying motion");
+    const size_t after_rejected = Sent().size();
+    std::string unsafe_generation = EmbodiedActionFrame(
+        sequence + 6, "lifecycle-step", "unsafe-generation", 4);
+    unsafe_generation = ReplaceOnce(
+        unsafe_generation, "\"actionGeneration\":4",
+        "\"actionGeneration\":9007199254740992");
+    Handle(unsafe_generation);
+    require(Sent().size() == after_rejected,
+            "unsafe non-exact generation is rejected without casting it into an ACK");
     Board::GetInstance().display_ = nullptr;
 }
 
