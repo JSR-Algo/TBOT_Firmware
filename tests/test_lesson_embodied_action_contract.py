@@ -2,12 +2,59 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
-HANDOFF_FIXTURE = (
-    ROOT.parents[2]
-    / "esp32-server/main/tbot-server/tests/fixtures/course-mode/lesson-embodied-action-wire-contract.json"
+HANDOFF_FIXTURE_RELATIVE = Path(
+    "main/tbot-server/tests/fixtures/course-mode/lesson-embodied-action-wire-contract.json"
 )
+
+
+def _task02_fixture_candidates(firmware_root: Path) -> list[Path]:
+    """Return only the canonical ESP sibling for enclosing firmware repositories."""
+    return [
+        parent.parent / "esp32-server" / HANDOFF_FIXTURE_RELATIVE
+        for parent in (firmware_root, *firmware_root.parents)
+        if parent.name == "TBOT-Firmware"
+    ]
+
+
+def _find_task02_fixture(firmware_root: Path) -> Path:
+    candidates = _task02_fixture_candidates(firmware_root)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "Task 02 wire fixture was not found at the canonical ESP sibling path: "
+        + ", ".join(str(candidate) for candidate in candidates)
+    )
+
+
+HANDOFF_FIXTURE = _find_task02_fixture(ROOT)
+
+
+def test_task02_fixture_discovery_supports_main_and_worktree_layouts():
+    firmware_root = Path("/workspace/robot/TBOT-Firmware")
+    expected = firmware_root.parent / "esp32-server" / HANDOFF_FIXTURE_RELATIVE
+    assert _task02_fixture_candidates(firmware_root) == [expected]
+    assert _task02_fixture_candidates(
+        firmware_root / ".worktrees/course-mode-task-03"
+    ) == [expected]
+
+    owning_root = next(parent for parent in ROOT.parents if parent.name == "TBOT-Firmware")
+    assert _find_task02_fixture(owning_root) == HANDOFF_FIXTURE
+
+
+def test_task02_fixture_discovery_rejects_noncanonical_files(tmp_path: Path):
+    firmware_root = tmp_path / "robot/TBOT-Firmware"
+    worktree_root = firmware_root / ".worktrees/course-mode-task-03"
+    arbitrary_fixture = tmp_path / "lesson-embodied-action-wire-contract.json"
+    worktree_root.mkdir(parents=True)
+    arbitrary_fixture.write_text("{}")
+
+    with pytest.raises(FileNotFoundError, match="canonical ESP sibling path"):
+        _find_task02_fixture(worktree_root)
 
 
 def test_frozen_task02_fixture_checksum_and_ack_outcomes():
