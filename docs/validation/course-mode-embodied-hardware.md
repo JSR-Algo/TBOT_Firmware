@@ -5,6 +5,11 @@
 - Firmware repository: `TBOT-Firmware`
 - Task branch: `course-mode/task-03-firmware-embodied`
 - Implementation base observed before Task 6 edits: `706a289866d444b7005a8d948f44199053bf8999`
+- Final reviewed software candidate: `3a43ac12abd6bde053519e74d008a0fbd2a3a4db`
+- LCDWiki no-flash build: `xiaozhi.bin` SHA-256
+  `5be58d580346ab79ab7d2f90e854e52a7440f2233e465fa597feb1b1f55b6281`
+- Generated assets SHA-256:
+  `d03b074c39d78601b2a2f6c3438620adc1cf779d634825385e63cafc4528a52b`
 - Observation date: 2026-08-22 (Asia/Ho_Chi_Minh)
 - Serial device visible read-only: `/dev/cu.usbmodem1101`
 - Flash, OTA, feature enablement, and production assignment: not performed
