@@ -603,7 +603,7 @@ def test_prepare_pure_validation_precedes_reservation_and_candidate_io():
 def test_unowned_prepare_refusal_uses_isolated_sequence_without_owner_mutation():
     h = read("main/lesson_handler.cc")
     helper_start = h.index("auto emit_isolated_prepare_error")
-    helper_end = h.index("const bool is_prepare =", helper_start)
+    helper_end = h.index("    };", helper_start) + len("    };")
     helper = h[helper_start:helper_end]
     assert "BuildFrame(in, \"lesson_error\", 1, frame_body)" in helper
     assert "g_session.fs_sequence" not in helper

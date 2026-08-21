@@ -603,9 +603,8 @@ def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
 
     assert "deferred_heartbeat_auth_failure_status_.exchange(0)" in setter
     assert "HandleHeartbeatAuthFailure(status_code)" in setter
-    assert setter.index("lesson_runtime_active_.store(active);") < setter.index(
-        "deferred_heartbeat_auth_failure_status_.exchange(0)"
-    )
+    exchange = setter.index("deferred_heartbeat_auth_failure_status_.exchange(0)")
+    assert setter.index("lesson_runtime_active_.store(false);") < exchange
     post_lesson = setter[setter.index("deferred_heartbeat_auth_failure_status_.exchange(0)") :]
     assert "Schedule([this, status_code]()" in post_lesson
 
