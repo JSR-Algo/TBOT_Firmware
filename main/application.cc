@@ -3830,6 +3830,37 @@ bool Application::SendHeadSetPercent(int percent) {
     return robot_uart_.SendHeadSetPercent(percent);
 }
 
+LessonRuntimeToken Application::GetLessonRuntimeToken() const {
+    if (!lesson_runtime_active_.load()) return {};
+    return {lesson_runtime_generation_.load()};
+}
+
+LessonEmbodiedMotionResult Application::ApplyLessonEmbodiedPreset(
+    const LessonRuntimeToken& token,
+    const LessonEmbodiedPreset& preset) {
+    if (!IsLessonRuntimeTokenAuthorized(
+            lesson_runtime_active_.load(), lesson_runtime_generation_.load(), token)) {
+        ESP_LOGI(TAG, "stale lesson embodied action token rejected");
+        return LessonEmbodiedMotionResult::kRejected;
+    }
+    return ApplyLessonEmbodiedPresetCommands(
+        preset,
+        [this](int percent) { return robot_uart_.SendHeadSetPercent(percent); },
+        [this](int percent) { return robot_uart_.SendLeftArmSetPercent(percent); },
+        [this](int percent) { return robot_uart_.SendRightArmSetPercent(percent); });
+}
+
+LessonEmbodiedMotionResult Application::CancelLessonEmbodiedAction(
+    const LessonRuntimeToken& token) {
+    return RestoreLessonRestPose(token);
+}
+
+LessonEmbodiedMotionResult Application::RestoreLessonRestPose(
+    const LessonRuntimeToken& token) {
+    return ApplyLessonEmbodiedPreset(
+        token, ResolveLessonEmbodiedPreset(LessonEmbodiedIntent::kRestWarm));
+}
+
 void Application::ShowActivationCode(const std::string& code, const std::string& message) {
     struct digit_sound {
         char digit;
@@ -3953,7 +3984,18 @@ void Application::CancelLessonInteractiveListening() {
 }
 
 void Application::SetLessonRuntimeActive(bool active) {
-    lesson_runtime_active_.store(active);
+    const bool was_active = lesson_runtime_active_.load();
+    if (was_active != active) {
+        if (active) {
+            lesson_runtime_generation_.store(NextLessonRuntimeGeneration(
+                lesson_runtime_generation_.load(), was_active, active));
+            lesson_runtime_active_.store(true);
+        } else {
+            lesson_runtime_active_.store(false);
+            lesson_runtime_generation_.store(NextLessonRuntimeGeneration(
+                lesson_runtime_generation_.load(), was_active, active));
+        }
+    }
     if (active) {
         lesson_terminal_audio_generation_.store(0);
     }

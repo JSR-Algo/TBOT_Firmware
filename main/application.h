@@ -5,6 +5,7 @@
 #include <freertos/event_groups.h>
 #include "lesson_transport_epoch_gate.h"
 #include "lesson_handler.h"
+#include "lesson_embodied_action.h"
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -126,6 +127,16 @@ public:
     void BeginLessonTerminalAudioQuiet();
     void SetLessonRuntimeActive(bool active);
     bool IsLessonRuntimeActive() const;
+    // Runtime authority only: wire assignment/session/step/action validation stays
+    // in LessonHandler. Tokens rotate across every lesson start/stop transition.
+    LessonRuntimeToken GetLessonRuntimeToken() const;
+    LessonEmbodiedMotionResult ApplyLessonEmbodiedPreset(
+        const LessonRuntimeToken& token,
+        const LessonEmbodiedPreset& preset);
+    LessonEmbodiedMotionResult CancelLessonEmbodiedAction(
+        const LessonRuntimeToken& token);
+    LessonEmbodiedMotionResult RestoreLessonRestPose(
+        const LessonRuntimeToken& token);
     void BeginLessonNetworkRenderQuiet();
     void EndLessonNetworkRenderQuiet();
     bool IsLessonNetworkRenderQuiet() const;
@@ -210,6 +221,7 @@ private:
     DeviceStateMachine state_machine_;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     std::atomic<bool> lesson_runtime_active_{false};
+    std::atomic<std::uint64_t> lesson_runtime_generation_{0};
     std::atomic<std::uint64_t> lesson_terminal_audio_generation_{0};
     std::atomic<uint32_t> lesson_interactive_listen_generation_{0};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
