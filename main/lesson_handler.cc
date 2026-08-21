@@ -2387,6 +2387,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
             }
             g_session.active_restore_confirmed =
                 restored != LessonEmbodiedMotionResult::kRejected;
+            g_session.active_action_nonce =
+                g_embodied_completion_nonce.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (g_session.active_action_nonce == 0) g_session.active_action_nonce = 1;
             if (!ArmLessonEmbodiedTimer(
                     LessonQueueItemKind::kEmbodiedSettled, g_session.active_settle_ms)) {
                 g_session.active_action_result = LessonEmbodiedMotionResult::kRejected;

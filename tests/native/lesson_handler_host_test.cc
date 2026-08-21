@@ -816,6 +816,7 @@ void test_embodied_action_cancel_duplicate_and_supersession_are_safe() {
     App().DrainLessonEmbodiedQueue();
     require(Sent().size() == before, "superseded timer output is suppressed without ACK");
 
+    const auto replaced_hold_callback = HostEspQueueTimerCallback();
     Handle(EmbodiedCancelFrame(sequence + 3, "lifecycle-step", "lifecycle:2", 2));
     require(Sent().size() == before, "matching cancel waits for the settle interval");
     HostEspFireTimer();
@@ -823,6 +824,10 @@ void test_embodied_action_cancel_duplicate_and_supersession_are_safe() {
     require(Sent().size() == before + 1 &&
                 FrameBodyStr(before, "embodiedAction", "outcome") == "applied",
             "matching cancel terminates with an allowed applied ACK after rest");
+    HostEspInvokeQueuedCallback(replaced_hold_callback);
+    App().DrainLessonEmbodiedQueue();
+    require(Sent().size() == before + 1,
+            "cancel suppresses the replaced hold callback after terminal ACK");
 
     const size_t after_cancel = Sent().size();
     Handle(EmbodiedCancelFrame(sequence + 4, "lifecycle-step", "unknown", 99));
