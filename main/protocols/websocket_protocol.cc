@@ -148,7 +148,8 @@ WebsocketProtocol::WebsocketProtocol() {
 
 void WebsocketProtocol::SetTransientConfig(std::string url, std::string token) {
 #if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
-    if (!IsValidCourseModeWebsocketUrl(url) || url != CONFIG_WEBSOCKET_URL || token.empty()) {
+    // Local OTA failures may leave the strictly compiled route without a token.
+    if (!IsValidCourseModeWebsocketUrl(url) || url != CONFIG_WEBSOCKET_URL) {
         url_.clear();
         token_.clear();
         transient_configured_ = false;

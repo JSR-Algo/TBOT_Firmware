@@ -82,6 +82,32 @@ def test_local_ota_response_is_ram_only_and_rejects_production_fields():
     assert "SetInt" not in parser
 
 
+def test_local_compiled_websocket_url_survives_failed_ota_response_handoff():
+    ota = read("main/ota.cc")
+    websocket = read("main/protocols/websocket_protocol.cc")
+
+    constructor = function(ota, "Ota::Ota()", "Ota::~Ota()")
+    assert f"#if {FLAG}" in constructor
+    local_constructor = constructor.split(f"#if {FLAG}", 1)[1].split("#endif", 1)[0]
+    assert "IsValidCourseModeWebsocketUrl(CONFIG_WEBSOCKET_URL)" in local_constructor
+    assert "transient_websocket_url_ = CONFIG_WEBSOCKET_URL;" in local_constructor
+
+    parser = function(ota, "bool Ota::ParseCourseModeResponse", "std::unique_ptr<Http>")
+    assert "transient_websocket_url_.clear();" not in parser
+    assert "transient_websocket_token_.clear();" in parser
+
+    setter = function(
+        websocket,
+        "void WebsocketProtocol::SetTransientConfig",
+        "void WebsocketProtocol::SetUnclaimedPublicLessonOnly",
+    )
+    local_setter = setter.split("#else", 1)[0]
+    assert "IsValidCourseModeWebsocketUrl(url)" in local_setter
+    assert "url != CONFIG_WEBSOCKET_URL" in local_setter
+    assert "token.empty()" not in local_setter
+    assert "transient_configured_ = true;" in local_setter
+
+
 def test_local_websocket_requires_transient_config_and_never_reads_settings():
     header = read("main/protocols/websocket_protocol.h")
     source = read("main/protocols/websocket_protocol.cc")

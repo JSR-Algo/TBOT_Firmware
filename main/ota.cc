@@ -181,6 +181,12 @@ Ota::Ota() {
         }
     }
 #endif
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    // Keep the compiled lab route available when OTA response validation fails.
+    if (IsValidCourseModeWebsocketUrl(CONFIG_WEBSOCKET_URL)) {
+        transient_websocket_url_ = CONFIG_WEBSOCKET_URL;
+    }
+#endif
 }
 
 Ota::~Ota() {
@@ -203,7 +209,6 @@ std::string Ota::GetCheckVersionUrl() {
 }
 
 bool Ota::ParseCourseModeResponse(const cJSON* root) {
-    transient_websocket_url_.clear();
     transient_websocket_token_.clear();
     has_websocket_config_ = false;
     has_mqtt_config_ = false;
