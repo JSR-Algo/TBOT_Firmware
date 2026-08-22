@@ -1,6 +1,10 @@
 #include "course_mode_local_endpoint_policy.h"
 
+#ifdef ESP_PLATFORM
+#include "lwip/sockets.h"
+#else
 #include <arpa/inet.h>
+#endif
 
 #include <array>
 #include <cstdint>
