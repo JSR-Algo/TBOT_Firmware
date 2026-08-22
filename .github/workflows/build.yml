@@ -40,6 +40,7 @@ jobs:
             tests/test_blufi_deinit_transaction.py \
             tests/test_heap_phase_checkpoint_contract.py \
             tests/test_lesson_heap_boundary_contract.py \
+            tests/test_course_mode_renderer_v4_persistence.py \
             tests/test_wifi_board_provisioning.py \
             tests/test_wifi_provisioning_brand.py -q
 
