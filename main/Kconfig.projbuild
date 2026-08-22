@@ -21,6 +21,14 @@ config WEBSOCKET_URL
         persisted websocket.url yet. This must be the stable public ESP WebSocket origin
         without query strings, secrets, or ephemeral tunnel hosts.
 
+config TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    bool "Enable Task 07 private-LAN endpoint mode"
+    default n
+    help
+        Attended-lab-only mode that routes OTA and WebSocket traffic exclusively
+        to the literal private-LAN CONFIG_OTA_URL and CONFIG_WEBSOCKET_URL values.
+        Keep disabled for production images.
+
 config TBOT_LESSON_ASSET_MAX_FILE_BYTES
     int "Maximum lesson asset file size in bytes"
     range 1 1073741824

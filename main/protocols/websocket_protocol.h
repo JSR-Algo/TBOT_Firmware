@@ -32,6 +32,7 @@ public:
     void ResetPassiveLiveness() override;
     void CompleteDeferredClose(uint32_t connection_epoch) override;
     void SetUnclaimedPublicLessonOnly(bool enabled);
+    void SetTransientConfig(std::string url, std::string token);
 
 private:
     EventGroupHandle_t event_group_handle_;
@@ -41,6 +42,7 @@ private:
     std::unique_ptr<WebSocket> websocket_;
     std::string url_;
     std::string token_;
+    bool transient_configured_ = false;
     int version_ = 1;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     bool unclaimed_public_lesson_only_ = true;

@@ -1091,6 +1091,7 @@ void Application::HandleNetworkConnectedEvent() {
         // The normal activation worker needs 8KB stack and fails to create, so the
         // UI freezes on "Loading setup..." forever. Run only the protocol setup
         // needed for public lesson sync and leave claimed bootstrap to BLE.
+#if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
         if (!IsDeviceClaimed()) {
             ESP_LOGW(TAG,
                      "Unclaimed device on Wi-Fi: run minimal activation transport "
@@ -1098,6 +1099,7 @@ void Application::HandleNetworkConnectedEvent() {
             CompleteUnclaimedProtocolOnlyActivation();
             return;
         }
+#endif
         if (activation_task_handle_ != nullptr) {
             ESP_LOGW(TAG, "Activation task already running");
             return;
@@ -1186,7 +1188,9 @@ void Application::HandleActivationDoneEvent() {
     display->SetChatMessage("system", "");
 
     // Release OTA object after activation is complete
+#if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     ota_.reset();
+#endif
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
@@ -1199,6 +1203,9 @@ void Application::HandleActivationDoneEvent() {
 }
 
 void Application::RefreshPendingTbotClaim() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return;
+#endif
     // BOOT re-pair (offline path): if an earlier re-pair could not reach the
     // cloud, backend.release_pending is still set and the robot rebooted into
     // Wi-Fi setup (SsidManager::Clear() -> kDeviceStateWifiConfiguring). The
@@ -1894,6 +1901,14 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
     }
 }
 
+void Application::PromoteCourseModeFromWifiConfigAfterProvisioning() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    PromoteFromWifiConfigAfterProvisioning();
+#else
+    return;
+#endif
+}
+
 void Application::CompleteUnclaimedProtocolOnlyActivation() {
     if (!ota_) {
         ota_ = std::make_unique<Ota>();
@@ -2156,6 +2171,9 @@ void Application::ClaimFetchTask(void* arg) {
 // ---------------------------------------------------------------------------
 
 void Application::StartClaimPoll() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return;
+#else
     if (online_intent_.load() && IsDeviceClaimed()) {
         return;  // Claimed + online; never re-arm the blocking claim backend poll.
     }
@@ -2204,6 +2222,7 @@ void Application::StartClaimPoll() {
     ESP_LOGI(TAG, "Claim poll started (every %lus, %lds cap)",
              static_cast<unsigned long>(claim_poll_interval_us_ / 1000000ULL),
              static_cast<long>(kClaimPollWindowMs / 1000));
+#endif
 }
 
 void Application::StopClaimPoll() {
@@ -2338,6 +2357,9 @@ void Application::HandleClaimConfirmTimeout() {
 // ---------------------------------------------------------------------------
 
 bool Application::IsDeviceClaimed() const {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return true;
+#else
     // Primary claimed-signal: a DEDICATED flag written ONLY by a successful
     // physical-claim confirm (PersistTbotClaimConfirmationResponse). Recovery
     // signal: backend device_id + device_secret are also written only by that
@@ -2360,6 +2382,7 @@ bool Application::IsDeviceClaimed() const {
     const std::string device_id = backend_settings.GetString("device_id");
     const std::string device_secret = backend_settings.GetString("device_secret");
     return !device_id.empty() && !device_secret.empty();
+#endif
 }
 
 void Application::EnsureBleAdvertisingForStandby() {
@@ -2503,6 +2526,9 @@ static std::string BuildTbotHeartbeatBody(const std::string& status_json,
 }
 
 void Application::StartHeartbeat() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return;
+#else
     if (heartbeat_active_) {
         return;
     }
@@ -2548,6 +2574,7 @@ void Application::StartHeartbeat() {
     esp_timer_start_periodic(heartbeat_timer_, kHeartbeatIntervalUs);
     ESP_LOGI(TAG, "Heartbeat started (every %lus)",
              static_cast<unsigned long>(kHeartbeatIntervalUs / 1000000ULL));
+#endif
 }
 
 void Application::StopHeartbeat() {
@@ -2595,6 +2622,10 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
 }
 
 void Application::EnterRepairPairingMode() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    ESP_LOGW(TAG, "Course-mode local endpoint blocks repair/reset networking");
+    return;
+#else
     // Callable from the BOOT button task; marshal ALL claim-FSM + NVS mutation onto
     // the Application task (OQ1: the claim state machine is single-threaded).
     Schedule([this]() {
@@ -2681,6 +2712,7 @@ void Application::EnterRepairPairingMode() {
         vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
     });
+#endif
 }
 
 namespace {
@@ -2693,6 +2725,9 @@ struct CloudReleaseContext {
 }  // namespace
 
 void Application::MaybeDispatchDeferredCloudRelease() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return;
+#else
     Settings backend_settings("backend", false);
     if (backend_settings.GetInt("release_pending", 0) == 0) {
         return;  // No pending BOOT re-pair release.
@@ -2742,6 +2777,7 @@ void Application::MaybeDispatchDeferredCloudRelease() {
         ESP_LOGE(TAG, "cloud_release task create failed; retrying next refresh");
         cloud_release_inflight_.store(false);
     }
+#endif
 }
 
 void Application::CloudReleaseTask(void* arg) {
@@ -2800,6 +2836,9 @@ struct HeartbeatContext {
 }  // namespace
 
 void Application::DispatchDeviceHeartbeat() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return;
+#else
     // Runs on the Application task. Do ALL the gating + URL/body build here (it
     // reads the FSM DeviceState and NVS settings, which stay serialized on the one
     // task that owns them per OQ1), then hand ONLY the blocking ~5s HTTP/TLS POST
@@ -2869,6 +2908,7 @@ void Application::DispatchDeviceHeartbeat() {
         delete ctx;
         heartbeat_inflight_.store(false);
     }
+#endif
 }
 
 void Application::HeartbeatTask(void* arg) {
@@ -2964,6 +3004,7 @@ void Application::ActivationTask() {
     // any network-bound version or assets work.
     ota_->MarkCurrentVersionValid();
 
+#if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     if (!IsDeviceClaimed()) {
         // Unclaimed + saved Wi-Fi keeps BLE advertising open for phone setup.
         // Running OTA HTTPS/config fetch at the same time exhausts internal heap
@@ -3004,6 +3045,12 @@ void Application::ActivationTask() {
             SystemInfo::StopHeapPhaseMonitor();
         }
     }
+#else
+    SystemInfo::StartHeapPhaseMonitor();
+    CheckNewVersion();
+    SystemInfo::PrintHeapCheckpoint("course_mode_local_config.complete");
+    SystemInfo::StopHeapPhaseMonitor();
+#endif
 
     // Initialize the protocol
     SystemInfo::StartHeapPhaseMonitor();
@@ -3172,6 +3219,7 @@ void Application::InitializeProtocol() {
     // call below). For MQTT, Start() brings up the control channel (not just an
     // audio preconnect), so we never gate it here.
     bool is_websocket_protocol = false;
+#if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     Settings websocket_settings("websocket", false);
     const bool has_configured_websocket_url =
         !websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL).empty();
@@ -3186,6 +3234,14 @@ void Application::InitializeProtocol() {
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
+#else
+    auto websocket_protocol = std::make_unique<WebsocketProtocol>();
+    websocket_protocol->SetTransientConfig(
+        ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken());
+    websocket_protocol->SetUnclaimedPublicLessonOnly(false);
+    protocol_ = std::move(websocket_protocol);
+    is_websocket_protocol = true;
+#endif
     protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 
     Protocol* callback_protocol = protocol_.get();
@@ -3701,6 +3757,9 @@ void Application::InitializeProtocol() {
     // lesson pull and backend lesson nudges have a route without entering
     // Listening. MQTT Start() is a control-channel connect, so it still runs here.
     if (is_websocket_protocol) {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+        ESP_LOGI(TAG, "Course-mode local endpoint: opening private-LAN WebSocket");
+#endif
         if (IsDeviceClaimed()) {
             ESP_LOGI(TAG, "Claimed device: opening passive WebSocket for lesson/nudge");
             StartPassiveLessonWebsocket();

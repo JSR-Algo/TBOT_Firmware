@@ -14,10 +14,14 @@
 #error "TBOT_HIL_PROFILE is derived from CONFIG_TBOT_HIL_STORAGE_FAULTS"
 #endif
 
+#if defined(CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT) && CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+#define TBOT_EMBEDDED_PROFILE "course-mode-task07-local-endpoint"
+#else
 #if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) && CONFIG_TBOT_HIL_STORAGE_FAULTS
 #define TBOT_EMBEDDED_PROFILE "task14-hil-v1"
 #else
 #define TBOT_EMBEDDED_PROFILE "production"
+#endif
 #endif
 
 const char kTbotEmbeddedProfileAudit[] =
