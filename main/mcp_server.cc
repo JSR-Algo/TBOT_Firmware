@@ -205,6 +205,43 @@ bool HasOnlyAllowedJsonFields(
     return true;
 }
 
+bool IsExactCourseModeCompatibility(const cJSON* compatibility) {
+    static constexpr const char* kCompatibilityFields[] = {
+        "schemaVersion", "contractChecksum", "layoutContract", "lessonId",
+        "lessonVersion", "manifestChecksum",
+    };
+    if (!HasOnlyAllowedJsonFields(compatibility, kCompatibilityFields)) {
+        return false;
+    }
+    const cJSON* schema_version =
+        cJSON_GetObjectItem(compatibility, "schemaVersion");
+    const cJSON* lesson_version =
+        cJSON_GetObjectItem(compatibility, "lessonVersion");
+    const char* contract_checksum =
+        JsonStringField(compatibility, "contractChecksum");
+    const char* layout_contract =
+        JsonStringField(compatibility, "layoutContract");
+    const char* lesson_id = JsonStringField(compatibility, "lessonId");
+    const char* manifest_checksum =
+        JsonStringField(compatibility, "manifestChecksum");
+    return cJSON_IsNumber(schema_version) && schema_version->valueint == 1 &&
+           schema_version->valuedouble == 1.0 &&
+           cJSON_IsNumber(lesson_version) && lesson_version->valueint == 1 &&
+           lesson_version->valuedouble == 1.0 &&
+           contract_checksum != nullptr &&
+           std::strcmp(
+               contract_checksum,
+               "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264") == 0 &&
+           layout_contract != nullptr &&
+           std::strcmp(layout_contract, "renderer-v4.course-mode-layout.v1") == 0 &&
+           lesson_id != nullptr &&
+           std::strcmp(lesson_id, "course-mode-pilot-cat-ball") == 0 &&
+           manifest_checksum != nullptr &&
+           std::strcmp(
+               manifest_checksum,
+               "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce") == 0;
+}
+
 bool IsBoundedMetadataString(const char* value, size_t max_bytes) {
     if (value == nullptr) {
         return false;
@@ -451,19 +488,21 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
 ) {
     static constexpr const char* kPackFields[] = {
         "assignmentVersion", "lessonId", "lessonVersion", "manifestChecksum",
-        "cacheKey", "localRoot", "ready", "assets",
+        "cacheKey", "localRoot", "ready", "assets", "courseModeCompatibility",
     };
     static constexpr const char* kAssetFields[] = {
         "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
         "mediaType", "critical", "layer", "role", "state", "checksumOk",
         "localPath", "sdPath", "cueId", "effect", "stepKey", "playbackMode",
-        "derivativeId", "phaseId", "compatibilityMetadata",
+        "derivativeId", "phaseId", "compatibilityMetadata", "courseModeCompatibility",
     };
     const char* cache_key = JsonStringField(pack, "cacheKey");
     const char* lesson_id = JsonStringField(pack, "lessonId");
     const char* manifest_checksum = JsonStringField(pack, "manifestChecksum");
     const char* local_root = JsonStringField(pack, "localRoot");
     const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
+    const cJSON* pack_compatibility =
+        cJSON_GetObjectItem(pack, "courseModeCompatibility");
     if (!HasOnlyAllowedJsonFields(pack, kPackFields) || cache_key == nullptr ||
         lesson_id == nullptr || manifest_checksum == nullptr || local_root == nullptr ||
         !IsCanonicalLessonAssetSyncCacheKey(cache_key) ||
@@ -473,7 +512,9 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
         !IsOptionalNonNegativeInteger(pack, "assignmentVersion") ||
         !IsOptionalNonNegativeInteger(pack, "lessonVersion") ||
         !IsOptionalBoundedString(pack, "lessonId", kLessonAssetIdentityMaxBytes) ||
-        !IsOptionalBoolean(pack, "ready")) {
+        !IsOptionalBoolean(pack, "ready") ||
+        (pack_compatibility != nullptr &&
+         !IsExactCourseModeCompatibility(pack_compatibility))) {
         throw std::runtime_error("lesson asset sync request invalid");
     }
     const std::string lesson_prefix = std::string(lesson_id) + "/";
@@ -506,6 +547,9 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
         const cJSON* critical = cJSON_GetObjectItem(asset, "critical");
         const cJSON* declared_size = cJSON_GetObjectItem(asset, "size");
         const char* media_type = JsonStringField(asset, "mediaType");
+        const cJSON* asset_compatibility =
+            cJSON_GetObjectItem(asset, "courseModeCompatibility");
+        const bool cue_present = cJSON_GetObjectItem(asset, "cueId") != nullptr;
         if (!HasOnlyAllowedJsonFields(asset, kAssetFields) ||
             !IsBoundedMetadataString(key, kLessonAssetSyncKeyMaxBytes) ||
             !IsBoundedMetadataString(path, kLessonAssetSyncMetadataPathMaxBytes) ||
@@ -520,7 +564,13 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
             !IsOptionalBoundedString(asset, "layer", 128) ||
             !IsOptionalBoundedString(asset, "role", 128) ||
             !IsOptionalBoundedString(asset, "state", 128) ||
-            !IsOptionalRendererV4AssetMetadata(asset)) {
+            !IsOptionalRendererV4AssetMetadata(asset) ||
+            (asset_compatibility != nullptr &&
+             !IsExactCourseModeCompatibility(asset_compatibility)) ||
+            (asset_compatibility != nullptr && pack_compatibility == nullptr) ||
+            (asset_compatibility != nullptr && !cue_present) ||
+            (pack_compatibility != nullptr && cue_present &&
+             asset_compatibility == nullptr)) {
             throw std::runtime_error("lesson asset sync request invalid");
         }
         const size_t declared_size_bytes = declared_size == nullptr

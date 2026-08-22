@@ -97,6 +97,108 @@ def test_generic_sync_accepts_only_valid_renderer_v4_cue_metadata():
     assert 'std::strcmp(value->valuestring, "loop") == 0' in source
 
 
+def test_generic_sync_requires_exact_course_mode_authority_binding():
+    source = SOURCE.read_text(encoding="utf-8")
+    validation = function_body(source, "ValidateLessonAssetSyncPackOrThrow(")
+
+    assert '"courseModeCompatibility"' in validation
+    assert "IsExactCourseModeCompatibility(pack_compatibility)" in validation
+    assert "IsExactCourseModeCompatibility(asset_compatibility)" in validation
+    assert "pack_compatibility == nullptr" in validation
+    assert "asset_compatibility == nullptr" in validation
+    assert "cue_present" in validation
+    assert "asset_compatibility != nullptr && !cue_present" in validation
+
+
+def test_course_mode_authority_validator_is_exact_and_host_executable(tmp_path):
+    source = SOURCE.read_text(encoding="utf-8")
+    validator_source = "\n\n".join(
+        function_definition(source, signature)
+        for signature in (
+            "const char* JsonStringField",
+            "template <size_t N>\nbool HasOnlyAllowedJsonFields",
+            "bool IsExactCourseModeCompatibility",
+        )
+    )
+    harness = textwrap.dedent(
+        f"""
+        #include <cstddef>
+        #include <cstring>
+
+        enum {{ kNumber = 1, kString = 2, kObject = 3 }};
+        struct cJSON {{
+            int type = 0;
+            int valueint = 0;
+            double valuedouble = 0;
+            const char* valuestring = nullptr;
+            const char* string = nullptr;
+            cJSON* child = nullptr;
+            cJSON* next = nullptr;
+        }};
+
+        bool cJSON_IsObject(const cJSON* value) {{ return value && value->type == kObject; }}
+        bool cJSON_IsNumber(const cJSON* value) {{ return value && value->type == kNumber; }}
+        bool cJSON_IsString(const cJSON* value) {{ return value && value->type == kString; }}
+        const cJSON* cJSON_GetObjectItem(const cJSON* object, const char* key) {{
+            for (const cJSON* field = object ? object->child : nullptr;
+                 field != nullptr; field = field->next) {{
+                if (field->string && std::strcmp(field->string, key) == 0) return field;
+            }}
+            return nullptr;
+        }}
+        #define cJSON_ArrayForEach(element, array) \\
+            for ((element) = (array)->child; (element) != nullptr; (element) = (element)->next)
+
+        {validator_source}
+
+        bool Accepts(const char* manifest_checksum, bool add_extra) {{
+            cJSON fields[7];
+            const char* names[7] = {{
+                "schemaVersion", "contractChecksum", "layoutContract", "lessonId",
+                "lessonVersion", "manifestChecksum", "extra"
+            }};
+            const char* values[7] = {{
+                nullptr,
+                "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+                "renderer-v4.course-mode-layout.v1", "course-mode-pilot-cat-ball",
+                nullptr, manifest_checksum, "unexpected"
+            }};
+            for (int index = 0; index < 7; ++index) {{
+                fields[index].string = names[index];
+                fields[index].next = index == (add_extra ? 6 : 5) ? nullptr : &fields[index + 1];
+                fields[index].type = kString;
+                fields[index].valuestring = values[index];
+            }}
+            fields[0].type = kNumber;
+            fields[0].valueint = 1;
+            fields[0].valuedouble = 1;
+            fields[4].type = kNumber;
+            fields[4].valueint = 1;
+            fields[4].valuedouble = 1;
+            cJSON marker;
+            marker.type = kObject;
+            marker.child = fields;
+            return IsExactCourseModeCompatibility(&marker);
+        }}
+
+        int main() {{
+            if (!Accepts("205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce", false)) return 1;
+            if (Accepts("005784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce", false)) return 2;
+            if (Accepts("205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce", true)) return 3;
+            return 0;
+        }}
+        """
+    )
+    executable = tmp_path / "course_mode_authority_test"
+    subprocess.run(
+        ["c++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-x", "c++", "-", "-o", str(executable)],
+        input=harness,
+        text=True,
+        check=True,
+    )
+    subprocess.run([str(executable)], check=True)
+
+
 def test_generic_sync_strictly_validates_renderer_v4_derivative_attestation():
     source = SOURCE.read_text(encoding="utf-8")
     validation = source[
