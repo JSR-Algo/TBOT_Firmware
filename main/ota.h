@@ -7,6 +7,8 @@
 #include <esp_err.h>
 #include "board.h"
 
+struct cJSON;
+
 class Ota {
 public:
     static constexpr int kHttpTimeoutMs = 8000;
@@ -31,6 +33,8 @@ public:
     const std::string& GetFirmwareUrl() const { return firmware_url_; }
     const std::string& GetActivationMessage() const { return activation_message_; }
     const std::string& GetActivationCode() const { return activation_code_; }
+    const std::string& GetTransientWebsocketUrl() const { return transient_websocket_url_; }
+    const std::string& GetTransientWebsocketToken() const { return transient_websocket_token_; }
     std::string GetCheckVersionUrl();
 
 private:
@@ -48,10 +52,13 @@ private:
     std::string firmware_url_;
     std::string activation_challenge_;
     std::string serial_number_;
+    std::string transient_websocket_url_;
+    std::string transient_websocket_token_;
     int activation_timeout_ms_ = 30000;
 
     std::function<void(int progress, size_t speed)> upgrade_callback_;
     std::string GetActivationPayload();
+    bool ParseCourseModeResponse(const cJSON* root);
     std::unique_ptr<Http> SetupHttp(int timeout_ms = kHttpTimeoutMs);
 };
 

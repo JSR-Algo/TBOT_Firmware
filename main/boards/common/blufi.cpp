@@ -1236,6 +1236,9 @@ bool Blufi::IsWifiScanCacheFresh() const {
 }
 
 void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return;
+#else
     struct ClaimRefreshDelayContext {
         Blufi* self;
         uint32_t generation;
@@ -1282,10 +1285,16 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
         delete ctx;
         ESP_LOGE(BLUFI_TAG, "Failed to create claim token delay task");
     }
+#endif
 }
 
 void Blufi::TryReportProvisioningAuthenticated(const char* reason,
                                                uint32_t expected_generation) {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    (void)reason;
+    (void)expected_generation;
+    return;
+#else
 #ifndef CONFIG_TBOT_PROVISIONING_REPORT_ENABLED
     (void)reason;
     (void)expected_generation;
@@ -1410,6 +1419,7 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
     ESP_LOGI(BLUFI_TAG,
              "Provisioning authenticated report started after BLE teardown: reason=%s",
              reason ? reason : "unknown");
+#endif
 #endif
 }
 
@@ -1699,6 +1709,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 // poll performs HTTPS/TLS on ESP32-S3. Real hardware otherwise
                 // fails inside mbedTLS AES allocation while BLE remains active.
                 const auto provisioning_token = self->CaptureProvisioningSession();
+#if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
                 Application::GetInstance().Schedule([self, generation, provisioning_token]() {
                     std::unique_lock<std::mutex> continuation_lock(
                         self->provisioning_finalization_mutex_);
@@ -1719,6 +1730,22 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                         "wifi_success_after_ble_teardown", generation);
                     Application::GetInstance().SchedulePendingTbotClaimRefresh(generation);
                 });
+#else
+                Application::GetInstance().Schedule([self, generation, provisioning_token]() {
+                    std::unique_lock<std::mutex> continuation_lock(
+                        self->provisioning_finalization_mutex_);
+                    if (generation != self->setup_generation_.load()) {
+                        return;
+                    }
+                    if (!self->CompleteSuccessfulProvisioningTeardown(
+                            "course_mode_wifi_credentials_connected", provisioning_token)) {
+                        return;
+                    }
+                    continuation_lock.unlock();
+                    Application::GetInstance()
+                        .PromoteCourseModeFromWifiConfigAfterProvisioning();
+                });
+#endif
             } else {
                 if (wifi.IsConnected()) {
                     ESP_LOGE(BLUFI_TAG, "WiFi connected but credential persistence failed");
@@ -1737,13 +1764,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 const int softap_conn_num = _get_softap_conn_num();
                 esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
                                                 softap_conn_num, &info);
-#ifdef CONFIG_TBOT_PROVISIONING_REPORT_ENABLED
+#if defined(CONFIG_TBOT_PROVISIONING_REPORT_ENABLED) && !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
                 std::string failure_token = self->bootstrap_token_;
                 std::string failure_code = self->provisioning_code_;
 #endif
                 finalization_lock.unlock();
                 ESP_LOGE(BLUFI_TAG, "Failed to connect to WiFi via esp-wifi-connect");
-#ifdef CONFIG_TBOT_PROVISIONING_REPORT_ENABLED
+#if defined(CONFIG_TBOT_PROVISIONING_REPORT_ENABLED) && !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
                 {
                     const std::string& token = failure_token;
                     const std::string& code = failure_code;
@@ -2458,6 +2485,19 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 }
             }
 
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+            SecureClearCustomDataSnapshot(snapshot);
+            if (!bootstrap_token_.empty()) {
+                std::fill(bootstrap_token_.begin(), bootstrap_token_.end(), '\0');
+                bootstrap_token_.clear();
+            }
+            if (!provisioning_code_.empty()) {
+                std::fill(provisioning_code_.begin(), provisioning_code_.end(), '\0');
+                provisioning_code_.clear();
+            }
+            ESP_LOGW(BLUFI_TAG, "Ignoring claim custom data in course-mode local endpoint");
+            break;
+#else
             auto* raw_context = new (std::nothrow) BlufiCustomDataContext;
             if (raw_context == nullptr) {
                 ESP_LOGE(BLUFI_TAG, "Failed to allocate secure custom-data context");
@@ -2516,6 +2556,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 }
                 secure_context->Clear();
             });
+#endif
             break;
         }
         default:
@@ -2645,6 +2686,10 @@ void Blufi::ClearProvisioningSecrets() {
         std::fill(provisioning_code_.begin(), provisioning_code_.end(), '\0');
         provisioning_code_.clear();
     }
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    ESP_LOGI(BLUFI_TAG, "Course-mode provisioning secrets cleared from RAM");
+    return;
+#else
     Settings websocket_settings("websocket", true);
     if (websocket_settings.GetString("claim_device_id").empty()) {
         // Legacy provisioning owns this token, so a successful provisioning-status
@@ -2656,6 +2701,7 @@ void Blufi::ClearProvisioningSecrets() {
         ESP_LOGI(BLUFI_TAG, "Claim flow active; preserving NVS bootstrap token for claim confirm");
     }
     ESP_LOGI(BLUFI_TAG, "Provisioning secrets cleared");
+#endif
 }
 
 void Blufi::_event_callback_trampoline(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* param) {

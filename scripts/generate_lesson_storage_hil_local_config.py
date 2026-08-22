@@ -39,6 +39,8 @@ def _validate_url(value: str, *, label: str, schemes: tuple[str, ...]) -> str:
         raise ConfigError(f"invalid {label} URL")
     if port is None and parsed.netloc.endswith(":"):
         raise ConfigError(f"invalid {label} URL")
+    if port is not None and port < 1:
+        raise ConfigError(f"invalid {label} URL")
 
     try:
         host = ipaddress.ip_address(parsed.hostname)
@@ -79,17 +81,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ota-url", required=True)
     parser.add_argument("--websocket-url", required=True)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--validate-only", action="store_true")
     arguments = parser.parse_args()
 
     try:
-        ota_url = _validate_url(arguments.ota_url, label="OTA", schemes=("http", "https"))
+        ota_url = _validate_url(arguments.ota_url, label="OTA", schemes=("http",))
         websocket_url = _validate_url(
             arguments.websocket_url,
             label="WebSocket",
-            schemes=("ws", "wss"),
+            schemes=("ws",),
         )
+        if arguments.validate_only:
+            return 0
+        if arguments.output is None:
+            raise ConfigError("output is required unless --validate-only is used")
         contents = (
+            "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT=y\n"
             f'CONFIG_OTA_URL="{_kconfig_string(ota_url)}"\n'
             f'CONFIG_WEBSOCKET_URL="{_kconfig_string(websocket_url)}"\n'
         )

@@ -39,6 +39,7 @@ set(SOURCES "audio/audio_codec.cc"
             "system_info.cc"
             "application.cc"
             "json_payload_safety.cc"
+            "course_mode_local_endpoint_policy.cc"
             "esp_build_identity.cc"
             "ota.cc"
             "settings.cc"
@@ -57,6 +58,23 @@ set(SOURCES "audio/audio_codec.cc"
             )
 
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
+
+if(CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT)
+    idf_build_get_property(python PYTHON)
+    execute_process(
+        COMMAND "${python}"
+                "${CMAKE_CURRENT_LIST_DIR}/../scripts/generate_lesson_storage_hil_local_config.py"
+                --ota-url "${CONFIG_OTA_URL}"
+                --websocket-url "${CONFIG_WEBSOCKET_URL}"
+                --validate-only
+        RESULT_VARIABLE course_mode_endpoint_validation
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+    if(NOT course_mode_endpoint_validation EQUAL 0)
+        message(FATAL_ERROR "Invalid Task 07 course-mode local endpoint configuration")
+    endif()
+endif()
 
 # Add board common files
 list(APPEND SOURCES

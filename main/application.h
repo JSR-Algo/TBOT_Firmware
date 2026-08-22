@@ -181,6 +181,7 @@ public:
      */
     void ResetProtocol();
     void SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation);
+    void PromoteCourseModeFromWifiConfigAfterProvisioning();
     void EnsureBleAdvertisingForUnclaimedSavedWifi();
     // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
     // Claimed robots suppress claim polling and keep normal online BLE off;

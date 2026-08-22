@@ -8,6 +8,7 @@
 #endif
 #include "json_payload_safety.h"
 #include "esp_build_identity.h"
+#include "course_mode_local_endpoint_policy.h"
 
 #include <cstring>
 #include <cJSON.h>
@@ -93,6 +94,12 @@ static std::string NewTraceParentHeader() {
 }
 
 void WebsocketProtocol::RefreshSettings() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    if (!transient_configured_) {
+        url_.clear();
+        token_.clear();
+    }
+#else
     Settings settings("websocket", false);
     url_ = settings.GetString("url", CONFIG_WEBSOCKET_URL);
     token_ = settings.GetString("token");
@@ -100,6 +107,7 @@ void WebsocketProtocol::RefreshSettings() {
     if (version != 0) {
         version_ = version;
     }
+#endif
 }
 
 bool WebsocketProtocol::IsAllowedUnclaimedPublicLessonMessage(const cJSON* root) const {
@@ -138,6 +146,23 @@ WebsocketProtocol::WebsocketProtocol() {
     RefreshSettings();
 }
 
+void WebsocketProtocol::SetTransientConfig(std::string url, std::string token) {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    if (!IsValidCourseModeWebsocketUrl(url) || url != CONFIG_WEBSOCKET_URL || token.empty()) {
+        url_.clear();
+        token_.clear();
+        transient_configured_ = false;
+        return;
+    }
+    url_ = std::move(url);
+    token_ = std::move(token);
+    transient_configured_ = true;
+#else
+    (void)url;
+    (void)token;
+#endif
+}
+
 void WebsocketProtocol::SetUnclaimedPublicLessonOnly(bool enabled) {
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     unclaimed_public_lesson_only_ = enabled;
@@ -160,11 +185,15 @@ bool WebsocketProtocol::Start() {
     // not block in the cold TLS/WebSocket handshake path.
     ESP_LOGI(TAG, "Preconnecting websocket audio channel");
     RefreshSettings();
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return OpenAudioChannel();
+#else
     bool opened = OpenAudioChannel();
     if (!opened) {
         ESP_LOGW(TAG, "Websocket preconnect failed; wake word will retry on demand");
     }
     return true;
+#endif
 }
 
 bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
@@ -335,6 +364,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
     RefreshSettings();
     std::string url = url_;
     std::string token = token_;
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    if (url.empty()) {
+        ESP_LOGE(TAG, "Course-mode WebSocket transient configuration is missing");
+        return false;
+    }
+#endif
     session_mode_ = unclaimed_public_lesson_only_
         ? WebsocketSessionMode::kUnclaimedPublicLesson
         : WebsocketSessionMode::kAuthenticatedRealtime;

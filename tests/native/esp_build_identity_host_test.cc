@@ -5,6 +5,8 @@
 #include <map>
 #include <string>
 
+extern const char kTbotEmbeddedProfileAudit[];
+
 namespace {
 
 void require(bool condition, const char* message) {
@@ -31,6 +33,14 @@ EspBuildIdentity valid_identity() {
 }  // namespace
 
 int main() {
+#ifdef TBOT_EXPECT_LOCAL_ENDPOINT_PROFILE
+    require(std::string(kTbotEmbeddedProfileAudit) ==
+                "TBOT_EMBEDDED_PROFILE=course-mode-task07-local-endpoint",
+            "course-mode identity is lab-only");
+#else
+    require(std::string(kTbotEmbeddedProfileAudit) == "TBOT_EMBEDDED_PROFILE=production",
+            "default identity remains production");
+#endif
     auto value = valid_identity();
     std::string error;
     require(ValidateEspBuildIdentity(value, &error), "valid identity accepted");

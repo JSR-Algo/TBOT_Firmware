@@ -3,6 +3,7 @@
 #include "settings.h"
 #include "assets/lang_config.h"
 #include "firmware_version_policy.h"
+#include "course_mode_local_endpoint_policy.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -186,12 +187,77 @@ Ota::~Ota() {
 }
 
 std::string Ota::GetCheckVersionUrl() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    if (!IsValidCourseModeOtaUrl(CONFIG_OTA_URL)) {
+        return {};
+    }
+    return CONFIG_OTA_URL;
+#else
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
     if (url.empty()) {
         url = CONFIG_OTA_URL;
     }
     return url;
+#endif
+}
+
+bool Ota::ParseCourseModeResponse(const cJSON* root) {
+    transient_websocket_url_.clear();
+    transient_websocket_token_.clear();
+    has_websocket_config_ = false;
+    has_mqtt_config_ = false;
+    has_new_version_ = false;
+    has_activation_code_ = false;
+    has_activation_challenge_ = false;
+    has_server_time_ = false;
+
+    if (!cJSON_IsObject(root) || cJSON_GetObjectItem(root, "firmware") != nullptr ||
+        cJSON_GetObjectItem(root, "mqtt") != nullptr ||
+        cJSON_GetObjectItem(root, "api_url") != nullptr ||
+        cJSON_GetObjectItem(root, "claim_reset") != nullptr ||
+        cJSON_GetObjectItem(root, "activation") != nullptr ||
+        cJSON_GetObjectItem(root, "server_time") != nullptr ||
+        cJSON_GetObjectItem(root, "factory_test_claimed") != nullptr) {
+        return false;
+    }
+    const cJSON* item = nullptr;
+    size_t root_field_count = 0;
+    cJSON_ArrayForEach(item, root) {
+        if (item->string == nullptr || std::strcmp(item->string, "websocket") != 0) return false;
+        ++root_field_count;
+    }
+    if (root_field_count != 1) return false;
+
+    const cJSON* websocket = cJSON_GetObjectItem(root, "websocket");
+    if (!cJSON_IsObject(websocket)) return false;
+    const cJSON* url = cJSON_GetObjectItem(websocket, "url");
+    const cJSON* token = cJSON_GetObjectItem(websocket, "token");
+    if (!cJSON_IsString(url) || !cJSON_IsString(token)) return false;
+    size_t websocket_field_count = 0;
+    cJSON_ArrayForEach(item, websocket) {
+        if (item->string == nullptr ||
+            (std::strcmp(item->string, "url") != 0 && std::strcmp(item->string, "token") != 0) ||
+            std::strcmp(item->string, "factory_test_claimed") == 0) {
+            return false;
+        }
+        ++websocket_field_count;
+    }
+    if (websocket_field_count != 2) return false;
+    const std::string_view websocket_url(url->valuestring);
+    const std::string_view websocket_token(token->valuestring);
+    if (!IsValidCourseModeWebsocketUrl(websocket_url) ||
+        websocket_url != CONFIG_WEBSOCKET_URL || websocket_token.empty() ||
+        websocket_token.size() > 1024) {
+        return false;
+    }
+    for (const unsigned char byte : websocket_token) {
+        if (byte < 0x21 || byte > 0x7e) return false;
+    }
+    transient_websocket_url_.assign(websocket_url);
+    transient_websocket_token_.assign(websocket_token);
+    has_websocket_config_ = true;
+    return true;
 }
 
 std::unique_ptr<Http> Ota::SetupHttp(int timeout_ms) {
@@ -218,6 +284,31 @@ std::unique_ptr<Http> Ota::SetupHttp(int timeout_ms) {
  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
  */
 esp_err_t Ota::CheckVersion() {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    auto& board = Board::GetInstance();
+    const auto app_desc = esp_app_get_description();
+    current_version_ = app_desc->version;
+    if (!IsValidCourseModeOtaUrl(CONFIG_OTA_URL) ||
+        !IsValidCourseModeWebsocketUrl(CONFIG_WEBSOCKET_URL)) {
+        ESP_LOGE(TAG, "Invalid compiled course-mode local endpoint");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    auto http = SetupHttp();
+    std::string data = board.GetSystemInfoJson();
+    http->SetContent(std::move(data));
+    if (!http->Open("POST", CONFIG_OTA_URL)) {
+        return http->GetLastError();
+    }
+    ScopedHttpClose close_http(*http);
+    if (http->GetStatusCode() != 200) return ESP_ERR_INVALID_RESPONSE;
+    const std::string response_body = http->ReadAll();
+    close_http.Close();
+    cJSON* root = cJSON_Parse(response_body.c_str());
+    const bool valid = ParseCourseModeResponse(root);
+    cJSON_Delete(root);
+    return valid ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
+#else
     auto& board = Board::GetInstance();
     auto app_desc = esp_app_get_description();
 
@@ -472,6 +563,7 @@ esp_err_t Ota::CheckVersion() {
 
     cJSON_Delete(root);
     return ESP_OK;
+#endif
 }
 
 void Ota::MarkCurrentVersionValid() {
