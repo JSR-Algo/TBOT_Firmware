@@ -31,6 +31,15 @@ bool ProbeLessonFlattenedCinematicReplacementCapacity(
 
 enum class LessonCinematicPlaybackMode : std::uint8_t { kOnce, kLoop };
 
+struct LessonCourseModeCompatibilityConfig {
+    std::uint16_t schema_version = 0;
+    const char* contract_checksum = nullptr;
+    const char* layout_contract = nullptr;
+    const char* lesson_id = nullptr;
+    std::uint16_t lesson_version = 0;
+    const char* manifest_checksum = nullptr;
+};
+
 struct LessonFlattenedCinematicAssetConfig {
     const char* derivative_id = nullptr;
     const char* phase_id = nullptr;
@@ -64,8 +73,14 @@ struct LessonFlattenedCinematicPhaseConfig {
     std::uint16_t fps = 0;
     std::uint32_t frame_count = 0;
     bool loop = false;
+    LessonCourseModeCompatibilityConfig course_mode_compatibility{};
     LessonFlattenedCinematicAssetConfig asset{};
 };
+
+bool IsExactLessonCourseModeCompatibility(
+    const LessonCourseModeCompatibilityConfig& compatibility);
+bool IsExactLessonCourseModePilotCue(
+    const LessonFlattenedCinematicPhaseConfig& config);
 
 struct LessonFlattenedCinematicRendererOps {
     LessonFlattenedCinematicRendererOps() = default;

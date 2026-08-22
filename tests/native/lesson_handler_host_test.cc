@@ -435,6 +435,34 @@ std::string V4V2BarnCuePrepareFrame(int seq, std::uint64_t command_sequence_id =
         body_extra + "}");
 }
 
+std::string CourseModeCompatibilityJson() {
+    return "{\"schemaVersion\":1,"
+        "\"contractChecksum\":\"cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264\","
+        "\"layoutContract\":\"renderer-v4.course-mode-layout.v1\","
+        "\"lessonId\":\"course-mode-pilot-cat-ball\",\"lessonVersion\":1,"
+        "\"manifestChecksum\":\"205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce\"}";
+}
+
+std::string V4CourseModePrepareFrame(int seq, std::uint64_t command_sequence_id = 281) {
+    const std::string compatibility = CourseModeCompatibilityJson();
+    return V4Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"flattenedMjpegCinematic\",\"templateVersion\":2,"
+        "\"cueId\":\"cat-discover\",\"effect\":\"teach\","
+        "\"stepKey\":\"cat-discover\",\"playbackMode\":\"once\","
+        "\"durationMs\":2000,\"fps\":10,\"frameCount\":20,"
+        "\"asset\":{"
+        "\"derivativeId\":\"6c5d8ee1c2695a12dfa8202df5d0820b360aeca5a15662583efb97e812c99f66\","
+        "\"cueId\":\"cat-discover\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/flattenedCinematic.cat-discover\","
+        "\"sha256\":\"ebeaf4e8159b17da82d615f359272e26e7e81a1f005183335feba5b702f98d72\","
+        "\"bytes\":134626,\"mediaType\":\"video/mp4\",\"width\":480,\"height\":320,"
+        "\"courseModeCompatibility\":" + compatibility + "},"
+        "\"courseModeCompatibility\":" + compatibility + "}}" );
+}
+
 std::string V4TrgbPrepareFrame(int seq, std::uint64_t command_sequence_id = 271,
                                const std::string& asset_extra = "",
                                const std::string& body_extra = "") {
@@ -1334,6 +1362,7 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     const std::string opened(path);
     std::uint32_t duration_ms = 300;
     if (opened.find("-opening") != std::string::npos) duration_ms = 9500;
+    else if (opened.find("cat-discover") != std::string::npos) duration_ms = 2000;
     else if (opened.find("-greet") != std::string::npos) duration_ms = 1200;
     else if (opened.find("-teach") != std::string::npos) duration_ms = 2600;
     else if (opened.find("-listen") != std::string::npos ||
@@ -1870,6 +1899,38 @@ void test_renderer_v4_accepts_template_v2_cue_identity_prepare_and_controls() {
                        "\"durationMs\":9500", "\"durationMs\":9400"));
     require(FrameType(0) == "lesson_error" && fake.opens == opens_before_stale_duration,
             "v4 template v2 rejects stale effect duration before renderer open");
+    tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
+}
+
+void test_renderer_v4_course_mode_compatibility_is_exact_and_narrow() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V3Open, V3Close, V3Decode, V3Present});
+    ActivateV4Renderer(&renderer);
+
+    Handle(V4CourseModePrepareFrame(1));
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady" &&
+                FrameBodyStr(0, "cinematicPhase", "cueId") == "cat-discover",
+            "exact frozen Course Mode marker and cue identity admit 2000ms once playback");
+
+    ResetObservable();
+    FreshSession();
+    const int opens_before_bad_marker = fake.opens;
+    Handle(ReplaceOnce(V4CourseModePrepareFrame(2),
+                       "renderer-v4.course-mode-layout.v1",
+                       "renderer-v4.course-mode-layout.v2"));
+    require(FrameType(0) == "lesson_error" && fake.opens == opens_before_bad_marker,
+            "Course Mode compatibility rejects any marker identity drift before renderer IO");
+
+    ResetObservable();
+    FreshSession();
+    const int opens_before_stale_generic = fake.opens;
+    Handle(V4V2PrepareFrame(3, 283, "", "", "cat-discover", "teach", "once", 2000, 20));
+    require(FrameType(0) == "lesson_error" && fake.opens == opens_before_stale_generic,
+            "generic renderer-v4 path still rejects stale 2000ms once teach cues");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
 }
 
@@ -8307,6 +8368,7 @@ int main() {
     test_renderer_v5_capability_exact_layers_and_lifecycle();
     test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v4_accepts_template_v2_cue_identity_prepare_and_controls();
+    test_renderer_v4_course_mode_compatibility_is_exact_and_narrow();
     test_renderer_v4_accepts_external_flattened_cue_metadata_matrix();
     test_renderer_v4_numeric_narrowing_rejects_before_renderer_work();
     test_renderer_v4_template_v2_exact_cue_schema_and_ack_identity();

@@ -81,6 +81,12 @@ std::string PrepareFingerprint(const LessonFlattenedCinematicPhaseConfig& config
     AppendFingerprint(value, config.asset.orientation);
     value += std::to_string(config.asset.frame_bytes) + ':';
     value += config.loop ? '1' : '0';
+    value += std::to_string(config.course_mode_compatibility.schema_version) + ':';
+    AppendFingerprint(value, config.course_mode_compatibility.contract_checksum);
+    AppendFingerprint(value, config.course_mode_compatibility.layout_contract);
+    AppendFingerprint(value, config.course_mode_compatibility.lesson_id);
+    value += std::to_string(config.course_mode_compatibility.lesson_version) + ':';
+    AppendFingerprint(value, config.course_mode_compatibility.manifest_checksum);
     return value;
 }
 
@@ -165,6 +171,12 @@ bool ExactContract(const LessonFlattenedCinematicPhaseConfig& config) {
     return config.template_version == 1 || config.template_version == 2;
 }
 
+bool HasCourseModeCompatibility(const LessonCourseModeCompatibilityConfig& compatibility) {
+    return compatibility.schema_version != 0 || compatibility.contract_checksum != nullptr ||
+        compatibility.layout_contract != nullptr || compatibility.lesson_id != nullptr ||
+        compatibility.lesson_version != 0 || compatibility.manifest_checksum != nullptr;
+}
+
 bool ValidMetadata(const LessonFlattenedCinematicPhaseConfig& config) {
     const bool native = config.asset.media_type != nullptr &&
         std::strcmp(config.asset.media_type, "application/vnd.tbot.rgb565-indexed") == 0;
@@ -177,11 +189,15 @@ bool ValidMetadata(const LessonFlattenedCinematicPhaseConfig& config) {
             std::strcmp(config.asset.phase_id, config.phase_id) == 0;
     } else {
         const auto* effect = FindV2Effect(config.effect);
+        const bool course_mode = HasCourseModeCompatibility(config.course_mode_compatibility);
         identity_ok = config.phase_id == nullptr && config.asset.phase_id == nullptr &&
             SafeSlug(config.cue_id) && SafeSlug(config.step_key) &&
             config.asset.cue_id != nullptr &&
             std::strcmp(config.asset.cue_id, config.cue_id) == 0 &&
-            (native
+            (course_mode
+                ? IsExactLessonCourseModeCompatibility(config.course_mode_compatibility) &&
+                    IsExactLessonCourseModePilotCue(config)
+                : native
                 ? config.loop ==
                     (config.playback_mode == LessonCinematicPlaybackMode::kLoop)
                 : effect != nullptr && effect->playback_mode == config.playback_mode &&
@@ -247,6 +263,61 @@ void RecordEvidenceFault(LessonCinematicError error) {
 }
 
 }  // namespace
+
+bool IsExactLessonCourseModeCompatibility(
+    const LessonCourseModeCompatibilityConfig& compatibility) {
+    return compatibility.schema_version == 1 && compatibility.contract_checksum != nullptr &&
+        std::strcmp(compatibility.contract_checksum,
+                    "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264") == 0 &&
+        compatibility.layout_contract != nullptr &&
+        std::strcmp(compatibility.layout_contract,
+                    "renderer-v4.course-mode-layout.v1") == 0 &&
+        compatibility.lesson_id != nullptr &&
+        std::strcmp(compatibility.lesson_id, "course-mode-pilot-cat-ball") == 0 &&
+        compatibility.lesson_version == 1 && compatibility.manifest_checksum != nullptr &&
+        std::strcmp(compatibility.manifest_checksum,
+                    "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce") == 0;
+}
+
+bool IsExactLessonCourseModePilotCue(
+    const LessonFlattenedCinematicPhaseConfig& config) {
+    struct CueContract {
+        const char* cue_id;
+        const char* effect;
+        const char* derivative_id;
+        const char* sha256;
+        std::uint64_t bytes;
+    };
+    static constexpr CueContract kCues[] = {
+        {"cat-discover", "teach", "6c5d8ee1c2695a12dfa8202df5d0820b360aeca5a15662583efb97e812c99f66", "ebeaf4e8159b17da82d615f359272e26e7e81a1f005183335feba5b702f98d72", 134626},
+        {"cat-meaning", "listen", "53c890908c8405e7b755f568ce8b3a687c3ff969bc05abb5267071a713d39a6b", "66cfb653fd9439c56d521db33490d91a5644a0e88f56951ab6d2d21b0ad642fe", 134306},
+        {"cat-joint-speech", "teach", "b08be0ab8f59cd3ab5be1abc5ea838f6ce06aad1bf245496326af22777d6bb0e", "ebeaf4e8159b17da82d615f359272e26e7e81a1f005183335feba5b702f98d72", 134626},
+        {"cat-recall", "listen", "334a28b4b8e84b43ab81f4792d92ce622f69e994b024e7cd3f013559f920c3fc", "66cfb653fd9439c56d521db33490d91a5644a0e88f56951ab6d2d21b0ad642fe", 134306},
+        {"cat-transfer", "listen", "c719470f3e38238d2e9f8b9ba55d7d79456e9eac2fe8f7993ea1330d14a1c017", "244fb7c795ea375cef023d5545f4399d79200b41047faee06114c80a3941f9e2", 132426},
+        {"ball-discover", "teach", "710b6c0afa7fa762efb75dc7561bde838142aa783c04798dc2caa8772381d379", "061ff71da9ad3e47dc6191016e4c6c228c198525749afaa83b47084c488262d4", 140166},
+        {"ball-meaning", "listen", "a2bba81867f1a389e4ef7b80b5d3f08e20168ea78b84502749d61bd830c070df", "3b38014a0855297e2fc47e3aa253aac0c1c5744a7c3c32bbfea1f86d206d9389", 135526},
+        {"cat-delayed", "listen", "10de40b2da10be7b591b067afb0603e6adeb626248a907e17ef8235a6dafa746", "6f7e0de371b790c018b3777a41f7914f9d06f1a1cea69d3c41ac9112d416048d", 143106},
+    };
+    if (config.cue_id == nullptr || config.effect == nullptr || config.step_key == nullptr ||
+        config.asset.derivative_id == nullptr || config.asset.sha256 == nullptr ||
+        config.playback_mode != LessonCinematicPlaybackMode::kOnce ||
+        config.duration_ms != 2000 || config.fps != 10 || config.frame_count != 20 ||
+        config.asset.media_type == nullptr ||
+        std::strcmp(config.asset.media_type, "video/mp4") != 0 ||
+        config.asset.width != 480 || config.asset.height != 320 || config.loop) {
+        return false;
+    }
+    for (const auto& cue : kCues) {
+        if (std::strcmp(config.cue_id, cue.cue_id) == 0) {
+            return std::strcmp(config.step_key, cue.cue_id) == 0 &&
+                std::strcmp(config.effect, cue.effect) == 0 &&
+                std::strcmp(config.asset.derivative_id, cue.derivative_id) == 0 &&
+                std::strcmp(config.asset.sha256, cue.sha256) == 0 &&
+                config.asset.bytes == cue.bytes;
+        }
+    }
+    return false;
+}
 
 bool LessonFlattenedCinematicRendererCapabilityReady() {
     return g_capability_ready.load(std::memory_order_acquire);

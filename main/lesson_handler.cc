@@ -326,6 +326,7 @@ bool ValidV2CinematicEffect(const char* effect, const char* playback_mode,
     }
     return false;
 }
+
 bool IsValidLessonIdentity(const char* value) {
     if (value == nullptr) return false;
     const size_t length = strlen(value);
@@ -512,6 +513,30 @@ bool ExactPositiveInteger(const cJSON* object, const char* key) {
     double value = 0;
     return Num(object, key, value) && std::isfinite(value) && value > 0 &&
            value <= 4294967295.0 && std::floor(value) == value;
+}
+
+bool ParseExactCourseModeCompatibility(
+    const cJSON* object, tbot::LessonCourseModeCompatibilityConfig* compatibility) {
+    static const std::set<std::string_view> kKeys = {
+        "schemaVersion", "contractChecksum", "layoutContract", "lessonId",
+        "lessonVersion", "manifestChecksum"};
+    if (compatibility == nullptr || !ExactObjectKeys(object, kKeys)) return false;
+    double schema_version = 0;
+    double lesson_version = 0;
+    if (!Num(object, "schemaVersion", schema_version) ||
+        !Num(object, "lessonVersion", lesson_version) ||
+        schema_version != 1 || lesson_version != 1) {
+        return false;
+    }
+    *compatibility = {
+        static_cast<std::uint16_t>(schema_version),
+        Str(object, "contractChecksum"),
+        Str(object, "layoutContract"),
+        Str(object, "lessonId"),
+        static_cast<std::uint16_t>(lesson_version),
+        Str(object, "manifestChecksum"),
+    };
+    return tbot::IsExactLessonCourseModeCompatibility(*compatibility);
 }
 
 bool ExactUint64(const cJSON* object, const char* key, std::uint64_t* out) {
@@ -2988,9 +3013,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     "command", "commandSequenceId", "templateId", "templateVersion",
                     "cueId", "effect", "stepKey", "playbackMode", "durationMs", "fps",
                     "frameCount", "asset"};
+                static const std::set<std::string_view> kCourseModeV2PrepareKeys = {
+                    "command", "commandSequenceId", "templateId", "templateVersion",
+                    "cueId", "effect", "stepKey", "playbackMode", "durationMs", "fps",
+                    "frameCount", "asset", "courseModeCompatibility"};
                 static const std::set<std::string_view> kV2AssetKeys = {
                     "derivativeId", "cueId", "sdPath", "sha256", "bytes",
                     "mediaType", "width", "height"};
+                static const std::set<std::string_view> kCourseModeV2AssetKeys = {
+                    "derivativeId", "cueId", "sdPath", "sha256", "bytes",
+                    "mediaType", "width", "height", "courseModeCompatibility"};
                 static const std::set<std::string_view> kV2TrgbAssetKeys = {
                     "derivativeId", "cueId", "sdPath", "sha256", "bytes", "mediaType",
                     "containerVersion", "storedWidth", "storedHeight", "orientation",
@@ -3004,6 +3036,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 const char* effect = Str(command_body, "effect");
                 const char* step_key = Str(command_body, "stepKey");
                 const char* playback_mode = Str(command_body, "playbackMode");
+                const cJSON* command_course_mode = Obj(command_body, "courseModeCompatibility");
+                const cJSON* asset_course_mode = Obj(asset, "courseModeCompatibility");
+                tbot::LessonCourseModeCompatibilityConfig course_mode_compatibility{};
+                tbot::LessonCourseModeCompatibilityConfig asset_course_mode_compatibility{};
+                const bool has_course_mode = command_course_mode != nullptr ||
+                    asset_course_mode != nullptr;
+                const bool course_mode_valid = has_course_mode &&
+                    ParseExactCourseModeCompatibility(
+                        command_course_mode, &course_mode_compatibility) &&
+                    ParseExactCourseModeCompatibility(
+                        asset_course_mode, &asset_course_mode_compatibility);
                 const bool trgb_asset = cinematic_v4_v2 &&
                     Str(asset, "mediaType") != nullptr &&
                     strcmp(Str(asset, "mediaType"),
@@ -3019,9 +3062,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     PositiveIntegerAtMost(bytes, static_cast<double>(UINT64_MAX));
                 const bool valid =
                     ExactObjectKeys(command_body,
-                                    cinematic_v4_v2 ? kV2PrepareKeys : kV1PrepareKeys) &&
+                                    cinematic_v4_v2
+                                        ? has_course_mode ? kCourseModeV2PrepareKeys : kV2PrepareKeys
+                                        : kV1PrepareKeys) &&
                     ExactObjectKeys(asset, trgb_asset ? kV2TrgbAssetKeys
-                                                     : cinematic_v4_v2 ? kV2AssetKeys
+                                                     : cinematic_v4_v2
+                                                         ? has_course_mode
+                                                             ? kCourseModeV2AssetKeys
+                                                             : kV2AssetKeys
                                                                        : kV1AssetKeys) &&
                     has_numeric_fields &&
                     template_version == cinematic_template_version && fps == 10 &&
@@ -3046,7 +3094,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             Str(asset, "phaseId") == nullptr &&
                             Str(asset, "cueId") != nullptr &&
                             std::strcmp(Str(asset, "cueId"), cue_id) == 0 &&
-                            ValidV2CinematicEffect(effect, playback_mode, duration_ms) &&
+                            (has_course_mode
+                                ? course_mode_valid
+                                : ValidV2CinematicEffect(
+                                    effect, playback_mode, duration_ms)) &&
                             (!trgb_asset ||
                              (ExpectedTrgbContainerBytes(
                                   static_cast<std::uint64_t>(frame_count),
@@ -3082,6 +3133,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     config.frame_count = static_cast<std::uint32_t>(frame_count);
                     config.loop = trgb_asset &&
                         strcmp(Str(command_body, "playbackMode"), "loop") == 0;
+                    config.course_mode_compatibility = course_mode_compatibility;
                     config.asset.derivative_id = Str(asset, "derivativeId");
                     config.asset.phase_id = Str(asset, "phaseId");
                     config.asset.cue_id = Str(asset, "cueId");

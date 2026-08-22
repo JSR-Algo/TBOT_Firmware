@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 
@@ -29,6 +30,36 @@ def test_course_mode_renderer_v4_persistence_fixture_is_frozen() -> None:
     assert all(cue["derivative"]["durationMs"] == 2000 for cue in fixture["cues"])
 
 
+def test_firmware_course_mode_compatibility_gate_matches_frozen_fixture() -> None:
+    fixture = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    source = (
+        Path(__file__).resolve().parents[1] / "main" / "lesson_flattened_cinematic_renderer.cc"
+    ).read_text(encoding="utf-8")
+    assert fixture["identity"]["semanticChecksum"] in source
+    assert "renderer-v4.course-mode-layout.v1" in source
+    assert "course-mode-pilot-cat-ball" in source
+    assert "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce" in source
+
+    source_cues = {
+        cue_id: (effect, derivative_id, sha256, int(byte_count))
+        for cue_id, effect, derivative_id, sha256, byte_count in re.findall(
+            r'\{"([a-z0-9-]+)", "([a-z0-9-]+)", "([0-9a-f]{64})", '
+            r'"([0-9a-f]{64})", ([0-9]+)\}',
+            source,
+        )
+    }
+    expected_cues = {
+        cue["cueId"]: (
+            cue["effect"],
+            cue["derivative"]["derivativeId"],
+            cue["derivative"]["sha256"],
+            cue["derivative"]["bytes"],
+        )
+        for cue in fixture["cues"]
+    }
+    assert source_cues == expected_cues
+
+
 def test_firmware_ci_runs_local_fixture_gate_without_cross_repo_dependencies() -> None:
     workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" / "build.yml").read_text(
         encoding="utf-8"
@@ -37,11 +68,16 @@ def test_firmware_ci_runs_local_fixture_gate_without_cross_repo_dependencies() -
         "tests/test_course_mode_renderer_v4_persistence.py::"
         "test_course_mode_renderer_v4_persistence_fixture_is_frozen"
     )
+    compatibility_gate = (
+        "tests/test_course_mode_renderer_v4_persistence.py::"
+        "test_firmware_course_mode_compatibility_gate_matches_frozen_fixture"
+    )
     ci_scope_gate = (
         "tests/test_course_mode_renderer_v4_persistence.py::"
         "test_firmware_ci_runs_local_fixture_gate_without_cross_repo_dependencies"
     )
     assert local_gate in workflow
+    assert compatibility_gate in workflow
     assert ci_scope_gate in workflow
     assert "tests/test_course_mode_renderer_v4_persistence.py \\" not in workflow
 

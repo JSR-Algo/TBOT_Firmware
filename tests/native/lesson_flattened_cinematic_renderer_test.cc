@@ -136,6 +136,9 @@ bool Open(void* raw, const char* path, tbot::LessonCinematicStreamMetadata* meta
         std::strstr(path, "barn-thinking") != nullptr) {
         frame_count = 13;
         duration_ms = 1300;
+    } else if (std::strstr(path, "course-mode-") != nullptr) {
+        frame_count = 20;
+        duration_ms = 2000;
     } else if (std::strstr(path, "barn-correct") != nullptr) {
         frame_count = 6;
         duration_ms = 600;
@@ -279,6 +282,17 @@ tbot::LessonFlattenedCinematicPhaseConfig V2Config(
     config.asset.cue_id = cue_id;
     config.asset.sd_path = "/sdcard/tbot/lesson-assets/flattenedCinematic.barn-listen";
     return config;
+}
+
+tbot::LessonCourseModeCompatibilityConfig CourseModeCompatibility() {
+    return {
+        1,
+        "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264",
+        "renderer-v4.course-mode-layout.v1",
+        "course-mode-pilot-cat-ball",
+        1,
+        "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce",
+    };
 }
 
 tbot::LessonFlattenedCinematicPhaseConfig TrgbConfig(bool loop = false) {
@@ -869,6 +883,62 @@ void TestTickDecodeTimeoutQuarantineRecoversOnSubsequentTicks() {
             "without requiring an explicit stop/cancel/discard");
 }
 
+void TestExactCourseModeCompatibilityAdmitsOnlyFrozenPilotCues() {
+    struct CueContract {
+        const char* cue_id;
+        const char* effect;
+        const char* derivative_id;
+        const char* sha256;
+        std::uint64_t bytes;
+    };
+    const std::vector<CueContract> cues = {
+        {"cat-discover", "teach", "6c5d8ee1c2695a12dfa8202df5d0820b360aeca5a15662583efb97e812c99f66", "ebeaf4e8159b17da82d615f359272e26e7e81a1f005183335feba5b702f98d72", 134626},
+        {"cat-meaning", "listen", "53c890908c8405e7b755f568ce8b3a687c3ff969bc05abb5267071a713d39a6b", "66cfb653fd9439c56d521db33490d91a5644a0e88f56951ab6d2d21b0ad642fe", 134306},
+        {"cat-joint-speech", "teach", "b08be0ab8f59cd3ab5be1abc5ea838f6ce06aad1bf245496326af22777d6bb0e", "ebeaf4e8159b17da82d615f359272e26e7e81a1f005183335feba5b702f98d72", 134626},
+        {"cat-recall", "listen", "334a28b4b8e84b43ab81f4792d92ce622f69e994b024e7cd3f013559f920c3fc", "66cfb653fd9439c56d521db33490d91a5644a0e88f56951ab6d2d21b0ad642fe", 134306},
+        {"cat-transfer", "listen", "c719470f3e38238d2e9f8b9ba55d7d79456e9eac2fe8f7993ea1330d14a1c017", "244fb7c795ea375cef023d5545f4399d79200b41047faee06114c80a3941f9e2", 132426},
+        {"ball-discover", "teach", "710b6c0afa7fa762efb75dc7561bde838142aa783c04798dc2caa8772381d379", "061ff71da9ad3e47dc6191016e4c6c228c198525749afaa83b47084c488262d4", 140166},
+        {"ball-meaning", "listen", "a2bba81867f1a389e4ef7b80b5d3f08e20168ea78b84502749d61bd830c070df", "3b38014a0855297e2fc47e3aa253aac0c1c5744a7c3c32bbfea1f86d206d9389", 135526},
+        {"cat-delayed", "listen", "10de40b2da10be7b591b067afb0603e6adeb626248a907e17ef8235a6dafa746", "6f7e0de371b790c018b3777a41f7914f9d06f1a1cea69d3c41ac9112d416048d", 143106},
+    };
+    FakeRuntime fake;
+    tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+    std::uint64_t sequence = 500;
+    for (const auto& cue : cues) {
+        auto config = V2Config(cue.cue_id, cue.effect,
+                               tbot::LessonCinematicPlaybackMode::kOnce);
+        const std::string path = std::string("/sd/course-mode-") + cue.cue_id + ".mp4";
+        config.step_key = cue.cue_id;
+        config.command_sequence_id = sequence++;
+        config.duration_ms = 2000;
+        config.frame_count = 20;
+        config.asset.sd_path = path.c_str();
+        config.asset.derivative_id = cue.derivative_id;
+        config.asset.sha256 = cue.sha256;
+        config.asset.bytes = cue.bytes;
+        config.course_mode_compatibility = CourseModeCompatibility();
+        Require(renderer.Prepare(config, 0).accepted,
+                "each frozen Course Mode pilot cue passes the exact compatibility gate");
+        renderer.DiscardSession();
+    }
+
+    FakeRuntime stale_fake;
+    tbot::LessonFlattenedCinematicRenderer stale_renderer(Ops(&stale_fake));
+    auto stale = V2Config("cat-discover", "teach",
+                          tbot::LessonCinematicPlaybackMode::kOnce);
+    stale.step_key = "cat-discover";
+    stale.duration_ms = 2000;
+    stale.frame_count = 20;
+    stale.asset.sd_path = "/sd/course-mode-cat-discover.mp4";
+    stale.asset.derivative_id = cues[0].derivative_id;
+    stale.asset.sha256 = cues[0].sha256;
+    stale.asset.bytes = cues[0].bytes;
+    Require(stale_renderer.Prepare(stale, 0).error ==
+                tbot::LessonCinematicError::kMetadataMismatch &&
+                stale_fake.opens == 0,
+            "unmarked generic 2000ms once cue remains rejected before file IO");
+}
+
 }  // namespace
 
 int main() {
@@ -889,6 +959,7 @@ int main() {
     TestTrgbReplayValidatesNativePrefetchAndDeadline();
     TestStartNativePlaybackReplayPrefetchFailureRelinquishesDmaOwnership();
     TestTickDecodeTimeoutQuarantineRecoversOnSubsequentTicks();
+    TestExactCourseModeCompatibilityAdmitsOnlyFrozenPilotCues();
     std::cout << "lesson_flattened_cinematic_renderer tests passed\n";
     return 0;
 }
