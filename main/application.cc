@@ -5135,8 +5135,8 @@ void Application::HandleListeningWatchdogTick() {
         return;
     }
 
-#if CONFIG_USE_DEVICE_AEC
-    // Device AEC disables AFE VAD, so elapsed time cannot prove realtime silence.
+#if !CONFIG_USE_AUDIO_PROCESSOR || CONFIG_USE_DEVICE_AEC
+    // Realtime silence expiry is safe only when the active processor supplies VAD.
     if (listening_mode_ == kListeningModeRealtime) {
         ESP_LOGD(TAG, "realtime_watchdog_disabled_without_vad");
         return;

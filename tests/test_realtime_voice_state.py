@@ -1465,7 +1465,7 @@ def test_listening_watchdog_exits_stale_turns_and_only_times_realtime_with_vad()
     watchdog_end = app_cc.index("void Application::HandleStateChangedEvent", watchdog_start)
     watchdog_body = app_cc[watchdog_start:watchdog_end]
     assert "GetDeviceState() != kDeviceStateListening" in watchdog_body
-    assert "#if CONFIG_USE_DEVICE_AEC" in watchdog_body
+    assert "#if !CONFIG_USE_AUDIO_PROCESSOR || CONFIG_USE_DEVICE_AEC" in watchdog_body
     assert "listening_mode_ == kListeningModeRealtime" in watchdog_body
     assert "realtime_watchdog_disabled_without_vad" in watchdog_body
     assert "kListeningRealtimeNoSpeechTimeoutMs" in watchdog_body
