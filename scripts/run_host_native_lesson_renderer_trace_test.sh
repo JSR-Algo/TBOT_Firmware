@@ -39,6 +39,7 @@ cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/l
   -I"${ROOT}/main/protocols" \
   "${BUILD_DIR}/src/lesson_renderer_trace_host_test.cc" \
   "${BUILD_DIR}/src/lesson_motion_presets.cc" \
+  "${ROOT}/main/lesson_embodied_action.cc" \
   "${ROOT}/main/lesson_layer_state.cc" \
   "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
   "${ROOT}/main/lesson_tvideo_template.cc" \

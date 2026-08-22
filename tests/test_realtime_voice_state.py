@@ -1445,7 +1445,7 @@ def test_lesson_prompt_speaking_timeout_preserves_pending_child_turn():
     )
 
 
-def test_listening_watchdog_exits_stale_autostop_turns():
+def test_listening_watchdog_exits_stale_turns_and_only_times_realtime_with_vad():
     app_cc = read("main/application.cc")
     app_h = read("main/application.h")
 
@@ -1465,11 +1465,89 @@ def test_listening_watchdog_exits_stale_autostop_turns():
     watchdog_end = app_cc.index("void Application::HandleStateChangedEvent", watchdog_start)
     watchdog_body = app_cc[watchdog_start:watchdog_end]
     assert "GetDeviceState() != kDeviceStateListening" in watchdog_body
+    assert "#if CONFIG_USE_DEVICE_AEC" in watchdog_body
     assert "listening_mode_ == kListeningModeRealtime" in watchdog_body
+    assert "realtime_watchdog_disabled_without_vad" in watchdog_body
+    assert "kListeningRealtimeNoSpeechTimeoutMs" in watchdog_body
+    assert "kListeningRealtimeMaxTurnMs" not in app_cc
+    assert "listening_mode_ != kListeningModeRealtime" in watchdog_body
+    assert "turn_timed_out" in watchdog_body
     assert "listening_watchdog_timeout" in watchdog_body
     assert "protocol_->SendStopListening();" in watchdog_body
     assert "audio_service_.EnableVoiceProcessing(false);" in watchdog_body
+    assert "audio_service_.PopPacketFromSendQueue()" in watchdog_body
+    assert "IsVoiceDetected()" in watchdog_body
+    audio_h = read("main/audio/audio_service.h")
+    assert "std::atomic<bool> voice_detected_{false};" in audio_h
     assert "SetDeviceState(kDeviceStateIdle);" in watchdog_body
+
+
+
+def test_microphone_uplink_requires_explicit_listening_authorization():
+    app_cc = read("main/application.cc")
+    app_h = read("main/application.h")
+
+    assert "bool IsMicrophoneUplinkAuthorized() const;" in app_h
+    assert "std::atomic<bool> microphone_uplink_authorized_{false};" in app_h
+    assert "bool Application::IsMicrophoneUplinkAuthorized() const" in app_cc
+    authorization_start = app_cc.index("bool Application::IsMicrophoneUplinkAuthorized() const")
+    authorization_end = app_cc.index("void Application::HandleListeningWatchdogTick", authorization_start)
+    authorization_body = app_cc[authorization_start:authorization_end]
+    assert "const DeviceState state = GetDeviceState();" in authorization_body
+    assert "state == kDeviceStateListening" in authorization_body
+    assert "state == kDeviceStateSpeaking" in authorization_body
+    assert "passive_ws_intent_.load()" in authorization_body
+    assert "!online_intent_.load()" in authorization_body
+    assert "lesson_runtime_active_.load()" in authorization_body
+    assert "lesson_interactive_listening_active_.load()" in authorization_body
+    assert "microphone_uplink_authorized_.load()" in authorization_body
+
+    send_start = app_cc.index("if (bits & MAIN_EVENT_SEND_AUDIO)")
+    send_end = app_cc.index("if (bits & MAIN_EVENT_WAKE_WORD_DETECTED)", send_start)
+    send_body = app_cc[send_start:send_end]
+    assert "if (!IsMicrophoneUplinkAuthorized())" in send_body
+    assert send_body.index("if (!IsMicrophoneUplinkAuthorized())") < send_body.index(
+        "IsLessonNetworkRenderQuiet()"
+    )
+    unauthorized = send_body[
+        send_body.index("if (!IsMicrophoneUplinkAuthorized())") :
+        send_body.index("} else {", send_body.index("if (!IsMicrophoneUplinkAuthorized())"))
+    ]
+    assert "audio_service_.EnableVoiceProcessing(false);" in unauthorized
+    assert "audio_service_.PopPacketFromSendQueue()" in unauthorized
+    assert "microphone_uplink_blocked" in unauthorized
+
+    state_start = app_cc.index("void Application::HandleStateChangedEvent")
+    state_end = app_cc.index("void Application::Schedule", state_start)
+    state_body = app_cc[state_start:state_end]
+    assert "microphone_uplink_authorized_.store(true);" in state_body
+    assert "microphone_uplink_authorized_.store(false);" in state_body
+
+    close_start = app_cc.index("void Application::CloseAudioChannelByIntent")
+    close_end = app_cc.index("void Application::DoResetProtocol", close_start)
+    close_body = app_cc[close_start:close_end]
+    assert "microphone_uplink_authorized_.store(false);" in close_body
+
+
+def test_server_tts_stop_cannot_open_microphone_from_idle_or_passive_socket():
+    app_cc = read("main/application.cc")
+    tts_start = app_cc.index('if (strcmp(type->valuestring, "tts") == 0)')
+    custom_start = app_cc.index('} else if (strcmp(type->valuestring, "stt") == 0)', tts_start)
+    tts_body = app_cc[tts_start:custom_start]
+
+    assert "const bool voice_turn_owned =" in tts_body
+    ownership = tts_body[
+        tts_body.index("const bool voice_turn_owned =") :
+        tts_body.index("if (force_continue_listening", tts_body.index("const bool voice_turn_owned ="))
+    ]
+    assert "microphone_uplink_authorized_.load()" in ownership
+    assert "!passive_ws_intent_.load()" in ownership
+    assert "online_intent_.load()" in ownership
+    assert "GetDeviceState() == kDeviceStateSpeaking" in ownership
+    assert "GetDeviceState() == kDeviceStateListening" in ownership
+    continue_branch = tts_body[tts_body.index("if (force_continue_listening") :]
+    assert "if (!voice_turn_owned)" in continue_branch
+    assert "tts_stop_continue_listening_rejected" in tts_body
 
 
 def test_autostop_listening_has_shorter_hard_cap_than_manual_turns():
@@ -1487,7 +1565,8 @@ def test_autostop_listening_has_shorter_hard_cap_than_manual_turns():
     assert "turn_limit_ms" in watchdog_body
     assert "listening_mode_ == kListeningModeAutoStop" in watchdog_body
     assert "kListeningAutoStopMaxTurnMs" in watchdog_body
-    assert "turn_ms < turn_limit_ms" in watchdog_body
+    assert "turn_ms >= turn_limit_ms" in watchdog_body
+    assert "turn_timed_out" in watchdog_body
 
 
 def test_wake_reopens_if_detect_frame_hits_stale_websocket():
@@ -2247,7 +2326,7 @@ def test_audio_uplink_pipeline_has_send_boundary_diagnostics():
     assert "MAIN_EVENT_SEND_AUDIO packet" in app_cc
     assert "Websocket SendAudio" in ws_cc
 
-def test_lesson_image_render_quiets_audio_uplink_without_dropping_packets():
+def test_lesson_image_render_quiets_authorized_audio_without_dropping_packets():
     app_h = read("main/application.h")
     app_cc = read("main/application.cc")
     lesson_cc = read("main/lesson_handler.cc")
@@ -2260,9 +2339,10 @@ def test_lesson_image_render_quiets_audio_uplink_without_dropping_packets():
     send_start = app_cc.index("if (bits & MAIN_EVENT_SEND_AUDIO)")
     send_end = app_cc.index("if (bits & MAIN_EVENT_WAKE_WORD_DETECTED)", send_start)
     send_body = app_cc[send_start:send_end]
+    authorization_idx = send_body.index("if (!IsMicrophoneUplinkAuthorized())")
     quiet_idx = send_body.index("IsLessonNetworkRenderQuiet()")
-    pop_idx = send_body.index("audio_service_.PopPacketFromSendQueue()")
-    assert quiet_idx < pop_idx
+    authorized_pop_idx = send_body.index("audio_service_.PopPacketFromSendQueue()", quiet_idx)
+    assert authorization_idx < quiet_idx < authorized_pop_idx
     assert "MAIN_EVENT_SEND_AUDIO deferred_for_lesson_render" in send_body
     assert "xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);" in send_body
     assert "vTaskDelay(pdMS_TO_TICKS(20));" in send_body

@@ -54,6 +54,7 @@ static constexpr uint32_t kTtsStopPlaybackDrainTimeoutMs = 2000;
 static constexpr uint32_t kListeningNoSpeechTimeoutMs = 15000;
 static constexpr uint32_t kListeningAutoStopMaxTurnMs = 10000;
 static constexpr uint32_t kListeningMaxTurnMs = 60000;
+static constexpr uint32_t kListeningRealtimeNoSpeechTimeoutMs = 15000;
 
 static void CancelLessonRobotEntranceOnDisplay() {
     Display* display = Board::GetInstance().GetDisplay();
@@ -911,7 +912,21 @@ void Application::Run() {
             static uint32_t send_packet_count = 0;
             static uint32_t lesson_render_defer_count = 0;
             send_event_count++;
-            if (IsLessonNetworkRenderQuiet()) {
+            if (!IsMicrophoneUplinkAuthorized()) {
+                audio_service_.EnableVoiceProcessing(false);
+                uint32_t dropped_packets = 0;
+                while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+                    ++dropped_packets;
+                }
+                if (dropped_packets > 0) {
+                    ESP_LOGW(TAG,
+                             "microphone_uplink_blocked state=%d passive=%d online=%d dropped=%lu",
+                             static_cast<int>(GetDeviceState()),
+                             passive_ws_intent_.load() ? 1 : 0,
+                             online_intent_.load() ? 1 : 0,
+                             static_cast<unsigned long>(dropped_packets));
+                }
+            } else if (IsLessonNetworkRenderQuiet()) {
                 lesson_render_defer_count++;
                 if (lesson_render_defer_count == 1 || lesson_render_defer_count % 25 == 0) {
                     ESP_LOGI(TAG, "MAIN_EVENT_SEND_AUDIO deferred_for_lesson_render count=%lu",
@@ -3500,7 +3515,21 @@ void Application::InitializeProtocol() {
                         ESP_LOGI(TAG, "manual_tts_stop -> idle from listening");
                         return;
                     }
+                    const bool voice_turn_owned =
+                        microphone_uplink_authorized_.load() &&
+                        !passive_ws_intent_.load() &&
+                        online_intent_.load() &&
+                        (GetDeviceState() == kDeviceStateSpeaking ||
+                         GetDeviceState() == kDeviceStateListening);
                     if (force_continue_listening && !lesson_interactive_turn) {
+                        if (!voice_turn_owned) {
+                            ESP_LOGW(TAG,
+                                     "tts_stop_continue_listening_rejected state=%d passive=%d online=%d",
+                                     static_cast<int>(GetDeviceState()),
+                                     passive_ws_intent_.load() ? 1 : 0,
+                                     online_intent_.load() ? 1 : 0);
+                            return;
+                        }
                         bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
                         if (!playback_drained) {
                             ESP_LOGW(TAG,
@@ -5086,17 +5115,33 @@ static const char* ConnectStateScreenCopy(const TbotConnectStateSpec* spec) {
     }
 }
 
+bool Application::IsMicrophoneUplinkAuthorized() const {
+    if (!microphone_uplink_authorized_.load() ||
+        passive_ws_intent_.load() || !online_intent_.load()) {
+        return false;
+    }
+    const DeviceState state = GetDeviceState();
+    if (state == kDeviceStateListening) {
+        return !lesson_runtime_active_.load() ||
+               lesson_interactive_listening_active_.load();
+    }
+    return state == kDeviceStateSpeaking &&
+           listening_mode_ == kListeningModeRealtime &&
+           !lesson_runtime_active_.load();
+}
+
 void Application::HandleListeningWatchdogTick() {
     if (GetDeviceState() != kDeviceStateListening) {
         return;
     }
 
-    // Realtime mode intentionally keeps a long-lived audio stream open. The
-    // watchdog is for finite AutoStop/manual turns that should not sit in
-    // Listening forever after missed VAD/STT/server-stop events.
+#if CONFIG_USE_DEVICE_AEC
+    // Device AEC disables AFE VAD, so elapsed time cannot prove realtime silence.
     if (listening_mode_ == kListeningModeRealtime) {
+        ESP_LOGD(TAG, "realtime_watchdog_disabled_without_vad");
         return;
     }
+#endif
 
     const int64_t now_ms = esp_timer_get_time() / 1000;
     int64_t started_ms = listening_started_ms_.load();
@@ -5106,16 +5151,24 @@ void Application::HandleListeningWatchdogTick() {
         last_listening_activity_ms_.store(now_ms);
         return;
     }
+    if (IsVoiceDetected()) {
+        last_listening_activity_ms_.store(now_ms);
+        last_activity_ms = now_ms;
+    }
 
     const int64_t idle_ms = now_ms - last_activity_ms;
     const int64_t turn_ms = now_ms - started_ms;
     const uint32_t idle_limit_ms = listening_mode_ == kListeningModeAutoStop
         ? kListeningNoSpeechTimeoutMs
-        : kListeningMaxTurnMs;
+        : (listening_mode_ == kListeningModeRealtime
+               ? kListeningRealtimeNoSpeechTimeoutMs
+               : kListeningMaxTurnMs);
     const uint32_t turn_limit_ms = listening_mode_ == kListeningModeAutoStop
         ? kListeningAutoStopMaxTurnMs
         : kListeningMaxTurnMs;
-    if (idle_ms < idle_limit_ms && turn_ms < turn_limit_ms) {
+    const bool turn_timed_out =
+        listening_mode_ != kListeningModeRealtime && turn_ms >= turn_limit_ms;
+    if (idle_ms < idle_limit_ms && !turn_timed_out) {
         return;
     }
 
@@ -5138,6 +5191,8 @@ void Application::HandleListeningWatchdogTick() {
         protocol_->SendStopListening();
     }
     audio_service_.EnableVoiceProcessing(false);
+    microphone_uplink_authorized_.store(false);
+    while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
     listening_started_ms_.store(0);
     last_listening_activity_ms_.store(0);
     lesson_interactive_listen_pending_.store(false);
@@ -5156,6 +5211,10 @@ void Application::HandleListeningWatchdogTick() {
 void Application::HandleStateChangedEvent() {
     DeviceState new_state = state_machine_.GetState();
     clock_ticks_ = 0;
+
+    if (new_state != kDeviceStateListening && new_state != kDeviceStateSpeaking) {
+        microphone_uplink_authorized_.store(false);
+    }
 
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
@@ -5244,6 +5303,7 @@ void Application::HandleStateChangedEvent() {
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening: {
+            microphone_uplink_authorized_.store(false);
             {
                 int64_t now_ms = esp_timer_get_time() / 1000;
                 listening_started_ms_.store(now_ms);
@@ -5272,6 +5332,8 @@ void Application::HandleStateChangedEvent() {
                 });
                 break;
             }
+
+            microphone_uplink_authorized_.store(true);
 
             // Make sure the audio processor is running
             if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
@@ -5753,6 +5815,7 @@ void Application::CloseAudioChannelByIntent() {
     passive_ws_intent_.store(false);
     reconnect_passive_.store(false);
     online_intent_.store(false);
+    microphone_uplink_authorized_.store(false);
     reconnect_attempt_ = 0;
     passive_reconnect_attempt_ = 0;
     connect_attempt_active_.store(false);

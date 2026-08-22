@@ -364,6 +364,7 @@ private:
     std::atomic<int64_t> last_speaking_activity_ms_{0};
     std::atomic<int64_t> listening_started_ms_{0};
     std::atomic<int64_t> last_listening_activity_ms_{0};
+    std::atomic<bool> microphone_uplink_authorized_{false};
     std::atomic<uint32_t> interrupt_count_{0};   // OBS-2: barge-in / abort count
     std::atomic<uint32_t> reconnect_count_{0};   // OBS-2: WS reconnect attempts
 
@@ -386,6 +387,7 @@ private:
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);
     void HandleListeningWatchdogTick();
+    bool IsMicrophoneUplinkAuthorized() const;
     void ContinueOpenAudioChannel(ListeningMode mode);
     void StartPassiveLessonWebsocket();
     bool StartOpenChannelWorker(void* context);
