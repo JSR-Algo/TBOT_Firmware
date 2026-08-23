@@ -380,6 +380,51 @@ std::string V5PrepareFrame(int seq, std::uint64_t command_sequence_id = 91) {
     );
 }
 
+std::string V5CourseModeCompatibilityJson() {
+    return "{\"schemaVersion\":1,"
+        "\"contractChecksum\":\"cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264\","
+        "\"layoutContract\":\"layeredCinematic\","
+        "\"lessonId\":\"course-mode-v5-farm-candidate\",\"lessonVersion\":2,"
+        "\"manifestChecksum\":\"e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc\"}";
+}
+
+std::string V5CourseModePrepareFrame(int seq, std::uint64_t command_sequence_id = 491,
+                                     const std::string& phase_id = "teach") {
+    return V5Frame("lesson_prepare", seq,
+        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+        "\"command\":\"prepare\",\"commandSequenceId\":" +
+        std::to_string(command_sequence_id) +
+        ",\"templateId\":\"layeredCinematic\",\"templateVersion\":1,"
+        "\"phaseId\":\"" + phase_id +
+        "\",\"durationMs\":3000,\"fps\":10,\"frameCount\":30,"
+        "\"playbackMode\":\"once\",\"courseModeCompatibility\":" +
+        V5CourseModeCompatibilityJson() + ",\"layers\":["
+        "{\"layer\":\"background\",\"slot\":\"backgroundScene\","
+        "\"assetVersionId\":\"75000000-0000-4000-8000-000000000011\","
+        "\"mediaKind\":\"image\",\"mediaType\":\"image/jpeg\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/course-mode-v5/background-farm.jpg\","
+        "\"sha256\":\"d4abb6087dc3122e0a00feb5e6a86b03dc7db550eb59d25e92f54d0fd09e4fc0\","
+        "\"bytes\":43599,\"width\":480,\"height\":320,"
+        "\"rect\":{\"x\":0,\"y\":0,\"width\":480,\"height\":320},\"fit\":\"cover\"},"
+        "{\"layer\":\"teachingObject\",\"slot\":\"teachingObject\","
+        "\"assetVersionId\":\"75000000-0000-4000-8000-000000000022\","
+        "\"mediaKind\":\"image\",\"mediaType\":\"image/png\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/course-mode-v5/barn-95x95.png\","
+        "\"sha256\":\"c466239ff8ba202998e3827b6871906d7fbac6232aeaea3a59b7c69bec7d8777\","
+        "\"bytes\":15086,\"width\":95,\"height\":95,"
+        "\"rect\":{\"x\":20,\"y\":168,\"width\":95,\"height\":95},\"fit\":\"contain\"},"
+        "{\"layer\":\"robotOverlay\",\"slot\":\"robotOverlay\","
+        "\"assetVersionId\":\"75000000-0000-4000-8000-000000000031\","
+        "\"mediaKind\":\"video\",\"mediaType\":\"video/mp4\","
+        "\"sdPath\":\"sd://tbot/lesson-assets/course-mode-v5/robot-teach.mp4\","
+        "\"sha256\":\"f2d496b5e750e895f7e086aec827d7b99d0bb322d73ea660a2e84ff484b602c4\","
+        "\"bytes\":223033,\"width\":240,\"height\":240,"
+        "\"rect\":{\"x\":118,\"y\":160,\"width\":150,\"height\":150},"
+        "\"codec\":\"mjpeg\",\"hasAudio\":false,"
+        "\"chromaKey\":{\"keyColor\":\"#00ff00\",\"tolerance\":20,\"featherPx\":1}}]}}"
+    );
+}
+
 std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
                            const std::string& asset_extra = "") {
     return V4Frame("lesson_prepare", seq,
@@ -1339,6 +1384,11 @@ struct V3RendererFake {
     int jpeg_decodes = 0;
     int png_decodes = 0;
     int video_decodes = 0;
+    std::vector<std::size_t> video_indices;
+    std::uint16_t video_width = 2;
+    std::uint16_t video_height = 2;
+    std::uint32_t video_frame_count = 3;
+    std::uint32_t video_duration_ms = 300;
 };
 
 void* V3Allocate(void* context, std::size_t size) {
@@ -1360,8 +1410,11 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     const bool background = std::string(path).find("background") != std::string::npos ||
         std::string(path).find("flattenedCinematic") != std::string::npos;
     const std::string opened(path);
+    fake->video_width = opened.find("robot-teach") != std::string::npos ? 240 : 2;
+    fake->video_height = opened.find("robot-teach") != std::string::npos ? 240 : 2;
     std::uint32_t duration_ms = 300;
     if (opened.find("-opening") != std::string::npos) duration_ms = 9500;
+    else if (opened.find("robot-teach") != std::string::npos) duration_ms = 3000;
     else if (opened.find("cat-discover") != std::string::npos) duration_ms = 2000;
     else if (opened.find("-greet") != std::string::npos) duration_ms = 1200;
     else if (opened.find("-teach") != std::string::npos) duration_ms = 2600;
@@ -1373,23 +1426,30 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     else if (opened.find("-retry-level-3") != std::string::npos) duration_ms = 1600;
     else if (opened.find("-celebrate") != std::string::npos) duration_ms = 3000;
     else if (opened.find("-word-transition") != std::string::npos) duration_ms = 1100;
+    fake->video_duration_ms = duration_ms;
+    fake->video_frame_count = duration_ms / 100;
     *metadata = {static_cast<std::uint16_t>(fake->trgb_open ? 320 : background ? 480 : 2),
-                 static_cast<std::uint16_t>(fake->trgb_open ? 480 : background ? 320 : 2), 10,
-                 duration_ms / 100, duration_ms,
+                 static_cast<std::uint16_t>(fake->trgb_open ? 480 : background ? 320 : fake->video_height), 10,
+                 fake->video_frame_count, duration_ms,
                  static_cast<std::uint32_t>(fake->trgb_open ? 307200 : 64)};
+    if (!fake->trgb_open && !background) {
+        metadata->width = fake->video_width;
+    }
     *handle = reinterpret_cast<void*>(static_cast<std::uintptr_t>(++fake->opens));
     return true;
 }
 void V3Close(void* context, void*) { ++static_cast<V3RendererFake*>(context)->closes; }
-bool V3Decode(void* context, void*, std::size_t, std::uint8_t* destination, std::size_t capacity,
-              std::uint16_t* width, std::uint16_t* height, std::size_t* stride) {
+bool V3Decode(void* context, void*, std::size_t index, std::uint8_t* destination,
+              std::size_t capacity, std::uint16_t* width, std::uint16_t* height,
+              std::size_t* stride) {
     auto* fake = static_cast<V3RendererFake*>(context);
     if (fake->fail_decode) return false;
     ++fake->video_decodes;
+    fake->video_indices.push_back(index);
     const bool trgb = fake->trgb_open;
     const bool background = capacity >= 480u * 320u * 2u;
-    *width = trgb ? 320 : background ? 480 : 2;
-    *height = trgb ? 480 : background ? 320 : 2;
+    *width = trgb ? 320 : background ? 480 : fake->video_width;
+    *height = trgb ? 480 : background ? 320 : fake->video_height;
     *stride = static_cast<std::size_t>(*width) * 2;
     std::memset(destination, 0, *stride * *height);
     return true;
@@ -1734,6 +1794,100 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
     Board::GetInstance().display_ = nullptr;
 
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+}
+
+void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+
+    Handle(V5CourseModePrepareFrame(1));
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "phaseId") == "teach" &&
+                fake.jpeg_decodes == 1 && fake.png_decodes == 1 &&
+                fake.video_indices == std::vector<std::size_t>({0}),
+            "exact reviewed v5 Course Mode identity prepares and decodes only Robot frame zero");
+    Handle(V5Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"teach\","
+        "\"commandSequenceId\":492}}"));
+    require(FrameType(1) == "lesson_ack",
+            "exact reviewed v5 Course Mode start control is accepted");
+    const std::uint64_t start_ms = static_cast<std::uint64_t>(HostEspNowUs() / 1000);
+    fake.monotonic_ms = start_ms + 200;
+    tbot::TickActiveLessonLayeredCinematicRenderer(start_ms + 200);
+    fake.monotonic_ms = start_ms + 300;
+    tbot::TickActiveLessonLayeredCinematicRenderer(start_ms + 300);
+    require(fake.video_indices.size() >= 2 && fake.video_indices.front() == 0 &&
+                std::any_of(fake.video_indices.begin() + 1, fake.video_indices.end(),
+                            [](std::size_t index) { return index > 0; }),
+            "real Robot MJPEG playback advances beyond the first frame");
+    Handle(V5Frame("lesson_stop", 4,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"teach\","
+        "\"commandSequenceId\":493}}"));
+
+    const std::vector<std::pair<std::string, std::string>> invalid_replacements = {
+        {"\"layoutContract\":\"layeredCinematic\"",
+         "\"layoutContract\":\"flattenedMjpegCinematic\""},
+        {"e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc",
+         "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce"},
+        {"75000000-0000-4000-8000-000000000022",
+         "75000000-0000-4000-8000-000000000021"},
+        {"c466239ff8ba202998e3827b6871906d7fbac6232aeaea3a59b7c69bec7d8777",
+         "eac30a7ddf3f14df79f27c3eb39f2114f3a780d5670bb11ef62446f5fa5dcbb9"},
+        {"\"bytes\":15086", "\"bytes\":200618"},
+        {"\"width\":240,\"height\":240",
+         "\"width\":239,\"height\":240"},
+        {"\"rect\":{\"x\":20,\"y\":168,\"width\":95,\"height\":95}",
+         "\"rect\":{\"x\":20,\"y\":168,\"width\":96,\"height\":95}"},
+        {"sd://tbot/lesson-assets/course-mode-v5/robot-teach.mp4",
+         "https://cdn.invalid/robot-teach.mp4"},
+        {"\"keyColor\":\"#00ff00\"", "\"keyColor\":\"#ff00ff\""},
+        {"\"hasAudio\":false", "\"hasAudio\":true"},
+        {"\"mediaKind\":\"video\",\"mediaType\":\"video/mp4\"",
+         "\"mediaKind\":\"image\",\"mediaType\":\"image/png\""},
+        {"\"fps\":10,\"frameCount\":30", "\"fps\":15,\"frameCount\":45"},
+    };
+    int sequence = 5;
+    std::uint64_t command_sequence = 501;
+    for (const auto& replacement : invalid_replacements) {
+        ResetObservable();
+        FreshSession();
+        const int opens_before = fake.opens;
+        Handle(ReplaceOnce(V5CourseModePrepareFrame(sequence++, command_sequence++),
+                           replacement.first, replacement.second));
+        require(FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                    fake.opens == opens_before,
+                "v5 Course Mode identity/media drift fails closed before renderer IO");
+    }
+
+    ResetObservable();
+    FreshSession();
+    fake.fail_open = true;
+    Handle(V5CourseModePrepareFrame(sequence++, command_sequence++));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_SD_PATH_MISSING",
+            "missing verified Robot file propagates the stable file-open error");
+    fake.fail_open = false;
+
+    ResetObservable();
+    FreshSession();
+    fake.fail_decode = true;
+    fake.operation_error = tbot::LessonCinematicError::kDecodeTimeout;
+    Handle(V5CourseModePrepareFrame(sequence++, command_sequence++));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_DECODE_TIMEOUT",
+            "Robot decoder timeout propagates without advancing the Course Mode phase");
+    fake.fail_decode = false;
+    fake.operation_error = tbot::LessonCinematicError::kNone;
+
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    Board::GetInstance().display_ = nullptr;
 }
 
 void test_renderer_v4_capability_and_exact_single_asset_routing() {
@@ -8513,6 +8667,7 @@ int main() {
     test_duplicate_prepare_replays_cached_ack_summary_when_history_is_unavailable();
     test_layer_install_timeout_degrades_without_committing_layer_state();
     test_renderer_v2_visual_motion_is_allowlisted_once_per_generation();
+    test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }
