@@ -388,10 +388,68 @@ std::string V5CourseModeCompatibilityJson() {
         "\"manifestChecksum\":\"e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc\"}";
 }
 
+constexpr const char* kV5CourseModeManifestChecksum =
+    "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc";
+constexpr const char* kV5CourseModePackName = "course-mode-v5-dynamic-pack";
+constexpr const char* kV5CourseModeAssetIds[3] = {
+    "75000000-0000-4000-8000-000000000011",
+    "75000000-0000-4000-8000-000000000022",
+    "75000000-0000-4000-8000-000000000031"};
+constexpr std::size_t kV5CourseModeAssetSizes[3] = {43599, 15086, 223033};
+
+std::string V5CourseModePackRoot() {
+    return std::string("sd://sdcard/tbot/lesson-assets/") + kV5CourseModePackName;
+}
+
+std::string V5CourseModeAssetPath(int index) {
+    return V5CourseModePackRoot() + "/" + kV5CourseModeAssetIds[index];
+}
+
+void StageV5CourseModeAssetPack() {
+    const std::string host_root = std::string("/tmp/") + kV5CourseModePackName;
+    require(system(("mkdir -p " + host_root).c_str()) == 0,
+            "Course Mode v5 asset-pack directory is staged");
+    setenv("TBOT_HOST_LESSON_ASSET_ROOT", "/tmp", 1);
+    for (int index = 0; index < 3; ++index) {
+        const std::string path = host_root + "/" + kV5CourseModeAssetIds[index];
+        FILE* file = fopen(path.c_str(), "wb");
+        require(file != nullptr, "Course Mode v5 sparse asset opens");
+        require(fseek(file, static_cast<long>(kV5CourseModeAssetSizes[index] - 1), SEEK_SET) == 0 &&
+                    fputc(0, file) != EOF,
+                "Course Mode v5 sparse asset reaches exact declared size");
+        fclose(file);
+    }
+}
+
+void RemoveV5CourseModeAssetPack() {
+    const std::string host_root = std::string("/tmp/") + kV5CourseModePackName;
+    for (const char* asset_id : kV5CourseModeAssetIds) {
+        remove((host_root + "/" + asset_id).c_str());
+    }
+    rmdir(host_root.c_str());
+    unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
+}
+
 std::string V5CourseModePrepareFrame(int seq, std::uint64_t command_sequence_id = 491,
-                                     const std::string& phase_id = "teach") {
-    return V5Frame("lesson_prepare", seq,
-        "{\"profile\":\"espTft\",\"cinematicPhase\":{"
+                                     const std::string& phase_id = "teach",
+                                     bool include_asset_pack = true) {
+    std::string body = "{\"profile\":\"espTft\",";
+    if (include_asset_pack) {
+        body += std::string("\"manifestRef\":{\"manifestChecksum\":\"") +
+        kV5CourseModeManifestChecksum +
+        "\"},\"assetPack\":{\"cacheKey\":\"course-mode-v5-" +
+        kV5CourseModeManifestChecksum + "\",\"localRoot\":\"" +
+        V5CourseModePackRoot() + "\",\"ready\":true,\"assets\":["
+        "{\"key\":\"" + kV5CourseModeAssetIds[0] +
+        "\",\"state\":\"READY\",\"checksumOk\":true,\"mediaType\":\"image/jpeg\",\"size\":43599},"
+        "{\"key\":\"" + kV5CourseModeAssetIds[1] +
+        "\",\"state\":\"READY\",\"checksumOk\":true,\"mediaType\":\"image/png\",\"size\":15086},"
+        "{\"key\":\"" + kV5CourseModeAssetIds[2] +
+        "\",\"state\":\"READY\",\"checksumOk\":true,\"mediaType\":\"video/mp4\",\"size\":223033}]},"
+        ;
+    }
+    body +=
+        "\"cinematicPhase\":{"
         "\"command\":\"prepare\",\"commandSequenceId\":" +
         std::to_string(command_sequence_id) +
         ",\"templateId\":\"layeredCinematic\",\"templateVersion\":1,"
@@ -402,27 +460,27 @@ std::string V5CourseModePrepareFrame(int seq, std::uint64_t command_sequence_id 
         "{\"layer\":\"background\",\"slot\":\"backgroundScene\","
         "\"assetVersionId\":\"75000000-0000-4000-8000-000000000011\","
         "\"mediaKind\":\"image\",\"mediaType\":\"image/jpeg\","
-        "\"sdPath\":\"sd://tbot/lesson-assets/course-mode-v5/background-farm.jpg\","
+        "\"sdPath\":\"" + V5CourseModeAssetPath(0) + "\","
         "\"sha256\":\"d4abb6087dc3122e0a00feb5e6a86b03dc7db550eb59d25e92f54d0fd09e4fc0\","
         "\"bytes\":43599,\"width\":480,\"height\":320,"
         "\"rect\":{\"x\":0,\"y\":0,\"width\":480,\"height\":320},\"fit\":\"cover\"},"
         "{\"layer\":\"teachingObject\",\"slot\":\"teachingObject\","
         "\"assetVersionId\":\"75000000-0000-4000-8000-000000000022\","
         "\"mediaKind\":\"image\",\"mediaType\":\"image/png\","
-        "\"sdPath\":\"sd://tbot/lesson-assets/course-mode-v5/barn-95x95.png\","
+        "\"sdPath\":\"" + V5CourseModeAssetPath(1) + "\","
         "\"sha256\":\"c466239ff8ba202998e3827b6871906d7fbac6232aeaea3a59b7c69bec7d8777\","
         "\"bytes\":15086,\"width\":95,\"height\":95,"
         "\"rect\":{\"x\":20,\"y\":168,\"width\":95,\"height\":95},\"fit\":\"contain\"},"
         "{\"layer\":\"robotOverlay\",\"slot\":\"robotOverlay\","
         "\"assetVersionId\":\"75000000-0000-4000-8000-000000000031\","
         "\"mediaKind\":\"video\",\"mediaType\":\"video/mp4\","
-        "\"sdPath\":\"sd://tbot/lesson-assets/course-mode-v5/robot-teach.mp4\","
+        "\"sdPath\":\"" + V5CourseModeAssetPath(2) + "\","
         "\"sha256\":\"f2d496b5e750e895f7e086aec827d7b99d0bb322d73ea660a2e84ff484b602c4\","
         "\"bytes\":223033,\"width\":240,\"height\":240,"
         "\"rect\":{\"x\":118,\"y\":160,\"width\":150,\"height\":150},"
         "\"codec\":\"mjpeg\",\"hasAudio\":false,"
-        "\"chromaKey\":{\"keyColor\":\"#00ff00\",\"tolerance\":20,\"featherPx\":1}}]}}"
-    );
+        "\"chromaKey\":{\"keyColor\":\"#00ff00\",\"tolerance\":20,\"featherPx\":1}}]}}";
+    return V5Frame("lesson_prepare", seq, body);
 }
 
 std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
@@ -1410,11 +1468,13 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
     const bool background = std::string(path).find("background") != std::string::npos ||
         std::string(path).find("flattenedCinematic") != std::string::npos;
     const std::string opened(path);
-    fake->video_width = opened.find("robot-teach") != std::string::npos ? 240 : 2;
-    fake->video_height = opened.find("robot-teach") != std::string::npos ? 240 : 2;
+    const bool course_mode_robot =
+        opened.find("75000000-0000-4000-8000-000000000031") != std::string::npos;
+    fake->video_width = opened.find("robot-teach") != std::string::npos || course_mode_robot ? 240 : 2;
+    fake->video_height = opened.find("robot-teach") != std::string::npos || course_mode_robot ? 240 : 2;
     std::uint32_t duration_ms = 300;
     if (opened.find("-opening") != std::string::npos) duration_ms = 9500;
-    else if (opened.find("robot-teach") != std::string::npos) duration_ms = 3000;
+    else if (opened.find("robot-teach") != std::string::npos || course_mode_robot) duration_ms = 3000;
     else if (opened.find("cat-discover") != std::string::npos) duration_ms = 2000;
     else if (opened.find("-greet") != std::string::npos) duration_ms = 1200;
     else if (opened.find("-teach") != std::string::npos) duration_ms = 2600;
@@ -1799,6 +1859,7 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
 void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
     ResetObservable();
     FreshSession();
+    StageV5CourseModeAssetPack();
     Board::GetInstance().display_ = nullptr;
     V3RendererFake fake;
     tbot::LessonLayeredCinematicRenderer renderer(
@@ -1833,10 +1894,10 @@ void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
     const std::vector<std::pair<std::string, std::string>> invalid_replacements = {
         {"\"layoutContract\":\"layeredCinematic\"",
          "\"layoutContract\":\"flattenedMjpegCinematic\""},
-        {"e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc",
-         "205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce"},
-        {"75000000-0000-4000-8000-000000000022",
-         "75000000-0000-4000-8000-000000000021"},
+        {"\"lessonVersion\":2,\"manifestChecksum\":\"e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc\"",
+         "\"lessonVersion\":2,\"manifestChecksum\":\"205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce\""},
+        {"\"assetVersionId\":\"75000000-0000-4000-8000-000000000022\"",
+         "\"assetVersionId\":\"75000000-0000-4000-8000-000000000021\""},
         {"c466239ff8ba202998e3827b6871906d7fbac6232aeaea3a59b7c69bec7d8777",
          "eac30a7ddf3f14df79f27c3eb39f2114f3a780d5670bb11ef62446f5fa5dcbb9"},
         {"\"bytes\":15086", "\"bytes\":200618"},
@@ -1844,27 +1905,48 @@ void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
          "\"width\":239,\"height\":240"},
         {"\"rect\":{\"x\":20,\"y\":168,\"width\":95,\"height\":95}",
          "\"rect\":{\"x\":20,\"y\":168,\"width\":96,\"height\":95}"},
-        {"sd://tbot/lesson-assets/course-mode-v5/robot-teach.mp4",
-         "https://cdn.invalid/robot-teach.mp4"},
+        {V5CourseModeAssetPath(2),
+         V5CourseModePackRoot() + "/alternate-robot-teach.mp4"},
+        {V5CourseModeAssetPath(2),
+         "file:///sdcard/tbot/lesson-assets/" + std::string(kV5CourseModePackName) +
+             "/" + kV5CourseModeAssetIds[2]},
+        {V5CourseModeAssetPath(2),
+         V5CourseModePackRoot() + "/../" + kV5CourseModeAssetIds[2]},
+        {V5CourseModeAssetPath(2), "https://cdn.invalid/robot-teach.mp4"},
         {"\"keyColor\":\"#00ff00\"", "\"keyColor\":\"#ff00ff\""},
         {"\"hasAudio\":false", "\"hasAudio\":true"},
         {"\"mediaKind\":\"video\",\"mediaType\":\"video/mp4\"",
          "\"mediaKind\":\"image\",\"mediaType\":\"image/png\""},
         {"\"fps\":10,\"frameCount\":30", "\"fps\":15,\"frameCount\":45"},
     };
-    int sequence = 5;
-    std::uint64_t command_sequence = 501;
+    int sequence = 6;
+    std::uint64_t command_sequence = 502;
+    std::vector<std::string> admitted_drifts;
     for (const auto& replacement : invalid_replacements) {
         ResetObservable();
         FreshSession();
         const int opens_before = fake.opens;
         Handle(ReplaceOnce(V5CourseModePrepareFrame(sequence++, command_sequence++),
                            replacement.first, replacement.second));
-        require(FrameType(0) == "lesson_error" &&
-                    FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
-                    fake.opens == opens_before,
-                "v5 Course Mode identity/media drift fails closed before renderer IO");
+        const bool rejected_before_io = FrameType(0) == "lesson_error" &&
+            FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+            fake.opens == opens_before;
+        if (!rejected_before_io) {
+            std::cerr << "Course Mode v5 drift case was not rejected before IO: "
+                      << replacement.second << "\n";
+            admitted_drifts.push_back(replacement.second);
+        }
     }
+    require(admitted_drifts.empty(),
+            "v5 Course Mode identity/media/path drift fails closed before renderer IO");
+
+    ResetObservable();
+    const int opens_before_missing_current_pack = fake.opens;
+    Handle(V5CourseModePrepareFrame(sequence++, command_sequence++, "teach", false));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.opens == opens_before_missing_current_pack,
+            "v5 Course Mode requires READY/checksum asset records from the same prepare frame");
 
     ResetObservable();
     FreshSession();
@@ -1888,6 +1970,7 @@ void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
 
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     Board::GetInstance().display_ = nullptr;
+    RemoveV5CourseModeAssetPack();
 }
 
 void test_renderer_v4_capability_and_exact_single_asset_routing() {

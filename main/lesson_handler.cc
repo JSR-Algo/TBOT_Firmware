@@ -1699,6 +1699,62 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
     return out;
 }
 
+bool ExactCourseModeV5AssetPackPaths(const cJSON* body, const cJSON* layers) {
+    static constexpr const char* kManifestChecksum =
+        "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc";
+    static constexpr const char* kAssetVersionIds[3] = {
+        "75000000-0000-4000-8000-000000000011",
+        "75000000-0000-4000-8000-000000000022",
+        "75000000-0000-4000-8000-000000000031"};
+    static constexpr const char* kMediaTypes[3] = {
+        "image/jpeg", "image/png", "video/mp4"};
+    static constexpr std::uint32_t kSizes[3] = {43599, 15086, 223033};
+
+    cJSON* pack_ack = BuildAssetPackAck(body);
+    const bool pack_ready = pack_ack != nullptr &&
+        cJSON_IsTrue(cJSON_GetObjectItem(pack_ack, "ready"));
+    cJSON_Delete(pack_ack);
+    if (!pack_ready || !cJSON_IsArray(layers) || cJSON_GetArraySize(layers) != 3) {
+        return false;
+    }
+
+    const cJSON* manifest_ref = Obj(body, "manifestRef");
+    const cJSON* pack = Obj(body, "assetPack");
+    const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
+    const char* local_root = Str(pack, "localRoot");
+    if (!ExactString(manifest_ref, "manifestChecksum", kManifestChecksum) ||
+        !cJSON_IsArray(assets) || cJSON_GetArraySize(assets) != 3 || Blank(local_root)) {
+        return false;
+    }
+    std::string root(local_root);
+    TrimAsciiWhitespace(root);
+    while (!root.empty() && root.back() == '/') root.pop_back();
+
+    for (int index = 0; index < 3; ++index) {
+        const cJSON* layer = cJSON_GetArrayItem(layers, index);
+        const cJSON* matching_asset = nullptr;
+        const cJSON* asset = nullptr;
+        cJSON_ArrayForEach(asset, assets) {
+            if (ExactString(asset, "key", kAssetVersionIds[index])) {
+                if (matching_asset != nullptr) return false;
+                matching_asset = asset;
+            }
+        }
+        double size = 0;
+        const std::string expected_path =
+            root + "/" + EncodeLessonAssetPathSegment(kAssetVersionIds[index]);
+        if (matching_asset == nullptr || !Blank(Str(matching_asset, "localPath")) ||
+            !ExactString(matching_asset, "mediaType", kMediaTypes[index]) ||
+            !Num(matching_asset, "size", size) || size != kSizes[index] ||
+            LessonLocalPath(expected_path.c_str()).empty() ||
+            !ExactString(layer, "assetVersionId", kAssetVersionIds[index]) ||
+            !ExactString(layer, "sdPath", expected_path.c_str())) {
+            return false;
+        }
+    }
+    return true;
+}
+
 std::map<std::string, std::string> VerifiedAssetPaths(const cJSON* body) {
     std::map<std::string, std::string> paths;
     const cJSON* pack = Obj(body, "assetPack");
@@ -2931,6 +2987,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     cJSON_IsArray(layers) && cJSON_GetArraySize(layers) == 3 &&
                     (!has_course_mode ||
                      (ParseExactCourseModeV5Compatibility(course_mode) &&
+                      ExactCourseModeV5AssetPackPaths(body, layers) &&
                       phase_id != nullptr &&
                       (strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0) &&
                       duration_ms == 3000 && fps == 10 && frame_count == 30 &&
