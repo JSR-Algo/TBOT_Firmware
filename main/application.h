@@ -382,6 +382,7 @@ private:
     void HandleStopListeningEvent();
     void HandleNetworkConnectedEvent();
     void HandleNetworkDisconnectedEvent();
+    void RearmClaimedIdleWakeWord();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
     void RunScheduledTasks();

@@ -1784,6 +1784,29 @@ def test_lesson_runtime_connect_watchdog_suppresses_generic_reconnect_and_idle_r
     assert "ScheduleReconnect" not in lesson_branch
 
 
+def test_passive_connect_watchdog_keeps_safe_idle_wake_detection_available():
+    app_cc = read("main/application.cc")
+    watchdog_start = app_cc.index("void Application::HandleConnectWatchdog")
+    schedule_start = app_cc.index("void Application::ScheduleReconnect", watchdog_start)
+    watchdog = app_cc[watchdog_start:schedule_start]
+    passive_start = watchdog.index("if (passive_ws_intent_.load())")
+    passive_backoff_start = watchdog.index(
+        'ESP_LOGW(TAG, "passive_lesson_connect_watchdog_timeout -> passive backoff")',
+        passive_start,
+    )
+    passive_backoff_end = watchdog.index("return;", passive_backoff_start)
+    passive_backoff = watchdog[passive_backoff_start:passive_backoff_end]
+
+    assert "SetDeviceState(kDeviceStateIdle);" in passive_backoff
+    assert "RearmClaimedIdleWakeWord();" in passive_backoff
+    assert passive_backoff.index("SetDeviceState(kDeviceStateIdle);") < passive_backoff.index(
+        "RearmClaimedIdleWakeWord();"
+    )
+    assert passive_backoff.index("RearmClaimedIdleWakeWord();") < passive_backoff.index(
+        "SchedulePassiveLessonReconnect();"
+    )
+
+
 def test_reconnect_backoff_rolls_into_slow_periodic_retry_without_terminal_giveup():
     app_cc = read("main/application.cc")
     app_h = read("main/application.h")

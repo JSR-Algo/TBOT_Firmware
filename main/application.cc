@@ -1158,6 +1158,16 @@ void Application::HandleNetworkDisconnectedEvent() {
     display->UpdateStatusBar(true);
 }
 
+void Application::RearmClaimedIdleWakeWord() {
+    if (!IsDeviceClaimed() || lesson_runtime_active_.load() ||
+        lesson_asset_sync_quiet_.load() || GetDeviceState() != kDeviceStateIdle) {
+        return;
+    }
+    audio_service_.EnableWakeWordDetection(true);
+    ESP_LOGI(TAG, "claimed_idle_wake_word_rearmed running=%d",
+             audio_service_.IsWakeWordRunning() ? 1 : 0);
+}
+
 void Application::HandleActivationDoneEvent() {
     auto state = GetDeviceState();
     if (state == kDeviceStateWifiConfiguring) {
@@ -1179,11 +1189,7 @@ void Application::HandleActivationDoneEvent() {
 
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
-    if (IsDeviceClaimed() && !lesson_asset_sync_quiet_.load()) {
-        audio_service_.EnableWakeWordDetection(true);
-        ESP_LOGI(TAG, "claimed_idle_wake_word_rearmed running=%d",
-                 audio_service_.IsWakeWordRunning() ? 1 : 0);
-    }
+    RearmClaimedIdleWakeWord();
 
     has_server_time_ = ota_->HasServerTime();
 
@@ -4608,6 +4614,10 @@ void Application::OpenChannelTask(void* arg) {
                     ESP_LOGW(TAG, "passive_lesson_websocket_failed");
                     self->deferred_wake_word_.clear();
                     self->passive_ws_intent_.store(false);
+                    if (self->GetDeviceState() == kDeviceStateConnecting) {
+                        self->SetDeviceState(kDeviceStateIdle);
+                    }
+                    self->RearmClaimedIdleWakeWord();
                     self->SchedulePassiveLessonReconnect();
                 } else if (wake_word_invoke) {
                     ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");
@@ -4699,6 +4709,10 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
         backend_offline_.store(true);
         connect_in_flight_.store(false);
         connect_attempt_active_.store(false);
+        if (GetDeviceState() == kDeviceStateConnecting) {
+            SetDeviceState(kDeviceStateIdle);
+        }
+        RearmClaimedIdleWakeWord();
         SchedulePassiveLessonReconnect();
         return;
     }

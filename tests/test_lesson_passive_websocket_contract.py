@@ -71,16 +71,39 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
 
 def test_claimed_activation_rearms_wake_before_passive_websocket_success():
     source = read("main/application.cc")
+    header = read("main/application.h")
     activation = function_body(source, "void Application::HandleActivationDoneEvent")
+    rearm = function_body(source, "void Application::RearmClaimedIdleWakeWord")
 
     assert "SetDeviceState(kDeviceStateIdle);" in activation
-    assert "IsDeviceClaimed()" in activation
-    assert "!lesson_asset_sync_quiet_.load()" in activation
-    assert "audio_service_.EnableWakeWordDetection(true);" in activation
+    assert "void RearmClaimedIdleWakeWord();" in header
+    assert "RearmClaimedIdleWakeWord();" in activation
     assert activation.index("SetDeviceState(kDeviceStateIdle);") < activation.index(
-        "audio_service_.EnableWakeWordDetection(true);"
+        "RearmClaimedIdleWakeWord();"
     )
     assert "protocol_->IsAudioChannelOpened()" not in activation
+    assert "!IsDeviceClaimed()" in rearm
+    assert "lesson_runtime_active_.load()" in rearm
+    assert "lesson_asset_sync_quiet_.load()" in rearm
+    assert "GetDeviceState() != kDeviceStateIdle" in rearm
+    assert "audio_service_.EnableWakeWordDetection(true);" in rearm
+
+
+def test_passive_websocket_failure_restores_safe_idle_wake_detection():
+    source = read("main/application.cc")
+    open_task = function_body(source, "void Application::OpenChannelTask")
+    failure_start = open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")')
+    failure_end = open_task.index("} else if (wake_word_invoke)", failure_start)
+    failure = open_task[failure_start:failure_end]
+
+    assert "self->SetDeviceState(kDeviceStateIdle);" in failure
+    assert "self->RearmClaimedIdleWakeWord();" in failure
+    assert failure.index("self->SetDeviceState(kDeviceStateIdle);") < failure.index(
+        "self->RearmClaimedIdleWakeWord();"
+    )
+    assert failure.index("self->RearmClaimedIdleWakeWord();") < failure.index(
+        "self->SchedulePassiveLessonReconnect();"
+    )
 
 def test_passive_lesson_socket_open_promotes_pending_answer_turn_to_listening():
     source = read("main/application.cc")
