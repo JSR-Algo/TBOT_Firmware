@@ -106,7 +106,7 @@ public:
         if (model_index > 0 && model_index <= model_count) {
             interval->last_valid_model_index = model_index;
             interval->last_valid_model_sequence = state_sequence_;
-        } else if (model_index > 0) {
+        } else if (category == WakeDecisionCategory::kDetected || model_index != 0) {
             SaturatingIncrement(interval->invalid_model_index_count);
         }
         EndPublication(state_channel_);

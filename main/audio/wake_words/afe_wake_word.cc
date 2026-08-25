@@ -114,9 +114,11 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         ESP_LOGE(TAG, "Failed to initialize wakenet model");
         return false;
     }
+    wakenet_model_count_ = 0;
     for (int i = 0; i < models_->num; i++) {
         ESP_LOGI(TAG, "Model %d: %s", i, models_->model_name[i]);
         if (strstr(models_->model_name[i], ESP_WN_PREFIX) != NULL) {
+            ++wakenet_model_count_;
             wakenet_model_ = models_->model_name[i];
             auto words = esp_srmodel_get_wake_words(models_, wakenet_model_);
             // split by ";" to get all wake words
@@ -289,10 +291,14 @@ void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     }
     input_buffer_.insert(input_buffer_.end(), feed_data->begin(), feed_data->end());
     size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * afe_feed_channels_;
+    const int expected_bytes = static_cast<int>(chunk_size * sizeof(int16_t));
     while (input_buffer_.size() >= chunk_size) {
+        const int accepted_bytes = afe_iface_->feed(afe_data_, input_buffer_.data());
+        if (accepted_bytes != expected_bytes) {
+            break;
+        }
         telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size,
                                     kDiagnosticSpeechFloorRms, esp_timer_get_time());
-        afe_iface_->feed(afe_data_, input_buffer_.data());
         feed_count_.fetch_add(1, std::memory_order_relaxed);
         input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);
     }
@@ -361,17 +367,26 @@ void AfeWakeWord::AudioDetectionTask() {
                     break;
             }
             telemetry_.ObserveWakeState(decision_category, res->wakenet_model_index,
-                                        static_cast<int>(wake_words_.size()));
+                                        wakenet_model_count_);
 
             // Store the wake word data for voice recognition, like who is speaking
             StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
 
             if (res->wakeup_state == WAKENET_DETECTED) {
-                if (res->wakenet_model_index < 1 ||
-                    res->wakenet_model_index > static_cast<int>(wake_words_.size())) {
-                    ESP_LOGW(TAG, "Wake detection returned invalid model index=%d count=%u",
-                             res->wakenet_model_index,
+                const bool valid_model_index =
+                    res->wakenet_model_index >= 1 &&
+                    res->wakenet_model_index <= wakenet_model_count_;
+                const bool invalid_wake_word_index =
+                    res->wake_word_index < 1 ||
+                    res->wake_word_index > static_cast<int>(wake_words_.size());
+                if (!valid_model_index || invalid_wake_word_index) {
+                    ESP_LOGW(TAG,
+                             "Wake detection returned invalid indices model=%d model_count=%d word=%d word_count=%u",
+                             res->wakenet_model_index, wakenet_model_count_,
+                             res->wake_word_index,
                              static_cast<unsigned>(wake_words_.size()));
+                }
+                if (invalid_wake_word_index) {
                     continue;
                 }
                 // RMS measurement (log-only mode): compute RMS so we can tune
@@ -397,7 +412,7 @@ void AfeWakeWord::AudioDetectionTask() {
                     continue;
                 }
                 Stop();
-                last_detected_wake_word_ = wake_words_[res->wakenet_model_index - 1];
+                last_detected_wake_word_ = wake_words_[res->wake_word_index - 1];
 
                 if (wake_word_detected_callback_) {
                     wake_word_detected_callback_(last_detected_wake_word_);

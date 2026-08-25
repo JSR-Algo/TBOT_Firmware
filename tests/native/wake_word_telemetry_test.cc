@@ -45,6 +45,8 @@ int main() {
     telemetry.ObserveWakeState(WakeDecisionCategory::kTransition, 0, 3);
     telemetry.ObserveWakeState(WakeDecisionCategory::kDetected, 2, 3);
     telemetry.ObserveWakeState(WakeDecisionCategory::kDetected, 4, 3);
+    telemetry.ObserveWakeState(WakeDecisionCategory::kDetected, 0, 3);
+    telemetry.ObserveWakeState(WakeDecisionCategory::kDetected, -1, 3);
     telemetry.ObserveWakeState(WakeDecisionCategory::kOther, 0, 3);
 
     const WakeTelemetrySnapshot first = telemetry.TakeSnapshot();
@@ -57,10 +59,11 @@ int main() {
     Require(first.last_above_floor_us == 3000, "latest above-floor timestamp is retained");
     Require(first.state_none == 1, "none state is counted");
     Require(first.state_transition == 1, "transition state is counted");
-    Require(first.state_detected == 2, "detected state is counted");
+    Require(first.state_detected == 4, "detected state is counted");
     Require(first.state_other == 1, "other state is counted");
     Require(first.last_valid_model_index == 2, "latest valid positive model index is retained");
-    Require(first.invalid_model_index_count == 1, "positive out-of-range model index is counted");
+    Require(first.invalid_model_index_count == 3,
+            "every unavailable or out-of-range detected model index is counted");
 
     const WakeTelemetrySnapshot second = telemetry.TakeSnapshot();
     Require(second.chunk_count == 0, "chunk count drains after a snapshot");

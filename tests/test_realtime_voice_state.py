@@ -124,7 +124,9 @@ def test_audio_metrics_report_wake_feed_fetch_progress_without_audio_content():
 
 
 def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
+    wake_h = read("main/audio/wake_words/afe_wake_word.h")
     wake_cc = read("main/audio/wake_words/afe_wake_word.cc")
+    initialize = function_body(wake_cc, "bool AfeWakeWord::Initialize")
     feed = function_body(wake_cc, "void AfeWakeWord::Feed(const std::vector<int16_t>& data)")
     task = function_body(wake_cc, "void AfeWakeWord::AudioDetectionTask()")
     progress = function_body(wake_cc, "WakeWordProgress AfeWakeWord::GetProgress()")
@@ -133,8 +135,22 @@ def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
     assert "telemetry_.TakeSnapshot()" in progress
     assert "telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size," in feed
     assert "kDiagnosticSpeechFloorRms, esp_timer_get_time())" in feed
-    assert feed.index("input_buffer_.insert") < feed.index("telemetry_.ObserveFeedChunk")
-    assert feed.index("telemetry_.ObserveFeedChunk") < feed.index("afe_iface_->feed")
+    feed_call = feed.index("afe_iface_->feed")
+    rejected_guard = feed.index("accepted_bytes != expected_bytes")
+    observe_chunk = feed.index("telemetry_.ObserveFeedChunk")
+    increment_feed = feed.index("feed_count_.fetch_add")
+    erase_chunk = feed.index("input_buffer_.erase")
+    assert "const int expected_bytes = static_cast<int>(chunk_size * sizeof(int16_t));" in feed
+    assert "const int accepted_bytes = afe_iface_->feed" in feed
+    assert feed.index("input_buffer_.insert") < feed_call
+    assert feed_call < rejected_guard < observe_chunk < increment_feed < erase_chunk
+    rejected_path = feed[rejected_guard:observe_chunk]
+    assert "break;" in rejected_path
+
+    assert "int wakenet_model_count_ = 0;" in wake_h
+    assert "wakenet_model_count_ = 0;" in initialize
+    wakenet_model_branch = initialize[initialize.index("ESP_WN_PREFIX") :]
+    assert "++wakenet_model_count_;" in wakenet_model_branch
 
     successful_fetch = task.index("fetch_count_.fetch_add")
     observe_state = task.index("telemetry_.ObserveWakeState")
@@ -149,19 +165,26 @@ def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
     assert "WakeDecisionCategory::kTransition" in task
     assert "WakeDecisionCategory::kDetected" in task
     assert "WakeDecisionCategory::kOther" in task
-    assert "res->wakenet_model_index" in task[observe_state:]
-    assert "static_cast<int>(wake_words_.size())" in task[observe_state:]
+    observation = task[observe_state : task.index("StoreWakeWordData", observe_state)]
+    assert "res->wakenet_model_index" in observation
+    assert "wakenet_model_count_" in observation
+    assert "wake_words_.size()" not in observation
 
     detected = task[task.index("if (res->wakeup_state == WAKENET_DETECTED)") :]
-    invalid_low = "res->wakenet_model_index < 1"
-    invalid_high = "res->wakenet_model_index > static_cast<int>(wake_words_.size())"
+    invalid_low = "res->wake_word_index < 1"
+    invalid_high = "res->wake_word_index > static_cast<int>(wake_words_.size())"
     assert invalid_low in detected
     assert invalid_high in detected
     assert detected.index(invalid_low) < detected.index("Stop();")
     assert detected.index(invalid_high) < detected.index("Stop();")
-    assert detected.index(invalid_high) < detected.index("wake_words_[res->wakenet_model_index - 1]")
-    assert "Wake detection returned invalid model index=%d count=%u" in detected
-    assert "wake_words_[" not in detected[:detected.index("continue;")]
+    assert detected.index(invalid_high) < detected.index("wake_words_[res->wake_word_index - 1]")
+    assert "Wake detection returned invalid indices" in detected
+    word_rejection = detected.index("if (invalid_wake_word_index)")
+    assert "continue;" not in detected[
+        detected.index("if (!valid_model_index || invalid_wake_word_index)") : word_rejection
+    ]
+    assert word_rejection < detected.index("continue;", word_rejection) < detected.index("Stop();")
+    assert "wake_words_[" not in detected[:detected.index("continue;", word_rejection)]
 
 def test_afe_wake_word_uses_more_sensitive_hiesp_threshold_on_lcdwiki():
     wake_cc = read("main/audio/wake_words/afe_wake_word.cc")
