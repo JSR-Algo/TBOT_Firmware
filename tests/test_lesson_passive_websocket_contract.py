@@ -68,6 +68,20 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
     assert "online_intent_.store(true)" in set_listening
     assert "passive_ws_intent_.store(false)" in set_listening
 
+
+def test_claimed_activation_rearms_wake_before_passive_websocket_success():
+    source = read("main/application.cc")
+    activation = function_body(source, "void Application::HandleActivationDoneEvent")
+
+    assert "SetDeviceState(kDeviceStateIdle);" in activation
+    assert "IsDeviceClaimed()" in activation
+    assert "!lesson_asset_sync_quiet_.load()" in activation
+    assert "audio_service_.EnableWakeWordDetection(true);" in activation
+    assert activation.index("SetDeviceState(kDeviceStateIdle);") < activation.index(
+        "audio_service_.EnableWakeWordDetection(true);"
+    )
+    assert "protocol_->IsAudioChannelOpened()" not in activation
+
 def test_passive_lesson_socket_open_promotes_pending_answer_turn_to_listening():
     source = read("main/application.cc")
     open_task = function_body(source, "void Application::OpenChannelTask")

@@ -1179,6 +1179,11 @@ void Application::HandleActivationDoneEvent() {
 
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
+    if (IsDeviceClaimed() && !lesson_asset_sync_quiet_.load()) {
+        audio_service_.EnableWakeWordDetection(true);
+        ESP_LOGI(TAG, "claimed_idle_wake_word_rearmed running=%d",
+                 audio_service_.IsWakeWordRunning() ? 1 : 0);
+    }
 
     has_server_time_ = ota_->HasServerTime();
 
