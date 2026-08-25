@@ -1,6 +1,8 @@
 from pathlib import Path
 import re
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -159,6 +161,105 @@ def cpp_direct_nested_types(class_body: str) -> list[tuple[str, str]]:
     return cpp_direct_structure(class_body)[1]
 
 
+def assert_wake_telemetry_no_hidden_storage(source: str) -> None:
+    code = sanitize_cpp_source(source)
+
+    type_declarations = []
+    for declaration in re.finditer(
+        r"\b(class|struct|union)\s+([A-Za-z_]\w*)", code
+    ):
+        if declaration.group(1) == "class" and re.search(
+            r"\benum\s+$", code[max(0, declaration.start() - 16) : declaration.start()]
+        ):
+            continue
+        type_declarations.append((declaration.group(1), declaration.group(2)))
+    assert type_declarations == [
+        ("struct", "WakeTelemetrySnapshot"),
+        ("class", "WakeWordTelemetry"),
+        ("struct", "FeedInterval"),
+        ("struct", "StateInterval"),
+        ("struct", "SpscChannel"),
+        ("class", "ExactMeanSquare"),
+    ], "type declarations changed"
+
+    outer_class = function_body(source, "class WakeWordTelemetry")
+    assert cpp_direct_nested_types(outer_class) == [
+        ("struct", "FeedInterval"),
+        ("struct", "StateInterval"),
+        ("struct", "SpscChannel"),
+        ("class", "ExactMeanSquare"),
+    ], "type declarations changed"
+    for signature in (
+        "struct FeedInterval",
+        "struct StateInterval",
+        "struct SpscChannel",
+        "class ExactMeanSquare",
+    ):
+        assert (
+            cpp_direct_nested_types(function_body(source, signature)) == []
+        ), "type declarations changed"
+
+    expected_static_lines = [
+        "static constexpr uint32_t kRmsMinSentinel = "
+        "std::numeric_limits<uint32_t>::max();",
+        "static constexpr uint32_t kMeanSquareBlockSamples = 1024;",
+        "static constexpr uint64_t kMaximumSampleSquare = uint64_t{32768} * 32768;",
+        "static void BeginPublication(SpscChannel<Interval>& channel) {",
+        "static Interval* CurrentProducerInterval(SpscChannel<Interval>& channel) {",
+        "static void EndPublication(SpscChannel<Interval>& channel) {",
+        "static void DrainOne(SpscChannel<Interval>& channel, int32_t& pending_slot,",
+        "static uint32_t SaturatingAdd(uint32_t left, uint32_t right) {",
+        "static void SaturatingIncrement(uint32_t& value) {",
+        "static void AdvanceSequence(uint64_t& sequence) {",
+        "static uint32_t IntegerSquareRoot(uint64_t value) {",
+    ]
+    static_lines = [
+        re.sub(r"\s+", " ", line).strip()
+        for line in code.splitlines()
+        if re.search(r"\b(?:inline\s+)?static\b", line)
+    ]
+    static_tokens = re.findall(r"\b(?:inline\s+)?static\b", code)
+    assert len(static_tokens) == len(expected_static_lines), "static declarations changed"
+    assert static_lines == expected_static_lines, "static declarations changed"
+
+    static_function_signatures = [
+        re.sub(r"\s+", " ", signature).strip()
+        for signature in re.findall(
+            r"(?m)^\s*((?:inline\s+)?static\s+[^;{}]+?\([^;{}]*?\))\s*\{",
+            code,
+        )
+    ]
+    assert static_function_signatures == [
+        "static void BeginPublication(SpscChannel<Interval>& channel)",
+        "static Interval* CurrentProducerInterval(SpscChannel<Interval>& channel)",
+        "static void EndPublication(SpscChannel<Interval>& channel)",
+        "static void DrainOne(SpscChannel<Interval>& channel, int32_t& pending_slot, "
+        "Interval& drained)",
+        "static uint32_t SaturatingAdd(uint32_t left, uint32_t right)",
+        "static void SaturatingIncrement(uint32_t& value)",
+        "static void AdvanceSequence(uint64_t& sequence)",
+        "static uint32_t IntegerSquareRoot(uint64_t value)",
+    ], "static declarations changed"
+
+    array_declarations = [
+        re.sub(r"\s+", " ", declaration).strip()
+        for declaration in re.findall(
+            r"(?m)^\s*((?:(?:inline|static|constexpr|const|volatile)\s+)*"
+            r"[A-Za-z_]\w*(?:::\w+)*(?:<[^;\n]+>)?(?:\s*[*&]+)?\s+"
+            r"[A-Za-z_]\w*\s*\[[^\]]+\]\s*(?:=[^;]*)?;)",
+            code,
+        )
+    ]
+    assert array_declarations == ["Interval intervals[2];"], "array declarations changed"
+
+    aliases = re.findall(
+        r"(?m)^\s*(?:using\s+[A-Za-z_]\w*\s*=[^;]+|typedef\s+[^;]+);",
+        code,
+    )
+    assert aliases == [], "type aliases changed"
+    assert "thread_local" not in code, "thread-local storage changed"
+
+
 def test_cpp_include_directives_ignore_comment_string_and_raw_string_fakes():
     fixture = r'''
         // #include <commented.h>
@@ -193,6 +294,32 @@ def test_cpp_direct_declarations_ignore_nested_methods_and_types():
     assert cpp_direct_nested_types(function_body(fixture, "class Example")) == [
         ("struct", "Nested")
     ]
+
+
+def test_wake_telemetry_contract_rejects_method_local_static_sample_array():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "        ExactMeanSquare mean_square;",
+        "        static int16_t retained_samples[160];\n"
+        "        ExactMeanSquare mean_square;",
+    )
+    assert mutated != telemetry_h
+
+    with pytest.raises(AssertionError, match="static declarations changed"):
+        assert_wake_telemetry_no_hidden_storage(mutated)
+
+
+def test_wake_telemetry_contract_rejects_type_hidden_in_allowed_interval():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "    struct FeedInterval {",
+        "    struct FeedInterval {\n"
+        "        struct HiddenRetention { int16_t samples[160]; };",
+    )
+    assert mutated != telemetry_h
+
+    with pytest.raises(AssertionError, match="type declarations changed"):
+        assert_wake_telemetry_no_hidden_storage(mutated)
 
 
 def test_runtime_logs_use_target_supported_integer_formats():
@@ -359,6 +486,7 @@ def test_audio_metrics_publish_aggregate_wake_signal_and_wakenet_diagnostics():
 def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
     telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
     code = sanitize_cpp_source(telemetry_h)
+    assert_wake_telemetry_no_hidden_storage(telemetry_h)
 
     assert cpp_include_directives(telemetry_h) == [
         "<atomic>",
