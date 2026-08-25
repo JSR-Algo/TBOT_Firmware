@@ -40,3 +40,11 @@ fi
     -o "${BUILD_DIR}/wake_word_model_map_test"
 
 "${BUILD_DIR}/wake_word_model_map_test"
+
+"${CXX:-c++}" -std=c++17 -pthread -Wall -Wextra -Werror \
+    -I"${ROOT_DIR}/main" \
+    "${ROOT_DIR}/tests/native/opus_encoder_serialization_test.cc" \
+    "${ROOT_DIR}/main/audio/opus_encoder_serialization.cc" \
+    -o "${BUILD_DIR}/opus_encoder_serialization_test"
+
+"${BUILD_DIR}/opus_encoder_serialization_test"

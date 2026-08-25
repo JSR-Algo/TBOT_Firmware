@@ -36,6 +36,7 @@ jobs:
           scripts/run_host_native_lesson_heap_probe_test.sh
           python3 -m pytest \
             tests/test_wake_word_lifecycle_contract.py \
+            tests/test_opus_encoder_serialization_contract.py \
             tests/test_provisioning_success_teardown_contract.py \
             tests/test_blufi_deinit_transaction.py \
             tests/test_heap_phase_checkpoint_contract.py \
