@@ -173,15 +173,20 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     xEventGroupClearBits(event_group_, DETECTION_EXITED_EVENT);
     const BaseType_t detection_created = xTaskCreate([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
+        this_->audio_detection_task_handle_.store(
+            xTaskGetCurrentTaskHandle(), std::memory_order_release);
         const EventGroupHandle_t exit_events = this_->event_group_;
         this_->AudioDetectionTask();
-        this_->audio_detection_task_handle_ = nullptr;
+        {
+            auto lifecycle_lock = this_->run_synchronization_.AcquireTransition();
+            this_->audio_detection_task_handle_.store(nullptr, std::memory_order_release);
+        }
         xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT);
         vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, tskIDLE_PRIORITY + 1, &audio_detection_task_handle_);
+    }, "audio_detection", 4096, this, tskIDLE_PRIORITY + 1, nullptr);
     if (detection_created != pdPASS) {
         xEventGroupSetBits(event_group_, DETECTION_EXITED_EVENT);
-        audio_detection_task_handle_ = nullptr;
+        audio_detection_task_handle_.store(nullptr, std::memory_order_release);
         return false;
     }
 
@@ -193,9 +198,12 @@ void AfeWakeWord::OnWakeWordDetected(std::function<void(const std::string& wake_
 }
 
 int32_t AfeWakeWord::GetDetectionTaskStackHighWaterMark() const {
-    return audio_detection_task_handle_ == nullptr
+    auto lifecycle_lock = run_synchronization_.AcquireTransition();
+    const TaskHandle_t task_handle =
+        audio_detection_task_handle_.load(std::memory_order_acquire);
+    return task_handle == nullptr
                ? -1
-               : static_cast<int32_t>(uxTaskGetStackHighWaterMark(audio_detection_task_handle_));
+               : static_cast<int32_t>(uxTaskGetStackHighWaterMark(task_handle));
 }
 
 WakeWordProgress AfeWakeWord::GetProgress() const {
@@ -207,7 +215,7 @@ WakeWordProgress AfeWakeWord::GetProgress() const {
 }
 
 void AfeWakeWord::Start() {
-    std::lock_guard<std::recursive_mutex> lifecycle_lock(detection_lifecycle_mutex_);
+    auto lifecycle_lock = run_synchronization_.AcquireTransition();
     if (shutting_down_.load(std::memory_order_acquire)) {
         return;
     }
@@ -217,22 +225,34 @@ void AfeWakeWord::Start() {
 }
 
 void AfeWakeWord::Stop() {
-    std::lock_guard<std::recursive_mutex> lifecycle_lock(detection_lifecycle_mutex_);
-    xEventGroupClearBits(event_group_, DETECTION_STOPPED_EVENT);
+    auto lifecycle_lock = run_synchronization_.AcquireTransition();
     const bool was_running =
         (xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT) != 0;
-    xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
-    const uint32_t stop_generation = run_synchronization_.BeginStop(run_generation_);
+    const uint32_t stop_generation = run_synchronization_.BeginStopAndClear(
+        run_generation_,
+        [this]() { xEventGroupClearBits(event_group_, DETECTION_STOPPED_EVENT); },
+        [this]() { xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT); });
 
-    if (!was_running || xTaskGetCurrentTaskHandle() == audio_detection_task_handle_) {
+    const TaskHandle_t detection_task =
+        audio_detection_task_handle_.load(std::memory_order_acquire);
+    if (!was_running || xTaskGetCurrentTaskHandle() == detection_task) {
         run_synchronization_.PublishStopped(stopped_generation_, stop_generation);
         xEventGroupSetBits(event_group_, DETECTION_STOPPED_EVENT);
     } else {
-        const EventBits_t stopped = xEventGroupWaitBits(
-            event_group_, DETECTION_STOPPED_EVENT, pdFALSE, pdTRUE,
-            pdMS_TO_TICKS(kStopAckTimeoutMs));
-        if (!(stopped & DETECTION_STOPPED_EVENT) ||
-            !run_synchronization_.IsStopAcknowledged(stopped_generation_, stop_generation)) {
+        const int64_t wait_started_us = esp_timer_get_time();
+        const bool stopped = run_synchronization_.WaitForStopAcknowledgement(
+            stopped_generation_, stop_generation, kStopAckTimeoutMs,
+            [wait_started_us]() {
+                return static_cast<uint32_t>(
+                    (esp_timer_get_time() - wait_started_us) / 1000);
+            },
+            [this](uint32_t remaining_ms) {
+                xEventGroupWaitBits(event_group_, DETECTION_STOPPED_EVENT,
+                                    pdTRUE, pdTRUE,
+                                    std::max<TickType_t>(
+                                        1, pdMS_TO_TICKS(remaining_ms)));
+            });
+        if (!stopped) {
             ESP_LOGE(TAG,
                      "afe stop acknowledgement timeout generation=%lu feed=%lu fetch=%lu",
                      static_cast<unsigned long>(run_generation_.load(std::memory_order_relaxed)),
@@ -311,8 +331,7 @@ void AfeWakeWord::AudioDetectionTask() {
                 vTaskDelay(pdMS_TO_TICKS(1));
                 continue;
             }
-            std::unique_lock<std::recursive_mutex> lifecycle_lock(
-                detection_lifecycle_mutex_, std::try_to_lock);
+            auto lifecycle_lock = run_synchronization_.TryAcquireTransition();
             if (!lifecycle_lock.owns_lock()) {
                 continue;
             }

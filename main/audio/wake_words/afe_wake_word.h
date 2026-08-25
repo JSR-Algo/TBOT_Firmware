@@ -58,7 +58,6 @@ private:
     std::string last_detected_wake_word_;
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
-    std::recursive_mutex detection_lifecycle_mutex_;
 
     // Sticky stereo->mono channel selection. The stereo codec (e.g. ES8311 on the
     // LCDWiki board) duplicates a single physical mic across two I2S slots; the
@@ -76,7 +75,7 @@ private:
     std::deque<std::vector<uint8_t>> wake_word_opus_;
     std::mutex wake_word_mutex_;
     std::condition_variable wake_word_cv_;
-    TaskHandle_t audio_detection_task_handle_ = nullptr;
+    std::atomic<TaskHandle_t> audio_detection_task_handle_{nullptr};
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> encode_active_{false};
     std::atomic<uint32_t> feed_count_{0};

@@ -77,7 +77,7 @@ def test_concrete_wake_words_ack_shutdown_and_preserve_borrowed_models():
     detection = afe[afe.index("const BaseType_t detection_created"):afe.index('"audio_detection"')]
     detection_ack = detection.index("xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT)")
     assert "this_->" not in detection[detection_ack:]
-    assert detection.index("audio_detection_task_handle_ = nullptr") < detection_ack
+    assert detection.index("audio_detection_task_handle_.store(nullptr") < detection_ack
     assert "DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT" in afe
 
 
@@ -99,8 +99,11 @@ def test_afe_fetch_is_bounded_and_stop_acknowledges_before_reset():
     wait = stop.index("xEventGroupWaitBits")
     reset = stop.index("reset_buffer")
     assert wait < reset
+    assert "BeginStopAndClear" in stop
+    assert "WaitForStopAcknowledgement" in stop
     assert '"afe stop acknowledgement timeout' in stop
-    assert "xTaskGetCurrentTaskHandle() == audio_detection_task_handle_" in stop
+    assert "xTaskGetCurrentTaskHandle() == detection_task" in stop
+    assert "pdTRUE, pdTRUE" in stop
 
 
 def test_afe_discards_fetch_from_superseded_run_generation():
@@ -117,12 +120,15 @@ def test_afe_discards_fetch_from_superseded_run_generation():
     generation_gate = detection.index("fetch_generation != run_generation_")
     assert generation_gate < detection.index("StoreWakeWordData")
     assert generation_gate < detection.index("wake_word_detected_callback_")
-    assert "std::recursive_mutex detection_lifecycle_mutex_" in header
-    assert "std::try_to_lock" in detection
+    assert "AcquireTransition" in source
+    assert "TryAcquireTransition" in detection
     assert "if (!lifecycle_lock.owns_lock())" in detection
-    assert detection.index("std::try_to_lock") < detection.index("StoreWakeWordData")
+    assert detection.index("TryAcquireTransition") < detection.index("StoreWakeWordData")
     assert "AfeRunSynchronization run_synchronization_" in header
-    assert "IsStopAcknowledged" in source
+    assert "WaitForStopAcknowledgement" in source
+    assert "std::atomic<TaskHandle_t> audio_detection_task_handle_" in header
+    assert "audio_detection_task_handle_.load" in source
+    assert "audio_detection_task_handle_.store" in source
 
 
 def test_wifi_provisioning_rearms_only_after_ble_deinit():
