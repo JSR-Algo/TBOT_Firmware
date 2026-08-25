@@ -28,6 +28,186 @@ def log_statement(text: str, marker: str) -> str:
     return text[start : text.index(";", start) + 1]
 
 
+def sanitize_cpp_source(source: str, *, strip_literals: bool) -> str:
+    output = list(source)
+    index = 0
+
+    def blank(start: int, end: int) -> None:
+        for position in range(start, end):
+            if output[position] not in "\r\n":
+                output[position] = " "
+
+    while index < len(source):
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            end = len(source) if end == -1 else end
+            blank(index, end)
+            index = end
+            continue
+        if source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            end = len(source) if end == -1 else end + 2
+            blank(index, end)
+            index = end
+            continue
+
+        raw_match = re.match(r'(?:u8|u|U|L)?R"([^ ()\\\t\r\n]{0,16})\(', source[index:])
+        if raw_match:
+            terminator = ")" + raw_match.group(1) + '"'
+            end = source.find(terminator, index + raw_match.end())
+            end = len(source) if end == -1 else end + len(terminator)
+            if strip_literals:
+                blank(index, end)
+            index = end
+            continue
+
+        if source[index] in {'"', "'"}:
+            quote = source[index]
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\":
+                    end += 2
+                    continue
+                end += 1
+                if source[end - 1] == quote:
+                    break
+            if strip_literals:
+                blank(index, min(end, len(source)))
+            index = end
+            continue
+        index += 1
+
+    return "".join(output)
+
+
+def cpp_without_function_bodies(source: str) -> str:
+    output = list(source)
+    index = 0
+    last_boundary = 0
+    while index < len(source):
+        if source[index] == "{" and ")" in source[last_boundary:index]:
+            depth = 1
+            end = index + 1
+            while end < len(source) and depth != 0:
+                if source[end] == "{":
+                    depth += 1
+                elif source[end] == "}":
+                    depth -= 1
+                end += 1
+            for position in range(index, end):
+                if output[position] not in "\r\n":
+                    output[position] = " "
+            index = end
+            last_boundary = end
+            continue
+        if source[index] in ";{}":
+            last_boundary = index + 1
+        index += 1
+    return "".join(output)
+
+
+def normalized_cpp_call_name(name: str) -> str:
+    name = name.replace("::", "_")
+    name = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name)
+    return name.lower()
+
+
+def wake_telemetry_privacy_violations(source: str) -> list[str]:
+    without_comments = sanitize_cpp_source(source, strip_literals=False)
+    code = sanitize_cpp_source(source, strip_literals=True)
+    violations = set()
+
+    includes = re.findall(r"#\s*include\s*[<\"]([^>\"]+)[>\"]", without_comments)
+    forbidden_standard_headers = {
+        "fcntl.h", "filesystem", "fstream", "stdio.h", "string", "unistd.h", "vector",
+    }
+    forbidden_api_header = re.compile(
+        r"(?:^|[_./-])(?:http|websocket|mqtt|socket|nvs|vfs|storage)(?:[_./-]|$)",
+        re.IGNORECASE,
+    )
+    if any(
+        include.lower().rsplit("/", 1)[-1] in forbidden_standard_headers
+        or forbidden_api_header.search(include)
+        for include in includes
+    ):
+        violations.add("transport_or_persistence_include")
+    if re.search(r"\bstd::(?:vector|basic_string|string)\b", code):
+        violations.add("owning_content_storage")
+    if re.search(r"\bstd::(?:fstream|ifstream|ofstream|filesystem)\b|\bFILE\s*\*", code):
+        violations.add("file_io")
+    if re.search(r"\bstd::(?:cout|cerr|clog)\b", code):
+        violations.add("logging")
+    if re.search(r"\b(?:new|delete)\b", code):
+        violations.add("dynamic_allocation")
+
+    call_names = re.findall(r"(?<![A-Za-z0-9_])([A-Za-z_]\w*(?:::\w+)*)\s*\(", code)
+    for call_name in call_names:
+        normalized = normalized_cpp_call_name(call_name)
+        tokens = normalized.split("_")
+        if re.fullmatch(r"esp_(?:(?:early|dram)_)?log[a-z0-9_]*", normalized) or normalized in {
+            "printf", "fprintf", "vprintf", "vfprintf", "snprintf", "vsnprintf",
+            "puts", "fputs", "ets_printf",
+        }:
+            violations.add("logging")
+        if normalized in {
+            "fopen", "fdopen", "freopen", "fclose", "fread", "fwrite", "fflush",
+            "open", "openat", "creat", "write", "writev", "pwrite", "pwritev",
+            "read", "readv", "pread", "preadv", "fsync", "fdatasync", "remove",
+            "rename", "unlink", "mkdir", "rmdir",
+        } or any(token.startswith("write") for token in tokens) or normalized.startswith((
+            "nvs_", "esp_vfs_", "esp_littlefs_", "esp_spiffs_", "sdmmc_", "fatfs_",
+            "std_filesystem_",
+        )):
+            violations.add("file_io")
+        if normalized in {
+            "socket", "socketpair", "connect", "send", "sendto", "sendmsg", "sendmmsg",
+            "recv", "recvfrom", "recvmsg", "recvmmsg",
+        } or any(
+            token.startswith(prefix)
+            for token in tokens
+            for prefix in ("send", "transmit", "upload", "publish", "receive")
+        ):
+            violations.add("transport")
+        if any(token in {"http", "https", "websocket", "mqtt", "network", "socket"} for token in tokens):
+            violations.add("transport")
+        if any(token in {"http", "https", "websocket", "mqtt", "network", "socket", "api"} for token in tokens):
+            violations.add("api")
+        if normalized in {
+            "malloc", "calloc", "realloc", "aligned_alloc", "heap_caps_malloc",
+            "heap_caps_calloc", "heap_caps_realloc",
+        }:
+            violations.add("dynamic_allocation")
+
+    sample_type = r"(?:u?int8_t|u?int16_t|int32_t|float|double|char|std::byte)"
+    if re.search(
+        rf"\bstd::(?:array|deque|list|forward_list|unique_ptr|shared_ptr)\s*<\s*(?:const\s+)?{sample_type}\b",
+        code,
+    ):
+        violations.add("owning_sample_storage")
+
+    member_source = cpp_without_function_bodies(code)
+    member_pointer = rf"\b(?:const\s+)?{sample_type}\s*\*+\s*[A-Za-z_]\w*\s*(?:=[^;]*)?;"
+    member_array = rf"\b(?:const\s+)?{sample_type}\s+[A-Za-z_]\w*\s*\[[^\]]+\]\s*(?:=[^;]*)?;"
+    sample_scalar_member = rf"\b(?:const\s+)?{sample_type}\s+[A-Za-z_]\w*(?:sample|pcm|audio|raw)[A-Za-z0-9_]*\s*(?:=[^;]*)?;"
+    raw_sample_return = rf"\b(?:const\s+)?{sample_type}\s*[*&]+\s*[A-Za-z_]\w*\s*\("
+    raw_sample_scalar_return = rf"\b(?:const\s+)?{sample_type}\s+[A-Za-z_]\w*(?:sample|pcm|audio|raw)[A-Za-z0-9_]*\s*\("
+    writable_sample_output = rf"(?:\(|,)\s*(?!const\b){sample_type}\s*\*+\s*[A-Za-z_]\w*"
+    if (
+        re.search(member_pointer, member_source)
+        or re.search(member_array, member_source)
+        or re.search(sample_scalar_member, member_source, re.IGNORECASE)
+    ):
+        violations.add("retained_sample_member")
+    if (
+        re.search(raw_sample_return, member_source)
+        or re.search(raw_sample_scalar_return, member_source, re.IGNORECASE)
+        or re.search(writable_sample_output, member_source)
+    ):
+        violations.add("raw_sample_exposure")
+
+    return sorted(violations)
+
+
 def test_runtime_logs_use_target_supported_integer_formats():
     app_cc = read("main/application.cc")
     lesson_cc = read("main/lesson_handler.cc")
@@ -191,19 +371,71 @@ def test_audio_metrics_publish_aggregate_wake_signal_and_wakenet_diagnostics():
 
 def test_wake_word_telemetry_helper_cannot_retain_log_or_transmit_audio_content():
     telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
-    source = re.sub(r"//.*?$|/\*.*?\*/", "", telemetry_h, flags=re.MULTILINE | re.DOTALL)
 
-    assert "std::vector" not in source
-    assert "std::string" not in source
-    assert "std::array" not in source
-    assert not re.search(r"#\s*include\s*[<\"](?:f?stream|string|vector|array|.*socket.*)[>\"]", source)
-    assert not re.search(r"\b(?:fopen|fclose|fread|fwrite|ifstream|ofstream)\s*\(", source)
-    assert not re.search(r"\b(?:socket|connect|send|sendto|recv|recvfrom)\s*\(", source)
-    assert not re.search(r"\b(?:ESP_LOG[A-Z]*|printf|fprintf|puts)\s*\(", source)
-    assert not re.search(r"\b(?:http|https|websocket|network|api)_?[a-zA-Z0-9_]*\s*\(", source, re.IGNORECASE)
+    assert wake_telemetry_privacy_violations(telemetry_h) == []
 
-    # The only raw-sample type is the borrowed observer input; class state is aggregate-only.
-    assert source.count("int16_t") == 1
+
+def test_wake_telemetry_privacy_checker_detects_prefixed_transport_log_and_file_calls():
+    cases = (
+        ("esp_http_client_perform(http_client);", {"api", "transport"}),
+        ('const char* url = "http://device.invalid/path"; esp_http_client_perform(http_client);', {"api", "transport"}),
+        ("esp_websocket_client_send_text(websocket, payload, length, timeout);", {"api", "transport"}),
+        ("esp_mqtt_client_publish(mqtt, topic, payload, length, 0, 0);", {"api", "transport"}),
+        ("transport.SendAudio(samples, sample_count);", {"transport"}),
+        ("writer.WriteSamples(samples, sample_count);", {"file_io"}),
+        ('ESP_LOGI(TAG, "sample=%d", samples[0]);', {"logging"}),
+        ('fprintf(file, "%d", samples[0]);', {"logging"}),
+        ('std::cerr << "sample=" << samples[0];', {"logging"}),
+        ('FILE* file = fopen("/sdcard/audio.raw", "wb");', {"file_io"}),
+        ("fwrite(samples, sizeof(samples[0]), sample_count, file);", {"file_io"}),
+        ("nvs_set_blob(handle, key, samples, byte_count);", {"file_io"}),
+        ("std::filesystem::copy_file(source, destination);", {"file_io"}),
+    )
+
+    for source, expected in cases:
+        assert expected <= set(wake_telemetry_privacy_violations(source)), source
+
+
+def test_wake_telemetry_privacy_checker_detects_owned_or_exposed_sample_storage():
+    cases = (
+        ("#include <fstream>", {"transport_or_persistence_include"}),
+        ("std::vector<int16_t> retained_chunks_;", {"owning_content_storage"}),
+        ("std::string transcript_;", {"owning_content_storage"}),
+        ("std::ofstream audio_file_;", {"file_io"}),
+        ("std::array<int16_t, 160> sample_buffer_;", {"owning_sample_storage"}),
+        ("const int16_t* retained_samples_;", {"retained_sample_member"}),
+        ("int16_t raw_samples_[160];", {"retained_sample_member"}),
+        ("int16_t last_sample_;", {"retained_sample_member"}),
+        ("int16_t* ExposeSamples();", {"raw_sample_exposure"}),
+        ("int16_t ReadRawSample();", {"raw_sample_exposure"}),
+        ("void CopySamples(int16_t* output);", {"raw_sample_exposure"}),
+        ("void AllocateSamples() { heap_caps_malloc(160 * sizeof(int16_t)); }", {"dynamic_allocation"}),
+    )
+
+    for member, expected in cases:
+        fixture = f"class UnsafeTelemetry {{ public: {member} }};"
+        assert expected <= set(wake_telemetry_privacy_violations(fixture)), member
+
+
+def test_wake_telemetry_privacy_checker_allows_comments_strings_borrowed_inputs_and_locals():
+    fixture = r'''
+        // esp_http_client_perform(client); ESP_LOGI(TAG, "not code");
+        class SafeTelemetry {
+        public:
+            void Observe(const int16_t* samples, size_t sample_count) {
+                const char* documentation = "http://device.invalid//ESP_LOGI";
+                const int16_t* cursor = samples;
+                int16_t sample = sample_count == 0 ? 0 : *cursor;
+                uint32_t send_count = sample == 0 ? 0 : 1;
+            }
+        private:
+            uint32_t aggregate_bins_[2];
+        };
+        #include <cstring>
+        #include <string_view>
+    '''
+
+    assert wake_telemetry_privacy_violations(fixture) == []
 
 
 def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
