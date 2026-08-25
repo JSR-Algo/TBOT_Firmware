@@ -20,3 +20,10 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
     -o "${BUILD_DIR}/afe_run_synchronization_test"
 
 "${BUILD_DIR}/afe_run_synchronization_test"
+
+"${CXX:-c++}" -std=c++17 -pthread \
+    -I"${ROOT_DIR}/main" \
+    "${ROOT_DIR}/tests/native/wake_word_telemetry_test.cc" \
+    -o "${BUILD_DIR}/wake_word_telemetry_test"
+
+"${BUILD_DIR}/wake_word_telemetry_test"
