@@ -29,6 +29,7 @@ struct WakeTelemetrySnapshot {
     uint32_t invalid_model_index_count;
 };
 
+// One producer records feed/state observations and one consumer takes snapshots.
 class WakeWordTelemetry {
 public:
     void ObserveFeedChunk(const int16_t* samples, size_t sample_count,
@@ -37,9 +38,10 @@ public:
             return;
         }
 
-        uint64_t mean_square = 0;
-        uint64_t mean_remainder = 0;
-        uint64_t observed_samples = 0;
+        uint64_t total_square = 0;
+        uint64_t total_samples = 0;
+        uint64_t block_square = 0;
+        uint32_t block_samples = 0;
         uint32_t peak = 0;
         for (size_t i = 0; i < sample_count; ++i) {
             const int32_t sample = samples[i];
@@ -49,101 +51,133 @@ public:
             if (magnitude > peak) {
                 peak = magnitude;
             }
-
-            const uint64_t square = static_cast<uint64_t>(magnitude) * magnitude;
-            UpdateExactMean(square, mean_square, mean_remainder, observed_samples);
+            block_square += static_cast<uint64_t>(magnitude) * magnitude;
+            ++block_samples;
+            if (block_samples == kMeanSquareBlockSamples) {
+                FoldBlock(block_square, block_samples, total_square, total_samples);
+                block_square = 0;
+                block_samples = 0;
+            }
+        }
+        if (block_samples != 0) {
+            FoldBlock(block_square, block_samples, total_square, total_samples);
         }
 
-        const uint32_t rms = IntegerSquareRoot(mean_square);
-        chunk_count_.fetch_add(1, std::memory_order_relaxed);
-        AtomicMin(rms_min_, rms);
-        AtomicMax(rms_max_, rms);
-        AtomicMax(peak_max_, peak);
+        const uint32_t rms = IntegerSquareRoot(total_square / total_samples);
+        const uint32_t slot = AcquireWriteSlot();
+        IntervalData& interval = intervals_[slot];
+        ++interval.chunk_count;
+        if (rms < interval.rms_min) {
+            interval.rms_min = rms;
+        }
+        if (rms > interval.rms_max) {
+            interval.rms_max = rms;
+        }
+        if (peak > interval.peak_max) {
+            interval.peak_max = peak;
+        }
         if (rms > speech_floor_rms) {
-            above_floor_count_.fetch_add(1, std::memory_order_relaxed);
-            above_floor_total_.fetch_add(1, std::memory_order_relaxed);
-            last_above_floor_us_.store(now_us, std::memory_order_relaxed);
+            ++interval.above_floor_count;
+            interval.last_above_floor_us = now_us;
         }
+        ReleaseWriteSlot(slot);
     }
 
     void ObserveWakeState(WakeDecisionCategory category, int model_index, int model_count) {
+        const uint32_t slot = AcquireWriteSlot();
+        IntervalData& interval = intervals_[slot];
         switch (category) {
             case WakeDecisionCategory::kNone:
-                state_none_.fetch_add(1, std::memory_order_relaxed);
+                ++interval.state_none;
+                ReleaseWriteSlot(slot);
                 return;
             case WakeDecisionCategory::kTransition:
-                state_transition_.fetch_add(1, std::memory_order_relaxed);
+                ++interval.state_transition;
                 break;
             case WakeDecisionCategory::kDetected:
-                state_detected_.fetch_add(1, std::memory_order_relaxed);
+                ++interval.state_detected;
                 break;
             case WakeDecisionCategory::kOther:
-                state_other_.fetch_add(1, std::memory_order_relaxed);
+                ++interval.state_other;
                 break;
         }
 
         if (model_index > 0 && model_index <= model_count) {
-            last_valid_model_index_.store(model_index, std::memory_order_relaxed);
+            interval.last_valid_model_index = model_index;
         } else if (model_index > 0) {
-            invalid_model_index_count_.fetch_add(1, std::memory_order_relaxed);
+            ++interval.invalid_model_index_count;
         }
+        ReleaseWriteSlot(slot);
     }
 
     WakeTelemetrySnapshot TakeSnapshot() {
-        const uint32_t rms_min = rms_min_.exchange(kRmsMinSentinel, std::memory_order_relaxed);
+        const uint32_t drained_slot = active_slot_.load();
+        active_slot_.store(drained_slot ^ 1U);
+        while (writer_active_[drained_slot].load() != 0) {
+        }
+
+        const IntervalData interval = intervals_[drained_slot];
+        intervals_[drained_slot] = IntervalData{};
+        above_floor_total_ += interval.above_floor_count;
+        if (interval.above_floor_count != 0) {
+            last_above_floor_us_ = interval.last_above_floor_us;
+        }
+        if (interval.last_valid_model_index > 0) {
+            last_valid_model_index_ = interval.last_valid_model_index;
+        }
+
         return {
-            chunk_count_.exchange(0, std::memory_order_relaxed),
-            rms_min == kRmsMinSentinel ? 0 : rms_min,
-            rms_max_.exchange(0, std::memory_order_relaxed),
-            peak_max_.exchange(0, std::memory_order_relaxed),
-            above_floor_count_.exchange(0, std::memory_order_relaxed),
-            above_floor_total_.load(std::memory_order_relaxed),
-            last_above_floor_us_.load(std::memory_order_relaxed),
-            state_none_.exchange(0, std::memory_order_relaxed),
-            state_transition_.exchange(0, std::memory_order_relaxed),
-            state_detected_.exchange(0, std::memory_order_relaxed),
-            state_other_.exchange(0, std::memory_order_relaxed),
-            last_valid_model_index_.load(std::memory_order_relaxed),
-            invalid_model_index_count_.exchange(0, std::memory_order_relaxed),
+            interval.chunk_count,
+            interval.rms_min == kRmsMinSentinel ? 0 : interval.rms_min,
+            interval.rms_max,
+            interval.peak_max,
+            interval.above_floor_count,
+            above_floor_total_,
+            last_above_floor_us_,
+            interval.state_none,
+            interval.state_transition,
+            interval.state_detected,
+            interval.state_other,
+            last_valid_model_index_,
+            interval.invalid_model_index_count,
         };
     }
 
 private:
     static constexpr uint32_t kRmsMinSentinel = std::numeric_limits<uint32_t>::max();
+    static constexpr uint32_t kMeanSquareBlockSamples = 1024;
+    static constexpr uint64_t kMaximumSampleSquare = uint64_t{32768} * 32768;
+    static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                  "telemetry handoff requires native 32-bit atomics");
+    static_assert(kMeanSquareBlockSamples <=
+                      std::numeric_limits<uint64_t>::max() / kMaximumSampleSquare,
+                  "mean-square block accumulation must not overflow");
 
-    static void UpdateExactMean(uint64_t value, uint64_t& mean, uint64_t& remainder,
-                                uint64_t& count) {
-        // Keep the running sum as quotient and remainder so squared samples are never accumulated.
-        if (count == 0) {
-            mean = value;
-            remainder = 0;
-            count = 1;
-            return;
-        }
+    struct IntervalData {
+        uint32_t chunk_count = 0;
+        uint32_t rms_min = kRmsMinSentinel;
+        uint32_t rms_max = 0;
+        uint32_t peak_max = 0;
+        uint32_t above_floor_count = 0;
+        int64_t last_above_floor_us = 0;
+        uint32_t state_none = 0;
+        uint32_t state_transition = 0;
+        uint32_t state_detected = 0;
+        uint32_t state_other = 0;
+        int32_t last_valid_model_index = 0;
+        uint32_t invalid_model_index_count = 0;
+    };
 
-        const uint64_t next_count = count + 1;
-        if (value >= mean) {
-            const uint64_t difference = value - mean;
-            mean += difference / next_count;
-            const uint64_t extra_remainder = difference % next_count;
-            if (remainder >= next_count - extra_remainder) {
-                remainder -= next_count - extra_remainder;
-                ++mean;
-            } else {
-                remainder += extra_remainder;
-            }
-        } else {
-            const uint64_t difference = mean - value;
-            if (remainder >= difference) {
-                remainder -= difference;
-            } else {
-                const uint64_t deficit = difference - remainder;
-                const uint64_t deficit_remainder = deficit % next_count;
-                mean -= deficit / next_count + (deficit_remainder != 0);
-                remainder = deficit_remainder == 0 ? 0 : next_count - deficit_remainder;
-            }
+    static void FoldBlock(uint64_t block_square, uint32_t block_samples,
+                          uint64_t& total_square, uint64_t& total_samples) {
+        // Scaling is unreachable for bounded ESP-SR chunks, but keeps arbitrary size_t safe.
+        while (total_square > std::numeric_limits<uint64_t>::max() - block_square ||
+               total_samples > std::numeric_limits<uint64_t>::max() - block_samples) {
+            total_square >>= 1;
+            total_samples >>= 1;
         }
-        count = next_count;
+        total_square += block_square;
+        total_samples += block_samples;
     }
 
     static uint32_t IntegerSquareRoot(uint64_t value) {
@@ -152,7 +186,7 @@ private:
         uint32_t result = 0;
         while (low <= high) {
             const uint32_t middle = low + (high - low) / 2;
-            if (middle == 0 || middle <= value / middle) {
+            if (static_cast<uint64_t>(middle) * middle <= value) {
                 result = middle;
                 low = middle + 1;
             } else {
@@ -162,33 +196,27 @@ private:
         return result;
     }
 
-    static void AtomicMin(std::atomic<uint32_t>& target, uint32_t value) {
-        uint32_t current = target.load(std::memory_order_relaxed);
-        while (value < current &&
-               !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
+    uint32_t AcquireWriteSlot() {
+        while (true) {
+            const uint32_t slot = active_slot_.load();
+            writer_active_[slot].store(1);
+            if (active_slot_.load() == slot) {
+                return slot;
+            }
+            writer_active_[slot].store(0);
         }
     }
 
-    static void AtomicMax(std::atomic<uint32_t>& target, uint32_t value) {
-        uint32_t current = target.load(std::memory_order_relaxed);
-        while (value > current &&
-               !target.compare_exchange_weak(current, value, std::memory_order_relaxed)) {
-        }
+    void ReleaseWriteSlot(uint32_t slot) {
+        writer_active_[slot].store(0);
     }
 
-    std::atomic<uint32_t> chunk_count_{0};
-    std::atomic<uint32_t> rms_min_{kRmsMinSentinel};
-    std::atomic<uint32_t> rms_max_{0};
-    std::atomic<uint32_t> peak_max_{0};
-    std::atomic<uint32_t> above_floor_count_{0};
-    std::atomic<uint32_t> above_floor_total_{0};
-    std::atomic<int64_t> last_above_floor_us_{0};
-    std::atomic<uint32_t> state_none_{0};
-    std::atomic<uint32_t> state_transition_{0};
-    std::atomic<uint32_t> state_detected_{0};
-    std::atomic<uint32_t> state_other_{0};
-    std::atomic<int32_t> last_valid_model_index_{0};
-    std::atomic<uint32_t> invalid_model_index_count_{0};
+    IntervalData intervals_[2];
+    std::atomic<uint32_t> active_slot_{0};
+    std::atomic<uint32_t> writer_active_[2] = {0, 0};
+    uint32_t above_floor_total_ = 0;
+    int64_t last_above_floor_us_ = 0;
+    int32_t last_valid_model_index_ = 0;
 };
 
 #endif  // WAKE_WORD_TELEMETRY_H_
