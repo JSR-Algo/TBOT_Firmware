@@ -221,6 +221,12 @@ AudioTaskStackHighWaterMarks AudioService::GetTaskStackHighWaterMarks() {
     return marks;
 }
 
+WakeWordProgress AudioService::GetWakeWordProgress() {
+    auto lease = wake_word_lifecycle_.TryAcquireAccess();
+    std::lock_guard<std::mutex> control_lock(wake_word_control_mutex_);
+    return !lease || wake_word_ == nullptr ? WakeWordProgress{} : wake_word_->GetProgress();
+}
+
 void AudioService::Stop() {
     esp_timer_stop(audio_power_timer_);
     service_stopped_ = true;

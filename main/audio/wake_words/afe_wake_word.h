@@ -37,6 +37,7 @@ public:
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
     bool Shutdown(uint32_t timeout_ms) override;
     int32_t GetDetectionTaskStackHighWaterMark() const override;
+    WakeWordProgress GetProgress() const override;
 
 private:
     srmodel_list_t *models_ = nullptr;
@@ -73,6 +74,9 @@ private:
     TaskHandle_t audio_detection_task_handle_ = nullptr;
     std::atomic<bool> shutting_down_{false};
     std::atomic<bool> encode_active_{false};
+    std::atomic<uint32_t> feed_count_{0};
+    std::atomic<uint32_t> fetch_count_{0};
+    std::atomic<uint32_t> run_generation_{0};
 
     void StoreWakeWordData(const int16_t* data, size_t size);
     void AudioDetectionTask();

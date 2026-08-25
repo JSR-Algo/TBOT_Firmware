@@ -1042,10 +1042,14 @@ void Application::Run() {
                 uint32_t decode_q = 0, send_q = 0, playback_q = 0;
                 audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
                 auto audio_stats = audio_service_.GetDebugStatistics();
-                ESP_LOGI(TAG, "audio_metrics decode_q=%lu send_q=%lu playback_q=%lu input_count=%lu wake_running=%d vp_running=%d decode_drop=%lu encode_drop=%lu stale_frames=%lu interrupts=%lu reconnects=%lu",
+                auto wake_progress = audio_service_.GetWakeWordProgress();
+                ESP_LOGI(TAG, "audio_metrics decode_q=%lu send_q=%lu playback_q=%lu input_count=%lu wake_running=%d wake_feed=%lu wake_fetch=%lu wake_gen=%lu vp_running=%d decode_drop=%lu encode_drop=%lu stale_frames=%lu interrupts=%lu reconnects=%lu",
                          (unsigned long)decode_q, (unsigned long)send_q, (unsigned long)playback_q,
                          (unsigned long)audio_stats.input_count,
                          audio_service_.IsWakeWordRunning() ? 1 : 0,
+                         (unsigned long)wake_progress.feed_count,
+                         (unsigned long)wake_progress.fetch_count,
+                         (unsigned long)wake_progress.run_generation,
                          audio_service_.IsAudioProcessorRunning() ? 1 : 0,
                          (unsigned long)audio_stats.decode_drop_count,
                          (unsigned long)audio_stats.encode_drop_count,

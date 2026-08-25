@@ -147,6 +147,7 @@ public:
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
     bool IsAfeWakeWord();
+    WakeWordProgress GetWakeWordProgress();
 
     void EnableWakeWordDetection(bool enable);
     // Materialize the AFE wake-word pipeline (create_from_config + spawn the

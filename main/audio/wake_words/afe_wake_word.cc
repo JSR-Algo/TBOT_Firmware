@@ -196,7 +196,16 @@ int32_t AfeWakeWord::GetDetectionTaskStackHighWaterMark() const {
                : static_cast<int32_t>(uxTaskGetStackHighWaterMark(audio_detection_task_handle_));
 }
 
+WakeWordProgress AfeWakeWord::GetProgress() const {
+    return {
+        feed_count_.load(std::memory_order_relaxed),
+        fetch_count_.load(std::memory_order_relaxed),
+        run_generation_.load(std::memory_order_relaxed),
+    };
+}
+
 void AfeWakeWord::Start() {
+    run_generation_.fetch_add(1, std::memory_order_relaxed);
     xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
 }
 
@@ -230,6 +239,7 @@ void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * afe_feed_channels_;
     while (input_buffer_.size() >= chunk_size) {
         afe_iface_->feed(afe_data_, input_buffer_.data());
+        feed_count_.fetch_add(1, std::memory_order_relaxed);
         input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);
     }
 }
@@ -262,6 +272,7 @@ void AfeWakeWord::AudioDetectionTask() {
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;;
         }
+        fetch_count_.fetch_add(1, std::memory_order_relaxed);
 
         // Store the wake word data for voice recognition, like who is speaking
         StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));

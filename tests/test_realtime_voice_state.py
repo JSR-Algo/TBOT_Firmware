@@ -75,6 +75,49 @@ def test_audio_metrics_include_input_and_wake_state_for_real_device_wake_debug()
     assert "(unsigned long)audio_stats.input_count" in app_cc
     assert "audio_service_.IsWakeWordRunning() ? 1 : 0" in app_cc
 
+
+def test_audio_metrics_report_wake_feed_fetch_progress_without_audio_content():
+    wake_h = read("main/audio/wake_word.h")
+    afe_h = read("main/audio/wake_words/afe_wake_word.h")
+    afe_cc = read("main/audio/wake_words/afe_wake_word.cc")
+    audio_h = read("main/audio/audio_service.h")
+    audio_cc = read("main/audio/audio_service.cc")
+    app_cc = read("main/application.cc")
+
+    assert "struct WakeWordProgress" in wake_h
+    assert "uint32_t feed_count" in wake_h
+    assert "uint32_t fetch_count" in wake_h
+    assert "uint32_t run_generation" in wake_h
+    assert "virtual WakeWordProgress GetProgress() const" in wake_h
+
+    assert "std::atomic<uint32_t> feed_count_" in afe_h
+    assert "std::atomic<uint32_t> fetch_count_" in afe_h
+    assert "std::atomic<uint32_t> run_generation_" in afe_h
+    assert "WakeWordProgress GetProgress() const override" in afe_h
+    assert "feed_count_.fetch_add(1, std::memory_order_relaxed);" in afe_cc
+    assert "fetch_count_.fetch_add(1, std::memory_order_relaxed);" in afe_cc
+    feed_body = function_body(afe_cc, "void AfeWakeWord::Feed(const std::vector<int16_t>& data)")
+    assert feed_body.index("afe_iface_->feed") < feed_body.index("feed_count_.fetch_add")
+    fetch_body = function_body(afe_cc, "void AfeWakeWord::AudioDetectionTask()")
+    assert fetch_body.index("res == nullptr || res->ret_value == ESP_FAIL") < fetch_body.index(
+        "fetch_count_.fetch_add"
+    )
+
+    assert "WakeWordProgress GetWakeWordProgress()" in audio_h
+    progress_body = function_body(audio_cc, "WakeWordProgress AudioService::GetWakeWordProgress()")
+    assert "wake_word_lifecycle_.TryAcquireAccess()" in progress_body
+    assert "wake_word_control_mutex_" in progress_body
+    assert "wake_word_->GetProgress()" in progress_body
+
+    metrics_start = app_cc.index('ESP_LOGI(TAG, "audio_metrics')
+    metrics_end = app_cc.index(";", metrics_start)
+    metrics = app_cc[metrics_start:metrics_end]
+    assert "wake_feed=%lu" in metrics
+    assert "wake_fetch=%lu" in metrics
+    assert "wake_gen=%lu" in metrics
+    assert "GetWakeWordProgress()" in app_cc[:metrics_start]
+    assert not re.search(r"pcm|rms|phrase|content", metrics, re.IGNORECASE)
+
 def test_afe_wake_word_uses_more_sensitive_hiesp_threshold_on_lcdwiki():
     wake_cc = read("main/audio/wake_words/afe_wake_word.cc")
 
