@@ -115,8 +115,8 @@ public:
     WakeTelemetrySnapshot TakeSnapshot() {
         FeedInterval feed;
         StateInterval state;
-        DrainOne(feed_channel_, feed_pending_slot_, feed);
-        DrainOne(state_channel_, state_pending_slot_, state);
+        DrainOne(feed_channel_, feed_pending_slot_, feed_collision_, feed);
+        DrainOne(state_channel_, state_pending_slot_, state_collision_, state);
 
         above_floor_total_ = SaturatingAdd(above_floor_total_, feed.above_floor_count);
         if (feed.last_above_floor_sequence > last_above_floor_sequence_) {
@@ -180,7 +180,7 @@ private:
         // Sequential consistency prevents both sides from missing a concurrent handoff.
         std::atomic<uint32_t> requested_slot{0};
         std::atomic<uint32_t> producer_active{0};
-        uint32_t producer_slot = 0;
+        std::atomic<uint32_t> producer_slot{0};
     };
 
     class ExactMeanSquare {
@@ -241,14 +241,14 @@ private:
     static void BeginPublication(SpscChannel<Interval>& channel) {
         channel.producer_active.store(1);
         const uint32_t requested_slot = channel.requested_slot.load();
-        if (channel.producer_slot != requested_slot) {
-            channel.producer_slot = requested_slot;
+        if (channel.producer_slot.load() != requested_slot) {
+            channel.producer_slot.store(requested_slot);
         }
     }
 
     template <typename Interval>
     static Interval* CurrentProducerInterval(SpscChannel<Interval>& channel) {
-        return &channel.intervals[channel.producer_slot];
+        return &channel.intervals[channel.producer_slot.load()];
     }
 
     template <typename Interval>
@@ -258,7 +258,27 @@ private:
 
     template <typename Interval>
     static void DrainOne(SpscChannel<Interval>& channel, int32_t& pending_slot,
-                         Interval& drained) {
+                         bool& collided, Interval& drained) {
+        if (collided) {
+            if (channel.producer_active.load() != 0) {
+                return;
+            }
+            const uint32_t completed_slot = channel.producer_slot.load();
+            channel.requested_slot.store(completed_slot ^ 1U);
+            if (channel.producer_active.load() != 0) {
+                return;
+            }
+            drained = channel.intervals[completed_slot];
+            channel.intervals[completed_slot] = Interval{};
+            collided = false;
+            if (pending_slot == static_cast<int32_t>(completed_slot)) {
+                pending_slot = -1;
+            } else if (pending_slot >= 0) {
+                channel.requested_slot.store(
+                    static_cast<uint32_t>(pending_slot) ^ 1U);
+            }
+            return;
+        }
         if (pending_slot < 0) {
             const uint32_t old_slot = channel.requested_slot.load();
             const uint32_t new_slot = old_slot ^ 1U;
@@ -266,6 +286,7 @@ private:
             pending_slot = static_cast<int32_t>(old_slot);
         }
         if (channel.producer_active.load() != 0) {
+            collided = true;
             return;
         }
         const uint32_t slot = static_cast<uint32_t>(pending_slot);
@@ -313,6 +334,8 @@ private:
     uint64_t state_sequence_ = 0;
     int32_t feed_pending_slot_ = -1;
     int32_t state_pending_slot_ = -1;
+    bool feed_collision_ = false;
+    bool state_collision_ = false;
     uint32_t above_floor_total_ = 0;
     uint64_t last_above_floor_sequence_ = 0;
     int64_t last_above_floor_us_ = 0;

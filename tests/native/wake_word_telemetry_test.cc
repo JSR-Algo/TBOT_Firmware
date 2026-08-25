@@ -1,11 +1,16 @@
-#include "audio/wake_words/wake_word_telemetry.h"
-
 #include <atomic>
 #include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <vector>
+
+#define private public
+#include "audio/wake_words/wake_word_telemetry.h"
+#undef private
 
 namespace {
 void Require(bool condition, const char* message) {
@@ -89,6 +94,53 @@ int main() {
         const WakeTelemetrySnapshot block_snapshot = block_telemetry.TakeSnapshot();
         Require(block_snapshot.rms_min == 4095 && block_snapshot.rms_max == 4095,
                 "cross-block mean-square combination preserves exact RMS truncation");
+    }
+
+    {
+        WakeWordTelemetry collision_telemetry;
+        auto& channel = collision_telemetry.feed_channel_;
+        auto& older = channel.intervals[0];
+        older.chunk_count = 2;
+        older.rms_min = 100;
+        older.rms_max = 200;
+        older.peak_max = 200;
+        older.above_floor_count = 2;
+        older.last_above_floor_us = 200;
+        older.last_above_floor_sequence = 2;
+
+        // Reproduce a producer that is active before it reads the requested slot.
+        channel.producer_active.store(1);
+        const WakeTelemetrySnapshot collided = collision_telemetry.TakeSnapshot();
+        Require(collided.chunk_count == 0,
+                "a snapshot never waits for an active feed producer");
+
+        channel.producer_slot.store(channel.requested_slot.load());
+        auto& produced = channel.intervals[channel.producer_slot.load()];
+        produced.chunk_count = 1;
+        produced.rms_min = 300;
+        produced.rms_max = 300;
+        produced.peak_max = 300;
+        produced.above_floor_count = 1;
+        produced.last_above_floor_us = 300;
+        produced.last_above_floor_sequence = 3;
+        channel.producer_active.store(0);
+
+        const WakeTelemetrySnapshot next = collision_telemetry.TakeSnapshot();
+        Require(next.chunk_count == 1 && next.rms_min == 300,
+                "the first successful retry drains the collided producer interval");
+        const WakeTelemetrySnapshot older_pending = collision_telemetry.TakeSnapshot();
+        Require(older_pending.chunk_count == 2 && older_pending.rms_min == 100 &&
+                    older_pending.rms_max == 200,
+                "a different older pending interval drains exactly once after the collision");
+        const WakeTelemetrySnapshot empty_after_collision =
+            collision_telemetry.TakeSnapshot();
+        Require(empty_after_collision.chunk_count == 0,
+                "repeated drains do not duplicate collided or older intervals");
+        Require(next.above_floor_total == 1 && older_pending.above_floor_total == 3 &&
+                    empty_after_collision.above_floor_total == 3,
+                "collision recovery accounts for every feed observation exactly once");
+        Require(empty_after_collision.last_above_floor_us == 300,
+                "collision recovery retains the newest aggregate timestamp");
     }
 
     {

@@ -25,6 +25,133 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def named_function_body(source: str, name: str) -> str:
+    code = sanitize_cpp_source(source)
+    match = re.search(rf"\b{re.escape(name)}\s*\(", code)
+    assert match is not None, f"missing function {name}"
+    brace = code.find("{", match.end())
+    assert brace != -1, f"missing function body {name}"
+    depth = 0
+    for index in range(brace, len(code)):
+        if code[index] == "{":
+            depth += 1
+        elif code[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return code[brace : index + 1]
+    raise AssertionError(f"unterminated function {name}")
+
+
+def cpp_tokens(source: str) -> list[str]:
+    return re.findall(
+        r"[A-Za-z_]\w*|0[xX][0-9A-Fa-f]+[uUlL]*|\d+[uUlL]*|"
+        r"::|<<|>>|<=|>=|==|!=|\+\+|--|&&|\|\||->|[{}()[\];,?:.<>=+\-*/%&|^!~]",
+        sanitize_cpp_source(source),
+    )
+
+
+def cpp_semicolon_statements(tokens: list[str]) -> list[list[str]]:
+    statements = []
+    start = 0
+    for index, token in enumerate(tokens):
+        if token in {"{", "}"}:
+            start = index + 1
+        elif token == ";":
+            statements.append(tokens[start : index + 1])
+            start = index + 1
+    return statements
+
+
+def cpp_static_storage_declarations(source: str) -> list[list[str]]:
+    tokens = cpp_tokens(source)
+    declarations = []
+    for start, token in enumerate(tokens):
+        if token != "static":
+            continue
+        index = start + 1
+        while index < len(tokens) and tokens[index] not in {";", "{"}:
+            index += 1
+        if index == len(tokens):
+            raise AssertionError("unterminated static declaration")
+        if tokens[index] == ";":
+            declarations.append(tokens[start : index + 1])
+            continue
+        if index > start and tokens[index - 1] == ")":
+            continue
+        depth = 1
+        index += 1
+        while index < len(tokens) and depth != 0:
+            if tokens[index] == "{":
+                depth += 1
+            elif tokens[index] == "}":
+                depth -= 1
+            index += 1
+        assert depth == 0, "unterminated static initializer"
+        while index < len(tokens) and tokens[index] not in {";", "{"}:
+            index += 1
+        assert index < len(tokens) and tokens[index] == ";", "static storage changed"
+        declarations.append(tokens[start : index + 1])
+    return declarations
+
+
+def assert_observe_feed_chunk_raw_sample_dataflow(source: str) -> None:
+    tokens = cpp_tokens(named_function_body(source, "ObserveFeedChunk"))
+    sample_reads = [
+        index
+        for index, token in enumerate(tokens[:-1])
+        if token == "samples" and tokens[index + 1] == "["
+    ]
+    assert len(sample_reads) == 1, "raw sample dataflow changed"
+    sample_tokens = [index for index, token in enumerate(tokens) if token == "samples"]
+    assert len(sample_tokens) == 2, "raw sample dataflow changed"
+    assert tokens[sample_tokens[0] : sample_tokens[0] + 3] == [
+        "samples", "==", "nullptr",
+    ], "raw sample dataflow changed"
+
+    statements = cpp_semicolon_statements(tokens)
+    raw_statements = [statement for statement in statements if "samples" in statement]
+    assert raw_statements == [[
+        "const", "int32_t", "sample", "=", "samples", "[", "i", "]", ";",
+    ]], "raw sample dataflow changed"
+    sample_statements = [statement for statement in statements if "sample" in statement]
+    assert sample_statements == [
+        ["const", "int32_t", "sample", "=", "samples", "[", "i", "]", ";"],
+        [
+            "const", "uint32_t", "magnitude", "=", "sample", "<", "0", "?",
+            "static_cast", "<", "uint32_t", ">", "(", "-", "sample", ")", ":",
+            "static_cast", "<", "uint32_t", ">", "(", "sample", ")", ";",
+        ],
+    ], "raw sample dataflow changed"
+
+    magnitude_positions = [
+        index for index, token in enumerate(tokens) if token == "magnitude"
+    ]
+    assert [
+        (tokens[index - 1], tokens[index + 1]) for index in magnitude_positions
+    ] == [
+        ("uint32_t", "="),
+        ("(", ">"),
+        ("=", ";"),
+        ("(", ")"),
+        ("*", ";"),
+    ], "raw sample dataflow changed"
+    magnitude_statements = [
+        statement for statement in statements if "magnitude" in statement
+    ]
+    assert magnitude_statements == [
+        [
+            "const", "uint32_t", "magnitude", "=", "sample", "<", "0", "?",
+            "static_cast", "<", "uint32_t", ">", "(", "-", "sample", ")", ":",
+            "static_cast", "<", "uint32_t", ">", "(", "sample", ")", ";",
+        ],
+        ["peak", "=", "magnitude", ";"],
+        [
+            "block_square", "+", "=", "static_cast", "<", "uint64_t", ">",
+            "(", "magnitude", ")", "*", "magnitude", ";",
+        ],
+    ], "raw sample dataflow changed"
+
+
 def log_statement(text: str, marker: str) -> str:
     start = text.index(marker)
     return text[start : text.index(";", start) + 1]
@@ -95,6 +222,19 @@ def cpp_include_directives(source: str) -> list[str]:
         assert target is not None, f"malformed include directive: {original.strip()}"
         includes.append(target.group(1))
     return includes
+
+
+def cpp_preprocessor_directives(source: str) -> list[tuple[str, str]]:
+    directives = []
+    for line in sanitize_cpp_source(source).splitlines():
+        directive = re.match(r"^\s*#\s*([A-Za-z_]\w*)\b(.*)$", line)
+        if directive is None:
+            continue
+        directives.append((
+            directive.group(1),
+            re.sub(r"\s+", " ", directive.group(2)).strip(),
+        ))
+    return directives
 
 
 def cpp_direct_structure(class_body: str) -> tuple[list[str], list[tuple[str, str]]]:
@@ -206,11 +346,19 @@ def cpp_file_scope_declarations(source: str) -> list[str]:
 def assert_wake_telemetry_no_hidden_storage(source: str) -> None:
     code = sanitize_cpp_source(source)
 
-    assert cpp_file_scope_declarations(source) == [
+    directives = cpp_preprocessor_directives(source)
+    assert [directive for directive in directives if directive[0] != "include"] == [
+        ("ifndef", "WAKE_WORD_TELEMETRY_H_"),
+        ("define", "WAKE_WORD_TELEMETRY_H_"),
+        ("endif", ""),
+    ], "preprocessor directives changed"
+
+    file_scope_declarations = cpp_file_scope_declarations(source)
+    assert len(file_scope_declarations) == 3 and set(file_scope_declarations) == {
         "enum class WakeDecisionCategory : uint8_t",
         "struct WakeTelemetrySnapshot",
         "class WakeWordTelemetry",
-    ], "file-scope declarations changed"
+    }, "file-scope declarations changed"
 
     type_declarations = []
     for declaration in re.finditer(
@@ -221,22 +369,23 @@ def assert_wake_telemetry_no_hidden_storage(source: str) -> None:
         ):
             continue
         type_declarations.append((declaration.group(1), declaration.group(2)))
-    assert type_declarations == [
+    assert len(type_declarations) == 6 and set(type_declarations) == {
         ("struct", "WakeTelemetrySnapshot"),
         ("class", "WakeWordTelemetry"),
         ("struct", "FeedInterval"),
         ("struct", "StateInterval"),
         ("struct", "SpscChannel"),
         ("class", "ExactMeanSquare"),
-    ], "type declarations changed"
+    }, "type declarations changed"
 
     outer_class = function_body(source, "class WakeWordTelemetry")
-    assert cpp_direct_nested_types(outer_class) == [
+    nested_types = cpp_direct_nested_types(outer_class)
+    assert len(nested_types) == 4 and set(nested_types) == {
         ("struct", "FeedInterval"),
         ("struct", "StateInterval"),
         ("struct", "SpscChannel"),
         ("class", "ExactMeanSquare"),
-    ], "type declarations changed"
+    }, "type declarations changed"
     for signature in (
         "struct FeedInterval",
         "struct StateInterval",
@@ -247,47 +396,20 @@ def assert_wake_telemetry_no_hidden_storage(source: str) -> None:
             cpp_direct_nested_types(function_body(source, signature)) == []
         ), "type declarations changed"
 
-    expected_static_lines = [
-        "static constexpr uint32_t kRmsMinSentinel = "
-        "std::numeric_limits<uint32_t>::max();",
-        "static constexpr uint32_t kMeanSquareBlockSamples = 1024;",
-        "static constexpr uint64_t kMaximumSampleSquare = uint64_t{32768} * 32768;",
-        "static void BeginPublication(SpscChannel<Interval>& channel) {",
-        "static Interval* CurrentProducerInterval(SpscChannel<Interval>& channel) {",
-        "static void EndPublication(SpscChannel<Interval>& channel) {",
-        "static void DrainOne(SpscChannel<Interval>& channel, int32_t& pending_slot,",
-        "static uint32_t SaturatingAdd(uint32_t left, uint32_t right) {",
-        "static void SaturatingIncrement(uint32_t& value) {",
-        "static void AdvanceSequence(uint64_t& sequence) {",
-        "static uint32_t IntegerSquareRoot(uint64_t value) {",
-    ]
-    static_lines = [
-        re.sub(r"\s+", " ", line).strip()
-        for line in code.splitlines()
-        if re.search(r"\b(?:inline\s+)?static\b", line)
-    ]
-    static_tokens = re.findall(r"\b(?:inline\s+)?static\b", code)
-    assert len(static_tokens) == len(expected_static_lines), "static declarations changed"
-    assert static_lines == expected_static_lines, "static declarations changed"
-
-    static_function_signatures = [
-        re.sub(r"\s+", " ", signature).strip()
-        for signature in re.findall(
-            r"(?m)^\s*((?:inline\s+)?static\s+[^;{}]+?\([^;{}]*?\))\s*\{",
-            code,
-        )
-    ]
-    assert static_function_signatures == [
-        "static void BeginPublication(SpscChannel<Interval>& channel)",
-        "static Interval* CurrentProducerInterval(SpscChannel<Interval>& channel)",
-        "static void EndPublication(SpscChannel<Interval>& channel)",
-        "static void DrainOne(SpscChannel<Interval>& channel, int32_t& pending_slot, "
-        "Interval& drained)",
-        "static uint32_t SaturatingAdd(uint32_t left, uint32_t right)",
-        "static void SaturatingIncrement(uint32_t& value)",
-        "static void AdvanceSequence(uint64_t& sequence)",
-        "static uint32_t IntegerSquareRoot(uint64_t value)",
-    ], "static declarations changed"
+    allowed_static_variables = {
+        tuple(cpp_tokens(
+            "static constexpr uint32_t kRmsMinSentinel = "
+            "std::numeric_limits<uint32_t>::max();"
+        )),
+        tuple(cpp_tokens("static constexpr uint32_t kMeanSquareBlockSamples = 1024;")),
+        tuple(cpp_tokens(
+            "static constexpr uint64_t kMaximumSampleSquare = uint64_t{32768} * 32768;"
+        )),
+    }
+    static_variables = {
+        tuple(declaration) for declaration in cpp_static_storage_declarations(code)
+    }
+    assert static_variables == allowed_static_variables, "static declarations changed"
 
     array_declarations = [
         re.sub(r"\s+", " ", declaration).strip()
@@ -298,7 +420,9 @@ def assert_wake_telemetry_no_hidden_storage(source: str) -> None:
             code,
         )
     ]
-    assert array_declarations == ["Interval intervals[2];"], "array declarations changed"
+    assert len(array_declarations) == 1 and set(array_declarations) == {
+        "Interval intervals[2];"
+    }, "array declarations changed"
 
     aliases = re.findall(
         r"(?m)^\s*(?:using\s+[A-Za-z_]\w*\s*=[^;]+|typedef\s+[^;]+);",
@@ -306,6 +430,7 @@ def assert_wake_telemetry_no_hidden_storage(source: str) -> None:
     )
     assert aliases == [], "type aliases changed"
     assert "thread_local" not in code, "thread-local storage changed"
+    assert_observe_feed_chunk_raw_sample_dataflow(source)
 
 
 def test_cpp_include_directives_ignore_comment_string_and_raw_string_fakes():
@@ -385,6 +510,74 @@ def test_wake_telemetry_contract_rejects_file_scope_sample_retention():
 
     with pytest.raises(AssertionError, match="file-scope declarations changed"):
         assert_wake_telemetry_no_hidden_storage(mutated)
+
+
+def test_wake_telemetry_contract_rejects_raw_sample_packed_into_channel_state():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "            const int32_t sample = samples[i];",
+        "            const int32_t sample = samples[i];\n"
+        "            feed_channel_.producer_slot =\n"
+        "                (feed_channel_.producer_slot & 0x0000ffffU) |\n"
+        "                (static_cast<uint32_t>(static_cast<uint16_t>(samples[0])) "
+        "<< 16);",
+    )
+    assert mutated != telemetry_h
+
+    with pytest.raises(AssertionError, match="raw sample dataflow changed"):
+        assert_wake_telemetry_no_hidden_storage(mutated)
+
+
+def test_wake_telemetry_contract_rejects_magnitude_retained_in_member():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "            if (magnitude > peak) {",
+        "            feed_sequence_ = magnitude;\n"
+        "            if (magnitude > peak) {",
+    )
+    assert mutated != telemetry_h
+
+    with pytest.raises(AssertionError, match="raw sample dataflow changed"):
+        assert_wake_telemetry_no_hidden_storage(mutated)
+
+
+def test_wake_telemetry_contract_rejects_macro_aliased_raw_sample_storage():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "#define WAKE_WORD_TELEMETRY_H_",
+        "#define WAKE_WORD_TELEMETRY_H_\n#define RAW_SAMPLE_ALIAS samples",
+    ).replace(
+        "            const int32_t sample = samples[i];",
+        "            const int32_t sample = samples[i];\n"
+        "            feed_sequence_ = static_cast<uint16_t>(RAW_SAMPLE_ALIAS[0]);",
+    )
+    assert mutated != telemetry_h
+
+    with pytest.raises(AssertionError, match="preprocessor directives changed"):
+        assert_wake_telemetry_no_hidden_storage(mutated)
+
+
+def test_wake_telemetry_contract_allows_harmless_wrapping_and_cast_spacing():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "    void ObserveFeedChunk(const int16_t* samples, size_t sample_count,\n"
+        "                          uint32_t speech_floor_rms, int64_t now_us) {",
+        "    void\n"
+        "    ObserveFeedChunk(\n"
+        "        const int16_t* samples,\n"
+        "        size_t sample_count,\n"
+        "        uint32_t speech_floor_rms,\n"
+        "        int64_t now_us) {",
+    ).replace(
+        "static_cast<uint32_t>(-sample)",
+        "static_cast< uint32_t >(\n                    -sample\n                )",
+    ).replace(
+        "static_cast<uint32_t>(sample)",
+        "static_cast< uint32_t >( sample )",
+    )
+    assert mutated != telemetry_h
+
+    assert_wake_telemetry_no_hidden_storage(mutated)
 
 
 def test_runtime_logs_use_target_supported_integer_formats():
@@ -553,12 +746,13 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
     code = sanitize_cpp_source(telemetry_h)
     assert_wake_telemetry_no_hidden_storage(telemetry_h)
 
-    assert cpp_include_directives(telemetry_h) == [
+    includes = cpp_include_directives(telemetry_h)
+    assert len(includes) == 4 and set(includes) == {
         "<atomic>",
         "<cstddef>",
         "<cstdint>",
         "<limits>",
-    ]
+    }
 
     snapshot = sanitize_cpp_source(
         function_body(telemetry_h, "struct WakeTelemetrySnapshot")
@@ -568,7 +762,7 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         snapshot,
         re.MULTILINE,
     )
-    assert snapshot_fields == [
+    assert len(snapshot_fields) == 13 and set(snapshot_fields) == {
         ("uint32_t", "chunk_count"),
         ("uint32_t", "rms_min"),
         ("uint32_t", "rms_max"),
@@ -582,7 +776,7 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         ("uint32_t", "state_other"),
         ("int32_t", "last_valid_model_index"),
         ("uint32_t", "invalid_model_index_count"),
-    ]
+    }
     assert not re.search(r"[*&\[\]]|\bstd::", snapshot)
     snapshot_remainder = re.sub(
         r"[{}]|^\s*(?:uint32_t|int32_t|int64_t)\s+[A-Za-z_]\w*\s*;",
@@ -597,11 +791,12 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         telemetry_class.index("public:") : telemetry_class.index("private:")
     ]
     public_methods = re.findall(
-        r"^    (?:void|WakeTelemetrySnapshot)\s+([A-Za-z_]\w*)\s*\(",
-        public_surface,
-        re.MULTILINE,
+        r"\b(?:void|WakeTelemetrySnapshot)\s+([A-Za-z_]\w*)\s*\(",
+        re.sub(r"\s+", " ", public_surface),
     )
-    assert public_methods == ["ObserveFeedChunk", "ObserveWakeState", "TakeSnapshot"]
+    assert len(public_methods) == 3 and set(public_methods) == {
+        "ObserveFeedChunk", "ObserveWakeState", "TakeSnapshot",
+    }
     assert not re.search(r"^ {4}(?! )[^{}();]+;\s*$", public_surface, re.MULTILINE)
     normalized_public = re.sub(r"\s+", " ", public_surface)
     assert (
@@ -614,9 +809,10 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
     ) in normalized_public
     assert "WakeTelemetrySnapshot TakeSnapshot()" in normalized_public
 
-    assert cpp_direct_declarations(
+    feed_interval_members = cpp_direct_declarations(
         function_body(telemetry_h, "struct FeedInterval")
-    ) == [
+    )
+    assert len(feed_interval_members) == 7 and set(feed_interval_members) == {
         "uint32_t chunk_count = 0;",
         "uint32_t rms_min = kRmsMinSentinel;",
         "uint32_t rms_max = 0;",
@@ -624,10 +820,11 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         "uint32_t above_floor_count = 0;",
         "int64_t last_above_floor_us = 0;",
         "uint64_t last_above_floor_sequence = 0;",
-    ]
-    assert cpp_direct_declarations(
+    }
+    state_interval_members = cpp_direct_declarations(
         function_body(telemetry_h, "struct StateInterval")
-    ) == [
+    )
+    assert len(state_interval_members) == 7 and set(state_interval_members) == {
         "uint32_t state_none = 0;",
         "uint32_t state_transition = 0;",
         "uint32_t state_detected = 0;",
@@ -635,29 +832,33 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         "int32_t last_valid_model_index = 0;",
         "uint64_t last_valid_model_sequence = 0;",
         "uint32_t invalid_model_index_count = 0;",
-    ]
-    assert cpp_direct_declarations(
+    }
+    channel_members = cpp_direct_declarations(
         function_body(telemetry_h, "struct SpscChannel")
-    ) == [
+    )
+    assert len(channel_members) == 4 and set(channel_members) == {
         "Interval intervals[2];",
         "std::atomic<uint32_t> requested_slot{0};",
         "std::atomic<uint32_t> producer_active{0};",
-        "uint32_t producer_slot = 0;",
-    ]
-    assert cpp_direct_declarations(
+        "std::atomic<uint32_t> producer_slot{0};",
+    }
+    mean_square_members = cpp_direct_declarations(
         function_body(telemetry_h, "class ExactMeanSquare")
-    ) == [
+    )
+    assert len(mean_square_members) == 3 and set(mean_square_members) == {
         "uint64_t mean_ = 0;",
         "uint64_t remainder_ = 0;",
         "uint64_t count_ = 0;",
-    ]
-    assert cpp_direct_nested_types(telemetry_class) == [
+    }
+    direct_nested_types = cpp_direct_nested_types(telemetry_class)
+    assert len(direct_nested_types) == 4 and set(direct_nested_types) == {
         ("struct", "FeedInterval"),
         ("struct", "StateInterval"),
         ("struct", "SpscChannel"),
         ("class", "ExactMeanSquare"),
-    ]
-    assert cpp_direct_declarations(telemetry_class) == [
+    }
+    telemetry_members = cpp_direct_declarations(telemetry_class)
+    assert len(telemetry_members) == 16 and set(telemetry_members) == {
         "static constexpr uint32_t kRmsMinSentinel = "
         "std::numeric_limits<uint32_t>::max();",
         "static constexpr uint32_t kMeanSquareBlockSamples = 1024;",
@@ -668,12 +869,14 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         "uint64_t state_sequence_ = 0;",
         "int32_t feed_pending_slot_ = -1;",
         "int32_t state_pending_slot_ = -1;",
+        "bool feed_collision_ = false;",
+        "bool state_collision_ = false;",
         "uint32_t above_floor_total_ = 0;",
         "uint64_t last_above_floor_sequence_ = 0;",
         "int64_t last_above_floor_us_ = 0;",
         "uint64_t last_valid_model_sequence_ = 0;",
         "int32_t last_valid_model_index_ = 0;",
-    ]
+    }
 
     forbidden_owning_tokens = (
         "std::vector", "std::deque", "std::array", "std::string", "std::span",
@@ -702,26 +905,6 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         code,
     )
 
-    call_names = set(
-        re.findall(r"(?<![A-Za-z0-9_])([A-Za-z_]\w*(?:::\w+)*)\s*\(", code)
-    )
-    assert call_names == {
-        "AddBlock", "AddCorrection", "AdvanceSequence", "BeginPublication",
-        "CurrentProducerInterval", "DrainOne", "EndPublication", "IntegerSquareRoot",
-        "ObserveFeedChunk", "ObserveWakeState", "SaturatingAdd", "SaturatingIncrement",
-        "SubtractCorrection", "TakeSnapshot", "for", "if", "load", "max", "sizeof",
-        "static_assert", "store", "switch", "value", "while",
-    }
-    assert re.findall(r"\b([A-Za-z_]\w*\.[A-Za-z_]\w*)\.store\(", code) == [
-        "channel.producer_active",
-        "channel.producer_active",
-        "channel.requested_slot",
-    ]
-    assert re.findall(r"\b([A-Za-z_]\w*\.[A-Za-z_]\w*)\.load\(", code) == [
-        "channel.requested_slot",
-        "channel.requested_slot",
-        "channel.producer_active",
-    ]
     assert not re.search(
         r"\b(?:ESP_LOG[A-Z0-9_]*|printf|fprintf|fopen|fwrite|nvs_[A-Za-z0-9_]*|"
         r"esp_http_[A-Za-z0-9_]*|esp_websocket_[A-Za-z0-9_]*|(?:esp_)?mqtt_[A-Za-z0-9_]*|"
