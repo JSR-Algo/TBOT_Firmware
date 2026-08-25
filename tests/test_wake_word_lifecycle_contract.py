@@ -86,8 +86,8 @@ def test_afe_fetch_is_bounded_and_stop_acknowledges_before_reset():
     source = read("main/audio/wake_words/afe_wake_word.cc")
 
     assert "DETECTION_STOPPED_EVENT" in source
-    assert "kFetchWaitMs" in header
-    assert "kStopAckTimeoutMs" in header
+    assert "kFetchWaitMs = 100" in header
+    assert "kStopAckTimeoutMs = 500" in header
     assert "fetch_with_delay(afe_data_, pdMS_TO_TICKS(kFetchWaitMs))" in source
 
     detection = source[source.index("void AfeWakeWord::AudioDetectionTask()") :]
@@ -109,7 +109,7 @@ def test_afe_discards_fetch_from_superseded_run_generation():
 
     start = source[source.index("void AfeWakeWord::Start()") :]
     start = start[: start.index("void AfeWakeWord::Stop()")]
-    assert "run_generation_.fetch_add" in start
+    assert "BeginStart(run_generation_)" in start
 
     detection = source[source.index("void AfeWakeWord::AudioDetectionTask()") :]
     detection = detection[: detection.index("void AfeWakeWord::StoreWakeWordData")]
@@ -118,7 +118,11 @@ def test_afe_discards_fetch_from_superseded_run_generation():
     assert generation_gate < detection.index("StoreWakeWordData")
     assert generation_gate < detection.index("wake_word_detected_callback_")
     assert "std::recursive_mutex detection_lifecycle_mutex_" in header
-    assert "std::lock_guard<std::recursive_mutex> lifecycle_lock(detection_lifecycle_mutex_)" in source
+    assert "std::try_to_lock" in detection
+    assert "if (!lifecycle_lock.owns_lock())" in detection
+    assert detection.index("std::try_to_lock") < detection.index("StoreWakeWordData")
+    assert "AfeRunSynchronization run_synchronization_" in header
+    assert "IsStopAcknowledged" in source
 
 
 def test_wifi_provisioning_rearms_only_after_ble_deinit():

@@ -13,3 +13,10 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
     -o "${BUILD_DIR}/wake_word_lifecycle_controller_test"
 
 "${BUILD_DIR}/wake_word_lifecycle_controller_test"
+
+"${CXX:-c++}" -std=c++17 -pthread \
+    -I"${ROOT_DIR}/main" \
+    "${ROOT_DIR}/tests/native/afe_run_synchronization_test.cc" \
+    -o "${BUILD_DIR}/afe_run_synchronization_test"
+
+"${BUILD_DIR}/afe_run_synchronization_test"

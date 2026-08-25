@@ -19,6 +19,7 @@
 #include <chrono>
 
 #include "audio_codec.h"
+#include "afe_run_synchronization.h"
 #include "wake_word.h"
 
 class AfeWakeWord : public WakeWord {
@@ -81,6 +82,8 @@ private:
     std::atomic<uint32_t> feed_count_{0};
     std::atomic<uint32_t> fetch_count_{0};
     std::atomic<uint32_t> run_generation_{0};
+    std::atomic<uint32_t> stopped_generation_{0};
+    AfeRunSynchronization run_synchronization_;
 
     void StoreWakeWordData(const int16_t* data, size_t size);
     void AudioDetectionTask();
