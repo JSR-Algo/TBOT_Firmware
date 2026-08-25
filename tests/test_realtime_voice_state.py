@@ -122,6 +122,17 @@ def assert_observe_feed_chunk_raw_sample_dataflow(source: str) -> None:
             "static_cast", "<", "uint32_t", ">", "(", "sample", ")", ";",
         ],
     ], "raw sample dataflow changed"
+    local_sample_positions = [
+        index for index, token in enumerate(tokens) if token == "sample"
+    ]
+    assert [
+        (tokens[index - 1], tokens[index + 1]) for index in local_sample_positions
+    ] == [
+        ("int32_t", "="),
+        ("=", "<"),
+        ("-", ")"),
+        ("(", ")"),
+    ], "raw sample dataflow changed"
 
     magnitude_positions = [
         index for index, token in enumerate(tokens) if token == "magnitude"
@@ -534,6 +545,21 @@ def test_wake_telemetry_contract_rejects_magnitude_retained_in_member():
         "            if (magnitude > peak) {",
         "            feed_sequence_ = magnitude;\n"
         "            if (magnitude > peak) {",
+    )
+    assert mutated != telemetry_h
+
+    with pytest.raises(AssertionError, match="raw sample dataflow changed"):
+        assert_wake_telemetry_no_hidden_storage(mutated)
+
+
+def test_wake_telemetry_contract_rejects_raw_sample_control_flow_retention():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "            const int32_t sample = samples[i];",
+        "            const int32_t sample = samples[i];\n"
+        "            if ((sample & 1) != 0) {\n"
+        "                feed_sequence_ |= 1;\n"
+        "            }",
     )
     assert mutated != telemetry_h
 
