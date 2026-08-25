@@ -78,6 +78,123 @@ def sanitize_cpp_source(source: str) -> str:
     return "".join(output)
 
 
+def cpp_include_directives(source: str) -> list[str]:
+    sanitized_lines = sanitize_cpp_source(source).splitlines()
+    original_lines = source.splitlines()
+    includes = []
+    for sanitized, original in zip(sanitized_lines, original_lines):
+        directive = re.match(r"^\s*#\s*include\b", sanitized)
+        if directive is None:
+            continue
+        hash_index = sanitized.index("#")
+        target = re.match(
+            r"#\s*include\s*([<\"][^>\"]+[>\"])", original[hash_index:]
+        )
+        assert target is not None, f"malformed include directive: {original.strip()}"
+        includes.append(target.group(1))
+    return includes
+
+
+def cpp_direct_structure(class_body: str) -> tuple[list[str], list[tuple[str, str]]]:
+    code = sanitize_cpp_source(class_body)
+    declarations = []
+    nested_types = []
+    statement_start = code.index("{") + 1
+    index = statement_start
+
+    while index < len(code) - 1:
+        if code[index] == ":":
+            access = code[statement_start:index].strip()
+            if access in {"public", "protected", "private"}:
+                statement_start = index + 1
+        elif code[index] == "{":
+            prefix = re.sub(r"\s+", " ", code[statement_start:index]).strip()
+            depth = 1
+            end = index + 1
+            while end < len(code) and depth != 0:
+                if code[end] == "{":
+                    depth += 1
+                elif code[end] == "}":
+                    depth -= 1
+                end += 1
+            assert depth == 0, "unterminated direct declaration body"
+
+            nested_type = re.search(
+                r"\b(class|struct|union|enum(?:\s+class)?)\s+([A-Za-z_]\w*)"
+                r"(?:\s*:[^{]+)?$",
+                prefix,
+            )
+            defines_method = re.search(
+                r"\)\s*(?:(?:const|noexcept|override|final)\s*)*$", prefix
+            )
+            if nested_type:
+                nested_types.append((nested_type.group(1), nested_type.group(2)))
+            if nested_type or defines_method:
+                index = end
+                while index < len(code) and code[index].isspace():
+                    index += 1
+                if index < len(code) and code[index] == ";":
+                    index += 1
+                statement_start = index
+                continue
+            index = end
+            continue
+        elif code[index] == ";":
+            declaration = re.sub(
+                r"\s+", " ", code[statement_start : index + 1]
+            ).strip()
+            if declaration and not declaration.startswith("static_assert"):
+                declarations.append(declaration)
+            statement_start = index + 1
+        index += 1
+
+    return declarations, nested_types
+
+
+def cpp_direct_declarations(class_body: str) -> list[str]:
+    return cpp_direct_structure(class_body)[0]
+
+
+def cpp_direct_nested_types(class_body: str) -> list[tuple[str, str]]:
+    return cpp_direct_structure(class_body)[1]
+
+
+def test_cpp_include_directives_ignore_comment_string_and_raw_string_fakes():
+    fixture = r'''
+        // #include <commented.h>
+        const char* text = "#include <string.h>";
+        const char* raw = R"DOC(
+        #include <raw-string.h>
+        )DOC";
+        /* #include <blocked.h> */
+        #include <atomic>
+        # include "project.h"
+    '''
+
+    assert cpp_include_directives(fixture) == ["<atomic>", '"project.h"']
+
+
+def test_cpp_direct_declarations_ignore_nested_methods_and_types():
+    fixture = r'''
+        class Example {
+            static constexpr uint32_t kLimit = uint32_t{4};
+            struct Nested { int16_t hidden_; };
+            void Method() { int16_t local = 0; }
+            std::atomic<uint32_t> state_{0};
+            const void* retained_ = nullptr;
+        };
+    '''
+
+    assert cpp_direct_declarations(function_body(fixture, "class Example")) == [
+        "static constexpr uint32_t kLimit = uint32_t{4};",
+        "std::atomic<uint32_t> state_{0};",
+        "const void* retained_ = nullptr;",
+    ]
+    assert cpp_direct_nested_types(function_body(fixture, "class Example")) == [
+        ("struct", "Nested")
+    ]
+
+
 def test_runtime_logs_use_target_supported_integer_formats():
     app_cc = read("main/application.cc")
     lesson_cc = read("main/lesson_handler.cc")
@@ -243,10 +360,12 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
     telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
     code = sanitize_cpp_source(telemetry_h)
 
-    includes = re.findall(
-        r"^\s*#include\s*([<\"][^>\"]+[>\"])", telemetry_h, re.MULTILINE
-    )
-    assert includes == ["<atomic>", "<cstddef>", "<cstdint>", "<limits>"]
+    assert cpp_include_directives(telemetry_h) == [
+        "<atomic>",
+        "<cstddef>",
+        "<cstdint>",
+        "<limits>",
+    ]
 
     snapshot = sanitize_cpp_source(
         function_body(telemetry_h, "struct WakeTelemetrySnapshot")
@@ -302,6 +421,67 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
     ) in normalized_public
     assert "WakeTelemetrySnapshot TakeSnapshot()" in normalized_public
 
+    assert cpp_direct_declarations(
+        function_body(telemetry_h, "struct FeedInterval")
+    ) == [
+        "uint32_t chunk_count = 0;",
+        "uint32_t rms_min = kRmsMinSentinel;",
+        "uint32_t rms_max = 0;",
+        "uint32_t peak_max = 0;",
+        "uint32_t above_floor_count = 0;",
+        "int64_t last_above_floor_us = 0;",
+        "uint64_t last_above_floor_sequence = 0;",
+    ]
+    assert cpp_direct_declarations(
+        function_body(telemetry_h, "struct StateInterval")
+    ) == [
+        "uint32_t state_none = 0;",
+        "uint32_t state_transition = 0;",
+        "uint32_t state_detected = 0;",
+        "uint32_t state_other = 0;",
+        "int32_t last_valid_model_index = 0;",
+        "uint64_t last_valid_model_sequence = 0;",
+        "uint32_t invalid_model_index_count = 0;",
+    ]
+    assert cpp_direct_declarations(
+        function_body(telemetry_h, "struct SpscChannel")
+    ) == [
+        "Interval intervals[2];",
+        "std::atomic<uint32_t> requested_slot{0};",
+        "std::atomic<uint32_t> producer_active{0};",
+        "uint32_t producer_slot = 0;",
+    ]
+    assert cpp_direct_declarations(
+        function_body(telemetry_h, "class ExactMeanSquare")
+    ) == [
+        "uint64_t mean_ = 0;",
+        "uint64_t remainder_ = 0;",
+        "uint64_t count_ = 0;",
+    ]
+    assert cpp_direct_nested_types(telemetry_class) == [
+        ("struct", "FeedInterval"),
+        ("struct", "StateInterval"),
+        ("struct", "SpscChannel"),
+        ("class", "ExactMeanSquare"),
+    ]
+    assert cpp_direct_declarations(telemetry_class) == [
+        "static constexpr uint32_t kRmsMinSentinel = "
+        "std::numeric_limits<uint32_t>::max();",
+        "static constexpr uint32_t kMeanSquareBlockSamples = 1024;",
+        "static constexpr uint64_t kMaximumSampleSquare = uint64_t{32768} * 32768;",
+        "SpscChannel<FeedInterval> feed_channel_;",
+        "SpscChannel<StateInterval> state_channel_;",
+        "uint64_t feed_sequence_ = 0;",
+        "uint64_t state_sequence_ = 0;",
+        "int32_t feed_pending_slot_ = -1;",
+        "int32_t state_pending_slot_ = -1;",
+        "uint32_t above_floor_total_ = 0;",
+        "uint64_t last_above_floor_sequence_ = 0;",
+        "int64_t last_above_floor_us_ = 0;",
+        "uint64_t last_valid_model_sequence_ = 0;",
+        "int32_t last_valid_model_index_ = 0;",
+    ]
+
     forbidden_owning_tokens = (
         "std::vector", "std::deque", "std::array", "std::string", "std::span",
         "std::function", "std::unique_ptr", "std::shared_ptr",
@@ -328,13 +508,6 @@ def test_wake_word_telemetry_helper_has_aggregate_only_privacy_structure():
         r"\b(?:const\s+)?(?:int16_t|uint8_t)\s*\*+\s*[A-Za-z_]\w*\s*(?:=[^;]*)?;",
         code,
     )
-
-    member_arrays = re.findall(
-        r"^\s*([A-Za-z_:][\w:<>]*)\s+([A-Za-z_]\w*)\s*\[([^\]]+)\]\s*;",
-        code,
-        re.MULTILINE,
-    )
-    assert member_arrays == [("Interval", "intervals", "2")]
 
     call_names = set(
         re.findall(r"(?<![A-Za-z0-9_])([A-Za-z_]\w*(?:::\w+)*)\s*\(", code)
