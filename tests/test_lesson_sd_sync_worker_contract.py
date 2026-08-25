@@ -98,6 +98,20 @@ def test_sync_worker_body_has_nonthrowing_failsafe_cleanup_boundary():
     assert in_flight_reset < watchdog_delete < task_delete
 
 
+def test_each_asset_sync_worker_owns_one_complete_quiet_interval():
+    source = read("main/mcp_server.cc")
+    starter = function_body(source, "bool McpServer::StartLessonAssetSyncTask")
+    worker = function_body(source, "void McpServer::LessonAssetSyncTaskBody")
+
+    assert "lesson_asset_sync_in_flight_.exchange(true)" in starter
+    assert starter.count("BeginLessonAssetSyncQuiet") == 1
+    assert "context->tool->Call(context->arguments)" in worker
+    assert worker.count("EndLessonAssetSyncQuiet") == 2
+    assert worker.index("context->tool->Call(context->arguments)") < worker.index(
+        "EndLessonAssetSyncQuiet"
+    )
+
+
 def test_sync_worker_owns_application_audio_quiet_lifecycle():
     app_header = read("main/application.h")
     app_source = read("main/application.cc")
