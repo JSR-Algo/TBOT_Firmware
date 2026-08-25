@@ -88,12 +88,16 @@ def test_audio_metrics_report_wake_feed_fetch_progress_without_audio_content():
     assert "uint32_t feed_count" in wake_h
     assert "uint32_t fetch_count" in wake_h
     assert "uint32_t run_generation" in wake_h
-    assert "virtual WakeWordProgress GetProgress() const" in wake_h
+    assert "WakeTelemetrySnapshot telemetry" in wake_h
+    assert "virtual WakeWordProgress GetProgress()" in wake_h
+    assert "virtual WakeWordProgress GetProgress() const" not in wake_h
 
     assert "std::atomic<uint32_t> feed_count_" in afe_h
     assert "std::atomic<uint32_t> fetch_count_" in afe_h
     assert "std::atomic<uint32_t> run_generation_" in afe_h
-    assert "WakeWordProgress GetProgress() const override" in afe_h
+    assert '#include "wake_word_telemetry.h"' in afe_h
+    assert "WakeWordTelemetry telemetry_;" in afe_h
+    assert "WakeWordProgress GetProgress() override" in afe_h
     assert "feed_count_.fetch_add(1, std::memory_order_relaxed);" in afe_cc
     assert "fetch_count_.fetch_add(1, std::memory_order_relaxed);" in afe_cc
     feed_body = function_body(afe_cc, "void AfeWakeWord::Feed(const std::vector<int16_t>& data)")
@@ -117,6 +121,47 @@ def test_audio_metrics_report_wake_feed_fetch_progress_without_audio_content():
     assert "wake_gen=%lu" in metrics
     assert "GetWakeWordProgress()" in app_cc[:metrics_start]
     assert not re.search(r"pcm|rms|phrase|content", metrics, re.IGNORECASE)
+
+
+def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
+    wake_cc = read("main/audio/wake_words/afe_wake_word.cc")
+    feed = function_body(wake_cc, "void AfeWakeWord::Feed(const std::vector<int16_t>& data)")
+    task = function_body(wake_cc, "void AfeWakeWord::AudioDetectionTask()")
+    progress = function_body(wake_cc, "WakeWordProgress AfeWakeWord::GetProgress()")
+
+    assert "kDiagnosticSpeechFloorRms" in wake_cc
+    assert "telemetry_.TakeSnapshot()" in progress
+    assert "telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size," in feed
+    assert "kDiagnosticSpeechFloorRms, esp_timer_get_time())" in feed
+    assert feed.index("input_buffer_.insert") < feed.index("telemetry_.ObserveFeedChunk")
+    assert feed.index("telemetry_.ObserveFeedChunk") < feed.index("afe_iface_->feed")
+
+    successful_fetch = task.index("fetch_count_.fetch_add")
+    observe_state = task.index("telemetry_.ObserveWakeState")
+    assert task.index("res == nullptr || res->ret_value == ESP_FAIL") < successful_fetch
+    assert task.index("TryAcquireTransition") < successful_fetch
+    assert task.index("IsCurrent(run_generation_, fetch_generation)", task.index("TryAcquireTransition")) < successful_fetch
+    assert successful_fetch < observe_state
+    assert "WAKENET_NO_DETECT" in task
+    assert "WAKENET_CHANNEL_VERIFIED" in task
+    assert "WAKENET_DETECTED" in task
+    assert "WakeDecisionCategory::kNone" in task
+    assert "WakeDecisionCategory::kTransition" in task
+    assert "WakeDecisionCategory::kDetected" in task
+    assert "WakeDecisionCategory::kOther" in task
+    assert "res->wakenet_model_index" in task[observe_state:]
+    assert "static_cast<int>(wake_words_.size())" in task[observe_state:]
+
+    detected = task[task.index("if (res->wakeup_state == WAKENET_DETECTED)") :]
+    invalid_low = "res->wakenet_model_index < 1"
+    invalid_high = "res->wakenet_model_index > static_cast<int>(wake_words_.size())"
+    assert invalid_low in detected
+    assert invalid_high in detected
+    assert detected.index(invalid_low) < detected.index("Stop();")
+    assert detected.index(invalid_high) < detected.index("Stop();")
+    assert detected.index(invalid_high) < detected.index("wake_words_[res->wakenet_model_index - 1]")
+    assert "Wake detection returned invalid model index=%d count=%u" in detected
+    assert "wake_words_[" not in detected[:detected.index("continue;")]
 
 def test_afe_wake_word_uses_more_sensitive_hiesp_threshold_on_lcdwiki():
     wake_cc = read("main/audio/wake_words/afe_wake_word.cc")

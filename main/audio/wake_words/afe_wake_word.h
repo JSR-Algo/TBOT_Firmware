@@ -21,6 +21,7 @@
 #include "audio_codec.h"
 #include "afe_run_synchronization.h"
 #include "wake_word.h"
+#include "wake_word_telemetry.h"
 
 class AfeWakeWord : public WakeWord {
 public:
@@ -38,7 +39,7 @@ public:
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
     bool Shutdown(uint32_t timeout_ms) override;
     int32_t GetDetectionTaskStackHighWaterMark() const override;
-    WakeWordProgress GetProgress() const override;
+    WakeWordProgress GetProgress() override;
 
 private:
     static constexpr uint32_t kFetchWaitMs = 100;
@@ -83,6 +84,7 @@ private:
     std::atomic<uint32_t> run_generation_{0};
     std::atomic<uint32_t> stopped_generation_{0};
     AfeRunSynchronization run_synchronization_;
+    WakeWordTelemetry telemetry_;
 
     void StoreWakeWordData(const int16_t* data, size_t size);
     void AudioDetectionTask();

@@ -15,6 +15,7 @@
 
 namespace {
 constexpr float kHiEspWakeThreshold = 0.55f;
+constexpr uint32_t kDiagnosticSpeechFloorRms = 100;
 }  // namespace
 
 std::vector<int16_t> AfeWakeWord::SelectDominantMonoChannel(const std::vector<int16_t>& data,
@@ -206,11 +207,12 @@ int32_t AfeWakeWord::GetDetectionTaskStackHighWaterMark() const {
                : static_cast<int32_t>(uxTaskGetStackHighWaterMark(task_handle));
 }
 
-WakeWordProgress AfeWakeWord::GetProgress() const {
+WakeWordProgress AfeWakeWord::GetProgress() {
     return {
         feed_count_.load(std::memory_order_relaxed),
         fetch_count_.load(std::memory_order_relaxed),
         run_generation_.load(std::memory_order_relaxed),
+        telemetry_.TakeSnapshot(),
     };
 }
 
@@ -288,6 +290,8 @@ void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     input_buffer_.insert(input_buffer_.end(), feed_data->begin(), feed_data->end());
     size_t chunk_size = afe_iface_->get_feed_chunksize(afe_data_) * afe_feed_channels_;
     while (input_buffer_.size() >= chunk_size) {
+        telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size,
+                                    kDiagnosticSpeechFloorRms, esp_timer_get_time());
         afe_iface_->feed(afe_data_, input_buffer_.data());
         feed_count_.fetch_add(1, std::memory_order_relaxed);
         input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);
@@ -341,10 +345,35 @@ void AfeWakeWord::AudioDetectionTask() {
             }
             fetch_count_.fetch_add(1, std::memory_order_relaxed);
 
+            WakeDecisionCategory decision_category;
+            switch (res->wakeup_state) {
+                case WAKENET_NO_DETECT:
+                    decision_category = WakeDecisionCategory::kNone;
+                    break;
+                case WAKENET_CHANNEL_VERIFIED:
+                    decision_category = WakeDecisionCategory::kTransition;
+                    break;
+                case WAKENET_DETECTED:
+                    decision_category = WakeDecisionCategory::kDetected;
+                    break;
+                default:
+                    decision_category = WakeDecisionCategory::kOther;
+                    break;
+            }
+            telemetry_.ObserveWakeState(decision_category, res->wakenet_model_index,
+                                        static_cast<int>(wake_words_.size()));
+
             // Store the wake word data for voice recognition, like who is speaking
             StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
 
             if (res->wakeup_state == WAKENET_DETECTED) {
+                if (res->wakenet_model_index < 1 ||
+                    res->wakenet_model_index > static_cast<int>(wake_words_.size())) {
+                    ESP_LOGW(TAG, "Wake detection returned invalid model index=%d count=%u",
+                             res->wakenet_model_index,
+                             static_cast<unsigned>(wake_words_.size()));
+                    continue;
+                }
                 // RMS measurement (log-only mode): compute RMS so we can tune
                 // the human-voice threshold from real user data, but DO NOT
                 // reject — let every wake through. Once we observe real RMS

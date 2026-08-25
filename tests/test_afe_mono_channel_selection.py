@@ -45,6 +45,17 @@ def test_wake_word_afe_downmixes_stereo_codec_to_dominant_mono_channel():
     assert "SelectDominantMonoChannel(data, codec_input_channels_)" in feed
     assert "afe_iface_->get_feed_chunksize(afe_data_) * afe_feed_channels_" in feed
 
+    observation = "telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size,"
+    submission = "afe_iface_->feed(afe_data_, input_buffer_.data());"
+    assert observation in feed
+    assert submission in feed
+    assert feed.index("SelectDominantMonoChannel") < feed.index(observation)
+    assert feed.index("input_buffer_.insert") < feed.index(observation)
+    between_observation_and_submission = feed[
+        feed.index(observation) + len(observation) : feed.index(submission)
+    ]
+    assert "input_buffer_" not in between_observation_and_submission
+
 
 def test_voice_processor_afe_downmixes_stereo_codec_to_dominant_mono_channel():
     header = read("main/audio/processors/afe_audio_processor.h")
