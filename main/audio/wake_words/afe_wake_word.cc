@@ -4,6 +4,7 @@
 #include <esp_log.h>
 #include <sstream>
 #include <cmath>
+#include <utility>
 
 #define DETECTION_RUNNING_EVENT 1
 #define SHUTDOWN_EVENT 2
@@ -114,25 +115,8 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         ESP_LOGE(TAG, "Failed to initialize wakenet model");
         return false;
     }
-    wakenet_model_count_ = 0;
     for (int i = 0; i < models_->num; i++) {
         ESP_LOGI(TAG, "Model %d: %s", i, models_->model_name[i]);
-        if (strstr(models_->model_name[i], ESP_WN_PREFIX) != NULL) {
-            ++wakenet_model_count_;
-            wakenet_model_ = models_->model_name[i];
-            auto words = esp_srmodel_get_wake_words(models_, wakenet_model_);
-            // split by ";" to get all wake words
-            std::stringstream ss(words);
-            std::string word;
-            while (std::getline(ss, word, ';')) {
-                // Rename built-in "Hi,ESP" to user's robot name for display purposes.
-                // Trigger phonetics is still "Hi, ESP" (model is fixed) but UI/log shows "Hi, Tâm".
-                if (word == "Hi,ESP" || word == "Hi ESP" || word == "hiesp") {
-                    word = "Hi, Tâm";
-                }
-                wake_words_.push_back(word);
-            }
-        }
     }
 
     std::string input_format;
@@ -149,6 +133,30 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         afe_feed_channels_ = codec_input_channels_;
     }
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    char* configured_wakenet_models[] = {
+        afe_config->wakenet_model_name,
+        afe_config->wakenet_model_name_2,
+    };
+    wake_words_by_model_.clear();
+    for (char* model_name : configured_wakenet_models) {
+        if (model_name == nullptr) {
+            break;
+        }
+        std::vector<std::string> model_wake_words;
+        const char* words = esp_srmodel_get_wake_words(models_, model_name);
+        if (words != nullptr) {
+            std::stringstream ss(words);
+            std::string word;
+            while (std::getline(ss, word, ';')) {
+                // The fixed phonetics stay unchanged; only the user-facing label is renamed.
+                if (word == "Hi,ESP" || word == "Hi ESP" || word == "hiesp") {
+                    word = "Hi, Tâm";
+                }
+                model_wake_words.push_back(std::move(word));
+            }
+        }
+        wake_words_by_model_.push_back(std::move(model_wake_words));
+    }
     afe_config->aec_init = codec_->input_reference();
     afe_config->aec_mode = AEC_MODE_SR_LOW_COST;
     afe_config->afe_perferred_core = 1;
@@ -294,12 +302,12 @@ void AfeWakeWord::Feed(const std::vector<int16_t>& data) {
     const int expected_bytes = static_cast<int>(chunk_size * sizeof(int16_t));
     while (input_buffer_.size() >= chunk_size) {
         const int accepted_bytes = afe_iface_->feed(afe_data_, input_buffer_.data());
-        if (accepted_bytes != expected_bytes) {
-            break;
+        const bool fully_accepted = accepted_bytes == expected_bytes;
+        if (fully_accepted) {
+            telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size,
+                                        kDiagnosticSpeechFloorRms, esp_timer_get_time());
+            feed_count_.fetch_add(1, std::memory_order_relaxed);
         }
-        telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size,
-                                    kDiagnosticSpeechFloorRms, esp_timer_get_time());
-        feed_count_.fetch_add(1, std::memory_order_relaxed);
         input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + chunk_size);
     }
 }
@@ -367,26 +375,28 @@ void AfeWakeWord::AudioDetectionTask() {
                     break;
             }
             telemetry_.ObserveWakeState(decision_category, res->wakenet_model_index,
-                                        wakenet_model_count_);
+                                        static_cast<int>(wake_words_by_model_.size()));
 
             // Store the wake word data for voice recognition, like who is speaking
             StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
 
             if (res->wakeup_state == WAKENET_DETECTED) {
-                const bool valid_model_index =
-                    res->wakenet_model_index >= 1 &&
-                    res->wakenet_model_index <= wakenet_model_count_;
-                const bool invalid_wake_word_index =
-                    res->wake_word_index < 1 ||
-                    res->wake_word_index > static_cast<int>(wake_words_.size());
-                if (!valid_model_index || invalid_wake_word_index) {
+                const std::string* wake_word = ResolveWakeWordLabel(
+                    wake_words_by_model_, res->wakenet_model_index,
+                    res->wake_word_index);
+                if (wake_word == nullptr) {
+                    size_t word_count = 0;
+                    if (res->wakenet_model_index >= 1 &&
+                        res->wakenet_model_index <=
+                            static_cast<int>(wake_words_by_model_.size())) {
+                        word_count = wake_words_by_model_[res->wakenet_model_index - 1].size();
+                    }
                     ESP_LOGW(TAG,
                              "Wake detection returned invalid indices model=%d model_count=%d word=%d word_count=%u",
-                             res->wakenet_model_index, wakenet_model_count_,
+                             res->wakenet_model_index,
+                             static_cast<int>(wake_words_by_model_.size()),
                              res->wake_word_index,
-                             static_cast<unsigned>(wake_words_.size()));
-                }
-                if (invalid_wake_word_index) {
+                             static_cast<unsigned>(word_count));
                     continue;
                 }
                 // RMS measurement (log-only mode): compute RMS so we can tune
@@ -412,7 +422,7 @@ void AfeWakeWord::AudioDetectionTask() {
                     continue;
                 }
                 Stop();
-                last_detected_wake_word_ = wake_words_[res->wake_word_index - 1];
+                last_detected_wake_word_ = *wake_word;
 
                 if (wake_word_detected_callback_) {
                     wake_word_detected_callback_(last_detected_wake_word_);

@@ -136,21 +136,30 @@ def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
     assert "telemetry_.ObserveFeedChunk(input_buffer_.data(), chunk_size," in feed
     assert "kDiagnosticSpeechFloorRms, esp_timer_get_time())" in feed
     feed_call = feed.index("afe_iface_->feed")
-    rejected_guard = feed.index("accepted_bytes != expected_bytes")
     observe_chunk = feed.index("telemetry_.ObserveFeedChunk")
     increment_feed = feed.index("feed_count_.fetch_add")
     erase_chunk = feed.index("input_buffer_.erase")
+    accepted_guard = feed.index("if (fully_accepted)")
     assert "const int expected_bytes = static_cast<int>(chunk_size * sizeof(int16_t));" in feed
     assert "const int accepted_bytes = afe_iface_->feed" in feed
+    assert "const bool fully_accepted = accepted_bytes == expected_bytes;" in feed
+    assert feed.count("afe_iface_->feed") == 1
+    assert feed.count("input_buffer_.erase") == 1
+    assert "if (!fully_accepted)" not in feed
+    assert "break;" not in feed
     assert feed.index("input_buffer_.insert") < feed_call
-    assert feed_call < rejected_guard < observe_chunk < increment_feed < erase_chunk
-    rejected_path = feed[rejected_guard:observe_chunk]
-    assert "break;" in rejected_path
+    assert feed_call < accepted_guard < observe_chunk < increment_feed < erase_chunk
 
-    assert "int wakenet_model_count_ = 0;" in wake_h
-    assert "wakenet_model_count_ = 0;" in initialize
-    wakenet_model_branch = initialize[initialize.index("ESP_WN_PREFIX") :]
-    assert "++wakenet_model_count_;" in wakenet_model_branch
+    assert '#include "wake_word_model_map.h"' in wake_h
+    assert "std::vector<std::vector<std::string>> wake_words_by_model_;" in wake_h
+    assert "wakenet_model_count_" not in wake_h
+    assert "char* wakenet_model_" not in wake_h
+    config_init = initialize.index("afe_config_init")
+    configured_models = initialize.index("configured_wakenet_models", config_init)
+    assert "afe_config->wakenet_model_name" in initialize[configured_models:]
+    assert "afe_config->wakenet_model_name_2" in initialize[configured_models:]
+    assert "wake_words_by_model_.push_back" in initialize[configured_models:]
+    assert "ESP_WN_PREFIX" not in initialize[:config_init]
 
     successful_fetch = task.index("fetch_count_.fetch_add")
     observe_state = task.index("telemetry_.ObserveWakeState")
@@ -167,24 +176,22 @@ def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
     assert "WakeDecisionCategory::kOther" in task
     observation = task[observe_state : task.index("StoreWakeWordData", observe_state)]
     assert "res->wakenet_model_index" in observation
-    assert "wakenet_model_count_" in observation
-    assert "wake_words_.size()" not in observation
+    assert "static_cast<int>(wake_words_by_model_.size())" in observation
 
     detected = task[task.index("if (res->wakeup_state == WAKENET_DETECTED)") :]
-    invalid_low = "res->wake_word_index < 1"
-    invalid_high = "res->wake_word_index > static_cast<int>(wake_words_.size())"
-    assert invalid_low in detected
-    assert invalid_high in detected
-    assert detected.index(invalid_low) < detected.index("Stop();")
-    assert detected.index(invalid_high) < detected.index("Stop();")
-    assert detected.index(invalid_high) < detected.index("wake_words_[res->wake_word_index - 1]")
+    resolver = "ResolveWakeWordLabel("
+    assert resolver in detected
+    resolver_call = detected[detected.index(resolver):detected.index(";", detected.index(resolver))]
+    assert "wake_words_by_model_" in resolver_call
+    assert "res->wakenet_model_index" in resolver_call
+    assert "res->wake_word_index" in resolver_call
+    assert detected.index(resolver) < detected.index("Stop();")
+    assert "if (wake_word == nullptr)" in detected
     assert "Wake detection returned invalid indices" in detected
-    word_rejection = detected.index("if (invalid_wake_word_index)")
-    assert "continue;" not in detected[
-        detected.index("if (!valid_model_index || invalid_wake_word_index)") : word_rejection
-    ]
-    assert word_rejection < detected.index("continue;", word_rejection) < detected.index("Stop();")
-    assert "wake_words_[" not in detected[:detected.index("continue;", word_rejection)]
+    rejection = detected.index("if (wake_word == nullptr)")
+    assert rejection < detected.index("continue;", rejection) < detected.index("Stop();")
+    assert "last_detected_wake_word_ = *wake_word;" in detected
+    assert "wake_words_[" not in detected
 
 def test_afe_wake_word_uses_more_sensitive_hiesp_threshold_on_lcdwiki():
     wake_cc = read("main/audio/wake_words/afe_wake_word.cc")

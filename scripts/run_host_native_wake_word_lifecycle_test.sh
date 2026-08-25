@@ -33,3 +33,10 @@ fi
     -o "${BUILD_DIR}/wake_word_telemetry_test"
 
 "${BUILD_DIR}/wake_word_telemetry_test"
+
+"${CXX:-c++}" -std=c++17 \
+    -I"${ROOT_DIR}/main" \
+    "${ROOT_DIR}/tests/native/wake_word_model_map_test.cc" \
+    -o "${BUILD_DIR}/wake_word_model_map_test"
+
+"${BUILD_DIR}/wake_word_model_map_test"

@@ -21,6 +21,7 @@
 #include "audio_codec.h"
 #include "afe_run_synchronization.h"
 #include "wake_word.h"
+#include "wake_word_model_map.h"
 #include "wake_word_telemetry.h"
 
 class AfeWakeWord : public WakeWord {
@@ -49,9 +50,7 @@ private:
     bool owns_models_ = false;
     const esp_afe_sr_iface_t* afe_iface_ = nullptr;
     esp_afe_sr_data_t* afe_data_ = nullptr;
-    char* wakenet_model_ = NULL;
-    int wakenet_model_count_ = 0;
-    std::vector<std::string> wake_words_;
+    std::vector<std::vector<std::string>> wake_words_by_model_;
     EventGroupHandle_t event_group_;
     std::function<void(const std::string& wake_word)> wake_word_detected_callback_;
     AudioCodec* codec_ = nullptr;

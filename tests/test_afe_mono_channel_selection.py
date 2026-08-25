@@ -52,7 +52,8 @@ def test_wake_word_afe_downmixes_stereo_codec_to_dominant_mono_channel():
     assert feed.index("SelectDominantMonoChannel") < feed.index(submission)
     assert feed.index("input_buffer_.insert") < feed.index(submission)
     assert feed.index(submission) < feed.index(observation)
-    assert feed.index("accepted_bytes != expected_bytes") < feed.index(observation)
+    assert feed.index(observation) < feed.index("input_buffer_.erase")
+    assert "break;" not in feed
 
 
 def test_voice_processor_afe_downmixes_stereo_codec_to_dominant_mono_channel():
