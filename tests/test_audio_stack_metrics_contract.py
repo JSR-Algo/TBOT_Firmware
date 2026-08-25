@@ -66,6 +66,14 @@ def test_audio_tasks_clear_handles_before_self_delete_and_afe_is_optional():
     afe_getter = function_body(
         afe_source, "int32_t AfeWakeWord::GetDetectionTaskStackHighWaterMark"
     )
+    getter_guard = afe_getter.index(
+        "auto lifecycle_lock = run_synchronization_.AcquireTransition()"
+    )
+    getter_load = afe_getter.index(
+        "audio_detection_task_handle_.load(std::memory_order_acquire)"
+    )
+    getter_watermark = afe_getter.index("uxTaskGetStackHighWaterMark(task_handle)")
+    assert getter_guard < getter_load < getter_watermark
     assert "audio_detection_task_handle_.load(std::memory_order_acquire)" in afe_getter
     assert "task_handle == nullptr" in afe_getter
     assert "uxTaskGetStackHighWaterMark(task_handle)" in afe_getter
@@ -77,11 +85,14 @@ def test_audio_tasks_clear_handles_before_self_delete_and_afe_is_optional():
         afe_source.index("const BaseType_t detection_created") :
         afe_source.index('"audio_detection"')
     ]
+    exit_guard = detection_task.index(
+        "auto lifecycle_lock = this_->run_synchronization_.AcquireTransition()"
+    )
     clear = detection_task.index(
         "audio_detection_task_handle_.store(nullptr, std::memory_order_release)"
     )
     exit_ack = detection_task.index("xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT)")
-    assert clear < exit_ack
+    assert exit_guard < clear < exit_ack
 
 
 def test_periodic_sys_metrics_emits_stable_audio_stack_fields():
