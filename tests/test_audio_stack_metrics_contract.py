@@ -24,6 +24,28 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def enclosing_scoped_block(text: str, marker: str) -> str:
+    marker_index = text.index(marker)
+    stack = []
+    for index, char in enumerate(text[:marker_index]):
+        if char == "{":
+            stack.append(index)
+        elif char == "}":
+            stack.pop()
+    assert stack, f"marker is not inside a brace scope: {marker}"
+
+    block_start = stack[-1]
+    depth = 0
+    for index in range(block_start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[block_start : index + 1]
+    raise AssertionError(f"unterminated scope containing {marker}")
+
+
 def test_audio_service_exposes_null_safe_stack_high_water_snapshot():
     header = read("main/audio/audio_service.h")
     source = read("main/audio/audio_service.cc")
@@ -74,6 +96,11 @@ def test_audio_tasks_clear_handles_before_self_delete_and_afe_is_optional():
     )
     getter_watermark = afe_getter.index("uxTaskGetStackHighWaterMark(task_handle)")
     assert getter_guard < getter_load < getter_watermark
+    getter_guard_scope = enclosing_scoped_block(
+        afe_getter, "auto lifecycle_lock = run_synchronization_.AcquireTransition()"
+    )
+    assert "audio_detection_task_handle_.load(std::memory_order_acquire)" in getter_guard_scope
+    assert "uxTaskGetStackHighWaterMark(task_handle)" in getter_guard_scope
     assert "audio_detection_task_handle_.load(std::memory_order_acquire)" in afe_getter
     assert "task_handle == nullptr" in afe_getter
     assert "uxTaskGetStackHighWaterMark(task_handle)" in afe_getter
@@ -93,6 +120,12 @@ def test_audio_tasks_clear_handles_before_self_delete_and_afe_is_optional():
     )
     exit_ack = detection_task.index("xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT)")
     assert exit_guard < clear < exit_ack
+    exit_guard_scope = enclosing_scoped_block(
+        detection_task,
+        "auto lifecycle_lock = this_->run_synchronization_.AcquireTransition()",
+    )
+    assert "audio_detection_task_handle_.store(nullptr, std::memory_order_release)" in exit_guard_scope
+    assert "xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT)" not in exit_guard_scope
 
 
 def test_periodic_sys_metrics_emits_stable_audio_stack_fields():
