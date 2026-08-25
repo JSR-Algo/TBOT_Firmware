@@ -105,6 +105,29 @@ def test_each_asset_sync_worker_owns_one_complete_quiet_interval():
 
     assert "lesson_asset_sync_in_flight_.exchange(true)" in starter
     assert starter.count("BeginLessonAssetSyncQuiet") == 1
+    quiet_begin = starter.index("BeginLessonAssetSyncQuiet")
+    context_allocation = starter.index("auto* context = new (std::nothrow)")
+    task_creation = starter.index("xTaskCreateWithCaps")
+    assert quiet_begin < context_allocation < task_creation
+
+    allocation_failure = starter[
+        starter.index("if (context == nullptr)") : task_creation
+    ]
+    assert "app.Schedule" in allocation_failure
+    assert "EndLessonAssetSyncQuiet" in allocation_failure
+    assert allocation_failure.index("app.Schedule") < allocation_failure.index(
+        "EndLessonAssetSyncQuiet"
+    )
+
+    creation_failure = starter[
+        task_creation : starter.index("return true;", task_creation)
+    ]
+    assert "app.Schedule" in creation_failure
+    assert "EndLessonAssetSyncQuiet" in creation_failure
+    assert creation_failure.index("app.Schedule") < creation_failure.index(
+        "EndLessonAssetSyncQuiet"
+    )
+
     assert "context->tool->Call(context->arguments)" in worker
     assert worker.count("EndLessonAssetSyncQuiet") == 2
     assert worker.index("context->tool->Call(context->arguments)") < worker.index(
