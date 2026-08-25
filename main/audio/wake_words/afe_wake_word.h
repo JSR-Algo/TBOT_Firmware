@@ -40,6 +40,9 @@ public:
     WakeWordProgress GetProgress() const override;
 
 private:
+    static constexpr uint32_t kFetchWaitMs = 100;
+    static constexpr uint32_t kStopAckTimeoutMs = 500;
+
     srmodel_list_t *models_ = nullptr;
     bool owns_models_ = false;
     const esp_afe_sr_iface_t* afe_iface_ = nullptr;
@@ -54,6 +57,7 @@ private:
     std::string last_detected_wake_word_;
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
+    std::recursive_mutex detection_lifecycle_mutex_;
 
     // Sticky stereo->mono channel selection. The stereo codec (e.g. ES8311 on the
     // LCDWiki board) duplicates a single physical mic across two I2S slots; the

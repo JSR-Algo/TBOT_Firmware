@@ -81,6 +81,46 @@ def test_concrete_wake_words_ack_shutdown_and_preserve_borrowed_models():
     assert "DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT" in afe
 
 
+def test_afe_fetch_is_bounded_and_stop_acknowledges_before_reset():
+    header = read("main/audio/wake_words/afe_wake_word.h")
+    source = read("main/audio/wake_words/afe_wake_word.cc")
+
+    assert "DETECTION_STOPPED_EVENT" in source
+    assert "kFetchWaitMs" in header
+    assert "kStopAckTimeoutMs" in header
+    assert "fetch_with_delay(afe_data_, pdMS_TO_TICKS(kFetchWaitMs))" in source
+
+    detection = source[source.index("void AfeWakeWord::AudioDetectionTask()") :]
+    detection = detection[: detection.index("void AfeWakeWord::StoreWakeWordData")]
+    assert "xEventGroupSetBits(event_group_, DETECTION_STOPPED_EVENT)" in detection
+
+    stop = source[source.index("void AfeWakeWord::Stop()") :]
+    stop = stop[: stop.index("void AfeWakeWord::Feed")]
+    wait = stop.index("xEventGroupWaitBits")
+    reset = stop.index("reset_buffer")
+    assert wait < reset
+    assert '"afe stop acknowledgement timeout' in stop
+    assert "xTaskGetCurrentTaskHandle() == audio_detection_task_handle_" in stop
+
+
+def test_afe_discards_fetch_from_superseded_run_generation():
+    header = read("main/audio/wake_words/afe_wake_word.h")
+    source = read("main/audio/wake_words/afe_wake_word.cc")
+
+    start = source[source.index("void AfeWakeWord::Start()") :]
+    start = start[: start.index("void AfeWakeWord::Stop()")]
+    assert "run_generation_.fetch_add" in start
+
+    detection = source[source.index("void AfeWakeWord::AudioDetectionTask()") :]
+    detection = detection[: detection.index("void AfeWakeWord::StoreWakeWordData")]
+    assert "const uint32_t fetch_generation" in detection
+    generation_gate = detection.index("fetch_generation != run_generation_")
+    assert generation_gate < detection.index("StoreWakeWordData")
+    assert generation_gate < detection.index("wake_word_detected_callback_")
+    assert "std::recursive_mutex detection_lifecycle_mutex_" in header
+    assert "std::lock_guard<std::recursive_mutex> lifecycle_lock(detection_lifecycle_mutex_)" in source
+
+
 def test_wifi_provisioning_rearms_only_after_ble_deinit():
     source = read("main/boards/common/wifi_board.cc")
     start = source.index("void WifiBoard::StartWifiConfigMode(")

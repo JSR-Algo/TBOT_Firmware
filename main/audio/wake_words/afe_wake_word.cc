@@ -9,6 +9,7 @@
 #define SHUTDOWN_EVENT 2
 #define DETECTION_EXITED_EVENT 4
 #define ENCODE_EXITED_EVENT 8
+#define DETECTION_STOPPED_EVENT 16
 
 #define TAG "AfeWakeWord"
 
@@ -77,7 +78,8 @@ AfeWakeWord::AfeWakeWord()
       wake_word_opus_() {
 
     event_group_ = xEventGroupCreate();
-    xEventGroupSetBits(event_group_, DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT);
+    xEventGroupSetBits(event_group_, DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT |
+                                        DETECTION_STOPPED_EVENT);
 }
 
 AfeWakeWord::~AfeWakeWord() {
@@ -205,13 +207,38 @@ WakeWordProgress AfeWakeWord::GetProgress() const {
 }
 
 void AfeWakeWord::Start() {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+        return;
+    }
     run_generation_.fetch_add(1, std::memory_order_relaxed);
+    xEventGroupClearBits(event_group_, DETECTION_STOPPED_EVENT);
     xEventGroupSetBits(event_group_, DETECTION_RUNNING_EVENT);
 }
 
 void AfeWakeWord::Stop() {
-    xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+    {
+        std::lock_guard<std::recursive_mutex> lifecycle_lock(detection_lifecycle_mutex_);
+        xEventGroupClearBits(event_group_, DETECTION_RUNNING_EVENT);
+        run_generation_.fetch_add(1, std::memory_order_relaxed);
+    }
 
+    if (xTaskGetCurrentTaskHandle() == audio_detection_task_handle_) {
+        xEventGroupSetBits(event_group_, DETECTION_STOPPED_EVENT);
+    } else {
+        const EventBits_t stopped = xEventGroupWaitBits(
+            event_group_, DETECTION_STOPPED_EVENT, pdFALSE, pdTRUE,
+            pdMS_TO_TICKS(kStopAckTimeoutMs));
+        if (!(stopped & DETECTION_STOPPED_EVENT)) {
+            ESP_LOGE(TAG,
+                     "afe stop acknowledgement timeout generation=%lu feed=%lu fetch=%lu",
+                     static_cast<unsigned long>(run_generation_.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long>(feed_count_.load(std::memory_order_relaxed)),
+                     static_cast<unsigned long>(fetch_count_.load(std::memory_order_relaxed)));
+            return;
+        }
+    }
+
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(detection_lifecycle_mutex_);
     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
@@ -257,6 +284,9 @@ void AfeWakeWord::AudioDetectionTask() {
     ESP_LOGI(TAG, "Audio detection task started, feed size: %d fetch size: %d",
         feed_size, fetch_size);
 
+    if (!(xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT)) {
+        xEventGroupSetBits(event_group_, DETECTION_STOPPED_EVENT);
+    }
     while (true) {
         auto bits = xEventGroupWaitBits(event_group_, DETECTION_RUNNING_EVENT | SHUTDOWN_EVENT,
                                         pdFALSE, pdFALSE, portMAX_DELAY);
@@ -264,46 +294,64 @@ void AfeWakeWord::AudioDetectionTask() {
             break;
         }
 
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
-        if (shutting_down_.load()) {
+        while (xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT) {
+            const uint32_t fetch_generation =
+                run_generation_.load(std::memory_order_acquire);
+            auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(kFetchWaitMs));
+            const EventBits_t current_bits = xEventGroupGetBits(event_group_);
+            if ((current_bits & SHUTDOWN_EVENT) || shutting_down_.load()) {
+                break;
+            }
+            if (!(current_bits & DETECTION_RUNNING_EVENT) ||
+                fetch_generation != run_generation_.load(std::memory_order_acquire)) {
+                continue;
+            }
+            if (res == nullptr || res->ret_value == ESP_FAIL) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                continue;
+            }
+            fetch_count_.fetch_add(1, std::memory_order_relaxed);
+
+            // Store the wake word data for voice recognition, like who is speaking
+            StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
+
+            if (res->wakeup_state == WAKENET_DETECTED) {
+                std::lock_guard<std::recursive_mutex> lifecycle_lock(detection_lifecycle_mutex_);
+                // RMS measurement (log-only mode): compute RMS so we can tune
+                // the human-voice threshold from real user data, but DO NOT
+                // reject — let every wake through. Once we observe real RMS
+                // values from genuine "Hi ESP" vs noise, change the policy.
+                int16_t* samples = res->data;
+                int sample_count = (int)(res->data_size / sizeof(int16_t));
+                int64_t sum_sq = 0;
+                for (int i = 0; i < sample_count; ++i) {
+                    int32_t s = (int32_t)samples[i];
+                    sum_sq += (int64_t)(s * s);
+                }
+                int rms = 0;
+                if (sample_count > 0) {
+                    rms = (int)sqrt((double)(sum_sq / (int64_t)sample_count));
+                }
+                ESP_LOGI(TAG, "Wake DETECTED rms=%d samples=%d (log-only mode)",
+                         rms, sample_count);
+
+                if (!(xEventGroupGetBits(event_group_) & DETECTION_RUNNING_EVENT) ||
+                    fetch_generation != run_generation_.load(std::memory_order_acquire)) {
+                    continue;
+                }
+                Stop();
+                last_detected_wake_word_ = wake_words_[res->wakenet_model_index - 1];
+
+                if (wake_word_detected_callback_) {
+                    wake_word_detected_callback_(last_detected_wake_word_);
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+        xEventGroupSetBits(event_group_, DETECTION_STOPPED_EVENT);
+        if ((xEventGroupGetBits(event_group_) & SHUTDOWN_EVENT) || shutting_down_.load()) {
             break;
         }
-        if (res == nullptr || res->ret_value == ESP_FAIL) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;;
-        }
-        fetch_count_.fetch_add(1, std::memory_order_relaxed);
-
-        // Store the wake word data for voice recognition, like who is speaking
-        StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
-
-        if (res->wakeup_state == WAKENET_DETECTED) {
-            // RMS measurement (log-only mode): compute RMS so we can tune
-            // the human-voice threshold from real user data, but DO NOT
-            // reject — let every wake through. Once we observe real RMS
-            // values from genuine "Hi ESP" vs noise, change the policy.
-            int16_t* samples = res->data;
-            int sample_count = (int)(res->data_size / sizeof(int16_t));
-            int64_t sum_sq = 0;
-            for (int i = 0; i < sample_count; ++i) {
-                int32_t s = (int32_t)samples[i];
-                sum_sq += (int64_t)(s * s);
-            }
-            int rms = 0;
-            if (sample_count > 0) {
-                rms = (int)sqrt((double)(sum_sq / (int64_t)sample_count));
-            }
-            ESP_LOGI(TAG, "Wake DETECTED rms=%d samples=%d (log-only mode)",
-                     rms, sample_count);
-
-            Stop();
-            last_detected_wake_word_ = wake_words_[res->wakenet_model_index - 1];
-
-            if (wake_word_detected_callback_) {
-                wake_word_detected_callback_(last_detected_wake_word_);
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
