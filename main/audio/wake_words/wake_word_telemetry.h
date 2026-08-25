@@ -29,7 +29,7 @@ struct WakeTelemetrySnapshot {
     uint32_t invalid_model_index_count;
 };
 
-// One producer records feed/state observations and one consumer takes snapshots.
+// Feed/state producers and the snapshot consumer serialize only aggregate publication.
 class WakeWordTelemetry {
 public:
     void ObserveFeedChunk(const int16_t* samples, size_t sample_count,
@@ -38,8 +38,7 @@ public:
             return;
         }
 
-        uint64_t total_square = 0;
-        uint64_t total_samples = 0;
+        ExactMeanSquare mean_square;
         uint64_t block_square = 0;
         uint32_t block_samples = 0;
         uint32_t peak = 0;
@@ -54,70 +53,61 @@ public:
             block_square += static_cast<uint64_t>(magnitude) * magnitude;
             ++block_samples;
             if (block_samples == kMeanSquareBlockSamples) {
-                FoldBlock(block_square, block_samples, total_square, total_samples);
+                mean_square.AddBlock(block_square, block_samples);
                 block_square = 0;
                 block_samples = 0;
             }
         }
         if (block_samples != 0) {
-            FoldBlock(block_square, block_samples, total_square, total_samples);
+            mean_square.AddBlock(block_square, block_samples);
         }
 
-        const uint32_t rms = IntegerSquareRoot(total_square / total_samples);
-        const uint32_t slot = AcquireWriteSlot();
-        IntervalData& interval = intervals_[slot];
-        ++interval.chunk_count;
-        if (rms < interval.rms_min) {
-            interval.rms_min = rms;
+        const uint32_t rms = IntegerSquareRoot(mean_square.value());
+        PublicationGuard guard(publication_guard_);
+        ++interval_.chunk_count;
+        if (rms < interval_.rms_min) {
+            interval_.rms_min = rms;
         }
-        if (rms > interval.rms_max) {
-            interval.rms_max = rms;
+        if (rms > interval_.rms_max) {
+            interval_.rms_max = rms;
         }
-        if (peak > interval.peak_max) {
-            interval.peak_max = peak;
+        if (peak > interval_.peak_max) {
+            interval_.peak_max = peak;
         }
         if (rms > speech_floor_rms) {
-            ++interval.above_floor_count;
-            interval.last_above_floor_us = now_us;
+            ++interval_.above_floor_count;
+            interval_.last_above_floor_us = now_us;
         }
-        ReleaseWriteSlot(slot);
     }
 
     void ObserveWakeState(WakeDecisionCategory category, int model_index, int model_count) {
-        const uint32_t slot = AcquireWriteSlot();
-        IntervalData& interval = intervals_[slot];
+        PublicationGuard guard(publication_guard_);
         switch (category) {
             case WakeDecisionCategory::kNone:
-                ++interval.state_none;
-                ReleaseWriteSlot(slot);
+                ++interval_.state_none;
                 return;
             case WakeDecisionCategory::kTransition:
-                ++interval.state_transition;
+                ++interval_.state_transition;
                 break;
             case WakeDecisionCategory::kDetected:
-                ++interval.state_detected;
+                ++interval_.state_detected;
                 break;
             case WakeDecisionCategory::kOther:
-                ++interval.state_other;
+                ++interval_.state_other;
                 break;
         }
 
         if (model_index > 0 && model_index <= model_count) {
-            interval.last_valid_model_index = model_index;
+            interval_.last_valid_model_index = model_index;
         } else if (model_index > 0) {
-            ++interval.invalid_model_index_count;
+            ++interval_.invalid_model_index_count;
         }
-        ReleaseWriteSlot(slot);
     }
 
     WakeTelemetrySnapshot TakeSnapshot() {
-        const uint32_t drained_slot = active_slot_.load();
-        active_slot_.store(drained_slot ^ 1U);
-        while (writer_active_[drained_slot].load() != 0) {
-        }
-
-        const IntervalData interval = intervals_[drained_slot];
-        intervals_[drained_slot] = IntervalData{};
+        PublicationGuard guard(publication_guard_);
+        const IntervalData interval = interval_;
+        interval_ = IntervalData{};
         above_floor_total_ += interval.above_floor_count;
         if (interval.above_floor_count != 0) {
             last_above_floor_us_ = interval.last_above_floor_us;
@@ -147,8 +137,7 @@ private:
     static constexpr uint32_t kRmsMinSentinel = std::numeric_limits<uint32_t>::max();
     static constexpr uint32_t kMeanSquareBlockSamples = 1024;
     static constexpr uint64_t kMaximumSampleSquare = uint64_t{32768} * 32768;
-    static_assert(std::atomic<uint32_t>::is_always_lock_free,
-                  "telemetry handoff requires native 32-bit atomics");
+    static_assert(sizeof(size_t) <= sizeof(uint64_t), "sample counts must fit in uint64_t");
     static_assert(kMeanSquareBlockSamples <=
                       std::numeric_limits<uint64_t>::max() / kMaximumSampleSquare,
                   "mean-square block accumulation must not overflow");
@@ -168,17 +157,77 @@ private:
         uint32_t invalid_model_index_count = 0;
     };
 
-    static void FoldBlock(uint64_t block_square, uint32_t block_samples,
-                          uint64_t& total_square, uint64_t& total_samples) {
-        // Scaling is unreachable for bounded ESP-SR chunks, but keeps arbitrary size_t safe.
-        while (total_square > std::numeric_limits<uint64_t>::max() - block_square ||
-               total_samples > std::numeric_limits<uint64_t>::max() - block_samples) {
-            total_square >>= 1;
-            total_samples >>= 1;
+    class ExactMeanSquare {
+    public:
+        void AddBlock(uint64_t square_sum, uint32_t sample_count) {
+            // mean_ * count_ + remainder_ is the exact accumulated square sum.
+            if (count_ == 0) {
+                mean_ = square_sum / sample_count;
+                remainder_ = square_sum % sample_count;
+                count_ = sample_count;
+                return;
+            }
+
+            const uint64_t next_count = count_ + sample_count;
+            const uint64_t baseline_square = mean_ * sample_count;
+            if (square_sum >= baseline_square) {
+                AddCorrection(square_sum - baseline_square, next_count);
+            } else {
+                SubtractCorrection(baseline_square - square_sum, next_count);
+            }
+            count_ = next_count;
         }
-        total_square += block_square;
-        total_samples += block_samples;
-    }
+
+        uint64_t value() const {
+            return mean_;
+        }
+
+    private:
+        void AddCorrection(uint64_t correction, uint64_t divisor) {
+            mean_ += correction / divisor;
+            const uint64_t correction_remainder = correction % divisor;
+            if (correction_remainder != 0 &&
+                remainder_ >= divisor - correction_remainder) {
+                remainder_ -= divisor - correction_remainder;
+                ++mean_;
+            } else {
+                remainder_ += correction_remainder;
+            }
+        }
+
+        void SubtractCorrection(uint64_t correction, uint64_t divisor) {
+            mean_ -= correction / divisor;
+            const uint64_t correction_remainder = correction % divisor;
+            if (remainder_ >= correction_remainder) {
+                remainder_ -= correction_remainder;
+            } else {
+                --mean_;
+                remainder_ = divisor - (correction_remainder - remainder_);
+            }
+        }
+
+        uint64_t mean_ = 0;
+        uint64_t remainder_ = 0;
+        uint64_t count_ = 0;
+    };
+
+    class PublicationGuard {
+    public:
+        explicit PublicationGuard(std::atomic_flag& flag) : flag_(flag) {
+            while (flag_.test_and_set(std::memory_order_acquire)) {
+            }
+        }
+
+        ~PublicationGuard() {
+            flag_.clear(std::memory_order_release);
+        }
+
+        PublicationGuard(const PublicationGuard&) = delete;
+        PublicationGuard& operator=(const PublicationGuard&) = delete;
+
+    private:
+        std::atomic_flag& flag_;
+    };
 
     static uint32_t IntegerSquareRoot(uint64_t value) {
         uint32_t low = 0;
@@ -196,24 +245,8 @@ private:
         return result;
     }
 
-    uint32_t AcquireWriteSlot() {
-        while (true) {
-            const uint32_t slot = active_slot_.load();
-            writer_active_[slot].store(1);
-            if (active_slot_.load() == slot) {
-                return slot;
-            }
-            writer_active_[slot].store(0);
-        }
-    }
-
-    void ReleaseWriteSlot(uint32_t slot) {
-        writer_active_[slot].store(0);
-    }
-
-    IntervalData intervals_[2];
-    std::atomic<uint32_t> active_slot_{0};
-    std::atomic<uint32_t> writer_active_[2] = {0, 0};
+    IntervalData interval_;
+    std::atomic_flag publication_guard_ = ATOMIC_FLAG_INIT;
     uint32_t above_floor_total_ = 0;
     int64_t last_above_floor_us_ = 0;
     int32_t last_valid_model_index_ = 0;

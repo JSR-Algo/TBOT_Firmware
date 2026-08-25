@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <thread>
+#include <vector>
 
 namespace {
 void Require(bool condition, const char* message) {
@@ -77,22 +78,67 @@ int main() {
     Require(second.last_valid_model_index == 2, "latest valid model index persists");
 
     {
+        WakeWordTelemetry block_telemetry;
+        std::vector<int16_t> cross_block_samples(1025, 4096);
+        cross_block_samples.back() = 4095;
+        block_telemetry.ObserveFeedChunk(
+            cross_block_samples.data(), cross_block_samples.size(), 0, 1);
+        const WakeTelemetrySnapshot block_snapshot = block_telemetry.TakeSnapshot();
+        Require(block_snapshot.rms_min == 4095 && block_snapshot.rms_max == 4095,
+                "cross-block mean-square combination preserves exact RMS truncation");
+    }
+
+    {
         WakeWordTelemetry concurrent_telemetry;
-        constexpr uint32_t kObservationCount = 200000;
+        constexpr uint32_t kObservationCount = 100000;
         const int16_t sample[] = {1000};
         std::atomic<bool> start{false};
-        std::atomic<bool> producer_done{false};
-        std::thread producer([&]() {
+        std::atomic<bool> feed_done{false};
+        std::atomic<bool> state_done{false};
+        std::thread feed_producer([&]() {
             while (!start.load(std::memory_order_acquire)) {
             }
             for (uint32_t i = 0; i < kObservationCount; ++i) {
                 concurrent_telemetry.ObserveFeedChunk(sample, 1, 100, i + 1);
             }
-            producer_done.store(true, std::memory_order_release);
+            feed_done.store(true, std::memory_order_release);
+        });
+        std::thread state_producer([&]() {
+            while (!start.load(std::memory_order_acquire)) {
+            }
+            for (uint32_t i = 0; i < kObservationCount; ++i) {
+                switch (i % 5) {
+                    case 0:
+                        concurrent_telemetry.ObserveWakeState(WakeDecisionCategory::kNone, 0, 3);
+                        break;
+                    case 1:
+                        concurrent_telemetry.ObserveWakeState(
+                            WakeDecisionCategory::kTransition, 0, 3);
+                        break;
+                    case 2:
+                        concurrent_telemetry.ObserveWakeState(
+                            WakeDecisionCategory::kDetected, 2, 3);
+                        break;
+                    case 3:
+                        concurrent_telemetry.ObserveWakeState(
+                            WakeDecisionCategory::kDetected, 4, 3);
+                        break;
+                    case 4:
+                        concurrent_telemetry.ObserveWakeState(WakeDecisionCategory::kOther, 0, 3);
+                        break;
+                }
+            }
+            state_done.store(true, std::memory_order_release);
         });
 
         uint32_t observed_chunks = 0;
         uint32_t observed_above_floor = 0;
+        uint32_t observed_none = 0;
+        uint32_t observed_transition = 0;
+        uint32_t observed_detected = 0;
+        uint32_t observed_other = 0;
+        uint32_t observed_invalid = 0;
+        int32_t last_valid_model_index = 0;
         start.store(true, std::memory_order_release);
         do {
             const WakeTelemetrySnapshot snapshot = concurrent_telemetry.TakeSnapshot();
@@ -109,12 +155,30 @@ int main() {
             }
             observed_chunks += snapshot.chunk_count;
             observed_above_floor += snapshot.above_floor_count;
-        } while (!producer_done.load(std::memory_order_acquire));
+            observed_none += snapshot.state_none;
+            observed_transition += snapshot.state_transition;
+            observed_detected += snapshot.state_detected;
+            observed_other += snapshot.state_other;
+            observed_invalid += snapshot.invalid_model_index_count;
+            if (snapshot.last_valid_model_index > 0) {
+                last_valid_model_index = snapshot.last_valid_model_index;
+            }
+        } while (!feed_done.load(std::memory_order_acquire) ||
+                 !state_done.load(std::memory_order_acquire));
 
         const WakeTelemetrySnapshot final_snapshot = concurrent_telemetry.TakeSnapshot();
-        producer.join();
+        feed_producer.join();
+        state_producer.join();
         observed_chunks += final_snapshot.chunk_count;
         observed_above_floor += final_snapshot.above_floor_count;
+        observed_none += final_snapshot.state_none;
+        observed_transition += final_snapshot.state_transition;
+        observed_detected += final_snapshot.state_detected;
+        observed_other += final_snapshot.state_other;
+        observed_invalid += final_snapshot.invalid_model_index_count;
+        if (final_snapshot.last_valid_model_index > 0) {
+            last_valid_model_index = final_snapshot.last_valid_model_index;
+        }
         Require(observed_chunks == kObservationCount,
                 "coherent drains account for every produced chunk exactly once");
         Require(observed_above_floor == kObservationCount,
@@ -123,6 +187,18 @@ int main() {
                 "persistent totals include every drained interval");
         Require(final_snapshot.last_above_floor_us == kObservationCount,
                 "persistent timestamp includes the latest drained interval");
+        Require(observed_none == kObservationCount / 5,
+                "concurrent drains preserve every none state");
+        Require(observed_transition == kObservationCount / 5,
+                "concurrent drains preserve every transition state");
+        Require(observed_detected == 2 * kObservationCount / 5,
+                "concurrent drains preserve every detected state");
+        Require(observed_other == kObservationCount / 5,
+                "concurrent drains preserve every other state");
+        Require(observed_invalid == kObservationCount / 5,
+                "concurrent drains preserve every invalid model index");
+        Require(last_valid_model_index == 2,
+                "concurrent drains preserve the latest valid model index");
     }
 
     std::cout << "wake word telemetry test OK\n";
