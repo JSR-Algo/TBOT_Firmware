@@ -157,7 +157,7 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     enable_body = audio_cc[enable_start:audio_cc.index("void AudioService::EnableVoiceProcessing", enable_start)]
     assert "CreateWakeWordIfAvailable();" in enable_body
 
-    assert "TaskHandle_t audio_detection_task_handle_" in afe_h
+    assert "std::atomic<TaskHandle_t> audio_detection_task_handle_{nullptr};" in afe_h
     assert "bool Shutdown(uint32_t timeout_ms) override;" in afe_h
     shutdown_body = function_body(afe_cc, "bool AfeWakeWord::Shutdown")
     assert "DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT" in shutdown_body
