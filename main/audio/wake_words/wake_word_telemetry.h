@@ -29,7 +29,6 @@ struct WakeTelemetrySnapshot {
     uint32_t invalid_model_index_count;
 };
 
-// Feed/state producers and the snapshot consumer serialize only aggregate publication.
 class WakeWordTelemetry {
 public:
     void ObserveFeedChunk(const int16_t* samples, size_t sample_count,
@@ -63,73 +62,86 @@ public:
         }
 
         const uint32_t rms = IntegerSquareRoot(mean_square.value());
-        PublicationGuard guard(publication_guard_);
-        ++interval_.chunk_count;
-        if (rms < interval_.rms_min) {
-            interval_.rms_min = rms;
+        BeginPublication(feed_channel_);
+        AdvanceSequence(feed_sequence_);
+        FeedInterval* interval = CurrentProducerInterval(feed_channel_);
+        SaturatingIncrement(interval->chunk_count);
+        if (rms < interval->rms_min) {
+            interval->rms_min = rms;
         }
-        if (rms > interval_.rms_max) {
-            interval_.rms_max = rms;
+        if (rms > interval->rms_max) {
+            interval->rms_max = rms;
         }
-        if (peak > interval_.peak_max) {
-            interval_.peak_max = peak;
+        if (peak > interval->peak_max) {
+            interval->peak_max = peak;
         }
         if (rms > speech_floor_rms) {
-            ++interval_.above_floor_count;
-            interval_.last_above_floor_us = now_us;
+            SaturatingIncrement(interval->above_floor_count);
+            interval->last_above_floor_us = now_us;
+            interval->last_above_floor_sequence = feed_sequence_;
         }
+        EndPublication(feed_channel_);
     }
 
     void ObserveWakeState(WakeDecisionCategory category, int model_index, int model_count) {
-        PublicationGuard guard(publication_guard_);
+        BeginPublication(state_channel_);
+        AdvanceSequence(state_sequence_);
+        StateInterval* interval = CurrentProducerInterval(state_channel_);
         switch (category) {
             case WakeDecisionCategory::kNone:
-                ++interval_.state_none;
+                SaturatingIncrement(interval->state_none);
+                EndPublication(state_channel_);
                 return;
             case WakeDecisionCategory::kTransition:
-                ++interval_.state_transition;
+                SaturatingIncrement(interval->state_transition);
                 break;
             case WakeDecisionCategory::kDetected:
-                ++interval_.state_detected;
+                SaturatingIncrement(interval->state_detected);
                 break;
             case WakeDecisionCategory::kOther:
-                ++interval_.state_other;
+                SaturatingIncrement(interval->state_other);
                 break;
         }
 
         if (model_index > 0 && model_index <= model_count) {
-            interval_.last_valid_model_index = model_index;
+            interval->last_valid_model_index = model_index;
+            interval->last_valid_model_sequence = state_sequence_;
         } else if (model_index > 0) {
-            ++interval_.invalid_model_index_count;
+            SaturatingIncrement(interval->invalid_model_index_count);
         }
+        EndPublication(state_channel_);
     }
 
     WakeTelemetrySnapshot TakeSnapshot() {
-        PublicationGuard guard(publication_guard_);
-        const IntervalData interval = interval_;
-        interval_ = IntervalData{};
-        above_floor_total_ += interval.above_floor_count;
-        if (interval.above_floor_count != 0) {
-            last_above_floor_us_ = interval.last_above_floor_us;
+        FeedInterval feed;
+        StateInterval state;
+        DrainOne(feed_channel_, feed_pending_slot_, feed);
+        DrainOne(state_channel_, state_pending_slot_, state);
+
+        above_floor_total_ = SaturatingAdd(above_floor_total_, feed.above_floor_count);
+        if (feed.last_above_floor_sequence > last_above_floor_sequence_) {
+            last_above_floor_sequence_ = feed.last_above_floor_sequence;
+            last_above_floor_us_ = feed.last_above_floor_us;
         }
-        if (interval.last_valid_model_index > 0) {
-            last_valid_model_index_ = interval.last_valid_model_index;
+        if (state.last_valid_model_sequence > last_valid_model_sequence_) {
+            last_valid_model_sequence_ = state.last_valid_model_sequence;
+            last_valid_model_index_ = state.last_valid_model_index;
         }
 
         return {
-            interval.chunk_count,
-            interval.rms_min == kRmsMinSentinel ? 0 : interval.rms_min,
-            interval.rms_max,
-            interval.peak_max,
-            interval.above_floor_count,
+            feed.chunk_count,
+            feed.rms_min == kRmsMinSentinel ? 0 : feed.rms_min,
+            feed.rms_max,
+            feed.peak_max,
+            feed.above_floor_count,
             above_floor_total_,
             last_above_floor_us_,
-            interval.state_none,
-            interval.state_transition,
-            interval.state_detected,
-            interval.state_other,
+            state.state_none,
+            state.state_transition,
+            state.state_detected,
+            state.state_other,
             last_valid_model_index_,
-            interval.invalid_model_index_count,
+            state.invalid_model_index_count,
         };
     }
 
@@ -142,19 +154,33 @@ private:
                       std::numeric_limits<uint64_t>::max() / kMaximumSampleSquare,
                   "mean-square block accumulation must not overflow");
 
-    struct IntervalData {
+    struct FeedInterval {
         uint32_t chunk_count = 0;
         uint32_t rms_min = kRmsMinSentinel;
         uint32_t rms_max = 0;
         uint32_t peak_max = 0;
         uint32_t above_floor_count = 0;
         int64_t last_above_floor_us = 0;
+        uint64_t last_above_floor_sequence = 0;
+    };
+
+    struct StateInterval {
         uint32_t state_none = 0;
         uint32_t state_transition = 0;
         uint32_t state_detected = 0;
         uint32_t state_other = 0;
         int32_t last_valid_model_index = 0;
+        uint64_t last_valid_model_sequence = 0;
         uint32_t invalid_model_index_count = 0;
+    };
+
+    template <typename Interval>
+    struct SpscChannel {
+        Interval intervals[2];
+        // Sequential consistency prevents both sides from missing a concurrent handoff.
+        std::atomic<uint32_t> requested_slot{0};
+        std::atomic<uint32_t> producer_active{0};
+        uint32_t producer_slot = 0;
     };
 
     class ExactMeanSquare {
@@ -211,23 +237,59 @@ private:
         uint64_t count_ = 0;
     };
 
-    class PublicationGuard {
-    public:
-        explicit PublicationGuard(std::atomic_flag& flag) : flag_(flag) {
-            while (flag_.test_and_set(std::memory_order_acquire)) {
-            }
+    template <typename Interval>
+    static void BeginPublication(SpscChannel<Interval>& channel) {
+        channel.producer_active.store(1);
+        const uint32_t requested_slot = channel.requested_slot.load();
+        if (channel.producer_slot != requested_slot) {
+            channel.producer_slot = requested_slot;
         }
+    }
 
-        ~PublicationGuard() {
-            flag_.clear(std::memory_order_release);
+    template <typename Interval>
+    static Interval* CurrentProducerInterval(SpscChannel<Interval>& channel) {
+        return &channel.intervals[channel.producer_slot];
+    }
+
+    template <typename Interval>
+    static void EndPublication(SpscChannel<Interval>& channel) {
+        channel.producer_active.store(0);
+    }
+
+    template <typename Interval>
+    static void DrainOne(SpscChannel<Interval>& channel, int32_t& pending_slot,
+                         Interval& drained) {
+        if (pending_slot < 0) {
+            const uint32_t old_slot = channel.requested_slot.load();
+            const uint32_t new_slot = old_slot ^ 1U;
+            channel.requested_slot.store(new_slot);
+            pending_slot = static_cast<int32_t>(old_slot);
         }
+        if (channel.producer_active.load() != 0) {
+            return;
+        }
+        const uint32_t slot = static_cast<uint32_t>(pending_slot);
+        drained = channel.intervals[slot];
+        channel.intervals[slot] = Interval{};
+        pending_slot = -1;
+    }
 
-        PublicationGuard(const PublicationGuard&) = delete;
-        PublicationGuard& operator=(const PublicationGuard&) = delete;
+    static uint32_t SaturatingAdd(uint32_t left, uint32_t right) {
+        const uint32_t maximum = std::numeric_limits<uint32_t>::max();
+        return right > maximum - left ? maximum : left + right;
+    }
 
-    private:
-        std::atomic_flag& flag_;
-    };
+    static void SaturatingIncrement(uint32_t& value) {
+        if (value != std::numeric_limits<uint32_t>::max()) {
+            ++value;
+        }
+    }
+
+    static void AdvanceSequence(uint64_t& sequence) {
+        if (sequence != std::numeric_limits<uint64_t>::max()) {
+            ++sequence;
+        }
+    }
 
     static uint32_t IntegerSquareRoot(uint64_t value) {
         uint32_t low = 0;
@@ -245,10 +307,16 @@ private:
         return result;
     }
 
-    IntervalData interval_;
-    std::atomic_flag publication_guard_ = ATOMIC_FLAG_INIT;
+    SpscChannel<FeedInterval> feed_channel_;
+    SpscChannel<StateInterval> state_channel_;
+    uint64_t feed_sequence_ = 0;
+    uint64_t state_sequence_ = 0;
+    int32_t feed_pending_slot_ = -1;
+    int32_t state_pending_slot_ = -1;
     uint32_t above_floor_total_ = 0;
+    uint64_t last_above_floor_sequence_ = 0;
     int64_t last_above_floor_us_ = 0;
+    uint64_t last_valid_model_sequence_ = 0;
     int32_t last_valid_model_index_ = 0;
 };
 

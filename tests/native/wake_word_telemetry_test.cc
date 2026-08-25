@@ -166,26 +166,37 @@ int main() {
         } while (!feed_done.load(std::memory_order_acquire) ||
                  !state_done.load(std::memory_order_acquire));
 
-        const WakeTelemetrySnapshot final_snapshot = concurrent_telemetry.TakeSnapshot();
         feed_producer.join();
         state_producer.join();
+        const WakeTelemetrySnapshot final_snapshot = concurrent_telemetry.TakeSnapshot();
+        const WakeTelemetrySnapshot deferred_snapshot = concurrent_telemetry.TakeSnapshot();
         observed_chunks += final_snapshot.chunk_count;
+        observed_chunks += deferred_snapshot.chunk_count;
         observed_above_floor += final_snapshot.above_floor_count;
+        observed_above_floor += deferred_snapshot.above_floor_count;
         observed_none += final_snapshot.state_none;
+        observed_none += deferred_snapshot.state_none;
         observed_transition += final_snapshot.state_transition;
+        observed_transition += deferred_snapshot.state_transition;
         observed_detected += final_snapshot.state_detected;
+        observed_detected += deferred_snapshot.state_detected;
         observed_other += final_snapshot.state_other;
+        observed_other += deferred_snapshot.state_other;
         observed_invalid += final_snapshot.invalid_model_index_count;
+        observed_invalid += deferred_snapshot.invalid_model_index_count;
         if (final_snapshot.last_valid_model_index > 0) {
             last_valid_model_index = final_snapshot.last_valid_model_index;
+        }
+        if (deferred_snapshot.last_valid_model_index > 0) {
+            last_valid_model_index = deferred_snapshot.last_valid_model_index;
         }
         Require(observed_chunks == kObservationCount,
                 "coherent drains account for every produced chunk exactly once");
         Require(observed_above_floor == kObservationCount,
                 "coherent drains account for every above-floor chunk exactly once");
-        Require(final_snapshot.above_floor_total == kObservationCount,
+        Require(deferred_snapshot.above_floor_total == kObservationCount,
                 "persistent totals include every drained interval");
-        Require(final_snapshot.last_above_floor_us == kObservationCount,
+        Require(deferred_snapshot.last_above_floor_us == kObservationCount,
                 "persistent timestamp includes the latest drained interval");
         Require(observed_none == kObservationCount / 5,
                 "concurrent drains preserve every none state");

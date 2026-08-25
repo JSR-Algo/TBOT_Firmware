@@ -21,6 +21,12 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
 
 "${BUILD_DIR}/afe_run_synchronization_test"
 
+if rg -q 'atomic_flag|test_and_set' \
+    "${ROOT_DIR}/main/audio/wake_words/wake_word_telemetry.h"; then
+    echo "wake word telemetry test failed: task-level spin guards are forbidden" >&2
+    exit 1
+fi
+
 "${CXX:-c++}" -std=c++17 -pthread \
     -I"${ROOT_DIR}/main" \
     "${ROOT_DIR}/tests/native/wake_word_telemetry_test.cc" \
