@@ -161,8 +161,56 @@ def cpp_direct_nested_types(class_body: str) -> list[tuple[str, str]]:
     return cpp_direct_structure(class_body)[1]
 
 
+def cpp_file_scope_declarations(source: str) -> list[str]:
+    code = re.sub(r"(?m)^\s*#.*$", "", sanitize_cpp_source(source))
+    declarations = []
+    statement_start = 0
+    index = 0
+
+    while index < len(code):
+        if code[index] == "{":
+            declaration = re.sub(
+                r"\s+", " ", code[statement_start:index]
+            ).strip()
+            depth = 1
+            end = index + 1
+            while end < len(code) and depth != 0:
+                if code[end] == "{":
+                    depth += 1
+                elif code[end] == "}":
+                    depth -= 1
+                end += 1
+            assert depth == 0, "unterminated file-scope declaration body"
+            if declaration:
+                declarations.append(declaration)
+            index = end
+            while index < len(code) and code[index].isspace():
+                index += 1
+            if index < len(code) and code[index] == ";":
+                index += 1
+            statement_start = index
+            continue
+        if code[index] == ";":
+            declaration = re.sub(
+                r"\s+", " ", code[statement_start : index + 1]
+            ).strip()
+            if declaration:
+                declarations.append(declaration)
+            statement_start = index + 1
+        index += 1
+
+    assert code[statement_start:].strip() == "", "trailing file-scope declaration"
+    return declarations
+
+
 def assert_wake_telemetry_no_hidden_storage(source: str) -> None:
     code = sanitize_cpp_source(source)
+
+    assert cpp_file_scope_declarations(source) == [
+        "enum class WakeDecisionCategory : uint8_t",
+        "struct WakeTelemetrySnapshot",
+        "class WakeWordTelemetry",
+    ], "file-scope declarations changed"
 
     type_declarations = []
     for declaration in re.finditer(
@@ -319,6 +367,23 @@ def test_wake_telemetry_contract_rejects_type_hidden_in_allowed_interval():
     assert mutated != telemetry_h
 
     with pytest.raises(AssertionError, match="type declarations changed"):
+        assert_wake_telemetry_no_hidden_storage(mutated)
+
+
+def test_wake_telemetry_contract_rejects_file_scope_sample_retention():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    mutated = telemetry_h.replace(
+        "enum class WakeDecisionCategory",
+        "inline int16_t retained_sample = 0;\n\n"
+        "enum class WakeDecisionCategory",
+    ).replace(
+        "            const int32_t sample = samples[i];",
+        "            const int32_t sample = samples[i];\n"
+        "            retained_sample = static_cast<int16_t>(sample);",
+    )
+    assert mutated != telemetry_h
+
+    with pytest.raises(AssertionError, match="file-scope declarations changed"):
         assert_wake_telemetry_no_hidden_storage(mutated)
 
 
