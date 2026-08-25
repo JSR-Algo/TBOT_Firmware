@@ -23,9 +23,15 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def log_statement(text: str, marker: str) -> str:
+    start = text.index(marker)
+    return text[start : text.index(";", start) + 1]
+
+
 def test_runtime_logs_use_target_supported_integer_formats():
     app_cc = read("main/application.cc")
     lesson_cc = read("main/lesson_handler.cc")
+    audio_metrics = log_statement(app_cc, 'ESP_LOGI(TAG, "audio_metrics')
 
     unsupported_logs = []
     unsupported_sd_helpers = []
@@ -33,12 +39,16 @@ def test_runtime_logs_use_target_supported_integer_formats():
         if source_path.suffix not in {".c", ".cc", ".cpp", ".h", ".hpp"}:
             continue
         contents = source_path.read_text(encoding="utf-8")
+        if source_path == ROOT / "main/application.cc":
+            contents = contents.replace(audio_metrics, "")
         if "%lld" in contents or "%llu" in contents:
             unsupported_logs.append(str(source_path.relative_to(ROOT)))
         if "sdmmc_card_print_info(" in contents:
             unsupported_sd_helpers.append(str(source_path.relative_to(ROOT)))
 
     assert unsupported_logs == []
+    assert audio_metrics.count("%lld") == 1
+    assert "%llu" not in audio_metrics
     assert unsupported_sd_helpers == []
     assert "tts_stop_received ts=%lu%03lu" in app_cc
     assert "lesson_* dropped: sequence must be an integer between 0 and INT32_MAX" in lesson_cc
@@ -114,13 +124,86 @@ def test_audio_metrics_report_wake_feed_fetch_progress_without_audio_content():
     assert "wake_word_->GetProgress()" in progress_body
 
     metrics_start = app_cc.index('ESP_LOGI(TAG, "audio_metrics')
-    metrics_end = app_cc.index(";", metrics_start)
-    metrics = app_cc[metrics_start:metrics_end]
+    metrics = log_statement(app_cc, 'ESP_LOGI(TAG, "audio_metrics')
     assert "wake_feed=%lu" in metrics
     assert "wake_fetch=%lu" in metrics
     assert "wake_gen=%lu" in metrics
     assert "GetWakeWordProgress()" in app_cc[:metrics_start]
-    assert not re.search(r"pcm|rms|phrase|content", metrics, re.IGNORECASE)
+    assert not re.search(
+        r"pcm|sample\s*=|transcript|phrase|spectrum|audio_buffer|raw(?:_audio)?|content",
+        metrics,
+        re.IGNORECASE,
+    )
+
+
+def test_audio_metrics_publish_aggregate_wake_signal_and_wakenet_diagnostics():
+    app_cc = read("main/application.cc")
+    metrics_marker = 'ESP_LOGI(TAG, "audio_metrics'
+    metrics_start = app_cc.index(metrics_marker)
+    metrics = log_statement(app_cc, metrics_marker)
+    interval_start = app_cc.rfind("if (clock_ticks_ % 10 == 0)", 0, metrics_start)
+    interval_prefix = app_cc[interval_start:metrics_start]
+
+    assert app_cc.count(metrics_marker) == 1
+    assert interval_start != -1
+    assert interval_prefix.count(
+        "auto wake_progress = audio_service_.GetWakeWordProgress();"
+    ) == 1
+
+    expected_fields = (
+        "wake_chunks=%lu",
+        "wake_rms_min=%lu",
+        "wake_rms_max=%lu",
+        "wake_peak_max=%lu",
+        "wake_above_floor=%lu",
+        "wake_above_total=%lu",
+        "wake_last_above_us=%lld",
+        "wn_none=%lu",
+        "wn_transition=%lu",
+        "wn_detected=%lu",
+        "wn_other=%lu",
+        "wn_model=%ld",
+        "wn_bad_model=%lu",
+    )
+    field_positions = [metrics.index(field) for field in expected_fields]
+    assert field_positions == sorted(field_positions)
+    assert all(metrics.count(field) == 1 for field in expected_fields)
+
+    expected_arguments = (
+        "(unsigned long)wake_progress.telemetry.chunk_count",
+        "(unsigned long)wake_progress.telemetry.rms_min",
+        "(unsigned long)wake_progress.telemetry.rms_max",
+        "(unsigned long)wake_progress.telemetry.peak_max",
+        "(unsigned long)wake_progress.telemetry.above_floor_count",
+        "(unsigned long)wake_progress.telemetry.above_floor_total",
+        "(long long)wake_progress.telemetry.last_above_floor_us",
+        "(unsigned long)wake_progress.telemetry.state_none",
+        "(unsigned long)wake_progress.telemetry.state_transition",
+        "(unsigned long)wake_progress.telemetry.state_detected",
+        "(unsigned long)wake_progress.telemetry.state_other",
+        "(long)wake_progress.telemetry.last_valid_model_index",
+        "(unsigned long)wake_progress.telemetry.invalid_model_index_count",
+    )
+    argument_positions = [metrics.index(argument) for argument in expected_arguments]
+    assert argument_positions == sorted(argument_positions)
+    assert all(metrics.count(argument) == 1 for argument in expected_arguments)
+
+
+def test_wake_word_telemetry_helper_cannot_retain_log_or_transmit_audio_content():
+    telemetry_h = read("main/audio/wake_words/wake_word_telemetry.h")
+    source = re.sub(r"//.*?$|/\*.*?\*/", "", telemetry_h, flags=re.MULTILINE | re.DOTALL)
+
+    assert "std::vector" not in source
+    assert "std::string" not in source
+    assert "std::array" not in source
+    assert not re.search(r"#\s*include\s*[<\"](?:f?stream|string|vector|array|.*socket.*)[>\"]", source)
+    assert not re.search(r"\b(?:fopen|fclose|fread|fwrite|ifstream|ofstream)\s*\(", source)
+    assert not re.search(r"\b(?:socket|connect|send|sendto|recv|recvfrom)\s*\(", source)
+    assert not re.search(r"\b(?:ESP_LOG[A-Z]*|printf|fprintf|puts)\s*\(", source)
+    assert not re.search(r"\b(?:http|https|websocket|network|api)_?[a-zA-Z0-9_]*\s*\(", source, re.IGNORECASE)
+
+    # The only raw-sample type is the borrowed observer input; class state is aggregate-only.
+    assert source.count("int16_t") == 1
 
 
 def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():

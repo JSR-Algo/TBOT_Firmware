@@ -1043,7 +1043,9 @@ void Application::Run() {
                 audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
                 auto audio_stats = audio_service_.GetDebugStatistics();
                 auto wake_progress = audio_service_.GetWakeWordProgress();
-                ESP_LOGI(TAG, "audio_metrics decode_q=%lu send_q=%lu playback_q=%lu input_count=%lu wake_running=%d wake_feed=%lu wake_fetch=%lu wake_gen=%lu vp_running=%d decode_drop=%lu encode_drop=%lu stale_frames=%lu interrupts=%lu reconnects=%lu",
+                ESP_LOGI(TAG, "audio_metrics decode_q=%lu send_q=%lu playback_q=%lu input_count=%lu wake_running=%d wake_feed=%lu wake_fetch=%lu wake_gen=%lu vp_running=%d decode_drop=%lu encode_drop=%lu stale_frames=%lu interrupts=%lu reconnects=%lu "
+                              "wake_chunks=%lu wake_rms_min=%lu wake_rms_max=%lu wake_peak_max=%lu wake_above_floor=%lu wake_above_total=%lu wake_last_above_us=%lld "
+                              "wn_none=%lu wn_transition=%lu wn_detected=%lu wn_other=%lu wn_model=%ld wn_bad_model=%lu",
                          (unsigned long)decode_q, (unsigned long)send_q, (unsigned long)playback_q,
                          (unsigned long)audio_stats.input_count,
                          audio_service_.IsWakeWordRunning() ? 1 : 0,
@@ -1055,7 +1057,20 @@ void Application::Run() {
                          (unsigned long)audio_stats.encode_drop_count,
                          (unsigned long)audio_stats.stale_frame_count,
                          (unsigned long)interrupt_count_.load(),
-                         (unsigned long)reconnect_count_.load());
+                         (unsigned long)reconnect_count_.load(),
+                         (unsigned long)wake_progress.telemetry.chunk_count,
+                         (unsigned long)wake_progress.telemetry.rms_min,
+                         (unsigned long)wake_progress.telemetry.rms_max,
+                         (unsigned long)wake_progress.telemetry.peak_max,
+                         (unsigned long)wake_progress.telemetry.above_floor_count,
+                         (unsigned long)wake_progress.telemetry.above_floor_total,
+                         (long long)wake_progress.telemetry.last_above_floor_us,
+                         (unsigned long)wake_progress.telemetry.state_none,
+                         (unsigned long)wake_progress.telemetry.state_transition,
+                         (unsigned long)wake_progress.telemetry.state_detected,
+                         (unsigned long)wake_progress.telemetry.state_other,
+                         (long)wake_progress.telemetry.last_valid_model_index,
+                         (unsigned long)wake_progress.telemetry.invalid_model_index_count);
                 // Stack high-water snapshots are sampled off the audio hot path.
                 auto stack_hwm = audio_service_.GetTaskStackHighWaterMarks();
                 ESP_LOGI(TAG, "sys_metrics stack_main_min=%u stack_audio_input_min=%ld "
