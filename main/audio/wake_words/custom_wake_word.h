@@ -1,10 +1,6 @@
 #ifndef CUSTOM_WAKE_WORD_H
 #define CUSTOM_WAKE_WORD_H
 
-#include <esp_attr.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/task.h>
-#include <freertos/event_groups.h>
 #include <esp_mn_iface.h>
 #include <esp_mn_models.h>
 #include <model_path.h>
@@ -14,9 +10,7 @@
 #include <vector>
 #include <functional>
 #include <mutex>
-#include <condition_variable>
 #include <atomic>
-#include <chrono>
 
 #include "audio_codec.h"
 #include "wake_word.h"
@@ -32,8 +26,6 @@ public:
     void Start();
     void Stop();
     size_t GetFeedSize();
-    void EncodeWakeWordData();
-    bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
     bool Shutdown(uint32_t timeout_ms) override;
 
@@ -62,16 +54,6 @@ private:
     std::vector<int16_t> input_buffer_;
     std::mutex input_buffer_mutex_;
 
-    TaskHandle_t wake_word_encode_task_ = nullptr;
-    std::deque<std::vector<int16_t>> wake_word_pcm_;
-    std::deque<std::vector<uint8_t>> wake_word_opus_;
-    std::mutex wake_word_mutex_;
-    std::condition_variable wake_word_cv_;
-    std::atomic<bool> shutting_down_{false};
-    std::atomic<bool> encode_active_{false};
-    EventGroupHandle_t shutdown_event_group_ = nullptr;
-
-    void StoreWakeWordData(const std::vector<int16_t>& data);
     void ParseWakenetModelConfig();
 };
 

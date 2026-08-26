@@ -686,35 +686,11 @@ std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
     return packet;
 }
 
-void AudioService::EncodeWakeWord() {
-    auto lease = wake_word_lifecycle_.TryAcquireAccess();
-    if (!lease) return;
-    std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
-    if (wake_word_) {
-        wake_word_->EncodeWakeWordData();
-    }
-}
-
 std::string AudioService::GetLastWakeWord() {
     auto lease = wake_word_lifecycle_.TryAcquireAccess();
     if (!lease) return {};
     std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
     return wake_word_ == nullptr ? std::string{} : wake_word_->GetLastDetectedWakeWord();
-}
-
-std::unique_ptr<AudioStreamPacket> AudioService::PopWakeWordPacket() {
-    auto lease = wake_word_lifecycle_.TryAcquireAccess();
-    if (!lease) return nullptr;
-    auto packet = std::make_unique<AudioStreamPacket>();
-    WakeWord* wake_word = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(wake_word_control_mutex_);
-        wake_word = wake_word_.get();
-    }
-    if (wake_word != nullptr && wake_word->GetWakeWordOpus(packet->payload)) {
-        return packet;
-    }
-    return nullptr;
 }
 
 void AudioService::EnableWakeWordDetection(bool enable) {

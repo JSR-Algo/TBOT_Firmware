@@ -993,7 +993,7 @@ def test_afe_wake_word_collects_privacy_safe_feed_and_wakenet_telemetry():
     assert "WakeDecisionCategory::kTransition" in task
     assert "WakeDecisionCategory::kDetected" in task
     assert "WakeDecisionCategory::kOther" in task
-    observation = task[observe_state : task.index("StoreWakeWordData", observe_state)]
+    observation = task[observe_state : task.index("if (res->wakeup_state == WAKENET_DETECTED)", observe_state)]
     assert "res->wakenet_model_index" in observation
     assert "static_cast<int>(wake_words_by_model_.size())" in observation
 
@@ -3217,7 +3217,7 @@ def test_afe_audio_loops_yield_to_avoid_watchdog_starvation():
     assert "vTaskDelay(pdMS_TO_TICKS(1));" in feed_body
 
     wake_start = wake_word.index("void AfeWakeWord::AudioDetectionTask()")
-    wake_end = wake_word.index("void AfeWakeWord::StoreWakeWordData", wake_start)
+    wake_end = wake_word.index("bool AfeWakeWord::Shutdown", wake_start)
     assert "vTaskDelay(pdMS_TO_TICKS(1));" in wake_word[wake_start:wake_end]
 
     processor_start = processor.index("void AfeAudioProcessor::AudioProcessorTask()")

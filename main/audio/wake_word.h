@@ -27,8 +27,6 @@ public:
     virtual void Start() = 0;
     virtual void Stop() = 0;
     virtual size_t GetFeedSize() = 0;
-    virtual void EncodeWakeWordData() = 0;
-    virtual bool GetWakeWordOpus(std::vector<uint8_t>& opus) = 0;
     virtual const std::string& GetLastDetectedWakeWord() const = 0;
     virtual bool Shutdown(uint32_t timeout_ms) = 0;
     virtual int32_t GetDetectionTaskStackHighWaterMark() const { return -1; }

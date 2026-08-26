@@ -6,17 +6,13 @@
 #include <freertos/event_groups.h>
 
 #include <esp_afe_sr_models.h>
-#include <esp_nsn_models.h>
 #include <model_path.h>
 
-#include <deque>
 #include <string>
 #include <vector>
 #include <functional>
 #include <mutex>
-#include <condition_variable>
 #include <atomic>
-#include <chrono>
 
 #include "audio_codec.h"
 #include "afe_run_synchronization.h"
@@ -35,8 +31,6 @@ public:
     void Start();
     void Stop();
     size_t GetFeedSize();
-    void EncodeWakeWordData();
-    bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
     bool Shutdown(uint32_t timeout_ms) override;
     int32_t GetDetectionTaskStackHighWaterMark() const override;
@@ -71,14 +65,8 @@ private:
     int dominant_channel_ = -1;
     std::vector<int16_t> SelectDominantMonoChannel(const std::vector<int16_t>& data, int channels);
 
-    TaskHandle_t wake_word_encode_task_ = nullptr;
-    std::deque<std::vector<int16_t>> wake_word_pcm_;
-    std::deque<std::vector<uint8_t>> wake_word_opus_;
-    std::mutex wake_word_mutex_;
-    std::condition_variable wake_word_cv_;
     std::atomic<TaskHandle_t> audio_detection_task_handle_{nullptr};
     std::atomic<bool> shutting_down_{false};
-    std::atomic<bool> encode_active_{false};
     std::atomic<uint32_t> feed_count_{0};
     std::atomic<uint32_t> fetch_count_{0};
     std::atomic<uint32_t> run_generation_{0};
@@ -86,7 +74,6 @@ private:
     AfeRunSynchronization run_synchronization_;
     WakeWordTelemetry telemetry_;
 
-    void StoreWakeWordData(const int16_t* data, size_t size);
     void AudioDetectionTask();
 };
 

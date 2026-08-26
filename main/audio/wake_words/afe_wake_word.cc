@@ -1,5 +1,4 @@
 #include "afe_wake_word.h"
-#include "audio_service.h"
 #include <algorithm>
 #include <esp_log.h>
 #include <sstream>
@@ -9,7 +8,6 @@
 #define DETECTION_RUNNING_EVENT 1
 #define SHUTDOWN_EVENT 2
 #define DETECTION_EXITED_EVENT 4
-#define ENCODE_EXITED_EVENT 8
 #define DETECTION_STOPPED_EVENT 16
 
 #define TAG "AfeWakeWord"
@@ -74,14 +72,9 @@ std::vector<int16_t> AfeWakeWord::SelectDominantMonoChannel(const std::vector<in
     return mono;
 }
 
-AfeWakeWord::AfeWakeWord()
-    : afe_data_(nullptr),
-      wake_word_pcm_(),
-      wake_word_opus_() {
-
+AfeWakeWord::AfeWakeWord() : afe_data_(nullptr) {
     event_group_ = xEventGroupCreate();
-    xEventGroupSetBits(event_group_, DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT |
-                                        DETECTION_STOPPED_EVENT);
+    xEventGroupSetBits(event_group_, DETECTION_EXITED_EVENT | DETECTION_STOPPED_EVENT);
 }
 
 AfeWakeWord::~AfeWakeWord() {
@@ -377,9 +370,6 @@ void AfeWakeWord::AudioDetectionTask() {
             telemetry_.ObserveWakeState(decision_category, res->wakenet_model_index,
                                         static_cast<int>(wake_words_by_model_.size()));
 
-            // Store the wake word data for voice recognition, like who is speaking
-            StoreWakeWordData(res->data, res->data_size / sizeof(int16_t));
-
             if (res->wakeup_state == WAKENET_DETECTED) {
                 const std::string* wake_word = ResolveWakeWordLabel(
                     wake_words_by_model_, res->wakenet_model_index,
@@ -439,137 +429,12 @@ void AfeWakeWord::AudioDetectionTask() {
     }
 }
 
-void AfeWakeWord::StoreWakeWordData(const int16_t* data, size_t samples) {
-    // store audio data to wake_word_pcm_
-    wake_word_pcm_.emplace_back(std::vector<int16_t>(data, data + samples));
-    // keep about 2 seconds of data, detect duration is 30ms (sample_rate == 16000, chunksize == 512)
-    while (wake_word_pcm_.size() > 2000 / 30) {
-        wake_word_pcm_.pop_front();
-    }
-}
-
-void AfeWakeWord::EncodeWakeWordData() {
-    if (shutting_down_.load() || encode_active_.exchange(true)) {
-        return;
-    }
-    const size_t stack_size = 4096 * 6;
-    xEventGroupClearBits(event_group_, ENCODE_EXITED_EVENT);
-    {
-        std::lock_guard<std::mutex> lock(wake_word_mutex_);
-        wake_word_opus_.clear();
-    }
-    const BaseType_t encode_created = xTaskCreateWithCaps([](void* arg) {
-        auto this_ = (AfeWakeWord*)arg;
-        const EventGroupHandle_t exit_events = this_->event_group_;
-        const auto finish = [this_]() {
-            this_->encode_active_.store(false);
-            this_->wake_word_encode_task_ = nullptr;
-        };
-        {
-            auto start_time = esp_timer_get_time();
-            // Create encoder
-            esp_opus_enc_config_t opus_enc_cfg = AS_OPUS_ENC_CONFIG();
-            void* encoder_handle = nullptr;
-            auto ret = esp_opus_enc_open(&opus_enc_cfg, sizeof(esp_opus_enc_config_t), &encoder_handle);
-            if (encoder_handle == nullptr) {
-                ESP_LOGE(TAG, "Failed to create audio encoder, error code: %d", ret);
-                {
-                    std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
-                    this_->wake_word_opus_.push_back(std::vector<uint8_t>());
-                    this_->wake_word_cv_.notify_all();
-                }
-                finish();
-                xEventGroupSetBits(exit_events, ENCODE_EXITED_EVENT);
-                vTaskDeleteWithCaps(nullptr);
-                return;
-            }
-
-            // Get frame size
-            int frame_size = 0;
-            int outbuf_size = 0;
-            esp_opus_enc_get_frame_size(encoder_handle, &frame_size, &outbuf_size);
-            frame_size = frame_size / sizeof(int16_t);
-
-            // Encode all PCM data
-            int packets = 0;
-            std::vector<int16_t> in_buffer;
-            esp_audio_enc_in_frame_t in = {};
-            esp_audio_enc_out_frame_t out = {};
-
-            for (auto& pcm: this_->wake_word_pcm_) {
-                if (in_buffer.empty()) {
-                    in_buffer = std::move(pcm);
-                } else {
-                    in_buffer.reserve(in_buffer.size() + pcm.size());
-                    in_buffer.insert(in_buffer.end(), pcm.begin(), pcm.end());
-                }
-
-                while (in_buffer.size() >= frame_size) {
-                    std::vector<uint8_t> opus_buf(outbuf_size);
-                    in.buffer = (uint8_t *)(in_buffer.data());
-                    in.len = (uint32_t)(frame_size * sizeof(int16_t));
-                    out.buffer = opus_buf.data();
-                    out.len = outbuf_size;
-                    out.encoded_bytes = 0;
-
-                    ret = esp_opus_enc_process(encoder_handle, &in, &out);
-                    if (ret == ESP_AUDIO_ERR_OK) {
-                        std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
-                        this_->wake_word_opus_.emplace_back(opus_buf.data(), opus_buf.data() + out.encoded_bytes);
-                        this_->wake_word_cv_.notify_all();
-                        packets++;
-                    } else {
-                        ESP_LOGE(TAG, "Failed to encode audio, error code: %d", ret);
-                    }
-
-                    in_buffer.erase(in_buffer.begin(), in_buffer.begin() + frame_size);
-                }
-            }
-            this_->wake_word_pcm_.clear();
-            // Close encoder
-            esp_opus_enc_close(encoder_handle);
-            auto end_time = esp_timer_get_time();
-            ESP_LOGI(TAG, "Encode wake word opus %d packets in %ld ms", packets, (long)((end_time - start_time) / 1000));
-
-            std::lock_guard<std::mutex> lock(this_->wake_word_mutex_);
-            this_->wake_word_opus_.push_back(std::vector<uint8_t>());
-            this_->wake_word_cv_.notify_all();
-        }
-        finish();
-        xEventGroupSetBits(exit_events, ENCODE_EXITED_EVENT);
-        vTaskDeleteWithCaps(nullptr);
-    }, "encode_wake_word", stack_size, this, 2, &wake_word_encode_task_, MALLOC_CAP_SPIRAM);
-    if (encode_created != pdPASS) {
-        wake_word_encode_task_ = nullptr;
-        encode_active_.store(false);
-        xEventGroupSetBits(event_group_, ENCODE_EXITED_EVENT);
-    }
-}
-
-bool AfeWakeWord::GetWakeWordOpus(std::vector<uint8_t>& opus) {
-    std::unique_lock<std::mutex> lock(wake_word_mutex_);
-    wake_word_cv_.wait(lock, [this]() {
-        return shutting_down_.load() || !wake_word_opus_.empty();
-    });
-    if (wake_word_opus_.empty()) {
-        return false;
-    }
-    opus.swap(wake_word_opus_.front());
-    wake_word_opus_.pop_front();
-    return !opus.empty();
-}
-
 bool AfeWakeWord::Shutdown(uint32_t timeout_ms) {
     shutting_down_.store(true);
     Stop();
     xEventGroupSetBits(event_group_, SHUTDOWN_EVENT);
-    {
-        std::lock_guard<std::mutex> lock(wake_word_mutex_);
-        wake_word_opus_.push_back({});
-    }
-    wake_word_cv_.notify_all();
 
-    const EventBits_t required = DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT;
+    const EventBits_t required = DETECTION_EXITED_EVENT;
     const TickType_t wait_ticks = timeout_ms == UINT32_MAX
                                       ? portMAX_DELAY
                                       : pdMS_TO_TICKS(timeout_ms);

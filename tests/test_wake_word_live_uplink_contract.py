@@ -46,6 +46,51 @@ def test_wake_finish_sends_label_then_starts_live_listening_without_preroll():
     assert "audio_service_.PopWakeWordPacket()" not in source
 
 
+def test_wake_preroll_storage_and_secondary_encoder_are_structurally_absent():
+    wake_files = [
+        read("main/audio/wake_word.h"),
+        read("main/audio/wake_words/afe_wake_word.h"),
+        read("main/audio/wake_words/afe_wake_word.cc"),
+        read("main/audio/wake_words/custom_wake_word.h"),
+        read("main/audio/wake_words/custom_wake_word.cc"),
+        read("main/audio/wake_words/esp_wake_word.h"),
+        read("main/audio/wake_words/esp_wake_word.cc"),
+    ]
+    wake_sources = "\n".join(wake_files)
+    for forbidden in (
+        "EncodeWakeWordData",
+        "GetWakeWordOpus",
+        "StoreWakeWordData",
+        "wake_word_pcm_",
+        "wake_word_opus_",
+        "wake_word_encode_task_",
+        "wake_word_mutex_",
+        "wake_word_cv_",
+        "encode_active_",
+        "ENCODE_EXITED_EVENT",
+        '"encode_wake_word"',
+        "esp_opus_enc_",
+        "xTaskCreateWithCaps",
+    ):
+        assert forbidden not in wake_sources
+
+    service_header = read("main/audio/audio_service.h")
+    service_source = read("main/audio/audio_service.cc")
+    assert "void EncodeWakeWord();" not in service_header
+    assert "PopWakeWordPacket" not in service_header
+    assert "void AudioService::EncodeWakeWord()" not in service_source
+    assert "AudioService::PopWakeWordPacket" not in service_source
+
+
+def test_live_audio_service_opus_encoder_remains_with_measured_stack_budget():
+    header = read("main/audio/audio_service.h")
+    source = read("main/audio/audio_service.cc")
+
+    assert "kOpusCodecTaskStackBytes = 28 * 1024" in header
+    assert '"opus_codec", kOpusCodecTaskStackBytes, this' in source
+    assert "esp_opus_enc_process(opus_encoder_, &in, &out)" in source
+
+
 def test_live_uplink_safety_contract_runs_in_host_ci():
     workflow = read(".github/workflows/build.yml")
     assert "tests/test_wake_word_live_uplink_contract.py" in workflow

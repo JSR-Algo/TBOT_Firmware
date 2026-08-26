@@ -6,7 +6,6 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
-#include <functional>
 #include <iostream>
 #include <mutex>
 #include <thread>
@@ -19,56 +18,6 @@ void Require(bool condition, const char* message) {
     }
 }
 
-class FakeAsyncWakeWord {
-public:
-    void StartEncode() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        encode_active_ = true;
-    }
-
-    bool Pop() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        pop_waiting_ = true;
-        cv_.notify_all();
-        cv_.wait(lock, [&]() { return shutting_down_ || packet_ready_; });
-        return packet_ready_;
-    }
-
-    void WaitUntilPopBlocked() {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [&]() { return pop_waiting_; });
-    }
-
-    void FinishFinalAccess() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        final_access_complete_ = true;
-        cv_.notify_all();
-    }
-
-    void PublishExitAck() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        exit_ack_ = true;
-        cv_.notify_all();
-    }
-
-    void Shutdown(const std::function<void()>& requested) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        shutting_down_ = true;
-        requested();
-        cv_.notify_all();
-        cv_.wait(lock, [&]() { return exit_ack_; });
-    }
-
-private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    bool encode_active_ = false;
-    bool final_access_complete_ = false;
-    bool exit_ack_ = false;
-    bool pop_waiting_ = false;
-    bool packet_ready_ = false;
-    bool shutting_down_ = false;
-};
 }  // namespace
 
 int main() {
@@ -357,36 +306,6 @@ int main() {
     }
     Require(static_cast<bool>(reservation_binding.TryReserve()),
             "failed Begin releases reservation without binding mutation");
-
-    FakeAsyncWakeWord async;
-    async.StartEncode();
-    std::atomic<bool> pop_result{true};
-    std::thread pop([&]() { pop_result.store(async.Pop()); });
-    async.WaitUntilPopBlocked();
-    std::mutex shutdown_barrier_mutex;
-    std::condition_variable shutdown_barrier_cv;
-    bool shutdown_requested = false;
-    std::atomic<bool> shutdown_done{false};
-    std::thread shutdown([&]() {
-        async.Shutdown([&]() {
-            std::lock_guard<std::mutex> lock(shutdown_barrier_mutex);
-            shutdown_requested = true;
-            shutdown_barrier_cv.notify_all();
-        });
-        shutdown_done.store(true);
-    });
-    {
-        std::unique_lock<std::mutex> lock(shutdown_barrier_mutex);
-        shutdown_barrier_cv.wait(lock, [&]() { return shutdown_requested; });
-    }
-    pop.join();
-    Require(!pop_result.load(), "shutdown wakes blocked Pop with terminal false");
-    Require(!shutdown_done.load(), "shutdown waits for async encode acknowledgement");
-    async.FinishFinalAccess();
-    Require(!shutdown_done.load(), "shutdown does not treat final access as exit acknowledgement");
-    async.PublishExitAck();
-    shutdown.join();
-    Require(shutdown_done.load(), "shutdown completes after encode exit acknowledgement");
 
     for (int i = 0; i < 3; ++i) {
         const auto token = controller.BeginProvisioningAndQuiesce([]() {});

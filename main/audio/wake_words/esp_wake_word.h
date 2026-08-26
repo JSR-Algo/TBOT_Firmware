@@ -25,8 +25,6 @@ public:
     void Start();
     void Stop();
     size_t GetFeedSize();
-    void EncodeWakeWordData();
-    bool GetWakeWordOpus(std::vector<uint8_t>& opus);
     const std::string& GetLastDetectedWakeWord() const { return last_detected_wake_word_; }
     bool Shutdown(uint32_t timeout_ms) override;
 

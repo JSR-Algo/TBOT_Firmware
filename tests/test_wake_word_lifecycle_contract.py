@@ -54,7 +54,7 @@ def test_begin_failure_after_quiescence_stays_fail_closed_without_rearm():
     assert "RollbackWifiConfigEntry(preparation)" in begin_failure
 
 
-def test_concrete_wake_words_ack_shutdown_and_preserve_borrowed_models():
+def test_concrete_wake_words_shutdown_safely_and_preserve_borrowed_models():
     for stem in ("afe_wake_word", "custom_wake_word", "esp_wake_word"):
         header = read(f"main/audio/wake_words/{stem}.h")
         source = read(f"main/audio/wake_words/{stem}.cc")
@@ -64,21 +64,14 @@ def test_concrete_wake_words_ack_shutdown_and_preserve_borrowed_models():
         assert "owns_models_ = false" in source
 
     afe = read("main/audio/wake_words/afe_wake_word.cc")
-    custom = read("main/audio/wake_words/custom_wake_word.cc")
-    for source in (afe, custom):
-        assert "shutting_down_" in source
-        assert "encode_active_" in source
-        assert "wake_word_cv_.notify_all()" in source
-        encode_task = source[source.index('"encode_wake_word"') - 6500:source.index('"encode_wake_word"')]
-        ack = encode_task.rindex("xEventGroupSetBits(exit_events, ENCODE_EXITED_EVENT)")
-        assert encode_task.rfind("this_->", 0, ack) >= 0
-        assert "this_->" not in encode_task[ack:]
-        assert "vTaskDeleteWithCaps(nullptr)" in encode_task[ack:]
+    assert "shutting_down_" in afe
     detection = afe[afe.index("const BaseType_t detection_created"):afe.index('"audio_detection"')]
     detection_ack = detection.index("xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT)")
     assert "this_->" not in detection[detection_ack:]
     assert detection.index("audio_detection_task_handle_.store(nullptr") < detection_ack
-    assert "DETECTION_EXITED_EVENT | ENCODE_EXITED_EVENT" in afe
+    shutdown = afe[afe.index("bool AfeWakeWord::Shutdown"):]
+    assert "const EventBits_t required = DETECTION_EXITED_EVENT;" in shutdown
+    assert "ENCODE_EXITED_EVENT" not in afe
 
 
 def test_afe_fetch_is_bounded_and_stop_acknowledges_before_reset():
@@ -91,7 +84,7 @@ def test_afe_fetch_is_bounded_and_stop_acknowledges_before_reset():
     assert "fetch_with_delay(afe_data_, pdMS_TO_TICKS(kFetchWaitMs))" in source
 
     detection = source[source.index("void AfeWakeWord::AudioDetectionTask()") :]
-    detection = detection[: detection.index("void AfeWakeWord::StoreWakeWordData")]
+    detection = detection[: detection.index("bool AfeWakeWord::Shutdown")]
     assert "xEventGroupSetBits(event_group_, DETECTION_STOPPED_EVENT)" in detection
 
     stop = source[source.index("void AfeWakeWord::Stop()") :]
@@ -115,15 +108,14 @@ def test_afe_discards_fetch_from_superseded_run_generation():
     assert "BeginStart(run_generation_)" in start
 
     detection = source[source.index("void AfeWakeWord::AudioDetectionTask()") :]
-    detection = detection[: detection.index("void AfeWakeWord::StoreWakeWordData")]
+    detection = detection[: detection.index("bool AfeWakeWord::Shutdown")]
     assert "const uint32_t fetch_generation" in detection
     generation_gate = detection.index("fetch_generation != run_generation_")
-    assert generation_gate < detection.index("StoreWakeWordData")
     assert generation_gate < detection.index("wake_word_detected_callback_")
     assert "AcquireTransition" in source
     assert "TryAcquireTransition" in detection
     assert "if (!lifecycle_lock.owns_lock())" in detection
-    assert detection.index("TryAcquireTransition") < detection.index("StoreWakeWordData")
+    assert detection.index("TryAcquireTransition") < detection.index("wake_word_detected_callback_")
     assert "AfeRunSynchronization run_synchronization_" in header
     assert "WaitForStopAcknowledgement" in source
     assert "std::atomic<TaskHandle_t> audio_detection_task_handle_" in header

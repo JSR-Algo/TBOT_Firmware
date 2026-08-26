@@ -107,13 +107,6 @@ size_t EspWakeWord::GetFeedSize() {
     return wakenet_iface_->get_samp_chunksize(wakenet_data_);
 }
 
-void EspWakeWord::EncodeWakeWordData() {
-}
-
-bool EspWakeWord::GetWakeWordOpus(std::vector<uint8_t>& opus) {
-    return false;
-}
-
 bool EspWakeWord::Shutdown(uint32_t) {
     Stop();
     return true;
