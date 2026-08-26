@@ -149,7 +149,10 @@ def test_opus_worker_stack_uses_the_measured_named_budget():
     header = read("main/audio/audio_service.h")
     source = read("main/audio/audio_service.cc")
 
-    assert "former 24 KiB allocation reported 16.9 KiB unused" in header
-    assert "kOpusCodecTaskStackBytes = 12 * 1024" in header
-    assert '"opus_codec", kOpusCodecTaskStackBytes' in source
+    assert "first live Opus encode overflowed the 12 KiB task stack" in header
+    assert "8 KiB safety margin" in header
+    assert "kOpusCodecTaskStackBytes = 20 * 1024" in header
+    assert '"opus_codec", kOpusCodecTaskStackBytes, this' in source
+    assert "kOpusCodecTaskStackBytes / sizeof(StackType_t)" not in source
+    assert "kOpusCodecTaskStackBytes / sizeof(StackType_t::value_type)" not in source
     assert "2048 * 12" not in source
