@@ -4,8 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FLAG = "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT"
-TASK07_OTA_URL = "http://192.168.100.183:8003/tbot/ota/"
-TASK07_WEBSOCKET_URL = "ws://192.168.100.183:8000/tbot/v1/"
+TASK07_OTA_URL = "http://192.168.0.117:8003/tbot/ota/"
+TASK07_WEBSOCKET_URL = "ws://192.168.0.117:8000/tbot/v1/"
 
 
 def read(path: str) -> str:
