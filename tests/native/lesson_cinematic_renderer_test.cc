@@ -32,6 +32,8 @@ struct FakeRuntime {
     bool fail_open_psram = false;
     bool enough_memory = true;
     std::uint64_t decode_elapsed_ms = 0;
+    bool use_layer_decode_elapsed = false;
+    std::array<std::uint64_t, 3> layer_decode_elapsed_ms{};
     std::atomic<bool> block_decode{false};
     std::atomic<bool> decode_entered{false};
     std::atomic<bool> allow_decode{false};
@@ -68,7 +70,7 @@ void Close(void* raw, void*) {
     ++static_cast<FakeRuntime*>(raw)->closes;
 }
 
-bool Decode(void* raw, void*, std::size_t index, std::uint8_t* destination,
+bool Decode(void* raw, void* stream, std::size_t index, std::uint8_t* destination,
             std::size_t capacity, std::uint16_t* width, std::uint16_t* height,
             std::size_t* stride) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
@@ -76,7 +78,9 @@ bool Decode(void* raw, void*, std::size_t index, std::uint8_t* destination,
         fake.decode_entered = true;
         while (!fake.allow_decode) std::this_thread::yield();
     }
-    fake.now_ms += fake.decode_elapsed_ms;
+    const auto layer_index = reinterpret_cast<std::uintptr_t>(stream) - 1;
+    fake.now_ms += fake.use_layer_decode_elapsed
+        ? fake.layer_decode_elapsed_ms.at(layer_index) : fake.decode_elapsed_ms;
     if (fake.fail_decode) return false;
     fake.decoded_indices.push_back(index);
     const bool background = capacity >= 480u * 320u * 2u;
@@ -232,6 +236,47 @@ void TestPrepareAllowsMeasuredColdDecodeButPlaybackKeepsDeadline() {
     Require(fake.presents == 1, "timed-out playback frame is never presented");
 }
 
+void TestPlaybackUsesBoundedLayerSpecificDecodeDeadlines() {
+    {
+        FakeRuntime fake;
+        tbot::LessonCinematicRenderer renderer(Ops(&fake));
+        Require(renderer.Prepare(Config(), 0).accepted, "layer deadline fixture prepares");
+        Require(renderer.Start(8, "teach", fake.now_ms).accepted, "layer deadline fixture starts");
+        fake.use_layer_decode_elapsed = true;
+        fake.layer_decode_elapsed_ms = {150, 100, 100};
+
+        const auto response = renderer.Tick(fake.now_ms + 100);
+        Require(response.accepted && fake.presents == 2,
+                "steady playback accepts a 150ms full-resolution background and 100ms overlays");
+    }
+    {
+        FakeRuntime fake;
+        tbot::LessonCinematicRenderer renderer(Ops(&fake));
+        Require(renderer.Prepare(Config(), 0).accepted, "foreground deadline fixture prepares");
+        Require(renderer.Start(8, "teach", fake.now_ms).accepted, "foreground deadline fixture starts");
+        fake.use_layer_decode_elapsed = true;
+        fake.layer_decode_elapsed_ms = {100, 101, 0};
+
+        const auto response = renderer.Tick(fake.now_ms + 100);
+        Require(!response.accepted && response.error == tbot::LessonCinematicError::kDecodeTimeout,
+                "steady foreground layers retain the 100ms deadline");
+        Require(fake.presents == 1, "foreground timeout prevents presentation");
+    }
+    {
+        FakeRuntime fake;
+        tbot::LessonCinematicRenderer renderer(Ops(&fake));
+        Require(renderer.Prepare(Config(), 0).accepted, "background timeout fixture prepares");
+        Require(renderer.Start(8, "teach", fake.now_ms).accepted, "background timeout fixture starts");
+        fake.use_layer_decode_elapsed = true;
+        fake.layer_decode_elapsed_ms = {151, 0, 0};
+
+        const auto response = renderer.Tick(fake.now_ms + 100);
+        Require(!response.accepted && response.error == tbot::LessonCinematicError::kDecodeTimeout,
+                "steady full-resolution background remains bounded at 150ms");
+        Require(fake.presents == 1, "background timeout prevents presentation");
+    }
+}
+
 void TestDuplicateSequenceFingerprintAndActiveTickLifecycle() {
     FakeRuntime fake;
     tbot::LessonCinematicRenderer renderer(Ops(&fake));
@@ -279,6 +324,7 @@ int main() {
     TestPrepareStartClockPauseResumeAndNoSteadyAllocations();
     TestIdempotencyValidationFailureAndSafeStop();
     TestPrepareAllowsMeasuredColdDecodeButPlaybackKeepsDeadline();
+    TestPlaybackUsesBoundedLayerSpecificDecodeDeadlines();
     TestDuplicateSequenceFingerprintAndActiveTickLifecycle();
     std::cout << "lesson_cinematic_renderer test passed\n";
     return 0;

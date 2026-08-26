@@ -523,10 +523,10 @@ LessonCinematicResponse LessonCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
     // AC:20 measured the cold background frame-zero decode at 124ms. Prepare is
-    // outside the playback clock, so allow bounded cold-start headroom without
-    // relaxing the 100ms steady-frame deadline.
+    // outside the playback clock, so allow bounded cold-start headroom.
     constexpr std::uint64_t kPrepareDecodeDeadlineMs = 150;
-    const LessonCinematicError frame_zero_error = RenderFrame(0, kPrepareDecodeDeadlineMs);
+    const LessonCinematicError frame_zero_error = RenderFrame(
+        0, kPrepareDecodeDeadlineMs, kPrepareDecodeDeadlineMs);
     if (frame_zero_error != LessonCinematicError::kNone) {
         CloseStreams();
         ReleaseBuffers();
@@ -646,9 +646,11 @@ LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
     }
     if (frame == displayed_frame_) return Applied(LessonCinematicResponseType::kCommandApplied,
                                                    last_sequence_);
-    constexpr std::uint64_t kPlaybackDecodeDeadlineMs = 100;
+    constexpr std::uint64_t kPlaybackBackgroundDecodeDeadlineMs = 150;
+    constexpr std::uint64_t kPlaybackForegroundDecodeDeadlineMs = 100;
     const LessonCinematicError render_error = RenderFrame(
-        static_cast<std::size_t>(frame), kPlaybackDecodeDeadlineMs);
+        static_cast<std::size_t>(frame), kPlaybackBackgroundDecodeDeadlineMs,
+        kPlaybackForegroundDecodeDeadlineMs);
     if (render_error != LessonCinematicError::kNone) {
         state_ = State::kFailed;
         return Failure(last_sequence_, render_error);
@@ -658,7 +660,8 @@ LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
 }
 
 LessonCinematicError LessonCinematicRenderer::RenderFrame(
-    std::size_t frame_index, std::uint64_t decode_deadline_ms) {
+    std::size_t frame_index, std::uint64_t background_decode_deadline_ms,
+    std::uint64_t foreground_decode_deadline_ms) {
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     std::size_t stride = 0;
@@ -667,6 +670,8 @@ LessonCinematicError LessonCinematicRenderer::RenderFrame(
     auto decode = [&]([[maybe_unused]] std::size_t layer_index, void* stream,
                       std::uint8_t* destination,
                       std::size_t capacity) {
+        const std::uint64_t decode_deadline_ms = layer_index == 0
+            ? background_decode_deadline_ms : foreground_decode_deadline_ms;
         const std::uint64_t started = ops_.monotonic_ms != nullptr
             ? ops_.monotonic_ms(ops_.context) : 0;
         const bool decoded = ops_.decode(ops_.context, stream, frame_index, destination,
