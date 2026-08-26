@@ -164,10 +164,11 @@ bool ProductionOpen(void* raw, const char* path, LessonCinematicStreamMetadata* 
     if (context->jpeg_input == nullptr) {
         context->jpeg_input = static_cast<std::uint8_t*>(heap_caps_malloc(
             context->jpeg_input_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        // The ROM decoder repeatedly accesses this 3.1 KB workspace during every MCU row.
         if (context->jpeg_input == nullptr ||
             jpeg_reusable_decoder_prepare_workspace(
                 &context->decoder, kLessonCinematicWidth, kLessonCinematicHeight,
-                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != ESP_OK) {
+                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != ESP_OK) {
             if (context->jpeg_input != nullptr) heap_caps_free(context->jpeg_input);
             context->jpeg_input = nullptr;
             jpeg_reusable_decoder_destroy(&context->decoder);
@@ -319,7 +320,7 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
     jpeg_reusable_decoder_t decoder_probe{};
     const bool decoder_ready = jpeg_reusable_decoder_prepare_workspace(
         &decoder_probe, kLessonCinematicWidth, kLessonCinematicHeight,
-        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) == ESP_OK;
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) == ESP_OK;
     const bool buffers_ready = framebuffer_probe != nullptr && foreground_probe != nullptr &&
                                jpeg_probe != nullptr && decoder_ready;
     if (framebuffer_probe != nullptr) heap_caps_free(framebuffer_probe);

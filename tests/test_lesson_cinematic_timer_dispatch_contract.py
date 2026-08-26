@@ -35,3 +35,12 @@ def test_renderer_worker_owns_all_production_tick_routes() -> None:
     assert "TickActiveLessonLayeredCinematicRenderer" in body
     assert "TickActiveLessonFlattenedCinematicRenderer" in body
     assert "TickActiveLessonCinematicRenderer" in body
+
+
+def test_v3_rom_jpeg_workspace_stays_in_internal_ram_for_steady_decode() -> None:
+    capacity_probe = _function_body("bool InitializeProductionLessonCinematicRenderer")
+    production_open = _function_body("bool ProductionOpen")
+
+    expected_caps = "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT"
+    assert expected_caps in capacity_probe
+    assert expected_caps in production_open
