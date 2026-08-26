@@ -4,6 +4,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FLAG = "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT"
+TASK07_OTA_URL = "http://192.168.100.183:8003/tbot/ota/"
+TASK07_WEBSOCKET_URL = "ws://192.168.100.183:8000/tbot/v1/"
 
 
 def read(path: str) -> str:
@@ -16,6 +18,15 @@ def function(source: str, signature: str, next_signature: str) -> str:
 
 def local_else_branch(source: str) -> str:
     return source.split("#else", 1)[1].split("#endif", 1)[0]
+
+
+def test_task07_local_overlay_pins_only_the_authorized_lab_endpoints():
+    overlay = read("sdkconfig.defaults.task07-local")
+
+    assert f"{FLAG}=y" in overlay
+    assert f'CONFIG_OTA_URL="{TASK07_OTA_URL}"' in overlay
+    assert f'CONFIG_WEBSOCKET_URL="{TASK07_WEBSOCKET_URL}"' in overlay
+    assert "esp.tjbot.vn" not in overlay
 
 
 def preprocess_local(source: str, *defines: str) -> str:

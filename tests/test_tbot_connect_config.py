@@ -32,6 +32,15 @@ def maintained_build_configs() -> list[Path]:
     return sorted(ROOT.glob("sdkconfig.defaults*"))
 
 
+def production_build_configs() -> list[Path]:
+    return [
+        path
+        for path in maintained_build_configs()
+        if "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT=y"
+        not in path.read_text(encoding="utf-8")
+    ]
+
+
 def test_firmware_compiles_no_ephemeral_websocket_endpoint_fallback():
     kconfig = read("main/Kconfig.projbuild")
 
@@ -53,7 +62,7 @@ def test_project_version_advances_past_current_production_lcdwiki_ota():
 
 
 def test_local_firmware_build_configs_compile_no_ephemeral_websocket_seed():
-    local_configs = maintained_build_configs()
+    local_configs = production_build_configs()
     assert all(path.is_file() for path in local_configs)
     assert ROOT / "sdkconfig.defaults.local" in local_configs
     assert ROOT / "sdkconfig.blufi" not in local_configs
@@ -69,7 +78,7 @@ def test_local_firmware_build_configs_compile_no_ephemeral_websocket_seed():
 
 
 def test_local_firmware_build_configs_compile_only_current_production_ota_seed():
-    local_configs = maintained_build_configs()
+    local_configs = production_build_configs()
     assert all(path.is_file() for path in local_configs)
     assert ROOT / "sdkconfig.defaults.local" in local_configs
     assert ROOT / "sdkconfig.blufi" not in local_configs
