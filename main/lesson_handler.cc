@@ -2670,7 +2670,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
         strcmp(protocol_version, tbot::kLessonRendererV4) == 0;
     const bool cinematic_v5 = protocol_version != nullptr &&
         strcmp(protocol_version, tbot::kLessonRendererV5) == 0;
-    if (cinematic_v3 || cinematic_v4 || cinematic_v5) {
+    const bool renderer_v3_lesson_step = cinematic_v3 && strcmp(type, "lesson_step") == 0;
+    if ((cinematic_v3 && !renderer_v3_lesson_step) || cinematic_v4 || cinematic_v5) {
         auto claim_cinematic_display = [this]() {
             Display* display = Board::GetInstance().GetDisplay();
             LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
@@ -3454,7 +3455,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                              strcmp(protocol_version, kLessonProtocolVersion) == 0;
     const bool renderer_v2 = protocol_version != nullptr &&
                              strcmp(protocol_version, kLessonRendererV2) == 0;
-    const bool version_ok = renderer_v1 || renderer_v2;
+    const bool version_ok = renderer_v1 || renderer_v2 || renderer_v3_lesson_step;
     const char* profile = Str(body, "profile");
     const bool profile_ok = (profile == nullptr) ||
                             strcmp(profile, kLessonProfileEspTft) == 0;

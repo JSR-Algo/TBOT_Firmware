@@ -1655,6 +1655,50 @@ void test_cinematic_rejects_unsupported_frames_and_accepts_all_late_phases() {
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
+void test_renderer_v3_routes_lesson_step_after_cinematic_start() {
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    NetworkInterface network;
+    Board::GetInstance().display_ = &display;
+    Board::GetInstance().network_ = &network;
+    ResetHostHttp();
+    HostHttp().body = JpegBody();
+    HostHttp().use_content_length = true;
+    HostJpegDecodeMode() = 0;
+
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer renderer({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                             V3Decode, V3Present});
+    tbot::SetActiveLessonCinematicRenderer(&renderer);
+    Handle(V3PrepareFrame(1));
+    Handle(V3Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"opening\","
+        "\"commandSequenceId\":42}}"));
+
+    std::string step = StepFrame(
+        3, "s1", "http://x/p.jpg", "http://x/o.jpg", "http://x/r.jpg",
+        ",\"prompt\":\"Welcome\",\"stepType\":\"greeting\","
+        "\"completionClass\":\"passive\"");
+    const std::string legacy_version = kLessonProtocolVersion;
+    const std::string renderer_v3 = tbot::kLessonRendererV3;
+    const std::size_t version = step.find(legacy_version);
+    require(version != std::string::npos, "step fixture contains its protocol version");
+    step.replace(version, legacy_version.size(), renderer_v3);
+    Handle(step);
+
+    require(Sent().size() == 3 && FrameType(2) == "lesson_ack" &&
+                FrameStepId(2) == "s1" && FrameBodyNum(2, "acks") == 3,
+            "renderer-v3 lesson_step reaches the standard step ACK path after cinematic start");
+    require(FrameBodyBool(2, "rendered", false) && !FrameBodyBool(2, "degraded", true),
+            "renderer-v3 lesson_step renders all authored layers without degradation");
+    Handle(V3Frame("lesson_cinematic_control", 4,
+        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":43}"));
+    require(FrameType(3) == "lesson_ack",
+            "renderer-v3 lesson_step fixture releases its cinematic session");
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+}
+
 void test_cinematic_renderer_failures_use_stable_error_mapping() {
     enum class FailureMode { kOpen, kAllocate, kDecode, kTimeout, kPresent };
     struct FailureCase {
@@ -8600,6 +8644,7 @@ int main() {
     test_renderer_v2_capability_shape_and_exact_tokens();
     test_renderer_v3_capability_is_fail_closed_until_initialized();
     test_cinematic_rejects_unsupported_frames_and_accepts_all_late_phases();
+    test_renderer_v3_routes_lesson_step_after_cinematic_start();
     test_cinematic_renderer_failures_use_stable_error_mapping();
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v5_capability_exact_layers_and_lifecycle();
