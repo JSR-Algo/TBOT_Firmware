@@ -127,9 +127,9 @@ struct AudioTaskStackHighWaterMarks {
 
 class AudioService {
 public:
-    // The first live Opus encode overflowed the 12 KiB task stack. Keep an
-    // 8 KiB safety margin above that observed failure point.
-    static constexpr uint32_t kOpusCodecTaskStackBytes = 20 * 1024;
+    // The measured 20 KiB task left only 428 bytes free after live encoding.
+    // That is ~19.6 KiB peak; 28 KiB keeps about 8 KiB headroom.
+    static constexpr uint32_t kOpusCodecTaskStackBytes = 28 * 1024;
 
     AudioService();
     ~AudioService();
