@@ -1692,10 +1692,11 @@ void test_renderer_v3_routes_lesson_step_after_cinematic_start() {
             "renderer-v3 lesson_step reaches the standard step ACK path after cinematic start");
     require(FrameBodyBool(2, "rendered", false) && !FrameBodyBool(2, "degraded", true),
             "renderer-v3 lesson_step renders all authored layers without degradation");
-    Handle(V3Frame("lesson_cinematic_control", 4,
-        "{\"command\":\"cancel\",\"phaseId\":\"opening\",\"commandSequenceId\":43}"));
-    require(FrameType(3) == "lesson_ack",
-            "renderer-v3 lesson_step fixture releases its cinematic session");
+    Handle(V3Frame("lesson_stop", 4, "{\"reason\":\"completed\"}"));
+    require(FrameType(3) == "lesson_ack" && FrameBodyNum(3, "acks") == 4,
+            "renderer-v3 terminal lesson_stop reaches the standard completion ACK path");
+    require(!renderer.prepared() && !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "renderer-v3 terminal lesson_stop releases its cinematic session and asset lease");
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 

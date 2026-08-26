@@ -2671,7 +2671,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool cinematic_v5 = protocol_version != nullptr &&
         strcmp(protocol_version, tbot::kLessonRendererV5) == 0;
     const bool renderer_v3_lesson_step = cinematic_v3 && strcmp(type, "lesson_step") == 0;
-    if ((cinematic_v3 && !renderer_v3_lesson_step) || cinematic_v4 || cinematic_v5) {
+    const bool renderer_v3_standard_frame = cinematic_v3 &&
+        (renderer_v3_lesson_step ||
+         (strcmp(type, "lesson_stop") == 0 && Obj(body, "cinematicPhase") == nullptr));
+    if ((cinematic_v3 && !renderer_v3_standard_frame) || cinematic_v4 || cinematic_v5) {
         auto claim_cinematic_display = [this]() {
             Display* display = Board::GetInstance().GetDisplay();
             LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
@@ -3455,7 +3458,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                              strcmp(protocol_version, kLessonProtocolVersion) == 0;
     const bool renderer_v2 = protocol_version != nullptr &&
                              strcmp(protocol_version, kLessonRendererV2) == 0;
-    const bool version_ok = renderer_v1 || renderer_v2 || renderer_v3_lesson_step;
+    const bool version_ok = renderer_v1 || renderer_v2 || renderer_v3_standard_frame;
     const char* profile = Str(body, "profile");
     const bool profile_ok = (profile == nullptr) ||
                             strcmp(profile, kLessonProfileEspTft) == 0;
@@ -3981,6 +3984,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
         g_session.running = false;
         g_session.paused = false;
         g_session.prepared = false;
+        if (g_session.cinematic_renderer_id == tbot::kLessonRendererV3) {
+            if (auto* renderer = tbot::ActiveLessonCinematicRenderer()) {
+                renderer->DiscardSession();
+            }
+        }
         g_embodied_ledger = LessonEmbodiedLedger{};
         g_layer_state.ClearAll();
         emit_ack(root, sequence, /*rendered*/ false, /*degraded*/ false);
