@@ -382,10 +382,9 @@ LessonCinematicError LessonLayeredCinematicRenderer::RenderFrame(std::size_t fra
     std::size_t stride = 0;
     const std::uint64_t started = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : 0;
-    if (!ops_.decode_video(ops_.context, robot_stream_, frame_index, robot_scratch_,
-                           kRobotCapacity, &width, &height, &stride)) {
-        return OperationError(LessonCinematicError::kDecodeFailed);
-    }
+    const bool decoded = ops_.decode_video(ops_.context, robot_stream_, frame_index,
+                                           robot_scratch_, kRobotCapacity, &width,
+                                           &height, &stride);
     if (ops_.monotonic_ms != nullptr) {
         const std::uint64_t finished = ops_.monotonic_ms(ops_.context);
 #ifdef ESP_PLATFORM
@@ -400,6 +399,7 @@ LessonCinematicError LessonLayeredCinematicRenderer::RenderFrame(std::size_t fra
             return LessonCinematicError::kDecodeTimeout;
         }
     }
+    if (!decoded) return OperationError(LessonCinematicError::kDecodeFailed);
     if (width == 0 || height == 0 || width > 240 || height > 240 ||
         stride != static_cast<std::size_t>(width) * 2 ||
         !LessonCompositeRgb565(

@@ -132,7 +132,7 @@ private:
                                     std::uint64_t sequence) const;
     LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* phase_id,
                                             const char* command) const;
-    LessonCinematicError RenderFrame(std::size_t frame_index);
+    LessonCinematicError RenderFrame(std::size_t frame_index, std::uint64_t decode_deadline_ms);
     LessonCinematicError OperationError(LessonCinematicError fallback) const;
     void CloseStreams();
     void ReleaseBuffers();

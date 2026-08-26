@@ -521,7 +521,11 @@ LessonCinematicResponse LessonCinematicRenderer::Prepare(
         ReleaseBuffers();
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
-    const LessonCinematicError frame_zero_error = RenderFrame(0);
+    // AC:20 measured the cold background frame-zero decode at 124ms. Prepare is
+    // outside the playback clock, so allow bounded cold-start headroom without
+    // relaxing the 100ms steady-frame deadline.
+    constexpr std::uint64_t kPrepareDecodeDeadlineMs = 150;
+    const LessonCinematicError frame_zero_error = RenderFrame(0, kPrepareDecodeDeadlineMs);
     if (frame_zero_error != LessonCinematicError::kNone) {
         CloseStreams();
         ReleaseBuffers();
@@ -641,7 +645,9 @@ LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
     }
     if (frame == displayed_frame_) return Applied(LessonCinematicResponseType::kCommandApplied,
                                                    last_sequence_);
-    const LessonCinematicError render_error = RenderFrame(static_cast<std::size_t>(frame));
+    constexpr std::uint64_t kPlaybackDecodeDeadlineMs = 100;
+    const LessonCinematicError render_error = RenderFrame(
+        static_cast<std::size_t>(frame), kPlaybackDecodeDeadlineMs);
     if (render_error != LessonCinematicError::kNone) {
         state_ = State::kFailed;
         return Failure(last_sequence_, render_error);
@@ -650,29 +656,43 @@ LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
     return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
 }
 
-LessonCinematicError LessonCinematicRenderer::RenderFrame(std::size_t frame_index) {
+LessonCinematicError LessonCinematicRenderer::RenderFrame(
+    std::size_t frame_index, std::uint64_t decode_deadline_ms) {
     std::uint16_t width = 0;
     std::uint16_t height = 0;
     std::size_t stride = 0;
     constexpr std::size_t kBackgroundCapacity =
         static_cast<std::size_t>(kLessonCinematicWidth) * kLessonCinematicHeight * 2;
-    constexpr std::uint64_t kReadDecodeDeadlineMs = 100;
-    auto decode = [&](void* stream, std::uint8_t* destination, std::size_t capacity) {
+    auto decode = [&]([[maybe_unused]] std::size_t layer_index, void* stream,
+                      std::uint8_t* destination,
+                      std::size_t capacity) {
         const std::uint64_t started = ops_.monotonic_ms != nullptr
             ? ops_.monotonic_ms(ops_.context) : 0;
         const bool decoded = ops_.decode(ops_.context, stream, frame_index, destination,
                                          capacity, &width, &height, &stride);
-        if (!decoded) return OperationError(LessonCinematicError::kDecodeFailed);
+        const LessonCinematicError operation_error = decoded
+            ? LessonCinematicError::kNone
+            : OperationError(LessonCinematicError::kDecodeFailed);
         if (ops_.monotonic_ms != nullptr) {
             const std::uint64_t finished = ops_.monotonic_ms(ops_.context);
-            if (finished >= started && finished - started > kReadDecodeDeadlineMs) {
+#ifdef ESP_PLATFORM
+            ESP_LOGI("LessonCinematic",
+                     "decode layer=%u frame=%u elapsed_ms=%" PRIu64
+                     " deadline_ms=%" PRIu64 " decoded=%d operation_error=%u",
+                     static_cast<unsigned>(layer_index), static_cast<unsigned>(frame_index),
+                     finished >= started ? finished - started : 0, decode_deadline_ms,
+                     decoded ? 1 : 0, static_cast<unsigned>(operation_error));
+#endif
+            if (!decoded) return operation_error;
+            if (finished >= started && finished - started > decode_deadline_ms) {
                 return LessonCinematicError::kDecodeTimeout;
             }
         }
+        if (!decoded) return operation_error;
         return LessonCinematicError::kNone;
     };
     const LessonCinematicError background_error = decode(
-        streams_[0], reinterpret_cast<std::uint8_t*>(framebuffer_), kBackgroundCapacity);
+        0, streams_[0], reinterpret_cast<std::uint8_t*>(framebuffer_), kBackgroundCapacity);
     if (background_error != LessonCinematicError::kNone ||
         width != kLessonCinematicWidth || height != kLessonCinematicHeight ||
         stride != static_cast<std::size_t>(width) * 2) {
@@ -681,7 +701,7 @@ LessonCinematicError LessonCinematicRenderer::RenderFrame(std::size_t frame_inde
     }
     for (std::size_t index = 1; index < streams_.size(); ++index) {
         const LessonCinematicError foreground_error = decode(
-            streams_[index], foreground_scratch_, foreground_capacity_);
+            index, streams_[index], foreground_scratch_, foreground_capacity_);
         if (foreground_error != LessonCinematicError::kNone ||
             width == 0 || height == 0 || width > 240 || height > 240 ||
             stride != static_cast<std::size_t>(width) * 2 ||

@@ -216,14 +216,20 @@ void TestIdempotencyValidationFailureAndSafeStop() {
             "stale phase/sequence is ACK-safe and rejected");
 }
 
-void TestReadDecodeDeadlineIsTyped() {
+void TestPrepareAllowsMeasuredColdDecodeButPlaybackKeepsDeadline() {
     FakeRuntime fake;
-    fake.decode_elapsed_ms = 101;
+    fake.decode_elapsed_ms = 124;
     tbot::LessonCinematicRenderer renderer(Ops(&fake));
-    const auto response = renderer.Prepare(Config(), 0);
+    auto response = renderer.Prepare(Config(), 0);
+    Require(response.accepted && response.type == tbot::LessonCinematicResponseType::kFrameZeroReady,
+            "prepare accepts the measured 124ms cold frame-zero decode");
+
+    Require(renderer.Start(8, "teach", fake.now_ms).accepted, "measured prepare starts");
+    fake.decode_elapsed_ms = 101;
+    response = renderer.Tick(fake.now_ms + 100);
     Require(!response.accepted && response.error == tbot::LessonCinematicError::kDecodeTimeout,
-            "read/decode elapsed-time deadline returns a typed timeout failure");
-    Require(fake.presents == 0, "timed-out frame is never presented");
+            "steady playback retains the 100ms read/decode deadline");
+    Require(fake.presents == 1, "timed-out playback frame is never presented");
 }
 
 void TestDuplicateSequenceFingerprintAndActiveTickLifecycle() {
@@ -272,7 +278,7 @@ void TestDuplicateSequenceFingerprintAndActiveTickLifecycle() {
 int main() {
     TestPrepareStartClockPauseResumeAndNoSteadyAllocations();
     TestIdempotencyValidationFailureAndSafeStop();
-    TestReadDecodeDeadlineIsTyped();
+    TestPrepareAllowsMeasuredColdDecodeButPlaybackKeepsDeadline();
     TestDuplicateSequenceFingerprintAndActiveTickLifecycle();
     std::cout << "lesson_cinematic_renderer test passed\n";
     return 0;
