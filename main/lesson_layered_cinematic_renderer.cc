@@ -3,8 +3,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <inttypes.h>
 #include <memory>
 #include <string_view>
+
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#endif
 
 namespace tbot {
 #ifdef ESP_PLATFORM
@@ -187,6 +192,8 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     std::uint16_t background_width = 0;
     std::uint16_t background_height = 0;
     std::size_t background_stride = 0;
+    [[maybe_unused]] const std::uint64_t background_started = ops_.monotonic_ms != nullptr
+        ? ops_.monotonic_ms(ops_.context) : 0;
     if (!ops_.decode_jpeg(ops_.context, config.background.sd_path, background_,
                           kScreenPixels * 2, &background_width, &background_height,
                           &background_stride) || background_width != kLessonCinematicWidth ||
@@ -196,6 +203,17 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id,
                        OperationError(LessonCinematicError::kDecodeFailed));
     }
+    [[maybe_unused]] const std::uint64_t background_finished = ops_.monotonic_ms != nullptr
+        ? ops_.monotonic_ms(ops_.context) : background_started;
+#ifdef ESP_PLATFORM
+    ESP_LOGI("LessonCinematic",
+             "prepare decode layer=background frame=static elapsed_ms=%" PRIu64
+             " deadline_ms=0 phase=%s path=%s",
+             background_finished >= background_started ? background_finished - background_started : 0,
+             config.phase_id, config.background.sd_path);
+#endif
+    [[maybe_unused]] const std::uint64_t object_started = ops_.monotonic_ms != nullptr
+        ? ops_.monotonic_ms(ops_.context) : 0;
     if (!ops_.decode_png(ops_.context, config.teaching_object.sd_path, object_rgba_,
                          kObjectCapacity, &object_width_, &object_height_, &object_stride_) ||
         object_width_ == 0 || object_height_ == 0 || object_width_ > 240 ||
@@ -204,6 +222,15 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id,
                        OperationError(LessonCinematicError::kDecodeFailed));
     }
+    [[maybe_unused]] const std::uint64_t object_finished = ops_.monotonic_ms != nullptr
+        ? ops_.monotonic_ms(ops_.context) : object_started;
+#ifdef ESP_PLATFORM
+    ESP_LOGI("LessonCinematic",
+             "prepare decode layer=teachingObject frame=static elapsed_ms=%" PRIu64
+             " deadline_ms=0 phase=%s path=%s",
+             object_finished >= object_started ? object_finished - object_started : 0,
+             config.phase_id, config.teaching_object.sd_path);
+#endif
     if (!ops_.open_video(ops_.context, config.robot.sd_path, &robot_metadata_, &robot_stream_) ||
         robot_stream_ == nullptr) {
         Release();
@@ -361,6 +388,14 @@ LessonCinematicError LessonLayeredCinematicRenderer::RenderFrame(std::size_t fra
     }
     if (ops_.monotonic_ms != nullptr) {
         const std::uint64_t finished = ops_.monotonic_ms(ops_.context);
+#ifdef ESP_PLATFORM
+        ESP_LOGI("LessonCinematic",
+                 "prepare decode layer=robotOverlay frame=%u elapsed_ms=%" PRIu64
+                 " deadline_ms=%" PRIu64 " phase=%s path=%s",
+                 static_cast<unsigned>(frame_index),
+                 finished >= started ? finished - started : 0, kDecodeDeadlineMs,
+                 phase_id_.c_str(), robot_config_.sd_path);
+#endif
         if (finished >= started && finished - started > kDecodeDeadlineMs) {
             return LessonCinematicError::kDecodeTimeout;
         }
