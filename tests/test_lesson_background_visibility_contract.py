@@ -42,6 +42,28 @@ def implemented_layer_bodies(source: str, signature: str) -> list[str]:
     return bodies
 
 
+def enclosing_block(text: str, marker: str) -> str:
+    marker_index = text.index(marker)
+    stack = []
+    for index, char in enumerate(text[:marker_index]):
+        if char == "{":
+            stack.append(index)
+        elif char == "}":
+            stack.pop()
+    if not stack:
+        raise AssertionError(f"marker is not inside a block: {marker}")
+    opening = stack[-1]
+    depth = 0
+    for index in range(opening, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[opening : index + 1]
+    raise AssertionError(f"unterminated block containing: {marker}")
+
+
 def test_lesson_background_layer_is_not_hidden_behind_opaque_chat_surfaces():
     source = SOURCE.read_text(encoding="utf-8")
     body = function_body(source, "void LcdDisplay::SetLessonBackground")
@@ -403,10 +425,7 @@ def test_lesson_mode_keeps_conversation_emotions_behind_lesson_scene():
 def test_cinematic_renderer_claims_lesson_display_mode_before_playback():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     body = function_body(source, "void Application::HandleLessonMessage")
-    cinematic = body[
-        body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)") :
-        body.index("const bool is_prepare", body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)"))
-    ]
+    cinematic = enclosing_block(body, "auto claim_cinematic_display")
 
     assert "claim_cinematic_display" in cinematic
     start_accepted = cinematic[
@@ -419,10 +438,7 @@ def test_cinematic_renderer_claims_lesson_display_mode_before_playback():
 def test_cinematic_renderer_releases_lesson_display_mode_at_terminal_command():
     source = (ROOT / "main/lesson_handler.cc").read_text(encoding="utf-8")
     body = function_body(source, "void Application::HandleLessonMessage")
-    cinematic = body[
-        body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)") :
-        body.index("const bool is_prepare", body.index("if (cinematic_v3 || cinematic_v4 || cinematic_v5)"))
-    ]
+    cinematic = enclosing_block(body, "auto release_cinematic_display")
 
     assert "release_cinematic_display" in cinematic
     terminal = cinematic[
