@@ -5053,8 +5053,8 @@ void Application::HandleWakeWordDetectedEvent() {
         // To reduce false-positives, raise wake-word threshold in sdkconfig
         // (CONFIG_USE_AFE_WAKE_WORD_THRESHOLD) or add post-wake RMS check
         // on the buffered wake-word audio. Both are out of scope here.
-        audio_service_.EncodeWakeWord();
-        auto wake_word = audio_service_.GetLastWakeWord();
+        // Hardware evidence shows the temporary AFE Opus encoder corrupts execution
+        // after close even when all encoder calls are serialized. Use live uplink only.
 
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
@@ -5168,15 +5168,6 @@ void Application::FinishWakeWordInvoke(const std::string& wake_word) {
         return;
     }
     SetListeningMode(kListeningModeAutoStop);
-    // Send buffered wake audio only after the state event has sent listen/start.
-    Schedule([this]() {
-        if (!protocol_ || !protocol_->IsAudioChannelOpened()) {
-            return;
-        }
-        while (auto packet = audio_service_.PopWakeWordPacket()) {
-            protocol_->SendAudio(std::move(packet));
-        }
-    });
 #else
     // Set flag to play popup sound after state changes to listening
     // (PlaySound here would be cleared by ResetDecoder in EnableVoiceProcessing)
@@ -5810,8 +5801,6 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
     }
     
     if (state == kDeviceStateIdle) {
-        audio_service_.EncodeWakeWord();
-
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)

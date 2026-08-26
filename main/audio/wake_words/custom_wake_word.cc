@@ -1,5 +1,4 @@
 #include "custom_wake_word.h"
-#include "audio/opus_encoder_serialization.h"
 #include "audio_service.h"
 #include "system_info.h"
 #include "assets.h"
@@ -234,7 +233,6 @@ void CustomWakeWord::EncodeWakeWordData() {
         };
         {
             auto start_time = esp_timer_get_time();
-            auto encoder_lease = OpusEncoderSerialization::Acquire();
             // Create encoder
             esp_opus_enc_config_t opus_enc_cfg = AS_OPUS_ENC_CONFIG();
             void* encoder_handle = nullptr;

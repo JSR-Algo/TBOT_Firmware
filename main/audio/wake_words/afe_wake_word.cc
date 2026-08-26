@@ -1,5 +1,4 @@
 #include "afe_wake_word.h"
-#include "audio/opus_encoder_serialization.h"
 #include "audio_service.h"
 #include <algorithm>
 #include <esp_log.h>
@@ -468,7 +467,6 @@ void AfeWakeWord::EncodeWakeWordData() {
         };
         {
             auto start_time = esp_timer_get_time();
-            auto encoder_lease = OpusEncoderSerialization::Acquire();
             // Create encoder
             esp_opus_enc_config_t opus_enc_cfg = AS_OPUS_ENC_CONFIG();
             void* encoder_handle = nullptr;

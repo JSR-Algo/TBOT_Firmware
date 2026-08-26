@@ -1,5 +1,4 @@
 #include "audio_service.h"
-#include "opus_encoder_serialization.h"
 #include <esp_log.h>
 #include <cstring>
 
@@ -51,7 +50,6 @@ AudioService::~AudioService() {
         vEventGroupDelete(event_group_);
     }
     if (opus_encoder_ != nullptr) {
-        auto encoder_lease = OpusEncoderSerialization::Acquire();
         esp_opus_enc_close(opus_encoder_);
     }
     if (opus_decoder_ != nullptr) {
@@ -79,17 +77,14 @@ void AudioService::Initialize(AudioCodec* codec) {
         decoder_frame_size_ = decoder_sample_rate_ / 1000 * OPUS_FRAME_DURATION_MS;
     }
     esp_opus_enc_config_t opus_enc_cfg = AS_OPUS_ENC_CONFIG();
-    {
-        auto encoder_lease = OpusEncoderSerialization::Acquire();
-        ret = esp_opus_enc_open(&opus_enc_cfg, sizeof(esp_opus_enc_config_t), &opus_encoder_);
-        if (opus_encoder_ == nullptr) {
-            ESP_LOGE(TAG, "Failed to create audio encoder, error code: %d", ret);
-        } else {
-            encoder_sample_rate_ = 16000;
-            encoder_duration_ms_ = OPUS_FRAME_DURATION_MS;
-            esp_opus_enc_get_frame_size(opus_encoder_, &encoder_frame_size_, &encoder_outbuf_size_);
-            encoder_frame_size_ = encoder_frame_size_ / sizeof(int16_t);
-        }
+    ret = esp_opus_enc_open(&opus_enc_cfg, sizeof(esp_opus_enc_config_t), &opus_encoder_);
+    if (opus_encoder_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create audio encoder, error code: %d", ret);
+    } else {
+        encoder_sample_rate_ = 16000;
+        encoder_duration_ms_ = OPUS_FRAME_DURATION_MS;
+        esp_opus_enc_get_frame_size(opus_encoder_, &encoder_frame_size_, &encoder_outbuf_size_);
+        encoder_frame_size_ = encoder_frame_size_ / sizeof(int16_t);
     }
 
     if (codec->input_sample_rate() != 16000) {
@@ -513,11 +508,7 @@ void AudioService::OpusCodecTask() {
                     .len = (uint32_t)encoder_outbuf_size_,
                     .encoded_bytes = 0,
                 };
-                esp_audio_err_t ret;
-                {
-                    auto encoder_lease = OpusEncoderSerialization::Acquire();
-                    ret = esp_opus_enc_process(opus_encoder_, &in, &out);
-                }
+                auto ret = esp_opus_enc_process(opus_encoder_, &in, &out);
                 if (ret == ESP_AUDIO_ERR_OK) {
                     packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
 

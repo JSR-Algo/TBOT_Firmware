@@ -1612,7 +1612,7 @@ def test_wake_word_listening_uses_autostop_even_when_default_mode_is_realtime():
     assert "SetListeningMode(GetDefaultListeningMode());" not in body
 
 
-def test_wake_word_data_is_sent_after_listen_control_frames():
+def test_wake_word_uses_live_uplink_without_buffered_preroll():
     app_cc = read("main/application.cc")
 
     start = app_cc.index("void Application::FinishWakeWordInvoke")
@@ -1622,12 +1622,8 @@ def test_wake_word_data_is_sent_after_listen_control_frames():
     assert body.index("protocol_->SendWakeWordDetected(wake_word);") < body.index(
         "SetListeningMode(kListeningModeAutoStop);"
     )
-    assert body.index("SetListeningMode(kListeningModeAutoStop);") < body.index(
-        "audio_service_.PopWakeWordPacket()"
-    )
-    assert body.index("SetListeningMode(kListeningModeAutoStop);") < body.index(
-        "protocol_->SendAudio(std::move(packet));"
-    )
+    assert "audio_service_.PopWakeWordPacket()" not in body
+    assert "protocol_->SendAudio(std::move(packet));" not in body
 
 
 def test_protocol_idle_timeout_allows_sixty_minute_sessions():
