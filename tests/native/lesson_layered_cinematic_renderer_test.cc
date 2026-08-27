@@ -218,12 +218,29 @@ void TestDiscardSessionAllowsSequenceRestart() {
             "new lesson may restart its command sequence after session discard");
 }
 
+void TestFallbackPhaseKeepsBackgroundAndRobotWithoutTeachingObject() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    auto fallback = Config();
+    fallback.has_teaching_object = false;
+    fallback.teaching_object = {};
+
+    const auto response = renderer.Prepare(fallback, 0);
+
+    Require(response.accepted, "two-layer fallback phase prepares");
+    Require(fake.jpeg_decodes == 1 && fake.png_decodes == 0 && fake.video_decodes == 1,
+            "fallback keeps the static background and Robot without decoding an object");
+    Require(fake.allocations == 3,
+            "fallback allocates only background, framebuffer, and Robot scratch buffers");
+}
+
 }  // namespace
 
 int main() {
     TestStaticLayersDecodeOnceAndRobotOwnsClock();
     TestTypedFailuresAndLoopPlayback();
     TestDiscardSessionAllowsSequenceRestart();
+    TestFallbackPhaseKeepsBackgroundAndRobotWithoutTeachingObject();
     std::cout << "lesson_layered_cinematic_renderer tests passed\n";
     return 0;
 }

@@ -274,6 +274,11 @@ const char* SID() { return g_sid.c_str(); }
 
 // ---- frame builders ------------------------------------------------------
 
+std::string ReplaceOnce(std::string value, const std::string& from,
+                        const std::string& to);
+std::string ReplaceAll(std::string value, const std::string& from,
+                       const std::string& to);
+
 std::string PrepareFrame(int seq, const std::string& extra_body = "") {
     return std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
            kLessonProtocolVersion + "\",\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" +
@@ -382,14 +387,14 @@ std::string V5PrepareFrame(int seq, std::uint64_t command_sequence_id = 91) {
 
 std::string V5CourseModeCompatibilityJson() {
     return "{\"schemaVersion\":1,"
-        "\"contractChecksum\":\"cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264\","
+        "\"contractChecksum\":\"332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be\","
         "\"layoutContract\":\"layeredCinematic\","
         "\"lessonId\":\"course-mode-v5-farm-candidate\",\"lessonVersion\":2,"
-        "\"manifestChecksum\":\"e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc\"}";
+        "\"manifestChecksum\":\"22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d\"}";
 }
 
 constexpr const char* kV5CourseModeManifestChecksum =
-    "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc";
+    "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d";
 constexpr const char* kV5CourseModePackName = "course-mode-v5-dynamic-pack";
 constexpr const char* kV5CourseModeAssetIds[3] = {
     "75000000-0000-4000-8000-000000000011",
@@ -481,6 +486,33 @@ std::string V5CourseModePrepareFrame(int seq, std::uint64_t command_sequence_id 
         "\"codec\":\"mjpeg\",\"hasAudio\":false,"
         "\"chromaKey\":{\"keyColor\":\"#00ff00\",\"tolerance\":20,\"featherPx\":1}}]}}";
     return V5Frame("lesson_prepare", seq, body);
+}
+
+std::string V5CourseModeActivityFallbackPrepareFrame(
+    int seq, std::uint64_t command_sequence_id = 191) {
+    std::string frame = V5CourseModePrepareFrame(seq, command_sequence_id, "listen");
+    frame = ReplaceOnce(
+        frame, "\"playbackMode\":\"once\",\"courseModeCompatibility\":",
+        "\"playbackMode\":\"once\",\"activityIds\":[\"w19-weather-recall\"],"
+        "\"courseModeCompatibility\":");
+    frame = ReplaceOnce(
+        frame, V5CourseModeCompatibilityJson(),
+        "{\"schemaVersion\":1,"
+        "\"contractChecksum\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\","
+        "\"layoutContract\":\"layeredCinematic\","
+        "\"lessonId\":\"english-6month-week-19\",\"lessonVersion\":1,"
+        "\"manifestChecksum\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"}");
+    frame = ReplaceAll(
+        frame, kV5CourseModeManifestChecksum,
+        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    const std::string object_start = "{\"layer\":\"teachingObject\"";
+    const std::string robot_start = "{\"layer\":\"robotOverlay\"";
+    const auto begin = frame.find(object_start);
+    const auto end = frame.find(robot_start, begin);
+    require(begin != std::string::npos && end != std::string::npos,
+            "Course Mode fallback payload contains removable object layer");
+    frame.erase(begin, end - begin);
+    return frame;
 }
 
 std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
@@ -777,6 +809,19 @@ std::string ReplaceOnce(std::string value, const std::string& from, const std::s
     const size_t position = value.find(from);
     require(position != std::string::npos, "projection test replacement target exists");
     value.replace(position, from.size(), to);
+    return value;
+}
+
+std::string ReplaceAll(std::string value, const std::string& from, const std::string& to) {
+    require(!from.empty(), "projection test replacement target is nonempty");
+    size_t position = 0;
+    bool replaced = false;
+    while ((position = value.find(from, position)) != std::string::npos) {
+        value.replace(position, from.size(), to);
+        position += to.size();
+        replaced = true;
+    }
+    require(replaced, "projection test replacement target exists");
     return value;
 }
 
@@ -1901,6 +1946,50 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
 }
 
+void test_renderer_v5_course_mode_activity_fallback_without_object() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady",
+            "activity-aware Course Mode fallback prepares without a teaching object");
+    require(fake.jpeg_decodes == 1 && fake.png_decodes == 0 && fake.video_decodes == 1,
+            "fallback keeps background and Robot static state without object decoding");
+    Handle(V5Frame("lesson_stop", 2,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":192}}"));
+    require(FrameType(1) == "lesson_ack" &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "activity-aware fallback stop releases its lesson asset reservation");
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+}
+
+void test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(ReplaceOnce(
+        V5CourseModeActivityFallbackPrepareFrame(1),
+        "\"manifestChecksum\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"",
+        "\"manifestChecksum\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\""));
+
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.jpeg_decodes == 0 && fake.video_decodes == 0,
+            "Course Mode fallback rejects a marker from a different manifest before IO");
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+}
+
 void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
     ResetObservable();
     FreshSession();
@@ -1937,9 +2026,11 @@ void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
         "\"commandSequenceId\":493}}"));
 
     const std::vector<std::pair<std::string, std::string>> invalid_replacements = {
+        {"\"lessonId\":\"course-mode-v5-farm-candidate\"",
+         "\"lessonId\":\"course-mode-v5-farm-candidate-drift\""},
         {"\"layoutContract\":\"layeredCinematic\"",
          "\"layoutContract\":\"flattenedMjpegCinematic\""},
-        {"\"lessonVersion\":2,\"manifestChecksum\":\"e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc\"",
+        {"\"lessonVersion\":2,\"manifestChecksum\":\"22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d\"",
          "\"lessonVersion\":2,\"manifestChecksum\":\"205784b3f97cb081ce9c226d8fd83fdd400401e706c000e1b09ba4e7ebdf36ce\""},
         {"\"assetVersionId\":\"75000000-0000-4000-8000-000000000022\"",
          "\"assetVersionId\":\"75000000-0000-4000-8000-000000000021\""},
@@ -8649,6 +8740,8 @@ int main() {
     test_cinematic_renderer_failures_use_stable_error_mapping();
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v5_capability_exact_layers_and_lifecycle();
+    test_renderer_v5_course_mode_activity_fallback_without_object();
+    test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix();
     test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v4_accepts_template_v2_cue_identity_prepare_and_controls();
     test_renderer_v4_course_mode_compatibility_is_exact_and_narrow();

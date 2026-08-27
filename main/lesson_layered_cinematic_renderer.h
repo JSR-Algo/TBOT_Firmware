@@ -29,6 +29,7 @@ struct LessonLayeredCinematicPhaseConfig {
     std::uint16_t fps = 0;
     std::uint32_t frame_count = 0;
     LessonLayeredPlaybackMode playback_mode = LessonLayeredPlaybackMode::kOnce;
+    bool has_teaching_object = true;
     LessonLayeredImageConfig background{};
     LessonLayeredImageConfig teaching_object{};
     LessonCinematicLayerConfig robot{};
@@ -97,6 +98,7 @@ private:
     void* robot_stream_ = nullptr;
     LessonCinematicStreamMetadata robot_metadata_{};
     LessonCinematicRect object_rect_{};
+    bool has_teaching_object_ = true;
     LessonCinematicLayerConfig robot_config_{};
     LessonLayeredPlaybackMode playback_mode_ = LessonLayeredPlaybackMode::kOnce;
     std::string phase_id_;

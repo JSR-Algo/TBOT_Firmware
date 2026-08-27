@@ -171,20 +171,25 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         return Failure(config.command_sequence_id, LessonCinematicError::kStaleCommand);
     }
     if (!KnownPhase(config.phase_id) || !LocalPath(config.background.sd_path) ||
-        !LocalPath(config.teaching_object.sd_path) || !LocalPath(config.robot.sd_path) ||
+        (config.has_teaching_object && !LocalPath(config.teaching_object.sd_path)) ||
+        !LocalPath(config.robot.sd_path) ||
         config.background.rect.x != 0 || config.background.rect.y != 0 ||
         config.background.rect.width != kLessonCinematicWidth ||
         config.background.rect.height != kLessonCinematicHeight ||
-        !ForegroundRect(config.teaching_object.rect) || !ForegroundRect(config.robot.rect)) {
+        (config.has_teaching_object && !ForegroundRect(config.teaching_object.rect)) ||
+        !ForegroundRect(config.robot.rect)) {
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
     Release();
     phase_id_ = config.phase_id;
     background_ = static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kScreenPixels * 2));
     framebuffer_ = static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kScreenPixels * 2));
-    object_rgba_ = static_cast<std::uint8_t*>(ops_.allocate(ops_.context, kObjectCapacity));
+    object_rgba_ = config.has_teaching_object
+        ? static_cast<std::uint8_t*>(ops_.allocate(ops_.context, kObjectCapacity))
+        : nullptr;
     robot_scratch_ = static_cast<std::uint8_t*>(ops_.allocate(ops_.context, kRobotCapacity));
-    if (background_ == nullptr || framebuffer_ == nullptr || object_rgba_ == nullptr ||
+    if (background_ == nullptr || framebuffer_ == nullptr ||
+        (config.has_teaching_object && object_rgba_ == nullptr) ||
         robot_scratch_ == nullptr) {
         Release();
         return Failure(config.command_sequence_id, LessonCinematicError::kInsufficientPsram);
@@ -214,10 +219,11 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
 #endif
     [[maybe_unused]] const std::uint64_t object_started = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : 0;
-    if (!ops_.decode_png(ops_.context, config.teaching_object.sd_path, object_rgba_,
-                         kObjectCapacity, &object_width_, &object_height_, &object_stride_) ||
-        object_width_ == 0 || object_height_ == 0 || object_width_ > 240 ||
-        object_height_ > 240 || object_stride_ < static_cast<std::size_t>(object_width_) * 4) {
+    if (config.has_teaching_object &&
+        (!ops_.decode_png(ops_.context, config.teaching_object.sd_path, object_rgba_,
+                          kObjectCapacity, &object_width_, &object_height_, &object_stride_) ||
+         object_width_ == 0 || object_height_ == 0 || object_width_ > 240 ||
+         object_height_ > 240 || object_stride_ < static_cast<std::size_t>(object_width_) * 4)) {
         Release();
         return Failure(config.command_sequence_id,
                        OperationError(LessonCinematicError::kDecodeFailed));
@@ -225,11 +231,13 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     [[maybe_unused]] const std::uint64_t object_finished = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : object_started;
 #ifdef ESP_PLATFORM
-    ESP_LOGI("LessonCinematic",
-             "prepare decode layer=teachingObject frame=static elapsed_ms=%" PRIu64
-             " deadline_ms=0 phase=%s path=%s",
-             object_finished >= object_started ? object_finished - object_started : 0,
-             config.phase_id, config.teaching_object.sd_path);
+    if (config.has_teaching_object) {
+        ESP_LOGI("LessonCinematic",
+                 "prepare decode layer=teachingObject frame=static elapsed_ms=%" PRIu64
+                 " deadline_ms=0 phase=%s path=%s",
+                 object_finished >= object_started ? object_finished - object_started : 0,
+                 config.phase_id, config.teaching_object.sd_path);
+    }
 #endif
     if (!ops_.open_video(ops_.context, config.robot.sd_path, &robot_metadata_, &robot_stream_) ||
         robot_stream_ == nullptr) {
@@ -246,6 +254,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         Release();
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
+    has_teaching_object_ = config.has_teaching_object;
     object_rect_ = config.teaching_object.rect;
     robot_config_ = config.robot;
     playback_mode_ = config.playback_mode;
@@ -373,7 +382,8 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Tick(std::uint64_t now_m
 
 LessonCinematicError LessonLayeredCinematicRenderer::RenderFrame(std::size_t frame_index) {
     std::memcpy(framebuffer_, background_, kScreenPixels * 2);
-    if (!CompositeObject(object_rgba_, object_width_, object_height_, object_stride_,
+    if (has_teaching_object_ &&
+        !CompositeObject(object_rgba_, object_width_, object_height_, object_stride_,
                          framebuffer_, object_rect_)) {
         return LessonCinematicError::kDecodeFailed;
     }
@@ -429,6 +439,7 @@ void LessonLayeredCinematicRenderer::Release() {
     object_width_ = 0;
     object_height_ = 0;
     object_stride_ = 0;
+    has_teaching_object_ = true;
 }
 
 void LessonLayeredCinematicRenderer::DiscardSession() {

@@ -563,12 +563,35 @@ bool ParseExactCourseModeV5Compatibility(const cJSON* object) {
     return ExactObjectKeys(object, kKeys) && Num(object, "schemaVersion", schema_version) &&
         schema_version == 1 &&
         ExactString(object, "contractChecksum",
-                    "cf12b1a5f71f0a80a8ee22bb2cdc775ada5b803e26d154e5d29c76b14c9fb264") &&
+                    "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be") &&
         ExactString(object, "layoutContract", "layeredCinematic") &&
         ExactString(object, "lessonId", "course-mode-v5-farm-candidate") &&
         Num(object, "lessonVersion", lesson_version) && lesson_version == 2 &&
         ExactString(object, "manifestChecksum",
-                    "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc");
+                    "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d");
+}
+
+bool ParseCourseModeV5Compatibility(const cJSON* object) {
+    static const std::set<std::string_view> kKeys = {
+        "schemaVersion", "contractChecksum", "layoutContract", "lessonId",
+        "lessonVersion", "manifestChecksum"};
+    const auto checksum = [](const char* value) {
+        if (value == nullptr || std::strlen(value) != 64) return false;
+        for (const char* cursor = value; *cursor != '\0'; ++cursor) {
+            if (!((*cursor >= '0' && *cursor <= '9') || (*cursor >= 'a' && *cursor <= 'f'))) {
+                return false;
+            }
+        }
+        return true;
+    };
+    double schema_version = 0;
+    double lesson_version = 0;
+    return ExactObjectKeys(object, kKeys) && Num(object, "schemaVersion", schema_version) &&
+        schema_version == 1 && checksum(Str(object, "contractChecksum")) &&
+        ExactString(object, "layoutContract", "layeredCinematic") &&
+        !Blank(Str(object, "lessonId")) && Num(object, "lessonVersion", lesson_version) &&
+        lesson_version > 0 && std::floor(lesson_version) == lesson_version &&
+        checksum(Str(object, "manifestChecksum"));
 }
 
 bool ValidOpeningEntrance(const cJSON* entrance) {
@@ -1701,7 +1724,7 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
 
 bool ExactCourseModeV5AssetPackPaths(const cJSON* body, const cJSON* layers) {
     static constexpr const char* kManifestChecksum =
-        "e8ee7ff1fb67e8dbd0f8c6908b09c4a4f8e0d1cf3ce41bb38142da0fc03519dc";
+        "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d";
     static constexpr const char* kAssetVersionIds[3] = {
         "75000000-0000-4000-8000-000000000011",
         "75000000-0000-4000-8000-000000000022",
@@ -2960,6 +2983,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     "command", "commandSequenceId", "templateId", "templateVersion",
                     "phaseId", "durationMs", "fps", "frameCount", "playbackMode", "layers",
                     "courseModeCompatibility"};
+                static const std::set<std::string_view> kActivityPrepareKeys = {
+                    "command", "commandSequenceId", "templateId", "templateVersion",
+                    "phaseId", "durationMs", "fps", "frameCount", "playbackMode", "layers",
+                    "activityIds"};
+                static const std::set<std::string_view> kCourseModeActivityPrepareKeys = {
+                    "command", "commandSequenceId", "templateId", "templateVersion",
+                    "phaseId", "durationMs", "fps", "frameCount", "playbackMode", "layers",
+                    "activityIds", "courseModeCompatibility"};
                 static const std::set<std::string_view> kImageLayerKeys = {
                     "layer", "slot", "mediaKind", "mediaType", "sdPath", "sha256",
                     "bytes", "width", "height", "rect", "fit"};
@@ -2976,10 +3007,36 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 const cJSON* layers = cJSON_GetObjectItem(command_body, "layers");
                 const cJSON* course_mode = Obj(command_body, "courseModeCompatibility");
                 const bool has_course_mode = course_mode != nullptr;
+                const cJSON* manifest_ref = Obj(body, "manifestRef");
+                const char* manifest_checksum = Str(manifest_ref, "manifestChecksum");
+                const cJSON* activity_ids = cJSON_GetObjectItem(command_body, "activityIds");
+                const bool activity_aware = cJSON_IsArray(activity_ids);
+                bool valid_activity_ids = !activity_aware || cJSON_GetArraySize(activity_ids) > 0;
+                std::set<std::string> unique_activity_ids;
+                if (activity_aware) {
+                    cJSON* activity_id = nullptr;
+                    cJSON_ArrayForEach(activity_id, activity_ids) {
+                        valid_activity_ids = valid_activity_ids && cJSON_IsString(activity_id) &&
+                            activity_id->valuestring != nullptr && activity_id->valuestring[0] != '\0' &&
+                            unique_activity_ids.insert(activity_id->valuestring).second;
+                    }
+                }
                 double duration_ms = 0, fps = 0, frame_count = 0;
                 const char* playback_mode = Str(command_body, "playbackMode");
-                bool valid = ExactObjectKeys(
-                        command_body, has_course_mode ? kCourseModePrepareKeys : kPrepareKeys) &&
+                const auto& prepare_keys = has_course_mode
+                    ? activity_aware ? kCourseModeActivityPrepareKeys : kCourseModePrepareKeys
+                    : activity_aware ? kActivityPrepareKeys : kPrepareKeys;
+                const int layer_count = cJSON_IsArray(layers) ? cJSON_GetArraySize(layers) : 0;
+                const bool canonical_course_mode_candidate = has_course_mode && (
+                    ExactString(course_mode, "lessonId", "course-mode-v5-farm-candidate") ||
+                    ExactString(
+                        course_mode, "contractChecksum",
+                        "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be") ||
+                    ExactString(
+                        course_mode, "manifestChecksum",
+                        "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d"));
+                bool valid = ExactObjectKeys(command_body, prepare_keys) && valid_activity_ids &&
+                    (!activity_aware || has_course_mode) &&
                     Num(command_body, "durationMs", duration_ms) &&
                     Num(command_body, "fps", fps) && Num(command_body, "frameCount", frame_count) &&
                     PositiveIntegerAtMost(duration_ms, UINT32_MAX) &&
@@ -2988,14 +3045,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         static_cast<std::uint64_t>(frame_count) * 1000 &&
                     playback_mode != nullptr &&
                     (strcmp(playback_mode, "once") == 0 || strcmp(playback_mode, "loop") == 0) &&
-                    cJSON_IsArray(layers) && cJSON_GetArraySize(layers) == 3 &&
+                    cJSON_IsArray(layers) &&
+                    (layer_count == 3 || (activity_aware && has_course_mode && layer_count == 2)) &&
                     (!has_course_mode ||
-                     (ParseExactCourseModeV5Compatibility(course_mode) &&
-                      ExactCourseModeV5AssetPackPaths(body, layers) &&
-                      phase_id != nullptr &&
-                      (strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0) &&
-                      duration_ms == 3000 && fps == 10 && frame_count == 30 &&
-                      strcmp(playback_mode, "once") == 0));
+                     (ParseCourseModeV5Compatibility(course_mode) &&
+                      manifest_checksum != nullptr &&
+                      ExactString(course_mode, "manifestChecksum", manifest_checksum) &&
+                      (!canonical_course_mode_candidate ||
+                       (ParseExactCourseModeV5Compatibility(course_mode) &&
+                        ExactCourseModeV5AssetPackPaths(body, layers) &&
+                        phase_id != nullptr &&
+                        (strcmp(phase_id, "teach") == 0 || strcmp(phase_id, "listen") == 0) &&
+                        duration_ms == 3000 && fps == 10 && frame_count == 30 &&
+                        strcmp(playback_mode, "once") == 0))));
                 tbot::LessonLayeredCinematicPhaseConfig config{};
                 config.renderer_id = protocol_version;
                 config.template_id = Str(command_body, "templateId");
@@ -3007,6 +3069,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 config.playback_mode = playback_mode != nullptr && strcmp(playback_mode, "loop") == 0
                     ? tbot::LessonLayeredPlaybackMode::kLoop
                     : tbot::LessonLayeredPlaybackMode::kOnce;
+                config.has_teaching_object = layer_count == 3;
                 std::array<std::string, 3> normalized_paths;
                 static constexpr const char* kLayers[3] = {
                     "background", "teachingObject", "robotOverlay"};
@@ -3015,26 +3078,27 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 static constexpr const char* kMediaKinds[3] = {"image", "image", "video"};
                 static constexpr const char* kMediaTypes[3] = {
                     "image/jpeg", "image/png", "video/mp4"};
-                for (int index = 0; valid && index < 3; ++index) {
+                for (int index = 0; valid && index < layer_count; ++index) {
+                    const int role_index = layer_count == 2 && index == 1 ? 2 : index;
                     const cJSON* layer = cJSON_GetArrayItem(layers, index);
                     const cJSON* rect = Obj(layer, "rect");
                     double x = 0, y = 0, rect_width = 0, rect_height = 0, bytes = 0;
                     double media_width = 0, media_height = 0;
-                    const auto& layer_keys = index == 2
+                    const auto& layer_keys = role_index == 2
                         ? has_course_mode ? kCourseModeRobotLayerKeys : kRobotLayerKeys
                         : has_course_mode ? kCourseModeImageLayerKeys : kImageLayerKeys;
                     valid = ExactObjectKeys(layer, layer_keys) &&
-                        Str(layer, "layer") != nullptr && strcmp(Str(layer, "layer"), kLayers[index]) == 0 &&
-                        Str(layer, "slot") != nullptr && strcmp(Str(layer, "slot"), kSlots[index]) == 0 &&
+                        Str(layer, "layer") != nullptr && strcmp(Str(layer, "layer"), kLayers[role_index]) == 0 &&
+                        Str(layer, "slot") != nullptr && strcmp(Str(layer, "slot"), kSlots[role_index]) == 0 &&
                         Str(layer, "mediaKind") != nullptr &&
-                            strcmp(Str(layer, "mediaKind"), kMediaKinds[index]) == 0 &&
+                            strcmp(Str(layer, "mediaKind"), kMediaKinds[role_index]) == 0 &&
                         Str(layer, "mediaType") != nullptr &&
-                            strcmp(Str(layer, "mediaType"), kMediaTypes[index]) == 0 &&
+                            strcmp(Str(layer, "mediaType"), kMediaTypes[role_index]) == 0 &&
                         IsSha256(Str(layer, "sha256")) && Num(layer, "bytes", bytes) &&
                         PositiveIntegerAtMost(bytes, UINT32_MAX) &&
                         Num(layer, "width", media_width) && Num(layer, "height", media_height) &&
-                        PositiveIntegerAtMost(media_width, index == 0 ? 480 : 240) &&
-                        PositiveIntegerAtMost(media_height, index == 0 ? 320 : 240) &&
+                        PositiveIntegerAtMost(media_width, role_index == 0 ? 480 : 240) &&
+                        PositiveIntegerAtMost(media_height, role_index == 0 ? 320 : 240) &&
                         Num(rect, "x", x) && Num(rect, "y", y) &&
                         Num(rect, "width", rect_width) && Num(rect, "height", rect_height) &&
                         std::trunc(x) == x && std::trunc(y) == y &&
@@ -3055,31 +3119,31 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         static constexpr std::uint32_t kBytes[3] = {43599, 15086, 223033};
                         static constexpr std::uint16_t kWidths[3] = {480, 95, 240};
                         static constexpr std::uint16_t kHeights[3] = {320, 95, 240};
-                        valid = valid && ExactString(layer, "assetVersionId", kAssetVersionIds[index]) &&
-                            ExactString(layer, "sha256", kSha256[index]) &&
-                            bytes == kBytes[index] && media_width == kWidths[index] &&
-                            media_height == kHeights[index];
+                        valid = valid && ExactString(layer, "assetVersionId", kAssetVersionIds[role_index]) &&
+                            ExactString(layer, "sha256", kSha256[role_index]) &&
+                            bytes == kBytes[role_index] && media_width == kWidths[role_index] &&
+                            media_height == kHeights[role_index];
                     }
-                    normalized_paths[index] = LessonLocalPath(Str(layer, "sdPath"));
-                    valid = valid && !normalized_paths[index].empty();
+                    normalized_paths[role_index] = LessonLocalPath(Str(layer, "sdPath"));
+                    valid = valid && !normalized_paths[role_index].empty();
                     const tbot::LessonCinematicRect parsed_rect = {
                         static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
                         static_cast<std::uint16_t>(rect_width),
                         static_cast<std::uint16_t>(rect_height)};
-                    if (index == 0) {
+                    if (role_index == 0) {
                         valid = valid && Str(layer, "fit") != nullptr &&
                             strcmp(Str(layer, "fit"), "cover") == 0 &&
                             media_width == 480 && media_height == 320 &&
                             parsed_rect.x == 0 && parsed_rect.y == 0 &&
                             parsed_rect.width == 480 && parsed_rect.height == 320;
-                        config.background = {normalized_paths[index].c_str(), parsed_rect};
-                    } else if (index == 1) {
+                        config.background = {normalized_paths[role_index].c_str(), parsed_rect};
+                    } else if (role_index == 1) {
                         valid = valid && Str(layer, "fit") != nullptr &&
                             strcmp(Str(layer, "fit"), "contain") == 0 &&
                             (!has_course_mode ||
                              (parsed_rect.x == 20 && parsed_rect.y == 168 &&
                               parsed_rect.width == 95 && parsed_rect.height == 95));
-                        config.teaching_object = {normalized_paths[index].c_str(), parsed_rect};
+                        config.teaching_object = {normalized_paths[role_index].c_str(), parsed_rect};
                     } else {
                         const cJSON* chroma = Obj(layer, "chromaKey");
                         const char* key_color = Str(chroma, "keyColor");
@@ -3098,7 +3162,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             (strcmp(key_color, "#00ff00") == 0 && tolerance == 20 &&
                              feather == 1 && parsed_rect.x == 118 && parsed_rect.y == 160 &&
                              parsed_rect.width == 150 && parsed_rect.height == 150));
-                        config.robot.sd_path = normalized_paths[index].c_str();
+                        config.robot.sd_path = normalized_paths[role_index].c_str();
                         config.robot.rect = parsed_rect;
                         config.robot.chroma = {{
                             static_cast<std::uint8_t>((rgb >> 16) & 0xff),
