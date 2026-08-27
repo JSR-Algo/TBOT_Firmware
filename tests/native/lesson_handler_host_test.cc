@@ -278,6 +278,8 @@ std::string ReplaceOnce(std::string value, const std::string& from,
                         const std::string& to);
 std::string ReplaceAll(std::string value, const std::string& from,
                        const std::string& to);
+std::string ReplaceNth(std::string value, const std::string& from,
+                       const std::string& to, int occurrence);
 
 std::string PrepareFrame(int seq, const std::string& extra_body = "") {
     return std::string("{\"type\":\"lesson_prepare\",\"protocolVersion\":\"") +
@@ -454,11 +456,11 @@ std::string V5CourseModePrepareFrame(int seq, std::uint64_t command_sequence_id 
         kV5CourseModeManifestChecksum + "\",\"localRoot\":\"" +
         V5CourseModePackRoot() + "\",\"ready\":true,\"assets\":["
         "{\"key\":\"" + kV5CourseModeAssetIds[0] +
-        "\",\"state\":\"READY\",\"checksumOk\":true,\"mediaType\":\"image/jpeg\",\"size\":43599},"
+        "\",\"state\":\"READY\",\"checksumOk\":true,\"sha256\":\"d4abb6087dc3122e0a00feb5e6a86b03dc7db550eb59d25e92f54d0fd09e4fc0\",\"mediaType\":\"image/jpeg\",\"size\":43599},"
         "{\"key\":\"" + kV5CourseModeAssetIds[1] +
-        "\",\"state\":\"READY\",\"checksumOk\":true,\"mediaType\":\"image/png\",\"size\":15086},"
+        "\",\"state\":\"READY\",\"checksumOk\":true,\"sha256\":\"c466239ff8ba202998e3827b6871906d7fbac6232aeaea3a59b7c69bec7d8777\",\"mediaType\":\"image/png\",\"size\":15086},"
         "{\"key\":\"" + kV5CourseModeAssetIds[2] +
-        "\",\"state\":\"READY\",\"checksumOk\":true,\"mediaType\":\"video/mp4\",\"size\":223033}]},"
+        "\",\"state\":\"READY\",\"checksumOk\":true,\"sha256\":\"f2d496b5e750e895f7e086aec827d7b99d0bb322d73ea660a2e84ff484b602c4\",\"mediaType\":\"video/mp4\",\"size\":223033}]},"
         ;
     }
     body +=
@@ -844,6 +846,19 @@ std::string ReplaceAll(std::string value, const std::string& from, const std::st
         replaced = true;
     }
     require(replaced, "projection test replacement target exists");
+    return value;
+}
+
+std::string ReplaceNth(std::string value, const std::string& from,
+                       const std::string& to, int occurrence) {
+    require(occurrence > 0, "projection replacement occurrence is positive");
+    size_t position = 0;
+    for (int index = 0; index < occurrence; ++index) {
+        position = value.find(from, position);
+        require(position != std::string::npos, "projection nth replacement target exists");
+        if (index + 1 < occurrence) position += from.size();
+    }
+    value.replace(position, from.size(), to);
     return value;
 }
 
@@ -2045,6 +2060,18 @@ void test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack() {
                 FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
                 fake.jpeg_decodes == 0 && fake.video_decodes == 0,
             "dynamic Course Mode rejects layer and asset-pack identity mismatch");
+
+    ResetObservable();
+    FreshSession();
+    Handle(ReplaceNth(
+        V5CourseModeActivityFallbackPrepareFrame(3),
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"",
+        "\"sha256\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\"",
+        2));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.jpeg_decodes == 0 && fake.video_decodes == 0,
+            "dynamic Course Mode rejects a layer checksum that differs from its READY pack asset");
 
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();

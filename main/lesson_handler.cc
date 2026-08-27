@@ -1742,8 +1742,9 @@ bool CourseModeV5AssetPackMatchesLayers(const cJSON* body, const cJSON* layers) 
     cJSON_ArrayForEach(layer, layers) {
         const char* asset_version_id = Str(layer, "assetVersionId");
         const char* layer_media_type = Str(layer, "mediaType");
+        const char* layer_sha256 = Str(layer, "sha256");
         double layer_bytes = 0;
-        if (Blank(asset_version_id) || !IsSha256(Str(layer, "sha256")) ||
+        if (Blank(asset_version_id) || !IsSha256(layer_sha256) ||
             Blank(layer_media_type) || !Num(layer, "bytes", layer_bytes) ||
             !PositiveIntegerAtMost(layer_bytes, UINT32_MAX) ||
             !matched_ids.insert(asset_version_id).second) {
@@ -1759,10 +1760,12 @@ bool CourseModeV5AssetPackMatchesLayers(const cJSON* body, const cJSON* layers) 
         }
         double asset_size = 0;
         const char* local_path = matching_asset == nullptr ? nullptr : Str(matching_asset, "localPath");
+        const char* asset_sha256 = matching_asset == nullptr ? nullptr : Str(matching_asset, "sha256");
         const std::string expected_path = Blank(local_path)
             ? root + "/" + EncodeLessonAssetPathSegment(asset_version_id)
             : std::string(local_path);
         if (matching_asset == nullptr ||
+            !IsSha256(asset_sha256) || std::strcmp(asset_sha256, layer_sha256) != 0 ||
             !ExactString(matching_asset, "mediaType", layer_media_type) ||
             !Num(matching_asset, "size", asset_size) || asset_size != layer_bytes ||
             LessonLocalPath(expected_path.c_str()).empty() ||
