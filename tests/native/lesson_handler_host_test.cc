@@ -401,6 +401,10 @@ constexpr const char* kV5CourseModeAssetIds[3] = {
     "75000000-0000-4000-8000-000000000022",
     "75000000-0000-4000-8000-000000000031"};
 constexpr std::size_t kV5CourseModeAssetSizes[3] = {43599, 15086, 223033};
+constexpr const char* kV5DynamicCourseModeAssetIds[3] = {
+    "85000000-0000-4000-8000-000000000011",
+    "85000000-0000-4000-8000-000000000022",
+    "85000000-0000-4000-8000-000000000031"};
 
 std::string V5CourseModePackRoot() {
     return std::string("sd://sdcard/tbot/lesson-assets/") + kV5CourseModePackName;
@@ -415,21 +419,25 @@ void StageV5CourseModeAssetPack() {
     require(system(("mkdir -p " + host_root).c_str()) == 0,
             "Course Mode v5 asset-pack directory is staged");
     setenv("TBOT_HOST_LESSON_ASSET_ROOT", "/tmp", 1);
-    for (int index = 0; index < 3; ++index) {
-        const std::string path = host_root + "/" + kV5CourseModeAssetIds[index];
-        FILE* file = fopen(path.c_str(), "wb");
-        require(file != nullptr, "Course Mode v5 sparse asset opens");
-        require(fseek(file, static_cast<long>(kV5CourseModeAssetSizes[index] - 1), SEEK_SET) == 0 &&
-                    fputc(0, file) != EOF,
-                "Course Mode v5 sparse asset reaches exact declared size");
-        fclose(file);
+    for (const auto* ids : {kV5CourseModeAssetIds, kV5DynamicCourseModeAssetIds}) {
+        for (int index = 0; index < 3; ++index) {
+            const std::string path = host_root + "/" + ids[index];
+            FILE* file = fopen(path.c_str(), "wb");
+            require(file != nullptr, "Course Mode v5 sparse asset opens");
+            require(fseek(file, static_cast<long>(kV5CourseModeAssetSizes[index] - 1), SEEK_SET) == 0 &&
+                        fputc(0, file) != EOF,
+                    "Course Mode v5 sparse asset reaches exact declared size");
+            fclose(file);
+        }
     }
 }
 
 void RemoveV5CourseModeAssetPack() {
     const std::string host_root = std::string("/tmp/") + kV5CourseModePackName;
-    for (const char* asset_id : kV5CourseModeAssetIds) {
-        remove((host_root + "/" + asset_id).c_str());
+    for (const auto* ids : {kV5CourseModeAssetIds, kV5DynamicCourseModeAssetIds}) {
+        for (int index = 0; index < 3; ++index) {
+            remove((host_root + "/" + ids[index]).c_str());
+        }
     }
     rmdir(host_root.c_str());
     unsetenv("TBOT_HOST_LESSON_ASSET_ROOT");
@@ -505,6 +513,20 @@ std::string V5CourseModeActivityFallbackPrepareFrame(
     frame = ReplaceAll(
         frame, kV5CourseModeManifestChecksum,
         "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc");
+    for (int index = 0; index < 3; ++index) {
+        frame = ReplaceAll(frame, kV5CourseModeAssetIds[index],
+                           kV5DynamicCourseModeAssetIds[index]);
+    }
+    frame = ReplaceAll(
+        frame, "d4abb6087dc3122e0a00feb5e6a86b03dc7db550eb59d25e92f54d0fd09e4fc0",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    frame = ReplaceAll(
+        frame, "f2d496b5e750e895f7e086aec827d7b99d0bb322d73ea660a2e84ff484b602c4",
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+    frame = ReplaceAll(
+        frame, "\"rect\":{\"x\":118,\"y\":160,\"width\":150,\"height\":150}",
+        "\"rect\":{\"x\":180,\"y\":120,\"width\":120,\"height\":120}");
+    frame = ReplaceAll(frame, "\"keyColor\":\"#00ff00\"", "\"keyColor\":\"#00aa00\"");
     const std::string object_start = "{\"layer\":\"teachingObject\"";
     const std::string robot_start = "{\"layer\":\"robotOverlay\"";
     const auto begin = frame.find(object_start);
@@ -1514,7 +1536,8 @@ bool V3Open(void* context, const char* path, tbot::LessonCinematicStreamMetadata
         std::string(path).find("flattenedCinematic") != std::string::npos;
     const std::string opened(path);
     const bool course_mode_robot =
-        opened.find("75000000-0000-4000-8000-000000000031") != std::string::npos;
+        opened.find("75000000-0000-4000-8000-000000000031") != std::string::npos ||
+        opened.find("85000000-0000-4000-8000-000000000031") != std::string::npos;
     fake->video_width = opened.find("robot-teach") != std::string::npos || course_mode_robot ? 240 : 2;
     fake->video_height = opened.find("robot-teach") != std::string::npos || course_mode_robot ? 240 : 2;
     std::uint32_t duration_ms = 300;
@@ -1949,6 +1972,7 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
 void test_renderer_v5_course_mode_activity_fallback_without_object() {
     ResetObservable();
     FreshSession();
+    StageV5CourseModeAssetPack();
     V3RendererFake fake;
     tbot::LessonLayeredCinematicRenderer renderer(
         {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
@@ -1968,11 +1992,13 @@ void test_renderer_v5_course_mode_activity_fallback_without_object() {
                 !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
             "activity-aware fallback stop releases its lesson asset reservation");
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
 }
 
 void test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix() {
     ResetObservable();
     FreshSession();
+    StageV5CourseModeAssetPack();
     V3RendererFake fake;
     tbot::LessonLayeredCinematicRenderer renderer(
         {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
@@ -1988,6 +2014,40 @@ void test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mi
                 fake.jpeg_decodes == 0 && fake.video_decodes == 0,
             "Course Mode fallback rejects a marker from a different manifest before IO");
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+}
+
+void test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack() {
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+
+    Handle(ReplaceOnce(
+        V5CourseModeActivityFallbackPrepareFrame(1),
+        "\"state\":\"READY\"", "\"state\":\"PRELOADING\""));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.jpeg_decodes == 0 && fake.video_decodes == 0,
+            "dynamic Course Mode rejects a pack without READY checksum attestation");
+
+    ResetObservable();
+    FreshSession();
+    Handle(ReplaceOnce(
+        V5CourseModeActivityFallbackPrepareFrame(2),
+        kV5DynamicCourseModeAssetIds[2],
+        "85000000-0000-4000-8000-000000000099"));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH" &&
+                fake.jpeg_decodes == 0 && fake.video_decodes == 0,
+            "dynamic Course Mode rejects layer and asset-pack identity mismatch");
+
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
 }
 
 void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
@@ -8742,6 +8802,7 @@ int main() {
     test_renderer_v5_capability_exact_layers_and_lifecycle();
     test_renderer_v5_course_mode_activity_fallback_without_object();
     test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix();
+    test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack();
     test_renderer_v4_capability_and_exact_single_asset_routing();
     test_renderer_v4_accepts_template_v2_cue_identity_prepare_and_controls();
     test_renderer_v4_course_mode_compatibility_is_exact_and_narrow();

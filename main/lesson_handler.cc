@@ -1722,6 +1722,57 @@ cJSON* BuildAssetPackAck(const cJSON* body) {
     return out;
 }
 
+bool CourseModeV5AssetPackMatchesLayers(const cJSON* body, const cJSON* layers) {
+    cJSON* pack_ack = BuildAssetPackAck(body);
+    const bool pack_ready = pack_ack != nullptr &&
+        cJSON_IsTrue(cJSON_GetObjectItem(pack_ack, "ready"));
+    cJSON_Delete(pack_ack);
+    const cJSON* pack = Obj(body, "assetPack");
+    const cJSON* assets = cJSON_GetObjectItem(pack, "assets");
+    const char* local_root = Str(pack, "localRoot");
+    if (!pack_ready || !cJSON_IsTrue(cJSON_GetObjectItem(pack, "ready")) ||
+        !cJSON_IsArray(layers) || !cJSON_IsArray(assets) || Blank(local_root)) {
+        return false;
+    }
+    std::string root(local_root);
+    TrimAsciiWhitespace(root);
+    while (!root.empty() && root.back() == '/') root.pop_back();
+    std::set<std::string> matched_ids;
+    const cJSON* layer = nullptr;
+    cJSON_ArrayForEach(layer, layers) {
+        const char* asset_version_id = Str(layer, "assetVersionId");
+        const char* layer_media_type = Str(layer, "mediaType");
+        double layer_bytes = 0;
+        if (Blank(asset_version_id) || !IsSha256(Str(layer, "sha256")) ||
+            Blank(layer_media_type) || !Num(layer, "bytes", layer_bytes) ||
+            !PositiveIntegerAtMost(layer_bytes, UINT32_MAX) ||
+            !matched_ids.insert(asset_version_id).second) {
+            return false;
+        }
+        const cJSON* matching_asset = nullptr;
+        const cJSON* asset = nullptr;
+        cJSON_ArrayForEach(asset, assets) {
+            if (ExactString(asset, "key", asset_version_id)) {
+                if (matching_asset != nullptr) return false;
+                matching_asset = asset;
+            }
+        }
+        double asset_size = 0;
+        const char* local_path = matching_asset == nullptr ? nullptr : Str(matching_asset, "localPath");
+        const std::string expected_path = Blank(local_path)
+            ? root + "/" + EncodeLessonAssetPathSegment(asset_version_id)
+            : std::string(local_path);
+        if (matching_asset == nullptr ||
+            !ExactString(matching_asset, "mediaType", layer_media_type) ||
+            !Num(matching_asset, "size", asset_size) || asset_size != layer_bytes ||
+            LessonLocalPath(expected_path.c_str()).empty() ||
+            !ExactString(layer, "sdPath", expected_path.c_str())) {
+            return false;
+        }
+    }
+    return matched_ids.size() == static_cast<size_t>(cJSON_GetArraySize(layers));
+}
+
 bool ExactCourseModeV5AssetPackPaths(const cJSON* body, const cJSON* layers) {
     static constexpr const char* kManifestChecksum =
         "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d";
@@ -1733,11 +1784,8 @@ bool ExactCourseModeV5AssetPackPaths(const cJSON* body, const cJSON* layers) {
         "image/jpeg", "image/png", "video/mp4"};
     static constexpr std::uint32_t kSizes[3] = {43599, 15086, 223033};
 
-    cJSON* pack_ack = BuildAssetPackAck(body);
-    const bool pack_ready = pack_ack != nullptr &&
-        cJSON_IsTrue(cJSON_GetObjectItem(pack_ack, "ready"));
-    cJSON_Delete(pack_ack);
-    if (!pack_ready || !cJSON_IsArray(layers) || cJSON_GetArraySize(layers) != 3) {
+    if (!CourseModeV5AssetPackMatchesLayers(body, layers) ||
+        !cJSON_IsArray(layers) || cJSON_GetArraySize(layers) != 3) {
         return false;
     }
 
@@ -3035,6 +3083,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     ExactString(
                         course_mode, "manifestChecksum",
                         "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d"));
+                const bool course_mode_pack_matches = !has_course_mode ||
+                    CourseModeV5AssetPackMatchesLayers(body, layers);
                 bool valid = ExactObjectKeys(command_body, prepare_keys) && valid_activity_ids &&
                     (!activity_aware || has_course_mode) &&
                     Num(command_body, "durationMs", duration_ms) &&
@@ -3051,6 +3101,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                      (ParseCourseModeV5Compatibility(course_mode) &&
                       manifest_checksum != nullptr &&
                       ExactString(course_mode, "manifestChecksum", manifest_checksum) &&
+                      course_mode_pack_matches &&
                       (!canonical_course_mode_candidate ||
                        (ParseExactCourseModeV5Compatibility(course_mode) &&
                         ExactCourseModeV5AssetPackPaths(body, layers) &&
@@ -3087,6 +3138,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     const auto& layer_keys = role_index == 2
                         ? has_course_mode ? kCourseModeRobotLayerKeys : kRobotLayerKeys
                         : has_course_mode ? kCourseModeImageLayerKeys : kImageLayerKeys;
+                    const bool numeric_metadata = Num(layer, "bytes", bytes) &&
+                        Num(layer, "width", media_width) && Num(layer, "height", media_height) &&
+                        Num(rect, "x", x) && Num(rect, "y", y) &&
+                        Num(rect, "width", rect_width) && Num(rect, "height", rect_height);
                     valid = ExactObjectKeys(layer, layer_keys) &&
                         Str(layer, "layer") != nullptr && strcmp(Str(layer, "layer"), kLayers[role_index]) == 0 &&
                         Str(layer, "slot") != nullptr && strcmp(Str(layer, "slot"), kSlots[role_index]) == 0 &&
@@ -3094,20 +3149,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             strcmp(Str(layer, "mediaKind"), kMediaKinds[role_index]) == 0 &&
                         Str(layer, "mediaType") != nullptr &&
                             strcmp(Str(layer, "mediaType"), kMediaTypes[role_index]) == 0 &&
-                        IsSha256(Str(layer, "sha256")) && Num(layer, "bytes", bytes) &&
+                        IsSha256(Str(layer, "sha256")) && numeric_metadata &&
                         PositiveIntegerAtMost(bytes, UINT32_MAX) &&
-                        Num(layer, "width", media_width) && Num(layer, "height", media_height) &&
                         PositiveIntegerAtMost(media_width, role_index == 0 ? 480 : 240) &&
                         PositiveIntegerAtMost(media_height, role_index == 0 ? 320 : 240) &&
-                        Num(rect, "x", x) && Num(rect, "y", y) &&
-                        Num(rect, "width", rect_width) && Num(rect, "height", rect_height) &&
                         std::trunc(x) == x && std::trunc(y) == y &&
                         std::trunc(rect_width) == rect_width &&
                         std::trunc(rect_height) == rect_height && x >= 0 && y >= 0 &&
                         rect_width > 0 && rect_height > 0 &&
                         x + rect_width <= tbot::kLessonCinematicWidth &&
                         y + rect_height <= tbot::kLessonCinematicHeight;
-                    if (has_course_mode) {
+                    if (canonical_course_mode_candidate) {
                         static constexpr const char* kAssetVersionIds[3] = {
                             "75000000-0000-4000-8000-000000000011",
                             "75000000-0000-4000-8000-000000000022",
@@ -3140,7 +3192,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     } else if (role_index == 1) {
                         valid = valid && Str(layer, "fit") != nullptr &&
                             strcmp(Str(layer, "fit"), "contain") == 0 &&
-                            (!has_course_mode ||
+                            (!canonical_course_mode_candidate ||
                              (parsed_rect.x == 20 && parsed_rect.y == 168 &&
                               parsed_rect.width == 95 && parsed_rect.height == 95));
                         config.teaching_object = {normalized_paths[role_index].c_str(), parsed_rect};
@@ -3158,7 +3210,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             Num(chroma, "featherPx", feather) && feather >= 0 && feather <= 4;
                         unsigned rgb = 0;
                         valid = valid && sscanf(key_color + 1, "%06x", &rgb) == 1;
-                        valid = valid && (!has_course_mode ||
+                        valid = valid && (!canonical_course_mode_candidate ||
                             (strcmp(key_color, "#00ff00") == 0 && tolerance == 20 &&
                              feather == 1 && parsed_rect.x == 118 && parsed_rect.y == 160 &&
                              parsed_rect.width == 150 && parsed_rect.height == 150));
