@@ -896,27 +896,66 @@ struct LessonCourseDeliveryLedger {
     static constexpr size_t kMaxEntries = 12;
     std::deque<std::pair<std::string, std::string>> entries;
     bool loaded = false;
+    bool storage_valid = true;
 };
 LessonCourseDeliveryLedger g_course_delivery_ledger;
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+std::string g_course_delivery_test_storage;
+#endif
+
+bool ValidPersistedCourseDeliveryToken(const std::string& value) {
+    if (value.empty() || value.size() > 128) return false;
+    return std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+        return ch >= 0x21 && ch <= 0x7e && ch != '\t';
+    });
+}
+
+std::string SerializeLessonCourseDeliveryLedger() {
+    std::string serialized;
+    for (const auto& entry : g_course_delivery_ledger.entries) {
+        serialized += entry.first;
+        serialized.push_back('\t');
+        serialized += entry.second;
+        serialized.push_back('\n');
+    }
+    return serialized;
+}
 
 void LoadLessonCourseDeliveryLedger() {
     if (g_course_delivery_ledger.loaded) return;
     g_course_delivery_ledger.loaded = true;
-#ifdef ESP_PLATFORM
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+    std::string serialized = g_course_delivery_test_storage;
+#elif defined(ESP_PLATFORM)
     Settings settings("lesson_course");
     std::string serialized = settings.GetString("deliveries");
+#else
+    std::string serialized;
+#endif
     size_t cursor = 0;
-    while (cursor < serialized.size() &&
-           g_course_delivery_ledger.entries.size() < LessonCourseDeliveryLedger::kMaxEntries) {
+    while (cursor < serialized.size()) {
         const size_t separator = serialized.find('\t', cursor);
         const size_t end = serialized.find('\n', cursor);
-        if (separator == std::string::npos || end == std::string::npos || separator >= end) break;
-        g_course_delivery_ledger.entries.emplace_back(
-            serialized.substr(cursor, separator - cursor),
-            serialized.substr(separator + 1, end - separator - 1));
+        if (separator == std::string::npos || end == std::string::npos || separator >= end) {
+            g_course_delivery_ledger.entries.clear();
+            g_course_delivery_ledger.storage_valid = false;
+            break;
+        }
+        std::string session = serialized.substr(cursor, separator - cursor);
+        std::string delivery = serialized.substr(separator + 1, end - separator - 1);
+        if (!ValidPersistedCourseDeliveryToken(session) ||
+            !ValidPersistedCourseDeliveryToken(delivery)) {
+            g_course_delivery_ledger.entries.clear();
+            g_course_delivery_ledger.storage_valid = false;
+            break;
+        }
+        g_course_delivery_ledger.entries.emplace_back(std::move(session), std::move(delivery));
+        while (g_course_delivery_ledger.entries.size() >
+               LessonCourseDeliveryLedger::kMaxEntries) {
+            g_course_delivery_ledger.entries.pop_front();
+        }
         cursor = end + 1;
     }
-#endif
 }
 
 bool LessonCourseDeliveryApplied(const char* session_id, const char* delivery_id) {
@@ -927,23 +966,20 @@ bool LessonCourseDeliveryApplied(const char* session_id, const char* delivery_id
         g_course_delivery_ledger.entries.end();
 }
 
-void RememberLessonCourseDelivery(const char* session_id, const char* delivery_id) {
+bool RememberLessonCourseDelivery(const char* session_id, const char* delivery_id) {
     LoadLessonCourseDeliveryLedger();
+    if (!g_course_delivery_ledger.storage_valid) return false;
     g_course_delivery_ledger.entries.emplace_back(session_id, delivery_id);
     while (g_course_delivery_ledger.entries.size() > LessonCourseDeliveryLedger::kMaxEntries) {
         g_course_delivery_ledger.entries.pop_front();
     }
-#ifdef ESP_PLATFORM
-    std::string serialized;
-    for (const auto& entry : g_course_delivery_ledger.entries) {
-        serialized += entry.first;
-        serialized.push_back('\t');
-        serialized += entry.second;
-        serialized.push_back('\n');
-    }
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+    g_course_delivery_test_storage = SerializeLessonCourseDeliveryLedger();
+#elif defined(ESP_PLATFORM)
     Settings settings("lesson_course", true);
-    settings.SetString("deliveries", serialized);
+    settings.SetString("deliveries", SerializeLessonCourseDeliveryLedger());
 #endif
+    return true;
 }
 void RestoreLessonEmbodiedLedger(const char* assignment_id, const char* session_id) {
     if (g_embodied_ledger.assignment_id == assignment_id &&
@@ -1031,6 +1067,26 @@ void SetLessonVisualCompletionNonceForTest(std::uint64_t value) {
 }
 void ClearLessonAckReplayHistoryForTest() {
     g_session.ack_history.clear();
+}
+bool LessonCourseDeliveryAppliedForTest(const char* session_id, const char* delivery_id) {
+    return ::LessonCourseDeliveryApplied(session_id, delivery_id);
+}
+void ResetLessonCourseDeliveryMemoryForTest() {
+    g_course_delivery_ledger.entries.clear();
+    g_course_delivery_ledger.loaded = false;
+    g_course_delivery_ledger.storage_valid = true;
+}
+void SetLessonCourseDeliveryStorageForTest(const char* serialized) {
+    g_course_delivery_test_storage = serialized != nullptr ? serialized : "";
+    ResetLessonCourseDeliveryMemoryForTest();
+}
+std::size_t LessonCourseDeliveryEntryCountForTest() {
+    LoadLessonCourseDeliveryLedger();
+    return g_course_delivery_ledger.entries.size();
+}
+bool LessonCourseDeliveryStorageValidForTest() {
+    LoadLessonCourseDeliveryLedger();
+    return g_course_delivery_ledger.storage_valid;
 }
 }  // namespace tbot
 namespace {
@@ -2882,6 +2938,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
         state.replay_entrance = cJSON_IsTrue(cJSON_GetObjectItem(body, "replayEntrance"));
         state.session_id = session_id;
         state.delivery_id = delivery_id;
+        if (has_delivery_id && !RememberLessonCourseDelivery(session_id, delivery_id)) {
+            emit(root, "lesson_error", MakeErrorBody(
+                "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+                "Course Mode activity durable delivery claim failed",
+                true, "courseActivity"));
+            return;
+        }
         const auto response = renderer->ApplyVisualState(
             state, static_cast<std::uint64_t>(sequence),
             static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
@@ -2891,7 +2954,6 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 true, "courseActivity"));
             return;
         }
-        if (has_delivery_id) RememberLessonCourseDelivery(session_id, delivery_id);
         g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
         const bool degraded = renderer->last_apply_degraded();
         emit_ack(root, sequence, true, degraded, nullptr, true, -1,
@@ -3078,6 +3140,14 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 CinematicJsonAddNumber(cinematic, "commandSequenceId",
                                        static_cast<double>(command_sequence_id)) &&
                 CinematicJsonAddBool(cinematic, "accepted", true);
+            const auto* layered = cinematic_v5
+                ? tbot::ActiveLessonLayeredCinematicRenderer() : nullptr;
+            const bool degraded = layered != nullptr && layered->last_apply_degraded();
+            if (degraded) {
+                built = built && CinematicJsonAddBool(cinematic, "degraded", true) &&
+                    CinematicJsonAddString(cinematic, "degradedReason",
+                                           "animationStartFailed");
+            }
             if (response.accepted && prepare_frame) {
                 built = built && CinematicJsonAddBool(cinematic, "frameZeroReady", true);
             } else if (response.accepted && start_command) {

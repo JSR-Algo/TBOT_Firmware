@@ -192,7 +192,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         ? (config.teaching_object.identity != nullptr
                ? config.teaching_object.identity : config.teaching_object.sd_path)
         : std::string();
-    const bool had_static_composition = config.retain_static_layers && background_ != nullptr;
+    const bool static_fallback_allowed = config.retain_static_layers;
     const bool keep_background = config.retain_static_layers && background_ != nullptr &&
         background_identity_ == background_identity;
     const bool keep_object = config.retain_static_layers &&
@@ -297,7 +297,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         ops_.open_video(ops_.context, config.robot.sd_path, &robot_metadata_, &robot_stream_) &&
         robot_stream_ != nullptr;
     if (!robot_opened) {
-        if (!had_static_composition) {
+        if (!static_fallback_allowed) {
             Release();
             return Failure(config.command_sequence_id,
                            OperationError(LessonCinematicError::kFileOpen));
@@ -326,7 +326,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     }
     const auto frame_error = RenderFrame(0);
     if (frame_error != LessonCinematicError::kNone) {
-        if (!had_static_composition) {
+        if (!static_fallback_allowed) {
             Release();
             state_ = State::kFailed;
             return Failure(config.command_sequence_id, frame_error);
@@ -461,8 +461,15 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Tick(std::uint64_t now_m
     if (state_ == State::kPaused) {
         return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
+    if (state_ == State::kPrepared && last_apply_degraded_) {
+        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    }
     if (state_ != State::kRunning) {
         return Failure(last_sequence_, LessonCinematicError::kInvalidState);
+    }
+    if (robot_stream_ == nullptr || robot_metadata_.frame_count == 0) {
+        state_ = State::kPrepared;
+        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
     }
     const std::uint64_t elapsed = now_ms >= clock_origin_ms_ ? now_ms - clock_origin_ms_ : 0;
     std::uint64_t frame = elapsed * robot_metadata_.fps / 1000;
@@ -478,8 +485,11 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Tick(std::uint64_t now_m
     }
     const auto error = RenderFrame(static_cast<std::size_t>(frame));
     if (error != LessonCinematicError::kNone) {
-        state_ = State::kFailed;
-        return Failure(last_sequence_, error);
+        ReleaseRobot();
+        last_apply_degraded_ = true;
+        state_ = State::kPrepared;
+        PresentStaticFrame(displayed_frame_);
+        return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
     displayed_frame_ = static_cast<std::size_t>(frame);
     return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);

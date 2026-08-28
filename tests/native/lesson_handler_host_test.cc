@@ -26,6 +26,14 @@
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
 #include "lesson_layered_cinematic_renderer.h"
+
+namespace tbot {
+bool LessonCourseDeliveryAppliedForTest(const char* session_id, const char* delivery_id);
+void ResetLessonCourseDeliveryMemoryForTest();
+void SetLessonCourseDeliveryStorageForTest(const char* serialized);
+std::size_t LessonCourseDeliveryEntryCountForTest();
+bool LessonCourseDeliveryStorageValidForTest();
+}
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
 #include "system_info.h"
@@ -1544,6 +1552,9 @@ struct V3RendererFake {
     std::uint16_t video_height = 2;
     std::uint32_t video_frame_count = 3;
     std::uint32_t video_duration_ms = 300;
+    std::string expected_claim_session;
+    std::string expected_claim_delivery;
+    bool observed_claim_before_decode = false;
 };
 
 void* V3Allocate(void* context, std::size_t size) {
@@ -1601,6 +1612,10 @@ bool V3Decode(void* context, void*, std::size_t index, std::uint8_t* destination
               std::size_t capacity, std::uint16_t* width, std::uint16_t* height,
               std::size_t* stride) {
     auto* fake = static_cast<V3RendererFake*>(context);
+    if (!fake->expected_claim_delivery.empty()) {
+        fake->observed_claim_before_decode = tbot::LessonCourseDeliveryAppliedForTest(
+            fake->expected_claim_session.c_str(), fake->expected_claim_delivery.c_str());
+    }
     if (fake->fail_decode) return false;
     ++fake->video_decodes;
     fake->video_indices.push_back(index);
@@ -2025,6 +2040,30 @@ void test_renderer_v5_course_mode_activity_fallback_without_object() {
     RemoveV5CourseModeAssetPack();
 }
 
+void test_renderer_v5_first_course_prepare_reports_static_degradation() {
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    fake.fail_open = true;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    require(FrameType(0) == "lesson_ack" &&
+                FrameBodyStr(0, "cinematicPhase", "degradedReason") ==
+                    "animationStartFailed" && renderer.prepared(),
+            "first Course Mode Robot open failure ACKs retained static degradation");
+    Handle(V5Frame("lesson_stop", 2,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":192}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+}
+
 void test_course_activity_retains_w19_static_layers_and_dedupes_delivery() {
     ResetObservable();
     FreshSession();
@@ -2045,16 +2084,25 @@ void test_course_activity_retains_w19_static_layers_and_dedupes_delivery() {
                 !FrameBodyBool(1, "degraded", true),
             "Course activity emits applied visual status");
 
-    Handle(CourseActivityFrame(3, "delivery-w19-1", "w19-weather-recall", "teach", true));
-    require(fake.video_decodes == initial_video_decodes,
+    fake.expected_claim_session = SID();
+    fake.expected_claim_delivery = "delivery-w19-claim-order";
+    Handle(CourseActivityFrame(3, "delivery-w19-claim-order",
+                               "w19-weather-order", "teach", true));
+    require(fake.observed_claim_before_decode,
+            "durable delivery claim is visible before the Robot side effect starts");
+    fake.expected_claim_delivery.clear();
+
+    const int after_claim_order = fake.video_decodes;
+    Handle(CourseActivityFrame(4, "delivery-w19-1", "w19-weather-recall", "teach", true));
+    require(fake.video_decodes == after_claim_order,
             "duplicate session and delivery identity applies no visual effect");
 
-    Handle(CourseActivityFrame(4, "delivery-w19-2", "w19-weather-transfer", "teach", true));
-    require(fake.video_decodes == initial_video_decodes + 1,
+    Handle(CourseActivityFrame(5, "delivery-w19-2", "w19-weather-transfer", "teach", true));
+    require(fake.video_decodes == after_claim_order + 1,
             "new delivery explicitly replays entrance exactly once");
 
     const std::string legacy_activity = ReplaceOnce(
-        CourseActivityFrame(5, "legacy-delivery", "w19-weather-legacy", "teach", true),
+        CourseActivityFrame(6, "legacy-delivery", "w19-weather-legacy", "teach", true),
         "\"deliveryId\":\"legacy-delivery\",", "");
     Handle(legacy_activity);
     const int after_legacy = fake.video_decodes;
@@ -2063,14 +2111,14 @@ void test_course_activity_retains_w19_static_layers_and_dedupes_delivery() {
             "legacy activity without deliveryId remains sequence-idempotent");
 
     fake.fail_decode = true;
-    Handle(CourseActivityFrame(6, "delivery-w19-3", "w19-weather-close", "celebrate", true));
+    Handle(CourseActivityFrame(7, "delivery-w19-3", "w19-weather-close", "celebrate", true));
     require(FrameBodyBool(Sent().size() - 1, "rendered", false) &&
                 FrameBodyBool(Sent().size() - 1, "degraded", false) &&
                 FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
                     "animationStartFailed",
             "Robot animation failure keeps static composition and emits degraded evidence");
 
-    Handle(V5Frame("lesson_stop", 7,
+    Handle(V5Frame("lesson_stop", 8,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"celebrate\","
         "\"commandSequenceId\":197}}"));
 
@@ -2083,8 +2131,42 @@ void test_course_activity_retains_w19_static_layers_and_dedupes_delivery() {
     Handle(V5Frame("lesson_stop", 3,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
         "\"commandSequenceId\":199}}"));
+
+    FreshSession();
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1, 200));
+    const int different_session_decodes = fake.video_decodes;
+    Handle(CourseActivityFrame(2, "delivery-w19-2", "w19-weather-new-session", "teach", true));
+    require(fake.video_decodes == different_session_decodes + 1,
+            "the same delivery identity in a different session remains a distinct effect");
+    Handle(V5Frame("lesson_stop", 3,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"teach\","
+        "\"commandSequenceId\":201}}"));
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();
+}
+
+void test_course_activity_delivery_persistence_reload_bounds_and_corruption() {
+    std::string persisted;
+    for (int index = 0; index < 15; ++index) {
+        persisted += "session-" + std::to_string(index) + "\tdelivery-" +
+                     std::to_string(index) + "\n";
+    }
+    tbot::SetLessonCourseDeliveryStorageForTest(persisted.c_str());
+    tbot::ResetLessonCourseDeliveryMemoryForTest();
+    require(tbot::LessonCourseDeliveryStorageValidForTest() &&
+                tbot::LessonCourseDeliveryEntryCountForTest() == 12,
+            "persisted delivery reload evicts oldest entries to the bounded window");
+    require(!tbot::LessonCourseDeliveryAppliedForTest("session-0", "delivery-0") &&
+                tbot::LessonCourseDeliveryAppliedForTest("session-14", "delivery-14"),
+            "reload preserves newest delivery identities and evicts oldest identities");
+
+    tbot::SetLessonCourseDeliveryStorageForTest("session-truncated\tdelivery-truncated");
+    tbot::ResetLessonCourseDeliveryMemoryForTest();
+    require(!tbot::LessonCourseDeliveryStorageValidForTest() &&
+                tbot::LessonCourseDeliveryEntryCountForTest() == 0,
+            "truncated persisted ledger fails closed without accepting a partial identity");
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+    tbot::ResetLessonCourseDeliveryMemoryForTest();
 }
 
 void test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix() {
@@ -8905,7 +8987,9 @@ int main() {
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v5_capability_exact_layers_and_lifecycle();
     test_renderer_v5_course_mode_activity_fallback_without_object();
+    test_renderer_v5_first_course_prepare_reports_static_degradation();
     test_course_activity_retains_w19_static_layers_and_dedupes_delivery();
+    test_course_activity_delivery_persistence_reload_bounds_and_corruption();
     test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix();
     test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack();
     test_renderer_v4_capability_and_exact_single_asset_routing();

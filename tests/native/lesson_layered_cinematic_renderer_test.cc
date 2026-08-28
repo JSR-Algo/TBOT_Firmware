@@ -28,6 +28,7 @@ struct FakeRuntime {
     std::size_t last_frame = 999;
     bool fail_static = false;
     bool fail_video = false;
+    bool fail_video_decode = false;
     bool fail_present = false;
     bool enough_memory = true;
     std::vector<std::size_t> video_frames;
@@ -92,7 +93,7 @@ bool DecodeVideo(void* raw, void*, std::size_t frame_index, std::uint8_t* destin
     auto& fake = *static_cast<FakeRuntime*>(raw);
     ++fake.video_decodes;
     fake.video_frames.push_back(frame_index);
-    if (fake.fail_video || capacity < 8) return false;
+    if (fake.fail_video || fake.fail_video_decode || capacity < 8) return false;
     *width = 2;
     *height = 2;
     *stride = 4;
@@ -317,6 +318,50 @@ void TestRobotFailureKeepsLastGoodStaticCompositionDegraded() {
             "degraded animation does not re-decode static layers");
 }
 
+void TestFirstCoursePrepareKeepsNewStaticWhenRobotFails() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    auto config = Config();
+    config.retain_static_layers = true;
+    fake.fail_video = true;
+
+    const auto response = renderer.Prepare(config, 0);
+
+    Require(response.accepted && renderer.last_apply_degraded(),
+            "first Course Mode prepare degrades when Robot cannot open");
+    Require(renderer.prepared() && fake.jpeg_decodes == 1 && fake.png_decodes == 1 &&
+                fake.presents == 1,
+            "newly decoded static composition remains prepared and visible");
+    Require(renderer.Start(8, "teach", 0).accepted && renderer.Tick(100).accepted,
+            "static-only degraded phase remains safe when runtime starts and ticks it");
+
+    FakeRuntime decode_fake;
+    tbot::LessonLayeredCinematicRenderer decode_renderer(Ops(&decode_fake));
+    decode_fake.fail_video_decode = true;
+    const auto decode_response = decode_renderer.Prepare(config, 0);
+    Require(decode_response.accepted && decode_renderer.last_apply_degraded() &&
+                decode_renderer.prepared() && decode_fake.presents == 1,
+            "first frame-zero decode failure also retains the newly decoded static composition");
+}
+
+void TestTickRobotFailureFallsBackToStaticComposition() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "tick failure fixture prepares");
+    Require(renderer.Start(8, "teach", 0).accepted, "tick failure fixture starts");
+    const std::size_t presents_before = fake.presents;
+    fake.fail_video_decode = true;
+
+    const auto response = renderer.Tick(110);
+
+    Require(response.accepted && renderer.last_apply_degraded(),
+            "later Robot frame failure is observable as degraded");
+    Require(renderer.prepared() && fake.presents == presents_before + 1,
+            "later Robot frame failure returns safely to retained static composition");
+    Require(renderer.Tick(220).accepted,
+            "subsequent timer ticks keep the degraded static phase stable");
+}
+
 }  // namespace
 
 int main() {
@@ -327,6 +372,8 @@ int main() {
     TestActivityTransitionsRetainPinnedStaticLayers();
     TestVisualStateDoesNotReplayEntranceUnlessRequested();
     TestRobotFailureKeepsLastGoodStaticCompositionDegraded();
+    TestFirstCoursePrepareKeepsNewStaticWhenRobotFails();
+    TestTickRobotFailureFallsBackToStaticComposition();
     std::cout << "lesson_layered_cinematic_renderer tests passed\n";
     return 0;
 }
