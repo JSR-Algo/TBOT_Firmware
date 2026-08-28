@@ -901,10 +901,25 @@ struct LessonCourseDeliveryLedger {
     bool storage_valid = true;
 };
 LessonCourseDeliveryLedger g_course_delivery_ledger;
+struct LessonCourseDeliveryRecovery {
+    enum class Action : std::uint8_t { kNone, kResolveOutcome, kRemoveClaim };
+    Action action = Action::kNone;
+    LessonCourseDeliveryLedger::Status outcome = LessonCourseDeliveryLedger::Status::kPending;
+    bool has_evicted = false;
+    LessonCourseDeliveryLedger::Record evicted{};
+};
+std::map<std::pair<std::string, std::string>, LessonCourseDeliveryRecovery>
+    g_course_delivery_recovery;
 #ifdef TBOT_HOST_NATIVE_COVERAGE
 std::string g_course_delivery_test_storage;
 bool g_course_delivery_test_write_failure = false;
+int g_course_delivery_test_write_count = 0;
+int g_course_delivery_test_fail_write_number = 0;
 #endif
+
+auto LessonCourseDeliveryKey(const char* session_id, const char* delivery_id) {
+    return std::make_pair(std::string(session_id), std::string(delivery_id));
+}
 
 bool ValidPersistedCourseDeliveryToken(const std::string& value) {
     if (value.empty() || value.size() > 128) return false;
@@ -1013,7 +1028,12 @@ LessonCourseDeliveryLedger::Record* FindLessonCourseDelivery(
 
 bool PersistLessonCourseDeliveryLedger() {
 #ifdef TBOT_HOST_NATIVE_COVERAGE
-    if (g_course_delivery_test_write_failure) return false;
+    ++g_course_delivery_test_write_count;
+    if (g_course_delivery_test_write_failure ||
+        (g_course_delivery_test_fail_write_number > 0 &&
+         g_course_delivery_test_write_count == g_course_delivery_test_fail_write_number)) {
+        return false;
+    }
     g_course_delivery_test_storage = SerializeLessonCourseDeliveryLedger();
 #elif defined(ESP_PLATFORM)
     nvs_handle_t handle = 0;
@@ -1031,13 +1051,17 @@ bool RememberLessonCourseDelivery(const char* session_id, const char* delivery_i
     LoadLessonCourseDeliveryLedger();
     if (!g_course_delivery_ledger.storage_valid) return false;
     const auto previous = g_course_delivery_ledger.entries;
+    auto& recovery = g_course_delivery_recovery[LessonCourseDeliveryKey(session_id, delivery_id)];
     g_course_delivery_ledger.entries.push_back(
         {session_id, delivery_id, LessonCourseDeliveryLedger::Status::kPending});
     while (g_course_delivery_ledger.entries.size() > LessonCourseDeliveryLedger::kMaxEntries) {
+        recovery.evicted = g_course_delivery_ledger.entries.front();
+        recovery.has_evicted = true;
         g_course_delivery_ledger.entries.pop_front();
     }
     if (PersistLessonCourseDeliveryLedger()) return true;
     g_course_delivery_ledger.entries = previous;
+    g_course_delivery_recovery.erase(LessonCourseDeliveryKey(session_id, delivery_id));
     return false;
 }
 
@@ -1047,8 +1071,14 @@ bool ResolveLessonCourseDelivery(const char* session_id, const char* delivery_id
     if (record == nullptr) return false;
     const auto previous = g_course_delivery_ledger.entries;
     record->status = status;
-    if (PersistLessonCourseDeliveryLedger()) return true;
+    if (PersistLessonCourseDeliveryLedger()) {
+        g_course_delivery_recovery.erase(LessonCourseDeliveryKey(session_id, delivery_id));
+        return true;
+    }
     g_course_delivery_ledger.entries = previous;
+    auto& recovery = g_course_delivery_recovery[LessonCourseDeliveryKey(session_id, delivery_id)];
+    recovery.action = LessonCourseDeliveryRecovery::Action::kResolveOutcome;
+    recovery.outcome = status;
     return false;
 }
 
@@ -1060,8 +1090,18 @@ bool RemoveLessonCourseDelivery(const char* session_id, const char* delivery_id)
     if (found == g_course_delivery_ledger.entries.end()) return true;
     const auto previous = g_course_delivery_ledger.entries;
     g_course_delivery_ledger.entries.erase(found);
-    if (PersistLessonCourseDeliveryLedger()) return true;
+    auto recovery = g_course_delivery_recovery.find(
+        LessonCourseDeliveryKey(session_id, delivery_id));
+    if (recovery != g_course_delivery_recovery.end() && recovery->second.has_evicted) {
+        g_course_delivery_ledger.entries.push_front(recovery->second.evicted);
+    }
+    if (PersistLessonCourseDeliveryLedger()) {
+        g_course_delivery_recovery.erase(LessonCourseDeliveryKey(session_id, delivery_id));
+        return true;
+    }
     g_course_delivery_ledger.entries = previous;
+    auto& pending = g_course_delivery_recovery[LessonCourseDeliveryKey(session_id, delivery_id)];
+    pending.action = LessonCourseDeliveryRecovery::Action::kRemoveClaim;
     return false;
 }
 void RestoreLessonEmbodiedLedger(const char* assignment_id, const char* session_id) {
@@ -1158,6 +1198,7 @@ void ResetLessonCourseDeliveryMemoryForTest() {
     g_course_delivery_ledger.entries.clear();
     g_course_delivery_ledger.loaded = false;
     g_course_delivery_ledger.storage_valid = true;
+    g_course_delivery_recovery.clear();
 }
 void SetLessonCourseDeliveryStorageForTest(const char* serialized) {
     g_course_delivery_test_storage = serialized != nullptr ? serialized : "";
@@ -1176,6 +1217,10 @@ std::string LessonCourseDeliveryStorageForTest() {
 }
 void SetLessonCourseDeliveryWriteFailureForTest(bool fail) {
     g_course_delivery_test_write_failure = fail;
+}
+void FailNextLessonCourseDeliveryWriteForTest(int write_number) {
+    g_course_delivery_test_write_count = 0;
+    g_course_delivery_test_fail_write_number = write_number;
 }
 }  // namespace tbot
 namespace {
@@ -3023,6 +3068,41 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (existing_delivery != nullptr) {
             g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
             if (existing_delivery->status == LessonCourseDeliveryLedger::Status::kPending) {
+                auto recovery = g_course_delivery_recovery.find(
+                    LessonCourseDeliveryKey(session_id, delivery_id));
+                if (recovery != g_course_delivery_recovery.end() &&
+                    recovery->second.action ==
+                        LessonCourseDeliveryRecovery::Action::kResolveOutcome) {
+                    const auto outcome = recovery->second.outcome;
+                    if (!ResolveLessonCourseDelivery(session_id, delivery_id, outcome)) {
+                        emit(root, "lesson_error", MakeErrorBody(
+                            "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+                            "Course Mode activity outcome reconciliation failed",
+                            true, "courseActivity"));
+                        return;
+                    }
+                    const bool degraded =
+                        outcome == LessonCourseDeliveryLedger::Status::kDegraded;
+                    emit_ack(root, sequence, true, degraded, nullptr, true, -1,
+                             degraded ? "animationStartFailed" : nullptr);
+                    return;
+                }
+                if (recovery != g_course_delivery_recovery.end() &&
+                    recovery->second.action ==
+                        LessonCourseDeliveryRecovery::Action::kRemoveClaim) {
+                    if (!RemoveLessonCourseDelivery(session_id, delivery_id)) {
+                        emit(root, "lesson_error", MakeErrorBody(
+                            "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+                            "Course Mode activity removal reconciliation failed",
+                            true, "courseActivity"));
+                        return;
+                    }
+                    emit(root, "lesson_error", MakeErrorBody(
+                        "COURSE_ACTIVITY_RENDER_FAILED",
+                        "Course Mode activity may retry after durable rollback",
+                        true, "courseActivity"));
+                    return;
+                }
                 emit(root, "lesson_error", MakeErrorBody(
                     "COURSE_ACTIVITY_DEDUPE_PENDING",
                     "Course Mode activity delivery outcome is pending",
@@ -3054,8 +3134,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
             state, static_cast<std::uint64_t>(sequence),
             static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
         if (!response.accepted) {
-            if (has_delivery_id && !renderer->last_apply_presented()) {
-                RemoveLessonCourseDelivery(session_id, delivery_id);
+            if (has_delivery_id && !RemoveLessonCourseDelivery(session_id, delivery_id)) {
+                emit(root, "lesson_error", MakeErrorBody(
+                    "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+                    "Course Mode activity durable rollback failed",
+                    true, "courseActivity"));
+                return;
             }
             emit(root, "lesson_error", MakeErrorBody(
                 "COURSE_ACTIVITY_RENDER_FAILED", "Course Mode activity visual state failed",

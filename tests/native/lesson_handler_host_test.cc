@@ -35,6 +35,7 @@ std::size_t LessonCourseDeliveryEntryCountForTest();
 bool LessonCourseDeliveryStorageValidForTest();
 std::string LessonCourseDeliveryStorageForTest();
 void SetLessonCourseDeliveryWriteFailureForTest(bool fail);
+void FailNextLessonCourseDeliveryWriteForTest(int write_number);
 }
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
@@ -2120,6 +2121,81 @@ void test_course_activity_durable_outcome_replay_and_write_failure() {
     Handle(V5Frame("lesson_stop", 8,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
         "\"commandSequenceId\":205}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+}
+
+void test_course_activity_reconciles_outcome_and_removal_write_failures() {
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    tbot::FailNextLessonCourseDeliveryWriteForTest(2);
+    Handle(CourseActivityFrame(2, "outcome-reconcile", "activity-outcome", "teach", true));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "second outcome write failure is explicit after one applied side effect");
+    const int applied_decodes = fake.video_decodes;
+    Handle(CourseActivityFrame(3, "outcome-reconcile", "activity-outcome", "teach", true));
+    require(fake.video_decodes == applied_decodes && FrameType(2) == "lesson_ack" &&
+                !FrameBodyBool(2, "degraded", true),
+            "retry durably resolves RAM outcome and ACKs without a second effect");
+
+    fake.fail_present = true;
+    tbot::FailNextLessonCourseDeliveryWriteForTest(2);
+    Handle(CourseActivityFrame(4, "removal-reconcile", "activity-removal", "listen", false));
+    require(FrameType(3) == "lesson_error" &&
+                FrameBodyStr(3, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "failed durable reservation removal does not advertise a retryable render path");
+    const int removal_decodes = fake.video_decodes;
+    fake.fail_present = false;
+    Handle(CourseActivityFrame(5, "removal-reconcile", "activity-removal", "listen", false));
+    require(fake.video_decodes == removal_decodes && FrameType(4) == "lesson_error" &&
+                FrameBodyStr(4, nullptr, "code") == "COURSE_ACTIVITY_RENDER_FAILED",
+            "retry first reconciles durable removal without applying the effect");
+    Handle(CourseActivityFrame(6, "removal-reconcile", "activity-removal", "listen", false));
+    require(FrameType(5) == "lesson_ack", "activity retries only after removal is durable");
+
+    Handle(V5Frame("lesson_stop", 7,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":206}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+}
+
+void test_course_activity_failed_thirteenth_claim_restores_evicted_oldest() {
+    FreshSession();
+    std::string full;
+    for (int index = 0; index < 12; ++index) {
+        full += std::string(SID()) + "\twindow-" + std::to_string(index) + "\tapplied\n";
+    }
+    tbot::SetLessonCourseDeliveryStorageForTest(full.c_str());
+    ResetObservable();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+    fake.fail_present = true;
+    Handle(CourseActivityFrame(2, "window-12", "activity-window", "listen", false));
+    fake.fail_present = false;
+    require(tbot::LessonCourseDeliveryEntryCountForTest() == 12 &&
+                tbot::LessonCourseDeliveryAppliedForTest(SID(), "window-0"),
+            "failed thirteenth effect restores the evicted oldest durable record");
+    Handle(V5Frame("lesson_stop", 3,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":207}}"));
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();
     tbot::SetLessonCourseDeliveryStorageForTest("");
@@ -9105,6 +9181,8 @@ int main() {
     test_renderer_v5_course_mode_activity_fallback_without_object();
     test_renderer_v5_first_course_prepare_reports_static_degradation();
     test_course_activity_durable_outcome_replay_and_write_failure();
+    test_course_activity_reconciles_outcome_and_removal_write_failures();
+    test_course_activity_failed_thirteenth_claim_restores_evicted_oldest();
     test_course_activity_retains_w19_static_layers_and_dedupes_delivery();
     test_course_activity_delivery_persistence_reload_bounds_and_corruption();
     test_course_activity_handler_persistence_round_trip_after_reboot();

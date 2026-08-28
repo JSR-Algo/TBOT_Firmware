@@ -313,6 +313,22 @@ void TestVisualStateStaticPresentFailureIsTypedAndRetryable() {
     Require(response.accepted, "static activity may retry after a non-applied present failure");
 }
 
+void TestRejectedVisualStatePreservesPriorControlPhase() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "control rollback fixture prepares teach");
+    tbot::LessonLayeredVisualState state{};
+    state.activity_id = "activity-listen";
+    state.phase_id = "listen";
+    state.retain_static_layers = true;
+    fake.fail_present = true;
+    const auto rejected = renderer.ApplyVisualState(state, 8, 0);
+    Require(!rejected.accepted, "listen transition is rejected when static present fails");
+    fake.fail_present = false;
+    Require(renderer.Start(8, "teach", 0).accepted,
+            "rejected listen transition preserves prior teach control phase");
+}
+
 void TestFailedRetainedReprepareLeavesOldCompositionUsable() {
     FakeRuntime fake;
     tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
@@ -423,6 +439,7 @@ int main() {
     TestActivityTransitionsRetainPinnedStaticLayers();
     TestVisualStateDoesNotReplayEntranceUnlessRequested();
     TestVisualStateStaticPresentFailureIsTypedAndRetryable();
+    TestRejectedVisualStatePreservesPriorControlPhase();
     TestFailedRetainedReprepareLeavesOldCompositionUsable();
     TestRobotFailureKeepsLastGoodStaticCompositionDegraded();
     TestFirstCoursePrepareKeepsNewStaticWhenRobotFails();

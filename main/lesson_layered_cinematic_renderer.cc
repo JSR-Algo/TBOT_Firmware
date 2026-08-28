@@ -446,6 +446,24 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
         background_ == nullptr || framebuffer_ == nullptr) {
         return Failure(sequence, LessonCinematicError::kInvalidState);
     }
+    const auto old_activity_id = activity_id_;
+    const auto old_phase_id = phase_id_;
+    const auto old_phase_variant = phase_variant_;
+    const auto old_state = state_;
+    const auto old_displayed_frame = displayed_frame_;
+    const auto old_degraded = last_apply_degraded_;
+    const auto old_presented = last_apply_presented_;
+    const auto old_degraded_error = last_degraded_error_;
+    const auto rollback = [&]() {
+        activity_id_ = old_activity_id;
+        phase_id_ = old_phase_id;
+        phase_variant_ = old_phase_variant;
+        state_ = old_state;
+        displayed_frame_ = old_displayed_frame;
+        last_apply_degraded_ = old_degraded;
+        last_apply_presented_ = old_presented;
+        last_degraded_error_ = old_degraded_error;
+    };
     activity_id_ = visual_state.activity_id;
     phase_id_ = visual_state.phase_id;
     phase_variant_ = visual_state.phase_variant != nullptr ? visual_state.phase_variant : "";
@@ -460,6 +478,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
             last_degraded_error_ = error;
             const auto static_error = PresentStaticFrame(0);
             if (static_error != LessonCinematicError::kNone) {
+                rollback();
                 return Failure(sequence, static_error);
             }
             last_apply_presented_ = true;
@@ -468,7 +487,10 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
         }
     } else {
         const auto static_error = PresentStaticFrame(0);
-        if (static_error != LessonCinematicError::kNone) return Failure(sequence, static_error);
+        if (static_error != LessonCinematicError::kNone) {
+            rollback();
+            return Failure(sequence, static_error);
+        }
         last_apply_presented_ = true;
     }
     state_ = State::kPrepared;
