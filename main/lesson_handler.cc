@@ -892,15 +892,24 @@ struct LessonEmbodiedLedger {
 LessonEmbodiedLedger g_embodied_ledger;
 
 struct LessonCourseDeliveryLedger {
-    enum class Status : std::uint8_t { kPending, kApplied, kDegraded };
-    struct Record { std::string session; std::string delivery; Status status; };
-    // NVS strings are capped at 4 KiB; twelve worst-case records stay bounded.
+    enum class Status : std::uint8_t { kPending, kApplied, kDegraded, kUnknown };
+    struct Record {
+        std::string session;
+        std::string delivery;
+        Status status;
+        bool has_rollback = false;
+        std::string rollback_session;
+        std::string rollback_delivery;
+        Status rollback_status = Status::kApplied;
+    };
+    // NVS strings are capped at 4 KiB; persistence rejects any oversized ledger.
     static constexpr size_t kMaxEntries = 12;
     std::deque<Record> entries;
     bool loaded = false;
     bool storage_valid = true;
 };
 LessonCourseDeliveryLedger g_course_delivery_ledger;
+constexpr size_t kLessonCourseDeliveryMaxSerializedBytes = 4095;
 struct LessonCourseDeliveryRecovery {
     enum class Action : std::uint8_t { kNone, kResolveOutcome, kRemoveClaim };
     Action action = Action::kNone;
@@ -928,6 +937,27 @@ bool ValidPersistedCourseDeliveryToken(const std::string& value) {
     });
 }
 
+const char* LessonCourseDeliveryStatusToken(LessonCourseDeliveryLedger::Status status) {
+    switch (status) {
+        case LessonCourseDeliveryLedger::Status::kPending: return "pending";
+        case LessonCourseDeliveryLedger::Status::kDegraded: return "degraded";
+        case LessonCourseDeliveryLedger::Status::kUnknown: return "unknown";
+        case LessonCourseDeliveryLedger::Status::kApplied: return "applied";
+    }
+    return "unknown";
+}
+
+bool ParseLessonCourseDeliveryStatus(
+    const std::string& token, LessonCourseDeliveryLedger::Status* status) {
+    if (status == nullptr) return false;
+    if (token == "pending") *status = LessonCourseDeliveryLedger::Status::kPending;
+    else if (token == "applied") *status = LessonCourseDeliveryLedger::Status::kApplied;
+    else if (token == "degraded") *status = LessonCourseDeliveryLedger::Status::kDegraded;
+    else if (token == "unknown") *status = LessonCourseDeliveryLedger::Status::kUnknown;
+    else return false;
+    return true;
+}
+
 std::string SerializeLessonCourseDeliveryLedger() {
     std::string serialized;
     for (const auto& entry : g_course_delivery_ledger.entries) {
@@ -935,8 +965,15 @@ std::string SerializeLessonCourseDeliveryLedger() {
         serialized.push_back('\t');
         serialized += entry.delivery;
         serialized.push_back('\t');
-        serialized += entry.status == LessonCourseDeliveryLedger::Status::kPending ? "pending" :
-            entry.status == LessonCourseDeliveryLedger::Status::kDegraded ? "degraded" : "applied";
+        serialized += LessonCourseDeliveryStatusToken(entry.status);
+        if (entry.has_rollback) {
+            serialized.push_back('\t');
+            serialized += entry.rollback_session;
+            serialized.push_back('\t');
+            serialized += entry.rollback_delivery;
+            serialized.push_back('\t');
+            serialized += LessonCourseDeliveryStatusToken(entry.rollback_status);
+        }
         serialized.push_back('\n');
     }
     return serialized;
@@ -947,6 +984,10 @@ void LoadLessonCourseDeliveryLedger() {
     g_course_delivery_ledger.loaded = true;
 #ifdef TBOT_HOST_NATIVE_COVERAGE
     std::string serialized = g_course_delivery_test_storage;
+    if (serialized.size() > kLessonCourseDeliveryMaxSerializedBytes) {
+        g_course_delivery_ledger.storage_valid = false;
+        return;
+    }
 #elif defined(ESP_PLATFORM)
     std::string serialized;
     nvs_handle_t handle = 0;
@@ -955,7 +996,7 @@ void LoadLessonCourseDeliveryLedger() {
         size_t size = 0;
         result = nvs_get_str(handle, "deliveries", nullptr, &size);
         if (result == ESP_OK && size > 0) {
-            if (size > 4096) {
+            if (size > kLessonCourseDeliveryMaxSerializedBytes + 1) {
                 result = ESP_ERR_NVS_INVALID_LENGTH;
             } else {
                 serialized.resize(size);
@@ -974,32 +1015,56 @@ void LoadLessonCourseDeliveryLedger() {
 #endif
     size_t cursor = 0;
     while (cursor < serialized.size()) {
-        const size_t separator = serialized.find('\t', cursor);
         const size_t end = serialized.find('\n', cursor);
-        if (separator == std::string::npos || end == std::string::npos || separator >= end) {
+        if (end == std::string::npos) {
             g_course_delivery_ledger.entries.clear();
             g_course_delivery_ledger.storage_valid = false;
             break;
         }
-        const size_t status_separator = serialized.find('\t', separator + 1);
-        std::string session = serialized.substr(cursor, separator - cursor);
-        const bool legacy = status_separator == std::string::npos || status_separator >= end;
-        std::string delivery = serialized.substr(
-            separator + 1, (legacy ? end : status_separator) - separator - 1);
-        std::string status = legacy ? "applied" :
-            serialized.substr(status_separator + 1, end - status_separator - 1);
-        if (!ValidPersistedCourseDeliveryToken(session) ||
-            !ValidPersistedCourseDeliveryToken(delivery) ||
-            (status != "pending" && status != "applied" && status != "degraded")) {
+        std::vector<std::string> fields;
+        size_t field_start = cursor;
+        while (field_start <= end) {
+            const size_t separator = serialized.find('\t', field_start);
+            if (separator == std::string::npos || separator >= end) {
+                fields.push_back(serialized.substr(field_start, end - field_start));
+                break;
+            }
+            fields.push_back(serialized.substr(field_start, separator - field_start));
+            field_start = separator + 1;
+        }
+        if ((fields.size() != 2 && fields.size() != 3 && fields.size() != 6) ||
+            !ValidPersistedCourseDeliveryToken(fields[0]) ||
+            !ValidPersistedCourseDeliveryToken(fields[1])) {
             g_course_delivery_ledger.entries.clear();
             g_course_delivery_ledger.storage_valid = false;
             break;
         }
-        const auto parsed_status = status == "pending" ? LessonCourseDeliveryLedger::Status::kPending :
-            status == "degraded" ? LessonCourseDeliveryLedger::Status::kDegraded :
-                                    LessonCourseDeliveryLedger::Status::kApplied;
-        g_course_delivery_ledger.entries.push_back(
-            {std::move(session), std::move(delivery), parsed_status});
+        LessonCourseDeliveryLedger::Status parsed_status =
+            LessonCourseDeliveryLedger::Status::kApplied;
+        LessonCourseDeliveryLedger::Status rollback_status =
+            LessonCourseDeliveryLedger::Status::kApplied;
+        if ((fields.size() >= 3 &&
+             !ParseLessonCourseDeliveryStatus(fields[2], &parsed_status)) ||
+            (fields.size() == 6 &&
+             (parsed_status != LessonCourseDeliveryLedger::Status::kPending ||
+              !ValidPersistedCourseDeliveryToken(fields[3]) ||
+              !ValidPersistedCourseDeliveryToken(fields[4]) ||
+              !ParseLessonCourseDeliveryStatus(fields[5], &rollback_status) ||
+              rollback_status == LessonCourseDeliveryLedger::Status::kPending))) {
+            g_course_delivery_ledger.entries.clear();
+            g_course_delivery_ledger.storage_valid = false;
+            break;
+        }
+        LessonCourseDeliveryLedger::Record record{
+            std::move(fields[0]), std::move(fields[1]), parsed_status,
+            false, "", "", LessonCourseDeliveryLedger::Status::kApplied};
+        if (fields.size() == 6) {
+            record.has_rollback = true;
+            record.rollback_session = std::move(fields[3]);
+            record.rollback_delivery = std::move(fields[4]);
+            record.rollback_status = rollback_status;
+        }
+        g_course_delivery_ledger.entries.push_back(std::move(record));
         while (g_course_delivery_ledger.entries.size() >
                LessonCourseDeliveryLedger::kMaxEntries) {
             g_course_delivery_ledger.entries.pop_front();
@@ -1012,7 +1077,9 @@ bool LessonCourseDeliveryApplied(const char* session_id, const char* delivery_id
     LoadLessonCourseDeliveryLedger();
     return std::any_of(g_course_delivery_ledger.entries.begin(),
                        g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
-        return entry.session == session_id && entry.delivery == delivery_id;
+        return (entry.session == session_id && entry.delivery == delivery_id) ||
+            (entry.has_rollback && entry.rollback_session == session_id &&
+             entry.rollback_delivery == delivery_id);
     });
 }
 
@@ -1021,12 +1088,16 @@ LessonCourseDeliveryLedger::Record* FindLessonCourseDelivery(
     LoadLessonCourseDeliveryLedger();
     auto found = std::find_if(g_course_delivery_ledger.entries.begin(),
                               g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
-        return entry.session == session_id && entry.delivery == delivery_id;
+        return (entry.session == session_id && entry.delivery == delivery_id) ||
+            (entry.has_rollback && entry.rollback_session == session_id &&
+             entry.rollback_delivery == delivery_id);
     });
     return found == g_course_delivery_ledger.entries.end() ? nullptr : &*found;
 }
 
 bool PersistLessonCourseDeliveryLedger() {
+    const std::string serialized = SerializeLessonCourseDeliveryLedger();
+    if (serialized.size() > kLessonCourseDeliveryMaxSerializedBytes) return false;
 #ifdef TBOT_HOST_NATIVE_COVERAGE
     ++g_course_delivery_test_write_count;
     if (g_course_delivery_test_write_failure ||
@@ -1034,11 +1105,10 @@ bool PersistLessonCourseDeliveryLedger() {
          g_course_delivery_test_write_count == g_course_delivery_test_fail_write_number)) {
         return false;
     }
-    g_course_delivery_test_storage = SerializeLessonCourseDeliveryLedger();
+    g_course_delivery_test_storage = serialized;
 #elif defined(ESP_PLATFORM)
     nvs_handle_t handle = 0;
     if (nvs_open("lesson_course", NVS_READWRITE, &handle) != ESP_OK) return false;
-    const std::string serialized = SerializeLessonCourseDeliveryLedger();
     const esp_err_t set_result = nvs_set_str(handle, "deliveries", serialized.c_str());
     const esp_err_t commit_result = set_result == ESP_OK ? nvs_commit(handle) : set_result;
     nvs_close(handle);
@@ -1053,11 +1123,28 @@ bool RememberLessonCourseDelivery(const char* session_id, const char* delivery_i
     const auto previous = g_course_delivery_ledger.entries;
     auto& recovery = g_course_delivery_recovery[LessonCourseDeliveryKey(session_id, delivery_id)];
     g_course_delivery_ledger.entries.push_back(
-        {session_id, delivery_id, LessonCourseDeliveryLedger::Status::kPending});
+        {session_id, delivery_id, LessonCourseDeliveryLedger::Status::kPending,
+         false, "", "", LessonCourseDeliveryLedger::Status::kApplied});
     while (g_course_delivery_ledger.entries.size() > LessonCourseDeliveryLedger::kMaxEntries) {
-        recovery.evicted = g_course_delivery_ledger.entries.front();
+        auto evicted = std::find_if(
+            g_course_delivery_ledger.entries.begin(),
+            std::prev(g_course_delivery_ledger.entries.end()), [](const auto& entry) {
+                return !entry.has_rollback &&
+                    entry.status != LessonCourseDeliveryLedger::Status::kPending;
+            });
+        if (evicted == std::prev(g_course_delivery_ledger.entries.end())) {
+            g_course_delivery_ledger.entries = previous;
+            g_course_delivery_recovery.erase(LessonCourseDeliveryKey(session_id, delivery_id));
+            return false;
+        }
+        recovery.evicted = *evicted;
         recovery.has_evicted = true;
-        g_course_delivery_ledger.entries.pop_front();
+        auto& pending = g_course_delivery_ledger.entries.back();
+        pending.has_rollback = true;
+        pending.rollback_session = recovery.evicted.session;
+        pending.rollback_delivery = recovery.evicted.delivery;
+        pending.rollback_status = recovery.evicted.status;
+        g_course_delivery_ledger.entries.erase(evicted);
     }
     if (PersistLessonCourseDeliveryLedger()) return true;
     g_course_delivery_ledger.entries = previous;
@@ -1067,10 +1154,65 @@ bool RememberLessonCourseDelivery(const char* session_id, const char* delivery_i
 
 bool ResolveLessonCourseDelivery(const char* session_id, const char* delivery_id,
                                  LessonCourseDeliveryLedger::Status status) {
-    auto* record = FindLessonCourseDelivery(session_id, delivery_id);
-    if (record == nullptr) return false;
     const auto previous = g_course_delivery_ledger.entries;
+    auto record = std::find_if(g_course_delivery_ledger.entries.begin(),
+                               g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
+        return entry.session == session_id && entry.delivery == delivery_id;
+    });
+    if (record == g_course_delivery_ledger.entries.end()) return false;
+    const bool restore_rollback =
+        status == LessonCourseDeliveryLedger::Status::kUnknown && record->has_rollback;
+    LessonCourseDeliveryLedger::Record rollback{};
+    if (restore_rollback) {
+        rollback.session = record->rollback_session;
+        rollback.delivery = record->rollback_delivery;
+        rollback.status = record->rollback_status;
+    }
+    std::pair<std::string, std::string> replacement_key;
+    if (restore_rollback) {
+        const bool rollback_present = std::any_of(
+            g_course_delivery_ledger.entries.begin(), g_course_delivery_ledger.entries.end(),
+            [&](const auto& entry) {
+                return entry.session == rollback.session && entry.delivery == rollback.delivery;
+            });
+        if (!rollback_present && g_course_delivery_ledger.entries.size() >=
+                                     LessonCourseDeliveryLedger::kMaxEntries) {
+            auto replacement = std::find_if(
+                g_course_delivery_ledger.entries.begin(),
+                g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
+                    return !(entry.session == session_id && entry.delivery == delivery_id) &&
+                        !entry.has_rollback &&
+                        entry.status != LessonCourseDeliveryLedger::Status::kPending;
+                });
+            if (replacement == g_course_delivery_ledger.entries.end()) return false;
+            replacement_key = {replacement->session, replacement->delivery};
+        }
+    }
     record->status = status;
+    record->has_rollback = false;
+    record->rollback_session.clear();
+    record->rollback_delivery.clear();
+    if (restore_rollback) {
+        const bool rollback_present = std::any_of(
+            g_course_delivery_ledger.entries.begin(), g_course_delivery_ledger.entries.end(),
+            [&](const auto& entry) {
+                return entry.session == rollback.session && entry.delivery == rollback.delivery;
+            });
+        if (!rollback_present) {
+            g_course_delivery_ledger.entries.push_front(std::move(rollback));
+            if (!replacement_key.first.empty()) {
+                auto replacement = std::find_if(
+                    g_course_delivery_ledger.entries.begin(),
+                    g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
+                        return entry.session == replacement_key.first &&
+                            entry.delivery == replacement_key.second;
+                    });
+                if (replacement != g_course_delivery_ledger.entries.end()) {
+                    g_course_delivery_ledger.entries.erase(replacement);
+                }
+            }
+        }
+    }
     if (PersistLessonCourseDeliveryLedger()) {
         g_course_delivery_recovery.erase(LessonCourseDeliveryKey(session_id, delivery_id));
         return true;
@@ -3067,6 +3209,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         if (existing_delivery != nullptr) {
             g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
+            const bool matched_rollback =
+                existing_delivery->session != session_id ||
+                existing_delivery->delivery != delivery_id;
+            if (matched_rollback) {
+                const bool unknown = existing_delivery->rollback_status ==
+                    LessonCourseDeliveryLedger::Status::kUnknown;
+                const bool degraded = unknown || existing_delivery->rollback_status ==
+                    LessonCourseDeliveryLedger::Status::kDegraded;
+                emit_ack(root, sequence, true, degraded, nullptr, true, -1,
+                         unknown ? "deliveryOutcomeUnknown" :
+                         degraded ? "animationStartFailed" : nullptr);
+                return;
+            }
             if (existing_delivery->status == LessonCourseDeliveryLedger::Status::kPending) {
                 auto recovery = g_course_delivery_recovery.find(
                     LessonCourseDeliveryKey(session_id, delivery_id));
@@ -3081,9 +3236,12 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             true, "courseActivity"));
                         return;
                     }
-                    const bool degraded =
+                    const bool unknown =
+                        outcome == LessonCourseDeliveryLedger::Status::kUnknown;
+                    const bool degraded = unknown ||
                         outcome == LessonCourseDeliveryLedger::Status::kDegraded;
                     emit_ack(root, sequence, true, degraded, nullptr, true, -1,
+                             unknown ? "deliveryOutcomeUnknown" :
                              degraded ? "animationStartFailed" : nullptr);
                     return;
                 }
@@ -3103,14 +3261,24 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         true, "courseActivity"));
                     return;
                 }
-                emit(root, "lesson_error", MakeErrorBody(
-                    "COURSE_ACTIVITY_DEDUPE_PENDING",
-                    "Course Mode activity delivery outcome is pending",
-                    false, "courseActivity"));
+                if (!ResolveLessonCourseDelivery(
+                        session_id, delivery_id,
+                        LessonCourseDeliveryLedger::Status::kUnknown)) {
+                    emit(root, "lesson_error", MakeErrorBody(
+                        "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+                        "Course Mode activity outcome reconciliation failed",
+                        true, "courseActivity"));
+                    return;
+                }
+                emit_ack(root, sequence, true, true, nullptr, true, -1,
+                         "deliveryOutcomeUnknown");
             } else {
-                const bool degraded =
-                    existing_delivery->status == LessonCourseDeliveryLedger::Status::kDegraded;
+                const bool unknown = existing_delivery->status ==
+                    LessonCourseDeliveryLedger::Status::kUnknown;
+                const bool degraded = unknown || existing_delivery->status ==
+                    LessonCourseDeliveryLedger::Status::kDegraded;
                 emit_ack(root, sequence, true, degraded, nullptr, true, -1,
+                         unknown ? "deliveryOutcomeUnknown" :
                          degraded ? "animationStartFailed" : nullptr);
             }
             return;

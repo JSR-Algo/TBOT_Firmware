@@ -2104,10 +2104,10 @@ void test_course_activity_durable_outcome_replay_and_write_failure() {
     tbot::SetLessonCourseDeliveryStorageForTest(pending_storage.c_str());
     const int before_pending = fake.video_decodes;
     Handle(CourseActivityFrame(5, "pending-after-reboot", "activity-pending", "teach", true));
-    require(FrameType(4) == "lesson_error" &&
-                FrameBodyStr(4, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_PENDING" &&
+    require(FrameType(4) == "lesson_ack" && FrameBodyBool(4, "degraded", false) &&
+                FrameBodyStr(4, nullptr, "degradedReason") == "deliveryOutcomeUnknown" &&
                 fake.video_decodes == before_pending,
-            "unresolved reboot reservation fails closed without replay or rendered success");
+            "legacy unresolved reservation reconciles conservatively without replay");
     tbot::SetLessonCourseDeliveryStorageForTest("");
 
     fake.fail_present = true;
@@ -2167,6 +2167,105 @@ void test_course_activity_reconciles_outcome_and_removal_write_failures() {
     Handle(V5Frame("lesson_stop", 7,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
         "\"commandSequenceId\":206}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+}
+
+void test_course_activity_reconciles_persisted_pending_after_reboot() {
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    tbot::FailNextLessonCourseDeliveryWriteForTest(2);
+    Handle(CourseActivityFrame(2, "outcome-reboot", "activity-outcome", "teach", true));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "outcome persistence failure leaves a durable pending reservation");
+    const std::string outcome_pending = tbot::LessonCourseDeliveryStorageForTest();
+    require(outcome_pending.find("\toutcome-reboot\tpending") != std::string::npos,
+            "serializer retains the unresolved outcome before reboot");
+    const int outcome_decodes = fake.video_decodes;
+    tbot::ResetLessonCourseDeliveryMemoryForTest();
+    tbot::FailNextLessonCourseDeliveryWriteForTest(0);
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(true);
+    Handle(CourseActivityFrame(3, "outcome-reboot", "activity-outcome", "teach", true));
+    require(fake.video_decodes == outcome_decodes && FrameType(2) == "lesson_error" &&
+                FrameBodyStr(2, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "reboot keeps unresolved delivery fail-closed while persistence is unavailable");
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(false);
+    Handle(CourseActivityFrame(4, "outcome-reboot", "activity-outcome", "teach", true));
+    require(fake.video_decodes == outcome_decodes && FrameType(3) == "lesson_ack" &&
+                FrameBodyBool(3, "degraded", false) &&
+                FrameBodyStr(3, nullptr, "degradedReason") == "deliveryOutcomeUnknown",
+            "retry reconciles an unresolved applied effect conservatively without replay");
+    require(tbot::LessonCourseDeliveryStorageForTest().find(
+                "\toutcome-reboot\tunknown\n") != std::string::npos,
+            "conservative reboot outcome is itself durable and no longer pending");
+    tbot::ResetLessonCourseDeliveryMemoryForTest();
+    Handle(CourseActivityFrame(5, "outcome-reboot", "activity-outcome", "teach", true));
+    require(fake.video_decodes == outcome_decodes && FrameType(4) == "lesson_ack" &&
+                FrameBodyStr(4, nullptr, "degradedReason") == "deliveryOutcomeUnknown",
+            "a second reboot replays the exact conservative outcome without effect");
+
+    Handle(V5Frame("lesson_stop", 6,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"teach\","
+        "\"commandSequenceId\":208}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+
+    FreshSession();
+    std::string full;
+    for (int index = 0; index < 12; ++index) {
+        full += std::string(SID()) + "\treboot-window-" + std::to_string(index) +
+                "\tapplied\n";
+    }
+    tbot::SetLessonCourseDeliveryStorageForTest(full.c_str());
+    ResetObservable();
+    StageV5CourseModeAssetPack();
+    V3RendererFake removal_fake;
+    tbot::LessonLayeredCinematicRenderer removal_renderer(
+        {&removal_fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&removal_renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    removal_fake.fail_present = true;
+    tbot::FailNextLessonCourseDeliveryWriteForTest(2);
+    Handle(CourseActivityFrame(2, "removal-reboot", "activity-removal", "listen", false));
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "removal persistence failure remains fail-closed before reboot");
+    const std::string removal_pending = tbot::LessonCourseDeliveryStorageForTest();
+    require(removal_pending.size() < 4096 &&
+                removal_pending.find("reboot-window-0") != std::string::npos,
+            "pending reservation durably carries bounded rollback identity");
+    const int removal_decodes = removal_fake.video_decodes;
+    removal_fake.fail_present = false;
+    tbot::ResetLessonCourseDeliveryMemoryForTest();
+    tbot::FailNextLessonCourseDeliveryWriteForTest(0);
+    Handle(CourseActivityFrame(3, "removal-reboot", "activity-removal", "listen", false));
+    require(removal_fake.video_decodes == removal_decodes && FrameType(2) == "lesson_ack" &&
+                FrameBodyBool(2, "degraded", false) &&
+                FrameBodyStr(2, nullptr, "degradedReason") == "deliveryOutcomeUnknown",
+            "reboot reconciles failed removal conservatively without applying the effect");
+    require(tbot::LessonCourseDeliveryEntryCountForTest() == 12 &&
+                tbot::LessonCourseDeliveryAppliedForTest(SID(), "reboot-window-0"),
+            "reboot reconciliation preserves the evicted oldest dedupe identity");
+    Handle(CourseActivityFrame(4, "reboot-window-0", "activity-oldest", "teach", true));
+    require(removal_fake.video_decodes == removal_decodes && FrameType(3) == "lesson_ack",
+            "preserved oldest identity cannot replay after reboot reconciliation");
+
+    Handle(V5Frame("lesson_stop", 5,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":209}}"));
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();
     tbot::SetLessonCourseDeliveryStorageForTest("");
@@ -2302,6 +2401,13 @@ void test_course_activity_delivery_persistence_reload_bounds_and_corruption() {
     require(!tbot::LessonCourseDeliveryStorageValidForTest() &&
                 tbot::LessonCourseDeliveryEntryCountForTest() == 0,
             "truncated persisted ledger fails closed without accepting a partial identity");
+    tbot::SetLessonCourseDeliveryStorageForTest(
+        "session\tdelivery\tapplied\trollback-session\trollback-delivery\tapplied\n");
+    require(!tbot::LessonCourseDeliveryStorageValidForTest(),
+            "rollback context is accepted only on unresolved pending records");
+    tbot::SetLessonCourseDeliveryStorageForTest(std::string(4096, 'x').c_str());
+    require(!tbot::LessonCourseDeliveryStorageValidForTest(),
+            "oversized persisted delivery bytes fail closed before parsing");
     tbot::SetLessonCourseDeliveryStorageForTest("");
     tbot::ResetLessonCourseDeliveryMemoryForTest();
 }
@@ -9182,6 +9288,7 @@ int main() {
     test_renderer_v5_first_course_prepare_reports_static_degradation();
     test_course_activity_durable_outcome_replay_and_write_failure();
     test_course_activity_reconciles_outcome_and_removal_write_failures();
+    test_course_activity_reconciles_persisted_pending_after_reboot();
     test_course_activity_failed_thirteenth_claim_restores_evicted_oldest();
     test_course_activity_retains_w19_static_layers_and_dedupes_delivery();
     test_course_activity_delivery_persistence_reload_bounds_and_corruption();
