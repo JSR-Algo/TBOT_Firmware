@@ -354,12 +354,29 @@ void TestTickRobotFailureFallsBackToStaticComposition() {
 
     const auto response = renderer.Tick(110);
 
-    Require(response.accepted && renderer.last_apply_degraded(),
-            "later Robot frame failure is observable as degraded");
+    Require(!response.accepted && response.error == tbot::LessonCinematicError::kDecodeFailed &&
+                renderer.last_apply_degraded(),
+            "later Robot frame failure returns an explicit error while retaining degraded state");
     Require(renderer.prepared() && fake.presents == presents_before + 1,
             "later Robot frame failure returns safely to retained static composition");
-    Require(renderer.Tick(220).accepted,
-            "subsequent timer ticks keep the degraded static phase stable");
+    const auto repeated = renderer.Tick(220);
+    Require(!repeated.accepted && repeated.error == tbot::LessonCinematicError::kDecodeFailed,
+            "subsequent timer ticks preserve the same observable degraded failure");
+}
+
+void TestTickFailsWhenStaticFallbackCannotPresent() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "static present failure fixture prepares");
+    Require(renderer.Start(8, "teach", 0).accepted, "static present failure fixture starts");
+    fake.fail_video_decode = true;
+    fake.fail_present = true;
+
+    const auto response = renderer.Tick(110);
+
+    Require(!response.accepted && response.error == tbot::LessonCinematicError::kPresentFailed,
+            "failed static fallback never advertises degraded-safe success");
+    Require(!renderer.prepared(), "failed static fallback leaves a coherent failed state");
 }
 
 }  // namespace
@@ -374,6 +391,7 @@ int main() {
     TestRobotFailureKeepsLastGoodStaticCompositionDegraded();
     TestFirstCoursePrepareKeepsNewStaticWhenRobotFails();
     TestTickRobotFailureFallsBackToStaticComposition();
+    TestTickFailsWhenStaticFallbackCannotPresent();
     std::cout << "lesson_layered_cinematic_renderer tests passed\n";
     return 0;
 }

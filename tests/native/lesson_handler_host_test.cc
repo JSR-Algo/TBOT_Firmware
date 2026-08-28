@@ -33,6 +33,7 @@ void ResetLessonCourseDeliveryMemoryForTest();
 void SetLessonCourseDeliveryStorageForTest(const char* serialized);
 std::size_t LessonCourseDeliveryEntryCountForTest();
 bool LessonCourseDeliveryStorageValidForTest();
+std::string LessonCourseDeliveryStorageForTest();
 }
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
@@ -2167,6 +2168,61 @@ void test_course_activity_delivery_persistence_reload_bounds_and_corruption() {
             "truncated persisted ledger fails closed without accepting a partial identity");
     tbot::SetLessonCourseDeliveryStorageForTest("");
     tbot::ResetLessonCourseDeliveryMemoryForTest();
+}
+
+void test_course_activity_handler_persistence_round_trip_after_reboot() {
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    for (int index = 0; index < 15; ++index) {
+        const std::string delivery = "roundtrip-delivery-" + std::to_string(index);
+        const std::string activity = "roundtrip-activity-" + std::to_string(index);
+        Handle(CourseActivityFrame(index + 2, delivery.c_str(), activity.c_str()));
+    }
+    const std::string persisted = tbot::LessonCourseDeliveryStorageForTest();
+    require(!persisted.empty(), "handler claims are serialized into durable host storage");
+
+    tbot::ResetLessonCourseDeliveryMemoryForTest();
+    require(!tbot::LessonCourseDeliveryAppliedForTest(SID(), "roundtrip-delivery-0") &&
+                tbot::LessonCourseDeliveryAppliedForTest(SID(), "roundtrip-delivery-14") &&
+                tbot::LessonCourseDeliveryEntryCountForTest() == 12,
+            "reboot reloads serializer-produced bytes with the newest bounded window");
+
+    const int before_duplicate = fake.video_decodes;
+    Handle(CourseActivityFrame(17, "roundtrip-delivery-14",
+                               "roundtrip-activity-14", "teach", true));
+    require(fake.video_decodes == before_duplicate,
+            "reloaded durable claim suppresses the duplicate handler side effect");
+    Handle(CourseActivityFrame(18, "roundtrip-delivery-new",
+                               "roundtrip-activity-new", "teach", true));
+    require(fake.video_decodes == before_duplicate + 1,
+            "a distinct delivery still applies after reboot reload");
+
+    Handle(V5Frame("lesson_stop", 19,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"teach\","
+        "\"commandSequenceId\":202}}"));
+
+    FreshSession();
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1, 203));
+    const int different_session_before = fake.video_decodes;
+    Handle(CourseActivityFrame(2, "roundtrip-delivery-14",
+                               "roundtrip-other-session", "teach", true));
+    require(fake.video_decodes == different_session_before + 1,
+            "reloaded delivery identity remains distinct in a different session");
+    Handle(V5Frame("lesson_stop", 3,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"teach\","
+        "\"commandSequenceId\":204}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+    tbot::SetLessonCourseDeliveryStorageForTest("");
 }
 
 void test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix() {
@@ -8990,6 +9046,7 @@ int main() {
     test_renderer_v5_first_course_prepare_reports_static_degradation();
     test_course_activity_retains_w19_static_layers_and_dedupes_delivery();
     test_course_activity_delivery_persistence_reload_bounds_and_corruption();
+    test_course_activity_handler_persistence_round_trip_after_reboot();
     test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix();
     test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack();
     test_renderer_v4_capability_and_exact_single_asset_routing();

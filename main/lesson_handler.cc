@@ -1088,6 +1088,9 @@ bool LessonCourseDeliveryStorageValidForTest() {
     LoadLessonCourseDeliveryLedger();
     return g_course_delivery_ledger.storage_valid;
 }
+std::string LessonCourseDeliveryStorageForTest() {
+    return g_course_delivery_test_storage;
+}
 }  // namespace tbot
 namespace {
 #endif

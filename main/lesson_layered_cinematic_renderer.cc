@@ -304,6 +304,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         }
         ReleaseRobot();
         last_apply_degraded_ = true;
+        last_degraded_error_ = OperationError(LessonCinematicError::kFileOpen);
         if (PresentStaticFrame(0) != LessonCinematicError::kNone) {
             return Failure(config.command_sequence_id, OperationError(LessonCinematicError::kFileOpen));
         }
@@ -333,12 +334,14 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         }
         ReleaseRobot();
         last_apply_degraded_ = true;
+        last_degraded_error_ = frame_error;
         if (PresentStaticFrame(0) != LessonCinematicError::kNone) {
             state_ = State::kFailed;
             return Failure(config.command_sequence_id, frame_error);
         }
     } else {
         last_apply_degraded_ = false;
+        last_degraded_error_ = LessonCinematicError::kNone;
     }
     state_ = State::kPrepared;
     displayed_frame_ = 0;
@@ -373,11 +376,13 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
     phase_id_ = visual_state.phase_id;
     phase_variant_ = visual_state.phase_variant != nullptr ? visual_state.phase_variant : "";
     last_apply_degraded_ = false;
+    last_degraded_error_ = LessonCinematicError::kNone;
     if (visual_state.replay_entrance) {
         const auto error = robot_stream_ != nullptr ? RenderFrame(0)
                                                     : LessonCinematicError::kFileOpen;
         if (error != LessonCinematicError::kNone) {
             last_apply_degraded_ = true;
+            last_degraded_error_ = error;
             if (PresentStaticFrame(0) != LessonCinematicError::kNone) {
                 return Failure(sequence, error);
             }
@@ -462,7 +467,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Tick(std::uint64_t now_m
         return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
     if (state_ == State::kPrepared && last_apply_degraded_) {
-        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+        return Failure(last_sequence_, last_degraded_error_);
     }
     if (state_ != State::kRunning) {
         return Failure(last_sequence_, LessonCinematicError::kInvalidState);
@@ -487,9 +492,15 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Tick(std::uint64_t now_m
     if (error != LessonCinematicError::kNone) {
         ReleaseRobot();
         last_apply_degraded_ = true;
+        const auto static_error = PresentStaticFrame(displayed_frame_);
+        if (static_error != LessonCinematicError::kNone) {
+            last_degraded_error_ = static_error;
+            state_ = State::kFailed;
+            return Failure(last_sequence_, static_error);
+        }
+        last_degraded_error_ = error;
         state_ = State::kPrepared;
-        PresentStaticFrame(displayed_frame_);
-        return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
+        return Failure(last_sequence_, error);
     }
     displayed_frame_ = static_cast<std::size_t>(frame);
     return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
@@ -597,6 +608,7 @@ void LessonLayeredCinematicRenderer::DiscardSession() {
     activity_id_.clear();
     phase_variant_.clear();
     last_apply_degraded_ = false;
+    last_degraded_error_ = LessonCinematicError::kNone;
 }
 
 bool LessonLayeredCinematicRendererCapabilityReady() {

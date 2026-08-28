@@ -122,6 +122,7 @@ private:
     std::string activity_id_;
     std::string phase_variant_;
     bool last_apply_degraded_ = false;
+    LessonCinematicError last_degraded_error_ = LessonCinematicError::kNone;
     LessonCinematicLayerConfig robot_config_{};
     LessonLayeredPlaybackMode playback_mode_ = LessonLayeredPlaybackMode::kOnce;
     std::string phase_id_;
