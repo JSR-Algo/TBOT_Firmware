@@ -51,6 +51,10 @@
 #include <atomic>
 #include <vector>
 
+#ifdef ESP_PLATFORM
+#include "settings.h"
+#endif
+
 #include <cJSON.h>
 #include <esp_err.h>
 #include <esp_log.h>
@@ -886,6 +890,61 @@ struct LessonEmbodiedLedger {
     unsigned mastery_celebrations = 0;
 };
 LessonEmbodiedLedger g_embodied_ledger;
+
+struct LessonCourseDeliveryLedger {
+    // NVS strings are capped at 4 KiB; twelve worst-case identity pairs stay bounded.
+    static constexpr size_t kMaxEntries = 12;
+    std::deque<std::pair<std::string, std::string>> entries;
+    bool loaded = false;
+};
+LessonCourseDeliveryLedger g_course_delivery_ledger;
+
+void LoadLessonCourseDeliveryLedger() {
+    if (g_course_delivery_ledger.loaded) return;
+    g_course_delivery_ledger.loaded = true;
+#ifdef ESP_PLATFORM
+    Settings settings("lesson_course");
+    std::string serialized = settings.GetString("deliveries");
+    size_t cursor = 0;
+    while (cursor < serialized.size() &&
+           g_course_delivery_ledger.entries.size() < LessonCourseDeliveryLedger::kMaxEntries) {
+        const size_t separator = serialized.find('\t', cursor);
+        const size_t end = serialized.find('\n', cursor);
+        if (separator == std::string::npos || end == std::string::npos || separator >= end) break;
+        g_course_delivery_ledger.entries.emplace_back(
+            serialized.substr(cursor, separator - cursor),
+            serialized.substr(separator + 1, end - separator - 1));
+        cursor = end + 1;
+    }
+#endif
+}
+
+bool LessonCourseDeliveryApplied(const char* session_id, const char* delivery_id) {
+    LoadLessonCourseDeliveryLedger();
+    return std::find(g_course_delivery_ledger.entries.begin(),
+                     g_course_delivery_ledger.entries.end(),
+                     std::make_pair(std::string(session_id), std::string(delivery_id))) !=
+        g_course_delivery_ledger.entries.end();
+}
+
+void RememberLessonCourseDelivery(const char* session_id, const char* delivery_id) {
+    LoadLessonCourseDeliveryLedger();
+    g_course_delivery_ledger.entries.emplace_back(session_id, delivery_id);
+    while (g_course_delivery_ledger.entries.size() > LessonCourseDeliveryLedger::kMaxEntries) {
+        g_course_delivery_ledger.entries.pop_front();
+    }
+#ifdef ESP_PLATFORM
+    std::string serialized;
+    for (const auto& entry : g_course_delivery_ledger.entries) {
+        serialized += entry.first;
+        serialized.push_back('\t');
+        serialized += entry.second;
+        serialized.push_back('\n');
+    }
+    Settings settings("lesson_course", true);
+    settings.SetString("deliveries", serialized);
+#endif
+}
 void RestoreLessonEmbodiedLedger(const char* assignment_id, const char* session_id) {
     if (g_embodied_ledger.assignment_id == assignment_id &&
         g_embodied_ledger.session_id == session_id) {
@@ -1007,6 +1066,11 @@ std::string BuildFrame(const cJSON* in, const char* type, int64_t fs_seq, cJSON*
     }
     LessonJsonAddString(root, "type", type);
     CopyStr(root, in, "protocolVersion");
+    if (Str(in, "protocolVersion") == nullptr &&
+        ExactString(in, "type", "lesson_course_activity") &&
+        !g_session.cinematic_renderer_id.empty()) {
+        LessonJsonAddString(root, "protocolVersion", g_session.cinematic_renderer_id.c_str());
+    }
     CopyStr(root, in, "assignmentId");
     CopyStr(root, in, "sessionId");
     CopyStr(root, in, "lessonId");
@@ -2738,6 +2802,103 @@ void Application::HandleLessonMessage(const cJSON* root) {
         return;
     }
 
+    const bool is_course_activity = strcmp(type, "lesson_course_activity") == 0;
+    if (is_course_activity) {
+        static const std::set<std::string_view> kKeys = {
+            "contractVersion", "deliveryId", "activityId", "visualState",
+            "embodiedIntent", "retainStaticLayers", "replayEntrance"};
+        static const std::set<std::string_view> kLegacyKeys = {
+            "contractVersion", "activityId", "visualState", "embodiedIntent",
+            "retainStaticLayers", "replayEntrance"};
+        const char* delivery_id = Str(body, "deliveryId");
+        const char* activity_id = Str(body, "activityId");
+        const char* visual_state = Str(body, "visualState");
+        const char* embodied_intent = Str(body, "embodiedIntent");
+        const auto safe_delivery_id = [](const char* value) {
+            if (value == nullptr) return false;
+            const size_t length = std::strlen(value);
+            if (length == 0 || length > 128) return false;
+            for (const unsigned char* ch = reinterpret_cast<const unsigned char*>(value);
+                 *ch != '\0'; ++ch) {
+                if (*ch < 0x21 || *ch > 0x7e) return false;
+            }
+            return true;
+        };
+        const auto phase_for_state = [](const char* state) -> const char* {
+            if (state == nullptr) return nullptr;
+            if (std::strcmp(state, "teach") == 0) return "teach";
+            if (std::strcmp(state, "listen") == 0) return "listen";
+            if (std::strcmp(state, "thinking") == 0 ||
+                std::strcmp(state, "nearMiss") == 0 ||
+                std::strcmp(state, "incorrect") == 0 ||
+                std::strcmp(state, "retry") == 0) return "thinking";
+            if (std::strcmp(state, "correct") == 0 ||
+                std::strcmp(state, "celebrate") == 0 ||
+                std::strcmp(state, "completion") == 0) return "celebrate";
+            return nullptr;
+        };
+        const bool valid_intent = embodied_intent != nullptr &&
+            (std::strcmp(embodied_intent, "NONE") == 0 ||
+             std::strcmp(embodied_intent, "PRESENT_LEFT") == 0 ||
+             std::strcmp(embodied_intent, "PRESENT_CENTER") == 0 ||
+             std::strcmp(embodied_intent, "PRESENT_RIGHT") == 0 ||
+             std::strcmp(embodied_intent, "ENCOURAGE_RETRY") == 0 ||
+             std::strcmp(embodied_intent, "CELEBRATE_MASTERY") == 0 ||
+             std::strcmp(embodied_intent, "CALM_REGULATE") == 0 ||
+             std::strcmp(embodied_intent, "LISTEN_ATTENTIVELY") == 0);
+        const char* phase_id = phase_for_state(visual_state);
+        auto* renderer = tbot::ActiveLessonLayeredCinematicRenderer();
+        const bool has_delivery_id = delivery_id != nullptr;
+        const bool valid = ExactObjectKeys(body, has_delivery_id ? kKeys : kLegacyKeys) &&
+            ExactString(body, "contractVersion", "courseCompanion.v2.contract.v1") &&
+            (!has_delivery_id || safe_delivery_id(delivery_id)) &&
+            safe_delivery_id(session_id) &&
+            IsValidLessonIdentity(activity_id) &&
+            phase_id != nullptr && valid_intent &&
+            cJSON_IsBool(cJSON_GetObjectItem(body, "retainStaticLayers")) &&
+            cJSON_IsBool(cJSON_GetObjectItem(body, "replayEntrance")) &&
+            cJSON_IsTrue(cJSON_GetObjectItem(body, "retainStaticLayers")) &&
+            g_session.assignment_id == assignment_id && g_session.session_id == session_id &&
+            g_session.prepared &&
+            g_session.cinematic_renderer_id == tbot::kLessonRendererV5 &&
+            renderer != nullptr && renderer->prepared();
+        if (!valid) {
+            emit(root, "lesson_error", MakeErrorBody(
+                "COURSE_ACTIVITY_INVALID", "Course Mode activity visual state rejected",
+                false, "courseActivity"));
+            return;
+        }
+        if ((!has_delivery_id && sequence <= g_session.last_in_sequence) ||
+            (has_delivery_id && LessonCourseDeliveryApplied(session_id, delivery_id))) {
+            g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
+            emit_ack(root, sequence, true, false);
+            return;
+        }
+        tbot::LessonLayeredVisualState state{};
+        state.activity_id = activity_id;
+        state.phase_id = phase_id;
+        state.phase_variant = visual_state;
+        state.retain_static_layers = true;
+        state.replay_entrance = cJSON_IsTrue(cJSON_GetObjectItem(body, "replayEntrance"));
+        state.session_id = session_id;
+        state.delivery_id = delivery_id;
+        const auto response = renderer->ApplyVisualState(
+            state, static_cast<std::uint64_t>(sequence),
+            static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
+        if (!response.accepted) {
+            emit(root, "lesson_error", MakeErrorBody(
+                "COURSE_ACTIVITY_RENDER_FAILED", "Course Mode activity visual state failed",
+                true, "courseActivity"));
+            return;
+        }
+        if (has_delivery_id) RememberLessonCourseDelivery(session_id, delivery_id);
+        g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
+        const bool degraded = renderer->last_apply_degraded();
+        emit_ack(root, sequence, true, degraded, nullptr, true, -1,
+                 degraded ? "animationStartFailed" : nullptr);
+        return;
+    }
+
     const bool cinematic_v3 = protocol_version != nullptr &&
         strcmp(protocol_version, tbot::kLessonRendererV3) == 0;
     const bool cinematic_v4 = protocol_version != nullptr &&
@@ -3124,6 +3285,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     ? tbot::LessonLayeredPlaybackMode::kLoop
                     : tbot::LessonLayeredPlaybackMode::kOnce;
                 config.has_teaching_object = layer_count == 3;
+                config.retain_static_layers = activity_aware;
                 std::array<std::string, 3> normalized_paths;
                 static constexpr const char* kLayers[3] = {
                     "background", "teachingObject", "robotOverlay"};
@@ -3192,6 +3354,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                             parsed_rect.x == 0 && parsed_rect.y == 0 &&
                             parsed_rect.width == 480 && parsed_rect.height == 320;
                         config.background = {normalized_paths[role_index].c_str(), parsed_rect};
+                        config.background.identity = has_course_mode
+                            ? Str(layer, "assetVersionId") : Str(layer, "sha256");
                     } else if (role_index == 1) {
                         valid = valid && Str(layer, "fit") != nullptr &&
                             strcmp(Str(layer, "fit"), "contain") == 0 &&
@@ -3199,6 +3363,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                              (parsed_rect.x == 20 && parsed_rect.y == 168 &&
                               parsed_rect.width == 95 && parsed_rect.height == 95));
                         config.teaching_object = {normalized_paths[role_index].c_str(), parsed_rect};
+                        config.teaching_object.identity = has_course_mode
+                            ? Str(layer, "assetVersionId") : Str(layer, "sha256");
                     } else {
                         const cJSON* chroma = Obj(layer, "chromaKey");
                         const char* key_color = Str(chroma, "keyColor");

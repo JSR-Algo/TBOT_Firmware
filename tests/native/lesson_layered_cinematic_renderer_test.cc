@@ -234,6 +234,89 @@ void TestFallbackPhaseKeepsBackgroundAndRobotWithoutTeachingObject() {
             "fallback allocates only background, framebuffer, and Robot scratch buffers");
 }
 
+void TestActivityTransitionsRetainPinnedStaticLayers() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    auto initial = Config();
+    initial.background.identity = "background-v1";
+    initial.teaching_object.identity = "object-v1";
+    Require(renderer.Prepare(initial, 0).accepted, "initial pinned composition prepares");
+
+    auto retained = initial;
+    retained.command_sequence_id = 8;
+    retained.phase_id = "listen";
+    retained.retain_static_layers = true;
+    Require(renderer.Prepare(retained, 0).accepted, "retained activity prepares");
+    Require(fake.jpeg_decodes == 1 && fake.png_decodes == 1,
+            "unchanged pinned static identities are not decoded twice");
+
+    auto changed_object = retained;
+    changed_object.command_sequence_id = 9;
+    changed_object.teaching_object.identity = "object-v2";
+    changed_object.teaching_object.sd_path = "/sd/object-v2.png";
+    Require(renderer.Prepare(changed_object, 0).accepted, "changed object prepares");
+    Require(fake.jpeg_decodes == 1 && fake.png_decodes == 2,
+            "only the changed pinned object is decoded");
+
+    auto changed_background = changed_object;
+    changed_background.command_sequence_id = 10;
+    changed_background.background.identity = "background-v2";
+    changed_background.background.sd_path = "/sd/background-v2.jpg";
+    Require(renderer.Prepare(changed_background, 0).accepted, "changed background prepares");
+    Require(fake.jpeg_decodes == 2 && fake.png_decodes == 2,
+            "only the changed pinned background is decoded");
+    renderer.DiscardSession();
+    Require(fake.allocations == fake.frees,
+            "retained and replaced layer buffers are released exactly once");
+}
+
+void TestVisualStateDoesNotReplayEntranceUnlessRequested() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "visual state fixture prepares");
+    const std::size_t entrance_decodes = fake.video_decodes;
+
+    tbot::LessonLayeredVisualState state{};
+    state.activity_id = "activity-2";
+    state.phase_id = "listen";
+    state.retain_static_layers = true;
+    state.replay_entrance = false;
+    auto response = renderer.ApplyVisualState(state, 8, 0);
+    Require(response.accepted && response.phase_id == "listen",
+            "activity visual state is applied without entrance");
+    Require(fake.video_decodes == entrance_decodes,
+            "entrance frame is not replayed by default");
+
+    state.activity_id = "activity-3";
+    state.phase_id = "teach";
+    state.replay_entrance = true;
+    response = renderer.ApplyVisualState(state, 9, 0);
+    Require(response.accepted && fake.video_decodes == entrance_decodes + 1,
+            "explicit replayEntrance replays frame zero once");
+}
+
+void TestRobotFailureKeepsLastGoodStaticCompositionDegraded() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "last good composition prepares");
+    const std::size_t static_presents = fake.presents;
+    fake.fail_video = true;
+
+    tbot::LessonLayeredVisualState state{};
+    state.activity_id = "activity-degraded";
+    state.phase_id = "celebrate";
+    state.retain_static_layers = true;
+    state.replay_entrance = true;
+    const auto response = renderer.ApplyVisualState(state, 8, 0);
+
+    Require(response.accepted && renderer.last_apply_degraded(),
+            "Robot animation failure is accepted as degraded visual state");
+    Require(fake.presents == static_presents + 1,
+            "Robot failure presents the retained static background and object");
+    Require(fake.jpeg_decodes == 1 && fake.png_decodes == 1,
+            "degraded animation does not re-decode static layers");
+}
+
 }  // namespace
 
 int main() {
@@ -241,6 +324,9 @@ int main() {
     TestTypedFailuresAndLoopPlayback();
     TestDiscardSessionAllowsSequenceRestart();
     TestFallbackPhaseKeepsBackgroundAndRobotWithoutTeachingObject();
+    TestActivityTransitionsRetainPinnedStaticLayers();
+    TestVisualStateDoesNotReplayEntranceUnlessRequested();
+    TestRobotFailureKeepsLastGoodStaticCompositionDegraded();
     std::cout << "lesson_layered_cinematic_renderer tests passed\n";
     return 0;
 }

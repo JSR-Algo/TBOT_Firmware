@@ -18,6 +18,17 @@ enum class LessonLayeredPlaybackMode : std::uint8_t { kOnce, kLoop };
 struct LessonLayeredImageConfig {
     const char* sd_path = nullptr;
     LessonCinematicRect rect{};
+    const char* identity = nullptr;
+};
+
+struct LessonLayeredVisualState {
+    const char* activity_id = nullptr;
+    const char* phase_id = nullptr;
+    const char* phase_variant = nullptr;
+    bool retain_static_layers = true;
+    bool replay_entrance = false;
+    const char* session_id = nullptr;
+    const char* delivery_id = nullptr;
 };
 
 struct LessonLayeredCinematicPhaseConfig {
@@ -30,6 +41,7 @@ struct LessonLayeredCinematicPhaseConfig {
     std::uint32_t frame_count = 0;
     LessonLayeredPlaybackMode playback_mode = LessonLayeredPlaybackMode::kOnce;
     bool has_teaching_object = true;
+    bool retain_static_layers = false;
     LessonLayeredImageConfig background{};
     LessonLayeredImageConfig teaching_object{};
     LessonCinematicLayerConfig robot{};
@@ -69,9 +81,13 @@ public:
     LessonCinematicResponse Stop(std::uint64_t sequence, const char* phase_id);
     LessonCinematicResponse Cancel(std::uint64_t sequence, const char* phase_id);
     LessonCinematicResponse Tick(std::uint64_t now_ms);
+    LessonCinematicResponse ApplyVisualState(const LessonLayeredVisualState& visual_state,
+                                             std::uint64_t sequence,
+                                             std::uint64_t now_ms);
     void DiscardSession();
     bool initialized() const;
     bool prepared() const;
+    bool last_apply_degraded() const;
 
 private:
     enum class State : std::uint8_t { kIdle, kPrepared, kRunning, kPaused, kFailed };
@@ -82,8 +98,10 @@ private:
     LessonCinematicResponse ValidateControl(std::uint64_t sequence, const char* phase_id,
                                             const char* command) const;
     LessonCinematicError RenderFrame(std::size_t frame_index);
+    LessonCinematicError PresentStaticFrame(std::size_t frame_index);
     LessonCinematicError OperationError(LessonCinematicError fallback) const;
     void Release();
+    void ReleaseRobot();
 
     LessonLayeredCinematicRendererOps ops_{};
     mutable std::mutex mutex_;
@@ -99,6 +117,11 @@ private:
     LessonCinematicStreamMetadata robot_metadata_{};
     LessonCinematicRect object_rect_{};
     bool has_teaching_object_ = true;
+    std::string background_identity_;
+    std::string object_identity_;
+    std::string activity_id_;
+    std::string phase_variant_;
+    bool last_apply_degraded_ = false;
     LessonCinematicLayerConfig robot_config_{};
     LessonLayeredPlaybackMode playback_mode_ = LessonLayeredPlaybackMode::kOnce;
     std::string phase_id_;

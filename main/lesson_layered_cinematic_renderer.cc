@@ -142,6 +142,11 @@ bool LessonLayeredCinematicRenderer::prepared() const {
            state_ == State::kPaused;
 }
 
+bool LessonLayeredCinematicRenderer::last_apply_degraded() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_apply_degraded_;
+}
+
 LessonCinematicResponse LessonLayeredCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
     return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};
@@ -180,31 +185,54 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         !ForegroundRect(config.robot.rect)) {
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
-    Release();
+    if (!config.retain_static_layers) Release();
+    const std::string background_identity = config.background.identity != nullptr
+        ? config.background.identity : config.background.sd_path;
+    const std::string object_identity = config.has_teaching_object
+        ? (config.teaching_object.identity != nullptr
+               ? config.teaching_object.identity : config.teaching_object.sd_path)
+        : std::string();
+    const bool had_static_composition = config.retain_static_layers && background_ != nullptr;
+    const bool keep_background = config.retain_static_layers && background_ != nullptr &&
+        background_identity_ == background_identity;
+    const bool keep_object = config.retain_static_layers &&
+        config.has_teaching_object == has_teaching_object_ &&
+        (!config.has_teaching_object ||
+         (object_rgba_ != nullptr && object_identity_ == object_identity));
+
+    ReleaseRobot();
     phase_id_ = config.phase_id;
-    background_ = static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kScreenPixels * 2));
-    framebuffer_ = static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kScreenPixels * 2));
-    object_rgba_ = config.has_teaching_object
-        ? static_cast<std::uint8_t*>(ops_.allocate(ops_.context, kObjectCapacity))
-        : nullptr;
+    std::uint16_t* new_background = keep_background ? background_ :
+        static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kScreenPixels * 2));
+    std::uint8_t* new_object = keep_object ? object_rgba_ : config.has_teaching_object
+        ? static_cast<std::uint8_t*>(ops_.allocate(ops_.context, kObjectCapacity)) : nullptr;
+    if (framebuffer_ == nullptr) {
+        framebuffer_ = static_cast<std::uint16_t*>(ops_.allocate(
+            ops_.context, kScreenPixels * 2));
+    }
     robot_scratch_ = static_cast<std::uint8_t*>(ops_.allocate(ops_.context, kRobotCapacity));
-    if (background_ == nullptr || framebuffer_ == nullptr ||
-        (config.has_teaching_object && object_rgba_ == nullptr) ||
+    if (new_background == nullptr || framebuffer_ == nullptr ||
+        (config.has_teaching_object && new_object == nullptr) ||
         robot_scratch_ == nullptr) {
-        Release();
+        if (!keep_background && new_background != nullptr) ops_.free(ops_.context, new_background);
+        if (!keep_object && new_object != nullptr) ops_.free(ops_.context, new_object);
+        ReleaseRobot();
         return Failure(config.command_sequence_id, LessonCinematicError::kInsufficientPsram);
     }
-    std::uint16_t background_width = 0;
-    std::uint16_t background_height = 0;
-    std::size_t background_stride = 0;
+    std::uint16_t background_width = kLessonCinematicWidth;
+    std::uint16_t background_height = kLessonCinematicHeight;
+    std::size_t background_stride = kLessonCinematicWidth;
     [[maybe_unused]] const std::uint64_t background_started = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : 0;
-    if (!ops_.decode_jpeg(ops_.context, config.background.sd_path, background_,
-                          kScreenPixels * 2, &background_width, &background_height,
-                          &background_stride) || background_width != kLessonCinematicWidth ||
-        background_height != kLessonCinematicHeight ||
-        background_stride != kLessonCinematicWidth) {
-        Release();
+    const bool background_decoded = keep_background ||
+        ops_.decode_jpeg(ops_.context, config.background.sd_path, new_background,
+                         kScreenPixels * 2, &background_width, &background_height,
+                         &background_stride);
+    if (!background_decoded || background_width != kLessonCinematicWidth ||
+        background_height != kLessonCinematicHeight || background_stride != kLessonCinematicWidth) {
+        if (!keep_background) ops_.free(ops_.context, new_background);
+        if (!keep_object && new_object != nullptr) ops_.free(ops_.context, new_object);
+        ReleaseRobot();
         return Failure(config.command_sequence_id,
                        OperationError(LessonCinematicError::kDecodeFailed));
     }
@@ -219,12 +247,20 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
 #endif
     [[maybe_unused]] const std::uint64_t object_started = ops_.monotonic_ms != nullptr
         ? ops_.monotonic_ms(ops_.context) : 0;
-    if (config.has_teaching_object &&
-        (!ops_.decode_png(ops_.context, config.teaching_object.sd_path, object_rgba_,
-                          kObjectCapacity, &object_width_, &object_height_, &object_stride_) ||
-         object_width_ == 0 || object_height_ == 0 || object_width_ > 240 ||
-         object_height_ > 240 || object_stride_ < static_cast<std::size_t>(object_width_) * 4)) {
-        Release();
+    std::uint16_t new_object_width = keep_object ? object_width_ : 0;
+    std::uint16_t new_object_height = keep_object ? object_height_ : 0;
+    std::size_t new_object_stride = keep_object ? object_stride_ : 0;
+    const bool object_decoded = !config.has_teaching_object || keep_object ||
+        ops_.decode_png(ops_.context, config.teaching_object.sd_path, new_object,
+                        kObjectCapacity, &new_object_width, &new_object_height,
+                        &new_object_stride);
+    if (!object_decoded || (config.has_teaching_object &&
+        (new_object_width == 0 || new_object_height == 0 || new_object_width > 240 ||
+         new_object_height > 240 ||
+         new_object_stride < static_cast<std::size_t>(new_object_width) * 4))) {
+        if (!keep_background) ops_.free(ops_.context, new_background);
+        if (!keep_object && new_object != nullptr) ops_.free(ops_.context, new_object);
+        ReleaseRobot();
         return Failure(config.command_sequence_id,
                        OperationError(LessonCinematicError::kDecodeFailed));
     }
@@ -239,10 +275,44 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
                  config.phase_id, config.teaching_object.sd_path);
     }
 #endif
-    if (!ops_.open_video(ops_.context, config.robot.sd_path, &robot_metadata_, &robot_stream_) ||
-        robot_stream_ == nullptr) {
-        Release();
-        return Failure(config.command_sequence_id, OperationError(LessonCinematicError::kFileOpen));
+    if (!keep_background) {
+        if (background_ != nullptr) ops_.free(ops_.context, background_);
+        background_ = new_background;
+        background_identity_ = background_identity;
+    }
+    if (!keep_object) {
+        if (object_rgba_ != nullptr) ops_.free(ops_.context, object_rgba_);
+        object_rgba_ = new_object;
+        object_identity_ = object_identity;
+    }
+    object_width_ = new_object_width;
+    object_height_ = new_object_height;
+    object_stride_ = new_object_stride;
+    has_teaching_object_ = config.has_teaching_object;
+    object_rect_ = config.teaching_object.rect;
+    robot_config_ = config.robot;
+    playback_mode_ = config.playback_mode;
+
+    const bool robot_opened =
+        ops_.open_video(ops_.context, config.robot.sd_path, &robot_metadata_, &robot_stream_) &&
+        robot_stream_ != nullptr;
+    if (!robot_opened) {
+        if (!had_static_composition) {
+            Release();
+            return Failure(config.command_sequence_id,
+                           OperationError(LessonCinematicError::kFileOpen));
+        }
+        ReleaseRobot();
+        last_apply_degraded_ = true;
+        if (PresentStaticFrame(0) != LessonCinematicError::kNone) {
+            return Failure(config.command_sequence_id, OperationError(LessonCinematicError::kFileOpen));
+        }
+        state_ = State::kPrepared;
+        displayed_frame_ = 0;
+        last_sequence_ = config.command_sequence_id;
+        last_response_ = Applied(LessonCinematicResponseType::kFrameZeroReady, last_sequence_);
+        last_command_ = "prepare";
+        return last_response_;
     }
     if (robot_metadata_.width == 0 || robot_metadata_.height == 0 ||
         robot_metadata_.width > 240 || robot_metadata_.height > 240 ||
@@ -251,18 +321,24 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         robot_metadata_.fps != config.fps ||
         robot_metadata_.frame_count != config.frame_count ||
         robot_metadata_.duration_ms != config.duration_ms) {
-        Release();
+        ReleaseRobot();
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
-    has_teaching_object_ = config.has_teaching_object;
-    object_rect_ = config.teaching_object.rect;
-    robot_config_ = config.robot;
-    playback_mode_ = config.playback_mode;
     const auto frame_error = RenderFrame(0);
     if (frame_error != LessonCinematicError::kNone) {
-        Release();
-        state_ = State::kFailed;
-        return Failure(config.command_sequence_id, frame_error);
+        if (!had_static_composition) {
+            Release();
+            state_ = State::kFailed;
+            return Failure(config.command_sequence_id, frame_error);
+        }
+        ReleaseRobot();
+        last_apply_degraded_ = true;
+        if (PresentStaticFrame(0) != LessonCinematicError::kNone) {
+            state_ = State::kFailed;
+            return Failure(config.command_sequence_id, frame_error);
+        }
+    } else {
+        last_apply_degraded_ = false;
     }
     state_ = State::kPrepared;
     displayed_frame_ = 0;
@@ -280,6 +356,35 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ValidateControl(
     if (sequence <= last_sequence_ || phase_id == nullptr || phase_id_ != phase_id) {
         return Failure(sequence, LessonCinematicError::kStaleCommand);
     }
+    return Applied(LessonCinematicResponseType::kCommandApplied, sequence);
+}
+
+LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
+    const LessonLayeredVisualState& visual_state, std::uint64_t sequence,
+    std::uint64_t) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (visual_state.activity_id == nullptr || visual_state.activity_id[0] == '\0' ||
+        !KnownPhase(visual_state.phase_id) ||
+        !visual_state.retain_static_layers ||
+        background_ == nullptr || framebuffer_ == nullptr) {
+        return Failure(sequence, LessonCinematicError::kInvalidState);
+    }
+    activity_id_ = visual_state.activity_id;
+    phase_id_ = visual_state.phase_id;
+    phase_variant_ = visual_state.phase_variant != nullptr ? visual_state.phase_variant : "";
+    last_apply_degraded_ = false;
+    if (visual_state.replay_entrance) {
+        const auto error = robot_stream_ != nullptr ? RenderFrame(0)
+                                                    : LessonCinematicError::kFileOpen;
+        if (error != LessonCinematicError::kNone) {
+            last_apply_degraded_ = true;
+            if (PresentStaticFrame(0) != LessonCinematicError::kNone) {
+                return Failure(sequence, error);
+            }
+        }
+    }
+    state_ = State::kPrepared;
+    displayed_frame_ = 0;
     return Applied(LessonCinematicResponseType::kCommandApplied, sequence);
 }
 
@@ -423,16 +528,40 @@ LessonCinematicError LessonLayeredCinematicRenderer::RenderFrame(std::size_t fra
         ? LessonCinematicError::kNone : LessonCinematicError::kPresentFailed;
 }
 
-void LessonLayeredCinematicRenderer::Release() {
+LessonCinematicError LessonLayeredCinematicRenderer::PresentStaticFrame(
+    std::size_t frame_index) {
+    if (background_ == nullptr || framebuffer_ == nullptr) {
+        return LessonCinematicError::kInvalidState;
+    }
+    std::memcpy(framebuffer_, background_, kScreenPixels * 2);
+    if (has_teaching_object_ &&
+        !CompositeObject(object_rgba_, object_width_, object_height_, object_stride_,
+                         framebuffer_, object_rect_)) {
+        return LessonCinematicError::kDecodeFailed;
+    }
+    return ops_.present(ops_.context, framebuffer_, kLessonCinematicWidth,
+                        kLessonCinematicHeight, frame_index)
+        ? LessonCinematicError::kNone : LessonCinematicError::kPresentFailed;
+}
+
+void LessonLayeredCinematicRenderer::ReleaseRobot() {
     if (robot_stream_ != nullptr) {
         ops_.close_video(ops_.context, robot_stream_);
         robot_stream_ = nullptr;
     }
-    for (void* pointer : {static_cast<void*>(robot_scratch_), static_cast<void*>(object_rgba_),
+    if (robot_scratch_ != nullptr) {
+        ops_.free(ops_.context, robot_scratch_);
+        robot_scratch_ = nullptr;
+    }
+    robot_metadata_ = {};
+}
+
+void LessonLayeredCinematicRenderer::Release() {
+    ReleaseRobot();
+    for (void* pointer : {static_cast<void*>(object_rgba_),
                           static_cast<void*>(framebuffer_), static_cast<void*>(background_)}) {
         if (pointer != nullptr) ops_.free(ops_.context, pointer);
     }
-    robot_scratch_ = nullptr;
     object_rgba_ = nullptr;
     framebuffer_ = nullptr;
     background_ = nullptr;
@@ -440,6 +569,8 @@ void LessonLayeredCinematicRenderer::Release() {
     object_height_ = 0;
     object_stride_ = 0;
     has_teaching_object_ = true;
+    background_identity_.clear();
+    object_identity_.clear();
 }
 
 void LessonLayeredCinematicRenderer::DiscardSession() {
@@ -453,6 +584,9 @@ void LessonLayeredCinematicRenderer::DiscardSession() {
     displayed_frame_ = 0;
     last_response_ = {};
     last_command_.clear();
+    activity_id_.clear();
+    phase_variant_.clear();
+    last_apply_degraded_ = false;
 }
 
 bool LessonLayeredCinematicRendererCapabilityReady() {

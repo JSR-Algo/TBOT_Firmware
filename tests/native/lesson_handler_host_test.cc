@@ -539,6 +539,21 @@ std::string V5CourseModeActivityFallbackPrepareFrame(
     return frame;
 }
 
+std::string CourseActivityFrame(int seq, const char* delivery_id,
+                                const char* activity_id = "w19-weather-recall",
+                                const char* visual_state = "listen",
+                                bool replay_entrance = false) {
+    return std::string("{\"type\":\"lesson_course_activity\",\"assignmentId\":\"") +
+        AID() + "\",\"sessionId\":\"" + SID() + "\",\"stepId\":\"a1\"," +
+        "\"sequence\":" + std::to_string(seq) + ",\"body\":{" +
+        "\"contractVersion\":\"courseCompanion.v2.contract.v1\"," +
+        "\"deliveryId\":\"" + delivery_id + "\",\"activityId\":\"" + activity_id +
+        "\",\"visualState\":\"" + visual_state +
+        "\",\"embodiedIntent\":\"PRESENT_CENTER\"," +
+        "\"retainStaticLayers\":true,\"replayEntrance\":" +
+        (replay_entrance ? "true" : "false") + "}}";
+}
+
 std::string V4PrepareFrame(int seq, std::uint64_t command_sequence_id = 71,
                            const std::string& asset_extra = "") {
     return V4Frame("lesson_prepare", seq,
@@ -2006,6 +2021,68 @@ void test_renderer_v5_course_mode_activity_fallback_without_object() {
     require(FrameType(1) == "lesson_ack" &&
                 !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
             "activity-aware fallback stop releases its lesson asset reservation");
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+}
+
+void test_course_activity_retains_w19_static_layers_and_dedupes_delivery() {
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+    const int initial_video_decodes = fake.video_decodes;
+
+    Handle(CourseActivityFrame(2, "delivery-w19-1"));
+    require(fake.jpeg_decodes == 1 && fake.png_decodes == 0 &&
+                fake.video_decodes == initial_video_decodes,
+            "W19 activity transition retains its two-layer static composition without entrance");
+    require(FrameType(1) == "lesson_ack" && FrameBodyBool(1, "rendered", false) &&
+                !FrameBodyBool(1, "degraded", true),
+            "Course activity emits applied visual status");
+
+    Handle(CourseActivityFrame(3, "delivery-w19-1", "w19-weather-recall", "teach", true));
+    require(fake.video_decodes == initial_video_decodes,
+            "duplicate session and delivery identity applies no visual effect");
+
+    Handle(CourseActivityFrame(4, "delivery-w19-2", "w19-weather-transfer", "teach", true));
+    require(fake.video_decodes == initial_video_decodes + 1,
+            "new delivery explicitly replays entrance exactly once");
+
+    const std::string legacy_activity = ReplaceOnce(
+        CourseActivityFrame(5, "legacy-delivery", "w19-weather-legacy", "teach", true),
+        "\"deliveryId\":\"legacy-delivery\",", "");
+    Handle(legacy_activity);
+    const int after_legacy = fake.video_decodes;
+    Handle(legacy_activity);
+    require(fake.video_decodes == after_legacy,
+            "legacy activity without deliveryId remains sequence-idempotent");
+
+    fake.fail_decode = true;
+    Handle(CourseActivityFrame(6, "delivery-w19-3", "w19-weather-close", "celebrate", true));
+    require(FrameBodyBool(Sent().size() - 1, "rendered", false) &&
+                FrameBodyBool(Sent().size() - 1, "degraded", false) &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "animationStartFailed",
+            "Robot animation failure keeps static composition and emits degraded evidence");
+
+    Handle(V5Frame("lesson_stop", 7,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"celebrate\","
+        "\"commandSequenceId\":197}}"));
+
+    fake.fail_decode = false;
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1, 198));
+    const int reconnect_video_decodes = fake.video_decodes;
+    Handle(CourseActivityFrame(2, "delivery-w19-2", "w19-weather-transfer", "teach", true));
+    require(fake.video_decodes == reconnect_video_decodes,
+            "delivery ledger suppresses an already applied effect after session reconnect");
+    Handle(V5Frame("lesson_stop", 3,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":199}}"));
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();
 }
@@ -8828,6 +8905,7 @@ int main() {
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v5_capability_exact_layers_and_lifecycle();
     test_renderer_v5_course_mode_activity_fallback_without_object();
+    test_course_activity_retains_w19_static_layers_and_dedupes_delivery();
     test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix();
     test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack();
     test_renderer_v4_capability_and_exact_single_asset_routing();
