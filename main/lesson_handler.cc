@@ -52,7 +52,7 @@
 #include <vector>
 
 #ifdef ESP_PLATFORM
-#include "settings.h"
+#include <nvs.h>
 #endif
 
 #include <cJSON.h>
@@ -892,15 +892,18 @@ struct LessonEmbodiedLedger {
 LessonEmbodiedLedger g_embodied_ledger;
 
 struct LessonCourseDeliveryLedger {
-    // NVS strings are capped at 4 KiB; twelve worst-case identity pairs stay bounded.
+    enum class Status : std::uint8_t { kPending, kApplied, kDegraded };
+    struct Record { std::string session; std::string delivery; Status status; };
+    // NVS strings are capped at 4 KiB; twelve worst-case records stay bounded.
     static constexpr size_t kMaxEntries = 12;
-    std::deque<std::pair<std::string, std::string>> entries;
+    std::deque<Record> entries;
     bool loaded = false;
     bool storage_valid = true;
 };
 LessonCourseDeliveryLedger g_course_delivery_ledger;
 #ifdef TBOT_HOST_NATIVE_COVERAGE
 std::string g_course_delivery_test_storage;
+bool g_course_delivery_test_write_failure = false;
 #endif
 
 bool ValidPersistedCourseDeliveryToken(const std::string& value) {
@@ -913,9 +916,12 @@ bool ValidPersistedCourseDeliveryToken(const std::string& value) {
 std::string SerializeLessonCourseDeliveryLedger() {
     std::string serialized;
     for (const auto& entry : g_course_delivery_ledger.entries) {
-        serialized += entry.first;
+        serialized += entry.session;
         serialized.push_back('\t');
-        serialized += entry.second;
+        serialized += entry.delivery;
+        serialized.push_back('\t');
+        serialized += entry.status == LessonCourseDeliveryLedger::Status::kPending ? "pending" :
+            entry.status == LessonCourseDeliveryLedger::Status::kDegraded ? "degraded" : "applied";
         serialized.push_back('\n');
     }
     return serialized;
@@ -927,8 +933,27 @@ void LoadLessonCourseDeliveryLedger() {
 #ifdef TBOT_HOST_NATIVE_COVERAGE
     std::string serialized = g_course_delivery_test_storage;
 #elif defined(ESP_PLATFORM)
-    Settings settings("lesson_course");
-    std::string serialized = settings.GetString("deliveries");
+    std::string serialized;
+    nvs_handle_t handle = 0;
+    esp_err_t result = nvs_open("lesson_course", NVS_READONLY, &handle);
+    if (result == ESP_OK) {
+        size_t size = 0;
+        result = nvs_get_str(handle, "deliveries", nullptr, &size);
+        if (result == ESP_OK && size > 0) {
+            if (size > 4096) {
+                result = ESP_ERR_NVS_INVALID_LENGTH;
+            } else {
+                serialized.resize(size);
+                result = nvs_get_str(handle, "deliveries", serialized.data(), &size);
+                while (!serialized.empty() && serialized.back() == '\0') serialized.pop_back();
+            }
+        }
+        nvs_close(handle);
+    }
+    if (result != ESP_OK && result != ESP_ERR_NVS_NOT_FOUND) {
+        g_course_delivery_ledger.storage_valid = false;
+        return;
+    }
 #else
     std::string serialized;
 #endif
@@ -941,15 +966,25 @@ void LoadLessonCourseDeliveryLedger() {
             g_course_delivery_ledger.storage_valid = false;
             break;
         }
+        const size_t status_separator = serialized.find('\t', separator + 1);
         std::string session = serialized.substr(cursor, separator - cursor);
-        std::string delivery = serialized.substr(separator + 1, end - separator - 1);
+        const bool legacy = status_separator == std::string::npos || status_separator >= end;
+        std::string delivery = serialized.substr(
+            separator + 1, (legacy ? end : status_separator) - separator - 1);
+        std::string status = legacy ? "applied" :
+            serialized.substr(status_separator + 1, end - status_separator - 1);
         if (!ValidPersistedCourseDeliveryToken(session) ||
-            !ValidPersistedCourseDeliveryToken(delivery)) {
+            !ValidPersistedCourseDeliveryToken(delivery) ||
+            (status != "pending" && status != "applied" && status != "degraded")) {
             g_course_delivery_ledger.entries.clear();
             g_course_delivery_ledger.storage_valid = false;
             break;
         }
-        g_course_delivery_ledger.entries.emplace_back(std::move(session), std::move(delivery));
+        const auto parsed_status = status == "pending" ? LessonCourseDeliveryLedger::Status::kPending :
+            status == "degraded" ? LessonCourseDeliveryLedger::Status::kDegraded :
+                                    LessonCourseDeliveryLedger::Status::kApplied;
+        g_course_delivery_ledger.entries.push_back(
+            {std::move(session), std::move(delivery), parsed_status});
         while (g_course_delivery_ledger.entries.size() >
                LessonCourseDeliveryLedger::kMaxEntries) {
             g_course_delivery_ledger.entries.pop_front();
@@ -960,26 +995,74 @@ void LoadLessonCourseDeliveryLedger() {
 
 bool LessonCourseDeliveryApplied(const char* session_id, const char* delivery_id) {
     LoadLessonCourseDeliveryLedger();
-    return std::find(g_course_delivery_ledger.entries.begin(),
-                     g_course_delivery_ledger.entries.end(),
-                     std::make_pair(std::string(session_id), std::string(delivery_id))) !=
-        g_course_delivery_ledger.entries.end();
+    return std::any_of(g_course_delivery_ledger.entries.begin(),
+                       g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
+        return entry.session == session_id && entry.delivery == delivery_id;
+    });
+}
+
+LessonCourseDeliveryLedger::Record* FindLessonCourseDelivery(
+    const char* session_id, const char* delivery_id) {
+    LoadLessonCourseDeliveryLedger();
+    auto found = std::find_if(g_course_delivery_ledger.entries.begin(),
+                              g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
+        return entry.session == session_id && entry.delivery == delivery_id;
+    });
+    return found == g_course_delivery_ledger.entries.end() ? nullptr : &*found;
+}
+
+bool PersistLessonCourseDeliveryLedger() {
+#ifdef TBOT_HOST_NATIVE_COVERAGE
+    if (g_course_delivery_test_write_failure) return false;
+    g_course_delivery_test_storage = SerializeLessonCourseDeliveryLedger();
+#elif defined(ESP_PLATFORM)
+    nvs_handle_t handle = 0;
+    if (nvs_open("lesson_course", NVS_READWRITE, &handle) != ESP_OK) return false;
+    const std::string serialized = SerializeLessonCourseDeliveryLedger();
+    const esp_err_t set_result = nvs_set_str(handle, "deliveries", serialized.c_str());
+    const esp_err_t commit_result = set_result == ESP_OK ? nvs_commit(handle) : set_result;
+    nvs_close(handle);
+    if (set_result != ESP_OK || commit_result != ESP_OK) return false;
+#endif
+    return true;
 }
 
 bool RememberLessonCourseDelivery(const char* session_id, const char* delivery_id) {
     LoadLessonCourseDeliveryLedger();
     if (!g_course_delivery_ledger.storage_valid) return false;
-    g_course_delivery_ledger.entries.emplace_back(session_id, delivery_id);
+    const auto previous = g_course_delivery_ledger.entries;
+    g_course_delivery_ledger.entries.push_back(
+        {session_id, delivery_id, LessonCourseDeliveryLedger::Status::kPending});
     while (g_course_delivery_ledger.entries.size() > LessonCourseDeliveryLedger::kMaxEntries) {
         g_course_delivery_ledger.entries.pop_front();
     }
-#ifdef TBOT_HOST_NATIVE_COVERAGE
-    g_course_delivery_test_storage = SerializeLessonCourseDeliveryLedger();
-#elif defined(ESP_PLATFORM)
-    Settings settings("lesson_course", true);
-    settings.SetString("deliveries", SerializeLessonCourseDeliveryLedger());
-#endif
-    return true;
+    if (PersistLessonCourseDeliveryLedger()) return true;
+    g_course_delivery_ledger.entries = previous;
+    return false;
+}
+
+bool ResolveLessonCourseDelivery(const char* session_id, const char* delivery_id,
+                                 LessonCourseDeliveryLedger::Status status) {
+    auto* record = FindLessonCourseDelivery(session_id, delivery_id);
+    if (record == nullptr) return false;
+    const auto previous = g_course_delivery_ledger.entries;
+    record->status = status;
+    if (PersistLessonCourseDeliveryLedger()) return true;
+    g_course_delivery_ledger.entries = previous;
+    return false;
+}
+
+bool RemoveLessonCourseDelivery(const char* session_id, const char* delivery_id) {
+    auto found = std::find_if(g_course_delivery_ledger.entries.begin(),
+                              g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
+        return entry.session == session_id && entry.delivery == delivery_id;
+    });
+    if (found == g_course_delivery_ledger.entries.end()) return true;
+    const auto previous = g_course_delivery_ledger.entries;
+    g_course_delivery_ledger.entries.erase(found);
+    if (PersistLessonCourseDeliveryLedger()) return true;
+    g_course_delivery_ledger.entries = previous;
+    return false;
 }
 void RestoreLessonEmbodiedLedger(const char* assignment_id, const char* session_id) {
     if (g_embodied_ledger.assignment_id == assignment_id &&
@@ -1090,6 +1173,9 @@ bool LessonCourseDeliveryStorageValidForTest() {
 }
 std::string LessonCourseDeliveryStorageForTest() {
     return g_course_delivery_test_storage;
+}
+void SetLessonCourseDeliveryWriteFailureForTest(bool fail) {
+    g_course_delivery_test_write_failure = fail;
 }
 }  // namespace tbot
 namespace {
@@ -2927,10 +3013,26 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 false, "courseActivity"));
             return;
         }
-        if ((!has_delivery_id && sequence <= g_session.last_in_sequence) ||
-            (has_delivery_id && LessonCourseDeliveryApplied(session_id, delivery_id))) {
+        auto* existing_delivery = has_delivery_id
+            ? FindLessonCourseDelivery(session_id, delivery_id) : nullptr;
+        if (!has_delivery_id && sequence <= g_session.last_in_sequence) {
             g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
             emit_ack(root, sequence, true, false);
+            return;
+        }
+        if (existing_delivery != nullptr) {
+            g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
+            if (existing_delivery->status == LessonCourseDeliveryLedger::Status::kPending) {
+                emit(root, "lesson_error", MakeErrorBody(
+                    "COURSE_ACTIVITY_DEDUPE_PENDING",
+                    "Course Mode activity delivery outcome is pending",
+                    false, "courseActivity"));
+            } else {
+                const bool degraded =
+                    existing_delivery->status == LessonCourseDeliveryLedger::Status::kDegraded;
+                emit_ack(root, sequence, true, degraded, nullptr, true, -1,
+                         degraded ? "animationStartFailed" : nullptr);
+            }
             return;
         }
         tbot::LessonLayeredVisualState state{};
@@ -2952,6 +3054,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
             state, static_cast<std::uint64_t>(sequence),
             static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
         if (!response.accepted) {
+            if (has_delivery_id && !renderer->last_apply_presented()) {
+                RemoveLessonCourseDelivery(session_id, delivery_id);
+            }
             emit(root, "lesson_error", MakeErrorBody(
                 "COURSE_ACTIVITY_RENDER_FAILED", "Course Mode activity visual state failed",
                 true, "courseActivity"));
@@ -2959,6 +3064,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
         const bool degraded = renderer->last_apply_degraded();
+        if (has_delivery_id && !ResolveLessonCourseDelivery(
+                session_id, delivery_id,
+                degraded ? LessonCourseDeliveryLedger::Status::kDegraded
+                         : LessonCourseDeliveryLedger::Status::kApplied)) {
+            emit(root, "lesson_error", MakeErrorBody(
+                "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+                "Course Mode activity outcome persistence failed",
+                true, "courseActivity"));
+            return;
+        }
         emit_ack(root, sequence, true, degraded, nullptr, true, -1,
                  degraded ? "animationStartFailed" : nullptr);
         return;
@@ -3145,7 +3260,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 CinematicJsonAddBool(cinematic, "accepted", true);
             const auto* layered = cinematic_v5
                 ? tbot::ActiveLessonLayeredCinematicRenderer() : nullptr;
-            const bool degraded = layered != nullptr && layered->last_apply_degraded();
+            const bool degraded = prepare_frame && layered != nullptr &&
+                layered->last_apply_degraded();
             if (degraded) {
                 built = built && CinematicJsonAddBool(cinematic, "degraded", true) &&
                     CinematicJsonAddString(cinematic, "degradedReason",

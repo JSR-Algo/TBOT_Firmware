@@ -34,6 +34,7 @@ void SetLessonCourseDeliveryStorageForTest(const char* serialized);
 std::size_t LessonCourseDeliveryEntryCountForTest();
 bool LessonCourseDeliveryStorageValidForTest();
 std::string LessonCourseDeliveryStorageForTest();
+void SetLessonCourseDeliveryWriteFailureForTest(bool fail);
 }
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_motion_presets.h"
@@ -2061,8 +2062,67 @@ void test_renderer_v5_first_course_prepare_reports_static_degradation() {
     Handle(V5Frame("lesson_stop", 2,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
         "\"commandSequenceId\":192}}"));
+    require(FrameBodyStr(1, "cinematicPhase", "degradedReason").empty(),
+            "successful stop ACK does not inherit prepare degradation");
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();
+}
+
+void test_course_activity_durable_outcome_replay_and_write_failure() {
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    fake.fail_decode = true;
+    Handle(CourseActivityFrame(2, "degraded-lost-ack", "activity-degraded", "teach", true));
+    require(FrameBodyBool(1, "degraded", false), "first degraded activity ACK is recorded");
+    const int degraded_decodes = fake.video_decodes;
+    fake.fail_decode = false;
+    Handle(CourseActivityFrame(3, "degraded-lost-ack", "activity-degraded", "teach", true));
+    require(fake.video_decodes == degraded_decodes && FrameBodyBool(2, "degraded", false) &&
+                FrameBodyStr(2, nullptr, "degradedReason") == "animationStartFailed",
+            "duplicate replays exact stored degraded outcome without reapplying");
+
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(true);
+    const int before_write_failure = fake.video_decodes;
+    Handle(CourseActivityFrame(4, "write-failure", "activity-write", "teach", true));
+    require(FrameType(3) == "lesson_error" &&
+                FrameBodyStr(3, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE" &&
+                fake.video_decodes == before_write_failure,
+            "durable reservation write failure emits retryable error before side effect");
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(false);
+
+    const std::string pending_storage = std::string(SID()) + "\tpending-after-reboot\tpending\n";
+    tbot::SetLessonCourseDeliveryStorageForTest(pending_storage.c_str());
+    const int before_pending = fake.video_decodes;
+    Handle(CourseActivityFrame(5, "pending-after-reboot", "activity-pending", "teach", true));
+    require(FrameType(4) == "lesson_error" &&
+                FrameBodyStr(4, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_PENDING" &&
+                fake.video_decodes == before_pending,
+            "unresolved reboot reservation fails closed without replay or rendered success");
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+
+    fake.fail_present = true;
+    Handle(CourseActivityFrame(6, "present-retry", "activity-present", "listen", false));
+    require(FrameType(5) == "lesson_error", "non-applied static present failure is rejected");
+    fake.fail_present = false;
+    Handle(CourseActivityFrame(7, "present-retry", "activity-present", "listen", false));
+    require(FrameType(6) == "lesson_ack" && FrameBodyBool(6, "rendered", false),
+            "non-applied present failure removes reservation and permits retry");
+
+    Handle(V5Frame("lesson_stop", 8,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":205}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+    tbot::SetLessonCourseDeliveryStorageForTest("");
 }
 
 void test_course_activity_retains_w19_static_layers_and_dedupes_delivery() {
@@ -9044,6 +9104,7 @@ int main() {
     test_renderer_v5_capability_exact_layers_and_lifecycle();
     test_renderer_v5_course_mode_activity_fallback_without_object();
     test_renderer_v5_first_course_prepare_reports_static_degradation();
+    test_course_activity_durable_outcome_replay_and_write_failure();
     test_course_activity_retains_w19_static_layers_and_dedupes_delivery();
     test_course_activity_delivery_persistence_reload_bounds_and_corruption();
     test_course_activity_handler_persistence_round_trip_after_reboot();

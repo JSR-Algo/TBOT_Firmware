@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <functional>
 #include <inttypes.h>
 #include <memory>
 #include <string_view>
@@ -147,6 +148,11 @@ bool LessonLayeredCinematicRenderer::last_apply_degraded() const {
     return last_apply_degraded_;
 }
 
+bool LessonLayeredCinematicRenderer::last_apply_presented() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_apply_presented_;
+}
+
 LessonCinematicResponse LessonLayeredCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
     return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};
@@ -185,7 +191,78 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         !ForegroundRect(config.robot.rect)) {
         return Failure(config.command_sequence_id, LessonCinematicError::kMetadataMismatch);
     }
-    if (!config.retain_static_layers) Release();
+    auto* old_background = background_;
+    auto* old_framebuffer = framebuffer_;
+    auto* old_object = object_rgba_;
+    auto* old_robot_scratch = robot_scratch_;
+    void* old_robot_stream = robot_stream_;
+    const auto old_robot_metadata = robot_metadata_;
+    const auto old_object_width = object_width_;
+    const auto old_object_height = object_height_;
+    const auto old_object_stride = object_stride_;
+    const auto old_object_rect = object_rect_;
+    const auto old_has_object = has_teaching_object_;
+    const auto old_robot_config = robot_config_;
+    const auto old_playback_mode = playback_mode_;
+    const auto old_state = state_;
+    const auto old_phase_id = phase_id_;
+    const auto old_background_identity = background_identity_;
+    const auto old_object_identity = object_identity_;
+    const auto old_last_sequence = last_sequence_;
+    const auto old_last_response = last_response_;
+    const auto old_last_command = last_command_;
+    const auto old_degraded = last_apply_degraded_;
+    const auto old_presented = last_apply_presented_;
+    const auto old_degraded_error = last_degraded_error_;
+    bool committed = false;
+    auto transaction = std::unique_ptr<void, std::function<void(void*)>>(
+        reinterpret_cast<void*>(1), [&, this](void*) {
+            if (committed) {
+                if (old_robot_stream != nullptr && old_robot_stream != robot_stream_) {
+                    ops_.close_video(ops_.context, old_robot_stream);
+                }
+                if (old_robot_scratch != nullptr && old_robot_scratch != robot_scratch_) {
+                    ops_.free(ops_.context, old_robot_scratch);
+                }
+                if (old_background != nullptr && old_background != background_) {
+                    ops_.free(ops_.context, old_background);
+                }
+                if (old_object != nullptr && old_object != object_rgba_) {
+                    ops_.free(ops_.context, old_object);
+                }
+                return;
+            }
+            if (background_ == old_background) background_ = nullptr;
+            if (framebuffer_ == old_framebuffer) framebuffer_ = nullptr;
+            if (object_rgba_ == old_object) object_rgba_ = nullptr;
+            Release();
+            background_ = old_background;
+            framebuffer_ = old_framebuffer;
+            object_rgba_ = old_object;
+            robot_scratch_ = old_robot_scratch;
+            robot_stream_ = old_robot_stream;
+            robot_metadata_ = old_robot_metadata;
+            object_width_ = old_object_width;
+            object_height_ = old_object_height;
+            object_stride_ = old_object_stride;
+            object_rect_ = old_object_rect;
+            has_teaching_object_ = old_has_object;
+            robot_config_ = old_robot_config;
+            playback_mode_ = old_playback_mode;
+            state_ = old_state;
+            phase_id_ = old_phase_id;
+            background_identity_ = old_background_identity;
+            object_identity_ = old_object_identity;
+            last_sequence_ = old_last_sequence;
+            last_response_ = old_last_response;
+            last_command_ = old_last_command;
+            last_apply_degraded_ = old_degraded;
+            last_apply_presented_ = old_presented;
+            last_degraded_error_ = old_degraded_error;
+        });
+    robot_stream_ = nullptr;
+    robot_scratch_ = nullptr;
+    robot_metadata_ = {};
     const std::string background_identity = config.background.identity != nullptr
         ? config.background.identity : config.background.sd_path;
     const std::string object_identity = config.has_teaching_object
@@ -200,7 +277,6 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         (!config.has_teaching_object ||
          (object_rgba_ != nullptr && object_identity_ == object_identity));
 
-    ReleaseRobot();
     phase_id_ = config.phase_id;
     std::uint16_t* new_background = keep_background ? background_ :
         static_cast<std::uint16_t*>(ops_.allocate(ops_.context, kScreenPixels * 2));
@@ -276,12 +352,10 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     }
 #endif
     if (!keep_background) {
-        if (background_ != nullptr) ops_.free(ops_.context, background_);
         background_ = new_background;
         background_identity_ = background_identity;
     }
     if (!keep_object) {
-        if (object_rgba_ != nullptr) ops_.free(ops_.context, object_rgba_);
         object_rgba_ = new_object;
         object_identity_ = object_identity;
     }
@@ -298,7 +372,6 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         robot_stream_ != nullptr;
     if (!robot_opened) {
         if (!static_fallback_allowed) {
-            Release();
             return Failure(config.command_sequence_id,
                            OperationError(LessonCinematicError::kFileOpen));
         }
@@ -313,6 +386,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         last_sequence_ = config.command_sequence_id;
         last_response_ = Applied(LessonCinematicResponseType::kFrameZeroReady, last_sequence_);
         last_command_ = "prepare";
+        committed = true;
         return last_response_;
     }
     if (robot_metadata_.width == 0 || robot_metadata_.height == 0 ||
@@ -328,7 +402,6 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     const auto frame_error = RenderFrame(0);
     if (frame_error != LessonCinematicError::kNone) {
         if (!static_fallback_allowed) {
-            Release();
             state_ = State::kFailed;
             return Failure(config.command_sequence_id, frame_error);
         }
@@ -348,6 +421,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     last_sequence_ = config.command_sequence_id;
     last_response_ = Applied(LessonCinematicResponseType::kFrameZeroReady, last_sequence_);
     last_command_ = "prepare";
+    committed = true;
     return last_response_;
 }
 
@@ -376,6 +450,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
     phase_id_ = visual_state.phase_id;
     phase_variant_ = visual_state.phase_variant != nullptr ? visual_state.phase_variant : "";
     last_apply_degraded_ = false;
+    last_apply_presented_ = false;
     last_degraded_error_ = LessonCinematicError::kNone;
     if (visual_state.replay_entrance) {
         const auto error = robot_stream_ != nullptr ? RenderFrame(0)
@@ -383,10 +458,18 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
         if (error != LessonCinematicError::kNone) {
             last_apply_degraded_ = true;
             last_degraded_error_ = error;
-            if (PresentStaticFrame(0) != LessonCinematicError::kNone) {
-                return Failure(sequence, error);
+            const auto static_error = PresentStaticFrame(0);
+            if (static_error != LessonCinematicError::kNone) {
+                return Failure(sequence, static_error);
             }
+            last_apply_presented_ = true;
+        } else {
+            last_apply_presented_ = true;
         }
+    } else {
+        const auto static_error = PresentStaticFrame(0);
+        if (static_error != LessonCinematicError::kNone) return Failure(sequence, static_error);
+        last_apply_presented_ = true;
     }
     state_ = State::kPrepared;
     displayed_frame_ = 0;
@@ -399,6 +482,8 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Start(
     const auto valid = ValidateControl(sequence, phase_id, "start");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kPrepared) return Failure(sequence, LessonCinematicError::kInvalidState);
+    last_apply_degraded_ = false;
+    last_degraded_error_ = LessonCinematicError::kNone;
     state_ = State::kRunning;
     clock_origin_ms_ = now_ms;
     last_sequence_ = sequence;
@@ -592,6 +677,9 @@ void LessonLayeredCinematicRenderer::Release() {
     has_teaching_object_ = true;
     background_identity_.clear();
     object_identity_.clear();
+    last_apply_degraded_ = false;
+    last_apply_presented_ = false;
+    last_degraded_error_ = LessonCinematicError::kNone;
 }
 
 void LessonLayeredCinematicRenderer::DiscardSession() {
@@ -608,6 +696,7 @@ void LessonLayeredCinematicRenderer::DiscardSession() {
     activity_id_.clear();
     phase_variant_.clear();
     last_apply_degraded_ = false;
+    last_apply_presented_ = false;
     last_degraded_error_ = LessonCinematicError::kNone;
 }
 

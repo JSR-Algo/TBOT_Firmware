@@ -285,8 +285,8 @@ void TestVisualStateDoesNotReplayEntranceUnlessRequested() {
     auto response = renderer.ApplyVisualState(state, 8, 0);
     Require(response.accepted && response.phase_id == "listen",
             "activity visual state is applied without entrance");
-    Require(fake.video_decodes == entrance_decodes,
-            "entrance frame is not replayed by default");
+    Require(fake.video_decodes == entrance_decodes && fake.presents == 2,
+            "entrance is not replayed and retained static composition is actively presented");
 
     state.activity_id = "activity-3";
     state.phase_id = "teach";
@@ -294,6 +294,40 @@ void TestVisualStateDoesNotReplayEntranceUnlessRequested() {
     response = renderer.ApplyVisualState(state, 9, 0);
     Require(response.accepted && fake.video_decodes == entrance_decodes + 1,
             "explicit replayEntrance replays frame zero once");
+}
+
+void TestVisualStateStaticPresentFailureIsTypedAndRetryable() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "static visual retry fixture prepares");
+    tbot::LessonLayeredVisualState state{};
+    state.activity_id = "activity-static";
+    state.phase_id = "listen";
+    state.retain_static_layers = true;
+    fake.fail_present = true;
+    auto response = renderer.ApplyVisualState(state, 8, 0);
+    Require(!response.accepted && response.error == tbot::LessonCinematicError::kPresentFailed,
+            "static activity present failure is typed");
+    fake.fail_present = false;
+    response = renderer.ApplyVisualState(state, 8, 0);
+    Require(response.accepted, "static activity may retry after a non-applied present failure");
+}
+
+void TestFailedRetainedReprepareLeavesOldCompositionUsable() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    auto initial = Config();
+    initial.retain_static_layers = true;
+    Require(renderer.Prepare(initial, 0).accepted, "transaction fixture prepares");
+    fake.fail_video = true;
+    auto replacement = initial;
+    replacement.command_sequence_id = 8;
+    replacement.phase_id = "listen";
+    replacement.retain_static_layers = false;
+    auto response = renderer.Prepare(replacement, 0);
+    Require(!response.accepted, "failed normal replacement is rejected");
+    Require(renderer.Start(8, "teach", 0).accepted,
+            "failed replacement preserves the prior stream, phase, and composition");
 }
 
 void TestRobotFailureKeepsLastGoodStaticCompositionDegraded() {
@@ -388,6 +422,8 @@ int main() {
     TestFallbackPhaseKeepsBackgroundAndRobotWithoutTeachingObject();
     TestActivityTransitionsRetainPinnedStaticLayers();
     TestVisualStateDoesNotReplayEntranceUnlessRequested();
+    TestVisualStateStaticPresentFailureIsTypedAndRetryable();
+    TestFailedRetainedReprepareLeavesOldCompositionUsable();
     TestRobotFailureKeepsLastGoodStaticCompositionDegraded();
     TestFirstCoursePrepareKeepsNewStaticWhenRobotFails();
     TestTickRobotFailureFallsBackToStaticComposition();

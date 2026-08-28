@@ -88,6 +88,7 @@ public:
     bool initialized() const;
     bool prepared() const;
     bool last_apply_degraded() const;
+    bool last_apply_presented() const;
 
 private:
     enum class State : std::uint8_t { kIdle, kPrepared, kRunning, kPaused, kFailed };
@@ -122,6 +123,7 @@ private:
     std::string activity_id_;
     std::string phase_variant_;
     bool last_apply_degraded_ = false;
+    bool last_apply_presented_ = false;
     LessonCinematicError last_degraded_error_ = LessonCinematicError::kNone;
     LessonCinematicLayerConfig robot_config_{};
     LessonLayeredPlaybackMode playback_mode_ = LessonLayeredPlaybackMode::kOnce;
