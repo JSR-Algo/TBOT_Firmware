@@ -665,6 +665,32 @@ def _station_connect_helper_body() -> str:
     return _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
 
 
+def test_wifi_credentials_release_ble_before_station_association():
+    helper = _station_connect_helper_body()
+
+    release = helper.index("ReleaseBleForStationAssociation")
+    station = helper.index("wifi.StartStation()")
+    assert release < station
+
+
+def test_failed_station_association_rolls_back_then_restores_ble_without_boot():
+    helper = _station_connect_helper_body()
+    failure = helper[helper.index("if (!credentials_committed)") :]
+
+    rollback = failure.index("RollbackSsidTransaction(ssid_transaction)")
+    restore = failure.index("RestoreBleAfterStationFailure")
+    assert rollback < restore
+
+
+def test_ble_restore_is_scoped_to_the_originating_setup_generation():
+    blufi = read("main/boards/common/blufi.cpp")
+    restore = _function_body(blufi, "void Blufi::RestoreBleAfterStationFailure")
+
+    assert "expected_generation != setup_generation_.load()" in restore
+    assert "init()" in restore
+    assert "StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC)" in restore
+
+
 # ---------------------------------------------------------------------------
 # FW15: blufi.cpp — TryReportProvisioningAuthenticated is LEVEL-TRIGGERED. It is
 #       invoked on EVERY input edge that can complete the precondition set
