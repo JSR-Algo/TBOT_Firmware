@@ -245,23 +245,21 @@ def test_fw3g_connect_request_and_password_fallback_share_guarded_helper():
     assert "BeginSsidTransaction" in helper
     assert "m_wifi_connect_task_started" in helper
     assert "blufi_wifi_conn" in helper
-    assert "ESP_BLUFI_STA_CONN_SUCCESS" in helper
-    assert "ESP_BLUFI_STA_CONN_FAIL" in helper
+    assert "ReleaseBleForStationAssociation" in helper
+    assert "RestoreBleAfterStationFailure" in helper
 
 
 # ---------------------------------------------------------------------------
 # FW4: blufi.cpp — esp_blufi_send_wifi_conn_report(... ESP_BLUFI_STA_CONN_SUCCESS
 #      ...) appears BEFORE BLE deinit / stop-BLE scheduling.
 # ---------------------------------------------------------------------------
-def test_fw4_conn_success_report_precedes_ble_teardown():
-    blufi = read("main/boards/common/blufi.cpp")
+def test_fw4_ble_teardown_precedes_station_association():
+    helper = _station_connect_helper_body()
 
-    success_idx = blufi.index("ESP_BLUFI_STA_CONN_SUCCESS")
-
-    # The conn-success report fires first; BLE teardown is scheduled afterwards.
-    teardown_idx = blufi.index("CompleteSuccessfulProvisioningTeardown", success_idx)
-    assert success_idx < teardown_idx
-    assert '"wifi_credentials_connected"' in blufi[teardown_idx:teardown_idx + 180]
+    release_idx = helper.index("ReleaseBleForStationAssociation")
+    station_idx = helper.index("wifi.StartStation()")
+    assert release_idx < station_idx
+    assert "ESP_BLUFI_STA_CONN_SUCCESS" not in helper
 
 
 # ---------------------------------------------------------------------------
@@ -410,12 +408,8 @@ def test_fw9_provisioning_report_does_not_log_token_or_request_body():
 # ---------------------------------------------------------------------------
 def test_fw10_wifi_connect_fail_lane_never_clears_claim_secrets():
     blufi = read("main/boards/common/blufi.cpp")
-
-    # Scope to the wifi-connect-FAIL region: from the STA_CONN_FAIL report down
-    # to the end of the task body (vTaskDelete) so markers belong to this lane.
-    fail_idx = blufi.index("ESP_BLUFI_STA_CONN_FAIL")
-    region_end = blufi.index("vTaskDelete(nullptr);", fail_idx)
-    region = blufi[fail_idx:region_end]
+    helper = _station_connect_helper_body()
+    region = helper[helper.index("if (!credentials_committed)") :]
 
     # The fail lane must report the failed status with the wifi_connect_failed
     # reason (sanity: we are anchored on the right region).
@@ -428,10 +422,9 @@ def test_fw10_wifi_connect_fail_lane_never_clears_claim_secrets():
     assert "ClearProvisioningSecrets" not in region
     assert "secrets retained for WiFi retry" in region
 
-    # This lane must NOT tear BLE down or open a new POST while BLE is active:
-    # the phone retries Wi-Fi over the SAME BLE session here. No deinit(), no
-    # new authenticated-report task in this region.
-    assert "self->deinit();" not in region
+    # BLE is already off for station association. Failure returns to a fresh BLE
+    # setup generation automatically, without consuming the claim secrets.
+    assert "RestoreBleAfterStationFailure(generation)" in region
     assert "xTaskCreate(" not in region
 
 
@@ -872,38 +865,19 @@ def test_fw20_ble_active_defer_skips_reschedule_during_wifi_connect():
 
 
 # ---------------------------------------------------------------------------
-# FW21: blufi.cpp — the Wi-Fi connect-SUCCESS lane must send the
-#       ESP_BLUFI_STA_CONN_SUCCESS conn-report (with BSSID + SSID extra info)
-#       BEFORE it disconnects the BLE link, and the BLE teardown +
-#       authenticated-report must be deferred onto the Application task (never
-#       executed inline in the wifi-connect FreeRTOS task).
+# FW21: BLE must be fully released before station association; success then
+#       completes the provisioning owner and starts claim work from Application.
 # ---------------------------------------------------------------------------
-def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect():
+def test_fw21_ble_release_precedes_station_and_claim_continuation():
     req = _station_connect_helper_body()
+    release_idx = req.index("ReleaseBleForStationAssociation")
+    station_idx = req.index("wifi.StartStation()")
+    success_idx = req.index("if (credentials_committed)")
+    sched_idx = req.index("Application::GetInstance().Schedule(", success_idx)
+    sched_body = req[sched_idx:]
 
-    # Anchor on the success branch after credential persistence succeeds.
-    conn_idx = req.index("if (credentials_committed)")
-    fail_idx = req.index("} else {", conn_idx)
-    success = req[conn_idx:fail_idx]
-
-    # The success conn-report carries the resolved BSSID + SSID extra info.
-    assert "info.sta_bssid_set = true;" in success
-    assert "info.sta_ssid = self->m_sta_ssid;" in success
-    assert "info.sta_ssid_len = self->m_sta_ssid_len;" in success
-
-    report_idx = success.index(
-        "esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS"
-    )
-    disconnect_idx = success.index("esp_blufi_disconnect();")
-    assert report_idx < disconnect_idx, (
-        "the SUCCESS conn-report must be sent to the phone BEFORE the BLE link is "
-        "dropped, otherwise the phone never sees the success frame"
-    )
-
-    # The BLE teardown + authenticated report happen on the Application task.
-    sched_idx = success.index("Application::GetInstance().Schedule(")
-    assert report_idx < sched_idx
-    sched_body = success[sched_idx:]
+    assert release_idx < station_idx < success_idx < sched_idx
+    assert "ESP_BLUFI_STA_CONN_SUCCESS" not in req
     assert "self->CompleteSuccessfulProvisioningTeardown" in sched_body
     assert (
         '"wifi_success_after_ble_teardown", generation' in sched_body
@@ -922,77 +896,13 @@ def test_fw21_conn_success_report_carries_extra_info_and_precedes_ble_disconnect
 #        successful enqueue before disconnect/deinit. An enqueue error must be
 #        handled separately and must never be described as delivered.
 # ---------------------------------------------------------------------------
-def test_fw21b_conn_success_report_gets_bounded_delivery_grace_before_teardown():
-    blufi = read("main/boards/common/blufi.cpp")
+def test_fw21b_station_association_has_no_ble_delivery_grace_or_report():
     req = _station_connect_helper_body()
-
-    grace_match = re.search(
-        r"constexpr\s+int\s+kBlufiSuccessReportDeliveryGraceMs\s*=\s*(\d+)\s*;",
-        blufi,
-    )
-    assert grace_match is not None, "BluFi SUCCESS delivery grace is not declared"
-    assert int(grace_match.group(1)) == 750
-
-    attempts_match = re.search(
-        r"constexpr\s+int\s+kBlufiSuccessReportEnqueueAttempts\s*=\s*(\d+)\s*;",
-        blufi,
-    )
-    backoff_match = re.search(
-        r"constexpr\s+int\s+kBlufiSuccessReportRetryBackoffMs\s*=\s*(\d+)\s*;",
-        blufi,
-    )
-    assert attempts_match is not None
-    assert int(attempts_match.group(1)) == 3
-    assert backoff_match is not None
-    assert int(backoff_match.group(1)) == 100
-
-    conn_idx = req.index("if (credentials_committed)")
-    fail_idx = req.index("} else {", conn_idx)
-    success = req[conn_idx:fail_idx]
-
-    enqueue = "success_report_err ="
-    assert enqueue in success
-    assert (
-        "esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS"
-        in success
-    )
-    assert "if (success_report_err == ESP_OK)" in success
-    assert "if (success_report_err != ESP_OK)" in success
-    assert "for (int report_attempt = 1;" in success
-    assert "report_attempt <= kBlufiSuccessReportEnqueueAttempts" in success
-    assert "report_attempt < kBlufiSuccessReportEnqueueAttempts" in success
-    assert "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportRetryBackoffMs));" in success
-    assert "Failed to queue WiFi success report after %d attempts" in success
-    assert "backend claim" in success
-    assert "polling remains the recovery path for the phone" in success
-
-    report_idx = success.index(enqueue)
-    retry_success_check_idx = success.index(
-        "if (success_report_err == ESP_OK)", report_idx
-    )
-    retry_backoff_idx = success.index(
-        "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportRetryBackoffMs));",
-        retry_success_check_idx,
-    )
-    grace_success_check_idx = success.index(
-        "if (success_report_err == ESP_OK)", retry_backoff_idx
-    )
-    delay_idx = success.index(
-        "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportDeliveryGraceMs));",
-        grace_success_check_idx,
-    )
-    failure_check_idx = success.index("if (success_report_err != ESP_OK)", delay_idx)
-    disconnect_idx = success.index("esp_blufi_disconnect();", failure_check_idx)
-    schedule_idx = success.index("Application::GetInstance().Schedule(", disconnect_idx)
-
-    assert report_idx < retry_success_check_idx < retry_backoff_idx
-    assert retry_backoff_idx < grace_success_check_idx < delay_idx < failure_check_idx
-    assert failure_check_idx < disconnect_idx < schedule_idx
-
-    # No claim/TLS work may start during the grace period.
-    grace_region = success[report_idx:disconnect_idx]
-    assert "TryReportProvisioningAuthenticated" not in grace_region
-    assert "SchedulePendingTbotClaimRefresh" not in grace_region
+    release_idx = req.index("ReleaseBleForStationAssociation")
+    station_idx = req.index("wifi.StartStation()")
+    assert release_idx < station_idx
+    assert "kBlufiSuccessReportDeliveryGraceMs" not in req
+    assert "esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS" not in req
 
 
 # ---------------------------------------------------------------------------
@@ -1002,35 +912,15 @@ def test_fw21b_conn_success_report_gets_bounded_delivery_grace_before_teardown()
 #        old worker may clear the barrier or disconnect a potentially newer
 #        GATT session.
 # ---------------------------------------------------------------------------
-def test_fw21c_delivery_grace_keeps_connect_guard_and_fences_stale_worker():
+def test_fw21c_ble_release_and_station_worker_are_generation_fenced():
     blufi = read("main/boards/common/blufi.cpp")
     req = _station_connect_helper_body()
-    report = _try_report_body()
-
-    conn_idx = req.index("if (credentials_committed)")
-    fail_idx = req.index("} else {", conn_idx)
-    success = req[conn_idx:fail_idx]
-
-    delay_idx = success.index(
-        "vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportDeliveryGraceMs));"
+    release_idx = req.index("ReleaseBleForStationAssociation")
+    generation_check_idx = req.index(
+        "if (generation != self->setup_generation_.load())", release_idx
     )
-    generation_check_idx = success.index(
-        "if (generation != self->setup_generation_.load())", delay_idx
-    )
-    clear_guard_idx = success.index("self->m_sta_is_connecting.store(false);", delay_idx)
-    disconnect_idx = success.index("esp_blufi_disconnect();", clear_guard_idx)
-
-    assert delay_idx < generation_check_idx < clear_guard_idx < disconnect_idx
-    stale_exit = success[generation_check_idx:clear_guard_idx]
-    assert "vTaskDelete(nullptr);" in stale_exit
-    assert "return;" in stale_exit
-    assert "esp_blufi_disconnect" not in stale_exit
-    assert "self->deinit" not in stale_exit
-
-    ble_guard_idx = report.index("if (ble_state != BleState::kOff)")
-    connect_guard_idx = report.index("if (!m_sta_is_connecting.load())", ble_guard_idx)
-    deferred_return_idx = report.index("return;", connect_guard_idx)
-    assert ble_guard_idx < connect_guard_idx < deferred_return_idx
+    station_idx = req.index("wifi.StartStation()", generation_check_idx)
+    assert release_idx < generation_check_idx < station_idx
 
     header = read("main/boards/common/blufi.h")
     assert "std::atomic<bool> m_sta_is_connecting{false};" in header
@@ -1148,14 +1038,13 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
     success = worker[success_start:failure_start]
     failure = worker[failure_start:]
 
-    success_disconnect = success.index("esp_blufi_disconnect();")
-    success_unlock = success.index("finalization_lock.unlock();", success_disconnect)
+    success_unlock = success.index("finalization_lock.unlock();")
     claim_schedule = success.index("Application::GetInstance().Schedule(", success_unlock)
-    assert success_disconnect < success_unlock < claim_schedule
+    assert success_unlock < claim_schedule
 
-    failure_report = failure.index("ESP_BLUFI_STA_CONN_FAIL")
-    failure_unlock = failure.index("finalization_lock.unlock();", failure_report)
-    assert failure_report < failure_unlock
+    failure_unlock = failure.index("finalization_lock.unlock();")
+    failure_restore = failure.index("RestoreBleAfterStationFailure", failure_unlock)
+    assert failure_unlock < failure_restore
 
     # Every self-delete reachable while the mutex is owned explicitly unlocks
     # first; FreeRTOS self-delete does not guarantee C++ stack unwinding.
@@ -2020,10 +1909,11 @@ def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_
 
     capture = helper.index("const uint32_t generation = setup_generation_.load();")
     settle_delay = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
-    start_station = helper.index("wifi_manager.StartStation();")
     spawn = helper.index("xTaskCreate(", capture)
-    assert capture < settle_delay < start_station < spawn
-    post_delay = helper[settle_delay:start_station]
+    release = helper.index("ReleaseBleForStationAssociation", spawn)
+    start_station = helper.index("wifi.StartStation();", release)
+    assert capture < settle_delay < spawn < release < start_station
+    post_delay = helper[settle_delay:spawn]
     assert "generation != setup_generation_.load()" in post_delay
     assert "generation != self->setup_generation_.load()" in helper
     continuation = helper[helper.index("Application::GetInstance().Schedule") :]
@@ -2062,20 +1952,20 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     assert "RollbackSsidTransaction(stale_ssid_transaction)" in restart
 
     stage_idx = helper.index("BeginSsidTransaction(ssid, password)")
-    station_idx = helper.index("wifi_manager.StartStation()")
+    station_idx = helper.index("wifi.StartStation()")
     commit_idx = helper.index("CommitSsidTransaction(ssid_transaction)")
     success_idx = helper.index("if (credentials_committed)")
     failure_branch_idx = helper.index("} else {", success_idx)
-    failure_idx = helper.index("ESP_BLUFI_STA_CONN_FAIL", failure_branch_idx)
+    failure_idx = helper.index("RestoreBleAfterStationFailure", failure_branch_idx)
     rollback_idx = helper.index("RollbackSsidTransaction(ssid_transaction)", commit_idx)
     assert stage_idx < station_idx < commit_idx < rollback_idx < success_idx < failure_idx
 
     # The candidate must not survive reboot after a rejected password, while
-    # the live BLE session remains available for an immediate corrected retry.
+    # BLE setup is restored automatically for an immediate corrected retry.
     assert "SsidManager::GetInstance().AddSsid(ssid, password);" not in helper[:success_idx]
     failure = helper[failure_branch_idx:]
     assert "m_provisioned = false;" in failure
-    assert "deinit();" not in failure
+    assert "RestoreBleAfterStationFailure(generation)" in failure
     assert "ClearProvisioningSecrets" not in failure
 
     for method in (
@@ -2128,7 +2018,7 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     ]
     assert "CommitSsidTransaction(ssid_transaction)" in persistence_guard
     assert "wifi.StopStation();" in failure
-    assert failure.index("wifi.StopStation();") < failure.index("ESP_BLUFI_STA_CONN_FAIL")
+    assert failure.index("wifi.StopStation();") < failure.index("RestoreBleAfterStationFailure")
     assert "if (credentials_committed)" in helper
 
 
@@ -2146,7 +2036,7 @@ def test_fw40_only_exact_candidate_wifi_can_commit_and_report_success():
     context_idx = helper.index("WifiConnectTaskContext")
     capture_idx = helper.index("memcpy(ctx->candidate_ssid.data()")
     delay_idx = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
-    station_idx = helper.index("wifi_manager.StartStation()")
+    station_idx = helper.index("wifi.StartStation()")
     assert context_idx < capture_idx < delay_idx < station_idx
 
     commit_guard = helper[
@@ -2160,7 +2050,7 @@ def test_fw40_only_exact_candidate_wifi_can_commit_and_report_success():
 
     failure_start = helper.index("} else {", helper.index("if (credentials_committed)"))
     failure = helper[failure_start:]
-    report_idx = failure.index("ESP_BLUFI_STA_CONN_FAIL")
+    report_idx = failure.index("RestoreBleAfterStationFailure")
     assert "wifi.StopStation();" in failure
     assert failure.index("wifi.StopStation();") < report_idx
     assert "self->deinit();" not in failure

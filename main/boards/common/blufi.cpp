@@ -74,9 +74,6 @@ void esp_blufi_btc_deinit(void);
 
 static const char* BLUFI_TAG = "BLUFI_CLASS";
 static constexpr int kClaimRefreshAfterTokenHandoffDelayMs = 2500;
-static constexpr int kBlufiSuccessReportDeliveryGraceMs = 750;
-static constexpr int kBlufiSuccessReportEnqueueAttempts = 3;
-static constexpr int kBlufiSuccessReportRetryBackoffMs = 100;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
 static constexpr uint16_t kMaxBlufiWifiScanCandidates = 8;
 
@@ -700,11 +697,13 @@ bool Blufi::CompleteSuccessfulProvisioningTeardown(
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown requested: reason=%s",
              reason ? reason : "unknown");
     CancelBleSetupTimeout();
-    const esp_err_t deinit_error = deinit();
-    if (deinit_error != ESP_OK) {
-        ESP_LOGE(BLUFI_TAG, "Successful provisioning teardown failed: reason=%s error=%s",
-                 reason ? reason : "unknown", esp_err_to_name(deinit_error));
-        return false;
+    if (!IsBleStackFullyOff()) {
+        const esp_err_t deinit_error = deinit();
+        if (deinit_error != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "Successful provisioning teardown failed: reason=%s error=%s",
+                     reason ? reason : "unknown", esp_err_to_name(deinit_error));
+            return false;
+        }
     }
 
     const bool rearmed = Application::GetInstance().GetAudioService().EndWifiProvisioningAndRearm(
@@ -726,6 +725,51 @@ bool Blufi::CompleteSuccessfulProvisioningTeardown(
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
              reason ? reason : "unknown", static_cast<int>(rearmed));
     return true;
+}
+
+bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
+    if (expected_generation != setup_generation_.load()) {
+        return false;
+    }
+
+    CancelBleSetupTimeout();
+    esp_blufi_adv_stop();
+    const esp_err_t teardown_error = deinit();
+    if (teardown_error != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Failed to release BLE before WiFi association: %s",
+                 esp_err_to_name(teardown_error));
+        return false;
+    }
+
+    // Bluedroid releases its queues asynchronously after deinit returns.
+    vTaskDelay(pdMS_TO_TICKS(300));
+    return expected_generation == setup_generation_.load() && IsBleStackFullyOff();
+}
+
+void Blufi::RestoreBleAfterStationFailure(uint32_t expected_generation) {
+    Application::GetInstance().Schedule([this, expected_generation]() {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return;
+        }
+
+        WifiManager::GetInstance().StopStation();
+        m_wifi_connect_task_started.store(false);
+        m_sta_is_connecting.store(false);
+        m_sta_connected = false;
+        m_sta_got_ip = false;
+        m_provisioned = false;
+        m_ble_is_connected = false;
+        setup_generation_.fetch_add(1);
+        provisioning_report_owner_generation_.reset();
+
+        if (init() == ESP_OK) {
+            StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
+            ESP_LOGI(BLUFI_TAG, "WiFi association failed; BLE setup restored automatically");
+        } else {
+            ESP_LOGE(BLUFI_TAG, "WiFi association failed and BLE setup restore failed");
+        }
+    });
 }
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
@@ -1447,8 +1491,6 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         m_sta_is_connecting.store(false);
         return;
     }
-    const auto provisioning_token = CaptureProvisioningSession();
-
     ESP_LOGI(BLUFI_TAG, "Starting WiFi connect from BluFi credentials: %s",
              reason ? reason : "unknown");
     m_sta_ssid_len = static_cast<int>(std::min(ssid.size(), sizeof(m_sta_ssid)));
@@ -1529,8 +1571,6 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         return;
     }
 
-    wifi_manager.StartStation();
-
     BaseType_t created = xTaskCreate(
         [](void* ctx) {
             auto* task_ctx = static_cast<WifiConnectTaskContext*>(ctx);
@@ -1541,6 +1581,28 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             const size_t candidate_ssid_len = task_ctx->candidate_ssid_len;
             delete task_ctx;
             auto& wifi = WifiManager::GetInstance();
+
+            if (!self->ReleaseBleForStationAssociation(generation)) {
+                ESP_LOGE(BLUFI_TAG, "Unable to release BLE before WiFi association");
+                SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
+                uint32_t expected_transaction = ssid_transaction;
+                self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
+                self->m_wifi_connect_task_started.store(false);
+                self->m_sta_is_connecting.store(false);
+                self->RestoreBleAfterStationFailure(generation);
+                vTaskDelete(nullptr);
+                return;
+            }
+
+            if (generation != self->setup_generation_.load()) {
+                SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
+                uint32_t expected_transaction = ssid_transaction;
+                self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
+                vTaskDelete(nullptr);
+                return;
+            }
+
+            wifi.StartStation();
             constexpr int kConnectTimeoutMs = 60000;
             constexpr TickType_t kDelayTick = pdMS_TO_TICKS(200);
             int waited_ms = 0;
@@ -1640,74 +1702,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                     memcpy(self->m_sta_bssid, ap_info.bssid, sizeof(self->m_sta_bssid));
                 }
 
-                esp_blufi_extra_info_t info = {};
-                memcpy(info.sta_bssid, self->m_sta_bssid, sizeof(self->m_sta_bssid));
-                info.sta_bssid_set = true;
-                info.sta_ssid = self->m_sta_ssid;
-                info.sta_ssid_len = self->m_sta_ssid_len;
-                const wifi_mode_t mode = GetWifiModeWithFallback(wifi);
-                const int softap_conn_num = _get_softap_conn_num();
-                esp_err_t success_report_err = ESP_FAIL;
-                for (int report_attempt = 1;
-                     report_attempt <= kBlufiSuccessReportEnqueueAttempts;
-                     ++report_attempt) {
-                    if (generation != self->setup_generation_.load()) {
-                        ESP_LOGI(BLUFI_TAG,
-                                 "Ignoring stale BluFi WiFi completion before success report");
-                        finalization_lock.unlock();
-                        vTaskDelete(nullptr);
-                        return;
-                    }
-                    success_report_err =
-                        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS,
-                                                        softap_conn_num, &info);
-                    if (success_report_err == ESP_OK) {
-                        break;
-                    }
-                    if (report_attempt < kBlufiSuccessReportEnqueueAttempts) {
-                        vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportRetryBackoffMs));
-                    }
-                }
-                if (success_report_err == ESP_OK) {
-                    // BluFi only confirms that the notification was queued. Give
-                    // the controller a bounded window to transmit it before
-                    // dropping GATT; there is no delivery-complete callback.
-                    vTaskDelay(pdMS_TO_TICKS(kBlufiSuccessReportDeliveryGraceMs));
-                }
-                if (success_report_err != ESP_OK) {
-                    ESP_LOGE(BLUFI_TAG,
-                             "Failed to queue WiFi success report after %d attempts: %s",
-                             kBlufiSuccessReportEnqueueAttempts,
-                             esp_err_to_name(success_report_err));
-                    // Continue BLE teardown and claim confirmation: backend claim
-                    // polling remains the recovery path for the phone. If the
-                    // claim stays unconfirmed, setup/repair can retry without a
-                    // factory reset.
-                }
-
-                // A fresh setup may tear down and replace the GATT session while
-                // this worker yields for delivery. Never let the stale worker
-                // clear the new generation's guard or disconnect its phone.
-                if (generation != self->setup_generation_.load()) {
-                    ESP_LOGI(BLUFI_TAG,
-                             "Ignoring stale BluFi WiFi completion after report grace");
-                    finalization_lock.unlock();
-                    vTaskDelete(nullptr);
-                    return;
-                }
                 self->m_sta_is_connecting.store(false);
                 ESP_LOGI(BLUFI_TAG, "connected to WiFi");
-
-                if (self->m_ble_is_connected) {
-                    esp_blufi_disconnect();
-                }
                 finalization_lock.unlock();
 
-                // BluFi has delivered the Wi-Fi credentials and the attempt
-                // bootstrap token by this point. Keep the connection report
-                // above for the phone, then free the BLE stack before the claim
-                // poll performs HTTPS/TLS on ESP32-S3. Real hardware otherwise
-                // fails inside mbedTLS AES allocation while BLE remains active.
+                // BLE was released before station association. Completing the
+                // provisioning session here only consumes ownership and rearms
+                // normal audio; deinit is idempotent when the stack is off.
                 const auto provisioning_token = self->CaptureProvisioningSession();
 #if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
                 Application::GetInstance().Schedule([self, generation, provisioning_token]() {
@@ -1756,14 +1757,6 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 self->m_sta_connected = false;
                 self->m_sta_got_ip = false;
                 self->m_provisioned = false;
-
-                esp_blufi_extra_info_t info = {};
-                info.sta_ssid = self->m_sta_ssid;
-                info.sta_ssid_len = self->m_sta_ssid_len;
-                const wifi_mode_t mode = GetWifiModeWithFallback(wifi);
-                const int softap_conn_num = _get_softap_conn_num();
-                esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
-                                                softap_conn_num, &info);
 #if defined(CONFIG_TBOT_PROVISIONING_REPORT_ENABLED) && !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
                 std::string failure_token = self->bootstrap_token_;
                 std::string failure_code = self->provisioning_code_;
@@ -1786,15 +1779,12 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                                      "Claim flow active; skipping legacy failed-status report");
                         }
                         ESP_LOGI(BLUFI_TAG, "Provisioning secrets retained for WiFi retry");
-                        // Deliberate difference vs the success lane: do NOT
-                        // tear down BLE here. On wifi_connect_failed the phone
-                        // must retry Wi-Fi over the SAME live BLE session, so
-                        // the BLE stack stays up.
                     }
                 }
                 SecureClearLocalString(failure_token);
                 SecureClearLocalString(failure_code);
 #endif
+                self->RestoreBleAfterStationFailure(generation);
             }
             vTaskDelete(nullptr);
         },

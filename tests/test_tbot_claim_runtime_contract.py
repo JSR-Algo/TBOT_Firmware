@@ -391,19 +391,19 @@ def test_blufi_wifi_success_tears_down_ble_before_claim_refresh():
     # pending claim.
     source = read("main/boards/common/blufi.cpp")
     branch_start = source.index("if (credentials_committed)")
-    report_idx = source.index("esp_blufi_send_wifi_conn_report", branch_start)
-    connected_log_idx = source.index('"connected to WiFi"', report_idx)
+    helper_start = source.index("void Blufi::StartStationConnectFromCredentials")
+    release_idx = source.index("ReleaseBleForStationAssociation", helper_start)
+    station_idx = source.index("wifi.StartStation()", release_idx)
+    connected_log_idx = source.index('"connected to WiFi"', station_idx)
     failure_log_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", connected_log_idx)
     success_body = source[branch_start:failure_log_idx]
 
-    assert "esp_blufi_send_wifi_conn_report" in success_body
-    assert "esp_blufi_disconnect();" in success_body
-    assert '"WiFi provisioned; stopping BLE before claim refresh"' in success_body
+    assert "ReleaseBleForStationAssociation" in source[helper_start:station_idx]
     assert "CompleteSuccessfulProvisioningTeardown" in success_body
     assert '"wifi_credentials_connected"' in success_body
     assert "SchedulePendingTbotClaimRefresh(generation);" in success_body
     teardown_idx = source.index("CompleteSuccessfulProvisioningTeardown", connected_log_idx)
-    assert report_idx < connected_log_idx < teardown_idx
+    assert release_idx < station_idx < connected_log_idx < teardown_idx
     assert teardown_idx < source.index(
         "SchedulePendingTbotClaimRefresh(generation);", connected_log_idx
     )
@@ -415,16 +415,18 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
     success_start = source.index("if (credentials_committed)")
-    report_idx = source.index("esp_blufi_send_wifi_conn_report", success_start)
-    failure_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", report_idx)
+    helper_start = source.index("void Blufi::StartStationConnectFromCredentials")
+    release_idx = source.index("ReleaseBleForStationAssociation", helper_start)
+    station_idx = source.index("wifi.StartStation()", release_idx)
+    failure_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", station_idx)
     success_body = source[success_start:failure_idx]
     helper_body = function_body(source, "void Blufi::TryReportProvisioningAuthenticated")
     custom_data_body = function_body(source, "case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA:")
-    report_rel = success_body.index("esp_blufi_send_wifi_conn_report")
 
     assert "void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);" in header
     assert '"wifi_success_after_ble_teardown", generation' in success_body
-    assert report_rel < success_body.index("CompleteSuccessfulProvisioningTeardown") < success_body.index(
+    assert release_idx < station_idx
+    assert success_body.index("CompleteSuccessfulProvisioningTeardown") < success_body.index(
         '"wifi_success_after_ble_teardown", generation'
     )
     assert "ProvisioningStatusReporter::Status::DeviceAuthenticated" in helper_body

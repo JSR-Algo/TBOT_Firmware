@@ -187,6 +187,8 @@ private:
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
+    bool ReleaseBleForStationAssociation(uint32_t expected_generation);
+    void RestoreBleAfterStationFailure(uint32_t expected_generation);
     void StartStationConnectFromCredentials(const char* reason);
     void SendStationConnectFailureReport();
     void ScheduleStationConnectFallback();
