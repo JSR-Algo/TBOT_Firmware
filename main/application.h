@@ -27,6 +27,9 @@
 #include "claim_confirmation_reporter.h"
 #include "tbot_connect_mapper.h"
 #include "connect_close_deferral.h"
+#if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
+#include "course_mode_hil_diagnostic.h"
+#endif
 
 // Main event bits
 #define MAIN_EVENT_SCHEDULE             (1 << 0)
@@ -143,6 +146,14 @@ public:
     bool BeginLessonAssetSyncQuiet();
     void EndLessonAssetSyncQuiet();
     bool IsLessonAssetSyncQuiet() const { return lesson_asset_sync_quiet_.load(); }
+#if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
+    bool RunCourseModeHilTftPattern();
+    CourseModeHilSdEvidence RunCourseModeHilSdRead(
+        const std::string& relative_path, const std::string& expected_sha256);
+    bool RunCourseModeHilAudioDrain();
+    bool RunCourseModeHilSafeMotion(int duration_ms);
+    bool RunCourseModeHilStopAndRest();
+#endif
 
     /**
      * Stop listening (event-based, thread-safe)

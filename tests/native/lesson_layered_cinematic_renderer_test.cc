@@ -296,6 +296,33 @@ void TestVisualStateDoesNotReplayEntranceUnlessRequested() {
             "explicit replayEntrance replays frame zero once");
 }
 
+void TestActivityOutcomesRetainStaticLayerIdentity() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    auto config = Config();
+    config.background.identity = "scene-week-19";
+    config.teaching_object.identity = "weather-card";
+    Require(renderer.Prepare(config, 0).accepted, "outcome fixture prepares static identity");
+    const auto static_decodes = fake.jpeg_decodes + fake.png_decodes;
+    const auto entrance_decodes = fake.video_decodes;
+
+    tbot::LessonLayeredVisualState state{};
+    state.activity_id = "w19.a06";
+    state.phase_id = "listen";
+    state.phase_variant = "nearMiss";
+    state.retain_static_layers = true;
+    Require(renderer.ApplyVisualState(state, 8, 0).accepted,
+            "near-miss outcome applies over retained static layers");
+    state.activity_id = "w19.a07";
+    state.phase_variant = "correct";
+    Require(renderer.ApplyVisualState(state, 9, 0).accepted,
+            "correct outcome applies over retained static layers");
+    Require(fake.jpeg_decodes + fake.png_decodes == static_decodes,
+            "activity outcomes preserve background and object identity without re-decode");
+    Require(fake.video_decodes == entrance_decodes,
+            "activity outcomes do not replay entrance unless explicitly requested");
+}
+
 void TestVisualStateStaticPresentFailureIsTypedAndRetryable() {
     FakeRuntime fake;
     tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
@@ -438,6 +465,7 @@ int main() {
     TestFallbackPhaseKeepsBackgroundAndRobotWithoutTeachingObject();
     TestActivityTransitionsRetainPinnedStaticLayers();
     TestVisualStateDoesNotReplayEntranceUnlessRequested();
+    TestActivityOutcomesRetainStaticLayerIdentity();
     TestVisualStateStaticPresentFailureIsTypedAndRetryable();
     TestRejectedVisualStatePreservesPriorControlPhase();
     TestFailedRetainedReprepareLeavesOldCompositionUsable();

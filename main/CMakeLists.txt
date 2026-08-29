@@ -57,6 +57,14 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
+if(CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS)
+    list(APPEND SOURCES
+        "course_mode_hil_diagnostic.cc"
+        "course_mode_hil_console.cc"
+        "course_mode_hil_sd_reader.cc"
+    )
+endif()
+
 set(INCLUDE_DIRS "." "display" "display/lvgl_display" "display/lvgl_display/jpg" "audio" "audio/demuxer" "protocols")
 
 if(CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT)
@@ -1101,6 +1109,7 @@ idf_component_register(SRCS ${SOURCES}
                         efuse
                         bt
                         fatfs
+                        mbedtls
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 

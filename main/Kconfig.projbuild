@@ -52,6 +52,15 @@ config TBOT_HIL_CINEMATIC_TELEMETRY
         Emits parseable HIL_CINE boot and cue_end terminal lines for hardware-in-loop
         cinematic validation. Keep disabled for production images.
 
+config TBOT_COURSE_MODE_HIL_DIAGNOSTICS
+    bool "Enable Course Mode physical serial HIL diagnostics"
+    depends on IDF_TARGET_ESP32S3
+    default n
+    help
+        Registers a local physical-console-only, nonce-bound diagnostic command
+        for attended Course Mode renderer validation. It never flashes or exposes
+        secrets. Keep disabled for production images.
+
 config TBOT_RELEASE_CINEMATIC_EVIDENCE
     bool "Enable production cinematic release evidence"
     depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P
