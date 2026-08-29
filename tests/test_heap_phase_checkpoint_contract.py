@@ -69,28 +69,27 @@ def test_activation_wraps_high_risk_boot_phases_with_local_minimum_monitors():
     assert_monitored_phase(
         activation, "RefreshWebsocketUrlFromConfigFetch();", "config_fetch.complete"
     )
-    assert_monitored_phase(
-        activation, "audio_service_.PrewarmWakeWord(wake_word_prewarm_token);", "afe_prewarm.complete"
-    )
     assert_monitored_phase(activation, "InitializeProtocol();", "protocol_init.complete")
+    assert "PrewarmWakeWord" not in activation
+    assert "afe_prewarm.complete" not in activation
     assert "PrewarmWakeWord" not in assets
     assert activation.count('SystemInfo::PrintHeapCheckpoint("activation.complete");') == 1
 
 
-def test_claimed_activation_finishes_boot_http_before_afe_prewarm_and_protocol():
+def test_claimed_activation_opens_protocol_without_materializing_wake_word_first():
     source = APPLICATION_SOURCE.read_text(encoding="utf-8")
     activation = function_body(source, "void Application::ActivationTask")
 
     assets = activation.index("CheckAssetsVersion();", activation.index("if (!IsDeviceClaimed())"))
     ota = activation.index("CheckNewVersion();", assets)
     config = activation.index("RefreshWebsocketUrlFromConfigFetch();", ota)
-    prewarm = activation.index("audio_service_.PrewarmWakeWord(wake_word_prewarm_token);", config)
-    protocol = activation.index("InitializeProtocol();", prewarm)
+    protocol = activation.index("InitializeProtocol();", config)
     activation_done = activation.index(
         "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);", protocol
     )
 
-    assert assets < ota < config < prewarm < protocol < activation_done
+    assert assets < ota < config < protocol < activation_done
+    assert "PrewarmWakeWord" not in activation[config:protocol]
 
 
 def test_unclaimed_activation_skips_claimed_bootstrap_but_reaches_protocol():
@@ -109,20 +108,12 @@ def test_unclaimed_activation_skips_claimed_bootstrap_but_reaches_protocol():
     assert unclaimed_start < unclaimed_end < protocol
 
 
-def test_claimed_activation_interrupted_by_setup_or_audio_test_skips_afe_prewarm():
+def test_claimed_activation_does_not_capture_or_prewarm_wake_word():
     source = APPLICATION_SOURCE.read_text(encoding="utf-8")
     activation = function_body(source, "void Application::ActivationTask")
 
-    config = activation.index("RefreshWebsocketUrlFromConfigFetch();")
-    state = activation.index("const auto activation_state = GetDeviceState();", config)
-    prewarm = activation.index("audio_service_.PrewarmWakeWord(wake_word_prewarm_token);", state)
-    protocol = activation.index("InitializeProtocol();", prewarm)
-    prewarm_guard = activation[state:prewarm]
-
-    assert state < prewarm < protocol
-    assert activation.index("} else {", activation.index("if (!IsDeviceClaimed())")) < state
-    assert "activation_state != kDeviceStateWifiConfiguring" in prewarm_guard
-    assert "activation_state != kDeviceStateAudioTesting" in prewarm_guard
+    assert "CaptureWakeWordPrewarmToken" not in activation
+    assert "PrewarmWakeWord" not in activation
 
 
 def test_local_minimum_monitor_preserves_lifetime_snapshot_until_checkpoint_is_logged():

@@ -120,10 +120,10 @@ def test_unclaimed_activation_does_not_run_claimed_only_bootstrap_work():
     for claimed_call in (
         "CheckNewVersion();",
         "RefreshWebsocketUrlFromConfigFetch();",
-        "audio_service_.PrewarmWakeWord",
     ):
         assert claimed_call not in before_transport
         assert claimed_call in claimed_only
+    assert "audio_service_.PrewarmWakeWord" not in activation
 
 
 def test_websocket_protocol_opens_passive_raw_session_without_claim_heartbeat():
@@ -149,11 +149,7 @@ def test_unclaimed_passive_websocket_success_does_not_rearm_wake_word_or_deferre
     opened = source[source.index("protocol_->OnAudioChannelOpened") : source.index("protocol_->OnAudioChannelClosed")]
     passive_opened = opened[opened.index("if (passive_ws_intent_.load())") : opened.index("} else {")]
 
-    assert "IsDeviceClaimed()" in passive_opened
-    assert "EnableWakeWordDetection(true)" in passive_opened
-    assert passive_opened.index("IsDeviceClaimed()") < passive_opened.index(
-        "EnableWakeWordDetection(true)"
-    )
+    assert "EnableWakeWordDetection(true)" not in passive_opened
 
     open_task = function_body(source, "void Application::OpenChannelTask")
     passive_success = open_task[

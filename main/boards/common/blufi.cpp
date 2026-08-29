@@ -1479,6 +1479,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     // re-entry can advance setup_generation_ while the station settles below;
     // the old attempt must never adopt that newer generation when it resumes.
     const uint32_t generation = setup_generation_.load();
+    const auto provisioning_token = CaptureProvisioningSession();
 
     std::string ssid(reinterpret_cast<const char*>(m_sta_config.sta.ssid),
                      m_sta_config_ssid_len_);
@@ -1542,11 +1543,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         Blufi* self;
         uint32_t generation;
         uint32_t ssid_transaction;
+        ProvisioningToken provisioning_token;
         std::array<uint8_t, 32> candidate_ssid;
         size_t candidate_ssid_len;
     };
     auto* ctx = new (std::nothrow) WifiConnectTaskContext{
-        this, generation, ssid_transaction, {}, static_cast<size_t>(m_sta_ssid_len)};
+        this, generation, ssid_transaction, provisioning_token, {},
+        static_cast<size_t>(m_sta_ssid_len)};
     if (ctx == nullptr) {
         ESP_LOGE(BLUFI_TAG, "Failed to allocate BluFi WiFi completion context");
         m_wifi_connect_task_started.store(false);
@@ -1577,6 +1580,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             auto* self = task_ctx->self;
             const uint32_t generation = task_ctx->generation;
             const uint32_t ssid_transaction = task_ctx->ssid_transaction;
+            const auto provisioning_token = task_ctx->provisioning_token;
             const auto candidate_ssid = task_ctx->candidate_ssid;
             const size_t candidate_ssid_len = task_ctx->candidate_ssid_len;
             delete task_ctx;
@@ -1709,7 +1713,6 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 // BLE was released before station association. Completing the
                 // provisioning session here only consumes ownership and rearms
                 // normal audio; deinit is idempotent when the stack is off.
-                const auto provisioning_token = self->CaptureProvisioningSession();
 #if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
                 Application::GetInstance().Schedule([self, generation, provisioning_token]() {
                     std::unique_lock<std::mutex> continuation_lock(

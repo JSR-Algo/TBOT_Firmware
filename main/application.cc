@@ -24,6 +24,7 @@
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
 #include "boards/common/system_reset.h"
+#include "boards/common/wifi_board.h"
 #include <ssid_manager.h>
 #include <wifi_manager.h>
 #endif
@@ -1184,7 +1185,8 @@ void Application::HandleNetworkDisconnectedEvent() {
 
 void Application::RearmClaimedIdleWakeWord() {
     if (!IsDeviceClaimed() || lesson_runtime_active_.load() ||
-        lesson_asset_sync_quiet_.load() || GetDeviceState() != kDeviceStateIdle) {
+        lesson_asset_sync_quiet_.load() || GetDeviceState() != kDeviceStateIdle ||
+        connect_in_flight_.load() || passive_ws_intent_.load()) {
         return;
     }
     audio_service_.EnableWakeWordDetection(true);
@@ -2673,6 +2675,9 @@ void Application::EnterRepairPairingMode() {
         ESP_LOGW(TAG, "BOOT re-pair: forgetting current claim so a new parent phone can connect");
         StopHeartbeat();
         CloseAudioChannelByIntent();
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetStatus(Lang::Strings::INITIALIZING);
+        display->SetChatMessage("system", "");
 
         // Release backend ownership NOW (synchronous) if we have credentials and are
         // online. This is a deliberate, user-initiated reset, so a one-time blocking
@@ -3052,8 +3057,6 @@ void Application::ActivationTask() {
                  "(claim path remains via BLE; public lesson sync uses raw WS)");
         CheckAssetsVersion();
     } else {
-        const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
-
         // Check for new assets version
         CheckAssetsVersion();
 
@@ -3071,16 +3074,9 @@ void Application::ActivationTask() {
         SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
         SystemInfo::StopHeapPhaseMonitor();
 
-        // Build the AFE only after boot HTTP/TLS transients have released their
-        // internal SRAM, but before protocol startup and the Idle wake-word gate.
-        const auto activation_state = GetDeviceState();
-        if (activation_state != kDeviceStateWifiConfiguring &&
-            activation_state != kDeviceStateAudioTesting) {
-            SystemInfo::StartHeapPhaseMonitor();
-            audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
-            SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
-            SystemInfo::StopHeapPhaseMonitor();
-        }
+        // Keep the AFE released until the passive WebSocket TLS handshake has
+        // completed. Both need contiguous internal SRAM; materializing wake-word
+        // here can leave the socket retry without even a 4 KB allocation.
     }
 #else
     SystemInfo::StartHeapPhaseMonitor();
@@ -3339,11 +3335,6 @@ void Application::InitializeProtocol() {
         if (passive_ws_intent_.load()) {
             ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
             StopHeartbeat();
-            if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
-                if (!lesson_asset_sync_quiet_.load()) {
-                    audio_service_.EnableWakeWordDetection(true);
-                }
-            }
         } else {
             const bool lesson_answer_turn =
                 lesson_interactive_listen_pending_.load() ||
@@ -3726,6 +3717,18 @@ void Application::InitializeProtocol() {
                     Schedule([this]() {
                         Reboot();
                     });
+                } else if (strcmp(command->valuestring, "unpair") == 0) {
+                    if (lesson_runtime_active_.load()) {
+                        ESP_LOGI(TAG, "System unpair ignored during lesson");
+                        return;
+                    }
+                    EnterRepairPairingMode();
+                } else if (strcmp(command->valuestring, "wifi_setup") == 0) {
+                    if (lesson_runtime_active_.load()) {
+                        ESP_LOGI(TAG, "System WiFi setup ignored during lesson");
+                        return;
+                    }
+                    static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
@@ -4643,7 +4646,6 @@ void Application::OpenChannelTask(void* arg) {
                     if (self->GetDeviceState() == kDeviceStateConnecting) {
                         self->SetDeviceState(kDeviceStateIdle);
                     }
-                    self->RearmClaimedIdleWakeWord();
                     self->SchedulePassiveLessonReconnect();
                 } else if (wake_word_invoke) {
                     ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");
