@@ -90,6 +90,7 @@ static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 static constexpr uint32_t kOpenChannelWorkerStackDepth = 8192;
+static constexpr uint32_t kHeartbeatWorkerStackDepth = 8192;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
 static constexpr uint32_t kLessonMessageWorkerStackDepth = 32768;
@@ -103,6 +104,10 @@ DRAM_ATTR StaticQueue_t open_channel_queue_buffer;
 DRAM_ATTR void* open_channel_queue_storage[1];
 QueueHandle_t open_channel_queue = nullptr;
 TaskHandle_t open_channel_task = nullptr;
+DRAM_ATTR StaticTask_t heartbeat_task_buffer;
+DRAM_ATTR StackType_t heartbeat_task_stack[kHeartbeatWorkerStackDepth];
+DRAM_ATTR StaticQueue_t heartbeat_queue_buffer;
+DRAM_ATTR void* heartbeat_queue_storage[1];
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 DRAM_ATTR StaticTask_t lesson_message_task_buffer;
@@ -2563,18 +2568,20 @@ void Application::StartHeartbeat() {
         return;
     }
     if (heartbeat_queue_ == nullptr) {
-        heartbeat_queue_ = xQueueCreate(1, sizeof(void*));
+        heartbeat_queue_ = xQueueCreateStatic(
+            1, sizeof(void*), reinterpret_cast<uint8_t*>(heartbeat_queue_storage),
+            &heartbeat_queue_buffer);
         if (heartbeat_queue_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create heartbeat queue");
             return;
         }
     }
     if (heartbeat_task_ == nullptr) {
-        if (xTaskCreateWithCaps(&Application::HeartbeatTask, "heartbeat_http", 8192, this,
-                                tskIDLE_PRIORITY + 1, &heartbeat_task_,
-                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+        heartbeat_task_ = xTaskCreateStatic(
+            &Application::HeartbeatTask, "heartbeat_http", kHeartbeatWorkerStackDepth, this,
+            tskIDLE_PRIORITY + 1, heartbeat_task_stack, &heartbeat_task_buffer);
+        if (heartbeat_task_ == nullptr) {
             ESP_LOGE(TAG, "Failed to create persistent heartbeat worker");
-            vQueueDelete(heartbeat_queue_);
             heartbeat_queue_ = nullptr;
             return;
         }

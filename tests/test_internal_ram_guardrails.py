@@ -133,7 +133,6 @@ def test_transient_http_workers_use_internal_dram_stacks():
     for signature, task_name in [
         ("bool Application::DispatchPendingTbotClaimFetch", '"claim_fetch"'),
         ("void Application::MaybeDispatchDeferredCloudRelease", '"cloud_release"'),
-        ("void Application::StartHeartbeat", '"heartbeat_http"'),
     ]:
         start = source.index(signature)
         task_index = source.index(task_name, start)
@@ -144,6 +143,15 @@ def test_transient_http_workers_use_internal_dram_stacks():
         assert create_start != -1, task_name
         assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in create_call, task_name
         assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" not in create_call, task_name
+
+    # Heartbeat is also internal DRAM, but its stack is reserved statically so
+    # wake-triggered reconnects cannot fail after TLS fragments the heap.
+    assert "DRAM_ATTR StackType_t heartbeat_task_stack[kHeartbeatWorkerStackDepth]" in source
+    heartbeat_start = function_body(
+        source, "void Application::StartHeartbeat", "void Application::StopHeartbeat"
+    )
+    assert "xTaskCreateStatic(" in heartbeat_start
+    assert "heartbeat_task_stack" in heartbeat_start
 
 
 def test_speaking_timeout_uses_esp_timer_not_transient_task_stack():
