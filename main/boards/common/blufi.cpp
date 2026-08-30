@@ -557,6 +557,11 @@ Blufi::~Blufi() {
 }
 
 esp_err_t Blufi::init() {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    return InitWithLifecycleOwned();
+}
+
+esp_err_t Blufi::InitWithLifecycleOwned() {
     if (teardown_failed_.load()) {
         ESP_LOGE(BLUFI_TAG, "BLE teardown previously failed; refusing blind reinitialization");
         return ESP_ERR_INVALID_STATE;
@@ -659,6 +664,11 @@ esp_err_t Blufi::_init_impl() {
 }
 
 esp_err_t Blufi::deinit() {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    return DeinitWithLifecycleOwned();
+}
+
+esp_err_t Blufi::DeinitWithLifecycleOwned() {
     auto turn = transition_gate_.Acquire(
         BlufiTransitionGate::Operation::kDeinit,
         reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
@@ -752,7 +762,7 @@ esp_err_t Blufi::RestartForSetup() {
 
     if (GetBleState() != BleState::kOff) {
         esp_blufi_adv_stop();
-        esp_err_t teardown_error = deinit();
+        esp_err_t teardown_error = DeinitWithLifecycleOwned();
         if (teardown_error != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Fresh BOOT BLE teardown failed: %s",
                      esp_err_to_name(teardown_error));
@@ -790,7 +800,7 @@ esp_err_t Blufi::RestartForSetup() {
 
     esp_err_t err = ESP_FAIL;
     for (int attempt = 1; attempt <= 3; ++attempt) {
-        err = init();
+        err = InitWithLifecycleOwned();
         if (err == ESP_OK) {
             return ESP_OK;
         }
@@ -879,7 +889,7 @@ bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
              reason ? reason : "unknown");
     CancelBleSetupTimeout();
     if (!IsBleStackFullyOff()) {
-        const esp_err_t deinit_error = deinit();
+        const esp_err_t deinit_error = DeinitWithLifecycleOwned();
         if (deinit_error != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Successful provisioning teardown failed: reason=%s error=%s",
                      reason ? reason : "unknown", esp_err_to_name(deinit_error));
@@ -924,7 +934,7 @@ bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
 
     CancelBleSetupTimeout();
     esp_blufi_adv_stop();
-    const esp_err_t teardown_error = deinit();
+    const esp_err_t teardown_error = DeinitWithLifecycleOwned();
     if (teardown_error != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to release BLE before WiFi association: %s",
                  esp_err_to_name(teardown_error));
@@ -939,22 +949,25 @@ bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
 
 void Blufi::RestoreBleAfterStationFailure(uint32_t expected_generation) {
     Application::GetInstance().Schedule([this, expected_generation]() {
-        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
-        if (expected_generation != setup_generation_.load()) {
-            return;
+        std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+        {
+            std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+            if (expected_generation != setup_generation_.load()) {
+                return;
+            }
+
+            m_wifi_connect_task_started.store(false);
+            m_sta_is_connecting.store(false);
+            m_sta_connected = false;
+            m_sta_got_ip = false;
+            m_provisioned = false;
+            m_ble_is_connected = false;
+            setup_generation_.fetch_add(1);
+            provisioning_report_owner_generation_.reset();
         }
 
         WifiManager::GetInstance().StopStation();
-        m_wifi_connect_task_started.store(false);
-        m_sta_is_connecting.store(false);
-        m_sta_connected = false;
-        m_sta_got_ip = false;
-        m_provisioned = false;
-        m_ble_is_connected = false;
-        setup_generation_.fetch_add(1);
-        provisioning_report_owner_generation_.reset();
-
-        if (init() == ESP_OK) {
+        if (InitWithLifecycleOwned() == ESP_OK) {
             StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
             ESP_LOGI(BLUFI_TAG, "WiFi association failed; BLE setup restored automatically");
         } else {

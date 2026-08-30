@@ -33,7 +33,7 @@ def test_one_helper_owns_cancel_deinit_and_conditional_rearm():
     assert "CompleteSuccessfulProvisioningTeardownImpl(" in public_body
     claim = body.index("provisioning_session_.Claim(provisioning_token)")
     cancel = body.index("CancelBleSetupTimeout()")
-    deinit = body.index("deinit()", cancel)
+    deinit = body.index("DeinitWithLifecycleOwned()", cancel)
     rearm = body.index("EndWifiProvisioningAndRearm(", deinit)
     assert claim < cancel < deinit < rearm
     assert "provisioning_token" in body[rearm:rearm + 120]

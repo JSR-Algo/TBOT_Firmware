@@ -1829,8 +1829,8 @@ void Application::ClaimConfirmationTask(void* arg) {
                 });
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
             if (applied && should_teardown) {
-                Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
-                    "claim_confirmed", provisioning_token);
+                Blufi::GetInstance().CompleteSuccessfulProvisioningTeardownForGeneration(
+                    "claim_confirmed", provisioning_token, expected_setup_generation);
             }
 #else
             if (applied && should_teardown) {

@@ -136,7 +136,7 @@ def test_wifi_provisioning_rearms_only_after_ble_deinit():
     helper = blufi[blufi.index("bool Blufi::CompleteSuccessfulProvisioningTeardown"):]
     helper = helper[:helper.index("#ifdef CONFIG_BT_BLUEDROID_ENABLED")]
     rearm = helper.index("EndWifiProvisioningAndRearm(")
-    assert helper.index("deinit()") < rearm
+    assert helper.index("DeinitWithLifecycleOwned()") < rearm
     assert helper.index("if (deinit_error != ESP_OK)") < rearm
     assert "provisioning_token" in helper[rearm:rearm + 120]
 

@@ -680,7 +680,7 @@ def test_ble_restore_is_scoped_to_the_originating_setup_generation():
     restore = _function_body(blufi, "void Blufi::RestoreBleAfterStationFailure")
 
     assert "expected_generation != setup_generation_.load()" in restore
-    assert "init()" in restore
+    assert "InitWithLifecycleOwned()" in restore
     assert "StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC)" in restore
 
 
@@ -1022,7 +1022,9 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
     transaction_take = restart.index("ssid_transaction_id_.exchange(0)")
     rollback = restart.index("RollbackSsidTransaction(stale_ssid_transaction)")
     initial_scope_end = restart.index("}\n\n    if (GetBleState()", rollback)
-    deinit = restart.index("esp_err_t teardown_error = deinit();", initial_scope_end)
+    deinit = restart.index(
+        "esp_err_t teardown_error = DeinitWithLifecycleOwned();", initial_scope_end
+    )
     post_teardown_lock = restart.index(
         "std::lock_guard<std::mutex> reset_state_lock(provisioning_finalization_mutex_);",
         deinit,
@@ -1098,7 +1100,9 @@ def test_fw21e_ble_release_uses_callback_safe_lifecycle_lock_across_teardown():
     initial_scope_end = release.index("}\n\n    CancelBleSetupTimeout();", generation_check)
     cancel = release.index("CancelBleSetupTimeout();")
     stop_advertising = release.index("esp_blufi_adv_stop();")
-    deinit = release.index("const esp_err_t teardown_error = deinit();")
+    deinit = release.index(
+        "const esp_err_t teardown_error = DeinitWithLifecycleOwned();"
+    )
     post_teardown_lock = release.index(
         "std::lock_guard<std::mutex> post_teardown_lock(provisioning_finalization_mutex_);",
         deinit,
@@ -1125,6 +1129,57 @@ def test_fw21e_ble_release_uses_callback_safe_lifecycle_lock_across_teardown():
     ]
 
 
+def test_fw21e_compound_lifecycle_transactions_use_owned_primitives_without_recursion():
+    blufi = read("main/boards/common/blufi.cpp")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    release = _function_body(blufi, "bool Blufi::ReleaseBleForStationAssociation")
+    teardown = _function_body(
+        blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl"
+    )
+    restore = _function_body(blufi, "void Blufi::RestoreBleAfterStationFailure")
+
+    for body in (restart, release, teardown, restore):
+        assert "ble_lifecycle_mutex_" in body
+        assert not re.search(r"(?<![A-Za-z_])init\(\)", body)
+        assert not re.search(r"(?<![A-Za-z_])deinit\(\)", body)
+
+    assert "DeinitWithLifecycleOwned()" in restart
+    assert "InitWithLifecycleOwned()" in restart
+    assert "DeinitWithLifecycleOwned()" in release
+    assert "DeinitWithLifecycleOwned()" in teardown
+
+    lifecycle = restore.index("ble_lifecycle_mutex_")
+    finalization = restore.index("provisioning_finalization_mutex_", lifecycle)
+    finalization_scope_end = restore.index(
+        "}\n\n        WifiManager::GetInstance().StopStation();", finalization
+    )
+    stop_station = restore.index("WifiManager::GetInstance().StopStation()")
+    init = restore.index("InitWithLifecycleOwned()", finalization_scope_end)
+    assert lifecycle < finalization < finalization_scope_end < stop_station < init
+    assert "provisioning_finalization_mutex_" not in restore[finalization_scope_end:init]
+
+
+def test_fw21e_callbacks_handoff_lifecycle_transitions_without_blocking():
+    blufi = read("main/boards/common/blufi.cpp")
+    event = _function_body(blufi, "void Blufi::_handle_event")
+    timer = _function_body(blufi, "void Blufi::_ble_setup_timeout_cb")
+    scan = _function_body(blufi, "void Blufi::_wifi_scan_event_handler")
+    gap = _function_body(blufi, "static void TbotBlufiGapEventHandler")
+
+    for callback in (event, timer, scan, gap):
+        assert "ble_lifecycle_mutex_" not in callback
+        assert "InitWithLifecycleOwned" not in callback
+        assert "DeinitWithLifecycleOwned" not in callback
+
+    disconnect = _function_body(blufi, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+    assert "Application::GetInstance().Schedule" in disconnect
+    assert "CompleteSuccessfulProvisioningTeardown" in disconnect
+
+    schedule = timer.index("Application::GetInstance().Schedule")
+    assert "self->deinit();" not in timer[:schedule]
+    assert "self->deinit();" in timer[schedule:]
+
+
 def test_fw21e_successful_teardown_validates_generation_without_locking_callbacks():
     blufi = read("main/boards/common/blufi.cpp")
     teardown = _function_body(blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl")
@@ -1140,7 +1195,9 @@ def test_fw21e_successful_teardown_validates_generation_without_locking_callback
     )
     generation_scope_end = teardown.index("}\n\n    constexpr", generation_check)
     claim = teardown.index("provisioning_session_.Claim", generation_scope_end)
-    deinit = teardown.index("const esp_err_t deinit_error = deinit();", claim)
+    deinit = teardown.index(
+        "const esp_err_t deinit_error = DeinitWithLifecycleOwned();", claim
+    )
 
     assert lifecycle_lock < generation_lock < generation_check < generation_scope_end < claim < deinit
     assert "provisioning_finalization_mutex_" not in teardown[generation_scope_end:deinit]
@@ -1357,9 +1414,7 @@ def test_fw21h_generation_bound_claim_confirm_defers_ble_teardown_until_after_ga
 
     gate = task.index("Blufi::GetInstance().RunIfSetupGenerationCurrent(")
     gate_end = task.index("});", gate)
-    teardown = task.index(
-        "Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(", gate_end
-    )
+    teardown = task.index("CompleteSuccessfulProvisioningTeardown", gate_end)
 
     assert "apply_result(true)" in task[gate:gate_end]
     assert "CompleteSuccessfulProvisioningTeardown" not in task[gate:gate_end]
@@ -1370,9 +1425,15 @@ def test_fw21h_generation_bound_claim_confirm_defers_ble_teardown_until_after_ga
     assert re.search(
         r"#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\s+"
         r"if \(applied && should_teardown\) \{\s+"
-        r"Blufi::GetInstance\(\)\.CompleteSuccessfulProvisioningTeardown\(",
+        r"Blufi::GetInstance\(\)\.CompleteSuccessfulProvisioningTeardownForGeneration\(",
         post_gate,
     )
+    generation_teardown = post_gate.index(
+        "CompleteSuccessfulProvisioningTeardownForGeneration("
+    )
+    assert "expected_setup_generation" in post_gate[
+        generation_teardown:generation_teardown + 180
+    ]
     assert re.search(
         r"#else\s+if \(applied && should_teardown\) \{\s+"
         r"self->StopBleAdvertising\(\);",
@@ -2280,10 +2341,10 @@ def test_fw42_wifi_connect_single_flight_is_atomic_and_teardown_errors_are_prese
     assert "host_error" in deinit
     assert "controller_error" in deinit
     assert "return first_error;" in deinit
-    assert "esp_err_t teardown_error = deinit();" in restart
+    assert "esp_err_t teardown_error = DeinitWithLifecycleOwned();" in restart
     assert "if (teardown_error != ESP_OK)" in restart
     teardown_guard = restart[
-        restart.index("esp_err_t teardown_error = deinit();") : restart.index("_security_deinit();")
+        restart.index("esp_err_t teardown_error = DeinitWithLifecycleOwned();") : restart.index("_security_deinit();")
     ]
     assert "return teardown_error;" in teardown_guard
 
@@ -2352,7 +2413,7 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
 def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():
     header = read("main/boards/common/blufi.h")
     blufi = read("main/boards/common/blufi.cpp")
-    init = _function_body(blufi, "esp_err_t Blufi::init")
+    init = _function_body(blufi, "esp_err_t Blufi::InitWithLifecycleOwned")
     deinit = _function_body(blufi, "esp_err_t Blufi::_deinit_impl")
     restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
 

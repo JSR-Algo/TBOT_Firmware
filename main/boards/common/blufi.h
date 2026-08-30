@@ -76,6 +76,9 @@ public:
     bool AbortProvisioningSetup(ProvisioningToken token);
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);
+    bool CompleteSuccessfulProvisioningTeardownForGeneration(
+        const char* reason, ProvisioningToken provisioning_token,
+        uint32_t expected_generation);
     bool WasProvisioningSuccessfullyCompleted(ProvisioningToken provisioning_token) const;
 
     /**
@@ -148,6 +151,9 @@ private:
 
     ~Blufi();
 
+    // Call only while ble_lifecycle_mutex_ is owned by the current task.
+    esp_err_t InitWithLifecycleOwned();
+    esp_err_t DeinitWithLifecycleOwned();
     esp_err_t _init_impl();
     esp_err_t _deinit_impl();
 
@@ -188,9 +194,6 @@ private:
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
-    bool CompleteSuccessfulProvisioningTeardownForGeneration(
-        const char* reason, ProvisioningToken provisioning_token,
-        uint32_t expected_generation);
     bool CompleteSuccessfulProvisioningTeardownImpl(
         const char* reason, ProvisioningToken provisioning_token,
         std::optional<uint32_t> expected_generation);
