@@ -1068,8 +1068,20 @@ def test_fw21e_ble_release_holds_finalization_lock_across_teardown():
     cancel = release.index("CancelBleSetupTimeout();")
     stop_advertising = release.index("esp_blufi_adv_stop();")
     deinit = release.index("const esp_err_t teardown_error = deinit();")
+    post_deinit_generation_check = release.index(
+        "expected_generation == setup_generation_.load()", deinit
+    )
+    stack_off_check = release.index("IsBleStackFullyOff()", post_deinit_generation_check)
 
-    assert lock < generation_check < cancel < stop_advertising < deinit
+    assert (
+        lock
+        < generation_check
+        < cancel
+        < stop_advertising
+        < deinit
+        < post_deinit_generation_check
+        < stack_off_check
+    )
 
 
 # ---------------------------------------------------------------------------
