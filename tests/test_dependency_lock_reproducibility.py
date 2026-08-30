@@ -98,3 +98,7 @@ def test_classic_local_component_dependencies_are_migrated_without_weakening():
         re.DOTALL,
     )
     assert "${ML307_REQUIRES}" in ml307_cmake
+
+    wifi_cmake = LOCAL_COMPONENTS["esp-wifi-connect"].read_text(encoding="utf-8")
+    idf6_branch = wifi_cmake.split("else()", 1)[0]
+    assert re.search(r'REQUIRES(?:\s+"[^"]+")*\s+"cjson"', idf6_branch)
