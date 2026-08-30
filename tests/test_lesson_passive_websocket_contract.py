@@ -61,15 +61,39 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
     assert "SetDeviceState(kDeviceStateListening)" not in passive
     assert "if (passive_ws_intent_.load())" in opened
     passive_opened = opened[opened.index("if (passive_ws_intent_.load())") : opened.index("} else {")]
-    assert "StartHeartbeat" not in passive_opened
-    assert "DispatchDeviceHeartbeat" not in passive_opened
-    assert "EnableWakeWordDetection(true)" in passive_opened
+    assert "SetDeviceState(kDeviceStateListening)" not in passive_opened
+    assert "if (IsDeviceClaimed() && !lesson_runtime_active_.load())" in passive_opened
+    assert "StartHeartbeat();" in passive_opened
+    assert "DispatchDeviceHeartbeat();" in passive_opened
+    assert "EnableWakeWordDetection(true)" not in passive_opened
     assert "online_intent_.store(true)" in opened
     assert "online_intent_.store(true)" in set_listening
     assert "passive_ws_intent_.store(false)" in set_listening
 
 
-def test_claimed_activation_rearms_wake_before_passive_websocket_success():
+def test_claimed_idle_management_heartbeat_survives_passive_websocket_churn():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    initialize = function_body(source, "void Application::InitializeProtocol")
+
+    assert "bool ShouldKeepManagementHeartbeat() const;" in header
+    assert "bool Application::ShouldKeepManagementHeartbeat() const" in source
+
+    network_error = initialize[
+        initialize.index("protocol_->OnNetworkError") :
+        initialize.index("protocol_->OnIncomingAudio")
+    ]
+    closed = initialize[
+        initialize.index("protocol_->OnAudioChannelClosed") :
+        initialize.index("protocol_->OnIncomingJson")
+    ]
+    for callback in (network_error, closed):
+        assert "ShouldKeepManagementHeartbeat()" in callback
+        assert "StartHeartbeat();" in callback
+        assert "StopHeartbeat();" in callback
+
+
+def test_claimed_activation_defers_wake_until_passive_websocket_success():
     source = read("main/application.cc")
     header = read("main/application.h")
     activation = function_body(source, "void Application::HandleActivationDoneEvent")
@@ -78,10 +102,8 @@ def test_claimed_activation_rearms_wake_before_passive_websocket_success():
     assert "SetDeviceState(kDeviceStateIdle);" in activation
     assert "void RearmClaimedIdleWakeWord();" in header
     assert "RearmClaimedIdleWakeWord();" in activation
-    assert activation.index("SetDeviceState(kDeviceStateIdle);") < activation.index(
-        "RearmClaimedIdleWakeWord();"
-    )
-    assert "protocol_->IsAudioChannelOpened()" not in activation
+    assert "connect_in_flight_.load()" in rearm
+    assert "passive_ws_intent_.load()" in rearm
     assert "!IsDeviceClaimed()" in rearm
     assert "lesson_runtime_active_.load()" in rearm
     assert "lesson_asset_sync_quiet_.load()" in rearm
@@ -89,7 +111,7 @@ def test_claimed_activation_rearms_wake_before_passive_websocket_success():
     assert "audio_service_.EnableWakeWordDetection(true);" in rearm
 
 
-def test_passive_websocket_failure_restores_safe_idle_wake_detection():
+def test_passive_websocket_failure_keeps_wake_released_for_tls_retry():
     source = read("main/application.cc")
     open_task = function_body(source, "void Application::OpenChannelTask")
     failure_start = open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")')
@@ -97,13 +119,9 @@ def test_passive_websocket_failure_restores_safe_idle_wake_detection():
     failure = open_task[failure_start:failure_end]
 
     assert "self->SetDeviceState(kDeviceStateIdle);" in failure
-    assert "self->RearmClaimedIdleWakeWord();" in failure
-    assert failure.index("self->SetDeviceState(kDeviceStateIdle);") < failure.index(
-        "self->RearmClaimedIdleWakeWord();"
-    )
-    assert failure.index("self->RearmClaimedIdleWakeWord();") < failure.index(
-        "self->SchedulePassiveLessonReconnect();"
-    )
+    assert "self->RearmClaimedIdleWakeWord();" not in failure
+    assert "self->audio_service_.EnableWakeWordDetection(true);" not in failure
+    assert "self->SchedulePassiveLessonReconnect();" in failure
 
 def test_passive_lesson_socket_open_promotes_pending_answer_turn_to_listening():
     source = read("main/application.cc")
@@ -423,6 +441,9 @@ def test_passive_lesson_socket_connect_failure_retries_passively():
     assert "passive_reconnect_attempt_" in header
     assert "SchedulePassiveLessonReconnect();" in passive_failure
     assert "ScheduleReconnect" not in passive_failure
+    assert "ShouldKeepManagementHeartbeat()" in passive_failure
+    assert "StartHeartbeat();" in passive_failure
+    assert "DispatchDeviceHeartbeat();" in passive_failure
     assert "StartPassiveLessonWebsocket();" in reconnect_tick
     assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
     assert "passive_lesson_reconnect_scheduled" in passive_scheduler

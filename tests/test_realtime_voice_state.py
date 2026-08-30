@@ -1523,7 +1523,8 @@ def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
     assert body.index("lesson_runtime_active_.load()") < body.index("CloseAudioChannelByIntent();")
     assert body.index("lesson_runtime_active_.load()") < body.index('backend_settings.SetString("device_secret", "");')
     assert body.index("lesson_runtime_active_.load()") < body.index('claim_state.SetInt("confirmed", 0);')
-    assert body.index("lesson_runtime_active_.load()") < body.index("RenderClaimSubstate(claim_substate_);")
+    assert body.index("lesson_runtime_active_.load()") < body.index("SsidManager::GetInstance().Clear();")
+    assert body.index("lesson_runtime_active_.load()") < body.index("esp_restart();")
     guard = body[
         body.index("lesson_runtime_active_.load()") :
         body.index("CloseAudioChannelByIntent();")
@@ -1532,7 +1533,8 @@ def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
     assert "return;" in guard
     assert 'SetString("device_secret", "")' not in guard
     assert 'SetInt("confirmed", 0)' not in guard
-    assert "RenderClaimSubstate" not in guard
+    assert "SsidManager::GetInstance().Clear" not in guard
+    assert "esp_restart" not in guard
 
     start = app_cc.index("void Application::SetLessonRuntimeActive")
     end = app_cc.index("bool Application::IsLessonRuntimeActive", start)

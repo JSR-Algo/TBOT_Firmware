@@ -7,7 +7,7 @@
  *
  * Endpoint: POST CONFIG_PROVISIONING_STATUS_URL
  * Auth:     Authorization: Bearer <bootstrap_token>
- * Body:     {"device_id":"<uuid>","status":"device_authenticated","code":"123456"}
+ * Body:     {"device_id":"<uuid>","status":"device_authenticated","code":"123456","credential_response":true}
  *       or  {"device_id":"<uuid>","status":"failed","reason":"wifi_connect_failed"}
  *
  * HTTP client id 2 (OTA=0, WebSocket=1).
@@ -28,7 +28,7 @@ public:
      * @param token    Bootstrap token (Bearer credential). Must not be empty.
      * @param code     6-digit BLE pairing code (required for DeviceAuthenticated).
      * @param reason   Failure reason string (used only when status == Failed).
-     * @return true    Backend returned 2xx.
+     * @return true    Backend returned 2xx and authenticated credentials were persisted.
      * @return false   All retries exhausted or token empty.
      */
     static bool Report(Status status,

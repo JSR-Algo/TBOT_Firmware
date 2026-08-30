@@ -3,6 +3,7 @@
 #include "transport_deadline.h"
 
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <unistd.h>
 #include <cstring>
@@ -145,7 +146,7 @@ bool EspTcp::Connect(const std::string& host, int port) {
                                        ESP_TCP_EVENT_RECEIVE_TASK_START);
     shutdown_state_.TaskStarted();
     TaskHandle_t receive_task = nullptr;
-    BaseType_t created = xTaskCreate([](void* arg) {
+    BaseType_t created = xTaskCreateWithCaps([](void* arg) {
         EspTcp* tcp = (EspTcp*)arg;
         xEventGroupWaitBits(tcp->event_group_, ESP_TCP_EVENT_RECEIVE_TASK_START,
                             pdFALSE, pdFALSE, portMAX_DELAY);
@@ -159,7 +160,8 @@ bool EspTcp::Connect(const std::string& host, int port) {
         tcp->shutdown_state_.TaskExited();
         xEventGroupSetBits(event_group, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
         vTaskDelete(NULL);
-    }, "tcp_receive", 4096, this, 1, &receive_task);
+    }, "tcp_receive", 4096, this, 1, &receive_task,
+       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         configASSERT(shutdown_state_.TaskWillExit());
         shutdown_state_.TaskExited();

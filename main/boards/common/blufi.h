@@ -92,7 +92,7 @@ public:
     /**
      * @brief Zeroizes bootstrap_token_ and provisioning_code_ (call after successful report).
      */
-    void ClearProvisioningSecrets();
+    void ClearProvisioningSecrets(bool preserve_claim_token = true);
 
     /**
      * @brief Arm the BLE setup hard-timeout timer.
@@ -187,6 +187,8 @@ private:
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
+    bool ReleaseBleForStationAssociation(uint32_t expected_generation);
+    void RestoreBleAfterStationFailure(uint32_t expected_generation);
     void StartStationConnectFromCredentials(const char* reason);
     void SendStationConnectFailureReport();
     void ScheduleStationConnectFallback();

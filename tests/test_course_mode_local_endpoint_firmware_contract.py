@@ -251,7 +251,7 @@ def test_local_blufi_suppresses_claim_and_provisioning_network_schedulers():
     )
     clear = function(
         source,
-        "void Blufi::ClearProvisioningSecrets()",
+        "void Blufi::ClearProvisioningSecrets(bool preserve_claim_token)",
         "void Blufi::_event_callback_trampoline",
     )
 
@@ -268,12 +268,11 @@ def test_local_blufi_suppresses_claim_and_provisioning_network_schedulers():
     clear_local = clear.split("#else", 1)[0]
     assert "bootstrap_token_.clear()" in clear_local
     assert "provisioning_code_.clear()" in clear_local
-    assert "Settings" not in clear_local
+    settings_idx = clear.index("Settings websocket_settings")
+    assert f"#if !{FLAG}" in clear[:settings_idx]
 
     connected = source.index('ESP_LOGI(BLUFI_TAG, "connected to WiFi")')
-    wifi_success_start = source.index(
-        "const auto provisioning_token = self->CaptureProvisioningSession();", connected
-    )
+    wifi_success_start = source.index(f"#if !{FLAG}", connected)
     wifi_success_end = source.index("} else {", wifi_success_start)
     wifi_success = source[wifi_success_start:wifi_success_end]
     assert f"#if !{FLAG}" in wifi_success

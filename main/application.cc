@@ -24,6 +24,7 @@
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
 #include "boards/common/blufi.h"
 #include "boards/common/system_reset.h"
+#include "boards/common/wifi_board.h"
 #include <ssid_manager.h>
 #include <wifi_manager.h>
 #endif
@@ -1190,7 +1191,8 @@ void Application::HandleNetworkDisconnectedEvent() {
 
 void Application::RearmClaimedIdleWakeWord() {
     if (!IsDeviceClaimed() || lesson_runtime_active_.load() ||
-        lesson_asset_sync_quiet_.load() || GetDeviceState() != kDeviceStateIdle) {
+        lesson_asset_sync_quiet_.load() || GetDeviceState() != kDeviceStateIdle ||
+        connect_in_flight_.load() || passive_ws_intent_.load()) {
         return;
     }
     audio_service_.EnableWakeWordDetection(true);
@@ -1217,8 +1219,21 @@ void Application::HandleActivationDoneEvent() {
 
     ESP_LOGI(TAG, "Activation done");
 
+    // Migrate robots that received a heartbeat revocation on older firmware.
+    // That handler cleared only device_secret, leaving device_id plus the
+    // factory-test WebSocket marker to impersonate a claimed device forever.
+    if (HasStaleRevokedClaimIdentity()) {
+        ESP_LOGW(TAG, "Detected stale revoked claim identity; reopening WiFi setup");
+        HandleHeartbeatAuthFailure(401);
+        return;
+    }
+
     SystemInfo::PrintHeapStats();
     SetDeviceState(kDeviceStateIdle);
+    if (ShouldKeepManagementHeartbeat()) {
+        StartHeartbeat();
+        DispatchDeviceHeartbeat();
+    }
     RearmClaimedIdleWakeWord();
 
     has_server_time_ = ota_->HasServerTime();
@@ -1303,11 +1318,11 @@ void Application::RefreshPendingTbotClaim() {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     {
         const auto ble_state = Blufi::GetInstance().GetBleState();
-        if (!pending_tbot_claim_.active &&
-            ble_state == Blufi::BleState::kConnected && token.empty()) {
-            // A connected phone may still be sending claim custom-data. Do not
-            // tear down its GATT session or start TLS until the handoff finishes.
-            ESP_LOGI(TAG, "BLE connected without bootstrap token; waiting for custom-data handoff");
+        if (ble_state == Blufi::BleState::kConnected) {
+            // A bootstrap token can arrive before the phone sends SSID/password.
+            // The live GATT session owns the handoff regardless of token state;
+            // Wi-Fi completion will release BLE and schedule the claim refresh.
+            ESP_LOGI(TAG, "BLE connected; waiting for provisioning handoff to finish");
             return;
         }
         if (!pending_tbot_claim_.active &&
@@ -1321,30 +1336,13 @@ void Application::RefreshPendingTbotClaim() {
             StopBleAdvertising();
             paused_ble_for_fetch = true;
         } else if (!pending_tbot_claim_.active && !token.empty() &&
-                   (ble_state == Blufi::BleState::kAdvertising ||
-                    ble_state == Blufi::BleState::kConnected)) {
-            const bool retrying_backend_visibility =
-                !pending_tbot_claim_token_.empty() &&
-                pending_tbot_claim_token_ == token &&
-                claim_substate_ == TbotClaimSubstate::AvailableStandby;
-            if (retrying_backend_visibility) {
-                // A successful prior fetch saw no claim yet. Keep this BluFi
-                // instance stable while polling for delayed backend visibility;
-                // repeated host deinit/init eventually corrupts Bluedroid queue
-                // teardown on ESP32-S3. Audio workers are deferred while
-                // unclaimed, leaving enough SRAM for this BLE + TLS overlap.
-                ESP_LOGI(TAG, "Retrying delayed claim visibility while keeping BLE session stable");
-            } else {
-            // We ALREADY hold a bootstrap token but BLE is still active - e.g. a
-            // flaky BLE link (MIUI BLE contention) never reached the clean
-            // wifi-success deinit path. Do NOT strand behind this gate forever:
-            // free the BLE radio now (same StopBleAdvertising-before-TLS pattern as
-            // the confirm path below) so the blocking TLS claim fetch/confirm can
-            // run, then fall through instead of returning.
+                   ble_state == Blufi::BleState::kAdvertising) {
+            // The phone is no longer connected, so no credential handoff can be
+            // interrupted. Free advertising before the TLS claim fetch/confirm.
             ESP_LOGW(TAG, "Bootstrap token present but BLE still active; stopping BLE to proceed with claim fetch/confirm");
             Blufi::GetInstance().CancelBleSetupTimeout();
             StopBleAdvertising();
-            }
+            paused_ble_for_fetch = true;
         }
     }
 #endif
@@ -1414,6 +1412,10 @@ void Application::RefreshPendingTbotClaim() {
     // dedicated low-priority, non-core-0-pinned worker; all state mutation stays
     // on the Application task via the Schedule()d ApplyPendingTbotClaimFetchResult
     // continuation, preserving the single-threaded claim FSM invariant (OQ1).
+    if (!token.empty() && passive_ws_intent_.load()) {
+        ESP_LOGI(TAG, "Bootstrap claim preempting passive lesson WebSocket");
+        CloseAudioChannelByIntent();
+    }
     const bool claim_fetch_dispatched =
         DispatchPendingTbotClaimFetch(api_url, token, paused_ble_for_fetch);
     if (paused_ble_for_fetch && !claim_fetch_dispatched) {
@@ -1421,7 +1423,7 @@ void Application::RefreshPendingTbotClaim() {
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         RenderClaimSubstate(claim_substate_);
         EnsureBleAdvertisingForStandby();
-        StopClaimPoll();
+        StartClaimPoll();
     }
 }
 
@@ -1465,31 +1467,6 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
         websocket_settings.EraseKey("claim_device_id");
         pending_tbot_claim_ = PendingTbotClaim{};
         pending_tbot_claim_api_url_.clear();
-        SecureClearString(pending_tbot_claim_token_);
-        claim_confirmation_ambiguous_ = false;
-        claim_fetch_failures_ = 0;
-        claim_substate_ = TbotClaimSubstate::AvailableStandby;
-        RenderClaimSubstate(claim_substate_);
-        EnsureBleAdvertisingForStandby();
-        StopClaimPoll();
-        return;
-    }
-    if (fetched && !pending_claim.active && !token.empty()) {
-        // requestClaim() commits the pending claim before the phone sends this
-        // token over BluFi. A successful config response with no active claim
-        // therefore means the local token belongs to an abandoned attempt.
-        // Reusing it every poll tick fragments scarce internal SRAM until both
-        // TLS and BLE allocations fail on the ESP32-S3.
-        ESP_LOGW(TAG, "Device config has no active claim; clearing abandoned bootstrap token");
-        Settings websocket_settings("websocket", true);
-        websocket_settings.SetString("bootstrap_token", "");
-        websocket_settings.SetInt("claim_ambiguous", 0);
-#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-        Blufi::GetInstance().ClearProvisioningSecrets();
-#endif
-        websocket_settings.EraseKey("claim_device_id");
-        pending_tbot_claim_ = PendingTbotClaim{};
-        pending_tbot_claim_api_url_ = api_url;
         SecureClearString(pending_tbot_claim_token_);
         claim_confirmation_ambiguous_ = false;
         claim_fetch_failures_ = 0;
@@ -1884,12 +1861,17 @@ void Application::DispatchPendingTbotClaimRefreshForSetupGeneration(
         return;
     }
 
+    if (!token.empty() && passive_ws_intent_.load()) {
+        ESP_LOGI(TAG, "Provisioning claim preempting passive lesson WebSocket");
+        CloseAudioChannelByIntent();
+    }
     const bool dispatched = DispatchPendingTbotClaimFetch(
         api_url, token, true, expected_setup_generation, true);
     if (!dispatched) {
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         RenderClaimSubstate(claim_substate_);
         EnsureBleAdvertisingForStandby();
+        StartClaimPoll();
     }
 }
 
@@ -2397,6 +2379,19 @@ void Application::HandleClaimConfirmTimeout() {
 // RefreshPendingTbotClaim() and uses EnterWifiConfigMode() to reopen it.
 // ---------------------------------------------------------------------------
 
+bool Application::HasStaleRevokedClaimIdentity() const {
+#if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    return false;
+#else
+    Settings claim_state("tbot_claim", false);
+    Settings backend_settings("backend", false);
+    const bool claim_confirmed = claim_state.GetInt("confirmed", 0) != 0;
+    const std::string device_id = backend_settings.GetString("device_id");
+    const std::string device_secret = backend_settings.GetString("device_secret");
+    return !claim_confirmed && !device_id.empty() && device_secret.empty();
+#endif
+}
+
 bool Application::IsDeviceClaimed() const {
 #if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     return true;
@@ -2408,9 +2403,7 @@ bool Application::IsDeviceClaimed() const {
     // the robot on the claimed online path. We must NOT key off websocket
     // "token": OTA CheckVersion can write that realtime-WS token on every boot.
     Settings claim_state("tbot_claim", false);
-    if (claim_state.GetInt("confirmed", 0) != 0) {
-        return true;
-    }
+    const bool claim_confirmed = claim_state.GetInt("confirmed", 0) != 0;
 
     Settings websocket_settings("websocket", false);
     const std::string websocket_token = websocket_settings.GetString("token");
@@ -2422,6 +2415,9 @@ bool Application::IsDeviceClaimed() const {
     Settings backend_settings("backend", false);
     const std::string device_id = backend_settings.GetString("device_id");
     const std::string device_secret = backend_settings.GetString("device_secret");
+    if (claim_confirmed && (device_id.empty() || device_secret.empty())) {
+        ESP_LOGW(TAG, "Ignoring stale claim marker without complete backend credentials");
+    }
     return !device_id.empty() && !device_secret.empty();
 #endif
 }
@@ -2441,7 +2437,30 @@ void Application::EnsureBleAdvertisingForStandby() {
         // BT controller/host). init() resets the re-advertise cap for this fresh
         // discoverable window. init() does NOT disturb the connected station.
         ESP_LOGI(TAG, "Claim standby: starting BLE advertising (TBOT-<MAC>)");
-        blufi.init();
+        auto provisioning_token = blufi.CaptureProvisioningSession();
+        if (!provisioning_token.valid()) {
+            auto provisioning_reservation = blufi.TryReserveProvisioningSession();
+            if (!provisioning_reservation) {
+                ESP_LOGW(TAG, "Claim standby BLE start deferred: provisioning completion active");
+                return;
+            }
+            const auto begin_result = audio_service_.BeginWifiProvisioning();
+            if (!begin_result) {
+                ESP_LOGE(TAG, "Claim standby BLE start failed: audio lifecycle did not quiesce");
+                return;
+            }
+            provisioning_token = begin_result.token;
+            if (!provisioning_reservation.Commit(provisioning_token)) {
+                ESP_LOGE(TAG, "Claim standby BLE start failed: could not bind provisioning token");
+                audio_service_.EndWifiProvisioningAndRearm(provisioning_token);
+                return;
+            }
+        }
+        if (blufi.init() != ESP_OK) {
+            ESP_LOGE(TAG, "Claim standby BLE start failed: BLUFI init failed");
+            blufi.AbortProvisioningSetup(provisioning_token);
+            return;
+        }
     }
 
     // Re-arm the BLE hard-timeout on every standby poll. The poll cadence
@@ -2518,6 +2537,13 @@ static int ExtractWifiRssi(cJSON* status_root) {
         return -127;
     }
     return ClampInt(rssi->valueint, -127, 0);
+}
+
+bool Application::ShouldKeepManagementHeartbeat() const {
+    return IsDeviceClaimed() &&
+           !lesson_runtime_active_.load() &&
+           GetDeviceState() == kDeviceStateIdle &&
+           !IsConnectSuccessPublicationSuppressed();
 }
 
 static std::string BuildTbotHeartbeatBody(const std::string& status_json,
@@ -2634,21 +2660,33 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
         deferred_heartbeat_auth_failure_status_.store(status_code);
         return;
     }
-    ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d); clearing stale claim credentials", status_code);
+    ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d); entering remote-unpair WiFi setup", status_code);
     StopHeartbeat();
+    StopClaimPoll();
     CloseAudioChannelByIntent();
+
+    auto display = Board::GetInstance().GetDisplay();
+    if (display) {
+        display->SetStatus(Lang::Strings::INITIALIZING);
+        display->SetChatMessage("system", "");
+    }
 
     {
         Settings backend_settings("backend", true);
+        backend_settings.SetString("device_id", "");
         backend_settings.SetString("device_secret", "");
+        backend_settings.SetInt("release_pending", 0);
     }
     {
         Settings claim_state("tbot_claim", true);
         claim_state.SetInt("confirmed", 0);
+        claim_state.SetInt("factory_test", 0);
     }
     {
         Settings websocket_settings("websocket", true);
         websocket_settings.SetString("bootstrap_token", "");
+        websocket_settings.SetString("token", "");
+        websocket_settings.SetString("url", "");
         websocket_settings.SetInt("claim_ambiguous", 0);
         websocket_settings.EraseKey("claim_device_id");
     }
@@ -2659,9 +2697,13 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
     claim_confirmation_ambiguous_ = false;
     claim_substate_ = TbotClaimSubstate::AvailableStandby;
     backend_offline_.store(false);
-    EnsureBleAdvertisingForStandby();
-    StartClaimPoll();
-    RenderClaimSubstate(claim_substate_);
+
+    // A revoked heartbeat is the durable fallback when the backend invalidates
+    // ownership before its WebSocket unpair command reaches the robot. Forget
+    // the old network so the normal boot path opens BLUFI without a BOOT press.
+    SsidManager::GetInstance().Clear();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
 }
 
 void Application::EnterRepairPairingMode() {
@@ -2679,6 +2721,9 @@ void Application::EnterRepairPairingMode() {
         ESP_LOGW(TAG, "BOOT re-pair: forgetting current claim so a new parent phone can connect");
         StopHeartbeat();
         CloseAudioChannelByIntent();
+        auto display = Board::GetInstance().GetDisplay();
+        display->SetStatus(Lang::Strings::INITIALIZING);
+        display->SetChatMessage("system", "");
 
         // Release backend ownership NOW (synchronous) if we have credentials and are
         // online. This is a deliberate, user-initiated reset, so a one-time blocking
@@ -2950,6 +2995,8 @@ void Application::DispatchDeviceHeartbeat() {
         ESP_LOGE(TAG, "heartbeat worker queue unavailable; retrying next tick");
         delete ctx;
         heartbeat_inflight_.store(false);
+    } else {
+        ESP_LOGI(TAG, "Heartbeat queued");
     }
 #endif
 }
@@ -2961,6 +3008,7 @@ void Application::HeartbeatTask(void* arg) {
         if (ctx == nullptr) {
             continue;
         }
+        ESP_LOGI(TAG, "Heartbeat worker received request");
         const std::string url = ctx->url;
         const std::string device_secret = ctx->device_secret;
         std::string body = std::move(ctx->body);
@@ -3058,8 +3106,6 @@ void Application::ActivationTask() {
                  "(claim path remains via BLE; public lesson sync uses raw WS)");
         CheckAssetsVersion();
     } else {
-        const auto wake_word_prewarm_token = audio_service_.CaptureWakeWordPrewarmToken();
-
         // Check for new assets version
         CheckAssetsVersion();
 
@@ -3077,16 +3123,9 @@ void Application::ActivationTask() {
         SystemInfo::PrintHeapCheckpoint("config_fetch.complete");
         SystemInfo::StopHeapPhaseMonitor();
 
-        // Build the AFE only after boot HTTP/TLS transients have released their
-        // internal SRAM, but before protocol startup and the Idle wake-word gate.
-        const auto activation_state = GetDeviceState();
-        if (activation_state != kDeviceStateWifiConfiguring &&
-            activation_state != kDeviceStateAudioTesting) {
-            SystemInfo::StartHeapPhaseMonitor();
-            audio_service_.PrewarmWakeWord(wake_word_prewarm_token);
-            SystemInfo::PrintHeapCheckpoint("afe_prewarm.complete");
-            SystemInfo::StopHeapPhaseMonitor();
-        }
+        // Keep the AFE released until the passive WebSocket TLS handshake has
+        // completed. Both need contiguous internal SRAM; materializing wake-word
+        // here can leave the socket retry without even a 4 KB allocation.
     }
 #else
     SystemInfo::StartHeapPhaseMonitor();
@@ -3314,10 +3353,15 @@ void Application::InitializeProtocol() {
     protocol_->OnNetworkError([this, callback_protocol](const std::string& message) {
         if (protocol_.get() != callback_protocol) return;
         backend_offline_.store(true);   // -> OFFLINE_RETRY copy via the mapper
-        // H2: the session is down -> stop the heartbeat so it cannot keep POSTing
-        // (and blocking the main task) against a dead backend. It restarts only
-        // from OnConnected/OnAudioChannelOpened once the session is healthy again.
-        StopHeartbeat();
+        // The lesson WebSocket and management HTTP endpoint have independent
+        // availability. Keep claimed-idle presence alive while the passive
+        // lesson socket backs off; real network loss has its own stop path.
+        if (ShouldKeepManagementHeartbeat()) {
+            StartHeartbeat();
+            DispatchDeviceHeartbeat();
+        } else {
+            StopHeartbeat();
+        }
         last_error_message_ = message;
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
@@ -3343,12 +3387,14 @@ void Application::InitializeProtocol() {
         // preconnect only makes the device reachable for server lesson pull/nudge;
         // it must not later reconnect into Listening without a wake/button action.
         if (passive_ws_intent_.load()) {
-            ESP_LOGI(TAG, "passive_lesson_websocket_opened_without_heartbeat");
-            StopHeartbeat();
             if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
-                if (!lesson_asset_sync_quiet_.load()) {
-                    audio_service_.EnableWakeWordDetection(true);
-                }
+                ESP_LOGI(TAG, "claimed passive lesson websocket opened with management heartbeat");
+                StartHeartbeat();
+                DispatchDeviceHeartbeat();
+            }
+            if (!IsDeviceClaimed() || lesson_runtime_active_.load()) {
+                ESP_LOGI(TAG, "unclaimed passive lesson websocket opened without heartbeat");
+                StopHeartbeat();
             }
         } else {
             const bool lesson_answer_turn =
@@ -3380,7 +3426,12 @@ void Application::InitializeProtocol() {
     
     protocol_->OnAudioChannelClosed([this, &board, callback_protocol]() {
         tts_audio_accepting_.store(false);
-        StopHeartbeat();
+        if (ShouldKeepManagementHeartbeat()) {
+            StartHeartbeat();
+            DispatchDeviceHeartbeat();
+        } else {
+            StopHeartbeat();
+        }
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this, callback_protocol]() {
             if (protocol_.get() != callback_protocol) return;
@@ -3732,6 +3783,18 @@ void Application::InitializeProtocol() {
                     Schedule([this]() {
                         Reboot();
                     });
+                } else if (strcmp(command->valuestring, "unpair") == 0) {
+                    if (lesson_runtime_active_.load()) {
+                        ESP_LOGI(TAG, "System unpair ignored during lesson");
+                        return;
+                    }
+                    EnterRepairPairingMode();
+                } else if (strcmp(command->valuestring, "wifi_setup") == 0) {
+                    if (lesson_runtime_active_.load()) {
+                        ESP_LOGI(TAG, "System WiFi setup ignored during lesson");
+                        return;
+                    }
+                    static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
                 } else {
                     ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
                 }
@@ -4793,7 +4856,10 @@ void Application::OpenChannelTask(void* arg) {
                     if (self->GetDeviceState() == kDeviceStateConnecting) {
                         self->SetDeviceState(kDeviceStateIdle);
                     }
-                    self->RearmClaimedIdleWakeWord();
+                    if (self->ShouldKeepManagementHeartbeat()) {
+                        self->StartHeartbeat();
+                        self->DispatchDeviceHeartbeat();
+                    }
                     self->SchedulePassiveLessonReconnect();
                 } else if (wake_word_invoke) {
                     ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");

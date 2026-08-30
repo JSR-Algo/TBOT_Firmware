@@ -72,6 +72,19 @@ def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
     assert "if (!provisioning_reservation)" in start
 
 
+def test_unclaimed_standby_binds_audio_lifecycle_before_starting_blufi():
+    app = read("main/application.cc")
+    body = function_body(app, "void Application::EnsureBleAdvertisingForStandby")
+
+    reserve = body.index("TryReserveProvisioningSession()")
+    begin = body.index("audio_service_.BeginWifiProvisioning()", reserve)
+    commit = body.index("provisioning_reservation.Commit(provisioning_token)", begin)
+    init = body.index("blufi.init()", commit)
+
+    assert reserve < begin < commit < init
+    assert "blufi.AbortProvisioningSetup(provisioning_token)" in body[init:]
+
+
 def test_every_success_owner_passes_an_explicit_originating_token():
     sources = read("main/boards/common/blufi.cpp") + read("main/boards/common/wifi_board.cc") + read("main/application.cc")
     reasons = (

@@ -88,6 +88,16 @@ void WifiStation::Stop() {
     // Reset was_connected_ flag to prevent stale state from affecting subsequent sessions
     was_connected_ = false;
 
+    // Scan results own credential snapshots; none may cross a station session.
+    for (auto& record : connect_queue_) {
+        std::fill(record.password.begin(), record.password.end(), '\0');
+    }
+    connect_queue_.clear();
+    std::fill(password_.begin(), password_.end(), '\0');
+    password_.clear();
+    ssid_.clear();
+    ip_address_.clear();
+
     // Clear connected bit
     xEventGroupClearBits(event_group_, WIFI_EVENT_CONNECTED);
 

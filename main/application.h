@@ -198,6 +198,7 @@ public:
     // Claimed robots suppress claim polling and keep normal online BLE off;
     // explicit BOOT Wi-Fi-config mode reopens BluFi for owner reconnect/setup.
     bool IsDeviceClaimed() const;
+    bool HasStaleRevokedClaimIdentity() const;
 
     // BOOT long-press "re-pair": forget the current claim/ownership and re-enter
     // BLE pairing standby so a (possibly different) parent phone can connect and
@@ -504,6 +505,7 @@ private:
     void StopBleAdvertising();
 
     // --- Heartbeat (C5) ---
+    bool ShouldKeepManagementHeartbeat() const;
     void StartHeartbeat();
     void StopHeartbeat();
     void HandleHeartbeatAuthFailure(int status_code);
