@@ -1,4 +1,6 @@
 CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y
+# Keep production application artifacts byte-identical for the same source and toolchain.
+CONFIG_APP_REPRODUCIBLE_BUILD=y
 # Production-only serial evidence is board-scoped by Kconfig to LCDWiki ESP32-S3.
 CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y
 # Stable backend bootstrap seed. The OTA response returns the final websocket.url.
