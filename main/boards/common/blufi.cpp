@@ -887,6 +887,7 @@ bool Blufi::WasProvisioningSuccessfullyCompleted(
 }
 
 bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
+    std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
     if (expected_generation != setup_generation_.load()) {
         return false;
     }

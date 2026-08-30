@@ -1053,6 +1053,25 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
         assert "finalization_lock.unlock();" in prefix
 
 
+def test_fw21e_ble_release_holds_finalization_lock_across_teardown():
+    blufi = read("main/boards/common/blufi.cpp")
+    release = _function_body(blufi, "bool Blufi::ReleaseBleForStationAssociation")
+
+    lock = release.index(
+        "std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);"
+    )
+    assert re.match(
+        r"\{\s*std::lock_guard<std::mutex> finalization_lock\(provisioning_finalization_mutex_\);",
+        release,
+    )
+    generation_check = release.index("expected_generation != setup_generation_.load()")
+    cancel = release.index("CancelBleSetupTimeout();")
+    stop_advertising = release.index("esp_blufi_adv_stop();")
+    deinit = release.index("const esp_err_t teardown_error = deinit();")
+
+    assert lock < generation_check < cancel < stop_advertising < deinit
+
+
 # ---------------------------------------------------------------------------
 # FW21f: the deferred success continuation re-enters after the worker releases
 #        the mutex, so it must reacquire the same lock before generation check
