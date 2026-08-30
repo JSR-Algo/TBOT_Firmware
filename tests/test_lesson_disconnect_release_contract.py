@@ -47,8 +47,8 @@ def test_disconnect_and_replacement_use_bounded_worker_cleanup():
     lesson_error = main_error[main_error.index("if (lesson_runtime_active_.load())") :]
     lesson_error = lesson_error[: lesson_error.index("} else if (connect_attempt_active_.load()")]
     assert "RequestLessonStorageAbandonment();" in lesson_error
-    assert "if (protocol_.get() != callback_protocol) return;" in closed
-    current_transport = closed[closed.index("if (protocol_.get() != callback_protocol) return;") :]
+    assert "ProtocolLifetimeMatches(" in closed
+    current_transport = closed[closed.index("if (!ProtocolLifetimeMatches(") :]
     assert "RequestLessonStorageAbandonment();" in current_transport
     setup_guard_end = current_transport.index("if (lesson_runtime_active_.load() && passive_ws_intent_.load())")
     assert current_transport.index("RequestLessonStorageAbandonment();") < setup_guard_end

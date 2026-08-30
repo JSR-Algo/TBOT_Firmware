@@ -3327,6 +3327,8 @@ void Application::InitializeProtocol() {
     protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 
     Protocol* callback_protocol = protocol_.get();
+    const uint64_t callback_protocol_generation =
+        protocol_generation_.load(std::memory_order_acquire);
     protocol_->OnConnected([this]() {
         if (IsConnectSuccessPublicationSuppressed()) {
             ESP_LOGI(TAG, "connect success publication suppressed");
@@ -3424,17 +3426,26 @@ void Application::InitializeProtocol() {
         }
     });
     
-    protocol_->OnAudioChannelClosed([this, &board, callback_protocol]() {
+    protocol_->OnAudioChannelClosed([this, callback_protocol, callback_protocol_generation]() {
         tts_audio_accepting_.store(false);
-        if (ShouldKeepManagementHeartbeat()) {
-            StartHeartbeat();
-            DispatchDeviceHeartbeat();
-        } else {
-            StopHeartbeat();
-        }
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
-        Schedule([this, callback_protocol]() {
-            if (protocol_.get() != callback_protocol) return;
+        Schedule([this, callback_protocol, callback_protocol_generation]() {
+            if (!ProtocolLifetimeMatches(
+                    protocol_.get(), callback_protocol,
+                    protocol_generation_.load(std::memory_order_acquire),
+                    callback_protocol_generation)) {
+                return;
+            }
+            // WebSocket close callbacks can run on a PSRAM-backed transport task.
+            // NVS-backed claim checks and Wi-Fi power changes must run on the
+            // Application task, whose stack remains available while flash cache
+            // operations are in progress.
+            if (ShouldKeepManagementHeartbeat()) {
+                StartHeartbeat();
+                DispatchDeviceHeartbeat();
+            } else {
+                StopHeartbeat();
+            }
+            Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
             RequestLessonStorageAbandonment();
             auto display = Board::GetInstance().GetDisplay();
             if (!lesson_runtime_active_.load()) {

@@ -154,6 +154,41 @@ def test_transient_http_workers_use_internal_dram_stacks():
     assert "heartbeat_task_stack" in heartbeat_start
 
 
+def test_websocket_close_callback_defers_nvs_dependent_work_to_application_task():
+    """Transport callbacks can run on a PSRAM-backed network task stack."""
+    source = read("main/application.cc")
+    callback_start = source.index("protocol_->OnAudioChannelClosed")
+    schedule_start = source.index("Schedule([", callback_start)
+    callback_end = source.index("protocol_->OnIncomingJson", schedule_start)
+    callback_prefix = source[callback_start:schedule_start]
+    scheduled_close = source[schedule_start:callback_end]
+
+    assert "tts_audio_accepting_.store(false);" in callback_prefix
+    assert "ShouldKeepManagementHeartbeat()" not in callback_prefix
+    assert "StartHeartbeat();" not in callback_prefix
+    assert "DispatchDeviceHeartbeat();" not in callback_prefix
+    assert "StopHeartbeat();" not in callback_prefix
+    assert "SetPowerSaveLevel" not in callback_prefix
+
+    generation_capture = source.rfind(
+        "const uint64_t callback_protocol_generation", 0, callback_start
+    )
+    assert generation_capture != -1
+    assert "callback_protocol_generation" in callback_prefix
+    assert "ProtocolLifetimeMatches(" in scheduled_close
+    guard = scheduled_close.index("ProtocolLifetimeMatches(")
+    for effect in (
+        "ShouldKeepManagementHeartbeat()",
+        "StartHeartbeat();",
+        "DispatchDeviceHeartbeat();",
+        "StopHeartbeat();",
+        "SetPowerSaveLevel(PowerSaveLevel::LOW_POWER)",
+        "RequestLessonStorageAbandonment();",
+    ):
+        assert effect in scheduled_close
+        assert guard < scheduled_close.index(effect)
+
+
 def test_speaking_timeout_uses_esp_timer_not_transient_task_stack():
     source = read("main/application.cc")
     header = read("main/application.h")

@@ -409,7 +409,7 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     for effect in (
         "tts_audio_accepting_.store(false)",
         "StopHeartbeat();",
-        "board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER)",
+        "Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER)",
         "audio_service_.PopPacketFromSendQueue()",
         "SetDeviceState(kDeviceStateIdle);",
     ):
