@@ -16,4 +16,3 @@ The wrapper resets its pending state for every setup initialization so a connect
 2. Run the focused BluFi, Wi-Fi provisioning, security, and redaction suites.
 3. Build the LCDWiki ESP32-S3 application and flash only offset `0x20000`.
 4. On the attached Android phone, run at least three consecutive cycles of connect, BluFi service discovery, local disconnect, and reconnect without rebooting the robot.
-

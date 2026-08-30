@@ -47,4 +47,3 @@
 - [ ] Confirm Android discovers the TBOT advertisement.
 - [ ] Repeat three times without robot reboot: connect, discover service `0xFFFF`, disconnect locally, and reconnect.
 - [ ] Capture safe timestamps and verify three clean GATT closes with no credential-bearing output.
-
