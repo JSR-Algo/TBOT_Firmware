@@ -23,12 +23,14 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
-def test_esp_ml307_is_repo_local_override():
+def test_esp_ml307_is_repo_local_classic_component():
     manifest = read("main/idf_component.yml")
-    assert "78/esp-ml307:" in manifest
-    dependency = manifest[manifest.index("78/esp-ml307:") :]
-    assert "override_path: ../components/esp-ml307" in dependency[:200]
+    assert "78/esp-ml307:" not in manifest
+    assert "override_path: ../components/esp-ml307" not in manifest
     assert (ROOT / "components/esp-ml307/CMakeLists.txt").is_file()
+    assert not (ROOT / "components/esp-ml307/idf_component.yml").exists()
+    main_cmake = read("main/CMakeLists.txt")
+    assert re.search(r"^\s+esp-ml307\s*$", main_cmake, re.MULTILINE)
     gitignore = read(".gitignore")
     assert "!/components/esp-ml307/" in gitignore
     assert "!/components/esp-ml307/**" in gitignore

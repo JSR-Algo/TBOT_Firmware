@@ -12,11 +12,16 @@ The wrapper resets its pending state for every setup initialization so a connect
 
 ## Lifecycle Race Closure
 
-Treat station-association BLE release as one finalization transaction. Hold
-`provisioning_finalization_mutex_` while validating the setup generation,
-cancelling the setup timer, stopping advertising, and deinitializing BLE. This
-prevents a stale station worker from passing its generation check and then
-tearing down a newer setup lifecycle created by `RestartForSetup()`.
+Treat station-association BLE release as one lifecycle transaction without
+blocking BluFi callbacks on `provisioning_finalization_mutex_`. Acquire the
+callback-safe `ble_lifecycle_mutex_` across generation validation, timer
+cancellation, advertising stop, and BLE deinit. Use short finalization-lock
+scopes only to commit or validate generation-bound state before and after the
+blocking transition. Generation-bound claim-confirm results follow the same
+two-phase ownership: commit the accepted result under the finalization lock,
+release it, then let the lifecycle lock own blocking teardown. This prevents a
+stale worker from tearing down a newer setup while allowing disconnect callbacks
+needed by Bluedroid deinit to complete.
 
 Tag every advertising start completion that the wrapper intentionally owns,
 including the default BluFi fallback path. A fallback start from an older host
@@ -35,6 +40,7 @@ station-association lifecycle code.
 2. Run the focused BluFi, Wi-Fi provisioning, security, and redaction suites.
 3. Build the LCDWiki ESP32-S3 application and flash only offset `0x20000`.
 4. On the attached Android phone, run at least three consecutive cycles of connect, BluFi service discovery, local disconnect, and reconnect without rebooting the robot.
-5. Prove with source-contract tests that release holds the finalization lock
-   across generation validation and deinit, and that fallback advertising
-   completions carry lifecycle ownership.
+5. Prove with source-contract tests that release and generation-bound claim
+   completion hold the lifecycle lock across blocking deinit, never the
+   finalization lock, and that fallback advertising completions carry lifecycle
+   ownership.

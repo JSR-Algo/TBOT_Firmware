@@ -1111,6 +1111,8 @@ idf_component_register(SRCS ${SOURCES}
                         bt
                         fatfs
                         mbedtls
+                        esp-wifi-connect
+                        esp-ml307
                         ${MAIN_PRIV_REQUIRES_EXTRA}
                     )
 

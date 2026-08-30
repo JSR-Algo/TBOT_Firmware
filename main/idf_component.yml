@@ -21,18 +21,20 @@ dependencies:
   waveshare/custom_io_expander_ch32v003: ^1.0.0
   espressif/esp_lcd_panel_io_additions: ^1.0.1
   78/esp_lcd_nv3023: ~1.0.0
-  78/esp-wifi-connect:
-    version: ~3.1.3
-    override_path: ../components/esp-wifi-connect
   espressif/esp_audio_effects: ~1.2.1
   espressif/esp_audio_codec: ~2.4.1
-  78/esp-ml307:
-    version: ~3.6.5
-    override_path: ../components/esp-ml307
   78/uart-eth-modem:
     version: ~0.4.0
     rules:
     - if: target not in [esp32]
+  78/uart-uhci:
+    version: ~0.2.1
+    rules:
+    - if: target not in [esp32]
+  espressif/cjson:
+    version: ^1.7.19
+    matches:
+    - if: idf_version >=6.0
   78/xiaozhi-fonts: ~1.6.0
   espressif/led_strip: ~3.0.2
   espressif/esp_codec_dev: ~1.5.6

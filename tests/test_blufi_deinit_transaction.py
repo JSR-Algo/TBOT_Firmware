@@ -134,13 +134,28 @@ def test_init_cannot_overwrite_an_unfinished_cleanup_transaction():
     assert "return ESP_ERR_INVALID_STATE;" in body[guard:reset]
 
 
-def test_public_transitions_use_the_host_tested_serialization_gate():
+def test_public_transitions_own_full_lifecycle_before_entering_transition_gate():
     init = function_body("esp_err_t Blufi::init()")
     deinit = function_body("esp_err_t Blufi::deinit()")
+    owned_init = function_body("esp_err_t Blufi::InitWithLifecycleOwned()")
+    owned_deinit = function_body("esp_err_t Blufi::DeinitWithLifecycleOwned()")
     state = function_body("Blufi::BleState Blufi::GetBleState() const")
-    assert "BlufiTransitionGate::Operation::kInit" in init
-    assert "BlufiTransitionGate::Operation::kDeinit" in deinit
-    for body, impl in ((init, "_init_impl()"), (deinit, "_deinit_impl()")):
+
+    for body, primitive in (
+        (init, "InitWithLifecycleOwned()"),
+        (deinit, "DeinitWithLifecycleOwned()"),
+    ):
+        lifecycle = body.index(
+            "std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);"
+        )
+        assert lifecycle < body.index(primitive)
+        assert "transition_gate_.Acquire" not in body
+
+    for body, operation, impl in (
+        (owned_init, "BlufiTransitionGate::Operation::kInit", "_init_impl()"),
+        (owned_deinit, "BlufiTransitionGate::Operation::kDeinit", "_deinit_impl()"),
+    ):
+        assert operation in body
         assert impl in body
         assert "transition_gate_.Complete" in body
     assert "transition_gate_.IsTransitionActive()" in state

@@ -76,6 +76,9 @@ public:
     bool AbortProvisioningSetup(ProvisioningToken token);
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);
+    bool CompleteSuccessfulProvisioningTeardownForGeneration(
+        const char* reason, ProvisioningToken provisioning_token,
+        uint32_t expected_generation);
     bool WasProvisioningSuccessfullyCompleted(ProvisioningToken provisioning_token) const;
 
     /**
@@ -148,6 +151,9 @@ private:
 
     ~Blufi();
 
+    // Call only while ble_lifecycle_mutex_ is owned by the current task.
+    esp_err_t InitWithLifecycleOwned();
+    esp_err_t DeinitWithLifecycleOwned();
     esp_err_t _init_impl();
     esp_err_t _deinit_impl();
 
@@ -188,6 +194,9 @@ private:
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
+    bool CompleteSuccessfulProvisioningTeardownImpl(
+        const char* reason, ProvisioningToken provisioning_token,
+        std::optional<uint32_t> expected_generation);
     bool ReleaseBleForStationAssociation(uint32_t expected_generation);
     void RestoreBleAfterStationFailure(uint32_t expected_generation);
     void StartStationConnectFromCredentials(const char* reason);
@@ -271,6 +280,8 @@ private:
     // Never reset at reconnect: distinguishes clients within one setup generation.
     std::atomic<uint64_t> ble_connection_epoch_{0};
     std::atomic<uint32_t> ssid_transaction_id_{0};
+    // Serializes multi-step BLE teardown/restart sequences without blocking callbacks.
+    std::mutex ble_lifecycle_mutex_;
     std::mutex provisioning_finalization_mutex_;
     esp_blufi_extra_info_t m_sta_conn_info{};
 

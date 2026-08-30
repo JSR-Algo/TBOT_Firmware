@@ -557,6 +557,11 @@ Blufi::~Blufi() {
 }
 
 esp_err_t Blufi::init() {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    return InitWithLifecycleOwned();
+}
+
+esp_err_t Blufi::InitWithLifecycleOwned() {
     if (teardown_failed_.load()) {
         ESP_LOGE(BLUFI_TAG, "BLE teardown previously failed; refusing blind reinitialization");
         return ESP_ERR_INVALID_STATE;
@@ -659,6 +664,11 @@ esp_err_t Blufi::_init_impl() {
 }
 
 esp_err_t Blufi::deinit() {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    return DeinitWithLifecycleOwned();
+}
+
+esp_err_t Blufi::DeinitWithLifecycleOwned() {
     auto turn = transition_gate_.Acquire(
         BlufiTransitionGate::Operation::kDeinit,
         reinterpret_cast<uintptr_t>(xTaskGetCurrentTaskHandle()));
@@ -730,27 +740,29 @@ esp_err_t Blufi::_deinit_impl() {
 }
 
 esp_err_t Blufi::RestartForSetup() {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     if (teardown_failed_.load()) {
         ESP_LOGE(BLUFI_TAG, "BLE teardown is in a failed state; reboot required before setup");
         return ESP_ERR_INVALID_STATE;
     }
 
-    std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
-
-    // Invalidate completion workers from the prior BOOT generation before
-    // touching the controller/host or shared station flags.
-    ble_session_state_.exchange(
-        EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
-        std::memory_order_acq_rel);
-    setup_generation_.fetch_add(1);
-    provisioning_report_owner_generation_.reset();
-    const uint32_t stale_ssid_transaction = ssid_transaction_id_.exchange(0);
-    SsidManager::GetInstance().RollbackSsidTransaction(stale_ssid_transaction);
-    CancelBleSetupTimeout();
+    {
+        std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);
+        // Invalidate completion workers from the prior BOOT generation before
+        // touching the controller/host or shared station flags.
+        ble_session_state_.exchange(
+            EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
+            std::memory_order_acq_rel);
+        setup_generation_.fetch_add(1);
+        provisioning_report_owner_generation_.reset();
+        const uint32_t stale_ssid_transaction = ssid_transaction_id_.exchange(0);
+        SsidManager::GetInstance().RollbackSsidTransaction(stale_ssid_transaction);
+        CancelBleSetupTimeout();
+    }
 
     if (GetBleState() != BleState::kOff) {
         esp_blufi_adv_stop();
-        esp_err_t teardown_error = deinit();
+        esp_err_t teardown_error = DeinitWithLifecycleOwned();
         if (teardown_error != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Fresh BOOT BLE teardown failed: %s",
                      esp_err_to_name(teardown_error));
@@ -761,31 +773,34 @@ esp_err_t Blufi::RestartForSetup() {
         vTaskDelay(pdMS_TO_TICKS(300));
     }
 
-    _security_deinit();
-    m_ble_is_connected = false;
-    m_sta_connected = false;
-    m_sta_got_ip = false;
-    m_sta_is_connecting.store(false);
-    m_wifi_connect_task_started.store(false);
-    m_provisioned = false;
-    m_scan_in_progress = false;
-    m_send_list_after_scan = false;
-    m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
-    m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
-    m_scan_should_save_ssid = true;
-    std::vector<wifi_ap_record_t>().swap(m_ap_records);
-    m_ap_records_updated_us = 0;
-    memset(&m_sta_config, 0, sizeof(m_sta_config));
-    m_sta_config_ssid_len_ = 0;
-    memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
-    memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
-    m_sta_ssid_len = 0;
-    m_sta_conn_info = {};
-    ClearProvisioningSecrets();
+    {
+        std::lock_guard<std::mutex> reset_state_lock(provisioning_finalization_mutex_);
+        _security_deinit();
+        m_ble_is_connected = false;
+        m_sta_connected = false;
+        m_sta_got_ip = false;
+        m_sta_is_connecting.store(false);
+        m_wifi_connect_task_started.store(false);
+        m_provisioned = false;
+        m_scan_in_progress = false;
+        m_send_list_after_scan = false;
+        m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
+        m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
+        m_scan_should_save_ssid = true;
+        std::vector<wifi_ap_record_t>().swap(m_ap_records);
+        m_ap_records_updated_us = 0;
+        memset(&m_sta_config, 0, sizeof(m_sta_config));
+        m_sta_config_ssid_len_ = 0;
+        memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
+        memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
+        m_sta_ssid_len = 0;
+        m_sta_conn_info = {};
+        ClearProvisioningSecrets();
+    }
 
     esp_err_t err = ESP_FAIL;
     for (int attempt = 1; attempt <= 3; ++attempt) {
-        err = init();
+        err = InitWithLifecycleOwned();
         if (err == ESP_OK) {
             return ESP_OK;
         }
@@ -833,6 +848,28 @@ bool Blufi::AbortProvisioningSetup(ProvisioningToken token) {
 
 bool Blufi::CompleteSuccessfulProvisioningTeardown(
         const char* reason, ProvisioningToken provisioning_token) {
+    return CompleteSuccessfulProvisioningTeardownImpl(
+        reason, provisioning_token, std::nullopt);
+}
+
+bool Blufi::CompleteSuccessfulProvisioningTeardownForGeneration(
+        const char* reason, ProvisioningToken provisioning_token,
+        uint32_t expected_generation) {
+    return CompleteSuccessfulProvisioningTeardownImpl(
+        reason, provisioning_token, expected_generation);
+}
+
+bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
+        const char* reason, ProvisioningToken provisioning_token,
+        std::optional<uint32_t> expected_generation) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    if (expected_generation.has_value()) {
+        std::lock_guard<std::mutex> generation_lock(provisioning_finalization_mutex_);
+        if (expected_generation.value() != setup_generation_.load()) {
+            return false;
+        }
+    }
+
     constexpr uint64_t kTokenChunkBase = 1000000000ULL;
     const uint64_t token_generation = provisioning_token.generation;
     const auto token_high = static_cast<unsigned long>(
@@ -852,7 +889,7 @@ bool Blufi::CompleteSuccessfulProvisioningTeardown(
              reason ? reason : "unknown");
     CancelBleSetupTimeout();
     if (!IsBleStackFullyOff()) {
-        const esp_err_t deinit_error = deinit();
+        const esp_err_t deinit_error = DeinitWithLifecycleOwned();
         if (deinit_error != ESP_OK) {
             ESP_LOGE(BLUFI_TAG, "Successful provisioning teardown failed: reason=%s error=%s",
                      reason ? reason : "unknown", esp_err_to_name(deinit_error));
@@ -887,13 +924,17 @@ bool Blufi::WasProvisioningSuccessfullyCompleted(
 }
 
 bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
-    if (expected_generation != setup_generation_.load()) {
-        return false;
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return false;
+        }
     }
 
     CancelBleSetupTimeout();
     esp_blufi_adv_stop();
-    const esp_err_t teardown_error = deinit();
+    const esp_err_t teardown_error = DeinitWithLifecycleOwned();
     if (teardown_error != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to release BLE before WiFi association: %s",
                  esp_err_to_name(teardown_error));
@@ -902,27 +943,31 @@ bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
 
     // Bluedroid releases its queues asynchronously after deinit returns.
     vTaskDelay(pdMS_TO_TICKS(300));
+    std::lock_guard<std::mutex> post_teardown_lock(provisioning_finalization_mutex_);
     return expected_generation == setup_generation_.load() && IsBleStackFullyOff();
 }
 
 void Blufi::RestoreBleAfterStationFailure(uint32_t expected_generation) {
     Application::GetInstance().Schedule([this, expected_generation]() {
-        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
-        if (expected_generation != setup_generation_.load()) {
-            return;
+        std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+        {
+            std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+            if (expected_generation != setup_generation_.load()) {
+                return;
+            }
+
+            m_wifi_connect_task_started.store(false);
+            m_sta_is_connecting.store(false);
+            m_sta_connected = false;
+            m_sta_got_ip = false;
+            m_provisioned = false;
+            m_ble_is_connected = false;
+            setup_generation_.fetch_add(1);
+            provisioning_report_owner_generation_.reset();
         }
 
         WifiManager::GetInstance().StopStation();
-        m_wifi_connect_task_started.store(false);
-        m_sta_is_connecting.store(false);
-        m_sta_connected = false;
-        m_sta_got_ip = false;
-        m_provisioned = false;
-        m_ble_is_connected = false;
-        setup_generation_.fetch_add(1);
-        provisioning_report_owner_generation_.reset();
-
-        if (init() == ESP_OK) {
+        if (InitWithLifecycleOwned() == ESP_OK) {
             StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
             ESP_LOGI(BLUFI_TAG, "WiFi association failed; BLE setup restored automatically");
         } else {
@@ -1462,7 +1507,8 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
             delete task_ctx;
             vTaskDelay(pdMS_TO_TICKS(kClaimRefreshAfterTokenHandoffDelayMs));
             Application::GetInstance().Schedule([self, generation, provisioning_token]() {
-                self->RunIfSetupGenerationCurrent(generation, [self, generation, provisioning_token]() {
+                bool should_teardown = false;
+                const bool current = self->RunIfSetupGenerationCurrent(generation, [self, &should_teardown]() {
                     if (self->m_sta_is_connecting.load()) {
                         ESP_LOGI(BLUFI_TAG,
                                  "Deferring claim refresh: WiFi credential handoff in progress");
@@ -1473,13 +1519,14 @@ void Blufi::ScheduleClaimRefreshAfterTokenHandoff() {
                                  "Skipping connected-WiFi claim refresh: WiFi is not connected");
                         return;
                     }
-
-                    if (!self->CompleteSuccessfulProvisioningTeardown(
-                            "connected_wifi_token_handoff", provisioning_token)) {
-                        return;
-                    }
-                    Application::GetInstance().SchedulePendingTbotClaimRefresh(generation);
+                    should_teardown = true;
                 });
+                if (!current || !should_teardown ||
+                    !self->CompleteSuccessfulProvisioningTeardownForGeneration(
+                        "connected_wifi_token_handoff", provisioning_token, generation)) {
+                    return;
+                }
+                Application::GetInstance().SchedulePendingTbotClaimRefresh(generation);
             });
             vTaskDelete(nullptr);
         },
@@ -1544,18 +1591,14 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
             const auto provisioning_token = CaptureProvisioningSession();
             Application::GetInstance().Schedule(
                 [self, reason_copy, expected_generation, provisioning_token]() {
-                    const bool current = self->RunIfSetupGenerationCurrent(
-                        expected_generation, [self, provisioning_token]() {
-                            ESP_LOGI(
-                                BLUFI_TAG,
-                                "Provisioning authenticated report requested while BLE active; stopping BLE first");
-                            self->CompleteSuccessfulProvisioningTeardown(
-                                "authenticated_report_ble_release", provisioning_token);
-                        });
-                    if (current) {
-                        self->TryReportProvisioningAuthenticated(
-                            reason_copy.c_str(), expected_generation);
-                    }
+                    ESP_LOGI(
+                        BLUFI_TAG,
+                        "Provisioning authenticated report requested while BLE active; stopping BLE first");
+                    self->CompleteSuccessfulProvisioningTeardownForGeneration(
+                        "authenticated_report_ble_release", provisioning_token,
+                        expected_generation);
+                    self->TryReportProvisioningAuthenticated(
+                        reason_copy.c_str(), expected_generation);
                 });
         }
         ESP_LOGI(BLUFI_TAG,
@@ -1892,19 +1935,18 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                     const bool code_based_provisioning =
                         !self->provisioning_code_.empty();
                     ESP_LOGI(BLUFI_TAG, "WiFi provisioned; stopping BLE before claim refresh");
+                    continuation_lock.unlock();
                     const bool teardown_completed =
-                        self->CompleteSuccessfulProvisioningTeardown(
-                            "wifi_credentials_connected", provisioning_token);
+                        self->CompleteSuccessfulProvisioningTeardownForGeneration(
+                            "wifi_credentials_connected", provisioning_token, generation);
                     const bool completion_recorded =
                         teardown_completed ||
                         self->WasProvisioningSuccessfullyCompleted(provisioning_token);
                     if (!completion_recorded) {
-                        continuation_lock.unlock();
                         return;
                     }
                     self->provisioning_session_.AcknowledgeSuccessfullyCompleted(
                         provisioning_token);
-                    continuation_lock.unlock();
                     if (code_based_provisioning) {
                         self->TryReportProvisioningAuthenticated(
                             "wifi_success_after_ble_teardown", generation);
@@ -1919,9 +1961,11 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                     if (generation != self->setup_generation_.load()) {
                         return;
                     }
+                    continuation_lock.unlock();
                     const bool teardown_completed =
-                        self->CompleteSuccessfulProvisioningTeardown(
-                            "course_mode_wifi_credentials_connected", provisioning_token);
+                        self->CompleteSuccessfulProvisioningTeardownForGeneration(
+                            "course_mode_wifi_credentials_connected", provisioning_token,
+                            generation);
                     const bool completion_recorded =
                         teardown_completed ||
                         self->WasProvisioningSuccessfullyCompleted(provisioning_token);
@@ -1930,7 +1974,6 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                     }
                     self->provisioning_session_.AcknowledgeSuccessfullyCompleted(
                         provisioning_token);
-                    continuation_lock.unlock();
                     Application::GetInstance()
                         .PromoteCourseModeFromWifiConfigAfterProvisioning();
                 });

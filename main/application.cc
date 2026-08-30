@@ -1655,7 +1655,8 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
 
 bool Application::ApplyPendingTbotClaimConfirmationResult(
     ClaimConfirmationResult confirmation_result,
-    WakeWordLifecycleController::ProvisioningToken provisioning_token) {
+    WakeWordLifecycleController::ProvisioningToken provisioning_token,
+    bool defer_successful_teardown) {
     if (confirmation_result == ClaimConfirmationResult::RetryableFailure) {
         ESP_LOGW(TAG, "Claim confirmation retryable; retaining claim token for bounded retry");
         claim_substate_ = TbotClaimSubstate::WaitingConfirm;
@@ -1705,10 +1706,14 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
     // Claim confirmed -> the device is becoming claimed. Stop advertising for
     // pairing; an owned robot must not be BLE-discoverable for a new claim.
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
-        "claim_confirmed", provisioning_token);
+    if (!defer_successful_teardown) {
+        Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
+            "claim_confirmed", provisioning_token);
+    }
 #else
-    StopBleAdvertising();
+    if (!defer_successful_teardown) {
+        StopBleAdvertising();
+    }
 #endif
     if (protocol_) {
         CloseAudioChannelByIntent();
@@ -1806,19 +1811,34 @@ void Application::ClaimConfirmationTask(void* arg) {
                     success_response = std::move(success_response),
                     expected_setup_generation, enforce_setup_generation]() mutable {
         self->claim_confirm_inflight_.store(false);
-        auto apply_result = [&]() {
+        auto apply_result = [&](bool defer_successful_teardown) {
             ClaimConfirmationResult effective_result = result;
             if (effective_result == ClaimConfirmationResult::Confirmed &&
                 !PersistTbotClaimConfirmationResponse(success_response)) {
                 effective_result = ClaimConfirmationResult::AmbiguousSuccess;
             }
-            self->ApplyPendingTbotClaimConfirmationResult(effective_result, provisioning_token);
+            self->ApplyPendingTbotClaimConfirmationResult(
+                effective_result, provisioning_token, defer_successful_teardown);
+            return effective_result == ClaimConfirmationResult::Confirmed;
         };
         if (enforce_setup_generation) {
-            Blufi::GetInstance().RunIfSetupGenerationCurrent(
-                expected_setup_generation, apply_result);
+            bool should_teardown = false;
+            const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
+                expected_setup_generation, [&]() {
+                    should_teardown = apply_result(true);
+                });
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+            if (applied && should_teardown) {
+                Blufi::GetInstance().CompleteSuccessfulProvisioningTeardownForGeneration(
+                    "claim_confirmed", provisioning_token, expected_setup_generation);
+            }
+#else
+            if (applied && should_teardown) {
+                self->StopBleAdvertising();
+            }
+#endif
         } else {
-            apply_result();
+            apply_result(false);
         }
         SecureClearString(token);
         SecureClearString(success_response);

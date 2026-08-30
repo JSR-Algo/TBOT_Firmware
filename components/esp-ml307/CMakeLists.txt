@@ -9,6 +9,15 @@ set(COMMON_SRCS
     "src/http_client.cc"
 )
 
+set(ML307_REQUIRES
+    "esp_driver_gpio"
+    "esp_driver_uart"
+    "esp_pm"
+    "esp-tls"
+    "pthread"
+    "mqtt"
+)
+
 # Additional source files for non-ESP32 targets (uart-uhci not supported on ESP32)
 if(NOT IDF_TARGET STREQUAL "esp32")
     list(APPEND COMMON_SRCS
@@ -26,6 +35,7 @@ if(NOT IDF_TARGET STREQUAL "esp32")
         "src/ml307/ml307_udp.cc"
         "src/ml307/ml307_http.cc"
     )
+    list(APPEND ML307_REQUIRES "uart-uhci")
 endif()
 
 idf_component_register(
@@ -36,10 +46,5 @@ idf_component_register(
     PRIV_INCLUDE_DIRS
         "."
     REQUIRES
-        "esp_driver_gpio"
-        "esp_driver_uart"
-        "esp_pm"
-        "esp-tls"
-        "pthread"
-        "mqtt"
+        ${ML307_REQUIRES}
 )

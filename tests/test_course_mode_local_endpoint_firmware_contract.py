@@ -295,11 +295,26 @@ def test_local_blufi_wifi_success_promotes_activation_without_claim_refresh():
     local_success = blufi[local_start:local_end]
 
     assert "CompleteSuccessfulProvisioningTeardown" in local_success
+    generation_check = local_success.index(
+        "generation != self->setup_generation_.load()"
+    )
+    unlock_index = local_success.index("continuation_lock.unlock();", generation_check)
     teardown_index = local_success.index("CompleteSuccessfulProvisioningTeardown")
-    assert "continuation_lock.unlock();" in local_success[teardown_index:]
+    completion_index = local_success.index("completion_recorded", teardown_index)
+    completion_guard = local_success.index("if (!completion_recorded)", completion_index)
+    acknowledge_index = local_success.index(
+        "AcknowledgeSuccessfullyCompleted", completion_guard
+    )
     assert "PromoteCourseModeFromWifiConfigAfterProvisioning" in local_success
-    assert teardown_index < local_success.index(
-        "PromoteCourseModeFromWifiConfigAfterProvisioning"
+    promotion_index = local_success.index("PromoteCourseModeFromWifiConfigAfterProvisioning")
+    assert (
+        generation_check
+        < unlock_index
+        < teardown_index
+        < completion_index
+        < completion_guard
+        < acknowledge_index
+        < promotion_index
     )
     assert "SchedulePendingTbotClaimRefresh" not in local_success
     assert "TryReportProvisioningAuthenticated" not in local_success
