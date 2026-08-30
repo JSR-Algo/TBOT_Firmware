@@ -253,8 +253,12 @@ int main() {
     const auto session_c = binding_controller.BeginProvisioningAndQuiesce([]() {});
     Require(binding_controller.FinishProvisioningReset(session_c), "session C owns reset");
     Require(binding.Bind(session_c), "session C binds after B completes");
+    Require(binding.WasSuccessfullyCompleted(session_b),
+            "a new binding preserves prior completion evidence for its delayed continuation");
+    Require(binding.AcknowledgeSuccessfullyCompleted(session_b),
+            "the delayed continuation acknowledges its completion evidence");
     Require(!binding.WasSuccessfullyCompleted(session_b),
-            "a new binding invalidates the prior completion marker");
+            "acknowledged completion evidence is retired");
 
     WakeWordLifecycleController reservation_controller;
     ProvisioningSessionBinding reservation_binding;

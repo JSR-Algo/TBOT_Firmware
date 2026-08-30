@@ -106,7 +106,6 @@ public:
             return false;
         }
         token_ = token;
-        successfully_completed_token_ = {};
         return true;
     }
 
@@ -136,6 +135,16 @@ public:
                successfully_completed_token_.generation == token.generation;
     }
 
+    bool AcknowledgeSuccessfullyCompleted(Token token) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!token.valid() ||
+            successfully_completed_token_.generation != token.generation) {
+            return false;
+        }
+        successfully_completed_token_ = {};
+        return true;
+    }
+
     CompletionGuard Claim(Token token) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (completion_active_ || reservation_active_ ||
@@ -163,7 +172,6 @@ private:
             return false;
         }
         token_ = token;
-        successfully_completed_token_ = {};
         reservation_active_ = false;
         return true;
     }

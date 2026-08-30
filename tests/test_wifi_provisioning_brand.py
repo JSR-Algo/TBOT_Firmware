@@ -76,6 +76,25 @@ def test_blufi_compact_advertising_waits_for_adv_and_scan_response_payloads():
     assert deinit_body.index("InvalidateTbotBlufiAdvertising();") < deinit_body.index("_host_deinit()")
 
 
+def test_blufi_compact_advertising_ignores_callbacks_from_prior_lifecycle():
+    blufi = read("main/boards/common/blufi.cpp")
+
+    assert "tbot_adv_lifecycle_epoch" in blufi
+    assert "tbot_adv_data_callback_epochs" in blufi
+    assert "tbot_scan_rsp_callback_epochs" in blufi
+    assert "tbot_adv_start_callback_epochs" in blufi
+
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+    assert "PopTbotAdvertisingCallbackEpoch" in handler
+    assert "callback_epoch" in handler
+
+    maybe_start = function_body(blufi, "void MaybeStartTbotBlufiAdvertising")
+    assert "callback_epoch != tbot_adv_active_epoch" in maybe_start
+
+    start_complete = function_body(blufi, "void HandleTbotBlufiAdvertisingStartComplete")
+    assert "callback_epoch != tbot_adv_active_epoch" in start_complete
+
+
 def test_blufi_never_logs_wifi_password_values():
     blufi = read("main/boards/common/blufi.cpp")
 

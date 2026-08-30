@@ -1923,6 +1923,20 @@ def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_
     assert "delete ctx;" in helper
 
 
+def test_fw37b_stale_ble_release_failure_cannot_clear_new_wifi_attempt_flags():
+    blufi = read("main/boards/common/blufi.cpp")
+    helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+    failure = helper[
+        helper.index("if (!self->ReleaseBleForStationAssociation(generation))") :
+        helper.index("if (generation != self->setup_generation_.load())", helper.index("if (!self->ReleaseBleForStationAssociation(generation))") + 1)
+    ]
+
+    assert "generation == self->setup_generation_.load()" in failure
+    guard = failure.index("generation == self->setup_generation_.load()")
+    assert guard < failure.index("self->m_wifi_connect_task_started.store(false);")
+    assert guard < failure.index("self->m_sta_is_connecting.store(false);")
+
+
 def test_fw38_password_fallback_is_generation_scoped_and_spawn_failure_is_recoverable():
     blufi = read("main/boards/common/blufi.cpp")
     fallback = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")

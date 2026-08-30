@@ -124,8 +124,9 @@ def test_wifi_success_continues_after_disconnect_lane_completed_same_session():
     promote = continuation.index("SchedulePendingTbotClaimRefresh(", report)
 
     assert teardown < completed < report < promote
-    assert "if (!teardown_completed &&" in continuation
-    assert "!self->WasProvisioningSuccessfullyCompleted(provisioning_token)" in continuation
+    assert "teardown_completed ||" in continuation
+    assert "self->WasProvisioningSuccessfullyCompleted(provisioning_token)" in continuation
+    assert "AcknowledgeSuccessfullyCompleted" in continuation
 
 
 def test_each_other_delayed_owner_captures_before_scheduling_or_http():

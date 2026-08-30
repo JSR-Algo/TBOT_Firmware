@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <new>
 #include <string>
 #include <vector>
@@ -183,6 +184,12 @@ constexpr uint8_t kTbotScanRspPending = 1U << 1;
 std::atomic<uint8_t> tbot_adv_config_pending{0};
 std::atomic<bool> tbot_adv_lifecycle_active{false};
 std::atomic<bool> tbot_adv_start_pending{false};
+std::atomic<uint32_t> tbot_adv_lifecycle_epoch{0};
+std::atomic<uint32_t> tbot_adv_active_epoch{0};
+std::mutex tbot_adv_callback_mutex;
+std::deque<uint32_t> tbot_adv_data_callback_epochs;
+std::deque<uint32_t> tbot_scan_rsp_callback_epochs;
+std::deque<uint32_t> tbot_adv_start_callback_epochs;
 
 esp_ble_adv_params_t tbot_adv_params = {
     .adv_int_min = 0x100,
@@ -195,8 +202,31 @@ esp_ble_adv_params_t tbot_adv_params = {
 
 void InvalidateTbotBlufiAdvertising() {
     tbot_adv_lifecycle_active.store(false, std::memory_order_release);
+    tbot_adv_active_epoch.store(0, std::memory_order_release);
     tbot_adv_config_pending.store(0, std::memory_order_release);
     tbot_adv_start_pending.store(false, std::memory_order_release);
+}
+
+void QueueTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs, uint32_t epoch) {
+    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
+    epochs.push_back(epoch);
+}
+
+uint32_t PopTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs) {
+    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
+    if (epochs.empty()) {
+        return 0;
+    }
+    const uint32_t epoch = epochs.front();
+    epochs.pop_front();
+    return epoch;
+}
+
+void CancelTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs, uint32_t epoch) {
+    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
+    if (!epochs.empty() && epochs.back() == epoch) {
+        epochs.pop_back();
+    }
 }
 
 void FallbackToDefaultBlufiAdvertising(const char* reason) {
@@ -209,8 +239,11 @@ void FallbackToDefaultBlufiAdvertising(const char* reason) {
     esp_blufi_adv_start();
 }
 
-void MaybeStartTbotBlufiAdvertising(uint8_t completed_bit, esp_bt_status_t status) {
-    if (!tbot_adv_lifecycle_active.load(std::memory_order_acquire)) {
+void MaybeStartTbotBlufiAdvertising(uint32_t callback_epoch, uint8_t completed_bit,
+                                    esp_bt_status_t status) {
+    if (!tbot_adv_lifecycle_active.load(std::memory_order_acquire) ||
+        callback_epoch == 0 ||
+        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
         return;
     }
     if (status != ESP_BT_STATUS_SUCCESS) {
@@ -225,14 +258,21 @@ void MaybeStartTbotBlufiAdvertising(uint8_t completed_bit, esp_bt_status_t statu
     }
 
     tbot_adv_start_pending.store(true, std::memory_order_release);
+    QueueTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
     const esp_err_t err = esp_ble_gap_start_advertising(&tbot_adv_params);
     if (err != ESP_OK) {
+        CancelTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
         ESP_LOGW(BLUFI_TAG, "start compact advertising failed: %s", esp_err_to_name(err));
         FallbackToDefaultBlufiAdvertising("start failed");
     }
 }
 
-void HandleTbotBlufiAdvertisingStartComplete(esp_bt_status_t status) {
+void HandleTbotBlufiAdvertisingStartComplete(uint32_t callback_epoch,
+                                              esp_bt_status_t status) {
+    if (callback_epoch == 0 ||
+        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
+        return;
+    }
     if (!tbot_adv_start_pending.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
@@ -254,15 +294,23 @@ static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
 
     switch (event) {
         case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
-            MaybeStartTbotBlufiAdvertising(kTbotAdvDataPending,
+            MaybeStartTbotBlufiAdvertising(
+                                           PopTbotAdvertisingCallbackEpoch(
+                                               tbot_adv_data_callback_epochs),
+                                           kTbotAdvDataPending,
                                            param->adv_data_raw_cmpl.status);
             break;
         case ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT:
-            MaybeStartTbotBlufiAdvertising(kTbotScanRspPending,
+            MaybeStartTbotBlufiAdvertising(
+                                           PopTbotAdvertisingCallbackEpoch(
+                                               tbot_scan_rsp_callback_epochs),
+                                           kTbotScanRspPending,
                                            param->scan_rsp_data_raw_cmpl.status);
             break;
         case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-            HandleTbotBlufiAdvertisingStartComplete(param->adv_start_cmpl.status);
+            HandleTbotBlufiAdvertisingStartComplete(
+                PopTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs),
+                param->adv_start_cmpl.status);
             break;
         default:
             break;
@@ -315,19 +363,26 @@ static void StartTbotBlufiAdvertising(const char* device_name) {
 
     const uint8_t pending = static_cast<uint8_t>(
         kTbotAdvDataPending | (rsp_len > 0 ? kTbotScanRspPending : 0));
+    const uint32_t lifecycle_epoch =
+        tbot_adv_lifecycle_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    tbot_adv_active_epoch.store(lifecycle_epoch, std::memory_order_release);
     tbot_adv_lifecycle_active.store(true, std::memory_order_release);
     tbot_adv_start_pending.store(false, std::memory_order_release);
     tbot_adv_config_pending.store(pending, std::memory_order_release);
 
+    QueueTbotAdvertisingCallbackEpoch(tbot_adv_data_callback_epochs, lifecycle_epoch);
     esp_err_t err = esp_ble_gap_config_adv_data_raw(adv_raw, adv_len);
     if (err != ESP_OK) {
+        CancelTbotAdvertisingCallbackEpoch(tbot_adv_data_callback_epochs, lifecycle_epoch);
         ESP_LOGW(BLUFI_TAG, "raw ADV configuration failed: %s", esp_err_to_name(err));
         FallbackToDefaultBlufiAdvertising("ADV configuration rejected");
         return;
     }
     if (rsp_len > 0) {
+        QueueTbotAdvertisingCallbackEpoch(tbot_scan_rsp_callback_epochs, lifecycle_epoch);
         err = esp_ble_gap_config_scan_rsp_data_raw(scan_rsp, rsp_len);
         if (err != ESP_OK) {
+            CancelTbotAdvertisingCallbackEpoch(tbot_scan_rsp_callback_epochs, lifecycle_epoch);
             ESP_LOGW(BLUFI_TAG, "raw scan RSP configuration failed: %s", esp_err_to_name(err));
             FallbackToDefaultBlufiAdvertising("scan response configuration rejected");
         }
@@ -1700,9 +1755,11 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
                 uint32_t expected_transaction = ssid_transaction;
                 self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
-                self->m_wifi_connect_task_started.store(false);
-                self->m_sta_is_connecting.store(false);
-                self->RestoreBleAfterStationFailure(generation);
+                if (generation == self->setup_generation_.load()) {
+                    self->m_wifi_connect_task_started.store(false);
+                    self->m_sta_is_connecting.store(false);
+                    self->RestoreBleAfterStationFailure(generation);
+                }
                 vTaskDelete(nullptr);
                 return;
             }
@@ -1838,11 +1895,15 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                     const bool teardown_completed =
                         self->CompleteSuccessfulProvisioningTeardown(
                             "wifi_credentials_connected", provisioning_token);
-                    if (!teardown_completed &&
-                        !self->WasProvisioningSuccessfullyCompleted(provisioning_token)) {
+                    const bool completion_recorded =
+                        teardown_completed ||
+                        self->WasProvisioningSuccessfullyCompleted(provisioning_token);
+                    if (!completion_recorded) {
                         continuation_lock.unlock();
                         return;
                     }
+                    self->provisioning_session_.AcknowledgeSuccessfullyCompleted(
+                        provisioning_token);
                     continuation_lock.unlock();
                     if (code_based_provisioning) {
                         self->TryReportProvisioningAuthenticated(
@@ -1858,10 +1919,17 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                     if (generation != self->setup_generation_.load()) {
                         return;
                     }
-                    if (!self->CompleteSuccessfulProvisioningTeardown(
-                            "course_mode_wifi_credentials_connected", provisioning_token)) {
+                    const bool teardown_completed =
+                        self->CompleteSuccessfulProvisioningTeardown(
+                            "course_mode_wifi_credentials_connected", provisioning_token);
+                    const bool completion_recorded =
+                        teardown_completed ||
+                        self->WasProvisioningSuccessfullyCompleted(provisioning_token);
+                    if (!completion_recorded) {
                         return;
                     }
+                    self->provisioning_session_.AcknowledgeSuccessfullyCompleted(
+                        provisioning_token);
                     continuation_lock.unlock();
                     Application::GetInstance()
                         .PromoteCourseModeFromWifiConfigAfterProvisioning();
