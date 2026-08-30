@@ -5,9 +5,9 @@
 #include <string>
 #include <vector>
 
-// Chuoi hien thi Main Menu (tieng Viet CO DAU; menu dung font puhui cua chatbox
-// nen hien duoc dau). Uu tien doc tu /sdcard/tbot_ui/menu_config.json object "vi";
-// thieu/loi -> giu default hard-code ben duoi.
+// Chuỗi hiển thị menu chính (tiếng Việt có dấu; menu dùng phông Puhui của hộp thoại
+// nên hiển thị được dấu). Ưu tiên đọc đối tượng "vi" từ menu_config.json trên thẻ nhớ;
+// nếu thiếu hoặc lỗi thì giữ các giá trị mặc định bên dưới.
 struct MenuStrings {
     std::string title = "TBOT";
     std::string subtitle = "Chọn ứng dụng";
@@ -15,26 +15,26 @@ struct MenuStrings {
     std::string game = "Trò chơi";
     std::string music = "Âm nhạc";
     std::string music_empty = "Không có nhạc trên thẻ";
-    std::string left_right_hint = "Trái/Phải: đổi lựa chọn";
+    std::string left_right_hint = "Trái/phải: đổi lựa chọn";
     std::string both_hint = "Chạm cả hai: chọn";
     std::string hold_hint = "Giữ cả hai 3 giây: về menu";
     std::string slave_ok = "Slave: OK";
-    std::string slave_wait = "Slave: đợi kết nối";
+    std::string slave_wait = "Slave: chờ kết nối";
     std::string sd_ok = "Thẻ nhớ: OK";
     std::string sd_fail = "Thẻ nhớ: không có";
-    bool from_sd = false;   // true neu doc duoc config tu SD
+    bool from_sd = false;   // true nếu đọc được cấu hình từ thẻ nhớ
 };
 
 MenuStrings MenuLoadStrings();
 
-// SFX menu (PCM 16-bit mono 24kHz). Vector rong = file loi/khong co.
+// Âm thanh menu (PCM 16-bit mono 24 kHz). Vector rỗng nếu tệp lỗi hoặc không có.
 struct MenuSounds {
-    std::vector<int16_t> move;          // LEFT/RIGHT doi lua chon
-    std::vector<int16_t> select;        // BOTH_CLICK chon app
-    std::vector<int16_t> back;          // BOTH_HOLD ve menu
-    std::vector<int16_t> open_chatbox;  // vao Chatbox
-    std::vector<int16_t> open_game;     // vao Game
-    std::vector<int16_t> error;         // input khong hop le
+    std::vector<int16_t> move;          // LEFT/RIGHT đổi lựa chọn
+    std::vector<int16_t> select;        // BOTH_CLICK chọn ứng dụng
+    std::vector<int16_t> back;          // BOTH_HOLD về menu
+    std::vector<int16_t> open_chatbox;  // vào Trò chuyện
+    std::vector<int16_t> open_game;     // vào Trò chơi
+    std::vector<int16_t> error;         // thao tác không hợp lệ
     bool loaded = false;
 };
 

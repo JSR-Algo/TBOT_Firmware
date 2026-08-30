@@ -3556,7 +3556,7 @@ void Application::InitializeProtocol() {
                 // ResetDecoder — that cut the final 200-500ms of every response
                 // because the server sends `tts state=stop` immediately after
                 // audio_end while the playback queue still holds buffered frames.
-                // User reported: "phản hồi không ổn định chưa trả lời hết cầu
+                // User reported: "phản hồi không ổn định chưa trả lời hết câu
                 // chuyển sang đang lắng nghe". Normal stops rely on natural queue
                 // drain; only the interrupt branch above cuts early.
                 Schedule([this, force_continue_listening, force_realtime_listen,

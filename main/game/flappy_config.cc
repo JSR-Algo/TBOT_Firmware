@@ -159,6 +159,6 @@ void FlappyAssetsProbeAndLog() {
             ESP_LOGW(TAG, "ASSET REPORT: %-11s MISSING -> fallback primitive", a.name);
         }
     }
-    ESP_LOGI(TAG, "ASSET REPORT: %d/%d sprite san sang; game dang chay primitive "
+    ESP_LOGI(TAG, "ASSET REPORT: %d/%d sprite sẵn sàng; game đang chạy primitive "
                   "(decode BMP se bat o buoc sau)", ok, (int)(sizeof(assets)/sizeof(assets[0])));
 }

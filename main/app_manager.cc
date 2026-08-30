@@ -191,6 +191,15 @@ lv_obj_t* MakeLabel(lv_obj_t* parent, const char* text, uint32_t color) {
     return l;
 }
 
+lv_obj_t* MakeHintLabel(lv_obj_t* parent, const char* text, int bottom_offset) {
+    lv_obj_t* hint = MakeLabel(parent, text, 0x667085);
+    lv_obj_set_width(hint, 440);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, bottom_offset);
+    return hint;
+}
+
 void UpdateMenuSelection() {
     for (int i = 0; i < kMenuCount; ++i) {
         if (g_menu_box[i] == nullptr) {
@@ -225,7 +234,7 @@ void BuildMenu() {
         g_menu_strings.chatbox.c_str(),
         g_menu_strings.game.c_str(),
         g_menu_strings.music.c_str(),
-        "Tốc độ",   // literal: khong them std::string member (tiet kiem SRAM noi luc boot)
+        "Tốc độ",   // Dùng chuỗi trực tiếp để tiết kiệm SRAM khi khởi động.
     };
     const int box_x[kMenuCount] = { -171, -57, 57, 171 };
     for (int i = 0; i < kMenuCount; ++i) {
@@ -570,11 +579,10 @@ void BuildMusic() {
     }
 
     g_music_state_label = MakeLabel(g_overlay, "", 0x98A2B3);
-    lv_obj_align(g_music_state_label, LV_ALIGN_BOTTOM_MID, 0, -30);
+    lv_obj_align(g_music_state_label, LV_ALIGN_BOTTOM_MID, 0, -60);
 
-    lv_obj_t* hint = MakeLabel(g_overlay,
-        "Trai/Phai: doi bai   Cham 2 nut: phat/dung   Giu 3s: menu", 0x667085);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -8);
+    MakeHintLabel(g_overlay,
+        "Trái/phải: đổi bài   Chạm hai nút: phát/dừng\nGiữ 3 giây: menu", -8);
 
     UpdateMusicList();
 }
@@ -668,9 +676,8 @@ void BuildSpeed() {
     lv_obj_clear_flag(g_speed_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_align(g_speed_bar, LV_ALIGN_LEFT_MID, 0, 0);
 
-    lv_obj_t* hint = MakeLabel(g_overlay,
-        "Trái: chậm   Phải: nhanh   Chạm 2 nút: đặt lại 100%   Giữ 3s: menu", 0x667085);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -14);
+    MakeHintLabel(g_overlay,
+        "Trái: chậm   Phải: nhanh   Hai nút: 100%\nGiữ 3 giây: menu", -14);
 
     UpdateSpeedUI();
 }
@@ -805,7 +812,7 @@ void AppHandleMenuHold() {
     SwitchToInternal(AppMode::Menu);
 }
 
-// RIGHT hold 3s (slave EVT:RIGHT_HOLD_3S): doi Wi-Fi, giu claim.
+// Giữ nút phải 3 giây (slave EVT:RIGHT_HOLD_3S): đổi Wi-Fi, giữ claim.
 // Tuong duong BOOT double-click tren main board (lab). Co the goi tu moi AppMode.
 void AppHandleRightHold() {
     auto& app = Application::GetInstance();
