@@ -192,18 +192,21 @@ def test_async_claim_provisioning_token_is_blufi_guarded_with_non_blufi_fallback
 
     task = function_body(app, "void Application::ClaimConfirmationTask")
     assert "const auto provisioning_token = ctx->provisioning_token;" in task
-    assert "ApplyPendingTbotClaimConfirmationResult(effective_result, provisioning_token)" in task
+    assert "ApplyPendingTbotClaimConfirmationResult(" in task
+    assert "effective_result, provisioning_token, defer_successful_teardown" in task
 
     result_handler = function_body(
         app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
-    assert (
-        "#else\n"
-        "    StopBleAdvertising();\n"
-        "#endif"
-    ) in result_handler
+    stop = result_handler.index("StopBleAdvertising();")
+    non_blufi = result_handler[
+        result_handler.rindex("#else", 0, stop) : result_handler.index("#endif", stop)
+    ]
+    assert "if (!defer_successful_teardown)" in non_blufi
+    assert "StopBleAdvertising();" in non_blufi
 
-    assert app.count('"claim_confirmed", provisioning_token') == 1
+    assert result_handler.count('"claim_confirmed", provisioning_token') == 1
+    assert task.count('"claim_confirmed", provisioning_token') == 1
 
 
 def test_claim_confirmation_passes_the_originating_token_into_result_application():
@@ -216,7 +219,8 @@ def test_claim_confirmation_passes_the_originating_token_into_result_application
     assert "WakeWordLifecycleController::ProvisioningToken provisioning_token" in header
     assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm
     assert "CaptureProvisioningSession()" in dispatch
-    assert "ApplyPendingTbotClaimConfirmationResult(effective_result, provisioning_token)" in task
+    assert "ApplyPendingTbotClaimConfirmationResult(" in task
+    assert "effective_result, provisioning_token, defer_successful_teardown" in task
 
 
 def test_network_connected_is_not_a_teardown_or_rearm_owner():

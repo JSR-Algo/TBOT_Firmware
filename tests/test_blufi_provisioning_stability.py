@@ -1348,6 +1348,31 @@ def test_fw21h_generation_flows_through_claim_network_contexts_and_result_apply(
     assert "claim_confirm_inflight_" in header
 
 
+def test_fw21h_generation_bound_claim_confirm_defers_ble_teardown_until_after_gate():
+    application = read("main/application.cc")
+    task = _function_body(application, "void Application::ClaimConfirmationTask")
+    result_handler = _function_body(
+        application, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+
+    gate = task.index("Blufi::GetInstance().RunIfSetupGenerationCurrent(")
+    gate_end = task.index("});", gate)
+    teardown = task.index(
+        "Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(", gate_end
+    )
+
+    assert "apply_result(true)" in task[gate:gate_end]
+    assert "CompleteSuccessfulProvisioningTeardown" not in task[gate:gate_end]
+    assert "StopBleAdvertising" not in task[gate:gate_end]
+    assert gate < gate_end < teardown
+    assert '"claim_confirmed", provisioning_token' in task[teardown:teardown + 180]
+
+    confirmed = result_handler[result_handler.index("CancelClaimExpiryTimer();") :]
+    defer_guard = confirmed.index("if (!defer_successful_teardown)")
+    owned_teardown = confirmed.index("CompleteSuccessfulProvisioningTeardown(", defer_guard)
+    assert defer_guard < owned_teardown
+
+
 # ---------------------------------------------------------------------------
 # FW21i: the legacy authenticated-status worker is generation-owned too. Start,
 #        secret snapshot, and result application serialize on the finalization
