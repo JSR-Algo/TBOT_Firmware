@@ -237,6 +237,16 @@ def test_rpt7_retry_count_equals_kmaxattempts():
     assert 'ESP_LOGE(TAG, "All %d provisioning report attempts failed", kMaxAttempts);' in src
 
 
+def test_rpt8_authenticated_response_is_persisted_before_report_success():
+    src = read(REPORTER)
+    body = _report_fn_body(src)
+
+    assert 'resp_body = http->ReadAll();' in body
+    persist_idx = body.index('PersistProvisioningCredentialResponse(resp_body)')
+    success_idx = body.index('return true;', persist_idx)
+    assert persist_idx < success_idx
+
+
 # ---------------------------------------------------------------------------
 # RPT8: Report() returns true ONLY on a 2xx status code. Every other exit
 #       (empty token, retries exhausted) returns false; non-2xx never returns
@@ -281,7 +291,7 @@ def test_rpt8_returns_true_only_on_2xx():
     # A non-2xx status reads the response body and falls through to retry/fail —
     # it never returns true. The failure-log/will-retry marker sits AFTER the
     # success return, confirming non-2xx does not short-circuit to success.
-    fail_marker = body.index("will retry")
+    fail_marker = body.index("Provisioning status report failed")
     assert success_return < fail_marker, (
         "the success return must precede the non-2xx retry path"
     )

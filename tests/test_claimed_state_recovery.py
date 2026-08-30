@@ -39,6 +39,11 @@ def test_is_device_claimed_recovers_from_backend_credentials():
     assert 'backend_settings.GetString("device_secret")' in body
     assert "!device_id.empty() && !device_secret.empty()" in body
 
+    # A stale marker after an operator/backend unpair must never bypass the
+    # credential check and strand the robot in a fake claimed/offline state.
+    assert 'if (claim_state.GetInt("confirmed", 0) != 0)' not in body
+    assert "claim_confirmed && (device_id.empty() || device_secret.empty())" in body
+
 
 def test_refresh_claim_fsm_exits_early_on_recovered_claim_signal():
     source = SOURCE.read_text(encoding="utf-8")
@@ -59,3 +64,77 @@ def test_refresh_claim_fsm_exits_early_on_recovered_claim_signal():
     assert "StopClaimPoll();" in recovered_branch
     assert "StopBleAdvertising();" in recovered_branch
     assert "EnsureBleAdvertisingForStandby();" not in recovered_branch
+
+
+def test_claimed_reboot_starts_management_heartbeat_when_activation_reaches_idle():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleActivationDoneEvent")
+
+    idle = body.index("SetDeviceState(kDeviceStateIdle);")
+    claimed = body.index("if (ShouldKeepManagementHeartbeat())", idle)
+    start = body.index("StartHeartbeat();", claimed)
+    dispatch = body.index("DispatchDeviceHeartbeat();", start)
+
+    assert idle < claimed < start < dispatch
+
+
+def test_reboot_migrates_pre_fix_revoked_claim_into_wifi_setup():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = function_body(source, "void Application::HandleActivationDoneEvent")
+
+    # Older firmware cleared only device_secret on heartbeat 401, leaving a
+    # device_id/factory-test token combination that looked claimed forever.
+    stale_gate = "HasStaleRevokedClaimIdentity()"
+    assert stale_gate in body
+    assert "HandleHeartbeatAuthFailure(401);" in body
+    assert body.index(stale_gate) < body.index("SetDeviceState(kDeviceStateIdle);")
+    assert body.index("HandleHeartbeatAuthFailure(401);") < body.index(
+        "SetDeviceState(kDeviceStateIdle);"
+    )
+
+    header = (ROOT / "main/application.h").read_text(encoding="utf-8")
+    assert "bool HasStaleRevokedClaimIdentity() const;" in header
+
+    helper = function_body(source, "bool Application::HasStaleRevokedClaimIdentity")
+    assert 'backend_settings.GetString("device_id")' in helper
+    assert 'backend_settings.GetString("device_secret")' in helper
+    assert 'claim_state.GetInt("confirmed", 0)' in helper
+
+
+def test_unclaimed_reboot_restores_ble_when_token_claim_fetch_is_busy():
+    source = SOURCE.read_text(encoding="utf-8")
+    body = function_body(source, "void Application::RefreshPendingTbotClaim")
+
+    token_ble = body[
+        body.index("!pending_tbot_claim_.active && !token.empty()") :
+        body.index("#endif", body.index("!pending_tbot_claim_.active && !token.empty()"))
+    ]
+    assert "StopBleAdvertising();" in token_ble
+    assert "paused_ble_for_fetch = true;" in token_ble
+
+    dispatch = body[body.index("const bool claim_fetch_dispatched") :]
+    assert "if (paused_ble_for_fetch && !claim_fetch_dispatched)" in dispatch
+    assert "EnsureBleAdvertisingForStandby();" in dispatch
+
+
+def test_bootstrap_token_claim_preempts_passive_websocket_and_keeps_retrying():
+    source = SOURCE.read_text(encoding="utf-8")
+    refresh = function_body(source, "void Application::RefreshPendingTbotClaim")
+    direct = function_body(
+        source, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+
+    dispatch_at = refresh.index("const bool claim_fetch_dispatched")
+    pre_dispatch = refresh[:dispatch_at]
+    assert "if (!token.empty() && passive_ws_intent_.load())" in pre_dispatch
+    assert "CloseAudioChannelByIntent();" in pre_dispatch
+
+    failed = refresh[refresh.index("if (paused_ble_for_fetch && !claim_fetch_dispatched)") :]
+    assert "EnsureBleAdvertisingForStandby();" in failed
+    assert "StartClaimPoll();" in failed
+    assert "StopClaimPoll();" not in failed[: failed.index("}")]
+
+    direct_failed = direct[direct.index("if (!dispatched)") :]
+    assert "if (!token.empty() && passive_ws_intent_.load())" in direct
+    assert "CloseAudioChannelByIntent();" in direct
+    assert "StartClaimPoll();" in direct_failed

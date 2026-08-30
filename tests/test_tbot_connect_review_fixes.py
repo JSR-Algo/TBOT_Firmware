@@ -70,6 +70,17 @@ def test_claim_and_device_config_http_clients_cap_blocking_open_to_5s():
     assert confirm_body.index("http->SetTimeout(5000);") < confirm_body.index('http->Open("POST", url)')
 
 
+def test_shared_http_client_avoids_lazy_iostream_locale_initialization():
+    source = read("components/esp-ml307/src/http_client.cc")
+
+    # OTA, claim and heartbeat requests may begin on separate FreeRTOS tasks.
+    # ESP libstdc++ lazy locale initialization can corrupt the heap when their
+    # first stringstream constructions race, so this shared client stays locale-free.
+    assert "#include <sstream>" not in source
+    assert "std::ostringstream" not in source
+    assert "std::istringstream" not in source
+
+
 # ---------------------------------------------------------------------------
 # H1 — ConfirmTimeout is not a dead-end (button tap -> AvailableStandby)
 # ---------------------------------------------------------------------------
@@ -116,9 +127,8 @@ def test_heartbeat_is_stopped_on_network_loss_and_setup_entry():
     assert "StopHeartbeat();" in wifi_case
 
 
-def test_heartbeat_is_stopped_on_backend_error_and_started_only_on_connect():
+def test_backend_error_preserves_only_claimed_idle_management_heartbeat():
     source = read("main/application.cc")
-    # OnNetworkError stops it; OnConnected (re)starts it on the non-lesson path.
     proto_start = source.index("protocol_->OnConnected(")
     network_error_start = source.index("protocol_->OnNetworkError(", proto_start)
     incoming_audio_start = source.index("protocol_->OnIncomingAudio(", network_error_start)
@@ -127,8 +137,13 @@ def test_heartbeat_is_stopped_on_backend_error_and_started_only_on_connect():
 
     assert "StartHeartbeat();" in connected
     assert "DispatchDeviceHeartbeat();" in connected
+    assert "ShouldKeepManagementHeartbeat()" in network_error
+    assert "StartHeartbeat();" in network_error
+    assert "DispatchDeviceHeartbeat();" in network_error
     assert "StopHeartbeat();" in network_error
-    assert "StartHeartbeat();" not in network_error
+    assert network_error.index("ShouldKeepManagementHeartbeat()") < network_error.index(
+        "StartHeartbeat();"
+    ) < network_error.index("StopHeartbeat();")
 
 
 def test_heartbeat_sender_is_gated_on_a_live_online_device_state():
@@ -144,7 +159,7 @@ def test_heartbeat_sender_is_gated_on_a_live_online_device_state():
     assert dispatch_body.index("kDeviceStateSpeaking") < dispatch_body.index("xQueueSend")
 
 
-def test_heartbeat_auth_failure_clears_stale_claim_credentials_and_reopens_setup():
+def test_heartbeat_auth_failure_clears_stale_claim_credentials_and_reboots_into_setup():
     source = read("main/application.cc")
     header = read("main/application.h")
     heartbeat_task_body = function_body(source, "void Application::HeartbeatTask")
@@ -167,9 +182,11 @@ def test_heartbeat_auth_failure_clears_stale_claim_credentials_and_reopens_setup
     assert "claim_substate_ = TbotClaimSubstate::AvailableStandby;" in recovery_body
     assert "StopHeartbeat();" in recovery_body
     assert "CloseAudioChannelByIntent();" in recovery_body
-    assert "EnsureBleAdvertisingForStandby();" in recovery_body
-    assert "StartClaimPoll();" in recovery_body
-    assert "RenderClaimSubstate(claim_substate_);" in recovery_body
+    assert 'backend_settings.SetString("device_id", "");' in recovery_body
+    assert 'websocket_settings.SetString("token", "");' in recovery_body
+    assert 'websocket_settings.SetString("url", "");' in recovery_body
+    assert "SsidManager::GetInstance().Clear();" in recovery_body
+    assert "esp_restart();" in recovery_body
 
 # ---------------------------------------------------------------------------
 # H3 — all-21 mapper routing in HandleStateChangedEvent (text-scrapable)

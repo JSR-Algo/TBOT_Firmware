@@ -57,3 +57,23 @@ def test_repair_flow_shows_initializing_before_wifi_is_cleared_and_robot_restart
         "SsidManager::GetInstance().Clear();"
     )
     assert body.index("SsidManager::GetInstance().Clear();") < body.index("esp_restart();")
+
+
+def test_heartbeat_revocation_forgets_identity_and_wifi_then_reboots_into_setup():
+    source = app_source()
+    start = source.index("void Application::HandleHeartbeatAuthFailure")
+    end = source.index("void Application::EnterRepairPairingMode", start)
+    body = source[start:end]
+
+    # A heartbeat 401/403 after mobile unpair is the robot's durable remote-unpair
+    # signal. No stale identity or saved network may survive the automatic reboot.
+    assert 'backend_settings.SetString("device_id", "");' in body
+    assert 'backend_settings.SetString("device_secret", "");' in body
+    assert 'websocket_settings.SetString("token", "");' in body
+    assert 'websocket_settings.SetString("url", "");' in body
+    assert "SsidManager::GetInstance().Clear();" in body
+    assert "esp_restart();" in body
+    assert body.index('backend_settings.SetString("device_secret", "");') < body.index(
+        "SsidManager::GetInstance().Clear();"
+    )
+    assert body.index("SsidManager::GetInstance().Clear();") < body.index("esp_restart();")

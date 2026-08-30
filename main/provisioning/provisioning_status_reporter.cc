@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 
 #include "board.h"
+#include "claim_confirmation_reporter.h"
 #include "system_info.h"
 #include "settings.h"
 
@@ -37,6 +38,7 @@ bool ProvisioningStatusReporter::Report(Status status,
     if (status == Status::DeviceAuthenticated) {
         cJSON_AddStringToObject(root, "status", "device_authenticated");
         cJSON_AddStringToObject(root, "code", code.c_str());
+        cJSON_AddBoolToObject(root, "credential_response", true);
     } else {
         cJSON_AddStringToObject(root, "status", "failed");
         const std::string r = reason.empty() ? "wifi_connect_failed" : reason;
@@ -112,15 +114,18 @@ bool ProvisioningStatusReporter::Report(Status status,
         }
 
         int status_code = http->GetStatusCode();
-        std::string resp_body;
-        if (status_code < 200 || status_code >= 300) {
-            resp_body = http->ReadAll();
-        }
+        std::string resp_body = http->ReadAll();
         http->Close();
 
         ESP_LOGI(TAG, "Report response attempt=%d status_code=%d", attempt + 1, status_code);
 
         if (status_code >= 200 && status_code < 300) {
+            if (status == Status::DeviceAuthenticated &&
+                !PersistProvisioningCredentialResponse(resp_body)) {
+                ESP_LOGW(TAG,
+                         "Provisioning authenticated response did not contain valid credentials; will retry");
+                continue;
+            }
             ESP_LOGI(TAG, "Provisioning status reported successfully (HTTP %d)", status_code);
             return true;
         }

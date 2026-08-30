@@ -166,6 +166,26 @@ def test_unclaimed_passive_websocket_success_does_not_rearm_wake_word_or_deferre
         assert passive_success.index("self->IsDeviceClaimed()") < passive_success.index(wake_action)
 
 
+def test_claimed_passive_websocket_keeps_management_heartbeat_online():
+    source = read("main/application.cc")
+    opened = source[
+        source.index("protocol_->OnAudioChannelOpened") :
+        source.index("protocol_->OnAudioChannelClosed")
+    ]
+    passive_opened = opened[
+        opened.index("if (passive_ws_intent_.load())") : opened.index("} else {")
+    ]
+
+    assert "if (IsDeviceClaimed() && !lesson_runtime_active_.load())" in passive_opened
+    claimed = passive_opened[
+        passive_opened.index("if (IsDeviceClaimed() && !lesson_runtime_active_.load())") :
+    ]
+    assert "StartHeartbeat();" in claimed
+    assert "DispatchDeviceHeartbeat();" in claimed
+    assert claimed.index("StartHeartbeat();") < claimed.index("DispatchDeviceHeartbeat();")
+    assert "StopHeartbeat();" in passive_opened
+
+
 def test_unclaimed_protocol_selection_can_use_persisted_or_compile_time_websocket_url_without_ota():
     initialize = function_body(read("main/application.cc"), "void Application::InitializeProtocol")
     selection = initialize[:initialize.index("protocol_generation_.fetch_add")]

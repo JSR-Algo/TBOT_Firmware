@@ -442,7 +442,8 @@ bool RefreshWebsocketUrlFromConfigFetch() {
     return true;
 }
 
-static bool ProcessTbotClaimConfirmationResponse(const std::string& json, bool persist) {
+static bool ProcessTbotClaimConfirmationResponse(const std::string& json, bool persist,
+                                                 bool require_api_url = false) {
     cJSON* root = cJSON_Parse(json.c_str());
     if (root == nullptr) {
         return false;
@@ -451,12 +452,13 @@ static bool ProcessTbotClaimConfirmationResponse(const std::string& json, bool p
     cJSON* device_id = cJSON_GetObjectItem(root, "device_id");
     cJSON* device_secret = cJSON_GetObjectItem(root, "device_secret");
     cJSON* ws_url = cJSON_GetObjectItem(root, "ws_url");
+    cJSON* api_url = cJSON_GetObjectItem(root, "api_url");
     const auto is_nonempty_string = [](const cJSON* item) {
         return cJSON_IsString(item) && item->valuestring != nullptr &&
                item->valuestring[0] != '\0';
     };
     if (!is_nonempty_string(device_id) || !is_nonempty_string(device_secret) ||
-        !is_nonempty_string(ws_url)) {
+        !is_nonempty_string(ws_url) || (require_api_url && !is_nonempty_string(api_url))) {
         cJSON_Delete(root);
         return false;
     }
@@ -468,6 +470,9 @@ static bool ProcessTbotClaimConfirmationResponse(const std::string& json, bool p
         Settings backend_settings("backend", true);
         backend_settings.SetString("device_id", device_id->valuestring);
         backend_settings.SetString("device_secret", device_secret->valuestring);
+        if (is_nonempty_string(api_url)) {
+            backend_settings.SetString("api_url", api_url->valuestring);
+        }
 
         // Mark the device claimed with a DEDICATED flag. websocket "token" alone is
         // NOT a reliable claimed-signal: the OTA CheckVersion response also writes
@@ -482,6 +487,10 @@ static bool ProcessTbotClaimConfirmationResponse(const std::string& json, bool p
 
 bool PersistTbotClaimConfirmationResponse(const std::string& json) {
     return ProcessTbotClaimConfirmationResponse(json, true);
+}
+
+bool PersistProvisioningCredentialResponse(const std::string& json) {
+    return ProcessTbotClaimConfirmationResponse(json, true, true);
 }
 
 static std::string ExtractTbotClaimErrorSummary(const std::string& response_body) {

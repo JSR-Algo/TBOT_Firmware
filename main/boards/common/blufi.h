@@ -92,7 +92,7 @@ public:
     /**
      * @brief Zeroizes bootstrap_token_ and provisioning_code_ (call after successful report).
      */
-    void ClearProvisioningSecrets();
+    void ClearProvisioningSecrets(bool preserve_claim_token = true);
 
     /**
      * @brief Arm the BLE setup hard-timeout timer.

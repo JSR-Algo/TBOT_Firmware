@@ -304,7 +304,7 @@ def test_fw6_successful_report_clears_secrets():
     assert ok_idx < clear_idx
 
     # ClearProvisioningSecrets actually zeroizes + clears both secrets.
-    clear_def = blufi.index("void Blufi::ClearProvisioningSecrets()")
+    clear_def = blufi.index("void Blufi::ClearProvisioningSecrets(bool preserve_claim_token)")
     clear_body = blufi[clear_def:blufi.index("\n}", clear_def)]
     assert "bootstrap_token_.clear();" in clear_body
     assert "provisioning_code_.clear();" in clear_body
@@ -717,7 +717,7 @@ def test_fw15_authenticated_report_is_level_triggered_on_all_inputs():
     # exactly what makes an out-of-order arrival harmless (it retries later).
     body = _try_report_body()
     guard_idx = body.index(
-        "if (!wifi_connected || token_empty || code_empty || report_in_flight)"
+        "if (!m_provisioned || !wifi_connected || token_empty || code_empty || report_in_flight)"
     )
     early_return = body.index("return;", guard_idx)
     # The BLE-active defer block + the report task must come AFTER the guard.
@@ -729,10 +729,9 @@ def test_fw15_authenticated_report_is_level_triggered_on_all_inputs():
 
 
 # ---------------------------------------------------------------------------
-# FW16: blufi.cpp — the precondition guard must require ALL FOUR of:
-#       wifi_connected, token present, code present, and no report already in
-#       flight. Dropping any one of these either leaks a credential report with
-#       a missing piece, or double-fires the network POST.
+# FW16: blufi.cpp — the precondition guard requires a completed credential
+#       transaction, wifi_connected, token present, code present, and no report
+#       already in flight. A previously connected network is not provisioning.
 # ---------------------------------------------------------------------------
 def test_fw16_authenticated_report_requires_wifi_token_code_and_not_in_flight():
     body = _try_report_body()
@@ -742,11 +741,11 @@ def test_fw16_authenticated_report_requires_wifi_token_code_and_not_in_flight():
     assert "const bool token_empty = bootstrap_token_.empty();" in body
     assert "const bool code_empty = provisioning_code_.empty();" in body
 
-    # The single guard combines all four with OR of the negatives.
+    # The single guard combines all five with OR of the negatives.
     assert (
-        "if (!wifi_connected || token_empty || code_empty || report_in_flight)"
+        "if (!m_provisioned || !wifi_connected || token_empty || code_empty || report_in_flight)"
         in body
-    ), "the report must be gated on wifi+token+code+not-in-flight together"
+    ), "the report must be gated on new provisioning+wifi+token+code+not-in-flight"
 
     # The skip log must NOT format any secret value — only booleans/reason.
     skip_log_start = body.index("Reporting provisioning authenticated skipped")
@@ -1312,12 +1311,12 @@ def test_fw21j_custom_data_callback_is_nonblocking_and_application_owned():
     scheduled = blufi[blufi.index("Application::GetInstance().Schedule(", blufi.index("BlufiCustomDataSnapshot snapshot")) :]
     gate_idx = scheduled.index("RunIfSetupGenerationCurrent(")
     device_store = scheduled.index('"claim_device_id"', gate_idx)
-    token_assign = scheduled.index("bootstrap_token_.assign", device_store)
+    code_assign = scheduled.index("provisioning_code_.assign", device_store)
+    token_assign = scheduled.index("bootstrap_token_.assign", code_assign)
     token_store = scheduled.index('"bootstrap_token"', token_assign)
-    code_assign = scheduled.index("provisioning_code_.assign", token_store)
-    report_idx = scheduled.index("TryReportProvisioningAuthenticated(", code_assign)
+    report_idx = scheduled.index("TryReportProvisioningAuthenticated(", token_store)
     clear_idx = scheduled.index("secure_context->Clear();", report_idx)
-    assert gate_idx < device_store < token_assign < token_store < code_assign < report_idx < clear_idx
+    assert gate_idx < device_store < code_assign < token_assign < token_store < report_idx < clear_idx
 
 
 # ---------------------------------------------------------------------------
@@ -1696,7 +1695,7 @@ def test_fw28_wifi_connect_fail_lane_resets_flags_and_reports_fail():
 def test_fw29_clear_provisioning_secrets_erases_nvs_token_and_ram():
     blufi = read("main/boards/common/blufi.cpp")
 
-    clear_def = blufi.index("void Blufi::ClearProvisioningSecrets()")
+    clear_def = blufi.index("void Blufi::ClearProvisioningSecrets(bool preserve_claim_token)")
     clear_body = blufi[clear_def:blufi.index("\n}", clear_def)]
 
     # RAM zeroize + clear must remain (the existing FW6 behavior is preserved).
@@ -1752,7 +1751,7 @@ def test_fw30_nvs_token_erase_is_success_only_not_on_retain_path():
         "failure/retain lane"
     )
     erase_idx = blufi.index('EraseKey("bootstrap_token")')
-    clear_def = blufi.index("void Blufi::ClearProvisioningSecrets()")
+    clear_def = blufi.index("void Blufi::ClearProvisioningSecrets(bool preserve_claim_token)")
     clear_end = blufi.index("\n}", clear_def)
     assert clear_def < erase_idx < clear_end, (
         "the NVS erase must be scoped inside ClearProvisioningSecrets(), which is "
@@ -2189,3 +2188,19 @@ def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():
     assert "teardown_failed_.load()" in poison_guard
     assert "return ESP_ERR_INVALID_STATE;" in poison_guard
     assert "init();" not in poison_guard
+
+
+def test_fw46_station_stop_discards_stale_credential_snapshots():
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    stop = _function_body(station, "void WifiStation::Stop")
+
+    # Scan results copy passwords into connect_queue_. A new provisioning
+    # transaction for the same SSID must never consume a queued password from
+    # the previous station session and then commit the newly staged password.
+    assert "for (auto& record : connect_queue_)" in stop
+    assert "std::fill(record.password.begin(), record.password.end(), '\\0');" in stop
+    assert "connect_queue_.clear();" in stop
+
+    clear_idx = stop.index("connect_queue_.clear();")
+    stopped_idx = stop.index("xEventGroupSetBits(event_group_, WIFI_EVENT_STOPPED)")
+    assert clear_idx < stopped_idx

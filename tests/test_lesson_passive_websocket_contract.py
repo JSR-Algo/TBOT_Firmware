@@ -61,12 +61,36 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
     assert "SetDeviceState(kDeviceStateListening)" not in passive
     assert "if (passive_ws_intent_.load())" in opened
     passive_opened = opened[opened.index("if (passive_ws_intent_.load())") : opened.index("} else {")]
-    assert "StartHeartbeat" not in passive_opened
-    assert "DispatchDeviceHeartbeat" not in passive_opened
+    assert "SetDeviceState(kDeviceStateListening)" not in passive_opened
+    assert "if (IsDeviceClaimed() && !lesson_runtime_active_.load())" in passive_opened
+    assert "StartHeartbeat();" in passive_opened
+    assert "DispatchDeviceHeartbeat();" in passive_opened
     assert "EnableWakeWordDetection(true)" not in passive_opened
     assert "online_intent_.store(true)" in opened
     assert "online_intent_.store(true)" in set_listening
     assert "passive_ws_intent_.store(false)" in set_listening
+
+
+def test_claimed_idle_management_heartbeat_survives_passive_websocket_churn():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    initialize = function_body(source, "void Application::InitializeProtocol")
+
+    assert "bool ShouldKeepManagementHeartbeat() const;" in header
+    assert "bool Application::ShouldKeepManagementHeartbeat() const" in source
+
+    network_error = initialize[
+        initialize.index("protocol_->OnNetworkError") :
+        initialize.index("protocol_->OnIncomingAudio")
+    ]
+    closed = initialize[
+        initialize.index("protocol_->OnAudioChannelClosed") :
+        initialize.index("protocol_->OnIncomingJson")
+    ]
+    for callback in (network_error, closed):
+        assert "ShouldKeepManagementHeartbeat()" in callback
+        assert "StartHeartbeat();" in callback
+        assert "StopHeartbeat();" in callback
 
 
 def test_claimed_activation_defers_wake_until_passive_websocket_success():
@@ -417,6 +441,9 @@ def test_passive_lesson_socket_connect_failure_retries_passively():
     assert "passive_reconnect_attempt_" in header
     assert "SchedulePassiveLessonReconnect();" in passive_failure
     assert "ScheduleReconnect" not in passive_failure
+    assert "ShouldKeepManagementHeartbeat()" in passive_failure
+    assert "StartHeartbeat();" in passive_failure
+    assert "DispatchDeviceHeartbeat();" in passive_failure
     assert "StartPassiveLessonWebsocket();" in reconnect_tick
     assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
     assert "passive_lesson_reconnect_scheduled" in passive_scheduler

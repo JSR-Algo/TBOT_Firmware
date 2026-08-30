@@ -1350,7 +1350,10 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
     }
 
     Settings websocket_settings("websocket", false);
-    if (!websocket_settings.GetString("claim_device_id").empty()) {
+    const bool zero_code_claim_flow =
+        !websocket_settings.GetString("claim_device_id").empty() &&
+        provisioning_code_.empty();
+    if (zero_code_claim_flow) {
         // The mobile claim flow uses the same single-use bootstrap token for
         // /claim/confirm. Do not spend it on the legacy provisioning-status
         // report first, or the robot can fetch a pending claim but then fail the
@@ -1367,11 +1370,11 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
     const auto ble_state = GetBleState();
 
     const bool report_in_flight = provisioning_report_owner_generation_.has_value();
-    if (!wifi_connected || token_empty || code_empty || report_in_flight) {
+    if (!m_provisioned || !wifi_connected || token_empty || code_empty || report_in_flight) {
         ESP_LOGI(BLUFI_TAG,
-                 "Reporting provisioning authenticated skipped: reason=%s wifi_connected=%d token_empty=%d code_empty=%d in_flight=%d",
-                 reason ? reason : "unknown", (int)wifi_connected, (int)token_empty,
-                 (int)code_empty, (int)report_in_flight);
+                 "Reporting provisioning authenticated skipped: reason=%s wifi_provisioned=%d wifi_connected=%d token_empty=%d code_empty=%d in_flight=%d",
+                 reason ? reason : "unknown", (int)m_provisioned, (int)wifi_connected,
+                 (int)token_empty, (int)code_empty, (int)report_in_flight);
         return;
     }
 
@@ -1439,6 +1442,8 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
                     if (ok) {
                         ESP_LOGI(BLUFI_TAG, "Provisioning report succeeded after BLE teardown");
                         self->ClearProvisioningSecrets();
+                        Application::GetInstance().SchedulePendingTbotClaimRefresh(
+                            expected_generation);
                     } else {
                         ESP_LOGW(BLUFI_TAG,
                                  "Provisioning report failed after BLE teardown; secrets retained for retry");
@@ -1723,6 +1728,8 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                         continuation_lock.unlock();
                         return;
                     }
+                    const bool code_based_provisioning =
+                        !self->provisioning_code_.empty();
                     ESP_LOGI(BLUFI_TAG, "WiFi provisioned; stopping BLE before claim refresh");
                     if (!self->CompleteSuccessfulProvisioningTeardown(
                             "wifi_credentials_connected", provisioning_token)) {
@@ -1730,8 +1737,11 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                         return;
                     }
                     continuation_lock.unlock();
-                    self->TryReportProvisioningAuthenticated(
-                        "wifi_success_after_ble_teardown", generation);
+                    if (code_based_provisioning) {
+                        self->TryReportProvisioningAuthenticated(
+                            "wifi_success_after_ble_teardown", generation);
+                        return;
+                    }
                     Application::GetInstance().SchedulePendingTbotClaimRefresh(generation);
                 });
 #else
@@ -2216,6 +2226,11 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             // and is left with BLE down until the next explicit BOOT entry.
             ble_readvertise_count_ = 0;
             esp_blufi_adv_stop();
+            // Claim credentials belong to one BLE connection. A later
+            // credential-only Wi-Fi change sends no custom-data TLV, so retaining
+            // a failed prior code would misclassify it as code-based provisioning
+            // and spend an expired token on the legacy report endpoint.
+            ClearProvisioningSecrets(false);
             _security_init();
             break;
         }
@@ -2516,19 +2531,20 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                                 "claim_device_id",
                                 std::string(snapshot.device_id.data(), snapshot.device_id_len));
                         }
+                        if (has_code) {
+                            self->provisioning_code_.assign(
+                                snapshot.code.data(), snapshot.code_len);
+                        }
                         if (has_token) {
                             self->bootstrap_token_.assign(
                                 snapshot.token.data(), snapshot.token_len);
                             websocket_settings.SetString(
                                 "bootstrap_token", self->bootstrap_token_);
                             if (WifiManager::GetInstance().IsConnected() &&
-                                !self->m_sta_is_connecting.load()) {
+                                !self->m_sta_is_connecting.load() &&
+                                self->provisioning_code_.empty()) {
                                 self->ScheduleClaimRefreshAfterTokenHandoff();
                             }
-                        }
-                        if (has_code) {
-                            self->provisioning_code_.assign(
-                                snapshot.code.data(), snapshot.code_len);
                         }
                     });
                 if (applied && snapshot.device_id_len > 0) {
@@ -2669,7 +2685,14 @@ const char* Blufi::GetBleStateString() const {
     }
 }
 
-void Blufi::ClearProvisioningSecrets() {
+void Blufi::ClearProvisioningSecrets(bool preserve_claim_token) {
+#if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
+    Settings websocket_settings("websocket", true);
+    const bool zero_code_claim_flow =
+        preserve_claim_token &&
+        !websocket_settings.GetString("claim_device_id").empty() &&
+        provisioning_code_.empty();
+#endif
     // Zeroize in-place before clearing (defense-in-depth)
     if (!bootstrap_token_.empty()) {
         std::fill(bootstrap_token_.begin(), bootstrap_token_.end(), '\0');
@@ -2683,8 +2706,7 @@ void Blufi::ClearProvisioningSecrets() {
     ESP_LOGI(BLUFI_TAG, "Course-mode provisioning secrets cleared from RAM");
     return;
 #else
-    Settings websocket_settings("websocket", true);
-    if (websocket_settings.GetString("claim_device_id").empty()) {
+    if (!zero_code_claim_flow) {
         // Legacy provisioning owns this token, so a successful provisioning-status
         // report may clear the at-rest copy. In claim flow the same token is
         // single-use auth for /claim/confirm; only the claim terminal path may
