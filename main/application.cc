@@ -4860,6 +4860,7 @@ void Application::OpenChannelTask(void* arg) {
                         self->StartHeartbeat();
                         self->DispatchDeviceHeartbeat();
                     }
+                    self->RearmClaimedIdleWakeWord();
                     self->SchedulePassiveLessonReconnect();
                 } else if (wake_word_invoke) {
                     ESP_LOGW(TAG, "wake_audio_channel_open_failed -> idle");
@@ -4954,6 +4955,7 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
         if (GetDeviceState() == kDeviceStateConnecting) {
             SetDeviceState(kDeviceStateIdle);
         }
+        passive_ws_intent_.store(false);
         RearmClaimedIdleWakeWord();
         SchedulePassiveLessonReconnect();
         return;

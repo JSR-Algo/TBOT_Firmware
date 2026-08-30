@@ -111,7 +111,7 @@ def test_claimed_activation_defers_wake_until_passive_websocket_success():
     assert "audio_service_.EnableWakeWordDetection(true);" in rearm
 
 
-def test_passive_websocket_failure_keeps_wake_released_for_tls_retry():
+def test_passive_websocket_failure_restores_safe_idle_wake_before_tls_backoff():
     source = read("main/application.cc")
     open_task = function_body(source, "void Application::OpenChannelTask")
     failure_start = open_task.index('ESP_LOGW(TAG, "passive_lesson_websocket_failed")')
@@ -119,9 +119,15 @@ def test_passive_websocket_failure_keeps_wake_released_for_tls_retry():
     failure = open_task[failure_start:failure_end]
 
     assert "self->SetDeviceState(kDeviceStateIdle);" in failure
-    assert "self->RearmClaimedIdleWakeWord();" not in failure
-    assert "self->audio_service_.EnableWakeWordDetection(true);" not in failure
+    assert "self->passive_ws_intent_.store(false);" in failure
+    assert "self->RearmClaimedIdleWakeWord();" in failure
     assert "self->SchedulePassiveLessonReconnect();" in failure
+    assert failure.index("self->passive_ws_intent_.store(false);") < failure.index(
+        "self->RearmClaimedIdleWakeWord();"
+    )
+    assert failure.index("self->RearmClaimedIdleWakeWord();") < failure.index(
+        "self->SchedulePassiveLessonReconnect();"
+    )
 
 def test_passive_lesson_socket_open_promotes_pending_answer_turn_to_listening():
     source = read("main/application.cc")
