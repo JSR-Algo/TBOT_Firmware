@@ -10,9 +10,31 @@ Keep the compact payload split already used by the firmware: flags and BluFi UUI
 
 The wrapper resets its pending state for every setup initialization so a connect/deinit/reinit cycle cannot reuse stale completion bits. The change is limited to `main/boards/common/blufi.cpp` and a source-contract regression test.
 
+## Lifecycle Race Closure
+
+Treat station-association BLE release as one finalization transaction. Hold
+`provisioning_finalization_mutex_` while validating the setup generation,
+cancelling the setup timer, stopping advertising, and deinitializing BLE. This
+prevents a stale station worker from passing its generation check and then
+tearing down a newer setup lifecycle created by `RestartForSetup()`.
+
+Tag every advertising start completion that the wrapper intentionally owns,
+including the default BluFi fallback path. A fallback start from an older host
+lifecycle must never consume the queued epoch for a newer compact advertising
+start. Events without a matching active epoch remain forwarded to ESP-IDF but
+are ignored by the TBOT lifecycle state machine.
+
+The scan-mode integration must be applied hunk-by-hunk on top of current
+`main`. It may update scan initialization and diagnostic logging, but it must
+not replace the newer advertising, session binding, deferred Wi-Fi list, or
+station-association lifecycle code.
+
 ## Verification
 
 1. Demonstrate RED before implementation and GREEN after it.
 2. Run the focused BluFi, Wi-Fi provisioning, security, and redaction suites.
 3. Build the LCDWiki ESP32-S3 application and flash only offset `0x20000`.
 4. On the attached Android phone, run at least three consecutive cycles of connect, BluFi service discovery, local disconnect, and reconnect without rebooting the robot.
+5. Prove with source-contract tests that release holds the finalization lock
+   across generation validation and deinit, and that fallback advertising
+   completions carry lifecycle ownership.
