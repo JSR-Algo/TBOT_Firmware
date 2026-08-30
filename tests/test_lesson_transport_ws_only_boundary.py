@@ -133,7 +133,7 @@ def test_websocket_open_worker_reserves_one_reusable_internal_stack():
     assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in app
     assert "DRAM_ATTR StaticTask_t open_channel_task_buffer;" in app
     assert "DRAM_ATTR StaticQueue_t open_channel_queue_buffer;" in app
-    assert "DRAM_ATTR void* open_channel_queue_storage[1];" in app
+    assert "DRAM_ATTR NetworkWorkItem open_channel_queue_storage[2];" in app
     assert '"lesson_ws"' in constructor
     assert "xTaskCreateStatic" in constructor
     assert "xTaskCreateWithCaps(" not in starter

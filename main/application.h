@@ -309,8 +309,6 @@ private:
     // Heartbeat (C5): periodic POST /v1/device/heartbeat while claimed/online,
     // carrying backend DTO fields plus ble_state/ap_state/temp from board status.
     esp_timer_handle_t heartbeat_timer_ = nullptr;        // periodic, ~20s
-    QueueHandle_t heartbeat_queue_ = nullptr;
-    TaskHandle_t heartbeat_task_ = nullptr;
     bool heartbeat_active_ = false;
     std::atomic<int> deferred_heartbeat_auth_failure_status_{0};
     // "Hi ESP needs many tries" fix: single-flight guard for the off-task
@@ -513,8 +511,8 @@ private:
     // POST. Like the claim poll, run it OFF the priority-10 Application task so a
     // slow backend can never freeze the core-0 wake-word AFE feed/fetch pipeline.
     // DispatchDeviceHeartbeat() runs on the Application task (gating + body build),
-    // HeartbeatTask() does ONLY the blocking POST, and any auth-failure handling is
-    // Schedule()d back onto the Application task (OQ1: all state stays serialized).
+    // HeartbeatTask() runs one blocking POST on the shared persistent network
+    // worker, then Schedule()s auth-failure handling back onto the Application task.
     void DispatchDeviceHeartbeat();
     static void HeartbeatTask(void* arg);
     // Off-task worker body: the blocking POST. Returns the HTTP status code (0 on

@@ -97,7 +97,6 @@ static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;
 static constexpr uint64_t kConnectWatchdogTimeoutUs = 35ULL * 1000000ULL;
 static constexpr uint32_t kMaxAudioPacketsPerMainLoop = 4;
 static constexpr uint32_t kOpenChannelWorkerStackDepth = 8192;
-static constexpr uint32_t kHeartbeatWorkerStackDepth = 8192;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
 static constexpr uint32_t kLessonMessageWorkerStackDepth = 32768;
@@ -105,16 +104,22 @@ static constexpr uint32_t kLessonMessageWorkerMinimumFreeStackBytes = 4096;
 #endif
 
 namespace {
+enum class NetworkWorkKind : uint8_t {
+    kOpenChannel,
+    kHeartbeat,
+};
+
+struct NetworkWorkItem {
+    NetworkWorkKind kind;
+    void* context;
+};
+
 DRAM_ATTR StaticTask_t open_channel_task_buffer;
 DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
 DRAM_ATTR StaticQueue_t open_channel_queue_buffer;
-DRAM_ATTR void* open_channel_queue_storage[1];
+DRAM_ATTR NetworkWorkItem open_channel_queue_storage[2];
 QueueHandle_t open_channel_queue = nullptr;
 TaskHandle_t open_channel_task = nullptr;
-DRAM_ATTR StaticTask_t heartbeat_task_buffer;
-DRAM_ATTR StackType_t heartbeat_task_stack[kHeartbeatWorkerStackDepth];
-DRAM_ATTR StaticQueue_t heartbeat_queue_buffer;
-DRAM_ATTR void* heartbeat_queue_storage[1];
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 DRAM_ATTR StaticTask_t lesson_message_task_buffer;
@@ -163,9 +168,9 @@ static constexpr uint64_t kHeartbeatIntervalUs = 20ULL * 1000000ULL;  // 20s
 Application::Application() {
     event_group_ = xEventGroupCreate();
 
-    open_channel_queue =
-        xQueueCreateStatic(1, sizeof(void*), reinterpret_cast<uint8_t*>(open_channel_queue_storage),
-                           &open_channel_queue_buffer);
+    open_channel_queue = xQueueCreateStatic(
+        2, sizeof(NetworkWorkItem), reinterpret_cast<uint8_t*>(open_channel_queue_storage),
+        &open_channel_queue_buffer);
     if (open_channel_queue != nullptr) {
         open_channel_task = xTaskCreateStatic(
             &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackDepth, this,
@@ -2599,24 +2604,9 @@ void Application::StartHeartbeat() {
     if (heartbeat_active_) {
         return;
     }
-    if (heartbeat_queue_ == nullptr) {
-        heartbeat_queue_ = xQueueCreateStatic(
-            1, sizeof(void*), reinterpret_cast<uint8_t*>(heartbeat_queue_storage),
-            &heartbeat_queue_buffer);
-        if (heartbeat_queue_ == nullptr) {
-            ESP_LOGE(TAG, "Failed to create heartbeat queue");
-            return;
-        }
-    }
-    if (heartbeat_task_ == nullptr) {
-        heartbeat_task_ = xTaskCreateStatic(
-            &Application::HeartbeatTask, "heartbeat_http", kHeartbeatWorkerStackDepth, this,
-            tskIDLE_PRIORITY + 1, heartbeat_task_stack, &heartbeat_task_buffer);
-        if (heartbeat_task_ == nullptr) {
-            ESP_LOGE(TAG, "Failed to create persistent heartbeat worker");
-            heartbeat_queue_ = nullptr;
-            return;
-        }
+    if (open_channel_queue == nullptr || open_channel_task == nullptr) {
+        ESP_LOGE(TAG, "Persistent network worker unavailable for heartbeat");
+        return;
     }
     if (heartbeat_timer_ == nullptr) {
         esp_timer_create_args_t args = {
@@ -2991,7 +2981,8 @@ void Application::DispatchDeviceHeartbeat() {
     // The persistent worker is allocated once at claim time, before repeated TLS
     // calls fragment internal SRAM. Queueing avoids requiring a new contiguous
     // task stack on every 20-second tick.
-    if (heartbeat_queue_ == nullptr || xQueueSend(heartbeat_queue_, &ctx, 0) != pdTRUE) {
+    const NetworkWorkItem work{NetworkWorkKind::kHeartbeat, ctx};
+    if (open_channel_queue == nullptr || xQueueSend(open_channel_queue, &work, 0) != pdTRUE) {
         ESP_LOGE(TAG, "heartbeat worker queue unavailable; retrying next tick");
         delete ctx;
         heartbeat_inflight_.store(false);
@@ -3002,31 +2993,22 @@ void Application::DispatchDeviceHeartbeat() {
 }
 
 void Application::HeartbeatTask(void* arg) {
-    auto* self = static_cast<Application*>(arg);
-    HeartbeatContext* ctx = nullptr;
-    while (xQueueReceive(self->heartbeat_queue_, &ctx, portMAX_DELAY) == pdTRUE) {
-        if (ctx == nullptr) {
-            continue;
+    auto* ctx = static_cast<HeartbeatContext*>(arg);
+    if (ctx == nullptr) return;
+    auto* self = ctx->app;
+    ESP_LOGI(TAG, "Heartbeat worker received request");
+    const std::string url = ctx->url;
+    const std::string device_secret = ctx->device_secret;
+    std::string body = std::move(ctx->body);
+    delete ctx;
+
+    const int status_code = self->SendDeviceHeartbeat(url, device_secret, std::move(body));
+    self->Schedule([self, status_code]() {
+        self->heartbeat_inflight_.store(false);
+        if (status_code == 401 || status_code == 403) {
+            self->HandleHeartbeatAuthFailure(status_code);
         }
-        ESP_LOGI(TAG, "Heartbeat worker received request");
-        const std::string url = ctx->url;
-        const std::string device_secret = ctx->device_secret;
-        std::string body = std::move(ctx->body);
-        delete ctx;
-        ctx = nullptr;
-
-        // The ONLY work on this worker: the blocking ~5s HTTP/TLS POST.
-        const int status_code = self->SendDeviceHeartbeat(url, device_secret, std::move(body));
-
-        // Clear the single-flight guard and marshal any auth-failure handling
-        // back onto the Application task, which owns claim/BLE/NVS state.
-        self->Schedule([self, status_code]() {
-            self->heartbeat_inflight_.store(false);
-            if (status_code == 401 || status_code == 403) {
-                self->HandleHeartbeatAuthFailure(status_code);
-            }
-        });
-    }
+    });
 }
 
 int Application::SendDeviceHeartbeat(const std::string& url, const std::string& device_secret,
@@ -4703,17 +4685,23 @@ bool Application::StartOpenChannelWorker(void* context) {
     if (open_channel_queue == nullptr || open_channel_task == nullptr) {
         return false;
     }
-    void* queued_context = context;
-    return xQueueSend(open_channel_queue, &queued_context, 0) == pdTRUE;
+    const NetworkWorkItem work{NetworkWorkKind::kOpenChannel, context};
+    return xQueueSend(open_channel_queue, &work, 0) == pdTRUE;
 }
 
 void Application::OpenChannelTask(void* arg) {
     auto* self = static_cast<Application*>(arg);
     for (;;) {
-        ConnectContext* ctx = nullptr;
-        if (xQueueReceive(open_channel_queue, &ctx, portMAX_DELAY) != pdTRUE || ctx == nullptr) {
+        NetworkWorkItem work{};
+        if (xQueueReceive(open_channel_queue, &work, portMAX_DELAY) != pdTRUE ||
+            work.context == nullptr) {
             continue;
         }
+        if (work.kind == NetworkWorkKind::kHeartbeat) {
+            Application::HeartbeatTask(work.context);
+            continue;
+        }
+        auto* ctx = static_cast<ConnectContext*>(work.context);
         ListeningMode mode = ctx->mode;
         uint32_t gen = ctx->generation;
         std::string wake_word = ctx->wake_word;

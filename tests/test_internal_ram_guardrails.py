@@ -40,9 +40,10 @@ def test_websocket_open_requests_share_one_persistent_internal_dram_stack():
     assert '"lesson_ws"' in constructor
     assert "&Application::LessonMessageTask" in constructor
     assert '"lesson_worker"' in constructor
-    assert "xQueueCreateStatic(1, sizeof(void*)" in " ".join(constructor.split())
+    assert "xQueueCreateStatic(" in constructor
+    assert "2, sizeof(NetworkWorkItem)" in " ".join(constructor.split())
     assert "DRAM_ATTR StaticQueue_t open_channel_queue_buffer;" in source
-    assert "DRAM_ATTR void* open_channel_queue_storage[1];" in source
+    assert "DRAM_ATTR NetworkWorkItem open_channel_queue_storage[2];" in source
     assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
     assert "xTaskCreateWithCaps" not in constructor
 
@@ -63,6 +64,23 @@ def test_websocket_open_requests_share_one_persistent_internal_dram_stack():
         body = function_body(source, signature, next_signature)
         assert "StartOpenChannelWorker(ctx)" in body
         assert "xTaskCreate" not in body
+
+
+def test_management_heartbeat_reuses_the_persistent_network_worker_stack():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+
+    # The ESP32-S3 cannot keep two independent 8 KiB internal network stacks and
+    # still leave a TLS-sized contiguous heap block after provisioning. WebSocket
+    # opens and management heartbeats must therefore serialize on one worker.
+    assert "heartbeat_task_stack" not in source
+    assert "heartbeat_task_buffer" not in source
+    assert "heartbeat_queue_" not in source
+    assert "heartbeat_task_" not in header
+    assert "NetworkWorkKind::kHeartbeat" in source
+    assert "Application::HeartbeatTask(work.context);" in source
+    assert "xQueueSend(open_channel_queue, &work, 0)" in source
+    assert "2, sizeof(NetworkWorkItem)" in " ".join(source.split())
 
 
 def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
@@ -144,14 +162,16 @@ def test_transient_http_workers_use_internal_dram_stacks():
         assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in create_call, task_name
         assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" not in create_call, task_name
 
-    # Heartbeat is also internal DRAM, but its stack is reserved statically so
-    # wake-triggered reconnects cannot fail after TLS fragments the heap.
-    assert "DRAM_ATTR StackType_t heartbeat_task_stack[kHeartbeatWorkerStackDepth]" in source
+    # Heartbeat shares the statically reserved internal network stack. Reserving
+    # another 8 KiB stack leaves too little contiguous heap for TLS.
+    assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in source
+    assert "heartbeat_task_stack" not in source
     heartbeat_start = function_body(
         source, "void Application::StartHeartbeat", "void Application::StopHeartbeat"
     )
-    assert "xTaskCreateStatic(" in heartbeat_start
-    assert "heartbeat_task_stack" in heartbeat_start
+    assert "open_channel_queue" in heartbeat_start
+    assert "open_channel_task" in heartbeat_start
+    assert "xTaskCreate" not in heartbeat_start
 
 
 def test_websocket_close_callback_defers_nvs_dependent_work_to_application_task():

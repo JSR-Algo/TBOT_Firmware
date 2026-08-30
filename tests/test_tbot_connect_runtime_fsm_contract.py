@@ -93,19 +93,16 @@ def test_heartbeat_uses_one_persistent_worker_allocated_before_heap_fragmentatio
 
     # Physical ESP32-S3 evidence: repeated transient TLS workers progressively
     # fragment internal SRAM until even a fixed internal stack cannot be allocated.
-    # Reserve the queue and stack statically at boot. A wake-triggered reconnect
-    # can happen after TLS/audio work has fragmented internal SRAM, so even the
-    # first lazy allocation may fail despite enough aggregate free memory.
-    assert "xQueueCreateStatic(" in start_body
-    assert "xTaskCreateStatic(" in start_body
-    assert '"heartbeat_http", kHeartbeatWorkerStackDepth' in start_body
-    assert "heartbeat_task_stack" in start_body
-    assert "heartbeat_task_buffer" in start_body
-    assert "xQueueCreate(" not in start_body
-    assert "xTaskCreateWithCaps" not in start_body
+    # Reuse the one statically reserved 8 KiB network stack. Keeping a second
+    # heartbeat stack starves the contiguous internal heap required by TLS.
+    assert "open_channel_queue" in start_body
+    assert "open_channel_task" in start_body
+    assert "xQueueCreate" not in start_body
+    assert "xTaskCreate" not in start_body
     assert "xTaskCreateWithCaps" not in dispatch_body
-    assert "xQueueSend(heartbeat_queue_" in dispatch_body
-    assert "while (xQueueReceive(self->heartbeat_queue_" in worker_body
+    assert "NetworkWorkKind::kHeartbeat" in dispatch_body
+    assert "xQueueSend(open_channel_queue" in dispatch_body
+    assert "xQueueReceive" not in worker_body
     assert "vTaskDelete(nullptr)" not in worker_body
 
 
