@@ -1014,6 +1014,7 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
     lifecycle_lock = restart.index(
         "std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);"
     )
+    teardown_failed_check = restart.index("if (teardown_failed_.load())")
     restart_lock = restart.index(
         "std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);"
     )
@@ -1029,6 +1030,7 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
     state_reset = restart.index("m_sta_is_connecting.store(false)")
     assert (
         lifecycle_lock
+        < teardown_failed_check
         < restart_lock
         < generation_advance
         < transaction_take
@@ -1123,11 +1125,72 @@ def test_fw21e_ble_release_uses_callback_safe_lifecycle_lock_across_teardown():
     ]
 
 
+def test_fw21e_successful_teardown_validates_generation_without_locking_callbacks():
+    blufi = read("main/boards/common/blufi.cpp")
+    teardown = _function_body(blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl")
+
+    lifecycle_lock = teardown.index(
+        "std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);"
+    )
+    generation_lock = teardown.index(
+        "std::lock_guard<std::mutex> generation_lock(provisioning_finalization_mutex_);"
+    )
+    generation_check = teardown.index(
+        "expected_generation.value() != setup_generation_.load()", generation_lock
+    )
+    generation_scope_end = teardown.index("}\n\n    constexpr", generation_check)
+    claim = teardown.index("provisioning_session_.Claim", generation_scope_end)
+    deinit = teardown.index("const esp_err_t deinit_error = deinit();", claim)
+
+    assert lifecycle_lock < generation_lock < generation_check < generation_scope_end < claim < deinit
+    assert "provisioning_finalization_mutex_" not in teardown[generation_scope_end:deinit]
+
+
+def test_fw21e_teardown_callers_do_not_invoke_deinit_under_generation_action_lock():
+    blufi = read("main/boards/common/blufi.cpp")
+    token_handoff = _function_body(blufi, "void Blufi::ScheduleClaimRefreshAfterTokenHandoff")
+    report = _function_body(blufi, "void Blufi::TryReportProvisioningAuthenticated")
+
+    token_teardown = token_handoff.index("CompleteSuccessfulProvisioningTeardownForGeneration(")
+    assert '"connected_wifi_token_handoff", provisioning_token, generation' in token_handoff[
+        token_teardown:token_teardown + 180
+    ]
+    token_gate = token_handoff.index("RunIfSetupGenerationCurrent(")
+    token_gate_end = token_handoff.index("});", token_gate)
+    assert token_gate < token_gate_end < token_teardown
+
+    deferred_start = report.index("if (ble_state != BleState::kOff)")
+    deferred_end = report.index("struct ReportTaskContext", deferred_start)
+    deferred = report[deferred_start:deferred_end]
+    report_teardown = deferred.index("CompleteSuccessfulProvisioningTeardownForGeneration(")
+    assert '"authenticated_report_ble_release", provisioning_token,' in deferred[
+        report_teardown:report_teardown + 220
+    ]
+    assert "expected_generation" in deferred[report_teardown:report_teardown + 220]
+    assert "RunIfSetupGenerationCurrent(" not in deferred
+
+    connect = _station_connect_helper_body()
+    for reason in (
+        "wifi_credentials_connected",
+        "course_mode_wifi_credentials_connected",
+    ):
+        reason_idx = connect.index(f'"{reason}"')
+        teardown = connect.rfind(
+            "CompleteSuccessfulProvisioningTeardownForGeneration(", 0, reason_idx
+        )
+        unlock = connect.rfind("continuation_lock.unlock();", 0, teardown)
+        generation_check = connect.rfind(
+            "generation != self->setup_generation_.load()", 0, unlock
+        )
+        assert generation_check < unlock < teardown < reason_idx
+
+
 # ---------------------------------------------------------------------------
 # FW21f: the deferred success continuation re-enters after the worker releases
-#        the mutex, so it must reacquire the same lock before generation check
-#        and BLE teardown. Failure reporting must snapshot secrets by value
-#        under the worker lock and clear them after unlocked HTTP use.
+#        the mutex, so it must reacquire the same lock for the generation check,
+#        then release it before lifecycle-owned BLE teardown. Failure reporting
+#        must snapshot secrets by value under the worker lock and clear them
+#        after unlocked HTTP use.
 # ---------------------------------------------------------------------------
 def test_fw21f_deferred_teardown_and_failure_secret_snapshot_are_synchronized():
     req = _station_connect_helper_body()
@@ -1149,17 +1212,17 @@ def test_fw21f_deferred_teardown_and_failure_secret_snapshot_are_synchronized():
     )
     stale_unlock_idx = continuation.index("continuation_lock.unlock();", generation_idx)
     stale_return_idx = continuation.index("return;", stale_unlock_idx)
+    success_unlock_idx = continuation.index("continuation_lock.unlock();", stale_return_idx)
     teardown_idx = continuation.index(
-        "self->CompleteSuccessfulProvisioningTeardown(", stale_return_idx
+        "self->CompleteSuccessfulProvisioningTeardownForGeneration(", success_unlock_idx
     )
-    assert '"wifi_credentials_connected", provisioning_token' in continuation[
+    assert '"wifi_credentials_connected", provisioning_token, generation' in continuation[
         teardown_idx:teardown_idx + 180
     ]
-    success_unlock_idx = continuation.index("continuation_lock.unlock();", teardown_idx)
     report_idx = continuation.index("self->TryReportProvisioningAuthenticated", success_unlock_idx)
     claim_idx = continuation.index("SchedulePendingTbotClaimRefresh", report_idx)
     assert lock_idx < generation_idx < stale_unlock_idx < stale_return_idx
-    assert stale_return_idx < teardown_idx < success_unlock_idx < report_idx < claim_idx
+    assert stale_return_idx < success_unlock_idx < teardown_idx < report_idx < claim_idx
 
     token_snapshot = failure.index(
         "std::string failure_token = self->bootstrap_token_;"

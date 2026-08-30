@@ -26,9 +26,11 @@ def function_body(source: str, signature: str) -> str:
 def test_one_helper_owns_cancel_deinit_and_conditional_rearm():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    body = function_body(source, "bool Blufi::CompleteSuccessfulProvisioningTeardown")
+    public_body = function_body(source, "bool Blufi::CompleteSuccessfulProvisioningTeardown")
+    body = function_body(source, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl")
     assert "bool CompleteSuccessfulProvisioningTeardown(const char* reason," in header
     assert "ProvisioningToken provisioning_token);" in header
+    assert "CompleteSuccessfulProvisioningTeardownImpl(" in public_body
     claim = body.index("provisioning_session_.Claim(provisioning_token)")
     cancel = body.index("CancelBleSetupTimeout()")
     deinit = body.index("deinit()", cancel)
@@ -96,7 +98,7 @@ def test_every_success_owner_passes_an_explicit_originating_token():
     )
     for reason in reasons:
         assert re.search(
-            rf'CompleteSuccessfulProvisioningTeardown\(\s*"{reason}"\s*,\s*[^)]+\)',
+            rf'CompleteSuccessfulProvisioningTeardown(?:ForGeneration)?\(\s*"{reason}"\s*,\s*[^)]+\)',
             sources,
         ), reason
     assert "CaptureProvisioningSession()" in sources
@@ -118,7 +120,7 @@ def test_wifi_success_continues_after_disconnect_lane_completed_same_session():
     continuation = success[success.index("WiFi provisioned; stopping BLE before claim refresh"):]
     continuation = continuation[:continuation.index("} else {")]
 
-    teardown = continuation.index("CompleteSuccessfulProvisioningTeardown(")
+    teardown = continuation.index("CompleteSuccessfulProvisioningTeardownForGeneration(")
     completed = continuation.index("WasProvisioningSuccessfullyCompleted(", teardown)
     report = continuation.index("TryReportProvisioningAuthenticated(", completed)
     promote = continuation.index("SchedulePendingTbotClaimRefresh(", report)

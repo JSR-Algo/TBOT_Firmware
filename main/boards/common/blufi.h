@@ -188,6 +188,12 @@ private:
     bool IsWifiScanCacheFresh() const;
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
+    bool CompleteSuccessfulProvisioningTeardownForGeneration(
+        const char* reason, ProvisioningToken provisioning_token,
+        uint32_t expected_generation);
+    bool CompleteSuccessfulProvisioningTeardownImpl(
+        const char* reason, ProvisioningToken provisioning_token,
+        std::optional<uint32_t> expected_generation);
     bool ReleaseBleForStationAssociation(uint32_t expected_generation);
     void RestoreBleAfterStationFailure(uint32_t expected_generation);
     void StartStationConnectFromCredentials(const char* reason);
