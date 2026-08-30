@@ -106,6 +106,7 @@ public:
             return false;
         }
         token_ = token;
+        successfully_completed_token_ = {};
         return true;
     }
 
@@ -127,6 +128,12 @@ public:
     bool Matches(Token token) const {
         std::lock_guard<std::mutex> lock(mutex_);
         return token_.generation == token.generation;
+    }
+
+    bool WasSuccessfullyCompleted(Token token) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return token.valid() &&
+               successfully_completed_token_.generation == token.generation;
     }
 
     CompletionGuard Claim(Token token) {
@@ -156,6 +163,7 @@ private:
             return false;
         }
         token_ = token;
+        successfully_completed_token_ = {};
         reservation_active_ = false;
         return true;
     }
@@ -172,6 +180,7 @@ private:
         }
         if (consume && token_.generation == token.generation) {
             token_ = {};
+            successfully_completed_token_ = token;
         }
         completion_active_ = false;
         completion_token_ = {};
@@ -180,6 +189,7 @@ private:
 
     mutable std::mutex mutex_;
     Token token_{};
+    Token successfully_completed_token_{};
     bool reservation_active_ = false;
     bool completion_active_ = false;
     Token completion_token_{};

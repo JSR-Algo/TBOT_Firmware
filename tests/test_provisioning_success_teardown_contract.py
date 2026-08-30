@@ -98,6 +98,23 @@ def test_wifi_connect_worker_captures_session_before_any_delayed_work():
     assert capture < delay < task
 
 
+def test_wifi_success_continues_after_disconnect_lane_completed_same_session():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "void Blufi::StartStationConnectFromCredentials")
+    success = body[body.index("if (credentials_committed)"):]
+    continuation = success[success.index("WiFi provisioned; stopping BLE before claim refresh"):]
+    continuation = continuation[:continuation.index("} else {")]
+
+    teardown = continuation.index("CompleteSuccessfulProvisioningTeardown(")
+    completed = continuation.index("WasProvisioningSuccessfullyCompleted(", teardown)
+    report = continuation.index("TryReportProvisioningAuthenticated(", completed)
+    promote = continuation.index("SchedulePendingTbotClaimRefresh(", report)
+
+    assert teardown < completed < report < promote
+    assert "if (!teardown_completed &&" in continuation
+    assert "!self->WasProvisioningSuccessfullyCompleted(provisioning_token)" in continuation
+
+
 def test_each_other_delayed_owner_captures_before_scheduling_or_http():
     blufi = read("main/boards/common/blufi.cpp")
     app = read("main/application.cc")

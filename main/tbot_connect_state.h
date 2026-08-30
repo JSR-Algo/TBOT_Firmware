@@ -205,7 +205,7 @@ static constexpr TbotConnectStateSpec kTbotConnectStateSpecs[] = {
     },
     {
         .state = TbotConnectState::BLE_SETUP_ADVERTISING,
-        .screen_text = "Open TBot app",
+        .screen_text = "Searching for device...",
         .timeout_seconds = 300,
         .retry_policy = TbotRetryPolicy::WindowExpires,
         .ble_state = TbotSetupRadioState::Advertising,

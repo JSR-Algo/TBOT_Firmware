@@ -114,6 +114,7 @@ def test_heartbeat_is_stopped_on_network_loss_and_setup_entry():
     wifi_case_start = state_changed_body.index("case kDeviceStateWifiConfiguring:")
     wifi_case = state_changed_body[wifi_case_start:state_changed_body.index("break;", wifi_case_start)]
     assert "StopHeartbeat();" in wifi_case
+    assert "display->SetStatus(connect_copy);" in wifi_case
 
 
 def test_heartbeat_is_stopped_on_backend_error_and_started_only_on_connect():

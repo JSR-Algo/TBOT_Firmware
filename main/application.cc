@@ -5195,6 +5195,8 @@ static const char* ConnectStateScreenCopy(const TbotConnectStateSpec* spec) {
             return Lang::Strings::READY_TO_CONNECT;
         case TbotConnectState::CLAIM_CONFIRM_TIMEOUT:
             return Lang::Strings::SETUP_EXPIRED;
+        case TbotConnectState::BLE_SETUP_ADVERTISING:
+            return Lang::Strings::SEARCHING_FOR_DEVICE;
         default:
             // No localized key for this state -> use the contract copy directly
             // (e.g. BOOT "Starting", WIFI_CONNECTING, BOOTSTRAP_FETCHING,
@@ -5493,6 +5495,7 @@ void Application::HandleStateChangedEvent() {
         case kDeviceStateWifiConfiguring:
             // H2: entering Wi-Fi setup -> stop the heartbeat (not a live online
             // session; it (re)starts only from OnConnected).
+            display->SetStatus(connect_copy);
             StopHeartbeat();
             StopClaimPoll();
             audio_service_.EnableVoiceProcessing(false);

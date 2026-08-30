@@ -64,6 +64,19 @@ def _connected_event_body(wifi_board: str) -> str:
     return fn[case_idx:next_case]
 
 
+def test_wifi_config_entry_closes_full_screen_app_overlay():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    app_manager_header = read("main/app_manager.h")
+    body = _start_wifi_config_body(wifi_board)
+
+    publish = body.index("app.PublishWifiConfigEntry(preparation)")
+    close_overlay = body.index("AppExitToChatboxForSystemFlow()", publish)
+    stop_station = body.index("WifiManager::GetInstance().StopStation()", close_overlay)
+
+    assert "void AppExitToChatboxForSystemFlow();" in app_manager_header
+    assert publish < close_overlay < stop_station
+
+
 # ---------------------------------------------------------------------------
 # WB1: StartWifiConfigMode() full setup ordering for the BLE provisioning path:
 #      reserve -> BeginWifiProvisioning -> commit -> RestartForSetup() ->

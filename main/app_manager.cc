@@ -795,6 +795,10 @@ static void SwitchToInternal(AppMode mode) {
     }
 }
 
+void AppExitToChatboxForSystemFlow() {
+    SwitchToInternal(AppMode::Chatbox);
+}
+
 void AppHandleMenuHold() {
     if (g_mode != AppMode::Menu && !CanEnterMenu()) {
         ESP_LOGW(TAG, "MENU_HOLD ignored: device busy (state=%d)",

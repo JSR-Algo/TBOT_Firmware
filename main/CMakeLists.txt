@@ -21,6 +21,7 @@ set(SOURCES "audio/audio_codec.cc"
             "display/lvgl_display/emoji_collection.cc"
             "display/lvgl_display/lvgl_theme.cc"
             "display/lvgl_display/lvgl_font.cc"
+            "display/lvgl_display/tbot_vietnamese_20_4.c"
             "display/lvgl_display/lvgl_image.cc"
             "display/lvgl_display/gif/lvgl_gif.cc"
             "display/lvgl_display/gif/gifdec.c"
@@ -430,7 +431,7 @@ elseif(CONFIG_BOARD_TYPE_WAVESHARE_ESP32_S3_TOUCH_LCD_3_5)
     set(DEFAULT_EMOJI_COLLECTION twemoji_64)
 elseif(CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P)
     set(BOARD_TYPE "lcdwiki-es3c35p")
-    set(BUILTIN_TEXT_FONT font_puhui_basic_20_4)
+    set(BUILTIN_TEXT_FONT tbot_vietnamese_20_4)
     set(BUILTIN_ICON_FONT font_awesome_20_4)
     # TBot neon mochi faces: 21 animated 320x240 GIFs packed into the assets
     # SPIFFS partition (assets.cc overrides the theme's emoji collection at

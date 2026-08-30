@@ -76,6 +76,7 @@ public:
     bool AbortProvisioningSetup(ProvisioningToken token);
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);
+    bool WasProvisioningSuccessfullyCompleted(ProvisioningToken provisioning_token) const;
 
     /**
      * @brief Returns the bootstrap token received via BluFi custom-data (tag=0x01).

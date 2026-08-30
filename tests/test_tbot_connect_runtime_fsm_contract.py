@@ -250,6 +250,7 @@ def test_blufi_caps_re_advertising_on_disconnect():
 REQUIRED_COPY = {
     "READY_TO_CONNECT": ("Ready to connect", "Sẵn sàng kết nối"),
     "OPEN_TBOT_APP": ("Open TBot app", "Mở ứng dụng TBot"),
+    "SEARCHING_FOR_DEVICE": ("Searching for device...", "Đang tìm kiếm thiết bị..."),
     "PRESS_BUTTON_TO_CONFIRM": ("Press button to confirm", "Nhấn nút để xác nhận"),
     "SETUP_EXPIRED": ("Setup expired", "Hết hạn thiết lập"),
     "SERVER_UNAVAILABLE_RETRYING": ("Server unavailable. Retrying...",
@@ -270,6 +271,27 @@ def test_missing_copy_strings_exist_in_language_assets():
         assert f'"{key}": "{vi_text}"' in vi, f"vi-VN missing {key}"
 
 
+def test_only_ble_advertising_uses_searching_for_device_copy():
+    states = read("main/tbot_connect_state.h")
+
+    wifi_not_configured = states[
+        states.index(".state = TbotConnectState::WIFI_NOT_CONFIGURED,"):
+        states.index(".state = TbotConnectState::WIFI_CONNECTING,")
+    ]
+    ble_advertising = states[
+        states.index(".state = TbotConnectState::BLE_SETUP_ADVERTISING,"):
+        states.index(".state = TbotConnectState::BLE_SETUP_TIMEOUT,")
+    ]
+    ap_setup = states[
+        states.index(".state = TbotConnectState::AP_SETUP_ACTIVE,"):
+        states.index(".state = TbotConnectState::AP_SETUP_TIMEOUT,")
+    ]
+
+    assert '.screen_text = "Searching for device..."' in ble_advertising
+    assert '.screen_text = "Open TBot app"' in wifi_not_configured
+    assert '.screen_text = "Open TBot app"' in ap_setup
+
+
 def test_new_copy_is_wired_to_render_paths():
     source = read("main/application.cc")
     # CLAIM_CONFIRM_TIMEOUT -> "Setup expired".
@@ -278,6 +300,28 @@ def test_new_copy_is_wired_to_render_paths():
     assert "Lang::Strings::SERVER_UNAVAILABLE_RETRYING" in source
     # CLAIM_AVAILABLE -> "Ready to connect".
     assert "Lang::Strings::READY_TO_CONNECT" in source
+    connect_copy = function_body(source, "static const char* ConnectStateScreenCopy")
+    ble_case = connect_copy[
+        connect_copy.index("case TbotConnectState::BLE_SETUP_ADVERTISING:"):
+        connect_copy.index("default:")
+    ]
+    assert "return Lang::Strings::SEARCHING_FOR_DEVICE;" in ble_case
+
+
+def test_lcdwiki_font_fallback_preserves_ready_to_connect_vietnamese_glyph():
+    cmake = read("main/CMakeLists.txt")
+    font_source = read("main/display/lvgl_display/tbot_vietnamese_20_4.c")
+    font_runtime = read("main/display/lvgl_display/lvgl_font.cc")
+
+    lcdwiki_block = cmake.split("elseif(CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P)", 1)[1]
+    lcdwiki_block = lcdwiki_block.split("elseif(", 1)[0]
+    assert 'set(BUILTIN_TEXT_FONT tbot_vietnamese_20_4)' in lcdwiki_block
+    assert '"display/lvgl_display/tbot_vietnamese_20_4.c"' in cmake
+    assert ".range_start = 7861" in font_source  # U+1EB5: ẵ
+    assert ".fallback = &font_puhui_basic_20_4" in font_source
+    assert ".line_height = 25" in font_source
+    assert ".base_line = 6" in font_source
+    assert "font_->fallback = &tbot_vietnamese_20_4" in font_runtime
 
 
 # ---------------------------------------------------------------------------
@@ -328,3 +372,13 @@ def test_mapper_screen_text_comes_from_the_contract_table():
     # Screen text is read from kTbotConnectStateSpecs, not re-invented.
     assert "kTbotConnectStateSpecs" in spec_body
     assert "screen_text" in text_body
+
+
+def test_wifi_config_screen_takes_priority_over_claim_overlay():
+    mapper_cc = read("main/tbot_connect_mapper.cc")
+    resolve = function_body(mapper_cc, "TbotConnectState TbotConnectMapper::ResolveState")
+
+    wifi_setup = resolve.index("if (device_state == kDeviceStateWifiConfiguring)")
+    claim_overlay = resolve.index("switch (claim_substate)")
+
+    assert wifi_setup < claim_overlay

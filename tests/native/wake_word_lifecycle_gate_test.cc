@@ -245,6 +245,16 @@ int main() {
     Require(complete(session_b), "bound session B completes successfully");
     Require(deinit_calls == 1, "only current session owns BLE deinit");
     Require(!binding.Capture().valid(), "successful completion consumes binding once");
+    Require(binding.WasSuccessfullyCompleted(session_b),
+            "a racing success callback can observe the completed session");
+    Require(!binding.WasSuccessfullyCompleted(delayed_callback_a),
+            "a stale callback cannot borrow another session's completion");
+
+    const auto session_c = binding_controller.BeginProvisioningAndQuiesce([]() {});
+    Require(binding_controller.FinishProvisioningReset(session_c), "session C owns reset");
+    Require(binding.Bind(session_c), "session C binds after B completes");
+    Require(!binding.WasSuccessfullyCompleted(session_b),
+            "a new binding invalidates the prior completion marker");
 
     WakeWordLifecycleController reservation_controller;
     ProvisioningSessionBinding reservation_binding;

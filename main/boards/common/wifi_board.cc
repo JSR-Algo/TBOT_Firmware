@@ -2,6 +2,7 @@
 
 #include "display.h"
 #include "application.h"
+#include "app_manager.h"
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
@@ -334,6 +335,7 @@ void WifiBoard::StartWifiConfigMode(bool show_notification) {
         }
         return;
     }
+    AppExitToChatboxForSystemFlow();
     esp_timer_stop(connect_timer_);
     WifiManager::GetInstance().StopStation();
     in_config_mode_ = true;

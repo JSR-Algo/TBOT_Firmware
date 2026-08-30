@@ -26,6 +26,9 @@ void AppManagerSetSoundPlayer(std::function<void(const std::vector<int16_t>&)> p
 
 AppMode AppGetMode();
 
+// System flows such as Wi-Fi setup must reveal the chatbox/status layer.
+void AppExitToChatboxForSystemFlow();
+
 // Cac ham xu ly nay PHAI chay tren main task (UART listener marshal qua Application::Schedule).
 // Chung tu lock display (DisplayLockGuard) khi dung LVGL.
 void AppHandleInputLeft();

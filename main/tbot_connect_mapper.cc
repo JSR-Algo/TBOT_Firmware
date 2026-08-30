@@ -22,9 +22,23 @@ TbotConnectState TbotConnectMapper::ResolveState(DeviceState device_state,
                                                  TbotClaimSubstate claim_substate,
                                                  TbotBleSubstate ble_substate,
                                                  bool backend_offline) {
-    // 1) Claim sub-state takes priority over the coarse DeviceState because the
-    //    claim flow is a side-channel that overlays Idle/Activating: a pending
-    //    claim must surface "Allow connection?" even though DeviceState==Idle.
+    // 1) Explicit Wi-Fi setup owns the screen even for an already-claimed robot.
+    //    Otherwise the persistent Claimed overlay hides active BLE advertising
+    //    and makes a successful BOOT double-click appear to do nothing.
+    if (device_state == kDeviceStateWifiConfiguring) {
+        switch (ble_substate) {
+            case TbotBleSubstate::Advertising:
+                return TbotConnectState::BLE_SETUP_ADVERTISING;
+            case TbotBleSubstate::Timeout:
+                return TbotConnectState::BLE_SETUP_TIMEOUT;
+            case TbotBleSubstate::Off:
+                return TbotConnectState::WIFI_NOT_CONFIGURED;
+        }
+    }
+
+    // 2) Claim sub-state takes priority over the remaining coarse DeviceState
+    //    values because the claim flow overlays Idle/Activating: a pending claim
+    //    must surface "Allow connection?" even though DeviceState==Idle.
     switch (claim_substate) {
         case TbotClaimSubstate::AvailableStandby:
             return TbotConnectState::CLAIM_AVAILABLE;
@@ -38,19 +52,6 @@ TbotConnectState TbotConnectMapper::ResolveState(DeviceState device_state,
             return TbotConnectState::CLAIMED;
         case TbotClaimSubstate::None:
             break;  // fall through to BLE / DeviceState mapping
-    }
-
-    // 2) BLE setup sub-state (only meaningful while configuring Wi-Fi).
-    if (device_state == kDeviceStateWifiConfiguring) {
-        switch (ble_substate) {
-            case TbotBleSubstate::Advertising:
-                return TbotConnectState::BLE_SETUP_ADVERTISING;
-            case TbotBleSubstate::Timeout:
-                return TbotConnectState::BLE_SETUP_TIMEOUT;
-            case TbotBleSubstate::Off:
-                // No BLE radio up -> Wi-Fi not configured / waiting for the app.
-                return TbotConnectState::WIFI_NOT_CONFIGURED;
-        }
     }
 
     // 3) Backend offline overlay: the 11-state engine drops to Idle on a ws/

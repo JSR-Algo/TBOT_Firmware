@@ -45,6 +45,37 @@ def test_wifi_provisioning_uses_tbot_brand_names():
     assert '#define BLUFI_DEVICE_NAME "Xiaozhi-Blufi"' not in blufi
 
 
+def test_blufi_compact_advertising_waits_for_adv_and_scan_response_payloads():
+    blufi = read("main/boards/common/blufi.cpp")
+
+    assert "TbotBlufiGapEventHandler" in blufi
+    assert "esp_ble_gap_register_callback(TbotBlufiGapEventHandler)" in blufi
+
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+    assert "esp_blufi_gap_event_handler(event, param);" in handler
+    assert "ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT" in handler
+    assert "ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT" in handler
+    assert "ESP_GAP_BLE_ADV_START_COMPLETE_EVT" in handler
+    assert "MaybeStartTbotBlufiAdvertising" in handler
+    assert "HandleTbotBlufiAdvertisingStartComplete" in handler
+
+    configure = function_body(blufi, "static void StartTbotBlufiAdvertising")
+    assert "esp_ble_gap_config_adv_data_raw" in configure
+    assert "esp_ble_gap_config_scan_rsp_data_raw" in configure
+    assert "esp_ble_gap_start_advertising" not in configure
+    assert "uint8_t adv_raw[31]" in configure
+    assert "0x08" in configure
+    assert "std::memcpy(adv_raw + adv_len" in configure
+    assert "name_len == std::strlen(device_name) ? 0x09 : 0x08" in configure
+
+    init_body = function_body(blufi, "esp_err_t Blufi::_init_impl")
+    deinit_body = function_body(blufi, "esp_err_t Blufi::_deinit_impl")
+    assert "InvalidateTbotBlufiAdvertising();" in init_body
+    assert "InvalidateTbotBlufiAdvertising();" in deinit_body
+    assert init_body.index("InvalidateTbotBlufiAdvertising();") < init_body.index("_controller_init()")
+    assert deinit_body.index("InvalidateTbotBlufiAdvertising();") < deinit_body.index("_host_deinit()")
+
+
 def test_blufi_never_logs_wifi_password_values():
     blufi = read("main/boards/common/blufi.cpp")
 
