@@ -1009,15 +1009,36 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
 
     assert "#include <mutex>" in header
     assert "std::mutex provisioning_finalization_mutex_;" in header
+    assert "std::mutex ble_lifecycle_mutex_;" in header
 
+    lifecycle_lock = restart.index(
+        "std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);"
+    )
     restart_lock = restart.index(
-        "std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);"
+        "std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);"
     )
     generation_advance = restart.index("setup_generation_.fetch_add(1)")
     transaction_take = restart.index("ssid_transaction_id_.exchange(0)")
     rollback = restart.index("RollbackSsidTransaction(stale_ssid_transaction)")
+    initial_scope_end = restart.index("}\n\n    if (GetBleState()", rollback)
+    deinit = restart.index("esp_err_t teardown_error = deinit();", initial_scope_end)
+    post_teardown_lock = restart.index(
+        "std::lock_guard<std::mutex> reset_state_lock(provisioning_finalization_mutex_);",
+        deinit,
+    )
     state_reset = restart.index("m_sta_is_connecting.store(false)")
-    assert restart_lock < generation_advance < transaction_take < rollback < state_reset
+    assert (
+        lifecycle_lock
+        < restart_lock
+        < generation_advance
+        < transaction_take
+        < rollback
+        < initial_scope_end
+        < deinit
+        < post_teardown_lock
+        < state_reset
+    )
+    assert "provisioning_finalization_mutex_" not in restart[initial_scope_end:post_teardown_lock]
 
     worker_lock = worker.index("std::unique_lock<std::mutex> finalization_lock(")
     assert "self->provisioning_finalization_mutex_);" in worker[
@@ -1053,35 +1074,53 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
         assert "finalization_lock.unlock();" in prefix
 
 
-def test_fw21e_ble_release_holds_finalization_lock_across_teardown():
+def test_fw21e_ble_release_uses_callback_safe_lifecycle_lock_across_teardown():
+    header = read("main/boards/common/blufi.h")
     blufi = read("main/boards/common/blufi.cpp")
     release = _function_body(blufi, "bool Blufi::ReleaseBleForStationAssociation")
+    callbacks = _handle_event_body()
 
-    lock = release.index(
-        "std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);"
+    assert "std::mutex ble_lifecycle_mutex_;" in header
+    assert "ble_lifecycle_mutex_" not in callbacks
+    lifecycle_lock = release.index(
+        "std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);"
     )
     assert re.match(
-        r"\{\s*std::lock_guard<std::mutex> finalization_lock\(provisioning_finalization_mutex_\);",
+        r"\{\s*std::lock_guard<std::mutex> lifecycle_lock\(ble_lifecycle_mutex_\);",
         release,
     )
+    initial_state_lock = release.index(
+        "std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);"
+    )
     generation_check = release.index("expected_generation != setup_generation_.load()")
+    initial_scope_end = release.index("}\n\n    CancelBleSetupTimeout();", generation_check)
     cancel = release.index("CancelBleSetupTimeout();")
     stop_advertising = release.index("esp_blufi_adv_stop();")
     deinit = release.index("const esp_err_t teardown_error = deinit();")
+    post_teardown_lock = release.index(
+        "std::lock_guard<std::mutex> post_teardown_lock(provisioning_finalization_mutex_);",
+        deinit,
+    )
     post_deinit_generation_check = release.index(
-        "expected_generation == setup_generation_.load()", deinit
+        "expected_generation == setup_generation_.load()", post_teardown_lock
     )
     stack_off_check = release.index("IsBleStackFullyOff()", post_deinit_generation_check)
 
     assert (
-        lock
+        lifecycle_lock
+        < initial_state_lock
         < generation_check
+        < initial_scope_end
         < cancel
         < stop_advertising
         < deinit
+        < post_teardown_lock
         < post_deinit_generation_check
         < stack_off_check
     )
+    assert "provisioning_finalization_mutex_" not in release[
+        initial_scope_end:post_teardown_lock
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1269,7 +1308,7 @@ def test_fw21i_legacy_report_is_generation_owned_and_cannot_clear_new_setup():
         in header
     )
 
-    restart_lock = restart.index("finalization_lock")
+    restart_lock = restart.index("initial_state_lock")
     owner_reset = restart.index("provisioning_report_owner_generation_.reset()")
     assert restart_lock < owner_reset
 

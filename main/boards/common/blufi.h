@@ -271,6 +271,8 @@ private:
     // Never reset at reconnect: distinguishes clients within one setup generation.
     std::atomic<uint64_t> ble_connection_epoch_{0};
     std::atomic<uint32_t> ssid_transaction_id_{0};
+    // Serializes multi-step BLE teardown/restart sequences without blocking callbacks.
+    std::mutex ble_lifecycle_mutex_;
     std::mutex provisioning_finalization_mutex_;
     esp_blufi_extra_info_t m_sta_conn_info{};
 

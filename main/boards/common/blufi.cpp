@@ -735,18 +735,21 @@ esp_err_t Blufi::RestartForSetup() {
         return ESP_ERR_INVALID_STATE;
     }
 
-    std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
 
-    // Invalidate completion workers from the prior BOOT generation before
-    // touching the controller/host or shared station flags.
-    ble_session_state_.exchange(
-        EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
-        std::memory_order_acq_rel);
-    setup_generation_.fetch_add(1);
-    provisioning_report_owner_generation_.reset();
-    const uint32_t stale_ssid_transaction = ssid_transaction_id_.exchange(0);
-    SsidManager::GetInstance().RollbackSsidTransaction(stale_ssid_transaction);
-    CancelBleSetupTimeout();
+    {
+        std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);
+        // Invalidate completion workers from the prior BOOT generation before
+        // touching the controller/host or shared station flags.
+        ble_session_state_.exchange(
+            EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
+            std::memory_order_acq_rel);
+        setup_generation_.fetch_add(1);
+        provisioning_report_owner_generation_.reset();
+        const uint32_t stale_ssid_transaction = ssid_transaction_id_.exchange(0);
+        SsidManager::GetInstance().RollbackSsidTransaction(stale_ssid_transaction);
+        CancelBleSetupTimeout();
+    }
 
     if (GetBleState() != BleState::kOff) {
         esp_blufi_adv_stop();
@@ -761,27 +764,30 @@ esp_err_t Blufi::RestartForSetup() {
         vTaskDelay(pdMS_TO_TICKS(300));
     }
 
-    _security_deinit();
-    m_ble_is_connected = false;
-    m_sta_connected = false;
-    m_sta_got_ip = false;
-    m_sta_is_connecting.store(false);
-    m_wifi_connect_task_started.store(false);
-    m_provisioned = false;
-    m_scan_in_progress = false;
-    m_send_list_after_scan = false;
-    m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
-    m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
-    m_scan_should_save_ssid = true;
-    std::vector<wifi_ap_record_t>().swap(m_ap_records);
-    m_ap_records_updated_us = 0;
-    memset(&m_sta_config, 0, sizeof(m_sta_config));
-    m_sta_config_ssid_len_ = 0;
-    memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
-    memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
-    m_sta_ssid_len = 0;
-    m_sta_conn_info = {};
-    ClearProvisioningSecrets();
+    {
+        std::lock_guard<std::mutex> reset_state_lock(provisioning_finalization_mutex_);
+        _security_deinit();
+        m_ble_is_connected = false;
+        m_sta_connected = false;
+        m_sta_got_ip = false;
+        m_sta_is_connecting.store(false);
+        m_wifi_connect_task_started.store(false);
+        m_provisioned = false;
+        m_scan_in_progress = false;
+        m_send_list_after_scan = false;
+        m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
+        m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
+        m_scan_should_save_ssid = true;
+        std::vector<wifi_ap_record_t>().swap(m_ap_records);
+        m_ap_records_updated_us = 0;
+        memset(&m_sta_config, 0, sizeof(m_sta_config));
+        m_sta_config_ssid_len_ = 0;
+        memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
+        memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
+        m_sta_ssid_len = 0;
+        m_sta_conn_info = {};
+        ClearProvisioningSecrets();
+    }
 
     esp_err_t err = ESP_FAIL;
     for (int attempt = 1; attempt <= 3; ++attempt) {
@@ -887,9 +893,12 @@ bool Blufi::WasProvisioningSuccessfullyCompleted(
 }
 
 bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
-    std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
-    if (expected_generation != setup_generation_.load()) {
-        return false;
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return false;
+        }
     }
 
     CancelBleSetupTimeout();
@@ -903,6 +912,7 @@ bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
 
     // Bluedroid releases its queues asynchronously after deinit returns.
     vTaskDelay(pdMS_TO_TICKS(300));
+    std::lock_guard<std::mutex> post_teardown_lock(provisioning_finalization_mutex_);
     return expected_generation == setup_generation_.load() && IsBleStackFullyOff();
 }
 
