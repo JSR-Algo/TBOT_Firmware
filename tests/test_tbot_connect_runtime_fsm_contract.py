@@ -254,7 +254,7 @@ def test_blufi_caps_re_advertising_on_disconnect():
 
 REQUIRED_COPY = {
     "READY_TO_CONNECT": ("Ready to connect", "Sẵn sàng kết nối"),
-    "OPEN_TBOT_APP": ("Open TBot app", "Mở ứng dụng TBot"),
+    "OPEN_TBOT_APP": ("Open TBot app", "Mở ứng dụng TBOT"),
     "PRESS_BUTTON_TO_CONFIRM": ("Press button to confirm", "Nhấn nút để xác nhận"),
     "SETUP_EXPIRED": ("Setup expired", "Hết hạn thiết lập"),
     "SERVER_UNAVAILABLE_RETRYING": ("Server unavailable. Retrying...",
