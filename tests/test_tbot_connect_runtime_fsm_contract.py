@@ -93,11 +93,16 @@ def test_heartbeat_uses_one_persistent_worker_allocated_before_heap_fragmentatio
 
     # Physical ESP32-S3 evidence: repeated transient TLS workers progressively
     # fragment internal SRAM until even a fixed internal stack cannot be allocated.
-    # Allocate one worker while claim confirmation still has a large contiguous
-    # block, then feed it heartbeat contexts through a one-slot queue.
-    assert "xQueueCreate(1, sizeof(void*))" in start_body
-    assert '"heartbeat_http", 8192' in start_body
-    assert "MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT" in start_body
+    # Reserve the queue and stack statically at boot. A wake-triggered reconnect
+    # can happen after TLS/audio work has fragmented internal SRAM, so even the
+    # first lazy allocation may fail despite enough aggregate free memory.
+    assert "xQueueCreateStatic(" in start_body
+    assert "xTaskCreateStatic(" in start_body
+    assert '"heartbeat_http", kHeartbeatWorkerStackDepth' in start_body
+    assert "heartbeat_task_stack" in start_body
+    assert "heartbeat_task_buffer" in start_body
+    assert "xQueueCreate(" not in start_body
+    assert "xTaskCreateWithCaps" not in start_body
     assert "xTaskCreateWithCaps" not in dispatch_body
     assert "xQueueSend(heartbeat_queue_" in dispatch_body
     assert "while (xQueueReceive(self->heartbeat_queue_" in worker_body
@@ -249,7 +254,7 @@ def test_blufi_caps_re_advertising_on_disconnect():
 
 REQUIRED_COPY = {
     "READY_TO_CONNECT": ("Ready to connect", "Sẵn sàng kết nối"),
-    "OPEN_TBOT_APP": ("Open TBot app", "Mở ứng dụng TBot"),
+    "OPEN_TBOT_APP": ("Open TBot app", "Mở ứng dụng TBOT"),
     "SEARCHING_FOR_DEVICE": ("Searching for device...", "Đang tìm kiếm thiết bị..."),
     "PRESS_BUTTON_TO_CONFIRM": ("Press button to confirm", "Nhấn nút để xác nhận"),
     "SETUP_EXPIRED": ("Setup expired", "Hết hạn thiết lập"),

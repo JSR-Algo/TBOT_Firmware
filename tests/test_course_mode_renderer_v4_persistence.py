@@ -117,17 +117,30 @@ def test_firmware_course_mode_v5_identity_gate_matches_reviewed_fixture() -> Non
     renderer_source = (
         Path(__file__).resolve().parents[1] / "main" / "lesson_flattened_cinematic_renderer.cc"
     ).read_text(encoding="utf-8")
+    layered_header = (
+        Path(__file__).resolve().parents[1] / "main" / "lesson_layered_cinematic_renderer.h"
+    ).read_text(encoding="utf-8")
 
-    assert fixture["manifestIdentityChecksum"] in source + renderer_source
-    assert fixture["bundle"]["checksum"] in source + renderer_source
-    assert fixture["contractChecksum"] in source + renderer_source
-    assert fixture["lesson"]["key"] in source + renderer_source
-    assert fixture["template"] in source + renderer_source
-    for phase in fixture["phaseIdentity"]:
-        for layer in phase["layers"]:
-            assert layer["assetVersionId"] in source + renderer_source
-            assert layer["sha256"] in source + renderer_source
-            assert str(layer["bytes"]) in source + renderer_source
+    combined = source + renderer_source + layered_header
+    assert fixture["renderer"] in combined
+    assert fixture["template"] in combined
+    assert "ParseCourseModeV5Compatibility" in source
+    assert 'ExactString(object, "layoutContract", "layeredCinematic")' in source
+    assert "checksum(Str(object, \"contractChecksum\"))" in source
+    assert "checksum(Str(object, \"manifestChecksum\"))" in source
+    assert "lesson_version > 0" in source
+    assert 'IsSha256(Str(layer, "sha256"))' in source
+    assert 'PositiveIntegerAtMost(bytes, UINT32_MAX)' in source
+    assert fixture["manifestIdentityChecksum"] not in combined
+
+
+def test_renderer_v5_host_lane_is_part_of_the_canonical_cinematic_runner() -> None:
+    runner = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "run_host_native_lesson_cinematic_renderer_test.sh"
+    ).read_text(encoding="utf-8")
+    assert "run_host_native_lesson_layered_cinematic_renderer_test.sh" in runner
 
 
 def test_firmware_ci_runs_local_fixture_gate_without_cross_repo_dependencies() -> None:

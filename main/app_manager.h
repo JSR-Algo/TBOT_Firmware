@@ -34,8 +34,8 @@ void AppExitToChatboxForSystemFlow();
 void AppHandleInputLeft();
 void AppHandleInputRight();
 void AppHandleInputBothClick();
-void AppHandleMenuHold();   // giu 2 nut 3s: ve Menu
-void AppHandleRightHold();  // giu RIGHT 3s: doi Wi-Fi (giu claim)
+void AppHandleMenuHold();   // giữ hai nút 3 giây: về menu
+void AppHandleRightHold();  // giữ nút phải 3 giây: đổi Wi-Fi (giữ claim)
 void AppOnSlaveReady();
 
 #endif  // APP_MANAGER_H_

@@ -120,6 +120,37 @@ def test_lcdwiki_es3c35p_reference_sdkconfig_passes_prod_gate(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_lcdwiki_es3c35p_production_defaults_enable_reproducible_builds():
+    sdkconfig = lcdwiki_reference_sdkconfig()
+
+    assert "CONFIG_APP_REPRODUCIBLE_BUILD=y" in sdkconfig
+    assert "# CONFIG_APP_REPRODUCIBLE_BUILD is not set" not in sdkconfig
+
+
+def test_lcdwiki_es3c35p_prod_gate_rejects_nonreproducible_build(tmp_path):
+    sdkconfig = tmp_path / "sdkconfig.es3c35p-nonreproducible"
+    sdkconfig.write_text(
+        lcdwiki_reference_sdkconfig().replace(
+            "CONFIG_APP_REPRODUCIBLE_BUILD=y",
+            "# CONFIG_APP_REPRODUCIBLE_BUILD is not set",
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/assert_lcdwiki_prod_config.py"),
+            str(sdkconfig),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Reproducible application builds must be enabled" in result.stderr
+
+
 def test_lcdwiki_es3c35p_prod_gate_rejects_nonproduction_websocket_seed(tmp_path):
     sdkconfig = tmp_path / "sdkconfig.es3c35p-websocket"
     sdkconfig.write_text(

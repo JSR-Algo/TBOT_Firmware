@@ -136,7 +136,8 @@ def test_claim_confirm_response_rejects_empty_credentials_before_any_settings_wr
     validation = persist_body[:validation_end]
     assert "valuestring != nullptr" in validation
     assert "valuestring[0] != '\\0'" in validation
-    assert validation.count("is_nonempty_string(") == 3
+    assert validation.count("is_nonempty_string(") == 4
+    assert "require_api_url && !is_nonempty_string(api_url)" in validation
     assert 'Settings backend_settings("backend", true);' not in validation
     assert 'Settings claim_state("tbot_claim", true);' not in validation
 

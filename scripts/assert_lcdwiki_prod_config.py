@@ -19,6 +19,9 @@ def main() -> int:
     if not re.search(r"^CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y$", sdkconfig, re.MULTILINE):
         failures.append("CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P=y must be selected for the LCDWiki production build")
 
+    if not re.search(r"^CONFIG_APP_REPRODUCIBLE_BUILD=y$", sdkconfig, re.MULTILINE):
+        failures.append("Reproducible application builds must be enabled for LCDWiki production builds")
+
     if not re.search(rf'^CONFIG_OTA_URL="{re.escape(PRODUCTION_OTA_URL)}"$', sdkconfig, re.MULTILINE):
         failures.append(f'CONFIG_OTA_URL must be "{PRODUCTION_OTA_URL}" for production robot bootstrap')
 

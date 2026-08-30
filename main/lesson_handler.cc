@@ -564,7 +564,8 @@ bool ParseExactCourseModeV5Compatibility(const cJSON* object) {
         "lessonVersion", "manifestChecksum"};
     double schema_version = 0;
     double lesson_version = 0;
-    return ExactObjectKeys(object, kKeys) && Num(object, "schemaVersion", schema_version) &&
+    const bool compatible =
+        ExactObjectKeys(object, kKeys) && Num(object, "schemaVersion", schema_version) &&
         schema_version == 1 &&
         ExactString(object, "contractChecksum",
                     "332fb68e340abb94c0178dd83b06ed0939d6e2d63c17d48bcb09dab8cc6bb3be") &&
@@ -573,7 +574,7 @@ bool ParseExactCourseModeV5Compatibility(const cJSON* object) {
         Num(object, "lessonVersion", lesson_version) && lesson_version == 2 &&
         ExactString(object, "manifestChecksum",
                     "22e94ced4b2dae1ced13f3e34de1f72e8a3ce177e1ba3a7c599a4c3d002aea0d");
-}
+    return compatible; }
 
 bool ParseCourseModeV5Compatibility(const cJSON* object) {
     static const std::set<std::string_view> kKeys = {
@@ -590,13 +591,14 @@ bool ParseCourseModeV5Compatibility(const cJSON* object) {
     };
     double schema_version = 0;
     double lesson_version = 0;
-    return ExactObjectKeys(object, kKeys) && Num(object, "schemaVersion", schema_version) &&
+    const bool compatible =
+        ExactObjectKeys(object, kKeys) && Num(object, "schemaVersion", schema_version) &&
         schema_version == 1 && checksum(Str(object, "contractChecksum")) &&
         ExactString(object, "layoutContract", "layeredCinematic") &&
         !Blank(Str(object, "lessonId")) && Num(object, "lessonVersion", lesson_version) &&
         lesson_version > 0 && std::floor(lesson_version) == lesson_version &&
         checksum(Str(object, "manifestChecksum"));
-}
+    return compatible; }
 
 bool ValidOpeningEntrance(const cJSON* entrance) {
     constexpr std::array<std::string_view, 6> kKeys = {
@@ -927,7 +929,8 @@ int g_course_delivery_test_fail_write_number = 0;
 #endif
 
 auto LessonCourseDeliveryKey(const char* session_id, const char* delivery_id) {
-    return std::make_pair(std::string(session_id), std::string(delivery_id));
+    auto key = std::make_pair(std::string(session_id), std::string(delivery_id));
+    return key;
 }
 
 bool ValidPersistedCourseDeliveryToken(const std::string& value) {
@@ -945,6 +948,16 @@ const char* LessonCourseDeliveryStatusToken(LessonCourseDeliveryLedger::Status s
         case LessonCourseDeliveryLedger::Status::kApplied: return "applied";
     }
     return "unknown";
+}
+
+bool EligibleCourseDeliveryReplacement(
+    const LessonCourseDeliveryLedger::Record& entry,
+    const char* protected_session_id,
+    const char* protected_delivery_id) {
+    const bool protected_record = entry.session == protected_session_id &&
+                                  entry.delivery == protected_delivery_id;
+    return !protected_record && !entry.has_rollback &&
+           entry.status != LessonCourseDeliveryLedger::Status::kPending;
 }
 
 bool ParseLessonCourseDeliveryStatus(
@@ -1180,9 +1193,8 @@ bool ResolveLessonCourseDelivery(const char* session_id, const char* delivery_id
             auto replacement = std::find_if(
                 g_course_delivery_ledger.entries.begin(),
                 g_course_delivery_ledger.entries.end(), [&](const auto& entry) {
-                    return !(entry.session == session_id && entry.delivery == delivery_id) &&
-                        !entry.has_rollback &&
-                        entry.status != LessonCourseDeliveryLedger::Status::kPending;
+                    return EligibleCourseDeliveryReplacement(
+                        entry, session_id, delivery_id);
                 });
             if (replacement == g_course_delivery_ledger.entries.end()) return false;
             replacement_key = {replacement->session, replacement->delivery};
@@ -1356,6 +1368,10 @@ bool LessonCourseDeliveryStorageValidForTest() {
 }
 std::string LessonCourseDeliveryStorageForTest() {
     return g_course_delivery_test_storage;
+}
+const char* LessonCourseDeliveryStatusTokenForTest(std::uint8_t value) {
+    return ::LessonCourseDeliveryStatusToken(
+        static_cast<LessonCourseDeliveryLedger::Status>(value));
 }
 void SetLessonCourseDeliveryWriteFailureForTest(bool fail) {
     g_course_delivery_test_write_failure = fail;

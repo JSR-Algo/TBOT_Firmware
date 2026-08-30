@@ -14,8 +14,8 @@ enum class RobotInputEvent {
     LeftClick,
     RightClick,
     BothClick,
-    MenuHold,    // giu ca 2 nut 3s
-    RightHold,   // giu RIGHT 3s -> doi Wi-Fi (giu claim)
+    MenuHold,    // giữ cả hai nút 3 giây
+    RightHold,   // giữ nút phải 3 giây -> đổi Wi-Fi (giữ claim)
 };
 
 class RobotUart {

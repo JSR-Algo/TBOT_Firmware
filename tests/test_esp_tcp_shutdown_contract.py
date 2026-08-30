@@ -58,9 +58,9 @@ def test_esp_tcp_shutdown_joins_or_aborts_before_sync_delete():
         "vEventGroupDelete(event_group_)"
     )
     assert "shutdown_state_.TaskStarted();" in connect
-    assert connect.index("shutdown_state_.TaskStarted();") < connect.index("xTaskCreate")
+    assert connect.index("shutdown_state_.TaskStarted();") < connect.index("xTaskCreateWithCaps")
 
-    wrapper_start = connect.index("BaseType_t created = xTaskCreate")
+    wrapper_start = connect.index("BaseType_t created = xTaskCreateWithCaps")
     wrapper_end = connect.index('}, "tcp_receive"', wrapper_start)
     wrapper = connect[wrapper_start:wrapper_end]
     assert "EventGroupHandle_t event_group = tcp->event_group_;" in wrapper
@@ -80,7 +80,7 @@ def test_esp_tcp_shutdown_joins_or_aborts_before_sync_delete():
 def test_esp_tcp_connect_task_creation_failure_closes_transport():
     source = read("components/esp-ml307/src/esp/esp_tcp.cc")
     connect = function_body(source, "bool EspTcp::Connect")
-    assert "BaseType_t created = xTaskCreate" in connect
+    assert "BaseType_t created = xTaskCreateWithCaps" in connect
     assert "if (created != pdPASS)" in connect
     failure = connect[connect.index("if (created != pdPASS)") :]
     assert "shutdown_state_.TaskWillExit()" in failure
@@ -174,8 +174,8 @@ def test_production_wss_uses_esp_ssl_with_joined_shutdown():
     assert "std::mutex lifecycle_mutex_;" in header
     assert "std::atomic<bool> stop_requested_" in header
     assert "std::atomic<bool> disconnect_notified_" in header
-    assert "BaseType_t created = xTaskCreate" in connect
-    assert connect.index("shutdown_state_.TaskStarted();") < connect.index("xTaskCreate")
+    assert "BaseType_t created = xTaskCreateWithCaps" in connect
+    assert connect.index("shutdown_state_.TaskStarted();") < connect.index("xTaskCreateWithCaps")
     assert "if (created != pdPASS)" in connect
     assert "shutdown(sockfd, SHUT_RDWR);" in disconnect
     assert "close(sockfd);" not in disconnect
@@ -280,7 +280,7 @@ def test_esp_ssl_connect_uses_http_timeout_for_tls_handshake():
 def test_esp_ssl_callback_completes_before_exit_publication():
     source = read("components/esp-ml307/src/esp/esp_ssl.cc")
     connect = function_body(source, "bool EspSsl::Connect")
-    wrapper_start = connect.index("BaseType_t created = xTaskCreate")
+    wrapper_start = connect.index("BaseType_t created = xTaskCreateWithCaps")
     wrapper_end = connect.index('}, "ssl_receive"', wrapper_start)
     wrapper = connect[wrapper_start:wrapper_end]
 

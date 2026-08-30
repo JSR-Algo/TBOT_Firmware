@@ -12,3 +12,4 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
   "${ROOT}/main/lesson_chroma_compositor.cc" \
   -o "${BUILD_DIR}/lesson_cinematic_renderer_test"
 "${BUILD_DIR}/lesson_cinematic_renderer_test"
+"${ROOT}/scripts/run_host_native_lesson_layered_cinematic_renderer_test.sh"

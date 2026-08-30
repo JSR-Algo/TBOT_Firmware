@@ -1523,7 +1523,8 @@ def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
     assert body.index("lesson_runtime_active_.load()") < body.index("CloseAudioChannelByIntent();")
     assert body.index("lesson_runtime_active_.load()") < body.index('backend_settings.SetString("device_secret", "");')
     assert body.index("lesson_runtime_active_.load()") < body.index('claim_state.SetInt("confirmed", 0);')
-    assert body.index("lesson_runtime_active_.load()") < body.index("RenderClaimSubstate(claim_substate_);")
+    assert body.index("lesson_runtime_active_.load()") < body.index("SsidManager::GetInstance().Clear();")
+    assert body.index("lesson_runtime_active_.load()") < body.index("esp_restart();")
     guard = body[
         body.index("lesson_runtime_active_.load()") :
         body.index("CloseAudioChannelByIntent();")
@@ -1532,7 +1533,8 @@ def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
     assert "return;" in guard
     assert 'SetString("device_secret", "")' not in guard
     assert 'SetInt("confirmed", 0)' not in guard
-    assert "RenderClaimSubstate" not in guard
+    assert "SsidManager::GetInstance().Clear" not in guard
+    assert "esp_restart" not in guard
 
     start = app_cc.index("void Application::SetLessonRuntimeActive")
     end = app_cc.index("bool Application::IsLessonRuntimeActive", start)
@@ -1906,7 +1908,7 @@ def test_generic_open_worker_failure_cleans_context_and_recovers_idle():
     assert 'ESP_LOGE(TAG, "ws_open worker unavailable -> idle");' in failure
     assert "SetDeviceState(kDeviceStateIdle);" in failure
 
-def test_lesson_runtime_audio_open_callback_suppresses_stale_side_effects():
+def test_lesson_runtime_audio_open_callback_leaves_wake_rearm_to_worker_continuation():
     app_cc = read("main/application.cc")
 
     opened_start = app_cc.index("protocol_->OnAudioChannelOpened")
@@ -1919,9 +1921,19 @@ def test_lesson_runtime_audio_open_callback_suppresses_stale_side_effects():
     ]
     claimed_lesson_guard = "if (IsDeviceClaimed() && !lesson_runtime_active_.load())"
     assert claimed_lesson_guard in passive_branch
-    assert passive_branch.index(claimed_lesson_guard) < passive_branch.index(
-        "audio_service_.EnableWakeWordDetection(true);"
-    )
+    assert "audio_service_.EnableWakeWordDetection(true);" not in passive_branch
+
+    open_task_start = app_cc.index("void Application::OpenChannelTask")
+    watchdog_start = app_cc.index("void Application::HandleConnectWatchdog", open_task_start)
+    open_task = app_cc[open_task_start:watchdog_start]
+    passive_success = open_task[
+        open_task.index("if (passive_preconnect)") :
+        open_task.index("} else if (wake_word_invoke)", open_task.index("if (passive_preconnect)"))
+    ]
+    claimed_success = passive_success[
+        passive_success.index("else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load())") :
+    ]
+    assert "self->audio_service_.EnableWakeWordDetection(true);" in claimed_success
 
     generic_branch = opened_body[
         opened_body.index("} else {") :
@@ -2731,8 +2743,12 @@ def test_passive_connect_watchdog_keeps_safe_idle_wake_detection_available():
     passive_backoff = watchdog[passive_backoff_start:passive_backoff_end]
 
     assert "SetDeviceState(kDeviceStateIdle);" in passive_backoff
+    assert "passive_ws_intent_.store(false);" in passive_backoff
     assert "RearmClaimedIdleWakeWord();" in passive_backoff
     assert passive_backoff.index("SetDeviceState(kDeviceStateIdle);") < passive_backoff.index(
+        "passive_ws_intent_.store(false);"
+    )
+    assert passive_backoff.index("passive_ws_intent_.store(false);") < passive_backoff.index(
         "RearmClaimedIdleWakeWord();"
     )
     assert passive_backoff.index("RearmClaimedIdleWakeWord();") < passive_backoff.index(

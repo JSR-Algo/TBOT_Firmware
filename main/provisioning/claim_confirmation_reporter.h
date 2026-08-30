@@ -57,6 +57,10 @@ bool FetchPendingTbotClaimFromDeviceConfig(const std::string& api_base_url,
 // after confirming the setup session is still current.
 bool PersistTbotClaimConfirmationResponse(const std::string& json);
 
+// Provisioning-status credential responses additionally require api_url so a
+// fresh-NVS cold boot can dispatch heartbeat without relying on stale settings.
+bool PersistProvisioningCredentialResponse(const std::string& json);
+
 // Derive the device-bootstrap URL ({origin}/v1/device/bootstrap) from the
 // compiled provisioning-status URL ({origin}/v1/device/provisioning/status).
 // Returns "" if the provisioning URL does not carry the expected suffix.

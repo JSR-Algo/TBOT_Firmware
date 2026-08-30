@@ -34,6 +34,7 @@ void SetLessonCourseDeliveryStorageForTest(const char* serialized);
 std::size_t LessonCourseDeliveryEntryCountForTest();
 bool LessonCourseDeliveryStorageValidForTest();
 std::string LessonCourseDeliveryStorageForTest();
+const char* LessonCourseDeliveryStatusTokenForTest(std::uint8_t value);
 void SetLessonCourseDeliveryWriteFailureForTest(bool fail);
 void FailNextLessonCourseDeliveryWriteForTest(int write_number);
 }
@@ -2144,27 +2145,39 @@ void test_course_activity_reconciles_outcome_and_removal_write_failures() {
                 FrameBodyStr(1, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
             "second outcome write failure is explicit after one applied side effect");
     const int applied_decodes = fake.video_decodes;
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(true);
     Handle(CourseActivityFrame(3, "outcome-reconcile", "activity-outcome", "teach", true));
-    require(fake.video_decodes == applied_decodes && FrameType(2) == "lesson_ack" &&
-                !FrameBodyBool(2, "degraded", true),
+    require(fake.video_decodes == applied_decodes && FrameType(2) == "lesson_error" &&
+                FrameBodyStr(2, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "outcome reconciliation remains fail-closed while storage is unavailable");
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(false);
+    Handle(CourseActivityFrame(4, "outcome-reconcile", "activity-outcome", "teach", true));
+    require(fake.video_decodes == applied_decodes && FrameType(3) == "lesson_ack" &&
+                !FrameBodyBool(3, "degraded", true),
             "retry durably resolves RAM outcome and ACKs without a second effect");
 
     fake.fail_present = true;
     tbot::FailNextLessonCourseDeliveryWriteForTest(2);
-    Handle(CourseActivityFrame(4, "removal-reconcile", "activity-removal", "listen", false));
-    require(FrameType(3) == "lesson_error" &&
-                FrameBodyStr(3, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+    Handle(CourseActivityFrame(5, "removal-reconcile", "activity-removal", "listen", false));
+    require(FrameType(4) == "lesson_error" &&
+                FrameBodyStr(4, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
             "failed durable reservation removal does not advertise a retryable render path");
     const int removal_decodes = fake.video_decodes;
     fake.fail_present = false;
-    Handle(CourseActivityFrame(5, "removal-reconcile", "activity-removal", "listen", false));
-    require(fake.video_decodes == removal_decodes && FrameType(4) == "lesson_error" &&
-                FrameBodyStr(4, nullptr, "code") == "COURSE_ACTIVITY_RENDER_FAILED",
-            "retry first reconciles durable removal without applying the effect");
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(true);
     Handle(CourseActivityFrame(6, "removal-reconcile", "activity-removal", "listen", false));
-    require(FrameType(5) == "lesson_ack", "activity retries only after removal is durable");
+    require(fake.video_decodes == removal_decodes && FrameType(5) == "lesson_error" &&
+                FrameBodyStr(5, nullptr, "code") == "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "removal reconciliation remains fail-closed while storage is unavailable");
+    tbot::SetLessonCourseDeliveryWriteFailureForTest(false);
+    Handle(CourseActivityFrame(7, "removal-reconcile", "activity-removal", "listen", false));
+    require(fake.video_decodes == removal_decodes && FrameType(6) == "lesson_error" &&
+                FrameBodyStr(6, nullptr, "code") == "COURSE_ACTIVITY_RENDER_FAILED",
+            "retry first reconciles durable removal without applying the effect");
+    Handle(CourseActivityFrame(8, "removal-reconcile", "activity-removal", "listen", false));
+    require(FrameType(7) == "lesson_ack", "activity retries only after removal is durable");
 
-    Handle(V5Frame("lesson_stop", 7,
+    Handle(V5Frame("lesson_stop", 9,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
         "\"commandSequenceId\":206}}"));
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
@@ -2382,6 +2395,8 @@ void test_course_activity_retains_w19_static_layers_and_dedupes_delivery() {
 }
 
 void test_course_activity_delivery_persistence_reload_bounds_and_corruption() {
+    require(std::string(tbot::LessonCourseDeliveryStatusTokenForTest(0xff)) == "unknown",
+            "invalid internal delivery enum serializes to fail-closed unknown");
     std::string persisted;
     for (int index = 0; index < 15; ++index) {
         persisted += "session-" + std::to_string(index) + "\tdelivery-" +
@@ -2405,11 +2420,105 @@ void test_course_activity_delivery_persistence_reload_bounds_and_corruption() {
         "session\tdelivery\tapplied\trollback-session\trollback-delivery\tapplied\n");
     require(!tbot::LessonCourseDeliveryStorageValidForTest(),
             "rollback context is accepted only on unresolved pending records");
+    tbot::SetLessonCourseDeliveryStorageForTest("session\tdelivery\tinvalid-status\n");
+    require(!tbot::LessonCourseDeliveryStorageValidForTest(),
+            "unknown persisted delivery status fails closed");
+    tbot::SetLessonCourseDeliveryStorageForTest("session\tdelivery\textra\tfields\n");
+    require(!tbot::LessonCourseDeliveryStorageValidForTest(),
+            "persisted delivery records with an unsupported field count fail closed");
+    tbot::SetLessonCourseDeliveryStorageForTest("session with space\tdelivery\tapplied\n");
+    require(!tbot::LessonCourseDeliveryStorageValidForTest(),
+            "persisted delivery identity with unsafe characters fails closed");
     tbot::SetLessonCourseDeliveryStorageForTest(std::string(4096, 'x').c_str());
     require(!tbot::LessonCourseDeliveryStorageValidForTest(),
             "oversized persisted delivery bytes fail closed before parsing");
     tbot::SetLessonCourseDeliveryStorageForTest("");
     tbot::ResetLessonCourseDeliveryMemoryForTest();
+}
+
+void test_course_activity_validation_and_recovery_edge_paths() {
+    tbot::SetLessonCourseDeliveryStorageForTest("");
+    ResetObservable();
+    FreshSession();
+    StageV5CourseModeAssetPack();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+
+    int sequence = 2;
+    const std::array<const char*, 2> invalid_states = {"unsupported", nullptr};
+    for (const char* state : invalid_states) {
+        std::string frame = CourseActivityFrame(sequence++, "invalid-state");
+        if (state == nullptr) {
+            frame = ReplaceOnce(frame, "\"visualState\":\"listen\",", "");
+        } else {
+            frame = ReplaceOnce(frame, "\"visualState\":\"listen\"",
+                                std::string("\"visualState\":\"") + state + "\"");
+        }
+        Handle(frame);
+        require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                    FrameBodyStr(Sent().size() - 1, nullptr, "code") ==
+                        "COURSE_ACTIVITY_INVALID",
+                "unsupported Course activity visual state fails closed");
+    }
+    for (const char* intent : {"PRESENT_RIGHT", "ENCOURAGE_RETRY", "CELEBRATE_MASTERY",
+                               "CALM_REGULATE", "LISTEN_ATTENTIVELY"}) {
+        const std::string delivery = std::string("intent-") + intent;
+        Handle(ReplaceOnce(CourseActivityFrame(sequence++, delivery.c_str()),
+                           "\"embodiedIntent\":\"PRESENT_CENTER\"",
+                           std::string("\"embodiedIntent\":\"") + intent + "\""));
+        require(FrameType(Sent().size() - 1) == "lesson_ack",
+                "every supported Course activity embodied intent is admitted");
+    }
+
+    std::string pending_only;
+    for (int index = 0; index < 12; ++index) {
+        pending_only += std::string(SID()) + "\tpending-" + std::to_string(index) +
+                        "\tpending\n";
+    }
+    tbot::SetLessonCourseDeliveryStorageForTest(pending_only.c_str());
+    Handle(CourseActivityFrame(sequence++, "pending-overflow"));
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "code") ==
+                    "COURSE_ACTIVITY_DEDUPE_UNAVAILABLE",
+            "a full pending-only delivery window refuses unsafe eviction");
+
+    const std::string rollback_storage = std::string(SID()) +
+        "\tcurrent-delivery\tpending\t" + SID() + "\trollback-delivery\tdegraded\n";
+    tbot::SetLessonCourseDeliveryStorageForTest(rollback_storage.c_str());
+    require(tbot::LessonCourseDeliveryAppliedForTest(SID(), "rollback-delivery"),
+            "rollback delivery identity is included in duplicate lookup");
+    const int before_rollback_replay = fake.video_decodes;
+    Handle(CourseActivityFrame(sequence++, "rollback-delivery"));
+    require(fake.video_decodes == before_rollback_replay &&
+                FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyBool(Sent().size() - 1, "degraded", false),
+            "rollback delivery identity replays its durable degraded outcome");
+
+    std::string replacement_storage = std::string(SID()) +
+        "\ttarget-pending\tpending\t" + SID() + "\trestored-oldest\tapplied\n" +
+        SID() + "\tother-pending\tpending\n";
+    for (int index = 0; index < 10; ++index) {
+        replacement_storage += std::string(SID()) + "\treplacement-" +
+                               std::to_string(index) + "\tapplied\n";
+    }
+    tbot::SetLessonCourseDeliveryStorageForTest(replacement_storage.c_str());
+    Handle(CourseActivityFrame(sequence++, "target-pending"));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "degradedReason") ==
+                    "deliveryOutcomeUnknown" &&
+                tbot::LessonCourseDeliveryAppliedForTest(SID(), "restored-oldest"),
+            "unknown recovery restores rollback identity and replaces an eligible record");
+
+    Handle(V5Frame("lesson_stop", sequence++,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":210}}"));
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    RemoveV5CourseModeAssetPack();
+    tbot::SetLessonCourseDeliveryStorageForTest("");
 }
 
 void test_course_activity_handler_persistence_round_trip_after_reboot() {
@@ -2423,6 +2532,7 @@ void test_course_activity_handler_persistence_round_trip_after_reboot() {
          V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
     tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
     Handle(V5CourseModeActivityFallbackPrepareFrame(1));
+    const size_t motion_calls_before = App().robot_uart_.calls.size();
 
     for (int index = 0; index < 15; ++index) {
         const std::string delivery = "roundtrip-delivery-" + std::to_string(index);
@@ -2431,6 +2541,8 @@ void test_course_activity_handler_persistence_round_trip_after_reboot() {
     }
     const std::string persisted = tbot::LessonCourseDeliveryStorageForTest();
     require(!persisted.empty(), "handler claims are serialized into durable host storage");
+    require(App().robot_uart_.calls.size() == motion_calls_before,
+            "Course activity delivery never duplicates server-owned physical motion");
 
     tbot::ResetLessonCourseDeliveryMemoryForTest();
     require(!tbot::LessonCourseDeliveryAppliedForTest(SID(), "roundtrip-delivery-0") &&
@@ -2447,6 +2559,8 @@ void test_course_activity_handler_persistence_round_trip_after_reboot() {
                                "roundtrip-activity-new", "teach", true));
     require(fake.video_decodes == before_duplicate + 1,
             "a distinct delivery still applies after reboot reload");
+    require(App().robot_uart_.calls.size() == motion_calls_before,
+            "reboot delivery recovery does not synthesize a duplicate motion command");
 
     Handle(V5Frame("lesson_stop", 19,
         "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"teach\","
@@ -2530,6 +2644,41 @@ void test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack() {
                 fake.jpeg_decodes == 0 && fake.video_decodes == 0,
             "dynamic Course Mode rejects a layer checksum that differs from its READY pack asset");
 
+    ResetObservable();
+    FreshSession();
+    Handle(ReplaceOnce(
+        V5CourseModeActivityFallbackPrepareFrame(4),
+        "\"contractChecksum\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"",
+        "\"contractChecksum\":\"Bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\""));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH",
+            "dynamic Course Mode rejects non-lowercase SHA-256 compatibility identity");
+
+    ResetObservable();
+    FreshSession();
+    Handle(ReplaceOnce(
+        V5CourseModeActivityFallbackPrepareFrame(5),
+        "\"bytes\":43599", "\"bytes\":0"));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH",
+            "dynamic Course Mode rejects a non-positive layer byte count");
+
+    ResetObservable();
+    FreshSession();
+    std::string explicit_path = V5CourseModeActivityFallbackPrepareFrame(6);
+    explicit_path = ReplaceOnce(
+        explicit_path,
+        "\"key\":\"85000000-0000-4000-8000-000000000011\",\"state\":\"READY\"",
+        "\"key\":\"85000000-0000-4000-8000-000000000011\",\"localPath\":\"" +
+            V5CourseModePackRoot() +
+            "/85000000-0000-4000-8000-000000000011\",\"state\":\"READY\"");
+    Handle(explicit_path);
+    require(FrameType(0) == "lesson_ack",
+            "dynamic Course Mode accepts an explicit verified asset local path");
+    Handle(V5Frame("lesson_stop", 7,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":207}}"));
+
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();
 }
@@ -2598,6 +2747,9 @@ void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
         {"\"mediaKind\":\"video\",\"mediaType\":\"video/mp4\"",
          "\"mediaKind\":\"image\",\"mediaType\":\"image/png\""},
         {"\"fps\":10,\"frameCount\":30", "\"fps\":15,\"frameCount\":45"},
+        {"\"key\":\"75000000-0000-4000-8000-000000000011\",\"state\":\"READY\"",
+         "\"key\":\"75000000-0000-4000-8000-000000000011\",\"localPath\":\"" +
+             V5CourseModeAssetPath(0) + "\",\"state\":\"READY\""},
     };
     int sequence = 6;
     std::uint64_t command_sequence = 502;
@@ -2619,6 +2771,36 @@ void test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata() {
     }
     require(admitted_drifts.empty(),
             "v5 Course Mode identity/media/path drift fails closed before renderer IO");
+
+    ResetObservable();
+    FreshSession();
+    std::string two_layer_candidate = ReplaceOnce(
+        V5CourseModePrepareFrame(sequence++, command_sequence++),
+        "\"playbackMode\":\"once\",\"courseModeCompatibility\":",
+        "\"playbackMode\":\"once\",\"activityIds\":[\"candidate-activity\"],"
+        "\"courseModeCompatibility\":");
+    const auto object_begin = two_layer_candidate.find("{\"layer\":\"teachingObject\"");
+    const auto robot_begin = two_layer_candidate.find("{\"layer\":\"robotOverlay\"", object_begin);
+    require(object_begin != std::string::npos && robot_begin != std::string::npos,
+            "canonical candidate fixture exposes its removable object layer");
+    two_layer_candidate.erase(object_begin, robot_begin - object_begin);
+    Handle(two_layer_candidate);
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH",
+            "canonical candidate keeps its exact three-layer requirement");
+
+    ResetObservable();
+    FreshSession();
+    Handle(ReplaceOnce(
+        V5CourseModePrepareFrame(sequence++, command_sequence++),
+        "\"size\":223033}]",
+        "\"size\":223033},{\"key\":\"85000000-0000-4000-8000-000000000011\","
+        "\"state\":\"READY\",\"checksumOk\":true,"
+        "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\","
+        "\"mediaType\":\"image/jpeg\",\"size\":43599}]"));
+    require(FrameType(0) == "lesson_error" &&
+                FrameBodyStr(0, nullptr, "code") == "CINEMATIC_METADATA_MISMATCH",
+            "canonical candidate rejects an asset pack with extra identities");
 
     ResetObservable();
     const int opens_before_missing_current_pack = fake.opens;
@@ -2844,8 +3026,15 @@ void test_renderer_v4_course_mode_compatibility_is_exact_and_narrow() {
 
     ResetObservable();
     FreshSession();
+    Handle(ReplaceOnce(V4CourseModePrepareFrame(3),
+                       "\"schemaVersion\":1", "\"schemaVersion\":2"));
+    require(FrameType(0) == "lesson_error" && fake.opens == opens_before_bad_marker,
+            "Course Mode compatibility rejects unsupported schema versions before renderer IO");
+
+    ResetObservable();
+    FreshSession();
     const int opens_before_stale_generic = fake.opens;
-    Handle(V4V2PrepareFrame(3, 283, "", "", "cat-discover", "teach", "once", 2000, 20));
+    Handle(V4V2PrepareFrame(4, 283, "", "", "cat-discover", "teach", "once", 2000, 20));
     require(FrameType(0) == "lesson_error" && fake.opens == opens_before_stale_generic,
             "generic renderer-v4 path still rejects stale 2000ms once teach cues");
     tbot::SetActiveLessonFlattenedCinematicRenderer(nullptr);
@@ -9292,6 +9481,7 @@ int main() {
     test_course_activity_failed_thirteenth_claim_restores_evicted_oldest();
     test_course_activity_retains_w19_static_layers_and_dedupes_delivery();
     test_course_activity_delivery_persistence_reload_bounds_and_corruption();
+    test_course_activity_validation_and_recovery_edge_paths();
     test_course_activity_handler_persistence_round_trip_after_reboot();
     test_renderer_v5_course_mode_activity_fallback_rejects_manifest_identity_mix();
     test_renderer_v5_dynamic_course_mode_requires_ready_matching_asset_pack();

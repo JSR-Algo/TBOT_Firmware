@@ -37,7 +37,7 @@ char* ReadWholeFile(const char* path) {
     return buf;
 }
 
-// Gan chuoi tu vi[key] neu la string khong rong.
+// Gán chuỗi từ vi[key] nếu là chuỗi không rỗng.
 void GetStr(const cJSON* vi, const char* key, std::string* dst) {
     const cJSON* item = cJSON_GetObjectItemCaseSensitive(vi, key);
     if (cJSON_IsString(item) && item->valuestring != nullptr && item->valuestring[0] != '\0') {
@@ -48,17 +48,17 @@ void GetStr(const cJSON* vi, const char* key, std::string* dst) {
 }  // namespace
 
 MenuStrings MenuLoadStrings() {
-    MenuStrings s;  // default hard-code tieng Viet khong dau
+    MenuStrings s;  // Giá trị mặc định tiếng Việt có dấu.
 
     char* text = ReadWholeFile(kConfigPath);
     if (text == nullptr) {
-        ESP_LOGW(TAG, "Khong co %s -> dung text mac dinh", kConfigPath);
+        ESP_LOGW(TAG, "Không có %s, dùng văn bản mặc định", kConfigPath);
         return s;
     }
     cJSON* root = cJSON_Parse(text);
     free(text);
     if (root == nullptr) {
-        ESP_LOGW(TAG, "menu_config.json parse loi -> dung text mac dinh");
+        ESP_LOGW(TAG, "Không thể phân tích menu_config.json, dùng văn bản mặc định");
         return s;
     }
 
@@ -78,9 +78,9 @@ MenuStrings MenuLoadStrings() {
         GetStr(vi, "sd_ok", &s.sd_ok);
         GetStr(vi, "sd_fail", &s.sd_fail);
         s.from_sd = true;
-        ESP_LOGI(TAG, "Menu strings loaded tu SD (vi)");
+        ESP_LOGI(TAG, "Đã tải chuỗi menu tiếng Việt từ thẻ nhớ");
     } else {
-        ESP_LOGW(TAG, "menu_config.json thieu object 'vi' -> dung text mac dinh");
+        ESP_LOGW(TAG, "menu_config.json thiếu đối tượng 'vi', dùng văn bản mặc định");
     }
     cJSON_Delete(root);
     return s;

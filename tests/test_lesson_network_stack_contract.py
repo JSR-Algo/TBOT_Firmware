@@ -37,7 +37,9 @@ def test_lesson_https_fetch_has_tcpip_task_stack_headroom():
 def test_heartbeat_https_worker_has_stack_headroom_next_to_passive_websocket():
     source = (ROOT / "main/application.cc").read_text(encoding="utf-8")
 
-    assert f'"heartbeat_http", {MIN_HEARTBEAT_STACK_BYTES}' in source
+    assert f"kHeartbeatWorkerStackDepth = {MIN_HEARTBEAT_STACK_BYTES}" in source
+    assert "DRAM_ATTR StackType_t heartbeat_task_stack[kHeartbeatWorkerStackDepth]" in source
+    assert "xTaskCreateStatic(" in source
 
 def test_websocket_open_worker_has_tls_stack_headroom():
     source = (ROOT / "main/application.cc").read_text(encoding="utf-8")

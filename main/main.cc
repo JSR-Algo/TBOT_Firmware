@@ -13,6 +13,9 @@
 #else
 #include "application.h"
 #include "lesson_cinematic_evidence.h"
+#if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
+#include "course_mode_hil_console.h"
+#endif
 #endif
 
 #define TAG "main"
@@ -73,6 +76,9 @@ extern "C" void app_main(void)
     // Initialize and run the application
     auto& app = Application::GetInstance();
     app.Initialize();
+#if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
+    ESP_ERROR_CHECK(StartCourseModeHilConsole() ? ESP_OK : ESP_FAIL);
+#endif
     app.Run();  // This function runs the main event loop and never returns
 }
 #endif
