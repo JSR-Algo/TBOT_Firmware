@@ -4,7 +4,7 @@
 
 **Goal:** Close stale BLE teardown and fallback advertising callback races before merging the remaining Wi-Fi scan work into firmware `main`.
 
-**Architecture:** Keep lifecycle ownership in `blufi.cpp`. Serialize station-association teardown with `provisioning_finalization_mutex_`, and route default BluFi advertising configuration/start callbacks through FIFO epoch ownership just like compact raw advertising callbacks.
+**Architecture:** Keep lifecycle ownership in `blufi.cpp`. Serialize blocking BLE transitions with callback-safe `ble_lifecycle_mutex_`; use `provisioning_finalization_mutex_` only for short generation-bound state commits before releasing it for deinit. Generation-bound claim confirmation applies its result under the finalization lock, then performs teardown under lifecycle ownership after that lock is released. Route default BluFi advertising configuration/start callbacks through FIFO epoch ownership just like compact raw advertising callbacks.
 
 **Tech Stack:** C++17, ESP-IDF Bluedroid GAP/BluFi, pytest source-contract tests, ESP32-S3 hardware E2E.
 
@@ -16,9 +16,10 @@
 - Modify: `tests/test_blufi_provisioning_stability.py`
 - Modify: `main/boards/common/blufi.cpp`
 
-- [ ] Add a source-contract test asserting `provisioning_finalization_mutex_` is locked before the generation check and remains in scope through `deinit()`.
+- [ ] Add a source-contract test asserting `ble_lifecycle_mutex_` owns the full release/restart transition, while `provisioning_finalization_mutex_` is released before `deinit()` and reacquired only for post-transition validation.
 - [ ] Run `python3 -m pytest -q tests/test_blufi_provisioning_stability.py -k release_ble` and confirm the new assertion fails.
-- [ ] Add `std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);` at the start of `ReleaseBleForStationAssociation()` before reading `setup_generation_`.
+- [ ] Acquire `ble_lifecycle_mutex_` before reading lifecycle preconditions, validate generation under a short finalization-lock scope, release finalization before blocking deinit, then validate post-transition state under a new short scope.
+- [ ] For generation-bound claim confirmation, apply/commit the result inside `RunIfSetupGenerationCurrent()`, then call public successful teardown only after the generation gate returns and only when both `applied` and `should_teardown` are true.
 - [ ] Re-run the focused test and confirm it passes.
 
 ### Task 2: Own fallback advertising callbacks

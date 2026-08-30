@@ -1366,6 +1366,18 @@ def test_fw21h_generation_bound_claim_confirm_defers_ble_teardown_until_after_ga
     assert "StopBleAdvertising" not in task[gate:gate_end]
     assert gate < gate_end < teardown
     assert '"claim_confirmed", provisioning_token' in task[teardown:teardown + 180]
+    post_gate = task[gate_end:]
+    assert re.search(
+        r"#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\s+"
+        r"if \(applied && should_teardown\) \{\s+"
+        r"Blufi::GetInstance\(\)\.CompleteSuccessfulProvisioningTeardown\(",
+        post_gate,
+    )
+    assert re.search(
+        r"#else\s+if \(applied && should_teardown\) \{\s+"
+        r"self->StopBleAdvertising\(\);",
+        post_gate,
+    )
 
     confirmed = result_handler[result_handler.index("CancelClaimExpiryTimer();") :]
     defer_guard = confirmed.index("if (!defer_successful_teardown)")
