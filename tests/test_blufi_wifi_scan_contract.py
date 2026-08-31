@@ -37,7 +37,8 @@ def test_default_event_loop_barrier_has_one_bounded_public_api():
     )
 
     assert "bool DrainDefaultEventLoop(std::chrono::milliseconds timeout);" in header
-    assert "DefaultEventLoopScanDrainExecutor" in header
+    assert "DefaultEventLoopScanDrainExecutor" not in header
+    assert "WifiScanLeaseCoordinator" not in header
     assert "std::function" not in header
     assert "template <" not in header
     assert "bool barrier_drained" not in header
@@ -54,8 +55,11 @@ def test_default_event_loop_barrier_registers_one_process_lifetime_handler():
     assert "xSemaphoreCreateBinary" in state
     assert "esp_event_handler_instance_register" in state
     assert "esp_event_handler_instance_unregister" not in source
-    assert "static DefaultEventLoopBarrier* barrier =" in body
-    assert "new (std::nothrow) DefaultEventLoopBarrier" in body
+    assert "static DefaultEventLoopBarrier* barrier = nullptr" in source
+    assert "static std::mutex initialization_mutex" in source
+    assert "std::lock_guard<std::mutex> initialization_lock" in source
+    assert "if (barrier == nullptr)" in source
+    assert "barrier = new (std::nothrow) DefaultEventLoopBarrier" in source
     assert "xSemaphoreCreateBinary" not in body
     assert "esp_event_handler_instance_register" not in body
     assert "vSemaphoreDelete" not in body
@@ -83,47 +87,17 @@ def test_default_event_loop_barrier_serializes_and_rejects_late_generations():
     assert "xSemaphoreTake" in state
 
 
-def test_default_event_loop_barrier_scan_drain_executor_is_exact_and_ordered():
+def test_default_event_loop_barrier_has_no_scan_executor_or_driver_actions():
     header = read(
         "components/esp-wifi-connect/include/default_event_loop_barrier.h"
     )
     source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
-    execute = function_body(
-        source, "WifiScanLeaseCoordinator::DrainProof "
-        "DefaultEventLoopScanDrainExecutor::Execute"
-    )
 
-    assert "WifiScanLeaseCoordinator& coordinator" in header
-    assert "const WifiScanLeaseCoordinator::Lease& lease" in header
-    assert "const WifiScanLeaseCoordinator::DrainDecision& drain" in header
-    assert "IsCurrentDrain(lease, drain)" in execute
-    assert execute.index("IsCurrentDrain(lease, drain)") < execute.index(
-        "esp_wifi_scan_stop()"
-    ) < execute.index("DrainDefaultEventLoop(")
-    assert "WifiScanLeaseProofFactory" not in header + source
-    assert "std::function" not in header + source
-    assert "callback" not in header.lower()
-    assert "barrier_drained" not in header
-
-
-def test_default_event_loop_barrier_scan_drain_executor_has_no_driver_reset():
-    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
-    execute = function_body(
-        source, "WifiScanLeaseCoordinator::DrainProof "
-        "DefaultEventLoopScanDrainExecutor::Execute"
-    )
-
-    assert execute.count("esp_wifi_scan_stop()") == 1
-    assert "stop_result == ESP_OK" in execute
-    assert "ESP_ERR_WIFI_STATE" not in execute
-    assert "ESP_ERR_WIFI_NOT_INIT" not in execute
-    assert "esp_wifi_stop" not in execute
-    assert "esp_wifi_deinit" not in execute
-    assert "esp_wifi_init" not in execute
-    assert "esp_wifi_restore" not in execute
-    assert "WifiStation" not in execute
-    assert "WifiConfigurationAp" not in execute
-    assert "Blufi" not in execute
+    combined = header + source
+    assert "DefaultEventLoopScanDrainExecutor" not in combined
+    assert "WifiScanLeaseCoordinator" not in combined
+    assert "DrainProof" not in combined
+    assert "esp_wifi_" not in combined
 
 
 def test_default_event_loop_barrier_is_built_by_wifi_component():

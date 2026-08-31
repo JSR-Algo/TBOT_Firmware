@@ -8,7 +8,6 @@
 #include <new>
 
 #include "esp_event.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -111,25 +110,18 @@ private:
 }  // namespace
 
 bool DrainDefaultEventLoop(std::chrono::milliseconds timeout) {
-    static DefaultEventLoopBarrier* barrier =
-        new (std::nothrow) DefaultEventLoopBarrier();
-    if (barrier == nullptr) {
-        return false;
+    static std::mutex initialization_mutex;
+    static DefaultEventLoopBarrier* barrier = nullptr;
+    DefaultEventLoopBarrier* initialized_barrier = nullptr;
+    {
+        std::lock_guard<std::mutex> initialization_lock(initialization_mutex);
+        if (barrier == nullptr) {
+            barrier = new (std::nothrow) DefaultEventLoopBarrier();
+            if (barrier == nullptr) {
+                return false;
+            }
+        }
+        initialized_barrier = barrier;
     }
-    return barrier->Drain(timeout);
-}
-
-WifiScanLeaseCoordinator::DrainProof DefaultEventLoopScanDrainExecutor::Execute(
-        WifiScanLeaseCoordinator& coordinator,
-        const WifiScanLeaseCoordinator::Lease& lease,
-        const WifiScanLeaseCoordinator::DrainDecision& drain) {
-    if (!coordinator.IsCurrentDrain(lease, drain)) {
-        return WifiScanLeaseCoordinator::DrainProof{};
-    }
-
-    const esp_err_t stop_result = esp_wifi_scan_stop();
-    const bool barrier_drained =
-        DrainDefaultEventLoop(kMaximumBarrierWait);
-    return WifiScanLeaseCoordinator::DrainProof{
-        drain.drain_id(), stop_result == ESP_OK && barrier_drained};
+    return initialized_barrier->Drain(timeout);
 }
