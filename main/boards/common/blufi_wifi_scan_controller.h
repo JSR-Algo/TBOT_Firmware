@@ -218,8 +218,10 @@ public:
         return result;
     }
 
-    FinishDecision CompleteRecovery(const RecoveryTicket& ticket,
-                                    bool success) {
+    FinishDecision CompleteRecovery(const RecoveryTicket& ticket, bool success,
+                                    uint32_t current_generation,
+                                    uint64_t current_session,
+                                    uint64_t current_connection) {
         std::lock_guard<std::mutex> lock(mutex_);
         FinishDecision result;
         if (!ticket.valid || !recovering_ ||
@@ -237,8 +239,22 @@ public:
         if (driver_incarnation_ == 0) {
             ++driver_incarnation_;
         }
+
+        const Request recovered_owner = owner_;
+        std::optional<Request> valid_pending;
+        if (pending_.has_value() &&
+            Matches(*pending_, current_generation, current_session,
+                    current_connection)) {
+            valid_pending = pending_;
+        }
+        pending_.reset();
         ResetOwner();
-        PromotePending(result);
+        if (valid_pending.has_value()) {
+            Reserve(*valid_pending, result);
+        } else if (Matches(recovered_owner, current_generation,
+                           current_session, current_connection)) {
+            Reserve(recovered_owner, result);
+        }
         return result;
     }
 
@@ -281,8 +297,13 @@ private:
         if (!pending_.has_value()) {
             return;
         }
-        owner_ = *pending_;
+        const Request pending = *pending_;
         pending_.reset();
+        Reserve(pending, result);
+    }
+
+    void Reserve(const Request& request, FinishDecision& result) {
+        owner_ = request;
         owner_request_id_ = NextRequestId();
         phase_ = Phase::kStarting;
         submission_claimed_ = false;
