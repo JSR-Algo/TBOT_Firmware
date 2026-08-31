@@ -86,6 +86,7 @@ private:
     std::vector<WifiApRecord> connect_queue_;
     bool was_connected_ = false;  // Track if we were connected before disconnection
     WifiScanLeaseCoordinator& scan_lease_coordinator_;
+    std::recursive_mutex session_callback_mutex_;
     std::mutex scan_mutex_;
     std::mutex session_operation_mutex_;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
@@ -102,10 +103,11 @@ private:
     void ScheduleScanRetry(int64_t delay_microseconds);
     void StartConnect();
     WifiApRecord PrepareNextConnectLocked();
-    void StartConnectForSession(WifiApRecord ap_record, uint64_t session_id,
-                                std::function<void(const std::string&)> callback);
+    std::string StartConnectForSession(WifiApRecord ap_record);
     bool TryBeginSessionOperationLocked(uint64_t session_id);
     void FinishSessionOperation();
+    void DispatchSessionCallback(uint64_t expected_session,
+                                 std::function<void()> callback);
     void FinishDiscardedCompletionLocked(
         const WifiScanLeaseCoordinator::Lease& lease);
     void UpdateScanInterval();  // Exponential backoff for scan interval

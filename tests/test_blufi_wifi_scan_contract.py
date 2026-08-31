@@ -298,7 +298,8 @@ def test_station_uses_session_operation_permits_for_all_emitting_handlers():
     assert "bool TryBeginSessionOperationLocked(uint64_t session_id);" in header
     assert "void FinishSessionOperation();" in header
 
-    assert "TryBeginSessionOperationLocked(lease_session_id_)" in completion
+    assert "expected_session = lease_session_id_" in completion
+    assert "TryBeginSessionOperationLocked(expected_session)" in completion
     assert completion.index("TryBeginSessionOperationLocked") < completion.index(
         "lifecycle_lock.unlock()"
     )
@@ -316,18 +317,17 @@ def test_station_uses_session_operation_permits_for_all_emitting_handlers():
     assert disconnected.index("TryBeginSessionOperationLocked") < disconnected.index(
         "esp_wifi_connect()"
     )
-    assert disconnected.index("on_disconnected_(") < disconnected.index(
-        "FinishSessionOperation()"
+    assert disconnected.index("FinishSessionOperation()") < disconnected.index(
+        "on_disconnected_("
     )
 
     assert "TryBeginSessionOperationLocked(session_id)" in ip_handler
     assert ip_handler.index("TryBeginSessionOperationLocked") < ip_handler.index(
-        "on_connected_("
-    )
-    assert ip_handler.index("on_connected_(") < ip_handler.index(
         "FinishSessionOperation()"
     )
-
+    assert ip_handler.index("FinishSessionOperation()") < ip_handler.index(
+        "on_connected_("
+    )
     disable = stop.index("scans_enabled_ = false")
     invalidate = stop.index("++scan_session_id_")
     wait = stop.index("session_operations_drained_.wait(")
@@ -352,6 +352,48 @@ def test_wifi_manager_never_waits_for_station_stop_under_manager_mutex():
         )
         assert body.rfind("lock.unlock()", 0, stop) != -1
         assert "transition_generation" in body
+
+
+def test_station_external_callbacks_use_reentrant_session_gate_after_permit_finish():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    stop = function_body(source, "void WifiStation::Stop")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+    wifi_handler = function_body(source, "void WifiStation::WifiEventHandler")
+    ip_handler = function_body(source, "void WifiStation::IpEventHandler")
+    dispatch = function_body(source, "void WifiStation::DispatchSessionCallback")
+
+    assert "std::recursive_mutex session_callback_mutex_;" in header
+    assert "void DispatchSessionCallback(" in header
+    assert stop.index("session_callback_mutex_") < stop.index("scan_mutex_")
+    assert dispatch.index("session_callback_mutex_") < dispatch.index("scan_mutex_")
+    assert "scans_enabled_ && expected_session == scan_session_id_" in dispatch
+
+    assert completion.index("FinishSessionOperation()") < completion.index(
+        "DispatchSessionCallback("
+    )
+    sta_start = wifi_handler[
+        wifi_handler.index("WIFI_EVENT_STA_START") :
+        wifi_handler.index("WIFI_EVENT_SCAN_DONE")
+    ]
+    assert sta_start.index("FinishSessionOperation()") < sta_start.index(
+        "DispatchSessionCallback("
+    )
+    disconnected = wifi_handler[wifi_handler.index("WIFI_EVENT_STA_DISCONNECTED") :]
+    assert disconnected.index("FinishSessionOperation()") < disconnected.index(
+        "DispatchSessionCallback("
+    )
+    assert ip_handler.index("FinishSessionOperation()") < ip_handler.index(
+        "DispatchSessionCallback("
+    )
+
+    for callback in ("on_scan_begin_", "on_connect_", "on_connected_", "on_disconnected_"):
+        assert f"DispatchSessionCallback" in source
+        uses = [m.start() for m in re.finditer(re.escape(callback + "("), source)]
+        assert uses
+        for use in uses:
+            prefix = source[max(0, use - 500) : use]
+            assert "DispatchSessionCallback(" in prefix
 
 
 def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():

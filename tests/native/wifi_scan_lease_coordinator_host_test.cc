@@ -511,6 +511,129 @@ void StationSessionPermitSerializesAllEmittingPathsWithStop() {
     }
 }
 
+enum class StationCallbackType : uint8_t {
+    kScanning,
+    kConnecting,
+    kConnected,
+    kDisconnected,
+};
+
+class SplitStationCallbackGateModel {
+public:
+    void Run(StationCallbackType type, std::function<void()> callback = {}) {
+        uint64_t expected_session = 0;
+        {
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            if (!enabled_) {
+                return;
+            }
+            expected_session = session_id_;
+            ++in_flight_;
+        }
+        ++internal_actions_;
+        {
+            std::lock_guard<std::mutex> lock(session_mutex_);
+            --in_flight_;
+            if (in_flight_ == 0) {
+                drained_.notify_all();
+            }
+        }
+        Dispatch(expected_session, type, std::move(callback));
+    }
+
+    void Stop() {
+        std::lock_guard<std::recursive_mutex> callback_lock(callback_mutex_);
+        std::unique_lock<std::mutex> session_lock(session_mutex_);
+        enabled_ = false;
+        ++session_id_;
+        drained_.wait(session_lock, [this]() { return in_flight_ == 0; });
+        stop_returned_.store(true);
+    }
+
+    unsigned callbacks() const { return callbacks_.load(); }
+    unsigned internal_actions() const { return internal_actions_.load(); }
+    bool stop_returned() const { return stop_returned_.load(); }
+
+private:
+    void Dispatch(uint64_t expected_session, StationCallbackType,
+                  std::function<void()> callback) {
+        std::lock_guard<std::recursive_mutex> callback_lock(callback_mutex_);
+        {
+            std::lock_guard<std::mutex> session_lock(session_mutex_);
+            if (!enabled_ || expected_session != session_id_) {
+                return;
+            }
+        }
+        ++callbacks_;
+        if (callback) {
+            callback();
+        }
+    }
+
+    std::recursive_mutex callback_mutex_;
+    std::mutex session_mutex_;
+    std::condition_variable drained_;
+    bool enabled_ = true;
+    uint64_t session_id_ = 1;
+    unsigned in_flight_ = 0;
+    std::atomic<unsigned> callbacks_{0};
+    std::atomic<unsigned> internal_actions_{0};
+    std::atomic<bool> stop_returned_{false};
+};
+
+void StationCallbackGateHandlesCrossThreadAndReentrantStop() {
+    for (const auto type : {
+             StationCallbackType::kScanning,
+             StationCallbackType::kConnecting,
+             StationCallbackType::kConnected,
+             StationCallbackType::kDisconnected,
+         }) {
+        SplitStationCallbackGateModel model;
+        Barrier callback_entered(2);
+        Barrier allow_callback_return(2);
+        std::thread operation([&]() {
+            model.Run(type, [&]() {
+                callback_entered.ArriveAndWait();
+                allow_callback_return.ArriveAndWait();
+            });
+        });
+        callback_entered.ArriveAndWait();
+        std::thread stop([&]() { model.Stop(); });
+        assert(!model.stop_returned());
+        allow_callback_return.ArriveAndWait();
+        operation.join();
+        stop.join();
+        assert(model.callbacks() == 1);
+        assert(model.internal_actions() == 1);
+    }
+
+    for (const auto type : {
+             StationCallbackType::kScanning,
+             StationCallbackType::kConnecting,
+             StationCallbackType::kConnected,
+             StationCallbackType::kDisconnected,
+         }) {
+        SplitStationCallbackGateModel model;
+        model.Stop();
+        model.Run(type);
+        assert(model.callbacks() == 0);
+        assert(model.internal_actions() == 0);
+    }
+
+    for (const auto type : {
+             StationCallbackType::kScanning,
+             StationCallbackType::kConnecting,
+             StationCallbackType::kConnected,
+             StationCallbackType::kDisconnected,
+         }) {
+        SplitStationCallbackGateModel model;
+        model.Run(type, [&]() { model.Stop(); });
+        assert(model.stop_returned());
+        assert(model.callbacks() == 1);
+        assert(model.internal_actions() == 1);
+    }
+}
+
 void EarlyMatchingCallbackWaitsForSuccessfulCommit() {
     Coordinator coordinator;
     const auto acquired = coordinator.TryAcquire(Coordinator::Owner::kBlufi);
@@ -893,6 +1016,7 @@ int main() {
     StopCannotOvertakePhysicalStartAndCommit();
     CompletionAndStopHaveOneDeterministicWinner();
     StationSessionPermitSerializesAllEmittingPathsWithStop();
+    StationCallbackGateHandlesCrossThreadAndReentrantStop();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();
     ErrorFirstThenQueuedCallbackRetainsOwnershipUntilConsumed();
