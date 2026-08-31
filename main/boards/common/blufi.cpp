@@ -2412,6 +2412,9 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
         ESP_LOGI(BLUFI_TAG, "WiFi scan done");
 
         uint16_t ap_num = 0;
+        bool cache_scan_results = false;
+        int64_t scan_results_updated_us = 0;
+        std::vector<wifi_ap_record_t> scanned_ap_records;
         if (completion.discard_results) {
             esp_wifi_clear_ap_list();
         } else {
@@ -2420,46 +2423,61 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
             if (ap_num == 0) {
                 ESP_LOGW(BLUFI_TAG, "No APs found");
                 esp_wifi_clear_ap_list();
-                self->m_ap_records.clear();
-                self->m_ap_records_updated_us = 0;
+                cache_scan_results = completion.save_results;
             } else if (completion.save_results) {
                 ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);
-                self->m_ap_records.resize(ap_num);
-                esp_err_t err = esp_wifi_scan_get_ap_records(&ap_num, self->m_ap_records.data());
+                scanned_ap_records.resize(ap_num);
+                esp_err_t err = esp_wifi_scan_get_ap_records(
+                    &ap_num, scanned_ap_records.data());
                 if (err != ESP_OK) {
                     ESP_LOGE(BLUFI_TAG, "Failed to read WiFi scan records: %s", esp_err_to_name(err));
                     esp_wifi_clear_ap_list();
-                    self->m_ap_records.clear();
-                    self->m_ap_records_updated_us = 0;
+                    scanned_ap_records.clear();
                 } else {
                     esp_wifi_clear_ap_list();
-                    self->m_ap_records.resize(ap_num);
-                    self->m_ap_records_updated_us = esp_timer_get_time();
+                    scanned_ap_records.resize(ap_num);
+                    scan_results_updated_us = esp_timer_get_time();
 
                     ESP_LOGI(BLUFI_TAG, "Found %d APs", ap_num);
                 }
+                cache_scan_results = true;
             } else {
                 esp_wifi_clear_ap_list();
             }
         }
 
         uint64_t expected_wifi_list_dispatch_epoch = 0;
+        bool send_owned_wifi_list = false;
         std::vector<wifi_ap_record_t> owned_ap_records;
-        if (completion.send_list) {
+        if (cache_scan_results || completion.send_list) {
             std::lock_guard<std::mutex> session_lock(
                 self->provisioning_finalization_mutex_);
-            owned_ap_records.swap(self->m_ap_records);
-            self->m_ap_records_updated_us = 0;
-            expected_wifi_list_dispatch_epoch =
-                self->m_wifi_list_dispatch_epoch_.fetch_add(
-                    1, std::memory_order_acq_rel) + 1;
-            self->m_wifi_list_dispatch_pending_epoch_.store(
-                expected_wifi_list_dispatch_epoch, std::memory_order_release);
+            const bool completion_owner_is_current =
+                completion.owner.setup_generation ==
+                    self->setup_generation_.load(std::memory_order_acquire) &&
+                completion.owner.ble_session_state ==
+                    self->ble_session_state_.load(std::memory_order_acquire) &&
+                completion.owner.ble_connection_epoch ==
+                    self->ble_connection_epoch_.load(std::memory_order_acquire);
+            if (cache_scan_results && completion_owner_is_current) {
+                self->m_ap_records.swap(scanned_ap_records);
+                self->m_ap_records_updated_us = scan_results_updated_us;
+            }
+            if (completion.send_list && completion_owner_is_current) {
+                owned_ap_records.swap(self->m_ap_records);
+                self->m_ap_records_updated_us = 0;
+                expected_wifi_list_dispatch_epoch =
+                    self->m_wifi_list_dispatch_epoch_.fetch_add(
+                        1, std::memory_order_acq_rel) + 1;
+                self->m_wifi_list_dispatch_pending_epoch_.store(
+                    expected_wifi_list_dispatch_epoch, std::memory_order_release);
+                send_owned_wifi_list = true;
+            }
         }
 
         const auto finished =
             self->wifi_scan_controller_.FinishCompletion(completion.request_id);
-        if (completion.send_list) {
+        if (send_owned_wifi_list) {
             self->ScheduleWifiListSend(completion.owner.setup_generation,
                                        completion.owner.ble_session_state,
                                        completion.owner.ble_connection_epoch,
@@ -2705,18 +2723,25 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 ESP_LOGI(BLUFI_TAG, "WiFi list dispatch already pending");
                 break;
             }
-            // A fresh cache can be dispatched immediately without touching the
-            // scan controller.
-            if (!m_ap_records.empty() && IsWifiScanCacheFresh()) {
-                auto ap_records = std::move(m_ap_records);
+            std::vector<wifi_ap_record_t> cached_ap_records;
+            {
+                std::lock_guard<std::mutex> session_lock(
+                    provisioning_finalization_mutex_);
+                if (!m_ap_records.empty() && IsWifiScanCacheFresh()) {
+                    cached_ap_records.swap(m_ap_records);
+                } else {
+                    m_ap_records.clear();
+                }
                 m_ap_records_updated_us = 0;
-                _send_wifi_list(std::move(ap_records));
+            }
+            // Sending can stop the Wi-Fi radio and allocate BLE buffers, so it
+            // must stay outside the cache/session critical section.
+            if (!cached_ap_records.empty()) {
+                _send_wifi_list(std::move(cached_ap_records));
                 break;
             }
             // No fresh cache: coalesce this logical request with any owned
             // physical scan and dispatch only from its completion callback.
-            m_ap_records.clear();
-            m_ap_records_updated_us = 0;
             RequestWifiListScan(true, true);
             break;
         }

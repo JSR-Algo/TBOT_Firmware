@@ -48,6 +48,38 @@ def test_blufi_scan_completion_claims_owner_before_reading_driver_results():
     assert handler.index("esp_wifi_clear_ap_list") < handler.index("FinishCompletion(")
 
 
+def test_blufi_scan_cache_is_published_and_consumed_under_finalization_mutex():
+    source = read("main/boards/common/blufi.cpp")
+    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    event_body = function_body(source, "void Blufi::_handle_event")
+    get_list = event_body[
+        event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
+        event_body.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")
+    ]
+
+    scan_cache_lock = scan_done.index("provisioning_finalization_mutex_")
+    scan_cache_publish = scan_done.index("self->m_ap_records.swap(")
+    assert scan_cache_lock < scan_cache_publish
+
+    get_cache_lock = get_list.index("provisioning_finalization_mutex_")
+    get_cache_read = get_list.index("IsWifiScanCacheFresh()")
+    get_cache_move = get_list.index("cached_ap_records.swap(m_ap_records)")
+    assert get_cache_lock < get_cache_read < get_cache_move
+
+
+def test_blufi_scan_cache_publish_revalidates_exact_session_under_mutex():
+    source = read("main/boards/common/blufi.cpp")
+    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    cache_section = scan_done[scan_done.index("provisioning_finalization_mutex_") :]
+
+    assert "completion.owner.setup_generation ==" in cache_section
+    assert "completion.owner.ble_session_state ==" in cache_section
+    assert "completion.owner.ble_connection_epoch ==" in cache_section
+    current = cache_section.index("completion_owner_is_current")
+    publish = cache_section.index("self->m_ap_records.swap(")
+    assert current < publish
+
+
 def test_blufi_scan_request_captures_generation_session_and_connection():
     source = read("main/boards/common/blufi.cpp")
     request = function_body(source, "void Blufi::RequestWifiListScan")
@@ -212,8 +244,8 @@ def test_blufi_wifi_scan_caps_application_owned_candidates():
     cap = "ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);"
     assert "kMaxBlufiWifiScanCandidates" in source
     assert cap in body
-    assert body.index(cap) < body.index("m_ap_records.resize(ap_num)")
-    assert body.index(cap) < body.index("esp_wifi_scan_get_ap_records(&ap_num")
+    assert body.index(cap) < body.index("scanned_ap_records.resize(ap_num)")
+    assert body.index(cap) < body.index("esp_wifi_scan_get_ap_records(")
 
 
 def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_returns():
