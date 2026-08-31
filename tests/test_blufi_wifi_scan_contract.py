@@ -1036,14 +1036,30 @@ def test_blufi_busy_retry_has_process_lifetime_timer_and_failure_fallback():
 def test_blufi_watchdog_failures_enter_shared_recovery_immediately():
     source = read("main/boards/common/blufi.cpp")
     watchdog = function_body(source, "void Blufi::ScheduleOwnedWifiScanWatchdog")
+    watchdog_signal = function_body(source, "void Blufi::HandleWifiScanWatchdog")
     recovery = function_body(source, "void Blufi::RequestOwnedWifiScanRecovery")
 
-    assert watchdog.count("BeginDrain(lease)") >= 2
-    assert watchdog.count("RequestOwnedWifiScanRecovery(lease)") >= 2
-    assert "esp_timer_create" in watchdog
-    assert "esp_timer_start_once" in watchdog
+    assert "wifi_scan_watchdog_timer_.Arm" in watchdog
+    assert "HandleWifiScanWatchdog(exact)" in watchdog
+    assert "BeginDrain(exact.lease)" in watchdog_signal
+    assert "RequestOwnedWifiScanRecovery(exact.lease)" in watchdog_signal
+    assert "Application::GetInstance().Schedule" not in watchdog_signal
     assert "WifiManager::GetInstance().RequestScanRecovery(lease)" in recovery
     assert "ScheduleWifiScanRecoveryFallback(lease)" in recovery
+
+
+def test_blufi_scan_timeout_and_recovery_retry_do_not_allocate_application_work():
+    source = read("main/boards/common/blufi.cpp")
+    watchdog = function_body(source, "void Blufi::HandleWifiScanWatchdog")
+    retry = function_body(source, "void Blufi::HandleWifiScanRecoveryRetry")
+    signal_watchdog = function_body(source, "void Blufi::SignalWifiScanWatchdog")
+    signal_retry = function_body(source, "void Blufi::SignalWifiScanRecoveryRetry")
+
+    for body in (watchdog, retry, signal_watchdog, signal_retry):
+        assert "Application::GetInstance().Schedule" not in body
+    assert "catch (...)" in signal_watchdog
+    assert "catch (...)" in signal_retry
+    assert "RequestScanRecovery" in retry
 
 
 def test_blufi_scan_recovery_uses_shared_manager_executor():
@@ -1406,11 +1422,26 @@ def test_blufi_wifi_scan_caps_application_owned_candidates():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
-    cap = "ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);"
     assert "kMaxBlufiWifiScanCandidates" in source
-    assert cap in body
-    assert body.index(cap) < body.index("scanned_ap_records.resize(ap_num)")
-    assert body.index(cap) < body.index("esp_wifi_scan_get_ap_records(")
+    collector = "BlufiWifiScanResultCollector<"
+    assert collector in body
+    assert "wifi_ap_record_t, kMaxBlufiWifiScanCandidates" in body
+    assert "scanned_ap_records.resize(ap_num)" not in body
+    assert body.index(collector) < body.index("esp_wifi_scan_get_ap_records(")
+
+
+def test_blufi_wifi_scan_callback_contains_allocation_failure_and_recovery():
+    source = read("main/boards/common/blufi.cpp")
+    event_handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    completion = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert "try" in event_handler
+    assert "catch (...)" in event_handler
+    assert "RetainFailedCompletion(*lease)" in event_handler
+    assert "BlufiWifiScanResultCollector" in completion
+    assert "scanned_ap_records.assign" in completion
+    assert "materialization_failed" in completion
+    assert "scanned_ap_records.resize" not in completion
 
 
 def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_returns():

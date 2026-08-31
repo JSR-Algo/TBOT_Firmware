@@ -1,4 +1,5 @@
 #include "blufi.h"
+#include "blufi_wifi_scan_result_collector.h"
 #include "blufi_advertising_ledger.h"
 #include <algorithm>
 #include <array>
@@ -481,6 +482,65 @@ Blufi& Blufi::GetInstance() {
     return instance;
 }
 
+BlufiWifiScanLeaseTimer::Ops Blufi::WifiScanLeaseTimerOps() {
+    return BlufiWifiScanLeaseTimer::Ops{
+        .context = nullptr,
+        .create = [](void*, void (*callback)(void*), void* callback_arg,
+                     void** handle) noexcept {
+            const esp_timer_create_args_t args{
+                .callback = callback,
+                .arg = callback_arg,
+                .dispatch_method = ESP_TIMER_TASK,
+                .name = "blufi_scan_lease",
+                .skip_unhandled_events = true,
+            };
+            esp_timer_handle_t timer = nullptr;
+            if (esp_timer_create(&args, &timer) != ESP_OK) {
+                return false;
+            }
+            *handle = timer;
+            return true;
+        },
+        .stop = [](void*, void* handle) noexcept {
+            esp_timer_stop(static_cast<esp_timer_handle_t>(handle));
+        },
+        .start_once = [](void*, void* handle, int64_t timeout_us) noexcept {
+            return esp_timer_start_once(
+                       static_cast<esp_timer_handle_t>(handle), timeout_us) ==
+                ESP_OK;
+        },
+        .now_us = [](void*) noexcept { return esp_timer_get_time(); },
+    };
+}
+
+void Blufi::SignalWifiScanWatchdog(
+        void* context, BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        static_cast<Blufi*>(context)->HandleWifiScanWatchdog(exact);
+    } catch (...) {
+        // Never allow a C timer callback to unwind through esp_timer.
+        try {
+            auto& manager = WifiManager::GetInstance();
+            if (manager.ScanLeaseCoordinator().BeginDrain(exact.lease)) {
+                manager.RequestScanRecovery(exact.lease);
+            }
+        } catch (...) {
+        }
+    }
+}
+
+void Blufi::SignalWifiScanRecoveryRetry(
+        void* context, BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        static_cast<Blufi*>(context)->HandleWifiScanRecoveryRetry(exact);
+    } catch (...) {
+        try {
+            WifiManager::GetInstance().RequestScanRecovery(exact.lease);
+        } catch (...) {
+        }
+    }
+}
+
 Blufi::Blufi()
     : m_sec(nullptr),
       m_blufi_security_negotiated(false),
@@ -493,7 +553,12 @@ Blufi::Blufi()
       m_sta_is_connecting(false),
       m_wifi_connect_task_started(false),
       ble_setup_timer_(nullptr),
-      ble_timed_out_(false) {
+      ble_timed_out_(false),
+      wifi_scan_watchdog_timer_(
+          WifiScanLeaseTimerOps(), this, &Blufi::SignalWifiScanWatchdog),
+      wifi_scan_recovery_retry_timer_(
+          WifiScanLeaseTimerOps(), this,
+          &Blufi::SignalWifiScanRecoveryRetry) {
     memset(&m_sta_config, 0, sizeof(m_sta_config));
     memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
     memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
@@ -568,24 +633,25 @@ Blufi::Blufi()
                 if (!coordinator.CompleteRecovery(lease, proof)) {
                     return false;
                 }
-                std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
-                if (wifi_scan_recovery_ticket_.has_value()) {
-                    wifi_scan_recovery_finish_ =
-                        wifi_scan_controller_.CompleteRecovery(
-                            *wifi_scan_recovery_ticket_, true);
+                BlufiWifiScanLeaseTimer::ExactTuple exact;
+                {
+                    std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+                    exact = {wifi_scan_request_id_, lease};
+                    if (wifi_scan_recovery_ticket_.has_value()) {
+                        wifi_scan_recovery_finish_ =
+                            wifi_scan_controller_.CompleteRecovery(
+                                *wifi_scan_recovery_ticket_, true);
+                    }
+                    wifi_scan_recovery_ticket_.reset();
+                    wifi_scan_lease_.reset();
+                    wifi_scan_request_id_ = 0;
+                    wifi_scan_restore_sta_config_ = {};
+                    wifi_scan_restore_ap_config_ = {};
+                    wifi_scan_restore_sta_config_valid_ = false;
+                    wifi_scan_restore_ap_config_valid_ = false;
                 }
-                wifi_scan_recovery_ticket_.reset();
-                wifi_scan_lease_.reset();
-                wifi_scan_request_id_ = 0;
-                wifi_scan_restore_sta_config_ = {};
-                wifi_scan_restore_ap_config_ = {};
-                wifi_scan_restore_sta_config_valid_ = false;
-                wifi_scan_restore_ap_config_valid_ = false;
-                wifi_scan_watchdog_request_id_ = 0;
-                wifi_scan_watchdog_lease_.reset();
-                if (wifi_scan_watchdog_timer_ != nullptr) {
-                    esp_timer_stop(wifi_scan_watchdog_timer_);
-                }
+                wifi_scan_watchdog_timer_.Disarm(exact);
+                wifi_scan_recovery_retry_timer_.Disarm(exact);
                 return true;
             },
             .retry = [this](const auto&) {
@@ -2617,63 +2683,39 @@ bool Blufi::StartOwnedWifiScan(uint64_t request_id) {
 
 void Blufi::ScheduleOwnedWifiScanWatchdog(
         uint64_t request_id, WifiScanLeaseCoordinator::Lease lease) {
-    std::unique_lock<std::mutex> lock(wifi_scan_lease_mutex_);
-    if (wifi_scan_watchdog_timer_ == nullptr) {
-        const esp_timer_create_args_t args{
-            .callback = [](void* opaque) {
-                auto* self = static_cast<Blufi*>(opaque);
-                Application::GetInstance().Schedule([self]() {
-                uint64_t expected_request_id = 0;
-                std::optional<WifiScanLeaseCoordinator::Lease> expected_lease;
-                bool exact = false;
-                {
-                    std::lock_guard<std::mutex> lock(
-                        self->wifi_scan_lease_mutex_);
-                    expected_request_id = self->wifi_scan_watchdog_request_id_;
-                    expected_lease = self->wifi_scan_watchdog_lease_;
-                    self->wifi_scan_watchdog_request_id_ = 0;
-                    self->wifi_scan_watchdog_lease_.reset();
-                    exact = self->wifi_scan_lease_.has_value() &&
-                        expected_lease.has_value() &&
-                        self->wifi_scan_request_id_ == expected_request_id &&
-                        self->wifi_scan_lease_->lease_id ==
-                            expected_lease->lease_id &&
-                        self->wifi_scan_lease_->driver_incarnation ==
-                            expected_lease->driver_incarnation;
-                }
-                if (exact && self->wifi_scan_controller_.CallbackOwed()) {
-                    auto& coordinator =
-                        WifiManager::GetInstance().ScanLeaseCoordinator();
-                    coordinator.BeginDrain(*expected_lease);
-                    self->RequestOwnedWifiScanRecovery(*expected_lease);
-                }
-            });
-            },
-            .arg = this,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "blufi_scan_watch",
-            .skip_unhandled_events = true,
-        };
-        if (esp_timer_create(&args, &wifi_scan_watchdog_timer_) != ESP_OK) {
-            lock.unlock();
-            auto& coordinator = WifiManager::GetInstance().ScanLeaseCoordinator();
-            if (coordinator.BeginDrain(lease)) {
-                RequestOwnedWifiScanRecovery(lease);
-            }
+    const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
+    if (!wifi_scan_watchdog_timer_.Arm(exact, 5LL * 1000 * 1000)) {
+        HandleWifiScanWatchdog(exact);
+    }
+}
+
+void Blufi::HandleWifiScanWatchdog(
+        BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        bool current = false;
+        {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            current = wifi_scan_lease_.has_value() &&
+                wifi_scan_request_id_ == exact.request_id &&
+                wifi_scan_lease_->owner == exact.lease.owner &&
+                wifi_scan_lease_->lease_id == exact.lease.lease_id &&
+                wifi_scan_lease_->driver_incarnation ==
+                    exact.lease.driver_incarnation;
+        }
+        if (!current || !wifi_scan_controller_.CallbackOwed()) {
             return;
         }
-    }
-    wifi_scan_watchdog_request_id_ = request_id;
-    wifi_scan_watchdog_lease_ = lease;
-    esp_timer_stop(wifi_scan_watchdog_timer_);
-    if (esp_timer_start_once(
-            wifi_scan_watchdog_timer_, 5LL * 1000 * 1000) != ESP_OK) {
-        wifi_scan_watchdog_request_id_ = 0;
-        wifi_scan_watchdog_lease_.reset();
-        lock.unlock();
         auto& coordinator = WifiManager::GetInstance().ScanLeaseCoordinator();
-        if (coordinator.BeginDrain(lease)) {
-            RequestOwnedWifiScanRecovery(lease);
+        if (coordinator.BeginDrain(exact.lease)) {
+            RequestOwnedWifiScanRecovery(exact.lease);
+        }
+    } catch (...) {
+        try {
+            auto& manager = WifiManager::GetInstance();
+            if (manager.ScanLeaseCoordinator().BeginDrain(exact.lease)) {
+                manager.RequestScanRecovery(exact.lease);
+            }
+        } catch (...) {
         }
     }
 }
@@ -2855,29 +2897,48 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
     }
     std::optional<WifiScanLeaseCoordinator::Lease> lease;
     uint64_t request_id = 0;
-    {
-        std::lock_guard<std::mutex> lock(self->wifi_scan_lease_mutex_);
-        lease = self->wifi_scan_lease_;
-        request_id = self->wifi_scan_request_id_;
+    try {
+        {
+            std::lock_guard<std::mutex> lock(self->wifi_scan_lease_mutex_);
+            lease = self->wifi_scan_lease_;
+            request_id = self->wifi_scan_request_id_;
+        }
+        if (!lease.has_value()) {
+            return;
+        }
+        WifiScanLeaseCoordinator::CallbackDecision callback;
+        {
+            std::lock_guard<std::mutex> submission_lock(
+                self->wifi_scan_submission_mutex_);
+            callback = WifiManager::GetInstance().ScanLeaseCoordinator()
+                .ObserveScanDone(*lease);
+        }
+        if (callback.deferred_until_commit) {
+            return;
+        }
+        if (!callback.consume_now) {
+            ESP_LOGI(BLUFI_TAG,
+                     "Ignoring WiFi scan done event not owned by BluFi");
+            return;
+        }
+        self->ConsumeOwnedWifiScanCompletion(request_id);
+    } catch (...) {
+        try {
+            ESP_LOGE(BLUFI_TAG,
+                     "Unhandled WiFi scan completion failure; recovery required");
+            if (!lease.has_value()) {
+                return;
+            }
+            auto& coordinator =
+                WifiManager::GetInstance().ScanLeaseCoordinator();
+            if (coordinator.RetainFailedCompletion(*lease) &&
+                self->wifi_scan_controller_.RetainFailedCompletion(
+                    request_id)) {
+                self->RequestOwnedWifiScanRecovery(*lease);
+            }
+        } catch (...) {
+        }
     }
-    if (!lease.has_value()) {
-        return;
-    }
-    WifiScanLeaseCoordinator::CallbackDecision callback;
-    {
-        std::lock_guard<std::mutex> submission_lock(
-            self->wifi_scan_submission_mutex_);
-        callback = WifiManager::GetInstance().ScanLeaseCoordinator()
-            .ObserveScanDone(*lease);
-    }
-    if (callback.deferred_until_commit) {
-        return;
-    }
-    if (!callback.consume_now) {
-        ESP_LOGI(BLUFI_TAG, "Ignoring WiFi scan done event not owned by BluFi");
-        return;
-    }
-    self->ConsumeOwnedWifiScanCompletion(request_id);
 }
 
 void Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) {
@@ -2919,17 +2980,27 @@ void Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) {
                 cleanup_proven = esp_wifi_clear_ap_list() == ESP_OK;
                 cache_scan_results = completion.save_results;
             } else if (completion.save_results) {
-                ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);
-                scanned_ap_records.resize(ap_num);
-                esp_err_t err = esp_wifi_scan_get_ap_records(
-                    &ap_num, scanned_ap_records.data());
-                if (err != ESP_OK) {
-                    ESP_LOGE(BLUFI_TAG, "Failed to read WiFi scan records: %s", esp_err_to_name(err));
-                    cleanup_proven = esp_wifi_clear_ap_list() == ESP_OK;
-                    scanned_ap_records.clear();
+                using Collector = BlufiWifiScanResultCollector<
+                    wifi_ap_record_t, kMaxBlufiWifiScanCandidates>;
+                const auto collected = Collector::Collect(
+                    ap_num,
+                    [](uint16_t* count, wifi_ap_record_t* records) {
+                        return esp_wifi_scan_get_ap_records(count, records) ==
+                            ESP_OK;
+                    },
+                    []() { return esp_wifi_clear_ap_list() == ESP_OK; },
+                    [&](const wifi_ap_record_t* records, uint16_t count) {
+                        scanned_ap_records.assign(records, records + count);
+                    });
+                cleanup_proven = collected.cleanup_proven;
+                if (!cleanup_proven) {
+                    ESP_LOGE(BLUFI_TAG,
+                             "Failed to read or clear WiFi scan records");
+                } else if (collected.materialization_failed) {
+                    ESP_LOGE(BLUFI_TAG,
+                             "Insufficient memory to cache WiFi scan records");
                 } else {
-                    cleanup_proven = true;
-                    scanned_ap_records.resize(ap_num);
+                    ap_num = collected.record_count;
                     scan_results_updated_us = esp_timer_get_time();
 
                     ESP_LOGI(BLUFI_TAG, "Found %d APs", ap_num);
@@ -2993,22 +3064,25 @@ void Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) {
                  .FinishCompletion(*lease)) {
             return;
         }
+        bool released_exact_lease = false;
         {
             std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
             if (wifi_scan_lease_.has_value() &&
                 wifi_scan_lease_->lease_id == lease->lease_id) {
+                released_exact_lease = true;
                 wifi_scan_lease_.reset();
                 wifi_scan_request_id_ = 0;
                 wifi_scan_restore_sta_config_ = {};
                 wifi_scan_restore_ap_config_ = {};
                 wifi_scan_restore_sta_config_valid_ = false;
                 wifi_scan_restore_ap_config_valid_ = false;
-                wifi_scan_watchdog_request_id_ = 0;
-                wifi_scan_watchdog_lease_.reset();
-                if (wifi_scan_watchdog_timer_ != nullptr) {
-                    esp_timer_stop(wifi_scan_watchdog_timer_);
-                }
             }
+        }
+        if (released_exact_lease) {
+            const BlufiWifiScanLeaseTimer::ExactTuple exact{
+                completion.request_id, *lease};
+            wifi_scan_watchdog_timer_.Disarm(exact);
+            wifi_scan_recovery_retry_timer_.Disarm(exact);
         }
         if (send_owned_wifi_failure) {
             self->ScheduleWifiScanFailure(completion.owner,
@@ -3027,6 +3101,7 @@ void Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) {
 
 void Blufi::RequestOwnedWifiScanRecovery(
         const WifiScanLeaseCoordinator::Lease& lease) {
+    uint64_t request_id = 0;
     {
         std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
         if (!wifi_scan_lease_.has_value() ||
@@ -3036,18 +3111,11 @@ void Blufi::RequestOwnedWifiScanRecovery(
                 lease.driver_incarnation) {
             return;
         }
+        request_id = wifi_scan_request_id_;
     }
+    const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
     if (WifiManager::GetInstance().RequestScanRecovery(lease)) {
-        std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
-        if (wifi_scan_recovery_retry_lease_.has_value() &&
-            wifi_scan_recovery_retry_lease_->lease_id == lease.lease_id &&
-            wifi_scan_recovery_retry_lease_->driver_incarnation ==
-                lease.driver_incarnation) {
-            wifi_scan_recovery_retry_lease_.reset();
-            if (wifi_scan_recovery_retry_timer_ != nullptr) {
-                esp_timer_stop(wifi_scan_recovery_retry_timer_);
-            }
-        }
+        wifi_scan_recovery_retry_timer_.Disarm(exact);
         return;
     }
     ScheduleWifiScanRecoveryFallback(lease);
@@ -3055,52 +3123,43 @@ void Blufi::RequestOwnedWifiScanRecovery(
 
 void Blufi::ScheduleWifiScanRecoveryFallback(
         WifiScanLeaseCoordinator::Lease lease) {
+    uint64_t request_id = 0;
     {
         std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
-        wifi_scan_recovery_retry_lease_ = lease;
-    }
-    if (wifi_scan_recovery_retry_timer_ == nullptr) {
-        const esp_timer_create_args_t args{
-            .callback = [](void* opaque) {
-                auto* self = static_cast<Blufi*>(opaque);
-                std::optional<WifiScanLeaseCoordinator::Lease> retry;
-                {
-                    std::lock_guard<std::mutex> lock(
-                        self->wifi_scan_lease_mutex_);
-                    retry = self->wifi_scan_recovery_retry_lease_;
-                }
-                if (retry.has_value()) {
-                    self->RequestOwnedWifiScanRecovery(*retry);
-                }
-            },
-            .arg = this,
-            .dispatch_method = ESP_TIMER_TASK,
-            .name = "blufi_scan_recover_retry",
-            .skip_unhandled_events = true,
-        };
-        if (esp_timer_create(
-                &args, &wifi_scan_recovery_retry_timer_) != ESP_OK) {
-            bool expected = false;
-            if (wifi_scan_recovery_fallback_scheduled_.compare_exchange_strong(
-                    expected, true)) {
-                Application::GetInstance().Schedule([this, lease]() {
-                    wifi_scan_recovery_fallback_scheduled_.store(false);
-                    RequestOwnedWifiScanRecovery(lease);
-                });
-            }
+        if (!wifi_scan_lease_.has_value() ||
+            wifi_scan_lease_->lease_id != lease.lease_id ||
+            wifi_scan_lease_->driver_incarnation !=
+                lease.driver_incarnation) {
             return;
         }
+        request_id = wifi_scan_request_id_;
     }
-    esp_timer_stop(wifi_scan_recovery_retry_timer_);
-    if (esp_timer_start_once(
-            wifi_scan_recovery_retry_timer_, 50LL * 1000) != ESP_OK) {
-        bool expected = false;
-        if (wifi_scan_recovery_fallback_scheduled_.compare_exchange_strong(
-                expected, true)) {
-            Application::GetInstance().Schedule([this, lease]() {
-                wifi_scan_recovery_fallback_scheduled_.store(false);
-                RequestOwnedWifiScanRecovery(lease);
-            });
+    const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
+    if (!wifi_scan_recovery_retry_timer_.Arm(exact, 50LL * 1000)) {
+        HandleWifiScanRecoveryRetry(exact);
+    }
+}
+
+void Blufi::HandleWifiScanRecoveryRetry(
+        BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        bool current = false;
+        {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            current = wifi_scan_lease_.has_value() &&
+                wifi_scan_request_id_ == exact.request_id &&
+                wifi_scan_lease_->owner == exact.lease.owner &&
+                wifi_scan_lease_->lease_id == exact.lease.lease_id &&
+                wifi_scan_lease_->driver_incarnation ==
+                    exact.lease.driver_incarnation;
+        }
+        if (current) {
+            WifiManager::GetInstance().RequestScanRecovery(exact.lease);
+        }
+    } catch (...) {
+        try {
+            WifiManager::GetInstance().RequestScanRecovery(exact.lease);
+        } catch (...) {
         }
     }
 }
