@@ -108,7 +108,10 @@ public:
 
 private:
     WifiManager();
-    ~WifiManager();
+    // Event handlers and callbacks capture scanners, the coordinator, and
+    // manager state. The singleton therefore owns the whole graph for the
+    // process lifetime; production teardown is intentionally unavailable.
+    ~WifiManager() = delete;
 
     void NotifyEvent(WifiEvent event, const std::string& data = "");
 

@@ -909,69 +909,71 @@ void StaleCancelCannotSatisfyStopBoundary() {
     assert(model.WaitSatisfied());
 }
 
-class ManagerDestructorFaultModel {
+class ProcessLifetimeManagerGraphModel {
 public:
-    void Initialize() { initialized_ = true; }
-    void MarkInactiveFault() {
-        config_active_ = false;
-        teardown_faulted_ = true;
-    }
-    void Destroy() {
-        if (teardown_faulted_) {
-            scanners_retained_ = true;
-            return;
+    struct Callback {
+        ProcessLifetimeManagerGraphModel* graph;
+        void operator()() const {
+            assert(graph->alive_);
+            ++graph->coordinator_touches_;
+            ++graph->manager_capture_touches_;
         }
-        if (config_active_) {
-            config_stopped_ = true;
-        }
-        driver_deinitialized_ = initialized_;
+    };
+
+    Callback QueueCallback() { return Callback{this}; }
+    void MarkTeardownFault() { teardown_faulted_ = true; }
+    void RequestProductionDestruction() {
+        destruction_rejected_ = true;
     }
-    bool driver_deinitialized() const { return driver_deinitialized_; }
-    bool scanners_retained() const { return scanners_retained_; }
+    bool destruction_rejected() const { return destruction_rejected_; }
+    unsigned coordinator_touches() const { return coordinator_touches_; }
+    unsigned manager_capture_touches() const {
+        return manager_capture_touches_;
+    }
 
 private:
-    bool initialized_ = false;
-    bool config_active_ = false;
+    bool alive_ = true;
     bool teardown_faulted_ = false;
-    bool config_stopped_ = false;
-    bool scanners_retained_ = false;
-    bool driver_deinitialized_ = false;
+    bool destruction_rejected_ = false;
+    unsigned coordinator_touches_ = 0;
+    unsigned manager_capture_touches_ = 0;
 };
 
-void InactiveFaultStillBlocksManagerDestructorDeinit() {
-    ManagerDestructorFaultModel model;
-    model.Initialize();
-    model.MarkInactiveFault();
+class UnregisteredHostDestructorModel {
+public:
+    std::function<void()> QueueExternalCallback(unsigned* calls) {
+        return [calls]() { ++*calls; };
+    }
+    void Destroy() {
+        assert(!handlers_registered_);
+        destroyed_ = true;
+    }
+    bool destroyed() const { return destroyed_; }
+
+private:
+    bool handlers_registered_ = false;
+    bool destroyed_ = false;
+};
+
+void QueuedExternalCallbackSurvivesUnregisteredHostDestruction() {
+    unsigned callback_calls = 0;
+    UnregisteredHostDestructorModel model;
+    const auto callback = model.QueueExternalCallback(&callback_calls);
     model.Destroy();
-    assert(!model.driver_deinitialized());
-    assert(model.scanners_retained());
+    assert(model.destroyed());
+    callback();
+    assert(callback_calls == 1);
 }
 
-class NeverStartedConfigDestructorModel {
-public:
-    void Destroy() {
-        if (!started_) {
-            destroyed_without_driver_teardown_ = true;
-            return;
-        }
-        stop_called_ = true;
-    }
-    bool destroyed_without_driver_teardown() const {
-        return destroyed_without_driver_teardown_;
-    }
-    bool stop_called() const { return stop_called_; }
-
-private:
-    bool started_ = false;
-    bool destroyed_without_driver_teardown_ = false;
-    bool stop_called_ = false;
-};
-
-void NeverStartedConfigDestructionSkipsDriverTeardown() {
-    NeverStartedConfigDestructorModel model;
-    model.Destroy();
-    assert(model.destroyed_without_driver_teardown());
-    assert(!model.stop_called());
+void FaultedDestructionRequestRetainsCoordinatorAndManagerCapture() {
+    ProcessLifetimeManagerGraphModel model;
+    const auto callback = model.QueueCallback();
+    model.MarkTeardownFault();
+    model.RequestProductionDestruction();
+    assert(model.destruction_rejected());
+    callback();
+    assert(model.coordinator_touches() == 1);
+    assert(model.manager_capture_touches() == 1);
 }
 
 void CompletingLeaseCanEnterExactRecovery() {
@@ -1378,8 +1380,8 @@ int main() {
     DelayedConfigEventCannotCrossAttemptTerminalBoundary();
     StaleDisconnectCannotSatisfyCancelledConfigBoundary();
     StaleCancelCannotSatisfyStopBoundary();
-    InactiveFaultStillBlocksManagerDestructorDeinit();
-    NeverStartedConfigDestructionSkipsDriverTeardown();
+    QueuedExternalCallbackSurvivesUnregisteredHostDestruction();
+    FaultedDestructionRequestRetainsCoordinatorAndManagerCapture();
     CompletingLeaseCanEnterExactRecovery();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();

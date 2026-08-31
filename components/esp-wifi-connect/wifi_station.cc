@@ -1,6 +1,7 @@
 #include "wifi_station.h"
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 #include <utility>
 
 #include <freertos/FreeRTOS.h>
@@ -45,7 +46,11 @@ WifiStation::WifiStation(
 }
 
 WifiStation::~WifiStation() {
-    Stop();
+    if (instance_any_id_ != nullptr || instance_got_ip_ != nullptr ||
+        timer_handle_ != nullptr) {
+        ESP_LOGE(TAG, "Registered station callbacks require process-lifetime ownership");
+        std::abort();
+    }
     if (event_group_) {
         vEventGroupDelete(event_group_);
         event_group_ = nullptr;

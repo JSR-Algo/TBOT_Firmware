@@ -54,8 +54,13 @@ std::vector<wifi_ap_record_t> WifiConfigurationAp::GetAccessPoints()
 
 WifiConfigurationAp::~WifiConfigurationAp()
 {
-    if (started_.load() && !Stop()) {
-        ESP_LOGE(TAG, "Unsafe configuration AP destruction after teardown fault");
+    if (instance_any_id_ != nullptr || instance_got_ip_ != nullptr ||
+        scan_timer_ != nullptr
+#if !CONFIG_IDF_TARGET_ESP32P4
+        || sc_event_instance_ != nullptr
+#endif
+    ) {
+        ESP_LOGE(TAG, "Registered configuration callbacks require process-lifetime ownership");
         std::abort();
     }
     if (event_group_) {
