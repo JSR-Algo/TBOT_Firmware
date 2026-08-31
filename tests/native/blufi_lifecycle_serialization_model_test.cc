@@ -120,6 +120,35 @@ public:
     bool InitAfterReleaseV2() const { return init_after_release_v2_.load(); }
     bool StopAfterRestartV2() const { return stop_after_restart_v2_.load(); }
 
+    uint32_t CommitOriginalGenerationGate() {
+        std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+        return setup_generation_v3_.load();
+    }
+
+    void RestartAfterOriginalGenerationGate() {
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+        setup_generation_v3_.fetch_add(1);
+    }
+
+    void RunDeferredDispatch(uint32_t expected_generation, bool confirmation) {
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        {
+            std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+            if (expected_generation != setup_generation_v3_.load()) {
+                return;
+            }
+        }
+        if (confirmation) {
+            confirmation_launches_v3_.fetch_add(1);
+        } else {
+            refresh_launches_v3_.fetch_add(1);
+        }
+    }
+
+    int ConfirmationLaunchesV3() const { return confirmation_launches_v3_.load(); }
+    int RefreshLaunchesV3() const { return refresh_launches_v3_.load(); }
+
 private:
     void SignalGapAndWait() {
         std::unique_lock<std::mutex> lock(gap_mutex_);
@@ -158,6 +187,9 @@ private:
     std::atomic<bool> restart_completed_v2_{false};
     std::atomic<bool> init_after_release_v2_{false};
     std::atomic<bool> stop_after_restart_v2_{false};
+    std::atomic<uint32_t> setup_generation_v3_{1};
+    std::atomic<int> confirmation_launches_v3_{0};
+    std::atomic<int> refresh_launches_v3_{0};
 };
 
 void ReleaseDrainBlocksConcurrentPublicInit() {
@@ -208,6 +240,22 @@ void RestartFinalizationWaitsForCommitBeforeDeferredStop() {
     assert(model.StopAfterRestartV2());
 }
 
+void RestartAfterOriginalGateSuppressesDeferredConfirmationLaunch() {
+    LifecycleModel model;
+    const uint32_t generation = model.CommitOriginalGenerationGate();
+    model.RestartAfterOriginalGenerationGate();
+    model.RunDeferredDispatch(generation, true);
+    assert(model.ConfirmationLaunchesV3() == 0);
+}
+
+void RestartAfterOriginalGateSuppressesDeferredRefreshLaunch() {
+    LifecycleModel model;
+    const uint32_t generation = model.CommitOriginalGenerationGate();
+    model.RestartAfterOriginalGenerationGate();
+    model.RunDeferredDispatch(generation, false);
+    assert(model.RefreshLaunchesV3() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -215,5 +263,7 @@ int main() {
     RestartGapBlocksConcurrentPublicDeinit();
     ReleaseFinalizationWaitsForCommitBeforeDeferredInit();
     RestartFinalizationWaitsForCommitBeforeDeferredStop();
+    RestartAfterOriginalGateSuppressesDeferredConfirmationLaunch();
+    RestartAfterOriginalGateSuppressesDeferredRefreshLaunch();
     return 0;
 }

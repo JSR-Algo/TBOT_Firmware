@@ -1366,7 +1366,9 @@ def test_fw21h_generation_flows_through_claim_network_contexts_and_result_apply(
 
     assert "DispatchPendingTbotClaimRefreshForSetupGeneration" in header
     assert "DispatchPendingTbotClaimFetch" in prepare
-    assert "DispatchPendingTbotClaimConfirmation" in prepare
+    assert "effects.dispatch_confirmation = true" in prepare
+    assert "ClaimBleLifecycleIntent::kStopAdvertising" in prepare
+    assert "ExecuteClaimDeferredEffects" in prepare
     for blocking in (
         "FetchBackendApiUrlFromBootstrap",
         "FetchPendingTbotClaimFromDeviceConfig",
@@ -1505,6 +1507,62 @@ def test_fw21h_generation_aware_lifecycle_apis_preserve_global_lock_order():
         scope_end = body.index("}\n", generation)
         primitive_call = body.index(primitive, scope_end)
         assert lifecycle < finalization < generation < scope_end < primitive_call
+
+
+def test_fw21h_deferred_dispatch_launch_is_reserved_against_setup_restart():
+    app = read("main/application.cc")
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    refresh = _function_body(
+        app, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+
+    assert "RunWithSetupGenerationCurrent" in header
+    reservation = _function_body(blufi, "bool Blufi::RunWithSetupGenerationCurrent")
+    lifecycle = reservation.index("ble_lifecycle_mutex_")
+    finalization = reservation.index("provisioning_finalization_mutex_", lifecycle)
+    generation = reservation.index(
+        "expected_generation != setup_generation_.load()", finalization
+    )
+    scope_end = reservation.index("}\n", generation)
+    action = reservation.index("action()", generation)
+    assert lifecycle < finalization < generation < scope_end < action
+
+    assert "commit_dispatch" in effects
+    assert "RunClaimDispatchForSetupGeneration" in effects
+    assert "DispatchPendingTbotClaimConfirmation" in effects[
+        effects.index("commit_dispatch"):
+    ]
+    assert "StopBleAdvertising();" not in refresh
+    assert "ClaimBleLifecycleIntent::kStopAdvertising" in refresh
+    assert "ExecuteClaimDeferredEffects" in refresh
+    assert "RunClaimDispatchForSetupGeneration" in refresh
+
+
+def test_fw21h_claim_dispatch_docs_cover_post_gate_restart_suppression():
+    header = read("main/application.h")
+    assert "post-gate BOOT restart" in header
+    assert "confirmation or refresh worker" in header
+
+
+def test_fw21h_generation_dispatch_reservation_keeps_non_blufi_builds_compilable():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    helper = _function_body(app, "bool Application::RunClaimDispatchForSetupGeneration")
+    assert "RunClaimDispatchForSetupGeneration" in header
+    assert "#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING" in helper
+    guarded, fallback = helper.split("#else", 1)
+    assert "Blufi::GetInstance().RunWithSetupGenerationCurrent" in guarded
+    assert "Blufi::" not in fallback
+    assert "action();" in fallback
+
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    refresh = _function_body(
+        app, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+    assert "RunClaimDispatchForSetupGeneration" in effects
+    assert "RunClaimDispatchForSetupGeneration" in refresh
 
 
 # ---------------------------------------------------------------------------

@@ -455,9 +455,16 @@ private:
         bool dispatch_confirmation = false;
         bool dispatch_refresh = false;
     };
+    // Claim fetch and provisioning-promotion results first commit their state under
+    // RunIfSetupGenerationCurrent. A post-gate BOOT restart must still suppress the
+    // stale confirmation or refresh worker, so ExecuteClaimDeferredEffects reserves
+    // the lifecycle, briefly validates finalization, and commits bounded dispatch
+    // before unlock. Worker result application retains its own generation gate.
     void ExecuteClaimDeferredEffects(
         const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
         WakeWordLifecycleController::ProvisioningToken provisioning_token = {});
+    bool RunClaimDispatchForSetupGeneration(
+        uint32_t expected_setup_generation, const std::function<void()>& action);
     bool ConfirmPendingTbotClaim(bool trust_backend_expiry = false);
     bool DispatchPendingTbotClaimConfirmation(uint32_t expected_setup_generation,
                                               bool enforce_setup_generation);
@@ -518,11 +525,17 @@ private:
     // Wi-Fi-config path to reopen BluFi so BLE does not contend with AFE audio.
     // No-ops in non-BluFi builds.
     void EnsureBleAdvertisingForStandby();
-    bool EnsureBleAdvertisingForStandbyForSetupGeneration(uint32_t expected_generation);
-    bool EnsureBleAdvertisingForStandbyImpl(std::optional<uint32_t> expected_generation);
+    bool EnsureBleAdvertisingForStandbyForSetupGeneration(
+        uint32_t expected_generation, const std::function<void()>& on_current = {});
+    bool EnsureBleAdvertisingForStandbyImpl(
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current = {});
     void StopBleAdvertising();
-    bool StopBleAdvertisingForSetupGeneration(uint32_t expected_generation);
-    bool StopBleAdvertisingImpl(std::optional<uint32_t> expected_generation);
+    bool StopBleAdvertisingForSetupGeneration(
+        uint32_t expected_generation, const std::function<void()>& on_current = {});
+    bool StopBleAdvertisingImpl(
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current = {});
 
     // --- Heartbeat (C5) ---
     bool ShouldKeepManagementHeartbeat() const;

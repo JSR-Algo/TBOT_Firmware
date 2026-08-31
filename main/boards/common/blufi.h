@@ -63,7 +63,9 @@ public:
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t deinit();
-    esp_err_t DeinitForSetupGeneration(uint32_t expected_generation);
+    esp_err_t DeinitForSetupGeneration(
+        uint32_t expected_generation,
+        const std::function<void()>& on_current = {});
 
     /** Start a fresh provisioning generation for an explicit BOOT re-entry. */
     esp_err_t RestartForSetup();
@@ -71,6 +73,13 @@ public:
     /** Run a short non-network action while setup generation ownership is stable. */
     bool RunIfSetupGenerationCurrent(uint32_t expected_generation,
                                      const std::function<void()>& action);
+    /**
+     * Run a bounded dispatch action while BOOT restart is excluded.
+     * Lock order is lifecycle -> short finalization validation; action must not
+     * perform network I/O or re-enter a public BluFi lifecycle API.
+     */
+    bool RunWithSetupGenerationCurrent(uint32_t expected_generation,
+                                       const std::function<void()>& action);
 
     bool BindProvisioningSession(ProvisioningToken token);
     ProvisioningReservation TryReserveProvisioningSession();
@@ -82,7 +91,8 @@ public:
                                                 ProvisioningToken provisioning_token);
     bool CompleteSuccessfulProvisioningTeardownForGeneration(
         const char* reason, ProvisioningToken provisioning_token,
-        uint32_t expected_generation);
+        uint32_t expected_generation,
+        const std::function<void()>& on_current = {});
     bool WasProvisioningSuccessfullyCompleted(ProvisioningToken provisioning_token) const;
 
     /**
@@ -113,7 +123,9 @@ public:
      * @param seconds  Wall-clock budget for BLE provisioning (e.g. CONFIG_BLE_SETUP_TIMEOUT_SEC).
      */
     void StartBleSetupTimeout(int seconds);
-    bool StartBleSetupTimeoutForGeneration(uint32_t expected_generation, int seconds);
+    bool StartBleSetupTimeoutForGeneration(
+        uint32_t expected_generation, int seconds,
+        const std::function<void()>& on_current = {});
 
     /**
      * @brief Cancel the BLE setup timeout timer (call on provisioning success or Wi-Fi connect).
@@ -201,7 +213,8 @@ private:
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
     bool CompleteSuccessfulProvisioningTeardownImpl(
         const char* reason, ProvisioningToken provisioning_token,
-        std::optional<uint32_t> expected_generation);
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current = {});
     bool ReleaseBleForStationAssociation(uint32_t expected_generation);
     void RestoreBleAfterStationFailure(uint32_t expected_generation);
     void StartStationConnectFromCredentials(const char* reason);

@@ -683,7 +683,8 @@ esp_err_t Blufi::deinit() {
     return DeinitWithLifecycleOwned();
 }
 
-esp_err_t Blufi::DeinitForSetupGeneration(uint32_t expected_generation) {
+esp_err_t Blufi::DeinitForSetupGeneration(
+        uint32_t expected_generation, const std::function<void()>& on_current) {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     {
         std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
@@ -692,7 +693,11 @@ esp_err_t Blufi::DeinitForSetupGeneration(uint32_t expected_generation) {
         }
     }
     CancelBleSetupTimeout();
-    return DeinitWithLifecycleOwned();
+    const esp_err_t result = DeinitWithLifecycleOwned();
+    if (result == ESP_OK && on_current) {
+        on_current();
+    }
+    return result;
 }
 
 esp_err_t Blufi::DeinitWithLifecycleOwned() {
@@ -848,6 +853,19 @@ bool Blufi::RunIfSetupGenerationCurrent(uint32_t expected_generation,
     return true;
 }
 
+bool Blufi::RunWithSetupGenerationCurrent(uint32_t expected_generation,
+                                          const std::function<void()>& action) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return false;
+        }
+    }
+    action();
+    return true;
+}
+
 bool Blufi::BindProvisioningSession(ProvisioningToken token) {
     return provisioning_session_.Bind(token);
 }
@@ -876,19 +894,20 @@ bool Blufi::AbortProvisioningSetup(ProvisioningToken token) {
 bool Blufi::CompleteSuccessfulProvisioningTeardown(
         const char* reason, ProvisioningToken provisioning_token) {
     return CompleteSuccessfulProvisioningTeardownImpl(
-        reason, provisioning_token, std::nullopt);
+        reason, provisioning_token, std::nullopt, {});
 }
 
 bool Blufi::CompleteSuccessfulProvisioningTeardownForGeneration(
         const char* reason, ProvisioningToken provisioning_token,
-        uint32_t expected_generation) {
+        uint32_t expected_generation, const std::function<void()>& on_current) {
     return CompleteSuccessfulProvisioningTeardownImpl(
-        reason, provisioning_token, expected_generation);
+        reason, provisioning_token, expected_generation, on_current);
 }
 
 bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
         const char* reason, ProvisioningToken provisioning_token,
-        std::optional<uint32_t> expected_generation) {
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current) {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     if (expected_generation.has_value()) {
         std::lock_guard<std::mutex> generation_lock(provisioning_finalization_mutex_);
@@ -939,6 +958,9 @@ bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
                  reason ? reason : "unknown",
                  token_high, token_middle, token_low);
         return false;
+    }
+    if (on_current) {
+        on_current();
     }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
              reason ? reason : "unknown", static_cast<int>(rearmed));
@@ -2890,7 +2912,9 @@ void Blufi::StartBleSetupTimeout(int seconds) {
     ESP_LOGI(BLUFI_TAG, "BLE setup timer armed %ds", seconds);
 }
 
-bool Blufi::StartBleSetupTimeoutForGeneration(uint32_t expected_generation, int seconds) {
+bool Blufi::StartBleSetupTimeoutForGeneration(
+        uint32_t expected_generation, int seconds,
+        const std::function<void()>& on_current) {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     {
         std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
@@ -2899,6 +2923,9 @@ bool Blufi::StartBleSetupTimeoutForGeneration(uint32_t expected_generation, int 
         }
     }
     StartBleSetupTimeout(seconds);
+    if (on_current) {
+        on_current();
+    }
     return true;
 }
 

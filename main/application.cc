@@ -1887,26 +1887,37 @@ void Application::SchedulePendingTbotClaimRefresh(uint32_t expected_setup_genera
 void Application::ExecuteClaimDeferredEffects(
         const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
         WakeWordLifecycleController::ProvisioningToken provisioning_token) {
+    bool confirmation_dispatch_failed = false;
+    auto commit_dispatch = [this, &effects, expected_setup_generation,
+                            &confirmation_dispatch_failed]() {
+        if (effects.dispatch_confirmation &&
+            !DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
+            confirmation_dispatch_failed = true;
+        }
+    };
     bool lifecycle_ready = true;
     switch (effects.ble_intent) {
         case ClaimBleLifecycleIntent::kNone:
+            lifecycle_ready = RunClaimDispatchForSetupGeneration(
+                expected_setup_generation, commit_dispatch);
             break;
         case ClaimBleLifecycleIntent::kEnsureAdvertising:
             lifecycle_ready = EnsureBleAdvertisingForStandbyForSetupGeneration(
-                expected_setup_generation);
+                expected_setup_generation, commit_dispatch);
             break;
         case ClaimBleLifecycleIntent::kStopAdvertising:
             lifecycle_ready = StopBleAdvertisingForSetupGeneration(
-                expected_setup_generation);
+                expected_setup_generation, commit_dispatch);
             break;
         case ClaimBleLifecycleIntent::kCompleteSuccessfulTeardown:
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
             lifecycle_ready = Blufi::GetInstance()
                 .CompleteSuccessfulProvisioningTeardownForGeneration(
-                    "claim_confirmed", provisioning_token, expected_setup_generation);
+                    "claim_confirmed", provisioning_token, expected_setup_generation,
+                    commit_dispatch);
 #else
             lifecycle_ready = StopBleAdvertisingForSetupGeneration(
-                expected_setup_generation);
+                expected_setup_generation, commit_dispatch);
 #endif
             break;
     }
@@ -1914,13 +1925,24 @@ void Application::ExecuteClaimDeferredEffects(
     if (!lifecycle_ready) {
         return;
     }
-    if (effects.dispatch_confirmation &&
-        !DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
+    if (confirmation_dispatch_failed) {
         StartClaimPoll();
     }
     if (effects.dispatch_refresh) {
         DispatchPendingTbotClaimRefreshForSetupGeneration(expected_setup_generation);
     }
+}
+
+bool Application::RunClaimDispatchForSetupGeneration(
+        uint32_t expected_setup_generation, const std::function<void()>& action) {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    return Blufi::GetInstance().RunWithSetupGenerationCurrent(
+        expected_setup_generation, action);
+#else
+    (void)expected_setup_generation;
+    action();
+    return true;
+#endif
 }
 
 void Application::DispatchPendingTbotClaimRefreshForSetupGeneration(
@@ -1932,29 +1954,45 @@ void Application::DispatchPendingTbotClaimRefreshForSetupGeneration(
     SecureStringScope token_scope(token);
 
     if (pending_tbot_claim_.active && !token.empty()) {
-        if (!api_url.empty()) {
-            pending_tbot_claim_api_url_ = api_url;
-        }
-        SecureClearString(pending_tbot_claim_token_);
-        pending_tbot_claim_token_ = token;
-        StopBleAdvertising();
-        claim_substate_ = TbotClaimSubstate::WaitingConfirm;
-        if (!DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
-            StartClaimPoll();
+        ClaimDeferredEffects effects;
+        const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
+            expected_setup_generation, [&]() {
+                if (!api_url.empty()) {
+                    pending_tbot_claim_api_url_ = api_url;
+                }
+                SecureClearString(pending_tbot_claim_token_);
+                pending_tbot_claim_token_ = token;
+                claim_substate_ = TbotClaimSubstate::WaitingConfirm;
+                effects.ble_intent = ClaimBleLifecycleIntent::kStopAdvertising;
+                effects.dispatch_confirmation = true;
+            });
+        if (applied) {
+            ExecuteClaimDeferredEffects(effects, expected_setup_generation);
         }
         return;
     }
 
-    if (!token.empty() && passive_ws_intent_.load()) {
-        ESP_LOGI(TAG, "Provisioning claim preempting passive lesson WebSocket");
-        CloseAudioChannelByIntent();
+    bool dispatched = false;
+    const bool current = RunClaimDispatchForSetupGeneration(
+        expected_setup_generation, [&]() {
+            dispatched = DispatchPendingTbotClaimFetch(
+                api_url, token, true, expected_setup_generation, true);
+        });
+    if (!current) {
+        return;
     }
-    const bool dispatched = DispatchPendingTbotClaimFetch(
-        api_url, token, true, expected_setup_generation, true);
+    if (dispatched) {
+        if (!token.empty() && passive_ws_intent_.load()) {
+            ESP_LOGI(TAG, "Provisioning claim preempting passive lesson WebSocket");
+            CloseAudioChannelByIntent();
+        }
+    }
     if (!dispatched) {
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         RenderClaimSubstate(claim_substate_);
-        EnsureBleAdvertisingForStandby();
+        ClaimDeferredEffects effects;
+        effects.ble_intent = ClaimBleLifecycleIntent::kEnsureAdvertising;
+        ExecuteClaimDeferredEffects(effects, expected_setup_generation);
         StartClaimPoll();
     }
 }
@@ -2518,18 +2556,20 @@ void Application::EnsureBleAdvertisingForStandby() {
 }
 
 bool Application::EnsureBleAdvertisingForStandbyForSetupGeneration(
-        uint32_t expected_generation) {
-    return EnsureBleAdvertisingForStandbyImpl(expected_generation);
+        uint32_t expected_generation, const std::function<void()>& on_current) {
+    return EnsureBleAdvertisingForStandbyImpl(expected_generation, on_current);
 }
 
 bool Application::EnsureBleAdvertisingForStandbyImpl(
-        std::optional<uint32_t> expected_generation) {
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto& blufi = Blufi::GetInstance();
 
     if (IsDeviceClaimed()) {
         return expected_generation.has_value()
-            ? StopBleAdvertisingForSetupGeneration(expected_generation.value())
+            ? StopBleAdvertisingForSetupGeneration(
+                  expected_generation.value(), on_current)
             : StopBleAdvertisingImpl(std::nullopt);
     }
 
@@ -2586,9 +2626,16 @@ bool Application::EnsureBleAdvertisingForStandbyImpl(
     // (kMaxBleReadvertiseAttempts) is untouched and still bounds a flapping peer.
     if (expected_generation.has_value()) {
         return blufi.StartBleSetupTimeoutForGeneration(
-            expected_generation.value(), CONFIG_BLE_SETUP_TIMEOUT_SEC);
+            expected_generation.value(), CONFIG_BLE_SETUP_TIMEOUT_SEC, on_current);
     }
     blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
+#else
+    if (expected_generation.has_value()) {
+        (void)expected_generation;
+        if (on_current) {
+            on_current();
+        }
+    }
 #endif
     return true;
 }
@@ -2606,16 +2653,20 @@ void Application::StopBleAdvertising() {
     StopBleAdvertisingImpl(std::nullopt);
 }
 
-bool Application::StopBleAdvertisingForSetupGeneration(uint32_t expected_generation) {
-    return StopBleAdvertisingImpl(expected_generation);
+bool Application::StopBleAdvertisingForSetupGeneration(
+        uint32_t expected_generation, const std::function<void()>& on_current) {
+    return StopBleAdvertisingImpl(expected_generation, on_current);
 }
 
-bool Application::StopBleAdvertisingImpl(std::optional<uint32_t> expected_generation) {
+bool Application::StopBleAdvertisingImpl(
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto& blufi = Blufi::GetInstance();
     if (expected_generation.has_value()) {
         const bool was_active = blufi.GetBleState() != Blufi::BleState::kOff;
-        const esp_err_t result = blufi.DeinitForSetupGeneration(expected_generation.value());
+        const esp_err_t result = blufi.DeinitForSetupGeneration(
+            expected_generation.value(), on_current);
         if (result != ESP_OK) {
             return false;
         }
@@ -2630,6 +2681,13 @@ bool Application::StopBleAdvertisingImpl(std::optional<uint32_t> expected_genera
     if (blufi.GetBleState() != Blufi::BleState::kOff) {
         ESP_LOGI(TAG, "Leaving claimable standby: stopping BLE advertising");
         return blufi.deinit() == ESP_OK;
+    }
+#else
+    if (expected_generation.has_value()) {
+        (void)expected_generation;
+        if (on_current) {
+            on_current();
+        }
     }
 #endif
     return true;
