@@ -530,88 +530,49 @@ std::optional<WifiStation::ScanRecoveryClaim>
 WifiStation::ClaimScanRecovery(
         const WifiScanLeaseCoordinator::Lease& expected_lease) {
     std::lock_guard<std::mutex> lock(scan_mutex_);
-    if (!scan_lease_.has_value() || !scan_recovery_lease_.has_value() ||
-        scan_lease_->owner != scan_recovery_lease_->owner ||
-        scan_lease_->lease_id != scan_recovery_lease_->lease_id ||
-        scan_lease_->driver_incarnation !=
-            scan_recovery_lease_->driver_incarnation ||
-        scan_recovery_lease_->owner != expected_lease.owner ||
-        scan_recovery_lease_->lease_id != expected_lease.lease_id ||
-        scan_recovery_lease_->driver_incarnation !=
-            expected_lease.driver_incarnation) {
-        return std::nullopt;
-    }
-    const auto recovery =
-        scan_lease_coordinator_.BeginRecovery(*scan_recovery_lease_);
-    if (!recovery.begun()) {
-        return std::nullopt;
-    }
-    return ScanRecoveryClaim{*scan_recovery_lease_, recovery};
+    return WifiScanRecoveryGate::TryClaim(
+        scan_lease_coordinator_, expected_lease, scan_lease_,
+        scan_recovery_lease_, scan_session_id_, scans_enabled_,
+        scan_recovery_restore_state_);
 }
 
 bool WifiStation::HasScanRecoveryDebt(
         const WifiScanLeaseCoordinator::Lease& expected_lease) const {
     std::lock_guard<std::mutex> lock(scan_mutex_);
-    return scan_recovery_lease_.has_value() &&
-           scan_recovery_lease_->owner == expected_lease.owner &&
-           scan_recovery_lease_->lease_id == expected_lease.lease_id &&
-           scan_recovery_lease_->driver_incarnation ==
-               expected_lease.driver_incarnation;
+    return WifiScanRecoveryGate::HasDebt(expected_lease,
+                                         scan_recovery_lease_);
 }
 
 bool WifiStation::CompleteScanRecovery(
         const ScanRecoveryClaim& claim,
         const WifiScanLeaseCoordinator::RecoveryProof& proof) {
     std::lock_guard<std::mutex> lock(scan_mutex_);
-    if (!scan_lease_.has_value() || !scan_recovery_lease_.has_value() ||
-        scan_lease_->owner != claim.lease.owner ||
-        scan_lease_->lease_id != claim.lease.lease_id ||
-        scan_lease_->driver_incarnation != claim.lease.driver_incarnation ||
-        scan_recovery_lease_->owner != claim.lease.owner ||
-        scan_recovery_lease_->lease_id != claim.lease.lease_id ||
-        scan_recovery_lease_->driver_incarnation !=
-            claim.lease.driver_incarnation ||
-        !scan_lease_coordinator_.CompleteRecovery(claim.lease, proof)) {
-        return false;
-    }
-    scan_lease_.reset();
-    scan_recovery_lease_.reset();
-    return true;
+    return WifiScanRecoveryGate::Complete(
+        scan_lease_coordinator_, claim, proof, scan_lease_,
+        scan_recovery_lease_, scan_session_id_, true, scans_enabled_,
+        scan_recovery_restore_state_);
 }
 
-bool WifiStation::RestoreRadioAfterRecovery() {
-    uint64_t expected_session = 0;
+bool WifiStation::RestoreRadioAfterRecovery(const ScanRecoveryClaim& claim) {
     wifi_ps_type_t power_save_type = WIFI_PS_MIN_MODEM;
     {
         std::lock_guard<std::mutex> lock(scan_mutex_);
-        if (!scans_enabled_) {
-            return true;
+        if (!claim.scans_were_enabled ||
+            claim.scan_session_id != scan_session_id_) {
+            return WifiScanRecoveryGate::MarkRestored(
+                claim, scan_session_id_, true,
+                scan_recovery_restore_state_);
         }
-        expected_session = scan_session_id_;
-        scans_enabled_ = false;
     }
     {
         std::lock_guard<std::mutex> data_lock(session_data_mutex_);
         power_save_type = power_save_type_;
     }
-    bool restored = esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK &&
-                    esp_wifi_start() == ESP_OK;
-    if (restored && max_tx_power_ != 0) {
-        restored = esp_wifi_set_max_tx_power(max_tx_power_) == ESP_OK;
-    }
-    if (restored) {
-        restored = esp_wifi_set_ps(power_save_type) == ESP_OK;
-    }
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        if (expected_session == scan_session_id_) {
-            scans_enabled_ = true;
-        }
-    }
-    if (!restored) {
-        return false;
-    }
-    return true;
+    const bool restored = radio_recovery_restorer_.RestoreStation(
+        power_save_type, max_tx_power_);
+    std::lock_guard<std::mutex> lock(scan_mutex_);
+    return WifiScanRecoveryGate::MarkRestored(
+        claim, scan_session_id_, restored, scan_recovery_restore_state_);
 }
 
 void WifiStation::RetryScanAfterRecovery() {

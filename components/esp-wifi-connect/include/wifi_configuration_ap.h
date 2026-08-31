@@ -19,6 +19,8 @@
 #include "dns_server.h"
 #include "sdkconfig.h"
 #include "wifi_scan_lease_coordinator.h"
+#include "wifi_radio_recovery_restorer.h"
+#include "wifi_scan_recovery_gate.h"
 
 /**
  * WifiConfigurationAp - WiFi configuration access point
@@ -50,10 +52,7 @@ public:
     std::vector<wifi_ap_record_t> GetAccessPoints();
     std::string GetSsid();
     std::string GetWebServerUrl();
-    struct ScanRecoveryClaim {
-        WifiScanLeaseCoordinator::Lease lease;
-        WifiScanLeaseCoordinator::RecoveryDecision recovery;
-    };
+    using ScanRecoveryClaim = WifiScanRecoveryGate::Claim;
     std::optional<ScanRecoveryClaim> ClaimScanRecovery(
         const WifiScanLeaseCoordinator::Lease& expected_lease);
     bool HasScanRecoveryDebt(
@@ -61,7 +60,7 @@ public:
     bool CompleteScanRecovery(
         const ScanRecoveryClaim& claim,
         const WifiScanLeaseCoordinator::RecoveryProof& proof);
-    bool RestoreRadioAfterRecovery();
+    bool RestoreRadioAfterRecovery(const ScanRecoveryClaim& claim);
     void RetryScanAfterRecovery();
     void OnScanRecoveryNeeded(std::function<void(
         const WifiScanLeaseCoordinator::Lease&)> callback);
@@ -86,6 +85,7 @@ private:
     esp_netif_t* ap_netif_ = nullptr;
     std::vector<wifi_ap_record_t> ap_records_;
     WifiScanLeaseCoordinator& scan_lease_coordinator_;
+    WifiRadioRecoveryRestorer radio_recovery_restorer_;
     mutable std::mutex scan_mutex_;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
     bool scans_enabled_ = false;
@@ -103,6 +103,7 @@ private:
     std::atomic<bool> stopped_{false};
     std::atomic<bool> started_{false};
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
+    WifiScanRecoveryGate::RestoreState scan_recovery_restore_state_;
     std::function<void(const WifiScanLeaseCoordinator::Lease&)>
         scan_recovery_needed_;
 

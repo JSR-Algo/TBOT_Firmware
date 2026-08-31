@@ -14,6 +14,8 @@
 #include <esp_wifi_types_generic.h>
 
 #include "wifi_scan_lease_coordinator.h"
+#include "wifi_radio_recovery_restorer.h"
+#include "wifi_scan_recovery_gate.h"
 
 // WiFi power save level enumeration
 enum class WifiPowerSaveLevel {
@@ -55,10 +57,7 @@ public:
     std::string GetIpAddress() const;
     uint8_t GetChannel();
     void SetPowerSaveLevel(WifiPowerSaveLevel level);
-    struct ScanRecoveryClaim {
-        WifiScanLeaseCoordinator::Lease lease;
-        WifiScanLeaseCoordinator::RecoveryDecision recovery;
-    };
+    using ScanRecoveryClaim = WifiScanRecoveryGate::Claim;
     std::optional<ScanRecoveryClaim> ClaimScanRecovery(
         const WifiScanLeaseCoordinator::Lease& expected_lease);
     bool HasScanRecoveryDebt(
@@ -66,7 +65,7 @@ public:
     bool CompleteScanRecovery(
         const ScanRecoveryClaim& claim,
         const WifiScanLeaseCoordinator::RecoveryProof& proof);
-    bool RestoreRadioAfterRecovery();
+    bool RestoreRadioAfterRecovery(const ScanRecoveryClaim& claim);
     void RetryScanAfterRecovery();
     void OnScanRecoveryNeeded(std::function<void(
         const WifiScanLeaseCoordinator::Lease&)> callback);
@@ -102,6 +101,7 @@ private:
     std::vector<WifiApRecord> connect_queue_;
     bool was_connected_ = false;  // Track if we were connected before disconnection
     WifiScanLeaseCoordinator& scan_lease_coordinator_;
+    WifiRadioRecoveryRestorer radio_recovery_restorer_;
     // When nested: callback -> scan -> data. Never acquire scan while holding
     // data, and never hold data across driver calls or external callbacks.
     std::recursive_mutex session_callback_mutex_;
@@ -114,6 +114,7 @@ private:
     size_t in_flight_session_operations_ = 0;
     std::condition_variable session_operations_drained_;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
+    WifiScanRecoveryGate::RestoreState scan_recovery_restore_state_;
     std::function<void(const WifiScanLeaseCoordinator::Lease&)>
         scan_recovery_needed_;
 

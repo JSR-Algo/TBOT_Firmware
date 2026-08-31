@@ -31,9 +31,14 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#ifdef TBOT_WIFI_MANAGER_TESTING
+#include <wifi_station.h>
+#include <wifi_scan_recovery_executor.h>
+#else
 #include "wifi_station.h"
-#include "wifi_scan_lease_coordinator.h"
 #include "wifi_scan_recovery_executor.h"
+#endif
+#include "wifi_scan_lease_coordinator.h"
 
 class WifiStation;
 class WifiConfigurationAp;
@@ -111,8 +116,37 @@ public:
     WifiManager(const WifiManager&) = delete;
     WifiManager& operator=(const WifiManager&) = delete;
 
-private:
+#ifdef TBOT_WIFI_MANAGER_TESTING
     WifiManager();
+    void TestScheduleScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+        ScheduleScanRecovery(lease);
+    }
+    void TestRunScanRecovery() { RunScanRecovery(); }
+    WifiStation* TestStation() { return station_.get(); }
+    WifiConfigurationAp* TestConfigAp() { return config_ap_.get(); }
+    bool TestRecoveryActive() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return scan_recovery_active_;
+    }
+    bool TestStationActive() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return station_active_;
+    }
+    bool TestConfigActive() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return config_mode_active_;
+    }
+    void TestAdvanceLifecycleGeneration() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++lifecycle_generation_;
+    }
+#endif
+
+private:
+#ifndef TBOT_WIFI_MANAGER_TESTING
+    WifiManager();
+#endif
     // Event handlers and callbacks capture scanners, the coordinator, and
     // manager state. The singleton therefore owns the whole graph for the
     // process lifetime; production teardown is intentionally unavailable.
@@ -143,6 +177,8 @@ private:
         WifiScanLeaseCoordinator::Lease lease;
         WifiScanLeaseCoordinator::RecoveryDecision recovery;
         std::optional<WifiScanLeaseCoordinator::RecoveryProof> proof;
+        uint64_t scan_session_id = 0;
+        bool scans_were_enabled = false;
     };
 
     WifiManagerConfig config_;
@@ -153,6 +189,7 @@ private:
 
     mutable std::mutex mutex_;
     bool initialized_ = false;
+    bool wifi_runtime_ready_ = false;
     bool station_active_ = false;
     bool config_mode_active_ = false;
     uint64_t lifecycle_generation_ = 0;

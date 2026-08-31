@@ -159,14 +159,16 @@ void WifiManager::RunScanRecovery() {
                 auto claim = station_->ClaimScanRecovery(*debt);
                 if (claim.has_value()) {
                     work = ScanRecoveryWork{
-                        claim->lease, claim->recovery, std::nullopt};
+                        claim->lease, claim->recovery, std::nullopt,
+                        claim->scan_session_id, claim->scans_were_enabled};
                 }
             } else if (debt->owner ==
                        WifiScanLeaseCoordinator::Owner::kConfigAp) {
                 auto claim = config_ap_->ClaimScanRecovery(*debt);
                 if (claim.has_value()) {
                     work = ScanRecoveryWork{
-                        claim->lease, claim->recovery, std::nullopt};
+                        claim->lease, claim->recovery, std::nullopt,
+                        claim->scan_session_id, claim->scans_were_enabled};
                 }
             }
             if (!work.has_value()) {
@@ -224,10 +226,16 @@ void WifiManager::RunScanRecovery() {
 
         bool owner_ready = false;
         if (work->lease.owner == WifiScanLeaseCoordinator::Owner::kStation) {
-            owner_ready = station_->RestoreRadioAfterRecovery();
+            WifiStation::ScanRecoveryClaim claim{
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
+            owner_ready = station_->RestoreRadioAfterRecovery(claim);
         } else if (work->lease.owner ==
                    WifiScanLeaseCoordinator::Owner::kConfigAp) {
-            owner_ready = config_ap_->RestoreRadioAfterRecovery();
+            WifiConfigurationAp::ScanRecoveryClaim claim{
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
+            owner_ready = config_ap_->RestoreRadioAfterRecovery(claim);
         }
         if (!owner_ready) {
             {
@@ -240,12 +248,15 @@ void WifiManager::RunScanRecovery() {
 
         bool completed = false;
         if (work->lease.owner == WifiScanLeaseCoordinator::Owner::kStation) {
-            WifiStation::ScanRecoveryClaim claim{work->lease, work->recovery};
+            WifiStation::ScanRecoveryClaim claim{
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
             completed = station_->CompleteScanRecovery(claim, *work->proof);
         } else if (work->lease.owner ==
                    WifiScanLeaseCoordinator::Owner::kConfigAp) {
             WifiConfigurationAp::ScanRecoveryClaim claim{
-                work->lease, work->recovery};
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
             completed = config_ap_->CompleteScanRecovery(claim, *work->proof);
         }
         if (!completed) {
@@ -298,55 +309,55 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
     config_ = config;
     ESP_LOGI(TAG, "Initializing...");
 
-    // Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "Erasing NVS...");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
-        return false;
-    }
+    if (!wifi_runtime_ready_) {
+        // Initialize NVS
+        esp_err_t ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+            ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_LOGW(TAG, "Erasing NVS...");
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            ret = nvs_flash_init();
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
+            return false;
+        }
 
-    // Initialize netif
-    ret = esp_netif_init();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "Netif init failed: %s", esp_err_to_name(ret));
-        return false;
-    }
+        ret = esp_netif_init();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Netif init failed: %s", esp_err_to_name(ret));
+            return false;
+        }
 
-    // Create event loop
-    ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "Event loop create failed: %s", esp_err_to_name(ret));
-        return false;
-    }
+        ret = esp_event_loop_create_default();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Event loop create failed: %s", esp_err_to_name(ret));
+            return false;
+        }
 
-    // Initialize WiFi driver
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    cfg.nvs_enable = false;
-    ret = esp_wifi_init(&cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi init failed: %s", esp_err_to_name(ret));
-        return false;
-    }
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        cfg.nvs_enable = false;
+        ret = esp_wifi_init(&cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi init failed: %s", esp_err_to_name(ret));
+            return false;
+        }
 
-    station_ = std::make_unique<WifiStation>(scan_lease_coordinator_);
-    config_ap_ = std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_);
-    station_->OnScanRecoveryNeeded([this](const auto& lease) {
-        ScheduleScanRecovery(lease);
-    });
-    config_ap_->OnScanRecoveryNeeded([this](const auto& lease) {
-        ScheduleScanRecovery(lease);
-    });
+        station_ = std::make_unique<WifiStation>(scan_lease_coordinator_);
+        config_ap_ =
+            std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_);
+        station_->OnScanRecoveryNeeded([this](const auto& lease) {
+            ScheduleScanRecovery(lease);
+        });
+        config_ap_->OnScanRecoveryNeeded([this](const auto& lease) {
+            ScheduleScanRecovery(lease);
+        });
+        wifi_runtime_ready_ = true;
+    }
     if (scan_recovery_task_ == nullptr &&
         xTaskCreate(&WifiManager::ScanRecoveryTask, "wifi_scan_recover", 4096,
                     this, 5, &scan_recovery_task_) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create WiFi scan recovery task");
-        station_.reset();
-        config_ap_.reset();
         return false;
     }
 

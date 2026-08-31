@@ -708,10 +708,8 @@ def test_station_and_config_publish_exact_recovery_debt_for_start_and_cancel():
         assert "RetainRecoveryDebtLocked(lease)" in start
         assert "RetainRecoveryDebtLocked(lease)" in stop
         assert "scan_recovery_lease_" in claim
-        assert "BeginRecovery(" in claim
-        assert "CompleteRecovery(" in complete
-        assert "scan_lease_.reset()" in complete
-        assert "scan_recovery_lease_.reset()" in complete
+        assert "WifiScanRecoveryGate::TryClaim" in claim
+        assert "WifiScanRecoveryGate::Complete" in complete
         assert "ScanRecoveryClaim" in header
 
 
@@ -915,23 +913,11 @@ def test_recovery_restore_reapplies_start_time_wifi_runtime_settings():
         config, "bool WifiConfigurationAp::RestoreRadioAfterRecovery"
     )
 
-    assert "esp_wifi_set_mode(WIFI_MODE_STA)" in station_restore
-    assert "esp_wifi_start()" in station_restore
-    assert "esp_wifi_set_max_tx_power(max_tx_power_)" in station_restore
-    assert "esp_wifi_set_ps(power_save_type)" in station_restore
+    assert "radio_recovery_restorer_.RestoreStation" in station_restore
     assert "power_save_type_ = ps_type" in function_body(
         station, "void WifiStation::SetPowerSaveLevel"
     )
-    assert station_restore.index("esp_wifi_start()") < station_restore.index(
-        "esp_wifi_set_max_tx_power(max_tx_power_)"
-    )
-
-    assert "esp_wifi_set_mode(WIFI_MODE_APSTA)" in config_restore
-    assert "esp_wifi_set_config(WIFI_IF_AP" in config_restore
-    assert "esp_wifi_set_ps(WIFI_PS_NONE)" in config_restore
-    assert "esp_wifi_start()" in config_restore
-    assert "esp_wifi_set_band_mode" in config_restore
-    assert "esp_wifi_set_max_tx_power(max_tx_power_)" in config_restore
+    assert "radio_recovery_restorer_.RestoreConfigAp" in config_restore
 
 
 def test_coordinator_recovery_cannot_claim_active_completion_reader():
