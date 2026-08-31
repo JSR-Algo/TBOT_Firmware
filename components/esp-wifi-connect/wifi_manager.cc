@@ -39,12 +39,16 @@ WifiManager::~WifiManager() {
     if (station != nullptr) {
         station->Stop();
     }
+    bool config_boundary_closed = true;
     if (config_ap != nullptr) {
         if (!config_ap->Stop()) {
             ESP_LOGE(TAG, "Config AP teardown boundary failed during destruction");
+            station_.release();
+            config_ap_.release();
+            config_boundary_closed = false;
         }
     }
-    if (deinitialize) {
+    if (deinitialize && config_boundary_closed) {
         esp_wifi_deinit();
     }
 }
@@ -111,6 +115,7 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
     config_ap_ = std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_);
 
     initialized_ = true;
+    wifi_teardown_faulted_ = false;
     ESP_LOGI(TAG, "Initialized");
     return true;
 }
@@ -122,6 +127,9 @@ bool WifiManager::StopRadio() {
     std::unique_lock<std::mutex> lock(mutex_);
     if (!initialized_) {
         return true;
+    }
+    if (wifi_teardown_faulted_) {
+        return false;
     }
     if (lifecycle_transition_in_progress_) {
         return false;
@@ -142,7 +150,7 @@ bool WifiManager::StopRadio() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (lifecycle_generation_ == transition_generation &&
                 config_ap_.get() == config_ap) {
-                config_mode_active_ = true;
+                wifi_teardown_faulted_ = true;
                 lifecycle_transition_in_progress_ = false;
             }
             return false;
@@ -183,6 +191,11 @@ bool WifiManager::IsInitialized() const {
     return initialized_;
 }
 
+bool WifiManager::HasTeardownFault() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return wifi_teardown_faulted_;
+}
+
 // ==================== Station Mode ====================
 
 void WifiManager::StartStation() {
@@ -196,7 +209,8 @@ void WifiManager::StartStation() {
             ESP_LOGE(TAG, "Not initialized");
             return;
         }
-        if (station_active_ || lifecycle_transition_in_progress_) {
+        if (station_active_ || lifecycle_transition_in_progress_ ||
+            wifi_teardown_faulted_) {
             return;
         }
         lifecycle_transition_in_progress_ = true;
@@ -213,7 +227,7 @@ void WifiManager::StartStation() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (lifecycle_generation_ == transition_generation &&
                 config_ap_.get() == config_ap_to_stop) {
-                config_mode_active_ = true;
+                wifi_teardown_faulted_ = true;
                 lifecycle_transition_in_progress_ = false;
             }
             return;
@@ -338,7 +352,8 @@ void WifiManager::StartConfigAp() {
             ESP_LOGE(TAG, "Not initialized");
             return;
         }
-        if (config_mode_active_ || lifecycle_transition_in_progress_) {
+        if (config_mode_active_ || lifecycle_transition_in_progress_ ||
+            wifi_teardown_faulted_) {
             return;
         }
         lifecycle_transition_in_progress_ = true;
@@ -383,7 +398,8 @@ void WifiManager::StopConfigAp() {
     uint64_t transition_generation = 0;
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!config_mode_active_ || lifecycle_transition_in_progress_) {
+        if (!config_mode_active_ || lifecycle_transition_in_progress_ ||
+            wifi_teardown_faulted_) {
             return;
         }
         lifecycle_transition_in_progress_ = true;
@@ -399,7 +415,7 @@ void WifiManager::StopConfigAp() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (lifecycle_generation_ == transition_generation &&
             config_ap_.get() == config_ap) {
-            config_mode_active_ = true;
+            wifi_teardown_faulted_ = true;
             lifecycle_transition_in_progress_ = false;
         }
         return;

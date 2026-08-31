@@ -65,6 +65,7 @@ public:
     bool Initialize(const WifiManagerConfig& config = WifiManagerConfig{});
     bool StopRadio();
     bool IsInitialized() const;
+    bool HasTeardownFault() const;
 
     // ==================== Station Mode ====================
 
@@ -122,6 +123,7 @@ private:
     bool config_mode_active_ = false;
     uint64_t lifecycle_generation_ = 0;
     bool lifecycle_transition_in_progress_ = false;
+    bool wifi_teardown_faulted_ = false;
 
     std::function<void(WifiEvent, const std::string&)> event_callback_;
     mutable std::string mac_address_;

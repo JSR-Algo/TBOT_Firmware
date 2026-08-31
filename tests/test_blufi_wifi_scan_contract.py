@@ -474,7 +474,8 @@ def test_config_stop_runs_closed_two_sided_connection_boundary():
 
     assert "FinishConnectionAttemptBoundary(" in stop
     assert "FinishConnectionAttemptBoundary(0, 0, true)" in stop
-    assert "return boundary_closed" in stop
+    assert "if (!boundary_closed)" in stop
+    assert "return false" in stop
     assert "connection_boundary_ready_ = true" not in stop
     assert "if (stop_wifi)" in boundary
     assert boundary.index("esp_wifi_disconnect()") < boundary.index(
@@ -488,6 +489,14 @@ def test_config_stop_runs_closed_two_sided_connection_boundary():
     assert "WIFI_EVENT_STA_STOP" in function_body(
         source, "void WifiConfigurationAp::WifiEventHandler"
     )
+    waiter_drain = stop.index("connection_waiter_drained_.wait(")
+    clear_cancel = stop.index("xEventGroupClearBits(event_group_, WIFI_CANCEL_BIT)")
+    boundary_call = stop.index("FinishConnectionAttemptBoundary(0, 0, true)")
+    assert waiter_drain < clear_cancel < boundary_call
+
+    stop_wait = boundary[boundary.index("bool stop_terminal") :]
+    assert "WIFI_ATTEMPT_BOUNDARY_BIT | WIFI_CANCEL_BIT" not in stop_wait
+    assert "event_group_, WIFI_ATTEMPT_BOUNDARY_BIT," in stop_wait
 
     manager = read("components/esp-wifi-connect/wifi_manager.cc")
     start_station = function_body(manager, "void WifiManager::StartStation")
@@ -497,7 +506,49 @@ def test_config_stop_runs_closed_two_sided_connection_boundary():
     )
     stop_config = function_body(manager, "void WifiManager::StopConfigAp")
     assert "if (!config_ap->Stop())" in stop_config
-    assert "config_mode_active_ = true" in stop_config
+    assert "wifi_teardown_faulted_ = true" in stop_config
+    assert "config_mode_active_ = true" not in stop_config
+
+
+def test_failed_config_boundary_retains_resources_and_blocks_manager_transitions():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
+
+    assert "bool teardown_faulted_ = false;" in header
+    assert "std::atomic<bool> stopped_{false};" in header
+    assert "if (stopped_.load())" in stop
+    assert "if (!boundary_closed)" in stop
+    failure = stop[stop.index("if (!boundary_closed)") :]
+    for teardown in (
+        "esp_timer_delete(",
+        "esp_netif_destroy_default_wifi(",
+        "httpd_stop(",
+        "dns_server_->Stop()",
+    ):
+        assert failure.index("return false") < failure.index(teardown)
+    assert "teardown_faulted_ = true" in failure[: failure.index("return false")]
+    assert "bool wifi_teardown_faulted_ = false;" in manager_header
+
+    for signature in (
+        "void WifiManager::StartStation",
+        "void WifiManager::StartConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        body = function_body(manager, signature)
+        assert "wifi_teardown_faulted_" in body
+
+    destructor = function_body(source, "WifiConfigurationAp::~WifiConfigurationAp")
+    assert "if (!Stop())" in destructor
+    assert "std::abort()" in destructor
+
+    manager_destructor = function_body(manager, "WifiManager::~WifiManager")
+    assert "config_boundary_closed" in manager_destructor
+    assert "station_.release()" in manager_destructor
+    assert "config_ap_.release()" in manager_destructor
+    assert "deinitialize && config_boundary_closed" in manager_destructor
 
 
 def test_config_cancelled_scan_completion_cannot_publish_during_credential_test():

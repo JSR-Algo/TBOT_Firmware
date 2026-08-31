@@ -8,6 +8,7 @@
 #include <functional>
 #include <optional>
 #include <condition_variable>
+#include <atomic>
 
 #include <esp_http_server.h>
 #include <esp_event.h>
@@ -91,6 +92,8 @@ private:
     bool connection_boundary_waiting_ = false;
     bool connection_boundary_waiting_for_stop_ = false;
     bool connection_boundary_ready_ = true;
+    bool teardown_faulted_ = false;
+    std::atomic<bool> stopped_{false};
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
 
     // 高级配置项

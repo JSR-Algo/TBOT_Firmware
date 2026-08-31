@@ -1,6 +1,7 @@
 #include "wifi_configuration_ap.h"
 #include "default_event_loop_barrier.h"
 #include <chrono>
+#include <cstdlib>
 #include <cstdio>
 #include <limits>
 #include <memory>
@@ -53,7 +54,10 @@ std::vector<wifi_ap_record_t> WifiConfigurationAp::GetAccessPoints()
 
 WifiConfigurationAp::~WifiConfigurationAp()
 {
-    Stop();
+    if (!Stop()) {
+        ESP_LOGE(TAG, "Unsafe configuration AP destruction after teardown fault");
+        std::abort();
+    }
     if (event_group_) {
         vEventGroupDelete(event_group_);
         event_group_ = nullptr;
@@ -82,6 +86,7 @@ void WifiConfigurationAp::SetSsidPrefix(const std::string &ssid_prefix)
 
 void WifiConfigurationAp::Start()
 {
+    stopped_.store(false);
     if (instance_any_id_ == nullptr) {
         ESP_ERROR_CHECK(esp_event_handler_instance_register(
             WIFI_EVENT, ESP_EVENT_ANY_ID,
@@ -941,7 +946,7 @@ bool WifiConfigurationAp::FinishConnectionAttemptBoundary(
         stop_terminal = false;
         if (predrained && stop_result == ESP_OK) {
             const EventBits_t boundary_bits = xEventGroupWaitBits(
-                event_group_, WIFI_ATTEMPT_BOUNDARY_BIT | WIFI_CANCEL_BIT,
+                event_group_, WIFI_ATTEMPT_BOUNDARY_BIT,
                 pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
             stop_terminal =
                 (boundary_bits & WIFI_ATTEMPT_BOUNDARY_BIT) != 0;
@@ -1107,20 +1112,12 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
 #endif // !CONFIG_IDF_TARGET_ESP32P4
 
 bool WifiConfigurationAp::Stop() {
-#if !CONFIG_IDF_TARGET_ESP32P4
-    // 停止SmartConfig服务
-    if (sc_event_instance_) {
-        esp_event_handler_instance_unregister(SC_EVENT, ESP_EVENT_ANY_ID, sc_event_instance_);
-        sc_event_instance_ = nullptr;
+    if (stopped_.load()) {
+        return true;
     }
-    esp_smartconfig_stop();
-#endif
-
-    // 停止定时器
-    if (scan_timer_) {
+    if (scan_timer_ != nullptr) {
         esp_timer_stop(scan_timer_);
     }
-
     std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
     scans_enabled_ = false;
     ++scan_session_id_;
@@ -1128,9 +1125,7 @@ bool WifiConfigurationAp::Stop() {
     connection_waiter_drained_.wait(lifecycle_lock, [this]() {
         return !connection_waiter_active_ && !connection_boundary_waiting_;
     });
-    esp_timer_handle_t timer_to_delete = scan_timer_;
-    scan_timer_ = nullptr;
-
+    xEventGroupClearBits(event_group_, WIFI_CANCEL_BIT);
     if (scan_lease_.has_value()) {
         const auto lease = *scan_lease_;
         if (scan_lease_coordinator_.BeginDrain(lease)) {
@@ -1139,15 +1134,41 @@ bool WifiConfigurationAp::Stop() {
         esp_wifi_scan_stop();
     }
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ap_records_.clear();
-    }
     lifecycle_lock.unlock();
 
     // Close all queued STA events before WifiManager can start another mode.
     const bool boundary_closed =
         FinishConnectionAttemptBoundary(0, 0, true);
+    if (!boundary_closed) {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        teardown_faulted_ = true;
+        ESP_LOGE(TAG, "Configuration AP teardown proof failed; resources retained");
+        return false;
+    }
+
+#if !CONFIG_IDF_TARGET_ESP32P4
+    if (sc_event_instance_) {
+        esp_event_handler_instance_unregister(
+            SC_EVENT, ESP_EVENT_ANY_ID, sc_event_instance_);
+        sc_event_instance_ = nullptr;
+    }
+    esp_smartconfig_stop();
+#endif
+
+    esp_timer_handle_t timer_to_delete = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        teardown_faulted_ = false;
+        timer_to_delete = scan_timer_;
+        scan_timer_ = nullptr;
+    }
+    if (timer_to_delete != nullptr) {
+        esp_timer_stop(timer_to_delete);
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ap_records_.clear();
+    }
 
     // 销毁网络接口
     if (ap_netif_) {
@@ -1170,7 +1191,8 @@ bool WifiConfigurationAp::Stop() {
     }
 
     ESP_LOGI(TAG, "Wifi configuration AP stopped");
-    return boundary_closed;
+    stopped_.store(true);
+    return true;
 }
 
 void WifiConfigurationAp::RetainRecoveryDebtLocked(

@@ -878,6 +878,37 @@ void StaleDisconnectCannotSatisfyCancelledConfigBoundary() {
     assert(model.FinalDrainComplete());
 }
 
+class StopBoundaryEventBitsModel {
+public:
+    void CancelWaiter() { cancel_bit_ = true; }
+    void DrainWaiterAndBeginStopBoundary() {
+        waiter_drained_ = true;
+        cancel_bit_ = false;
+        waiting_for_stop_ = true;
+    }
+    bool WaitSatisfied() const {
+        return waiting_for_stop_ && stop_bit_;
+    }
+    void SignalStop() { stop_bit_ = true; }
+    bool waiter_drained() const { return waiter_drained_; }
+
+private:
+    bool cancel_bit_ = false;
+    bool stop_bit_ = false;
+    bool waiter_drained_ = false;
+    bool waiting_for_stop_ = false;
+};
+
+void StaleCancelCannotSatisfyStopBoundary() {
+    StopBoundaryEventBitsModel model;
+    model.CancelWaiter();
+    model.DrainWaiterAndBeginStopBoundary();
+    assert(model.waiter_drained());
+    assert(!model.WaitSatisfied());
+    model.SignalStop();
+    assert(model.WaitSatisfied());
+}
+
 void CompletingLeaseCanEnterExactRecovery() {
     Coordinator coordinator;
     const auto acquired = coordinator.TryAcquire(Coordinator::Owner::kStation);
@@ -1281,6 +1312,7 @@ int main() {
     OldConfigWaiterCannotConsumeOrDisconnectNextStationConnection();
     DelayedConfigEventCannotCrossAttemptTerminalBoundary();
     StaleDisconnectCannotSatisfyCancelledConfigBoundary();
+    StaleCancelCannotSatisfyStopBoundary();
     CompletingLeaseCanEnterExactRecovery();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();
