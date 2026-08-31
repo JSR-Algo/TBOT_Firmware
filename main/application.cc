@@ -1887,12 +1887,15 @@ void Application::SchedulePendingTbotClaimRefresh(uint32_t expected_setup_genera
 void Application::ExecuteClaimDeferredEffects(
         const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
         WakeWordLifecycleController::ProvisioningToken provisioning_token) {
-    bool confirmation_dispatch_failed = false;
-    auto commit_dispatch = [this, &effects, expected_setup_generation,
-                            &confirmation_dispatch_failed]() {
+    auto commit_dispatch = [this, &effects, expected_setup_generation]() {
         if (effects.dispatch_confirmation &&
             !DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
-            confirmation_dispatch_failed = true;
+            StartClaimPoll();
+        }
+        if (effects.restore_standby_after_dispatch_failure) {
+            claim_substate_ = TbotClaimSubstate::AvailableStandby;
+            RenderClaimSubstate(claim_substate_);
+            StartClaimPoll();
         }
     };
     bool lifecycle_ready = true;
@@ -1924,9 +1927,6 @@ void Application::ExecuteClaimDeferredEffects(
 
     if (!lifecycle_ready) {
         return;
-    }
-    if (confirmation_dispatch_failed) {
-        StartClaimPoll();
     }
     if (effects.dispatch_refresh) {
         DispatchPendingTbotClaimRefreshForSetupGeneration(expected_setup_generation);
@@ -1988,12 +1988,10 @@ void Application::DispatchPendingTbotClaimRefreshForSetupGeneration(
         }
     }
     if (!dispatched) {
-        claim_substate_ = TbotClaimSubstate::AvailableStandby;
-        RenderClaimSubstate(claim_substate_);
         ClaimDeferredEffects effects;
         effects.ble_intent = ClaimBleLifecycleIntent::kEnsureAdvertising;
+        effects.restore_standby_after_dispatch_failure = true;
         ExecuteClaimDeferredEffects(effects, expected_setup_generation);
-        StartClaimPoll();
     }
 }
 

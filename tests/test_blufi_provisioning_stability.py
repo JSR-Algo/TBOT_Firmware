@@ -1565,6 +1565,36 @@ def test_fw21h_generation_dispatch_reservation_keeps_non_blufi_builds_compilable
     assert "RunClaimDispatchForSetupGeneration" in refresh
 
 
+def test_fw21h_confirmation_dispatch_failure_fallback_is_committed_inside_reservation():
+    app = read("main/application.cc")
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    commit = effects[effects.index("auto commit_dispatch") : effects.index("};")]
+    assert "DispatchPendingTbotClaimConfirmation" in commit
+    assert "StartClaimPoll();" in commit
+    assert "confirmation_dispatch_failed" not in effects
+
+
+def test_fw21h_fetch_dispatch_failure_fallback_is_generation_reserved():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    refresh = _function_body(
+        app, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    assert "restore_standby_after_dispatch_failure" in header
+    failed = refresh[refresh.index("if (!dispatched)") :]
+    assert "restore_standby_after_dispatch_failure = true" in failed
+    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby" not in failed
+    assert "RenderClaimSubstate" not in failed
+    assert "StartClaimPoll" not in failed
+
+    commit = effects[effects.index("auto commit_dispatch") : effects.index("};")]
+    assert "restore_standby_after_dispatch_failure" in commit
+    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby" in commit
+    assert "RenderClaimSubstate" in commit
+    assert "StartClaimPoll" in commit
+
+
 # ---------------------------------------------------------------------------
 # FW21i: the legacy authenticated-status worker is generation-owned too. Start,
 #        secret snapshot, and result application serialize on the finalization

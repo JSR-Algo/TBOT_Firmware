@@ -454,12 +454,14 @@ private:
         ClaimBleLifecycleIntent ble_intent = ClaimBleLifecycleIntent::kNone;
         bool dispatch_confirmation = false;
         bool dispatch_refresh = false;
+        bool restore_standby_after_dispatch_failure = false;
     };
     // Claim fetch and provisioning-promotion results first commit their state under
     // RunIfSetupGenerationCurrent. A post-gate BOOT restart must still suppress the
     // stale confirmation or refresh worker, so ExecuteClaimDeferredEffects reserves
     // the lifecycle, briefly validates finalization, and commits bounded dispatch
-    // before unlock. Worker result application retains its own generation gate.
+    // plus any dispatch-failure poll/standby fallback before unlock. Worker result
+    // application retains its own generation gate.
     void ExecuteClaimDeferredEffects(
         const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
         WakeWordLifecycleController::ProvisioningToken provisioning_token = {});

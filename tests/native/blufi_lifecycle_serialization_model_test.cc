@@ -149,6 +149,81 @@ public:
     int ConfirmationLaunchesV3() const { return confirmation_launches_v3_.load(); }
     int RefreshLaunchesV3() const { return refresh_launches_v3_.load(); }
 
+    bool AttemptConfirmationDispatchFailure(uint32_t expected_generation) {
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        {
+            std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+            if (expected_generation != setup_generation_v3_.load()) {
+                return false;
+            }
+        }
+        {
+            std::unique_lock<std::mutex> lock(fallback_gap_mutex_v4_);
+            confirmation_dispatch_failed_v4_ = true;
+            fallback_gap_cv_v4_.notify_all();
+            fallback_gap_cv_v4_.wait(lock, [this]() {
+                return restart_attempted_v4_.load();
+            });
+        }
+        StartClaimPollFallback();
+        return false;
+    }
+
+    void WaitForConfirmationDispatchFailureV4() {
+        std::unique_lock<std::mutex> lock(fallback_gap_mutex_v4_);
+        fallback_gap_cv_v4_.wait(lock, [this]() {
+            return confirmation_dispatch_failed_v4_;
+        });
+    }
+
+    void RestartAtConfirmationFailureBoundaryV4() {
+        restart_attempted_v4_.store(true);
+        fallback_gap_cv_v4_.notify_all();
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+        restart_saw_committed_poll_v4_.store(claim_poll_starts_v4_.load() == 1);
+        setup_generation_v3_.fetch_add(1);
+    }
+
+    bool AttemptFetchDispatchFailure(uint32_t expected_generation) {
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        {
+            std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+            if (expected_generation != setup_generation_v3_.load()) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    void StartClaimPollFallback() { claim_poll_starts_v4_.fetch_add(1); }
+
+    void RunFetchFallbackReservation(uint32_t expected_generation) {
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        {
+            std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+            if (expected_generation != setup_generation_v3_.load()) {
+                return;
+            }
+        }
+        RestoreFetchFallback();
+    }
+
+    void RestoreFetchFallback() {
+        fetch_substate_writes_v4_.fetch_add(1);
+        fetch_renders_v4_.fetch_add(1);
+        fetch_ensure_calls_v4_.fetch_add(1);
+        claim_poll_starts_v4_.fetch_add(1);
+    }
+
+    int ClaimPollStartsV4() const { return claim_poll_starts_v4_.load(); }
+    int FetchSubstateWritesV4() const { return fetch_substate_writes_v4_.load(); }
+    int FetchRendersV4() const { return fetch_renders_v4_.load(); }
+    int FetchEnsureCallsV4() const { return fetch_ensure_calls_v4_.load(); }
+    bool RestartSawCommittedPollV4() const {
+        return restart_saw_committed_poll_v4_.load();
+    }
+
 private:
     void SignalGapAndWait() {
         std::unique_lock<std::mutex> lock(gap_mutex_);
@@ -190,6 +265,15 @@ private:
     std::atomic<uint32_t> setup_generation_v3_{1};
     std::atomic<int> confirmation_launches_v3_{0};
     std::atomic<int> refresh_launches_v3_{0};
+    std::atomic<int> claim_poll_starts_v4_{0};
+    std::atomic<int> fetch_substate_writes_v4_{0};
+    std::atomic<int> fetch_renders_v4_{0};
+    std::atomic<int> fetch_ensure_calls_v4_{0};
+    std::mutex fallback_gap_mutex_v4_;
+    std::condition_variable fallback_gap_cv_v4_;
+    bool confirmation_dispatch_failed_v4_ = false;
+    std::atomic<bool> restart_attempted_v4_{false};
+    std::atomic<bool> restart_saw_committed_poll_v4_{false};
 };
 
 void ReleaseDrainBlocksConcurrentPublicInit() {
@@ -256,6 +340,34 @@ void RestartAfterOriginalGateSuppressesDeferredRefreshLaunch() {
     assert(model.RefreshLaunchesV3() == 0);
 }
 
+void FailedConfirmationDispatchCommitsPollBeforeRestartCanAdvanceGeneration() {
+    LifecycleModel model;
+    const uint32_t generation = model.CommitOriginalGenerationGate();
+    std::thread failure([&model, generation]() {
+        model.AttemptConfirmationDispatchFailure(generation);
+    });
+    model.WaitForConfirmationDispatchFailureV4();
+    std::thread restart([&model]() {
+        model.RestartAtConfirmationFailureBoundaryV4();
+    });
+    failure.join();
+    restart.join();
+    assert(model.ClaimPollStartsV4() == 1);
+    assert(model.RestartSawCommittedPollV4());
+}
+
+void RestartAfterFailedFetchDispatchSuppressesStandbyFallback() {
+    LifecycleModel model;
+    const uint32_t generation = model.CommitOriginalGenerationGate();
+    model.AttemptFetchDispatchFailure(generation);
+    model.RestartAfterOriginalGenerationGate();
+    model.RunFetchFallbackReservation(generation);
+    assert(model.FetchSubstateWritesV4() == 0);
+    assert(model.FetchRendersV4() == 0);
+    assert(model.FetchEnsureCallsV4() == 0);
+    assert(model.ClaimPollStartsV4() == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -265,5 +377,7 @@ int main() {
     RestartFinalizationWaitsForCommitBeforeDeferredStop();
     RestartAfterOriginalGateSuppressesDeferredConfirmationLaunch();
     RestartAfterOriginalGateSuppressesDeferredRefreshLaunch();
+    FailedConfirmationDispatchCommitsPollBeforeRestartCanAdvanceGeneration();
+    RestartAfterFailedFetchDispatchSuppressesStandbyFallback();
     return 0;
 }

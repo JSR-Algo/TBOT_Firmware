@@ -23,6 +23,16 @@ release it, then let the lifecycle lock own blocking teardown. This prevents a
 stale worker from tearing down a newer setup while allowing disconnect callbacks
 needed by Bluedroid deinit to complete.
 
+Generation-bound claim worker dispatch uses the same global order. After the
+short state-commit gate, acquire lifecycle ownership, briefly revalidate the
+setup generation under the finalization lock, release finalization, and commit
+only bounded worker creation or timer/state fallback work before releasing
+lifecycle. If confirmation worker creation fails, re-arm claim polling inside
+that reservation. If fetch worker creation fails, enter a second equivalent
+generation-aware standby reservation before changing claim substate, rendering,
+ensuring BLE advertising, or re-arming polling. A BOOT restart between dispatch
+failure and fallback therefore suppresses every stale fallback effect.
+
 Tag every advertising start completion that the wrapper intentionally owns,
 including the default BluFi fallback path. A fallback start from an older host
 lifecycle must never consume the queued epoch for a newer compact advertising
@@ -44,3 +54,6 @@ station-association lifecycle code.
    completion hold the lifecycle lock across blocking deinit, never the
    finalization lock, and that fallback advertising completions carry lifecycle
    ownership.
+6. Prove deterministically that restart after claim dispatch failure cannot run
+   stale confirmation polling or fetch standby fallback state/render/BLE/poll
+   effects.
