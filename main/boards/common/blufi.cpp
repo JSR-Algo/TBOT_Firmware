@@ -695,12 +695,14 @@ esp_err_t Blufi::_deinit_impl() {
     ble_session_state_.exchange(
         EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
         std::memory_order_acq_rel);
+    InvalidateWifiScanSession();
     esp_err_t first_error = ESP_OK;
 
     if (m_deinited && !host_active_ && !controller_active_) {
         return teardown_failed_.load() ? ESP_ERR_INVALID_STATE : ESP_OK;
     }
-    if (scan_event_instance_ != nullptr) {
+    if (scan_event_instance_ != nullptr &&
+        wifi_scan_controller_.CanUnregisterHandler()) {
         esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
                                               scan_event_instance_);
         scan_event_instance_ = nullptr;
@@ -772,6 +774,7 @@ esp_err_t Blufi::RestartForSetup() {
         const uint32_t stale_ssid_transaction = ssid_transaction_id_.exchange(0);
         SsidManager::GetInstance().RollbackSsidTransaction(stale_ssid_transaction);
         CancelBleSetupTimeout();
+        InvalidateWifiScanSession();
     }
 
     if (GetBleState() != BleState::kOff) {
@@ -1521,6 +1524,14 @@ bool Blufi::EnsureWifiScanEventHandlerRegistered() {
         return false;
     }
     return true;
+}
+
+void Blufi::InvalidateWifiScanSession() {
+    wifi_scan_controller_.InvalidateSession(
+        setup_generation_.load(std::memory_order_acquire),
+        ble_session_state_.load(std::memory_order_acquire),
+        ble_connection_epoch_.load(std::memory_order_acquire));
+    m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
 }
 
 bool Blufi::IsWifiScanCacheFresh() const {
@@ -2608,6 +2619,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
                 m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
             }
+            InvalidateWifiScanSession();
             ESP_LOGI(BLUFI_TAG, "BLUFI ble disconnect");
             _security_deinit();
             if (!m_provisioned) {

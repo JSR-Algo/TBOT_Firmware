@@ -120,6 +120,37 @@ def test_blufi_scan_request_captures_generation_session_and_connection():
     assert "wifi_scan_controller_.RequestScan" in request
 
 
+def test_blufi_scan_session_is_invalidated_on_disconnect_restart_and_deinit():
+    source = read("main/boards/common/blufi.cpp")
+    disconnect = function_body(source, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+    restart = function_body(source, "esp_err_t Blufi::RestartForSetup")
+    deinit = function_body(source, "esp_err_t Blufi::_deinit_impl")
+
+    assert "InvalidateWifiScanSession();" in disconnect
+    assert "InvalidateWifiScanSession();" in restart
+    assert "InvalidateWifiScanSession();" in deinit
+
+
+def test_blufi_does_not_unregister_scan_handler_while_callback_is_owed():
+    source = read("main/boards/common/blufi.cpp")
+    deinit = function_body(source, "esp_err_t Blufi::_deinit_impl")
+
+    assert "CanUnregisterHandler()" in deinit
+    assert deinit.index("CanUnregisterHandler()") < deinit.index(
+        "esp_event_handler_instance_unregister"
+    )
+
+
+def test_blufi_scan_invalidation_clears_deferred_list_work():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    invalidation = function_body(source, "void Blufi::InvalidateWifiScanSession")
+
+    assert "void InvalidateWifiScanSession();" in header
+    assert "wifi_scan_controller_.InvalidateSession" in invalidation
+    assert "m_wifi_list_dispatch_pending_epoch_.store(0" in invalidation
+
+
 def test_blufi_scan_failures_are_deferred_and_exactly_owner_bound():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")

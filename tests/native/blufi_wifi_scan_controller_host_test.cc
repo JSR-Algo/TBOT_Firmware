@@ -74,17 +74,32 @@ private:
 
 void DelayedOldCompletionCannotSatisfyNewRequest() {
     Controller controller;
+    assert(controller.CanUnregisterHandler());
+    assert(!controller.CallbackOwed());
     const auto first = controller.RequestScan(Request(1, 11, 101));
     assert(first.start_now);
+    assert(!controller.CanUnregisterHandler());
+    assert(!controller.CallbackOwed());
     ClaimStart(controller, first.request_id);
     assert(controller.CommitStart(first.request_id, true).accepted);
+    assert(controller.CallbackOwed());
+    assert(!controller.CanUnregisterHandler());
+
+    const auto owned = controller.RecoveryTicketIfOwned(
+        first.request_id, controller.driver_incarnation());
+    assert(owned.has_value());
+    assert(owned->request_id == first.request_id);
 
     controller.InvalidateSession(2, 22, 202);
+    assert(controller.CallbackOwed());
+    assert(!controller.CanUnregisterHandler());
     const auto second = controller.RequestScan(Request(2, 22, 202));
     assert(second.queued);
 
     const auto old = controller.BeginCompletion(2, 22, 202);
     assert(old.owned_callback);
+    assert(!controller.CallbackOwed());
+    assert(!controller.CanUnregisterHandler());
     assert(old.discard_results);
     assert(!old.save_results);
     assert(!old.send_list);
@@ -94,6 +109,8 @@ void DelayedOldCompletionCannotSatisfyNewRequest() {
     assert(drained.request_id != old.request_id);
     assert(drained.pending.setup_generation == 2);
     assert(drained.pending.ble_connection_epoch == 202);
+    assert(!controller.CallbackOwed());
+    assert(!controller.CanUnregisterHandler());
 }
 
 void DelayedStaleRequestCannotOverwriteCurrentPending() {

@@ -181,6 +181,23 @@ def test_fw3d_wifi_list_send_path_does_not_start_overlapping_refresh_scan():
     assert "start_wifi_scan()" not in after_send
 
 
+def test_fw3d_scan_invalidation_follows_lifecycle_identity_changes():
+    blufi = read("main/boards/common/blufi.cpp")
+    disconnect = _function_body(blufi, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    deinit = _function_body(blufi, "esp_err_t Blufi::_deinit_impl")
+
+    assert disconnect.index("ble_session_state_.compare_exchange_strong") < disconnect.index(
+        "InvalidateWifiScanSession();"
+    )
+    assert restart.index("setup_generation_.fetch_add(1)") < restart.index(
+        "InvalidateWifiScanSession();"
+    )
+    assert deinit.index("ble_session_state_.exchange") < deinit.index(
+        "InvalidateWifiScanSession();"
+    )
+
+
 # ---------------------------------------------------------------------------
 # FW3e: blufi.cpp — scan completion must not log every AP while a phone is
 #       waiting for BluFi notifications. In dense RF environments this floods

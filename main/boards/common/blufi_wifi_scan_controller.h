@@ -265,6 +265,29 @@ public:
         return driver_incarnation_;
     }
 
+    bool CallbackOwed() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return !callback_claimed_ &&
+               (phase_ == Phase::kRunning || phase_ == Phase::kDraining);
+    }
+
+    bool CanUnregisterHandler() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return phase_ == Phase::kIdle && !recovering_;
+    }
+
+    std::optional<RecoveryTicket> RecoveryTicketIfOwned(
+            uint64_t request_id, uint32_t driver_incarnation) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            driver_incarnation != driver_incarnation_ || callback_claimed_ ||
+            (phase_ != Phase::kRunning && phase_ != Phase::kDraining)) {
+            return std::nullopt;
+        }
+        return RecoveryTicket{
+            owner_request_id_, driver_incarnation_, lifecycle_revision_, true};
+    }
+
 private:
     static bool Matches(const Request& request, uint32_t generation,
                         uint64_t session, uint64_t connection) {

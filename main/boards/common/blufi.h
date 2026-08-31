@@ -207,6 +207,7 @@ private:
 
     // WiFi scan methods
     bool EnsureWifiScanEventHandlerRegistered();
+    void InvalidateWifiScanSession();
     bool IsWifiScanCacheFresh() const;
     void RequestWifiListScan(bool save_results, bool send_list);
     bool StartOwnedWifiScan(uint64_t request_id);
