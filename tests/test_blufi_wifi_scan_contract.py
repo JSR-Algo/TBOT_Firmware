@@ -120,6 +120,34 @@ def test_blufi_scan_request_captures_generation_session_and_connection():
     assert "wifi_scan_controller_.RequestScan" in request
 
 
+def test_blufi_scan_failures_are_deferred_and_exactly_owner_bound():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    start = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    failure = function_body(source, "void Blufi::ScheduleWifiScanFailure")
+
+    assert "void ScheduleWifiScanFailure(" in header
+    assert "Application::GetInstance().Schedule" in failure
+    assert "request.setup_generation == current_generation" in failure
+    assert "request.ble_session_state == current_session" in failure
+    assert "request.ble_connection_epoch == current_connection" in failure
+    stale_return = failure.index("if (!failure_owner_is_current)")
+    send_error = failure.index("esp_blufi_send_error_info")
+    assert stale_return < send_error
+    assert "ScheduleWifiScanFailure(committed.owner" in start
+    assert "esp_blufi_send_error_info" not in start
+
+
+def test_empty_scan_completion_uses_owner_bound_failure_helper():
+    source = read("main/boards/common/blufi.cpp")
+    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    send_list = function_body(source, "void Blufi::_send_wifi_list")
+
+    assert "owned_ap_records.empty()" in scan_done
+    assert "ScheduleWifiScanFailure(completion.owner" in scan_done
+    assert "esp_blufi_send_error_info" not in send_list
+
+
 def test_blufi_wifi_scan_done_handler_is_registered_for_sta_mode_scans():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
@@ -238,11 +266,11 @@ def test_blufi_scan_uses_one_passive_start_after_mode_is_station_capable():
 
 def test_blufi_wifi_scan_failures_log_start_and_empty_result_separately():
     source = read("main/boards/common/blufi.cpp")
-    send_list = function_body(source, "void Blufi::_send_wifi_list")
     start = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
-    assert "WiFi scan fail reason=scan_completed_without_ap_records" in send_list
-    assert "WiFi scan fail reason=scan_start_failed" in start
+    assert 'ScheduleWifiScanFailure(committed.owner, "scan_start_failed")' in start
+    assert '"scan_completed_without_ap_records"' in scan_done
 
 
 def test_blufi_logs_heap_around_connection_and_wifi_list_dispatch():

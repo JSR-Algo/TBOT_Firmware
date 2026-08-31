@@ -414,6 +414,9 @@ void ForeignCompletionWhileStartingCannotOwnFailedSubmission() {
     const auto failed = controller.CommitStart(request.request_id, false);
     assert(!failed.accepted);
     assert(failed.send_failure);
+    assert(failed.owner.setup_generation == 1);
+    assert(failed.owner.ble_session_state == 11);
+    assert(failed.owner.ble_connection_epoch == 101);
     assert(controller.phase() == Controller::Phase::kIdle);
 }
 

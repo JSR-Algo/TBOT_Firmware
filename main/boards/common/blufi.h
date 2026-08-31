@@ -213,6 +213,9 @@ private:
     void SchedulePendingWifiScan(
         uint64_t request_id,
         const BlufiWifiScanController::Request& request);
+    void ScheduleWifiScanFailure(
+        const BlufiWifiScanController::Request& request,
+        const char* reason);
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
     bool CompleteSuccessfulProvisioningTeardownImpl(

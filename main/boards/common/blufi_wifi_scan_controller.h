@@ -39,6 +39,7 @@ public:
         bool draining = false;
         bool start_pending = false;
         uint64_t pending_request_id = 0;
+        Request owner;
         Request pending;
     };
 
@@ -122,6 +123,7 @@ public:
         }
 
         if (!accepted) {
+            result.owner = owner_;
             result.send_failure = !invalidated_ && owner_.send_list;
             ResetOwner();
             PromotePending(result);
