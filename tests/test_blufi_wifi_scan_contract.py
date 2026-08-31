@@ -114,6 +114,48 @@ def test_default_event_loop_barrier_host_cleanup_model():
     )
 
 
+def test_shared_scan_recovery_executor_is_the_only_proof_factory():
+    header = read(
+        "components/esp-wifi-connect/include/wifi_scan_recovery_executor.h"
+    )
+    source = read("components/esp-wifi-connect/wifi_scan_recovery_executor.cc")
+    coordinator = read(
+        "components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
+    )
+    cmake = read("components/esp-wifi-connect/CMakeLists.txt")
+
+    assert "class WifiScanRecoveryExecutor" in header
+    assert "WifiScanLeaseCoordinator::RecoveryProof Execute(" in header
+    assert "WifiScanRecoveryExecutor(const WifiScanRecoveryExecutor&) = delete" in header
+    assert "std::mutex mutex_;" in header
+    assert "friend class WifiScanRecoveryExecutor;" in coordinator
+    assert coordinator.count("friend class WifiScanRecoveryExecutor;") == 1
+    assert source.count("recovery.recovery_id(), true, true") == 1
+    assert '"wifi_scan_recovery_executor.cc"' in cmake
+
+
+def test_shared_scan_recovery_executor_has_exact_fail_closed_choreography():
+    source = read("components/esp-wifi-connect/wifi_scan_recovery_executor.cc")
+    execute = function_body(
+        source, "WifiScanRecoveryExecutor::Execute"
+    )
+
+    operations = (
+        "esp_wifi_scan_stop()",
+        "esp_wifi_stop()",
+        "esp_wifi_deinit()",
+        "DrainDefaultEventLoop(std::chrono::milliseconds(1000))",
+        "esp_wifi_init(&cfg)",
+    )
+    positions = [execute.index(operation) for operation in operations]
+    assert positions == sorted(positions)
+    assert "cfg.nvs_enable = false;" in execute
+    assert "ESP_ERR_WIFI_NOT_INIT" in source
+    assert "esp_netif_init" not in source
+    assert "esp_event_loop_create_default" not in source
+    assert "nvs_flash" not in source
+
+
 def test_wifi_manager_exposes_process_lifetime_scan_coordinator_without_locking():
     header = read("components/esp-wifi-connect/include/wifi_manager.h")
     source = read("components/esp-wifi-connect/wifi_manager.cc")
