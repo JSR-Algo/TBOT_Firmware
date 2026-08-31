@@ -815,6 +815,69 @@ void DelayedConfigEventCannotCrossAttemptTerminalBoundary() {
     assert(model.disconnects() == 1);
 }
 
+class TwoSidedConfigBoundaryModel {
+public:
+    void BeginAttempt() {
+        assert(boundary_ready_);
+        attempt_active_ = true;
+        boundary_ready_ = false;
+    }
+
+    void QueueStaleDisconnect() { stale_disconnect_queued_ = true; }
+
+    void CloseGateAndPreDrain() {
+        attempt_active_ = false;
+        boundary_waiting_ = true;
+        if (stale_disconnect_queued_) {
+            boundary_signal_ = true;
+            stale_disconnect_queued_ = false;
+        }
+        boundary_signal_ = false;
+    }
+
+    void IssueTeardown() { teardown_issued_ = true; }
+
+    void SignalDisconnect() {
+        if (boundary_waiting_ && teardown_issued_) {
+            boundary_signal_ = true;
+        }
+    }
+
+    void PostDrainAndOpen() {
+        assert(boundary_signal_);
+        final_drain_complete_ = true;
+        boundary_waiting_ = false;
+        boundary_ready_ = true;
+    }
+
+    bool CanStart() const { return boundary_ready_; }
+    bool FinalDrainComplete() const { return final_drain_complete_; }
+
+private:
+    bool attempt_active_ = false;
+    bool boundary_ready_ = true;
+    bool boundary_waiting_ = false;
+    bool stale_disconnect_queued_ = false;
+    bool boundary_signal_ = false;
+    bool teardown_issued_ = false;
+    bool final_drain_complete_ = false;
+};
+
+void StaleDisconnectCannotSatisfyCancelledConfigBoundary() {
+    TwoSidedConfigBoundaryModel model;
+    model.BeginAttempt();
+    model.QueueStaleDisconnect();
+    model.CloseGateAndPreDrain();
+    assert(!model.CanStart());
+    model.IssueTeardown();
+    assert(!model.CanStart());
+    model.SignalDisconnect();
+    assert(!model.CanStart());
+    model.PostDrainAndOpen();
+    assert(model.CanStart());
+    assert(model.FinalDrainComplete());
+}
+
 void CompletingLeaseCanEnterExactRecovery() {
     Coordinator coordinator;
     const auto acquired = coordinator.TryAcquire(Coordinator::Owner::kStation);
@@ -1217,6 +1280,7 @@ int main() {
     StationRetryRunsOnlyAfterPermitAndExactSessionRevalidation();
     OldConfigWaiterCannotConsumeOrDisconnectNextStationConnection();
     DelayedConfigEventCannotCrossAttemptTerminalBoundary();
+    StaleDisconnectCannotSatisfyCancelledConfigBoundary();
     CompletingLeaseCanEnterExactRecovery();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();

@@ -40,7 +40,9 @@ WifiManager::~WifiManager() {
         station->Stop();
     }
     if (config_ap != nullptr) {
-        config_ap->Stop();
+        if (!config_ap->Stop()) {
+            ESP_LOGE(TAG, "Config AP teardown boundary failed during destruction");
+        }
     }
     if (deinitialize) {
         esp_wifi_deinit();
@@ -135,7 +137,16 @@ bool WifiManager::StopRadio() {
         station->Stop();
     }
     if (config_ap != nullptr) {
-        config_ap->Stop();
+        if (!config_ap->Stop()) {
+            ESP_LOGE(TAG, "Config AP teardown boundary failed; radio stop remains blocked");
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ == transition_generation &&
+                config_ap_.get() == config_ap) {
+                config_mode_active_ = true;
+                lifecycle_transition_in_progress_ = false;
+            }
+            return false;
+        }
     }
 
     // Provisioning scans start the radio directly through esp_wifi_* and are
@@ -197,7 +208,16 @@ void WifiManager::StartStation() {
     }
     if (config_ap_to_stop != nullptr) {
         ESP_LOGI(TAG, "Stopping config AP before starting station");
-        config_ap_to_stop->Stop();
+        if (!config_ap_to_stop->Stop()) {
+            ESP_LOGE(TAG, "Config AP teardown boundary failed; station remains blocked");
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ == transition_generation &&
+                config_ap_.get() == config_ap_to_stop) {
+                config_mode_active_ = true;
+                lifecycle_transition_in_progress_ = false;
+            }
+            return;
+        }
         NotifyEvent(WifiEvent::ConfigModeExit);
     }
 
@@ -374,7 +394,16 @@ void WifiManager::StopConfigAp() {
     }
 
     ESP_LOGI(TAG, "Stopping config AP");
-    config_ap->Stop();
+    if (!config_ap->Stop()) {
+        ESP_LOGE(TAG, "Config AP teardown boundary failed; mode remains blocked");
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            config_ap_.get() == config_ap) {
+            config_mode_active_ = true;
+            lifecycle_transition_in_progress_ = false;
+        }
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (lifecycle_generation_ == transition_generation &&

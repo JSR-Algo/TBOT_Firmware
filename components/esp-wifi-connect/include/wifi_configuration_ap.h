@@ -40,7 +40,7 @@ public:
     void SetLanguage(const std::string &&language);
     void SetLanguage(const std::string &language);
     void Start();
-    void Stop();
+    bool Stop();
 #if !CONFIG_IDF_TARGET_ESP32P4
     void StartSmartConfig();
 #endif
@@ -89,6 +89,7 @@ private:
     bool connection_waiter_active_ = false;
     std::condition_variable connection_waiter_drained_;
     bool connection_boundary_waiting_ = false;
+    bool connection_boundary_waiting_for_stop_ = false;
     bool connection_boundary_ready_ = true;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
 
@@ -108,7 +109,8 @@ private:
     void ScheduleScanRetry(uint64_t expected_session,
                            int64_t delay_microseconds);
     bool FinishConnectionAttemptBoundary(uint64_t attempt_session,
-                                         uint64_t attempt_id);
+                                         uint64_t attempt_id,
+                                         bool stop_wifi = false);
     void RetainRecoveryDebtLocked(
         const WifiScanLeaseCoordinator::Lease& lease);
     void ClearRecoveryDebtLocked(

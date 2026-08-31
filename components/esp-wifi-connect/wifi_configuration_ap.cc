@@ -901,43 +901,67 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
 }
 
 bool WifiConfigurationAp::FinishConnectionAttemptBoundary(
-        uint64_t attempt_session, uint64_t attempt_id) {
+        uint64_t attempt_session, uint64_t attempt_id, bool stop_wifi) {
     {
         std::lock_guard<std::mutex> lock(scan_mutex_);
-        if (!scans_enabled_ || attempt_session != scan_session_id_ ||
-            attempt_id != active_connection_attempt_id_ ||
-            attempt_session != active_connection_session_id_) {
+        if (connection_boundary_waiting_ ||
+            (!stop_wifi &&
+             (!scans_enabled_ || attempt_session != scan_session_id_ ||
+              attempt_id != active_connection_attempt_id_ ||
+              attempt_session != active_connection_session_id_))) {
             return false;
         }
         active_connection_attempt_id_ = 0;
         active_connection_session_id_ = 0;
         connection_boundary_ready_ = false;
         connection_boundary_waiting_ = true;
-        xEventGroupClearBits(event_group_, WIFI_ATTEMPT_BOUNDARY_BIT);
+        connection_boundary_waiting_for_stop_ = stop_wifi;
     }
+
+    const bool predrained =
+        DrainDefaultEventLoop(std::chrono::milliseconds(1000));
+    xEventGroupClearBits(event_group_, WIFI_ATTEMPT_BOUNDARY_BIT);
 
     const esp_err_t disconnect_result = esp_wifi_disconnect();
     bool disconnect_terminal = disconnect_result == ESP_ERR_WIFI_NOT_CONNECT;
-    if (disconnect_result == ESP_OK) {
+    if (stop_wifi) {
+        disconnect_terminal = disconnect_result == ESP_OK ||
+            disconnect_result == ESP_ERR_WIFI_NOT_CONNECT;
+    } else if (predrained && disconnect_result == ESP_OK) {
         const EventBits_t boundary_bits = xEventGroupWaitBits(
             event_group_, WIFI_ATTEMPT_BOUNDARY_BIT | WIFI_CANCEL_BIT,
             pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
         disconnect_terminal =
             (boundary_bits & WIFI_ATTEMPT_BOUNDARY_BIT) != 0;
     }
-    const bool events_drained = disconnect_terminal &&
+    bool stop_terminal = true;
+    if (stop_wifi) {
+        xEventGroupClearBits(event_group_, WIFI_ATTEMPT_BOUNDARY_BIT);
+        const esp_err_t stop_result = esp_wifi_stop();
+        stop_terminal = false;
+        if (predrained && stop_result == ESP_OK) {
+            const EventBits_t boundary_bits = xEventGroupWaitBits(
+                event_group_, WIFI_ATTEMPT_BOUNDARY_BIT | WIFI_CANCEL_BIT,
+                pdTRUE, pdFALSE, pdMS_TO_TICKS(1000));
+            stop_terminal =
+                (boundary_bits & WIFI_ATTEMPT_BOUNDARY_BIT) != 0;
+        }
+    }
+    const bool postdrained = predrained && disconnect_terminal &&
+        stop_terminal &&
         DrainDefaultEventLoop(std::chrono::milliseconds(1000));
 
     std::lock_guard<std::mutex> lock(scan_mutex_);
     connection_boundary_waiting_ = false;
-    connection_boundary_ready_ = events_drained;
+    connection_boundary_waiting_for_stop_ = false;
+    connection_boundary_ready_ = predrained && postdrained;
     is_connecting_ = false;
     connection_waiter_drained_.notify_all();
-    if (!events_drained) {
+    if (!connection_boundary_ready_) {
         ESP_LOGE(TAG, "WiFi credential attempt boundary failed; restart required");
     }
-    return events_drained && scans_enabled_ &&
-        attempt_session == scan_session_id_;
+    return connection_boundary_ready_ &&
+        (stop_wifi || (scans_enabled_ && attempt_session == scan_session_id_));
 }
 
 void WifiConfigurationAp::Save(const std::string &ssid, const std::string &password)
@@ -973,7 +997,15 @@ void WifiConfigurationAp::WifiEventHandler(void* arg, esp_event_base_t event_bas
             self->active_connection_session_id_ == self->scan_session_id_) {
             xEventGroupSetBits(self->event_group_, WIFI_FAIL_BIT);
         }
-        if (self->connection_boundary_waiting_) {
+        if (self->connection_boundary_waiting_ &&
+            !self->connection_boundary_waiting_for_stop_) {
+            xEventGroupSetBits(
+                self->event_group_, WIFI_ATTEMPT_BOUNDARY_BIT);
+        }
+    } else if (event_id == WIFI_EVENT_STA_STOP) {
+        std::lock_guard<std::mutex> lock(self->scan_mutex_);
+        if (self->connection_boundary_waiting_ &&
+            self->connection_boundary_waiting_for_stop_) {
             xEventGroupSetBits(
                 self->event_group_, WIFI_ATTEMPT_BOUNDARY_BIT);
         }
@@ -1074,7 +1106,7 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
 }
 #endif // !CONFIG_IDF_TARGET_ESP32P4
 
-void WifiConfigurationAp::Stop() {
+bool WifiConfigurationAp::Stop() {
 #if !CONFIG_IDF_TARGET_ESP32P4
     // 停止SmartConfig服务
     if (sc_event_instance_) {
@@ -1092,9 +1124,6 @@ void WifiConfigurationAp::Stop() {
     std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
     scans_enabled_ = false;
     ++scan_session_id_;
-    is_connecting_ = false;
-    active_connection_attempt_id_ = 0;
-    active_connection_session_id_ = 0;
     xEventGroupSetBits(event_group_, WIFI_CANCEL_BIT);
     connection_waiter_drained_.wait(lifecycle_lock, [this]() {
         return !connection_waiter_active_ && !connection_boundary_waiting_;
@@ -1114,17 +1143,17 @@ void WifiConfigurationAp::Stop() {
         std::lock_guard<std::mutex> lock(mutex_);
         ap_records_.clear();
     }
+    lifecycle_lock.unlock();
 
-    // 停止WiFi（但不 deinit，WiFi 驱动由 WifiManager 管理）
-    esp_wifi_stop();
-    connection_boundary_ready_ = true;
+    // Close all queued STA events before WifiManager can start another mode.
+    const bool boundary_closed =
+        FinishConnectionAttemptBoundary(0, 0, true);
 
     // 销毁网络接口
     if (ap_netif_) {
         esp_netif_destroy_default_wifi(ap_netif_);
         ap_netif_ = nullptr;
     }
-    lifecycle_lock.unlock();
     if (timer_to_delete != nullptr) {
         esp_timer_delete(timer_to_delete);
     }
@@ -1141,6 +1170,7 @@ void WifiConfigurationAp::Stop() {
     }
 
     ESP_LOGI(TAG, "Wifi configuration AP stopped");
+    return boundary_closed;
 }
 
 void WifiConfigurationAp::RetainRecoveryDebtLocked(

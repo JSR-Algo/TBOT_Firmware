@@ -166,7 +166,7 @@ def test_config_ap_scan_lease_uses_one_owned_start_and_retained_handler():
     start_mode = function_body(source, "void WifiConfigurationAp::Start")
     start_scan = function_body(source, "bool WifiConfigurationAp::StartOwnedScan")
     handler = function_body(source, "void WifiConfigurationAp::WifiEventHandler")
-    stop = function_body(source, "void WifiConfigurationAp::Stop")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
     completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
 
     assert "std::mutex scan_mutex_;" in header
@@ -199,7 +199,7 @@ def test_station_and_config_stop_never_cancel_a_foreign_scan():
     station = read("components/esp-wifi-connect/wifi_station.cc")
     config = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
     station_stop = function_body(station, "void WifiStation::Stop")
-    config_stop = function_body(config, "void WifiConfigurationAp::Stop")
+    config_stop = function_body(config, "bool WifiConfigurationAp::Stop")
     config_connect = function_body(config, "bool WifiConfigurationAp::ConnectToWifi")
 
     for body in (station_stop, config_stop, config_connect):
@@ -259,7 +259,7 @@ def test_config_submission_connect_stop_and_publish_share_lifecycle_lock():
     source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
     start = function_body(source, "bool WifiConfigurationAp::StartOwnedScan")
     connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
-    stop = function_body(source, "void WifiConfigurationAp::Stop")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
     completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
 
     assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in start
@@ -277,7 +277,9 @@ def test_config_submission_connect_stop_and_publish_share_lifecycle_lock():
     assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in stop
     assert stop.index("lifecycle_lock") < stop.index("scans_enabled_ = false")
     assert stop.index("BeginDrain(") < stop.index("esp_wifi_scan_stop(")
-    assert stop.index("esp_wifi_stop(") < stop.index("lifecycle_lock.unlock()")
+    assert stop.index("lifecycle_lock.unlock()") < stop.index(
+        "FinishConnectionAttemptBoundary(0, 0, true)"
+    )
     assert "ap_records_.clear()" in stop
 
     assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in completion
@@ -424,7 +426,7 @@ def test_config_connect_waiter_is_exact_attempt_scoped_and_cancelled_by_stop():
     header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
     source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
     connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
-    stop = function_body(source, "void WifiConfigurationAp::Stop")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
     wifi_handler = function_body(source, "void WifiConfigurationAp::WifiEventHandler")
     ip_handler = function_body(source, "void WifiConfigurationAp::IpEventHandler")
 
@@ -437,7 +439,6 @@ def test_config_connect_waiter_is_exact_attempt_scoped_and_cancelled_by_stop():
     assert "attempt_id == active_connection_attempt_id_" in connect
     assert "attempt_session == active_connection_session_id_" in connect
     assert "ScheduleScanRetry(attempt_session" in connect
-    assert "active_connection_attempt_id_ = 0" in stop
     assert "xEventGroupSetBits(event_group_, WIFI_CANCEL_BIT)" in stop
     assert "connection_waiter_drained_.wait(" in stop
     assert "FinishConnectionAttemptBoundary(" in connect
@@ -445,22 +446,58 @@ def test_config_connect_waiter_is_exact_attempt_scoped_and_cancelled_by_stop():
     boundary = function_body(
         source, "bool WifiConfigurationAp::FinishConnectionAttemptBoundary"
     )
-    assert boundary.index("esp_wifi_disconnect()") < boundary.index(
-        "DrainDefaultEventLoop("
-    )
+    drains = [m.start() for m in re.finditer("DrainDefaultEventLoop\\(", boundary)]
+    assert len(drains) == 2
+    clear = boundary.index("xEventGroupClearBits(")
+    disconnect = boundary.index("esp_wifi_disconnect()")
+    wait = boundary.index("xEventGroupWaitBits(")
+    assert drains[0] < clear < disconnect < wait < drains[1]
     assert "WIFI_ATTEMPT_BOUNDARY_BIT" in boundary
-    assert boundary.index("xEventGroupWaitBits(") < boundary.index(
-        "DrainDefaultEventLoop("
-    )
     assert "active_connection_attempt_id_ = 0" in boundary
     assert "attempt_id != active_connection_attempt_id_" in boundary
     assert "attempt_session != active_connection_session_id_" in boundary
     assert boundary.index("active_connection_attempt_id_ = 0") < boundary.index(
         "esp_wifi_disconnect()"
     )
+    assert "connection_boundary_ready_ = predrained" in boundary
     for handler in (wifi_handler, ip_handler):
         assert "active_connection_attempt_id_ != 0" in handler
         assert "active_connection_session_id_ == self->scan_session_id_" in handler
+
+
+def test_config_stop_runs_closed_two_sided_connection_boundary():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
+    boundary = function_body(
+        source, "bool WifiConfigurationAp::FinishConnectionAttemptBoundary"
+    )
+
+    assert "FinishConnectionAttemptBoundary(" in stop
+    assert "FinishConnectionAttemptBoundary(0, 0, true)" in stop
+    assert "return boundary_closed" in stop
+    assert "connection_boundary_ready_ = true" not in stop
+    assert "if (stop_wifi)" in boundary
+    assert boundary.index("esp_wifi_disconnect()") < boundary.index(
+        "esp_wifi_stop()"
+    )
+    post_drain = boundary.rindex("DrainDefaultEventLoop(")
+    assert boundary.index("esp_wifi_stop()") < post_drain
+    assert post_drain < boundary.index(
+        "connection_boundary_ready_ = predrained"
+    )
+    assert "WIFI_EVENT_STA_STOP" in function_body(
+        source, "void WifiConfigurationAp::WifiEventHandler"
+    )
+
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    start_station = function_body(manager, "void WifiManager::StartStation")
+    assert "if (!config_ap_to_stop->Stop())" in start_station
+    assert start_station.index("if (!config_ap_to_stop->Stop())") < start_station.index(
+        "station->Start()"
+    )
+    stop_config = function_body(manager, "void WifiManager::StopConfigAp")
+    assert "if (!config_ap->Stop())" in stop_config
+    assert "config_mode_active_ = true" in stop_config
 
 
 def test_config_cancelled_scan_completion_cannot_publish_during_credential_test():
@@ -532,7 +569,12 @@ def test_station_and_config_publish_exact_recovery_debt_for_start_and_cancel():
         header = read(header_path)
         source = read(source_path)
         start = function_body(source, f"bool {owner}::StartOwnedScan")
-        stop = function_body(source, f"void {owner}::Stop")
+        stop_signature = (
+            f"bool {owner}::Stop"
+            if owner == "WifiConfigurationAp"
+            else f"void {owner}::Stop"
+        )
+        stop = function_body(source, stop_signature)
         claim = function_body(source, f"{owner}::ClaimScanRecovery")
         complete = function_body(source, f"bool {owner}::CompleteScanRecovery")
 
