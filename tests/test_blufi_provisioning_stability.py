@@ -1329,16 +1329,15 @@ def test_fw21g_claim_refresh_dispatch_is_generation_bound_without_tls_under_lock
     run_idx = schedule.index("RunIfSetupGenerationCurrent(")
     assert "expected_setup_generation" in schedule[run_idx:run_idx + 180]
     promote_idx = schedule.index("PromoteFromWifiConfigAfterProvisioning();", run_idx)
-    dispatch_idx = schedule.index(
-        "DispatchPendingTbotClaimRefreshForSetupGeneration(", promote_idx
-    )
-    assert "expected_setup_generation" in schedule[dispatch_idx:dispatch_idx + 150]
-    assert run_idx < promote_idx < dispatch_idx
-    guarded_dispatch = schedule[run_idx:dispatch_idx]
+    effects_idx = schedule.index("deferred_effects.dispatch_refresh = true", promote_idx)
+    execute_idx = schedule.index("ExecuteClaimDeferredEffects", effects_idx)
+    assert "expected_setup_generation" in schedule[execute_idx:execute_idx + 150]
+    assert run_idx < promote_idx < effects_idx < execute_idx
+    guarded_dispatch = schedule[run_idx:execute_idx]
     assert "FetchBackendApiUrlFromBootstrap" not in guarded_dispatch
     assert "ConfirmPendingTbotClaim" not in guarded_dispatch
     assert "RefreshPendingTbotClaim" not in schedule
-    assert "Schedule([this]()" not in schedule[promote_idx:dispatch_idx]
+    assert "Schedule([this]()" not in schedule[promote_idx:execute_idx]
 
     success_start = blufi.index("if (credentials_committed)")
     success_end = blufi.index("Failed to connect to WiFi via esp-wifi-connect", success_start)
@@ -1414,36 +1413,98 @@ def test_fw21h_generation_bound_claim_confirm_defers_ble_teardown_until_after_ga
 
     gate = task.index("Blufi::GetInstance().RunIfSetupGenerationCurrent(")
     gate_end = task.index("});", gate)
-    teardown = task.index("CompleteSuccessfulProvisioningTeardown", gate_end)
+    teardown = task.index("ExecuteClaimDeferredEffects", gate_end)
 
-    assert "apply_result(true)" in task[gate:gate_end]
+    assert "apply_result(true, &deferred_effects)" in task[gate:gate_end]
     assert "CompleteSuccessfulProvisioningTeardown" not in task[gate:gate_end]
     assert "StopBleAdvertising" not in task[gate:gate_end]
     assert gate < gate_end < teardown
-    assert '"claim_confirmed", provisioning_token' in task[teardown:teardown + 180]
+    assert "provisioning_token" in task[teardown:teardown + 180]
     post_gate = task[gate_end:]
-    assert re.search(
-        r"#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\s+"
-        r"if \(applied && should_teardown\) \{\s+"
-        r"Blufi::GetInstance\(\)\.CompleteSuccessfulProvisioningTeardownForGeneration\(",
-        post_gate,
-    )
-    generation_teardown = post_gate.index(
-        "CompleteSuccessfulProvisioningTeardownForGeneration("
-    )
+    generation_teardown = post_gate.index("ExecuteClaimDeferredEffects(")
     assert "expected_setup_generation" in post_gate[
         generation_teardown:generation_teardown + 180
     ]
-    assert re.search(
-        r"#else\s+if \(applied && should_teardown\) \{\s+"
-        r"self->StopBleAdvertising\(\);",
-        post_gate,
-    )
+    effects = _function_body(application, "void Application::ExecuteClaimDeferredEffects")
+    assert "CompleteSuccessfulProvisioningTeardownForGeneration" in effects
+    assert "StopBleAdvertisingForSetupGeneration" in effects
 
     confirmed = result_handler[result_handler.index("CancelClaimExpiryTimer();") :]
     defer_guard = confirmed.index("if (!defer_successful_teardown)")
     owned_teardown = confirmed.index("CompleteSuccessfulProvisioningTeardown(", defer_guard)
     assert defer_guard < owned_teardown
+
+
+def test_fw21h_generation_gates_commit_state_and_defer_all_lifecycle_effects():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    fetch_task = _function_body(app, "void Application::ClaimFetchTask")
+    confirm_task = _function_body(app, "void Application::ClaimConfirmationTask")
+    refresh = _function_body(app, "void Application::SchedulePendingTbotClaimRefresh")
+
+    assert "enum class ClaimBleLifecycleIntent" in header
+    assert "struct ClaimDeferredEffects" in header
+    assert "ExecuteClaimDeferredEffects" in header
+
+    fetch_apply = _function_body(app, "void Application::ApplyPendingTbotClaimFetchResult")
+    confirm_apply = _function_body(
+        app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    assert "deferred_effects != nullptr" in fetch_apply
+    assert "deferred_effects->ble_intent = intent" in fetch_apply
+    assert "deferred_effects->dispatch_confirmation = true" in fetch_apply
+    assert "deferred_effects != nullptr" in confirm_apply
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in confirm_apply
+    complete_teardown = confirm_apply.index(
+        "ClaimBleLifecycleIntent::kCompleteSuccessfulTeardown"
+    )
+    assert "ClaimBleLifecycleIntent::kStopAdvertising" in confirm_apply[
+        complete_teardown:
+    ]
+
+    for body in (fetch_task, confirm_task):
+        gate = body.index("RunIfSetupGenerationCurrent(")
+        execute = body.index("ExecuteClaimDeferredEffects", gate)
+        locked = body[gate:execute]
+        for forbidden in (
+            "EnsureBleAdvertisingForStandby",
+            "StopBleAdvertising",
+            "CompleteSuccessfulProvisioningTeardown",
+            "DispatchPendingTbotClaimRefreshForSetupGeneration",
+            ".init()",
+            ".deinit()",
+        ):
+            assert forbidden not in locked
+        assert "applied" in body[gate:execute]
+        assert "expected_setup_generation" in body[execute:execute + 220]
+
+    refresh_gate = refresh.index("RunIfSetupGenerationCurrent(")
+    refresh_end = refresh.index("ExecuteClaimDeferredEffects", refresh_gate)
+    assert "DispatchPendingTbotClaimRefreshForSetupGeneration" not in refresh[
+        refresh_gate:refresh_end
+    ]
+    assert "applied" in refresh[refresh_gate:refresh_end]
+    assert "expected_setup_generation" in refresh[refresh_end:refresh_end + 180]
+    execute_effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    dispatch = execute_effects.index("DispatchPendingTbotClaimRefreshForSetupGeneration")
+    assert "expected_setup_generation" in execute_effects[dispatch:dispatch + 180]
+
+
+def test_fw21h_generation_aware_lifecycle_apis_preserve_global_lock_order():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    for name, primitive in (
+        ("InitForSetupGeneration", "InitWithLifecycleOwned()"),
+        ("DeinitForSetupGeneration", "DeinitWithLifecycleOwned()"),
+    ):
+        assert name in header
+        body = _function_body(blufi, f"esp_err_t Blufi::{name}")
+        lifecycle = body.index("ble_lifecycle_mutex_")
+        finalization = body.index("provisioning_finalization_mutex_", lifecycle)
+        generation = body.index("expected_generation != setup_generation_.load()", finalization)
+        scope_end = body.index("}\n", generation)
+        primitive_call = body.index(primitive, scope_end)
+        assert lifecycle < finalization < generation < scope_end < primitive_call
 
 
 # ---------------------------------------------------------------------------

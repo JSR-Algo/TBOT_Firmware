@@ -17,6 +17,7 @@
 #include <memory>
 #include <atomic>
 #include <cstdint>
+#include <optional>
 
 #include "protocol.h"
 #include "ota.h"
@@ -443,6 +444,20 @@ private:
     // point only; the stale-event guards on HandleNetworkConnectedEvent/
     // RefreshPendingTbotClaim are left untouched.
     void PromoteFromWifiConfigAfterProvisioning();
+    enum class ClaimBleLifecycleIntent {
+        kNone,
+        kEnsureAdvertising,
+        kStopAdvertising,
+        kCompleteSuccessfulTeardown,
+    };
+    struct ClaimDeferredEffects {
+        ClaimBleLifecycleIntent ble_intent = ClaimBleLifecycleIntent::kNone;
+        bool dispatch_confirmation = false;
+        bool dispatch_refresh = false;
+    };
+    void ExecuteClaimDeferredEffects(
+        const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
+        WakeWordLifecycleController::ProvisioningToken provisioning_token = {});
     bool ConfirmPendingTbotClaim(bool trust_backend_expiry = false);
     bool DispatchPendingTbotClaimConfirmation(uint32_t expected_setup_generation,
                                               bool enforce_setup_generation);
@@ -450,7 +465,8 @@ private:
     bool ApplyPendingTbotClaimConfirmationResult(
         ClaimConfirmationResult result,
         WakeWordLifecycleController::ProvisioningToken provisioning_token,
-        bool defer_successful_teardown = false);
+        bool defer_successful_teardown = false,
+        ClaimDeferredEffects* deferred_effects = nullptr);
     // "Hi ESP needs many tries" fix: the blocking ~3s /device/config HTTP/TLS
     // fetch is split out of RefreshPendingTbotClaim() so it can run on a
     // dedicated low-priority worker instead of the priority-10 Application task
@@ -469,7 +485,8 @@ private:
                                           const PendingTbotClaim& pending_claim,
                                           bool fetched, int device_config_status,
                                           bool defer_confirmation = false,
-                                          uint32_t expected_setup_generation = 0);
+                                          uint32_t expected_setup_generation = 0,
+                                          ClaimDeferredEffects* deferred_effects = nullptr);
 
     // Deferred cloud-ownership release for the BOOT re-pair flow.
     // EnterRepairPairingMode() sets backend.release_pending and KEEPS the device
@@ -501,7 +518,11 @@ private:
     // Wi-Fi-config path to reopen BluFi so BLE does not contend with AFE audio.
     // No-ops in non-BluFi builds.
     void EnsureBleAdvertisingForStandby();
+    bool EnsureBleAdvertisingForStandbyForSetupGeneration(uint32_t expected_generation);
+    bool EnsureBleAdvertisingForStandbyImpl(std::optional<uint32_t> expected_generation);
     void StopBleAdvertising();
+    bool StopBleAdvertisingForSetupGeneration(uint32_t expected_generation);
+    bool StopBleAdvertisingImpl(std::optional<uint32_t> expected_generation);
 
     // --- Heartbeat (C5) ---
     bool ShouldKeepManagementHeartbeat() const;

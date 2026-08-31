@@ -561,6 +561,21 @@ esp_err_t Blufi::init() {
     return InitWithLifecycleOwned();
 }
 
+esp_err_t Blufi::InitForSetupGeneration(
+        uint32_t expected_generation, const std::function<esp_err_t()>& prepare) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    if (prepare && prepare() != ESP_OK) {
+        return ESP_FAIL;
+    }
+    return InitWithLifecycleOwned();
+}
+
 esp_err_t Blufi::InitWithLifecycleOwned() {
     if (teardown_failed_.load()) {
         ESP_LOGE(BLUFI_TAG, "BLE teardown previously failed; refusing blind reinitialization");
@@ -665,6 +680,18 @@ esp_err_t Blufi::_init_impl() {
 
 esp_err_t Blufi::deinit() {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    return DeinitWithLifecycleOwned();
+}
+
+esp_err_t Blufi::DeinitForSetupGeneration(uint32_t expected_generation) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    CancelBleSetupTimeout();
     return DeinitWithLifecycleOwned();
 }
 
@@ -2861,6 +2888,18 @@ void Blufi::StartBleSetupTimeout(int seconds) {
         return;
     }
     ESP_LOGI(BLUFI_TAG, "BLE setup timer armed %ds", seconds);
+}
+
+bool Blufi::StartBleSetupTimeoutForGeneration(uint32_t expected_generation, int seconds) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return false;
+        }
+    }
+    StartBleSetupTimeout(seconds);
+    return true;
 }
 
 void Blufi::CancelBleSetupTimeout() {

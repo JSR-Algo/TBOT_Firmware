@@ -76,7 +76,7 @@ def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
 
 def test_unclaimed_standby_binds_audio_lifecycle_before_starting_blufi():
     app = read("main/application.cc")
-    body = function_body(app, "void Application::EnsureBleAdvertisingForStandby")
+    body = function_body(app, "bool Application::EnsureBleAdvertisingForStandbyImpl")
 
     reserve = body.index("TryReserveProvisioningSession()")
     begin = body.index("audio_service_.BeginWifiProvisioning()", reserve)
@@ -206,7 +206,8 @@ def test_async_claim_provisioning_token_is_blufi_guarded_with_non_blufi_fallback
     assert "StopBleAdvertising();" in non_blufi
 
     assert result_handler.count('"claim_confirmed", provisioning_token') == 1
-    assert task.count('"claim_confirmed", provisioning_token') == 1
+    effects = function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    assert effects.count('"claim_confirmed", provisioning_token') == 1
 
 
 def test_claim_confirmation_passes_the_originating_token_into_result_application():
@@ -268,13 +269,13 @@ def test_timeout_failure_preconfirm_and_manual_teardown_never_rearm():
     blufi = read("main/boards/common/blufi.cpp")
     app = read("main/application.cc")
     timeout = function_body(blufi, "void Blufi::_ble_setup_timeout_cb")
-    stop = function_body(app, "void Application::StopBleAdvertising")
+    stop = function_body(app, "bool Application::StopBleAdvertisingImpl")
     apply = function_body(app, "void Application::ApplyPendingTbotClaimFetchResult")
     confirm = function_body(app, "bool Application::ConfirmPendingTbotClaim")
     preconfirm = apply[:apply.index("ConfirmPendingTbotClaim")]
     assert "deinit();" in timeout
     assert "CompleteSuccessfulProvisioningTeardown" not in timeout
-    assert "blufi.deinit();" in stop
+    assert "blufi.deinit()" in stop
     assert "CompleteSuccessfulProvisioningTeardown" not in stop
     assert "StopBleAdvertising();" in preconfirm
     assert "CompleteSuccessfulProvisioningTeardown" not in preconfirm

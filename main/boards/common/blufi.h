@@ -54,12 +54,16 @@ public:
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t init();
+    esp_err_t InitForSetupGeneration(
+        uint32_t expected_generation,
+        const std::function<esp_err_t()>& prepare = {});
 
     /**
      * @brief Deinitializes Blufi and the Bluetooth stack.
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t deinit();
+    esp_err_t DeinitForSetupGeneration(uint32_t expected_generation);
 
     /** Start a fresh provisioning generation for an explicit BOOT re-entry. */
     esp_err_t RestartForSetup();
@@ -109,6 +113,7 @@ public:
      * @param seconds  Wall-clock budget for BLE provisioning (e.g. CONFIG_BLE_SETUP_TIMEOUT_SEC).
      */
     void StartBleSetupTimeout(int seconds);
+    bool StartBleSetupTimeoutForGeneration(uint32_t expected_generation, int seconds);
 
     /**
      * @brief Cancel the BLE setup timeout timer (call on provisioning success or Wi-Fi connect).
