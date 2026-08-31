@@ -3313,7 +3313,7 @@ void Application::InitializeProtocol() {
         auto websocket_protocol = std::make_unique<WebsocketProtocol>();
         websocket_protocol->SetTransientConfig(
             ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
-            ota_->GetTransientEvidenceJourneyId());
+            ota_->TakeTransientEvidenceJourneyId());
         websocket_protocol->SetUnclaimedPublicLessonOnly(!IsDeviceClaimed());
         protocol_ = std::move(websocket_protocol);
         is_websocket_protocol = true;
@@ -3325,7 +3325,7 @@ void Application::InitializeProtocol() {
     auto websocket_protocol = std::make_unique<WebsocketProtocol>();
     websocket_protocol->SetTransientConfig(
         ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
-        ota_->GetTransientEvidenceJourneyId());
+        ota_->TakeTransientEvidenceJourneyId());
     websocket_protocol->SetUnclaimedPublicLessonOnly(false);
     protocol_ = std::move(websocket_protocol);
     is_websocket_protocol = true;

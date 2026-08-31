@@ -35,7 +35,7 @@ public:
     const std::string& GetActivationCode() const { return activation_code_; }
     const std::string& GetTransientWebsocketUrl() const { return transient_websocket_url_; }
     const std::string& GetTransientWebsocketToken() const { return transient_websocket_token_; }
-    const std::string& GetTransientEvidenceJourneyId() const { return transient_evidence_journey_id_; }
+    std::string TakeTransientEvidenceJourneyId();
     std::string GetCheckVersionUrl();
 
 private:

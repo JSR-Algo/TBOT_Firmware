@@ -30,9 +30,24 @@ def test_ota_declares_transient_journey_without_persistent_settings_surface():
     header = read("main/ota.h")
     source = read("main/ota.cc")
 
-    assert "GetTransientEvidenceJourneyId" in header
+    assert "TakeTransientEvidenceJourneyId" in header
+    assert "GetTransientEvidenceJourneyId" not in header
     assert "transient_evidence_journey_id_" in header
     assert f'SetString("{JOURNEY_KEY}"' not in source
+
+
+def test_ota_journey_handoff_is_consuming_so_protocol_recreation_cannot_replay_it():
+    header = read("main/ota.h")
+    source = read("main/ota.cc")
+    application = read("main/application.cc")
+    take = function_body(source, "std::string Ota::TakeTransientEvidenceJourneyId")
+    initialize = function_body(application, "void Application::InitializeProtocol")
+
+    assert "TakeTransientEvidenceJourneyId" in header
+    assert "std::move(transient_evidence_journey_id_)" in take
+    assert "transient_evidence_journey_id_.clear();" in take
+    assert "GetTransientEvidenceJourneyId" not in application
+    assert initialize.count("TakeTransientEvidenceJourneyId()") == 2
 
 
 def test_validator_is_exact_safe_ascii_length_contract_in_both_consumers():
@@ -78,9 +93,53 @@ def test_course_mode_schema_allows_only_optional_valid_journey():
     assert "transient_evidence_journey_id_.clear();" in parser
     assert f'cJSON_GetObjectItem(websocket, "{JOURNEY_KEY}")' in parser
     assert "IsValidEvidenceJourneyId" in parser
-    assert "websocket_field_count != 2 && websocket_field_count != 3" in parser
+    assert "url_field_count != 1" in parser
+    assert "token_field_count != 1" in parser
+    assert "evidence_journey_id_field_count > 1" in parser
     assert "Settings" not in parser
     assert "SetString" not in parser
+
+
+def test_course_mode_invalid_optional_journey_is_ignored_without_rejecting_url_token():
+    source = read("main/ota.cc")
+    parser = function_body(source, "bool Ota::ParseCourseModeResponse")
+    optional_check = parser[
+        parser.index("const bool has_valid_evidence_journey_id") :
+        parser.index("const std::string_view websocket_url")
+    ]
+
+    assert "cJSON_IsString(evidence_journey_id)" in optional_check
+    assert "IsValidEvidenceJourneyId(evidence_journey_id->valuestring)" in optional_check
+    assert "return false;" not in optional_check
+    assignment = parser[
+        parser.index("transient_websocket_url_.assign(websocket_url)") :
+        parser.index("has_websocket_config_ = true")
+    ]
+    assert "if (has_valid_evidence_journey_id)" in assignment
+    assert "transient_evidence_journey_id_.clear();" in parser[
+        : parser.index('cJSON_GetObjectItem(websocket, "evidence_journey_id")')
+    ]
+    for rejected_optional_value in (None, "", "has space", "../path", "x" * 65, "unicode-đ"):
+        assert not isinstance(rejected_optional_value, str) or not re.fullmatch(
+            r"[A-Za-z0-9._:-]{1,64}", rejected_optional_value
+        )
+
+
+def test_course_mode_strict_schema_rejects_duplicate_allowed_keys_and_unknown_fields():
+    source = read("main/ota.cc")
+    parser = function_body(source, "bool Ota::ParseCourseModeResponse")
+    field_loop = parser[
+        parser.index("cJSON_ArrayForEach(item, websocket)") :
+        parser.index("const std::string_view websocket_url")
+    ]
+
+    assert "url_field_count" in field_loop
+    assert "token_field_count" in field_loop
+    assert "evidence_journey_id_field_count" in field_loop
+    assert "url_field_count != 1" in field_loop
+    assert "token_field_count != 1" in field_loop
+    assert "evidence_journey_id_field_count > 1" in field_loop
+    assert "return false;" in field_loop
 
 
 def test_application_hands_journey_to_websocket_in_production_and_local_branches():
@@ -88,7 +147,7 @@ def test_application_hands_journey_to_websocket_in_production_and_local_branches
     initialize = function_body(source, "void Application::InitializeProtocol")
 
     assert initialize.count("SetTransientConfig(") == 2
-    assert initialize.count("ota_->GetTransientEvidenceJourneyId()") == 2
+    assert initialize.count("ota_->TakeTransientEvidenceJourneyId()") == 2
     production, local = initialize.split("#else", 1)
     assert "SetTransientConfig(" in production
     assert "SetTransientConfig(" in local
