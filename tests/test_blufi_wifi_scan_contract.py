@@ -721,14 +721,17 @@ def test_shared_scan_recovery_is_scheduled_by_process_lifetime_manager_worker():
     assert "WifiScanRecoveryExecutor scan_recovery_executor_;" in manager_header
     assert "TaskHandle_t scan_recovery_task_" in manager_header
     assert "std::optional<ScanRecoveryWork> scan_recovery_claim_;" in manager_header
-    assert "void WifiManager::ScheduleScanRecovery" in manager
+    assert "bool WifiManager::ScheduleScanRecovery" in manager
     assert "void WifiManager::ScanRecoveryTask" in manager
     assert "void WifiManager::RunScanRecovery" in manager
     assert "xTaskCreate" in function_body(manager, "bool WifiManager::Initialize")
     assert "vTaskDelete" not in manager
-    schedule = function_body(manager, "void WifiManager::ScheduleScanRecovery")
+    schedule = function_body(manager, "bool WifiManager::ScheduleScanRecovery")
     assert "xTaskNotifyGive" in schedule
     assert "scan_recovery_executor_.Execute" not in schedule
+    worker = function_body(manager, "void WifiManager::ScanRecoveryTask")
+    assert "pdMS_TO_TICKS" in worker
+    assert "portMAX_DELAY" not in worker
 
 
 def test_scanners_notify_exact_debt_only_after_releasing_scan_lock():
@@ -987,6 +990,60 @@ def test_blufi_scan_binds_logical_request_to_exact_global_lease():
     assert "*lease, scan_error == ESP_OK" in submit
     assert "physical_commit.consume_latched" in submit
     assert "physical_commit.callback_won_error" in submit
+
+
+def test_blufi_scan_commits_are_hidden_from_callback_until_logical_is_ready():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+
+    assert "std::mutex wifi_scan_submission_mutex_;" in header
+    submit_lock = submit.index("wifi_scan_submission_mutex_")
+    physical = submit.index("CommitSubmission(", submit_lock)
+    logical = submit.index("wifi_scan_controller_.CommitStart(", submit_lock)
+    assert submit_lock < physical < logical
+    assert "wifi_scan_submission_mutex_" in handler
+    assert handler.index("wifi_scan_submission_mutex_") < handler.index(
+        "ObserveScanDone"
+    )
+    failure = submit[submit.index("auto commit_failure") : submit.index(
+        "if (!EnsureWifiScanEventHandlerRegistered())"
+    )]
+    assert "wifi_scan_submission_mutex_" in failure
+    assert "CommitSubmission" in failure
+    assert "callback_won_error" in failure
+    assert "consume_latched" in failure
+
+
+def test_blufi_busy_retry_has_process_lifetime_timer_and_failure_fallback():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    retry = function_body(source, "void Blufi::RetryOwnedWifiScanAfterLeaseBusy")
+
+    assert "esp_timer_handle_t wifi_scan_retry_timer_" in header
+    assert "xTaskCreate" not in retry
+    assert "new (std::nothrow)" not in retry
+    assert "esp_timer_create" in retry
+    assert "esp_timer_start_once" in retry
+    assert "ScheduleWifiScanRetryFallback" in retry
+    assert "UnclaimedRequestIfCurrent" in retry
+    fallback = function_body(source, "void Blufi::ScheduleWifiScanRetryFallback")
+    assert "xTimerCreateStatic" in fallback
+    assert "xTimerChangePeriod" in fallback
+
+
+def test_blufi_watchdog_failures_enter_shared_recovery_immediately():
+    source = read("main/boards/common/blufi.cpp")
+    watchdog = function_body(source, "void Blufi::ScheduleOwnedWifiScanWatchdog")
+    recovery = function_body(source, "void Blufi::RequestOwnedWifiScanRecovery")
+
+    assert watchdog.count("BeginDrain(lease)") >= 2
+    assert watchdog.count("RequestOwnedWifiScanRecovery(lease)") >= 2
+    assert "esp_timer_create" in watchdog
+    assert "esp_timer_start_once" in watchdog
+    assert "WifiManager::GetInstance().RequestScanRecovery(lease)" in recovery
+    assert "ScheduleWifiScanRecoveryFallback(lease)" in recovery
 
 
 def test_blufi_scan_recovery_uses_shared_manager_executor():

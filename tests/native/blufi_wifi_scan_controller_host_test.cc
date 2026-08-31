@@ -11,6 +11,15 @@
 
 using Controller = BlufiWifiScanController;
 
+class WifiScanRecoveryExecutor {
+public:
+    static WifiScanLeaseCoordinator::RecoveryProof Prove(
+            const WifiScanLeaseCoordinator::RecoveryDecision& recovery) {
+        return WifiScanLeaseCoordinator::RecoveryProof{
+            recovery.recovery_id(), recovery.coordinator_identity_, true, true};
+    }
+};
+
 namespace {
 
 Controller::Request Request(uint32_t generation, uint64_t session,
@@ -145,6 +154,33 @@ void DisconnectReconnectReplacesLeaseBusyReservation() {
     assert(current.request_id != stale.request_id);
     assert(!logical.ClaimStart(stale.request_id).claimed);
     ClaimStart(logical, current.request_id);
+}
+
+void RetryReservationSurvivesSchedulerFailuresAndStartsExactlyOnce() {
+    Controller logical;
+    const auto requested = logical.RequestScan(Request(1, 11, 101));
+    assert(requested.start_now);
+    for (int failure = 0; failure < 3; ++failure) {
+        const auto retry = logical.UnclaimedRequestIfCurrent(
+            requested.request_id, 1, 11, 101);
+        assert(retry.has_value());
+        assert(retry->ble_connection_epoch == 101);
+    }
+    const auto eventual = logical.UnclaimedRequestIfCurrent(
+        requested.request_id, 1, 11, 101);
+    assert(eventual.has_value());
+    ClaimStart(logical, requested.request_id);
+    assert(!logical.UnclaimedRequestIfCurrent(
+        requested.request_id, 1, 11, 101).has_value());
+    assert(!logical.ClaimStart(requested.request_id).claimed);
+}
+
+void StaleRetryReservationIsDiscardedAtLifecycleBoundary() {
+    Controller logical;
+    const auto stale = logical.RequestScan(Request(1, 11, 101));
+    logical.InvalidateSession(2, 22, 202);
+    assert(!logical.UnclaimedRequestIfCurrent(
+        stale.request_id, 1, 11, 101).has_value());
 }
 
 class Barrier {
@@ -906,6 +942,165 @@ void SimultaneousCallbackAndInvalidateHaveConsistentLinearization() {
     }
 }
 
+void CallbackBetweenDriverReturnAndCommitsCannotStrandEitherOwner() {
+    for (const bool driver_accepted : {true, false}) {
+        Controller logical;
+        WifiScanLeaseCoordinator physical;
+        std::mutex submission_mutex;
+        const auto request = logical.RequestScan(Request(1, 11, 101));
+        const auto lease = physical.TryAcquire(
+            WifiScanLeaseCoordinator::Owner::kBlufi);
+        assert(lease.acquired);
+        ClaimStart(logical, request.request_id);
+
+        Barrier driver_returned(2);
+        Signal callback_observed;
+        WifiScanLeaseCoordinator::CallbackDecision callback;
+        std::thread event([&]() {
+            driver_returned.ArriveAndWait();
+            std::lock_guard<std::mutex> lock(submission_mutex);
+            callback = physical.ObserveScanDone(lease.lease);
+            callback_observed.Notify();
+        });
+        driver_returned.ArriveAndWait();
+        callback_observed.Wait();
+
+        WifiScanLeaseCoordinator::CommitDecision physical_commit;
+        Controller::StartDecision logical_commit;
+        {
+            std::lock_guard<std::mutex> lock(submission_mutex);
+            physical_commit = physical.CommitSubmission(
+                lease.lease, driver_accepted);
+            logical_commit = logical.CommitStart(
+                request.request_id,
+                driver_accepted || physical_commit.callback_won_error,
+                physical_commit.drain_required);
+        }
+        event.join();
+        assert(callback.deferred_until_commit);
+        assert(physical_commit.consume_latched);
+        assert(logical_commit.accepted);
+        assert(!logical_commit.send_failure);
+        const auto completion = logical.BeginCompletion(1, 11, 101);
+        assert(completion.owned_callback);
+        logical.FinishCompletion(completion.request_id);
+        assert(physical.FinishCompletion(lease.lease));
+    }
+}
+
+void CallbackCannotEnterBetweenPhysicalAndLogicalCommit() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    std::mutex submission_mutex;
+    const auto request = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    ClaimStart(logical, request.request_id);
+
+    Signal physical_committed;
+    Signal callback_finished;
+    WifiScanLeaseCoordinator::CallbackDecision callback;
+    std::thread event([&]() {
+        physical_committed.Wait();
+        std::lock_guard<std::mutex> lock(submission_mutex);
+        callback = physical.ObserveScanDone(lease.lease);
+        callback_finished.Notify();
+    });
+    {
+        std::lock_guard<std::mutex> lock(submission_mutex);
+        const auto physical_commit =
+            physical.CommitSubmission(lease.lease, true);
+        assert(physical_commit.accepted);
+        physical_committed.Notify();
+        const auto logical_commit =
+            logical.CommitStart(request.request_id, true);
+        assert(logical_commit.accepted);
+    }
+    callback_finished.Wait();
+    event.join();
+    assert(callback.consume_now);
+    const auto completion = logical.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    logical.FinishCompletion(completion.request_id);
+    assert(physical.FinishCompletion(lease.lease));
+}
+
+void CallbackLatchedBeforePreSubmissionFailureCannotStrandLease() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    std::mutex submission_mutex;
+    const auto request = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    ClaimStart(logical, request.request_id);
+
+    assert(physical.ObserveScanDone(lease.lease).deferred_until_commit);
+    WifiScanLeaseCoordinator::CommitDecision physical_commit;
+    Controller::StartDecision logical_commit;
+    {
+        std::lock_guard<std::mutex> lock(submission_mutex);
+        assert(!physical.AbandonUnsubmitted(lease.lease));
+        physical_commit = physical.CommitSubmission(lease.lease, false);
+        logical_commit = logical.CommitStart(
+            request.request_id, physical_commit.callback_won_error,
+            physical_commit.drain_required);
+    }
+    assert(physical_commit.consume_latched);
+    assert(physical_commit.callback_won_error);
+    assert(logical_commit.accepted);
+    const auto completion = logical.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    logical.FinishCompletion(completion.request_id);
+    assert(physical.FinishCompletion(lease.lease));
+    assert(physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kStation).acquired);
+}
+
+void WatchdogArmFailureEntersExactRecoveryAndRetriesNotification() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    const auto request = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(logical.SynchronizeDriverIncarnation(
+        request.request_id, lease.lease.driver_incarnation));
+    ClaimStart(logical, request.request_id);
+    assert(physical.CommitSubmission(lease.lease, true).accepted);
+    assert(logical.CommitStart(request.request_id, true).accepted);
+
+    // Both watchdog create and start failures take this same exact-debt path.
+    assert(physical.BeginDrain(lease.lease));
+    int manager_notifications = 1;  // first notification fails
+    const auto ticket = logical.BeginRecovery(request.request_id);
+    assert(ticket.valid);
+    const auto recovery = physical.BeginRecovery(lease.lease);
+    assert(recovery.begun());
+    ++manager_notifications;  // fallback timer retries successfully
+    const auto proof = WifiScanRecoveryExecutor::Prove(recovery);
+    assert(physical.CompleteRecovery(lease.lease, proof));
+    const auto recovered = logical.CompleteRecovery(ticket, true);
+    assert(recovered.start_pending);
+    assert(manager_notifications == 2);
+}
+
+void CallbackWinningWatchdogRecoveryNeedsNoReset() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    const auto request = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    ClaimStart(logical, request.request_id);
+    assert(physical.CommitSubmission(lease.lease, true).accepted);
+    assert(logical.CommitStart(request.request_id, true).accepted);
+    assert(physical.BeginDrain(lease.lease));
+    assert(physical.ObserveScanDone(lease.lease).consume_now);
+    const auto completion = logical.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    assert(!physical.BeginRecovery(lease.lease).begun());
+    logical.FinishCompletion(completion.request_id);
+    assert(physical.FinishCompletion(lease.lease));
+}
+
 }  // namespace
 
 int main() {
@@ -917,6 +1112,8 @@ int main() {
     GlobalIncarnationSynchronizesBeforeLogicalClaim();
     StationDrainBackpressuresOneBlufiRequestUntilRelease();
     DisconnectReconnectReplacesLeaseBusyReservation();
+    RetryReservationSurvivesSchedulerFailuresAndStartsExactlyOnce();
+    StaleRetryReservationIsDiscardedAtLifecycleBoundary();
     DelayedOldCompletionCannotSatisfyNewRequest();
     DisconnectReconnectRefreshesLifecycleWhileOldCallbackDrains();
     DelayedLifecycleRefreshCannotRegressNewGeneration();
@@ -950,6 +1147,11 @@ int main() {
     CallbackBeforeInvalidatePreservesCurrentOwnerDelivery();
     InvalidateBeforeCallbackDiscardsCurrentOwnerDelivery();
     SimultaneousCallbackAndInvalidateHaveConsistentLinearization();
+    CallbackBetweenDriverReturnAndCommitsCannotStrandEitherOwner();
+    CallbackCannotEnterBetweenPhysicalAndLogicalCommit();
+    CallbackLatchedBeforePreSubmissionFailureCannotStrandLease();
+    WatchdogArmFailureEntersExactRecoveryAndRetriesNotification();
+    CallbackWinningWatchdogRecoveryNeedsNoReset();
     std::cout << "PASS: BluFi WiFi scan controller host model\n";
     return 0;
 }

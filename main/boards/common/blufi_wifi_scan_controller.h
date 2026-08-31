@@ -142,6 +142,19 @@ public:
         return true;
     }
 
+    std::optional<Request> UnclaimedRequestIfCurrent(
+            uint64_t request_id, uint32_t generation, uint64_t session,
+            uint64_t connection) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            phase_ != Phase::kStarting || submission_claimed_ || invalidated_ ||
+            !Matches(owner_, generation, session, connection) ||
+            !MatchesCurrent(owner_)) {
+            return std::nullopt;
+        }
+        return owner_;
+    }
+
     bool IsClaimCurrent(uint64_t request_id, uint32_t generation,
                         uint64_t session, uint64_t connection) const {
         std::lock_guard<std::mutex> lock(mutex_);

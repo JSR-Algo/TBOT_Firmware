@@ -14,6 +14,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
@@ -222,6 +223,8 @@ private:
     void RetryOwnedWifiScanAfterLeaseBusy(
         uint64_t request_id,
         BlufiWifiScanController::Request request);
+    void DispatchOwnedWifiScanRetry();
+    void ScheduleWifiScanRetryFallback();
     bool StartOwnedWifiScan(uint64_t request_id);
     void ConsumeOwnedWifiScanCompletion(uint64_t request_id);
     void ScheduleOwnedWifiScanWatchdog(
@@ -229,6 +232,8 @@ private:
         WifiScanLeaseCoordinator::Lease lease);
     void RequestOwnedWifiScanRecovery(
         const WifiScanLeaseCoordinator::Lease& lease);
+    void ScheduleWifiScanRecoveryFallback(
+        WifiScanLeaseCoordinator::Lease lease);
     void SchedulePendingWifiScan(
         uint64_t request_id,
         const BlufiWifiScanController::Request& request);
@@ -356,6 +361,7 @@ private:
     static constexpr int64_t kWifiScanCacheMaxAgeUs = 10LL * 1000 * 1000;
     BlufiWifiScanController wifi_scan_controller_;
     std::mutex wifi_scan_lease_mutex_;
+    std::mutex wifi_scan_submission_mutex_;
     std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_lease_;
     uint64_t wifi_scan_request_id_ = 0;
     std::optional<BlufiWifiScanController::RecoveryTicket>
@@ -370,9 +376,17 @@ private:
     std::atomic<bool> wifi_scan_retry_scheduled_{false};
     uint64_t wifi_scan_retry_request_id_ = 0;
     std::optional<BlufiWifiScanController::Request> wifi_scan_retry_request_;
+    esp_timer_handle_t wifi_scan_retry_timer_ = nullptr;
+    StaticTimer_t wifi_scan_retry_fallback_storage_{};
+    TimerHandle_t wifi_scan_retry_fallback_timer_ = nullptr;
+    std::atomic<bool> wifi_scan_retry_fallback_scheduled_{false};
     esp_timer_handle_t wifi_scan_watchdog_timer_ = nullptr;
     uint64_t wifi_scan_watchdog_request_id_ = 0;
     std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_watchdog_lease_;
+    esp_timer_handle_t wifi_scan_recovery_retry_timer_ = nullptr;
+    std::optional<WifiScanLeaseCoordinator::Lease>
+        wifi_scan_recovery_retry_lease_;
+    std::atomic<bool> wifi_scan_recovery_fallback_scheduled_{false};
     esp_event_handler_instance_t scan_event_instance_ = nullptr;
     std::atomic<uint64_t> m_wifi_list_dispatch_epoch_{0};
     // Zero means no queued response; otherwise this is the owning dispatch token.

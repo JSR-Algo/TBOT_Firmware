@@ -55,22 +55,21 @@ bool WifiManager::RegisterScanRecoveryOwner(
     return true;
 }
 
-void WifiManager::ScheduleScanRecovery(
+bool WifiManager::ScheduleScanRecovery(
         const WifiScanLeaseCoordinator::Lease& lease) {
     TaskHandle_t task = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_ || scan_recovery_task_ == nullptr) {
-            return;
+            return false;
         }
         if (scan_recovery_debt_.has_value() &&
             SameLease(*scan_recovery_debt_, lease)) {
-            return;
-        }
-        if (scan_recovery_active_) {
+            task = scan_recovery_task_;
+        } else if (scan_recovery_active_) {
             if (scan_recovery_claim_.has_value()) {
                 ESP_LOGE(TAG, "Conflicting WiFi scan recovery debt rejected");
-                return;
+                return false;
             }
             // The previous callback may have released its debt before this
             // worker claimed it. Retarget the queued wakeup to the new exact
@@ -84,13 +83,15 @@ void WifiManager::ScheduleScanRecovery(
             task = scan_recovery_task_;
         }
     }
-    xTaskNotifyGive(task);
+    return xTaskNotifyGive(task) == pdPASS;
 }
 
 void WifiManager::ScanRecoveryTask(void* context) {
     auto* self = static_cast<WifiManager*>(context);
     for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        // A failed task notification must not strand one-shot recovery debt.
+        // Periodic polling is the allocation-free, process-lifetime fallback.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
         self->RunScanRecovery();
     }
 }

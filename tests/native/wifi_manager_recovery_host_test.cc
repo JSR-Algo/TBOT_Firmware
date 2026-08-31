@@ -67,6 +67,7 @@ int wifi_init_calls = 0;
 int task_create_calls = 0;
 int task_notify_calls = 0;
 bool fail_task_create_once = false;
+bool fail_task_notify_once = false;
 bool fail_executor_once = false;
 WifiManager* lock_probe_manager = nullptr;
 int lock_probe_calls = 0;
@@ -91,15 +92,37 @@ void RunUntilYield(WifiManager& manager) {
 
 void TaskCreationFailureRetriesOnlyFailedStage() {
     auto* manager = new WifiManager;
+    const auto before_init = manager->ScanLeaseCoordinator().TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(before_init.acquired);
+    assert(manager->ScanLeaseCoordinator()
+        .CommitSubmission(before_init.lease, false).drain_required);
+    assert(!manager->RequestScanRecovery(before_init.lease));
     fail_task_create_once = true;
     assert(!manager->Initialize());
     auto* station = manager->TestStation();
     assert(station != nullptr);
     assert(wifi_init_calls == 1);
     assert(manager->Initialize());
+    assert(manager->RequestScanRecovery(before_init.lease));
     assert(manager->TestStation() == station);
     assert(wifi_init_calls == 1);
     assert(task_create_calls == 2);
+}
+
+void OneShotStationDebtSurvivesWorkerNotificationFailure() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto* station = manager->TestStation();
+    fail_task_notify_once = true;
+    station->PublishDebt();
+    assert(manager->TestRecoveryActive());
+    // The production worker's bounded wait reaches this path even though the
+    // one-shot publisher never calls RequestScanRecovery again.
+    manager->TestRunScanRecovery();
+    assert(!manager->TestRecoveryActive());
+    assert(station->RestoreCalls() == 1);
+    assert(station->RetryCalls() == 1);
 }
 
 void DuplicateDebtCoalescesAndProductionRestoreRetries() {
@@ -304,7 +327,14 @@ BaseType_t xTaskCreate(TaskFunction_t, const char*, uint32_t, void*, int,
     *handle = reinterpret_cast<void*>(0x1);
     return pdPASS;
 }
-void xTaskNotifyGive(TaskHandle_t) { ++task_notify_calls; }
+BaseType_t xTaskNotifyGive(TaskHandle_t) {
+    ++task_notify_calls;
+    if (fail_task_notify_once) {
+        fail_task_notify_once = false;
+        return 0;
+    }
+    return pdPASS;
+}
 uint32_t ulTaskNotifyTake(BaseType_t, TickType_t) { return 1; }
 void vTaskDelay(TickType_t) { throw DelayAbort(); }
 esp_err_t nvs_flash_init() { return ESP_OK; }
@@ -498,6 +528,7 @@ WifiScanLeaseCoordinator::RecoveryProof WifiScanRecoveryExecutor::Execute(
 
 int main() {
     TaskCreationFailureRetriesOnlyFailedStage();
+    OneShotStationDebtSurvivesWorkerNotificationFailure();
     DuplicateDebtCoalescesAndProductionRestoreRetries();
     ExecutorFailureRetainsClaimAndRetriesWithoutReclaiming();
     ProofCompletionFailureKeepsScansGatedAndRestoresAgain();

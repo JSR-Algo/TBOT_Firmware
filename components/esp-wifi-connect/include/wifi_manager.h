@@ -127,9 +127,9 @@ public:
     bool RegisterScanRecoveryOwner(
         WifiScanLeaseCoordinator::Owner owner,
         ScanRecoveryOwnerHooks hooks);
-    void RequestScanRecovery(
+    bool RequestScanRecovery(
         const WifiScanLeaseCoordinator::Lease& lease) {
-        ScheduleScanRecovery(lease);
+        return ScheduleScanRecovery(lease);
     }
 
     WifiManager(const WifiManager&) = delete;
@@ -172,7 +172,7 @@ private:
     ~WifiManager() = delete;
 
     void NotifyEvent(WifiEvent event, const std::string& data = "");
-    void ScheduleScanRecovery(
+    bool ScheduleScanRecovery(
         const WifiScanLeaseCoordinator::Lease& lease);
     static void ScanRecoveryTask(void* context);
     void RunScanRecovery();
