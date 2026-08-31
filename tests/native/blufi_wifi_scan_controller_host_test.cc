@@ -1,4 +1,5 @@
 #include "../../main/boards/common/blufi_wifi_scan_controller.h"
+#include "../../components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
 
 #include <cassert>
 #include <condition_variable>
@@ -25,6 +26,125 @@ Controller::Request Request(uint32_t generation, uint64_t session,
 
 void ClaimStart(Controller& controller, uint64_t request_id) {
     assert(controller.ClaimStart(request_id).claimed);
+}
+
+void EarlyPhysicalCallbackIsConsumedAfterBothCommits() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    const auto request = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(request.start_now);
+    assert(lease.acquired);
+    assert(logical.ClaimStart(request.request_id).claimed);
+    assert(physical.ObserveScanDone(lease.lease).deferred_until_commit);
+    const auto physical_commit =
+        physical.CommitSubmission(lease.lease, true);
+    assert(physical_commit.consume_latched);
+    assert(logical.CommitStart(request.request_id, true).accepted);
+    const auto completion = logical.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    assert(logical.FinishCompletion(completion.request_id).start_pending == false);
+    assert(physical.FinishCompletion(lease.lease));
+}
+
+void LeaseBusyCoalescesOneUnclaimedCurrentRequest() {
+    Controller logical;
+    const auto first = logical.RequestScan(Request(1, 11, 101, false));
+    const auto repeated = logical.RequestScan(Request(1, 11, 101, true));
+    assert(first.start_now);
+    assert(repeated.queued);
+    assert(repeated.request_id == first.request_id);
+    const auto owner = logical.ClaimStart(first.request_id);
+    assert(owner.claimed);
+    const auto committed = logical.CommitStart(first.request_id, true);
+    assert(committed.accepted);
+    const auto completion = logical.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    assert(completion.send_list);
+    assert(!logical.FinishCompletion(completion.request_id).start_pending);
+}
+
+void SynchronousFailureRecoveryDoesNotRetryFailedOwner() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    const auto failure = controller.CommitStart(owner.request_id, false, true);
+    assert(failure.send_failure);
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
+    assert(!recovered.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
+}
+
+void CleanupFailureCanEnterRecoveryAfterCallbackClaim() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+    const auto completion = controller.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    assert(controller.RetainFailedCompletion(completion.request_id));
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+}
+
+void ClaimedStartMustRevalidateExactLifecycleBeforeSubmission() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.IsClaimCurrent(owner.request_id, 1, 11, 101));
+    controller.InvalidateSession(2, 22, 202);
+    assert(!controller.IsClaimCurrent(owner.request_id, 2, 22, 202));
+}
+
+void GlobalIncarnationSynchronizesBeforeLogicalClaim() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    assert(controller.SynchronizeDriverIncarnation(owner.request_id, 7));
+    assert(controller.driver_incarnation() == 7);
+    ClaimStart(controller, owner.request_id);
+    assert(!controller.SynchronizeDriverIncarnation(owner.request_id, 8));
+}
+
+void StationDrainBackpressuresOneBlufiRequestUntilRelease() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    const auto station = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kStation);
+    assert(station.acquired);
+    assert(physical.CommitSubmission(station.lease, true).accepted);
+    assert(physical.BeginDrain(station.lease));
+
+    const auto request = logical.RequestScan(Request(1, 11, 101));
+    assert(request.start_now);
+    assert(!physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi).acquired);
+    const auto repeated = logical.RequestScan(Request(1, 11, 101));
+    assert(repeated.queued);
+    assert(repeated.request_id == request.request_id);
+
+    assert(physical.ObserveScanDone(station.lease).consume_now);
+    assert(physical.FinishCompletion(station.lease));
+    const auto blufi = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(blufi.acquired);
+    assert(logical.SynchronizeDriverIncarnation(
+        request.request_id, blufi.lease.driver_incarnation));
+    ClaimStart(logical, request.request_id);
+}
+
+void DisconnectReconnectReplacesLeaseBusyReservation() {
+    Controller logical;
+    const auto stale = logical.RequestScan(Request(1, 11, 101));
+    assert(stale.start_now);
+    logical.InvalidateSession(2, 22, 202);
+    const auto current = logical.RequestScan(Request(2, 22, 202));
+    assert(current.start_now);
+    assert(current.request_id != stale.request_id);
+    assert(!logical.ClaimStart(stale.request_id).claimed);
+    ClaimStart(logical, current.request_id);
 }
 
 class Barrier {
@@ -218,8 +338,8 @@ void CurrentRepeatedRequestStillCoalescesAndReplacesPending() {
 
     const auto completion = controller.BeginCompletion(1, 11, 101);
     const auto promoted = controller.FinishCompletion(completion.request_id);
-    assert(promoted.start_pending);
-    assert(!promoted.pending.send_list);
+    assert(!promoted.start_pending);
+    assert(completion.send_list);
 }
 
 void ThreadedDelayedStaleRequestCannotReplaceCurrentPending() {
@@ -405,9 +525,8 @@ void ConcurrentRequestsCoalesceToLatestPendingRequest() {
     const auto completion = controller.BeginCompletion(1, 11, 101);
     assert(completion.owned_callback);
     const auto next = controller.FinishCompletion(completion.request_id);
-    assert(next.start_pending);
-    assert(next.pending.setup_generation == 1);
-    assert(controller.phase() == Controller::Phase::kStarting);
+    assert(!next.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
     assert(!controller.FinishCompletion(completion.request_id).start_pending);
 }
 
@@ -634,7 +753,7 @@ void ThreadedInvalidateDuringRecoveryUsesLatestLifecycle() {
     assert(recovered.pending.ble_connection_epoch == 202);
 }
 
-void ValidPendingRequestWinsOverCurrentOwnerRecovery() {
+void RepeatedCurrentRequestMergesIntoOwnerAcrossRecovery() {
     Controller controller;
     const auto owner_request = Request(1, 11, 101, true);
     const auto pending_request = Request(1, 11, 101, false);
@@ -647,7 +766,7 @@ void ValidPendingRequestWinsOverCurrentOwnerRecovery() {
     assert(ticket.valid);
     const auto recovered = controller.CompleteRecovery(ticket, true);
     assert(recovered.start_pending);
-    assert(recovered.pending.send_list == pending_request.send_list);
+    assert(recovered.pending.send_list == owner_request.send_list);
     assert(recovered.pending.save_results == pending_request.save_results);
 }
 
@@ -790,6 +909,14 @@ void SimultaneousCallbackAndInvalidateHaveConsistentLinearization() {
 }  // namespace
 
 int main() {
+    EarlyPhysicalCallbackIsConsumedAfterBothCommits();
+    LeaseBusyCoalescesOneUnclaimedCurrentRequest();
+    SynchronousFailureRecoveryDoesNotRetryFailedOwner();
+    CleanupFailureCanEnterRecoveryAfterCallbackClaim();
+    ClaimedStartMustRevalidateExactLifecycleBeforeSubmission();
+    GlobalIncarnationSynchronizesBeforeLogicalClaim();
+    StationDrainBackpressuresOneBlufiRequestUntilRelease();
+    DisconnectReconnectReplacesLeaseBusyReservation();
     DelayedOldCompletionCannotSatisfyNewRequest();
     DisconnectReconnectRefreshesLifecycleWhileOldCallbackDrains();
     DelayedLifecycleRefreshCannotRegressNewGeneration();
@@ -816,7 +943,7 @@ int main() {
     InvalidationRevisionRetiresRecoveringOwnerEvenForSameTuple();
     PendingFromNewLifecycleWinsWhenRecoveryTicketRevisionIsOld();
     ThreadedInvalidateDuringRecoveryUsesLatestLifecycle();
-    ValidPendingRequestWinsOverCurrentOwnerRecovery();
+    RepeatedCurrentRequestMergesIntoOwnerAcrossRecovery();
     RejectedStalePendingLeavesCurrentOwnerRecovery();
     RecoveryIncarnationWrapSkipsZero();
     WrongRequestRecoveryIsRejected();

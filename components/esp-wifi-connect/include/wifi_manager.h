@@ -23,6 +23,7 @@
 #define _WIFI_MANAGER_H_
 
 #include <string>
+#include <array>
 #include <memory>
 #include <functional>
 #include <mutex>
@@ -68,6 +69,17 @@ struct WifiManagerConfig {
  */
 class WifiManager {
 public:
+    struct ScanRecoveryOwnerHooks {
+        std::function<std::optional<WifiScanLeaseCoordinator::RecoveryDecision>(
+            const WifiScanLeaseCoordinator::Lease&)> claim;
+        std::function<bool(const WifiScanLeaseCoordinator::Lease&)> has_debt;
+        std::function<bool(const WifiScanLeaseCoordinator::Lease&)> restore_radio;
+        std::function<bool(
+            const WifiScanLeaseCoordinator::Lease&,
+            const WifiScanLeaseCoordinator::RecoveryProof&)> complete;
+        std::function<void(const WifiScanLeaseCoordinator::Lease&)> retry;
+    };
+
     static WifiManager& GetInstance();
 
     // ==================== Lifecycle ====================
@@ -111,6 +123,13 @@ public:
     // Callback paths use this accessor without taking the manager lifecycle lock.
     WifiScanLeaseCoordinator& ScanLeaseCoordinator() {
         return scan_lease_coordinator_;
+    }
+    bool RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner owner,
+        ScanRecoveryOwnerHooks hooks);
+    void RequestScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+        ScheduleScanRecovery(lease);
     }
 
     WifiManager(const WifiManager&) = delete;
@@ -200,6 +219,8 @@ private:
     bool scan_recovery_retry_pending_ = false;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_debt_;
     std::optional<ScanRecoveryWork> scan_recovery_claim_;
+    std::array<std::optional<ScanRecoveryOwnerHooks>, 4>
+        external_scan_recovery_hooks_;
     PendingLifecycleTarget pending_lifecycle_target_ =
         PendingLifecycleTarget::kNone;
     uint64_t pending_lifecycle_generation_ = 0;

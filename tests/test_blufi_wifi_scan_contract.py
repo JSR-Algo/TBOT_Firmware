@@ -969,17 +969,68 @@ def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():
     assert "m_send_list_after_scan" not in header
 
 
-def test_blufi_scan_completion_claims_owner_before_reading_driver_results():
+def test_blufi_scan_binds_logical_request_to_exact_global_lease():
+    header = read("main/boards/common/blufi.h")
     source = read("main/boards/common/blufi.cpp")
+    start = function_body(source, "void Blufi::ScheduleOwnedWifiScanStart")
+    submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
     handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_lease_;" in header
+    assert "TryAcquire(" in start
+    assert "WifiScanLeaseCoordinator::Owner::kBlufi" in start
+    assert start.index("TryAcquire(") < start.index("ClaimStart(")
+    assert start.index("SynchronizeDriverIncarnation(") < start.index("ClaimStart(")
+    assert "RetryOwnedWifiScanAfterLeaseBusy" in start
+    assert "ObserveScanDone(*lease)" in handler
+    assert "CommitSubmission(" in submit
+    assert "*lease, scan_error == ESP_OK" in submit
+    assert "physical_commit.consume_latched" in submit
+    assert "physical_commit.callback_won_error" in submit
+
+
+def test_blufi_scan_recovery_uses_shared_manager_executor():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager_source = read("components/esp-wifi-connect/wifi_manager.cc")
+
+    assert "RegisterScanRecoveryOwner" in manager_header
+    assert "RequestScanRecovery" in manager_header
+    assert "WifiScanLeaseCoordinator::Owner::kBlufi" in manager_source
+    assert "RegisterScanRecoveryOwner(" in source
+    assert "RequestScanRecovery(lease)" in source
+    assert "WifiScanRecoveryExecutor" not in header + source
+    assert "DrainDefaultEventLoop" not in header + source
+
+
+def test_blufi_ap_cleanup_failure_retains_exact_recovery_debt():
+    source = read("main/boards/common/blufi.cpp")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert "cleanup_proven" in handler
+    assert "RetainFailedCompletion(*lease)" in handler
+    assert "wifi_scan_controller_.RetainFailedCompletion(" in handler
+    assert "completion.request_id" in handler
+    assert "RequestOwnedWifiScanRecovery(*lease)" in handler
+    cleanup = handler.index("cleanup_proven")
+    finish_physical = handler.index("FinishCompletion(*lease)")
+    assert cleanup < finish_physical
+
+
+def test_blufi_scan_completion_claims_owner_before_reading_driver_results():
+    source = read("main/boards/common/blufi.cpp")
+    event_handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert "ObserveScanDone(*lease)" in event_handler
     assert handler.index("BeginCompletion(") < handler.index("esp_wifi_scan_get_ap_num")
     assert handler.index("esp_wifi_clear_ap_list") < handler.index("FinishCompletion(")
 
 
 def test_blufi_scan_cache_is_published_and_consumed_under_finalization_mutex():
     source = read("main/boards/common/blufi.cpp")
-    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
     event_body = function_body(source, "void Blufi::_handle_event")
     get_list = event_body[
         event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
@@ -998,7 +1049,7 @@ def test_blufi_scan_cache_is_published_and_consumed_under_finalization_mutex():
 
 def test_blufi_scan_cache_publish_revalidates_exact_session_under_mutex():
     source = read("main/boards/common/blufi.cpp")
-    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
     cache_section = scan_done[scan_done.index("provisioning_finalization_mutex_") :]
 
     assert "completion.owner.setup_generation ==" in cache_section
@@ -1012,7 +1063,7 @@ def test_blufi_scan_cache_publish_revalidates_exact_session_under_mutex():
 def test_blufi_scan_cache_records_exact_owner_when_published():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert "std::optional<BlufiWifiScanController::Request> m_ap_records_owner_;" in header
     publish = scan_done.index("self->m_ap_records.swap(scanned_ap_records)")
@@ -1139,7 +1190,7 @@ def test_blufi_scan_failures_are_deferred_and_exactly_owner_bound():
 
 def test_empty_scan_completion_uses_owner_bound_failure_helper():
     source = read("main/boards/common/blufi.cpp")
-    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
     send_list = function_body(source, "void Blufi::_send_wifi_list")
 
     assert "owned_ap_records.empty()" in scan_done
@@ -1266,7 +1317,7 @@ def test_blufi_scan_uses_one_passive_start_after_mode_is_station_capable():
 def test_blufi_wifi_scan_failures_log_start_and_empty_result_separately():
     source = read("main/boards/common/blufi.cpp")
     start = function_body(source, "bool Blufi::StartOwnedWifiScan")
-    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert 'ScheduleWifiScanFailure(committed.owner, "scan_start_failed")' in start
     assert '"scan_completed_without_ap_records"' in scan_done
@@ -1296,7 +1347,7 @@ def test_blufi_logs_heap_around_connection_and_wifi_list_dispatch():
 
 def test_blufi_wifi_scan_caps_application_owned_candidates():
     source = read("main/boards/common/blufi.cpp")
-    body = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    body = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     cap = "ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);"
     assert "kMaxBlufiWifiScanCandidates" in source
@@ -1307,7 +1358,7 @@ def test_blufi_wifi_scan_caps_application_owned_candidates():
 
 def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_returns():
     source = read("main/boards/common/blufi.cpp")
-    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert "ScheduleWifiListSend" in handler
     assert "_send_wifi_list();" not in handler
@@ -1316,12 +1367,21 @@ def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_re
     assert "Application::GetInstance().Schedule" in helper
     assert "RunIfSetupGenerationCurrent" in helper
     assert "m_ble_is_connected" in helper
+    assert "dispatch_current = true" in helper
+    assert helper.index("dispatch_current = true") < helper.index(
+        "_send_wifi_list(std::move(ap_records))"
+    )
+    guarded = helper[
+        helper.index("RunIfSetupGenerationCurrent") :
+        helper.index("if (dispatch_current)")
+    ]
+    assert "_send_wifi_list" not in guarded
 
 
 def test_blufi_deferred_wifi_list_is_bound_to_exact_ble_connection():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
     helper = function_body(source, "void Blufi::ScheduleWifiListSend")
     connect = source[
         source.index("case ESP_BLUFI_EVENT_BLE_CONNECT") :
@@ -1355,7 +1415,7 @@ def test_blufi_deferred_wifi_list_is_bound_to_exact_ble_connection():
 def test_blufi_wifi_list_retry_waits_for_owned_deferred_dispatch():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
     event_body = function_body(source, "void Blufi::_handle_event")
     get_list = event_body[
         event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
@@ -1417,8 +1477,12 @@ def test_blufi_scan_done_handler_ignores_scan_events_it_did_not_start():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
-    assert "!completion.owned_callback" in body
-    assert body.index("!completion.owned_callback") < body.index("esp_wifi_scan_get_ap_num")
+    assert "!callback.consume_now" in body
+    assert "callback.deferred_until_commit" in body
+    assert "esp_wifi_scan_get_ap_num" not in body
+    assert body.index("!callback.consume_now") < body.index(
+        "ConsumeOwnedWifiScanCompletion"
+    )
     assert "Ignoring WiFi scan done event not owned by BluFi" in body
 
 def test_blufi_wifi_list_requests_refresh_stale_cached_scan_results():

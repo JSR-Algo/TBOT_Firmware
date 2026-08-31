@@ -174,6 +174,52 @@ void CallbackBeforeClaimCancelsRecoveryWithoutRestore() {
     assert(station->RestoreCalls() == 0);
 }
 
+void RegisteredBlufiOwnerUsesSharedRecoveryExecutor() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto& coordinator = manager->ScanLeaseCoordinator();
+    const auto acquired = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(acquired.acquired);
+    assert(coordinator.CommitSubmission(acquired.lease, false).drain_required);
+
+    bool debt = true;
+    int restore_calls = 0;
+    int retry_calls = 0;
+    WifiManager::ScanRecoveryOwnerHooks hooks;
+    hooks.claim = [&](const auto& lease)
+                -> std::optional<WifiScanLeaseCoordinator::RecoveryDecision> {
+                const auto recovery = coordinator.BeginRecovery(lease);
+                return recovery.begun()
+                    ? std::optional<WifiScanLeaseCoordinator::RecoveryDecision>(
+                          recovery)
+                    : std::nullopt;
+            };
+    hooks.has_debt = [&](const auto&) { return debt; };
+    hooks.restore_radio = [&](const auto&) {
+                ++restore_calls;
+                ProbeManagerLock();
+                return true;
+            };
+    hooks.complete = [&](const auto& lease, const auto& proof) {
+                debt = false;
+                return coordinator.CompleteRecovery(lease, proof);
+            };
+    hooks.retry = [&](const auto&) { ++retry_calls; };
+    assert(manager->RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner::kBlufi, std::move(hooks)));
+    lock_probe_manager = manager;
+    manager->TestScheduleScanRecovery(acquired.lease);
+    manager->TestRunScanRecovery();
+    lock_probe_manager = nullptr;
+    assert(!manager->TestRecoveryActive());
+    assert(restore_calls == 1);
+    assert(retry_calls == 1);
+    assert(lock_probe_calls > 0);
+    assert(coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kStation).acquired);
+}
+
 void NewUnclaimedDebtRetargetsButClaimedDebtRejectsReplacement() {
     auto* manager = new WifiManager;
     assert(manager->Initialize());
@@ -456,6 +502,7 @@ int main() {
     ExecutorFailureRetainsClaimAndRetriesWithoutReclaiming();
     ProofCompletionFailureKeepsScansGatedAndRestoresAgain();
     CallbackBeforeClaimCancelsRecoveryWithoutRestore();
+    RegisteredBlufiOwnerUsesSharedRecoveryExecutor();
     NewUnclaimedDebtRetargetsButClaimedDebtRejectsReplacement();
     RecoveryHooksRunWithoutManagerMutex();
     BothPendingTransitionsResumeOnlyAfterRecovery();

@@ -188,6 +188,16 @@ public:
         return result;
     }
 
+    bool AbandonUnsubmitted(const Lease& lease) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!Matches(lease) || phase_ != Phase::kStarting ||
+            !submission_pending_ || callback_latched_) {
+            return false;
+        }
+        ReleaseLocked();
+        return true;
+    }
+
     bool FinishCompletion(const Lease& lease) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(lease) || phase_ != Phase::kCompleting) {

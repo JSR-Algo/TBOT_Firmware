@@ -216,7 +216,19 @@ private:
                                uint64_t connection_epoch);
     bool IsWifiScanCacheFresh() const;
     void RequestWifiListScan(bool save_results, bool send_list);
+    void ScheduleOwnedWifiScanStart(
+        uint64_t request_id,
+        BlufiWifiScanController::Request request);
+    void RetryOwnedWifiScanAfterLeaseBusy(
+        uint64_t request_id,
+        BlufiWifiScanController::Request request);
     bool StartOwnedWifiScan(uint64_t request_id);
+    void ConsumeOwnedWifiScanCompletion(uint64_t request_id);
+    void ScheduleOwnedWifiScanWatchdog(
+        uint64_t request_id,
+        WifiScanLeaseCoordinator::Lease lease);
+    void RequestOwnedWifiScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease);
     void SchedulePendingWifiScan(
         uint64_t request_id,
         const BlufiWifiScanController::Request& request);
@@ -343,6 +355,24 @@ private:
     std::optional<BlufiWifiScanController::Request> m_ap_records_owner_;
     static constexpr int64_t kWifiScanCacheMaxAgeUs = 10LL * 1000 * 1000;
     BlufiWifiScanController wifi_scan_controller_;
+    std::mutex wifi_scan_lease_mutex_;
+    std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_lease_;
+    uint64_t wifi_scan_request_id_ = 0;
+    std::optional<BlufiWifiScanController::RecoveryTicket>
+        wifi_scan_recovery_ticket_;
+    std::optional<BlufiWifiScanController::FinishDecision>
+        wifi_scan_recovery_finish_;
+    wifi_mode_t wifi_scan_restore_mode_ = WIFI_MODE_STA;
+    wifi_config_t wifi_scan_restore_sta_config_{};
+    wifi_config_t wifi_scan_restore_ap_config_{};
+    bool wifi_scan_restore_sta_config_valid_ = false;
+    bool wifi_scan_restore_ap_config_valid_ = false;
+    std::atomic<bool> wifi_scan_retry_scheduled_{false};
+    uint64_t wifi_scan_retry_request_id_ = 0;
+    std::optional<BlufiWifiScanController::Request> wifi_scan_retry_request_;
+    esp_timer_handle_t wifi_scan_watchdog_timer_ = nullptr;
+    uint64_t wifi_scan_watchdog_request_id_ = 0;
+    std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_watchdog_lease_;
     esp_event_handler_instance_t scan_event_instance_ = nullptr;
     std::atomic<uint64_t> m_wifi_list_dispatch_epoch_{0};
     // Zero means no queued response; otherwise this is the owning dispatch token.

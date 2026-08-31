@@ -161,7 +161,7 @@ def test_fw3c_wifi_list_releases_scan_heap_before_blufi_dispatch():
 
 def test_fw3c_scan_driver_records_are_released_on_all_exit_paths():
     blufi = read("main/boards/common/blufi.cpp")
-    scan_body = _function_body(blufi, "void Blufi::_wifi_scan_event_handler")
+    scan_body = _function_body(blufi, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert scan_body.count("esp_wifi_clear_ap_list()") >= 2
 
@@ -222,7 +222,7 @@ def test_fw3d_scan_controller_lock_never_nests_finalization_lock():
 # ---------------------------------------------------------------------------
 def test_fw3e_wifi_scan_done_does_not_log_every_ap_before_blufi_send():
     blufi = read("main/boards/common/blufi.cpp")
-    scan_body = _function_body(blufi, "void Blufi::_wifi_scan_event_handler")
+    scan_body = _function_body(blufi, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert "Found %d APs" in scan_body
     assert "SSID: %s" not in scan_body

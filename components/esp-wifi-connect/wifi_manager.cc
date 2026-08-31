@@ -36,6 +36,25 @@ bool SameLease(const WifiScanLeaseCoordinator::Lease& left,
 
 }  // namespace
 
+bool WifiManager::RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner owner,
+        ScanRecoveryOwnerHooks hooks) {
+    if ((owner != WifiScanLeaseCoordinator::Owner::kBlufi &&
+         owner != WifiScanLeaseCoordinator::Owner::kBlockingUi) ||
+        !hooks.claim || !hooks.has_debt || !hooks.restore_radio ||
+        !hooks.complete || !hooks.retry) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (scan_recovery_active_ && scan_recovery_debt_.has_value() &&
+        scan_recovery_debt_->owner == owner) {
+        return false;
+    }
+    external_scan_recovery_hooks_[static_cast<size_t>(owner)] =
+        std::move(hooks);
+    return true;
+}
+
 void WifiManager::ScheduleScanRecovery(
         const WifiScanLeaseCoordinator::Lease& lease) {
     TaskHandle_t task = nullptr;
@@ -137,6 +156,8 @@ void WifiManager::RunScanRecovery() {
         std::optional<ScanRecoveryWork> work;
         bool wait_for_lifecycle = false;
         bool resume_pending_transition = false;
+        ScanRecoveryOwnerHooks external_hooks;
+        bool external_owner = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!scan_recovery_active_ || !scan_recovery_debt_.has_value()) {
@@ -147,6 +168,12 @@ void WifiManager::RunScanRecovery() {
             wait_for_lifecycle = lifecycle_transition_in_progress_;
             if (wait_for_lifecycle) {
                 scan_recovery_retry_pending_ = true;
+            }
+            const size_t owner_index = static_cast<size_t>(debt->owner);
+            external_owner = owner_index < external_scan_recovery_hooks_.size() &&
+                external_scan_recovery_hooks_[owner_index].has_value();
+            if (external_owner) {
+                external_hooks = *external_scan_recovery_hooks_[owner_index];
             }
         }
         if (wait_for_lifecycle) {
@@ -170,12 +197,23 @@ void WifiManager::RunScanRecovery() {
                         claim->lease, claim->recovery, std::nullopt,
                         claim->scan_session_id, claim->scans_were_enabled};
                 }
+            } else if (external_owner) {
+                const auto recovery = external_hooks.claim(*debt);
+                if (recovery.has_value()) {
+                    work = ScanRecoveryWork{
+                        *debt, *recovery, std::nullopt, 0, false};
+                }
             }
             if (!work.has_value()) {
-                const bool debt_still_exists =
-                    debt->owner == WifiScanLeaseCoordinator::Owner::kStation
-                        ? station_->HasScanRecoveryDebt(*debt)
-                        : config_ap_->HasScanRecoveryDebt(*debt);
+                bool debt_still_exists = false;
+                if (debt->owner == WifiScanLeaseCoordinator::Owner::kStation) {
+                    debt_still_exists = station_->HasScanRecoveryDebt(*debt);
+                } else if (debt->owner ==
+                           WifiScanLeaseCoordinator::Owner::kConfigAp) {
+                    debt_still_exists = config_ap_->HasScanRecoveryDebt(*debt);
+                } else if (external_owner) {
+                    debt_still_exists = external_hooks.has_debt(*debt);
+                }
                 if (debt_still_exists) {
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -236,6 +274,8 @@ void WifiManager::RunScanRecovery() {
                 work->lease, work->recovery, work->scan_session_id,
                 work->scans_were_enabled};
             owner_ready = config_ap_->RestoreRadioAfterRecovery(claim);
+        } else if (external_owner) {
+            owner_ready = external_hooks.restore_radio(work->lease);
         }
         if (!owner_ready) {
             {
@@ -258,6 +298,8 @@ void WifiManager::RunScanRecovery() {
                 work->lease, work->recovery, work->scan_session_id,
                 work->scans_were_enabled};
             completed = config_ap_->CompleteScanRecovery(claim, *work->proof);
+        } else if (external_owner) {
+            completed = external_hooks.complete(work->lease, *work->proof);
         }
         if (!completed) {
             {
@@ -280,6 +322,8 @@ void WifiManager::RunScanRecovery() {
             station_->RetryScanAfterRecovery();
         } else if (owner == WifiScanLeaseCoordinator::Owner::kConfigAp) {
             config_ap_->RetryScanAfterRecovery();
+        } else if (external_owner) {
+            external_hooks.retry(work->lease);
         }
         ResumePendingLifecycleTransition();
         return;

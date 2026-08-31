@@ -88,6 +88,26 @@ public:
             return result;
         }
 
+        if (phase_ == Phase::kStarting && !submission_claimed_) {
+            // A busy physical lease has not submitted anything yet. Fold all
+            // current-session callers into that reservation so one eventual
+            // scan satisfies the latest requested delivery semantics.
+            owner_.save_results = owner_.save_results || request.save_results;
+            owner_.send_list = owner_.send_list || request.send_list;
+            result.request_id = owner_request_id_;
+            result.queued = true;
+            return result;
+        }
+
+        if (phase_ == Phase::kRunning && !callback_claimed_ && !invalidated_ &&
+            MatchesCurrent(request)) {
+            owner_.save_results = owner_.save_results || request.save_results;
+            owner_.send_list = owner_.send_list || request.send_list;
+            result.request_id = owner_request_id_;
+            result.queued = true;
+            return result;
+        }
+
         // Multiple logical callers need only one subsequent physical scan. The
         // latest lifecycle snapshot supersedes older pending work.
         pending_ = request;
@@ -110,7 +130,30 @@ public:
         return result;
     }
 
-    StartDecision CommitStart(uint64_t request_id, bool accepted) {
+    bool SynchronizeDriverIncarnation(uint64_t request_id,
+                                      uint32_t driver_incarnation) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            phase_ != Phase::kStarting || submission_claimed_ ||
+            driver_incarnation == 0) {
+            return false;
+        }
+        driver_incarnation_ = driver_incarnation;
+        return true;
+    }
+
+    bool IsClaimCurrent(uint64_t request_id, uint32_t generation,
+                        uint64_t session, uint64_t connection) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return request_id != 0 && request_id == owner_request_id_ &&
+               phase_ == Phase::kStarting && submission_claimed_ &&
+               !invalidated_ &&
+               Matches(owner_, generation, session, connection) &&
+               MatchesCurrent(owner_);
+    }
+
+    StartDecision CommitStart(uint64_t request_id, bool accepted,
+                              bool retain_for_recovery = false) {
         std::lock_guard<std::mutex> lock(mutex_);
         StartDecision result;
         if (request_id == 0 || request_id != owner_request_id_ ||
@@ -125,6 +168,12 @@ public:
         if (!accepted) {
             result.owner = owner_;
             result.send_failure = !invalidated_ && owner_.send_list;
+            if (retain_for_recovery) {
+                invalidated_ = true;
+                retry_owner_after_recovery_ = false;
+                phase_ = Phase::kDraining;
+                return result;
+            }
             ResetOwner();
             PromotePending(result);
             return result;
@@ -175,6 +224,19 @@ public:
         ResetOwner();
         PromotePending(result);
         return result;
+    }
+
+    bool RetainFailedCompletion(uint64_t request_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            !callback_claimed_ || recovering_) {
+            return false;
+        }
+        callback_claimed_ = false;
+        invalidated_ = true;
+        retry_owner_after_recovery_ = false;
+        phase_ = Phase::kDraining;
+        return true;
     }
 
     FinishDecision InvalidateSession(uint32_t current_generation,
@@ -256,6 +318,7 @@ public:
         }
 
         const Request recovered_owner = owner_;
+        const bool retry_recovered_owner = retry_owner_after_recovery_;
         const bool lifecycle_unchanged =
             ticket.lifecycle_revision == lifecycle_revision_;
         std::optional<Request> valid_pending;
@@ -266,7 +329,8 @@ public:
         ResetOwner();
         if (valid_pending.has_value()) {
             Reserve(*valid_pending, result);
-        } else if (lifecycle_unchanged && MatchesCurrent(recovered_owner)) {
+        } else if (retry_recovered_owner && lifecycle_unchanged &&
+                   MatchesCurrent(recovered_owner)) {
             Reserve(recovered_owner, result);
         }
         return result;
@@ -367,6 +431,7 @@ private:
         submission_claimed_ = false;
         callback_claimed_ = false;
         invalidated_ = false;
+        retry_owner_after_recovery_ = true;
     }
 
     void PromotePending(FinishDecision& result) {
@@ -415,4 +480,5 @@ private:
     bool callback_claimed_ = false;
     bool invalidated_ = false;
     bool recovering_ = false;
+    bool retry_owner_after_recovery_ = true;
 };
