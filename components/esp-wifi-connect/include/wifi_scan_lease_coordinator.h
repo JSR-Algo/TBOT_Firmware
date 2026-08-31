@@ -3,13 +3,20 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <utility>
+
+class WifiScanLeaseProofFactory;
 
 // Serializes ownership of the process-global ESP-IDF Wi-Fi scan callback.
 class WifiScanLeaseCoordinator {
 public:
     explicit WifiScanLeaseCoordinator(uint64_t last_lease_id = 0,
-                                      uint32_t driver_incarnation = 1)
+                                      uint32_t driver_incarnation = 1,
+                                      uint64_t last_drain_id = 0,
+                                      uint64_t last_recovery_id = 0)
         : last_lease_id_(last_lease_id),
+          last_drain_id_(last_drain_id),
+          last_recovery_id_(last_recovery_id),
           driver_incarnation_(driver_incarnation) {}
 
     enum class Owner : uint8_t {
@@ -55,6 +62,41 @@ public:
     struct DrainDecision {
         bool armed = false;
         uint64_t drain_id = 0;
+    };
+
+    class DrainProof {
+    private:
+        DrainProof() = default;
+        DrainProof(uint64_t drain_id, bool barrier_drained)
+            : drain_id_(drain_id), barrier_drained_(barrier_drained) {}
+
+        uint64_t drain_id_ = 0;
+        bool barrier_drained_ = false;
+
+        friend class WifiScanLeaseCoordinator;
+        friend class WifiScanLeaseProofFactory;
+    };
+
+    struct RecoveryDecision {
+        bool begun = false;
+        uint64_t recovery_id = 0;
+    };
+
+    class RecoveryProof {
+    private:
+        RecoveryProof() = default;
+        RecoveryProof(uint64_t recovery_id, bool driver_ready,
+                      bool barrier_drained)
+            : recovery_id_(recovery_id),
+              driver_ready_(driver_ready),
+              barrier_drained_(barrier_drained) {}
+
+        uint64_t recovery_id_ = 0;
+        bool driver_ready_ = false;
+        bool barrier_drained_ = false;
+
+        friend class WifiScanLeaseCoordinator;
+        friend class WifiScanLeaseProofFactory;
     };
 
     AcquireDecision TryAcquire(Owner owner) {
@@ -168,33 +210,40 @@ public:
         return result;
     }
 
-    bool CompleteDrain(const Lease& lease, const DrainDecision& drain,
-                       bool barrier_drained) {
+    bool CompleteDrain(const Lease& lease, const DrainProof& proof) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(lease) || phase_ != Phase::kDraining ||
-            submission_pending_ || !drain.armed || drain.drain_id == 0 ||
-            drain.drain_id != armed_drain_id_ || !barrier_drained) {
+            submission_pending_ || proof.drain_id_ == 0 ||
+            proof.drain_id_ != armed_drain_id_ || !proof.barrier_drained_) {
             return false;
         }
         ReleaseLocked();
         return true;
     }
 
-    bool BeginRecovery(const Lease& lease) {
+    RecoveryDecision BeginRecovery(const Lease& lease) {
         std::lock_guard<std::mutex> lock(mutex_);
+        RecoveryDecision result;
         if (!Matches(lease) || submission_pending_ ||
-            (phase_ != Phase::kRunning && phase_ != Phase::kDraining)) {
-            return false;
+            (phase_ != Phase::kRunning && phase_ != Phase::kDraining) ||
+            last_recovery_id_ == std::numeric_limits<uint64_t>::max()) {
+            return result;
         }
+
+        ++last_recovery_id_;
+        active_recovery_id_ = last_recovery_id_;
         phase_ = Phase::kRecovering;
-        return true;
+        result.begun = true;
+        result.recovery_id = active_recovery_id_;
+        return result;
     }
 
-    bool CompleteRecovery(const Lease& lease, bool driver_ready,
-                          bool barrier_drained) {
+    bool CompleteRecovery(const Lease& lease, const RecoveryProof& proof) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!Matches(lease) || phase_ != Phase::kRecovering || !driver_ready ||
-            !barrier_drained) {
+        if (!Matches(lease) || phase_ != Phase::kRecovering ||
+            proof.recovery_id_ == 0 ||
+            proof.recovery_id_ != active_recovery_id_ ||
+            !proof.driver_ready_ || !proof.barrier_drained_) {
             return false;
         }
 
@@ -235,6 +284,7 @@ private:
         callback_latched_ = false;
         submission_pending_ = false;
         armed_drain_id_ = 0;
+        active_recovery_id_ = 0;
         phase_ = Phase::kFree;
     }
 
@@ -244,7 +294,47 @@ private:
     uint64_t last_lease_id_ = 0;
     uint64_t last_drain_id_ = 0;
     uint64_t armed_drain_id_ = 0;
+    uint64_t last_recovery_id_ = 0;
+    uint64_t active_recovery_id_ = 0;
     uint32_t driver_incarnation_ = 1;
     bool callback_latched_ = false;
     bool submission_pending_ = false;
+};
+
+// Executes external proof work only after receiving the coordinator-issued ID.
+class WifiScanLeaseProofFactory {
+public:
+    struct RecoveryOutcome {
+        bool driver_ready = false;
+        bool barrier_drained = false;
+    };
+
+    template <typename BarrierOperation>
+    static WifiScanLeaseCoordinator::DrainProof RunDrainBarrier(
+            const WifiScanLeaseCoordinator::DrainDecision& drain,
+            BarrierOperation&& operation) {
+        if (!drain.armed || drain.drain_id == 0) {
+            return WifiScanLeaseCoordinator::DrainProof{};
+        }
+        return WifiScanLeaseCoordinator::DrainProof{
+            drain.drain_id,
+            std::forward<BarrierOperation>(operation)(),
+        };
+    }
+
+    template <typename RecoveryOperation>
+    static WifiScanLeaseCoordinator::RecoveryProof RunRecovery(
+            const WifiScanLeaseCoordinator::RecoveryDecision& recovery,
+            RecoveryOperation&& operation) {
+        if (!recovery.begun || recovery.recovery_id == 0) {
+            return WifiScanLeaseCoordinator::RecoveryProof{};
+        }
+        const RecoveryOutcome outcome =
+            std::forward<RecoveryOperation>(operation)();
+        return WifiScanLeaseCoordinator::RecoveryProof{
+            recovery.recovery_id,
+            outcome.driver_ready,
+            outcome.barrier_drained,
+        };
+    }
 };

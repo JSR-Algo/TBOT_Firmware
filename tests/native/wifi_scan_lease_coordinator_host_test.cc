@@ -7,6 +7,7 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <type_traits>
 
 using Coordinator = WifiScanLeaseCoordinator;
 
@@ -37,6 +38,31 @@ private:
     unsigned arrived_ = 0;
     unsigned generation_ = 0;
 };
+
+Coordinator::DrainProof RunDrainBarrier(
+        const Coordinator::DrainDecision& drain, bool barrier_drained) {
+    return WifiScanLeaseProofFactory::RunDrainBarrier(
+        drain, [barrier_drained]() { return barrier_drained; });
+}
+
+Coordinator::RecoveryProof RunRecovery(
+        const Coordinator::RecoveryDecision& recovery, bool driver_ready,
+        bool barrier_drained) {
+    return WifiScanLeaseProofFactory::RunRecovery(
+        recovery, [driver_ready, barrier_drained]() {
+            return WifiScanLeaseProofFactory::RecoveryOutcome{
+                driver_ready,
+                barrier_drained,
+            };
+        });
+}
+
+static_assert(!std::is_aggregate<Coordinator::DrainProof>::value);
+static_assert(!std::is_constructible<Coordinator::DrainProof, uint64_t,
+                                     bool>::value);
+static_assert(!std::is_aggregate<Coordinator::RecoveryProof>::value);
+static_assert(!std::is_constructible<Coordinator::RecoveryProof, uint64_t,
+                                     bool, bool>::value);
 
 void ExactIdentityOwnsEveryTransition() {
     Coordinator coordinator;
@@ -103,7 +129,7 @@ void SimultaneousAcquireGrantsExactlyOneLease() {
     assert(!failed.released);
     const auto drain = coordinator.ArmDrainBarrier(winner);
     assert(drain.armed);
-    assert(coordinator.CompleteDrain(winner, drain, true));
+    assert(coordinator.CompleteDrain(winner, RunDrainBarrier(drain, true)));
 }
 
 void EarlyMatchingCallbackWaitsForSuccessfulCommit() {
@@ -203,9 +229,16 @@ void ErrorWithoutCallbackRequiresSuccessfulBarrier() {
     assert(!failed_start.released);
     const auto drain = coordinator.ArmDrainBarrier(acquired.lease);
     assert(drain.armed);
-    assert(!coordinator.CompleteDrain(acquired.lease, drain, false));
+    assert(!coordinator.CompleteDrain(acquired.lease,
+                                      RunDrainBarrier(drain, false)));
     assert(!coordinator.TryAcquire(Coordinator::Owner::kStation).acquired);
-    assert(coordinator.CompleteDrain(acquired.lease, drain, true));
+    const auto retry = coordinator.ArmDrainBarrier(acquired.lease);
+    assert(retry.armed);
+    assert(retry.drain_id != drain.drain_id);
+    assert(!coordinator.CompleteDrain(acquired.lease,
+                                      RunDrainBarrier(drain, true)));
+    assert(coordinator.CompleteDrain(acquired.lease,
+                                     RunDrainBarrier(retry, true)));
     assert(coordinator.TryAcquire(Coordinator::Owner::kStation).acquired);
 }
 
@@ -216,7 +249,8 @@ void ForeignOrStaleCallbackCannotClaimLease() {
     assert(coordinator.CommitSubmission(first.lease, false).drain_required);
     const auto first_drain = coordinator.ArmDrainBarrier(first.lease);
     assert(first_drain.armed);
-    assert(coordinator.CompleteDrain(first.lease, first_drain, true));
+    assert(coordinator.CompleteDrain(first.lease,
+                                     RunDrainBarrier(first_drain, true)));
 
     const auto current = coordinator.TryAcquire(Coordinator::Owner::kBlufi);
     assert(current.acquired);
@@ -243,7 +277,8 @@ void BarrierFailureRetainsDrainingLease() {
     assert(coordinator.BeginDrain(station.lease));
     const auto drain = coordinator.ArmDrainBarrier(station.lease);
     assert(drain.armed);
-    assert(!coordinator.CompleteDrain(station.lease, drain, false));
+    assert(!coordinator.CompleteDrain(station.lease,
+                                      RunDrainBarrier(drain, false)));
     assert(!coordinator.TryAcquire(Coordinator::Owner::kBlufi).acquired);
 
     const auto callback = coordinator.ObserveScanDone(station.lease);
@@ -261,7 +296,8 @@ void SuccessfulDrainRejectsQueuedOldCallback() {
     assert(coordinator.BeginDrain(station.lease));
     const auto drain = coordinator.ArmDrainBarrier(station.lease);
     assert(drain.armed);
-    assert(coordinator.CompleteDrain(station.lease, drain, true));
+    assert(coordinator.CompleteDrain(station.lease,
+                                     RunDrainBarrier(drain, true)));
 
     const auto blufi = coordinator.TryAcquire(Coordinator::Owner::kBlufi);
     assert(blufi.acquired);
@@ -270,7 +306,8 @@ void SuccessfulDrainRejectsQueuedOldCallback() {
     assert(coordinator.CommitSubmission(blufi.lease, false).drain_required);
     const auto blufi_drain = coordinator.ArmDrainBarrier(blufi.lease);
     assert(blufi_drain.armed);
-    assert(coordinator.CompleteDrain(blufi.lease, blufi_drain, true));
+    assert(coordinator.CompleteDrain(blufi.lease,
+                                     RunDrainBarrier(blufi_drain, true)));
 }
 
 void StopDuringSubmissionCannotResurrectOrReleaseEarly() {
@@ -294,6 +331,7 @@ void StopDuringSubmissionCannotResurrectOrReleaseEarly() {
         assert(coordinator.BeginDrain(acquired.lease));
         const auto premature = coordinator.ArmDrainBarrier(acquired.lease);
         assert(!premature.armed);
+        const auto stale_precommit_proof = RunDrainBarrier(premature, true);
         assert(!coordinator.TryAcquire(Coordinator::Owner::kBlufi).acquired);
 
         return_from_driver.ArriveAndWait();
@@ -303,18 +341,19 @@ void StopDuringSubmissionCannotResurrectOrReleaseEarly() {
         assert(!committed.released);
         assert(!coordinator.TryAcquire(Coordinator::Owner::kBlufi).acquired);
 
-        assert(!coordinator.CompleteDrain(acquired.lease, premature, true));
+        const auto fresh_drain = coordinator.ArmDrainBarrier(acquired.lease);
+        assert(fresh_drain.armed);
+        assert(!coordinator.CompleteDrain(acquired.lease,
+                                          stale_precommit_proof));
+        assert(!coordinator.TryAcquire(Coordinator::Owner::kBlufi).acquired);
 
         if (driver_accepted) {
             const auto callback = coordinator.ObserveScanDone(acquired.lease);
             assert(callback.consume_now);
             assert(coordinator.FinishCompletion(acquired.lease));
         } else {
-            const auto post_commit =
-                coordinator.ArmDrainBarrier(acquired.lease);
-            assert(post_commit.armed);
-            assert(coordinator.CompleteDrain(acquired.lease, post_commit,
-                                             true));
+            assert(coordinator.CompleteDrain(
+                acquired.lease, RunDrainBarrier(fresh_drain, true)));
         }
         assert(coordinator.TryAcquire(Coordinator::Owner::kBlufi).acquired);
     }
@@ -347,25 +386,45 @@ void RecoveryAdvancesIncarnationBeforeNextAcquire() {
     const auto lost = coordinator.TryAcquire(Coordinator::Owner::kBlufi);
     assert(lost.acquired);
     assert(coordinator.CommitSubmission(lost.lease, true).accepted);
-    assert(coordinator.BeginRecovery(lost.lease));
+    const auto recovery = coordinator.BeginRecovery(lost.lease);
+    assert(recovery.begun);
 
-    assert(!coordinator.CompleteRecovery(lost.lease, true, false));
+    assert(!coordinator.CompleteRecovery(
+        lost.lease, RunRecovery(recovery, true, false)));
     assert(!coordinator.TryAcquire(Coordinator::Owner::kStation).acquired);
-    assert(!coordinator.CompleteRecovery(lost.lease, false, true));
+    assert(!coordinator.CompleteRecovery(
+        lost.lease, RunRecovery(recovery, false, true)));
     assert(!coordinator.TryAcquire(Coordinator::Owner::kStation).acquired);
-    assert(coordinator.CompleteRecovery(lost.lease, true, true));
+
+    assert(coordinator.CompleteRecovery(
+        lost.lease, RunRecovery(recovery, true, true)));
 
     const auto recovered =
         coordinator.TryAcquire(Coordinator::Owner::kStation);
     assert(recovered.acquired);
     assert(recovered.lease.driver_incarnation !=
            lost.lease.driver_incarnation);
+    assert(coordinator.CommitSubmission(recovered.lease, true).accepted);
+    const auto second_recovery = coordinator.BeginRecovery(recovered.lease);
+    assert(second_recovery.begun);
+    assert(second_recovery.recovery_id != recovery.recovery_id);
+    assert(!coordinator.CompleteRecovery(
+        recovered.lease, RunRecovery(recovery, true, true)));
+    assert(!coordinator.TryAcquire(Coordinator::Owner::kBlufi).acquired);
+    assert(coordinator.CompleteRecovery(
+        recovered.lease, RunRecovery(second_recovery, true, true)));
+
     assert(!coordinator.ObserveScanDone(lost.lease).consume_now);
-    assert(coordinator.CommitSubmission(recovered.lease, false).drain_required);
+    const auto final = coordinator.TryAcquire(Coordinator::Owner::kStation);
+    assert(final.acquired);
+    assert(final.lease.driver_incarnation !=
+           recovered.lease.driver_incarnation);
+    assert(coordinator.CommitSubmission(final.lease, false).drain_required);
     const auto recovered_drain =
-        coordinator.ArmDrainBarrier(recovered.lease);
+        coordinator.ArmDrainBarrier(final.lease);
     assert(recovered_drain.armed);
-    assert(coordinator.CompleteDrain(recovered.lease, recovered_drain, true));
+    assert(coordinator.CompleteDrain(
+        final.lease, RunDrainBarrier(recovered_drain, true)));
 }
 
 void ExhaustedLeaseIdsAndIncarnationsFailClosed() {
@@ -379,7 +438,8 @@ void ExhaustedLeaseIdsAndIncarnationsFailClosed() {
     assert(one_lease_left.CommitSubmission(last.lease, false).drain_required);
     const auto last_drain = one_lease_left.ArmDrainBarrier(last.lease);
     assert(last_drain.armed);
-    assert(one_lease_left.CompleteDrain(last.lease, last_drain, true));
+    assert(one_lease_left.CompleteDrain(
+        last.lease, RunDrainBarrier(last_drain, true)));
     assert(!one_lease_left.TryAcquire(Coordinator::Owner::kBlufi).acquired);
 
     Coordinator incarnation_exhausted(0, max_incarnation - 1);
@@ -387,8 +447,11 @@ void ExhaustedLeaseIdsAndIncarnationsFailClosed() {
         incarnation_exhausted.TryAcquire(Coordinator::Owner::kBlufi);
     assert(lease.acquired);
     assert(incarnation_exhausted.CommitSubmission(lease.lease, true).accepted);
-    assert(incarnation_exhausted.BeginRecovery(lease.lease));
-    assert(incarnation_exhausted.CompleteRecovery(lease.lease, true, true));
+    const auto first_recovery =
+        incarnation_exhausted.BeginRecovery(lease.lease);
+    assert(first_recovery.begun);
+    assert(incarnation_exhausted.CompleteRecovery(
+        lease.lease, RunRecovery(first_recovery, true, true)));
 
     const auto final_incarnation =
         incarnation_exhausted.TryAcquire(Coordinator::Owner::kBlufi);
@@ -396,14 +459,37 @@ void ExhaustedLeaseIdsAndIncarnationsFailClosed() {
     assert(final_incarnation.lease.driver_incarnation == max_incarnation);
     assert(incarnation_exhausted.CommitSubmission(final_incarnation.lease, true)
                .accepted);
-    assert(incarnation_exhausted.BeginRecovery(final_incarnation.lease));
-    assert(!incarnation_exhausted.CompleteRecovery(final_incarnation.lease,
-                                                   true, true));
+    const auto exhausted_recovery =
+        incarnation_exhausted.BeginRecovery(final_incarnation.lease);
+    assert(exhausted_recovery.begun);
+    assert(!incarnation_exhausted.CompleteRecovery(
+        final_incarnation.lease,
+        RunRecovery(exhausted_recovery, true, true)));
     assert(!incarnation_exhausted.TryAcquire(Coordinator::Owner::kStation)
                 .acquired);
 
     Coordinator invalid_incarnation(0, 0);
     assert(!invalid_incarnation.TryAcquire(Coordinator::Owner::kStation)
+                .acquired);
+
+    Coordinator drain_id_exhausted(0, 1, max_lease_id, 0);
+    const auto draining =
+        drain_id_exhausted.TryAcquire(Coordinator::Owner::kStation);
+    assert(draining.acquired);
+    assert(drain_id_exhausted.CommitSubmission(draining.lease, false)
+               .drain_required);
+    assert(!drain_id_exhausted.ArmDrainBarrier(draining.lease).armed);
+    assert(!drain_id_exhausted.TryAcquire(Coordinator::Owner::kBlufi)
+                .acquired);
+
+    Coordinator recovery_id_exhausted(0, 1, 0, max_lease_id);
+    const auto recovering =
+        recovery_id_exhausted.TryAcquire(Coordinator::Owner::kBlufi);
+    assert(recovering.acquired);
+    assert(recovery_id_exhausted.CommitSubmission(recovering.lease, true)
+               .accepted);
+    assert(!recovery_id_exhausted.BeginRecovery(recovering.lease).begun);
+    assert(!recovery_id_exhausted.TryAcquire(Coordinator::Owner::kStation)
                 .acquired);
 }
 
