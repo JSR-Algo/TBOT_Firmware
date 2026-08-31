@@ -3303,21 +3303,25 @@ void Application::InitializeProtocol() {
     // call below). For MQTT, Start() brings up the control channel (not just an
     // audio preconnect), so we never gate it here.
     bool is_websocket_protocol = false;
+    std::string transient_evidence_journey_id =
+        ota_->TakeTransientEvidenceJourneyId();
 #if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     Settings websocket_settings("websocket", false);
     const bool has_configured_websocket_url =
         !websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL).empty();
     if (ota_->HasMqttConfig()) {
+        SecureClearString(transient_evidence_journey_id);
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig() || has_configured_websocket_url) {
         auto websocket_protocol = std::make_unique<WebsocketProtocol>();
         websocket_protocol->SetTransientConfig(
             ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
-            ota_->TakeTransientEvidenceJourneyId());
+            std::move(transient_evidence_journey_id));
         websocket_protocol->SetUnclaimedPublicLessonOnly(!IsDeviceClaimed());
         protocol_ = std::move(websocket_protocol);
         is_websocket_protocol = true;
     } else {
+        SecureClearString(transient_evidence_journey_id);
         ESP_LOGW(TAG, "No protocol specified in the OTA config, using MQTT");
         protocol_ = std::make_unique<MqttProtocol>();
     }
@@ -3325,11 +3329,12 @@ void Application::InitializeProtocol() {
     auto websocket_protocol = std::make_unique<WebsocketProtocol>();
     websocket_protocol->SetTransientConfig(
         ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
-        ota_->TakeTransientEvidenceJourneyId());
+        std::move(transient_evidence_journey_id));
     websocket_protocol->SetUnclaimedPublicLessonOnly(false);
     protocol_ = std::move(websocket_protocol);
     is_websocket_protocol = true;
 #endif
+    SecureClearString(transient_evidence_journey_id);
     protocol_generation_.fetch_add(1, std::memory_order_acq_rel);
 
     Protocol* callback_protocol = protocol_.get();

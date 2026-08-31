@@ -47,7 +47,24 @@ def test_ota_journey_handoff_is_consuming_so_protocol_recreation_cannot_replay_i
     assert "std::move(transient_evidence_journey_id_)" in take
     assert "transient_evidence_journey_id_.clear();" in take
     assert "GetTransientEvidenceJourneyId" not in application
-    assert initialize.count("TakeTransientEvidenceJourneyId()") == 2
+    assert initialize.count("TakeTransientEvidenceJourneyId()") == 1
+
+
+def test_application_consumes_before_transport_selection_and_discards_non_websocket_paths():
+    source = read("main/application.cc")
+    initialize = function_body(source, "void Application::InitializeProtocol")
+    consume = initialize.index("ota_->TakeTransientEvidenceJourneyId()")
+    compile_branch = initialize.index("#if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT")
+
+    assert consume < compile_branch
+    assert "std::string transient_evidence_journey_id" in initialize[:compile_branch]
+    production, local = initialize.split("#else", 1)
+    assert production.count("SecureClearString(transient_evidence_journey_id);") >= 2
+    assert "std::move(transient_evidence_journey_id)" in production
+    assert "std::move(transient_evidence_journey_id)" in local
+    assert "SecureClearString(transient_evidence_journey_id);" in initialize[
+        initialize.index("#endif") :
+    ]
 
 
 def test_validator_is_exact_safe_ascii_length_contract_in_both_consumers():
@@ -63,6 +80,12 @@ def test_validator_is_exact_safe_ascii_length_contract_in_both_consumers():
         for unsafe in ("'/'", "'\\\\'", "' '"):
             assert unsafe not in validator
         assert "return false;" in validator
+
+    exact_contract = re.compile(r"[A-Za-z0-9._:-]{1,64}")
+    assert exact_contract.fullmatch("a")
+    assert exact_contract.fullmatch("A0._:-" + "x" * 58)
+    for invalid in ("", "x" * 65, "é", "\x00", "has space"):
+        assert exact_contract.fullmatch(invalid) is None
 
 
 def test_normal_ota_intercepts_journey_before_generic_string_persistence():
@@ -84,6 +107,18 @@ def test_normal_ota_intercepts_journey_before_generic_string_persistence():
         : websocket_parse.index("cJSON_ArrayForEach(item, websocket)")
     ]
     assert "continue;" in loop[intercept:persist]
+
+
+def test_ota_parse_entry_and_error_paths_clear_stale_journey_state():
+    source = read("main/ota.cc")
+    check = function_body(source, "esp_err_t Ota::CheckVersion")
+    course_parser = function_body(source, "bool Ota::ParseCourseModeResponse")
+
+    check_clear = check.index("transient_evidence_journey_id_.clear();")
+    assert check_clear < check.index("#if")
+    assert check_clear < check.index("return ")
+    course_clear = course_parser.index("transient_evidence_journey_id_.clear();")
+    assert course_clear < course_parser.index("return false;")
 
 
 def test_course_mode_schema_allows_only_optional_valid_journey():
@@ -147,10 +182,10 @@ def test_application_hands_journey_to_websocket_in_production_and_local_branches
     initialize = function_body(source, "void Application::InitializeProtocol")
 
     assert initialize.count("SetTransientConfig(") == 2
-    assert initialize.count("ota_->TakeTransientEvidenceJourneyId()") == 2
+    assert initialize.count("ota_->TakeTransientEvidenceJourneyId()") == 1
     production, local = initialize.split("#else", 1)
-    assert "SetTransientConfig(" in production
-    assert "SetTransientConfig(" in local
+    assert "std::move(transient_evidence_journey_id)" in production
+    assert "std::move(transient_evidence_journey_id)" in local
 
 
 def test_websocket_transient_config_keeps_url_token_branch_semantics_and_validates_journey():
@@ -184,6 +219,9 @@ def test_hello_adds_valid_journey_only_and_consumes_before_allocation_or_add_fai
     assert "IsValidEvidenceJourneyId(evidence_journey_id)" in hello
     assert "if (root == nullptr)" in hello
     assert "if (json_str == nullptr)" in hello
+    assert hello.count("transient_evidence_journey_id_") == 2
+    assert hello.rindex("transient_evidence_journey_id_") < create
+    assert clear < hello.index("return {};", create)
 
 
 def test_journey_value_never_reaches_logging_or_print_sinks():
