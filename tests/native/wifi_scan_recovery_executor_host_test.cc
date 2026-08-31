@@ -34,6 +34,8 @@ struct FakeDriver {
     std::vector<std::string> calls;
     FailureStep failure = FailureStep::kNone;
     FailureStep not_initialized = FailureStep::kNone;
+    FailureStep not_started = FailureStep::kNone;
+    FailureStep invalid_state = FailureStep::kNone;
     bool block_scan_stop = false;
     bool scan_stop_entered = false;
     bool release_scan_stop = false;
@@ -44,6 +46,8 @@ struct FakeDriver {
         calls.clear();
         failure = FailureStep::kNone;
         not_initialized = FailureStep::kNone;
+        not_started = FailureStep::kNone;
+        invalid_state = FailureStep::kNone;
         block_scan_stop = false;
         scan_stop_entered = false;
         release_scan_stop = false;
@@ -63,6 +67,12 @@ struct FakeDriver {
         }
         if (not_initialized == step) {
             return ESP_ERR_WIFI_NOT_INIT;
+        }
+        if (not_started == step) {
+            return ESP_ERR_WIFI_NOT_STARTED;
+        }
+        if (invalid_state == step) {
+            return ESP_ERR_WIFI_STATE;
         }
         return ESP_OK;
     }
@@ -161,6 +171,53 @@ void NotInitializedShutdownStatesAreBenign() {
     }
 }
 
+void ScanStopTransientStatesContinueThroughDriverStop() {
+    for (const bool still_connecting : {false, true}) {
+        driver.Reset();
+        if (still_connecting) {
+            driver.invalid_state = FailureStep::kScanStop;
+        } else {
+            driver.not_started = FailureStep::kScanStop;
+        }
+        RecoveryFixture fixture;
+        WifiScanRecoveryExecutor executor;
+
+        const auto proof = executor.Execute(fixture.recovery);
+
+        assert(proof.Proves(fixture.recovery.recovery_id()));
+        assert((Calls() == std::vector<std::string>{
+            "scan_stop", "wifi_stop", "wifi_deinit", "barrier", "wifi_init"}));
+    }
+}
+
+void ScanStopTransientStatesAreNotBenignForLaterStages() {
+    for (const auto step : {FailureStep::kWifiStop,
+                            FailureStep::kWifiDeinit}) {
+        for (const bool wifi_state : {false, true}) {
+            driver.Reset();
+            if (wifi_state) {
+                driver.invalid_state = step;
+            } else {
+                driver.not_started = step;
+            }
+            RecoveryFixture fixture;
+            WifiScanRecoveryExecutor executor;
+
+            const auto proof = executor.Execute(fixture.recovery);
+
+            assert(!proof.Proves(fixture.recovery.recovery_id()));
+            const std::vector<std::string> expected =
+                step == FailureStep::kWifiStop
+                    ? std::vector<std::string>{"scan_stop", "wifi_stop"}
+                    : std::vector<std::string>{
+                          "scan_stop", "wifi_stop", "wifi_deinit"};
+            assert(Calls() == expected);
+            assert(!fixture.coordinator.TryAcquire(
+                WifiScanLeaseCoordinator::Owner::kBlufi).acquired);
+        }
+    }
+}
+
 void InvalidAndOverflowedRecoveryDecisionsNeverTouchTheDriver() {
     driver.Reset();
     WifiScanLeaseCoordinator coordinator(
@@ -253,6 +310,8 @@ int main() {
     SuccessfulRecoveryUsesExactChoreography();
     EveryFailureReturnsNoProofAndStopsChoreography();
     NotInitializedShutdownStatesAreBenign();
+    ScanStopTransientStatesContinueThroughDriverStop();
+    ScanStopTransientStatesAreNotBenignForLaterStages();
     InvalidAndOverflowedRecoveryDecisionsNeverTouchTheDriver();
     ExecuteCallsAreSerialized();
     std::cout << "wifi scan recovery executor host tests passed\n";

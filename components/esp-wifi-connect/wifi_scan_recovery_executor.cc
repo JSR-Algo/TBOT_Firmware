@@ -12,6 +12,13 @@ bool IsStoppedOrNotInitialized(esp_err_t result) {
     return result == ESP_OK || result == ESP_ERR_WIFI_NOT_INIT;
 }
 
+bool IsScanStoppedOrDriverCanStopIt(esp_err_t result) {
+    // ESP-IDF reports STATE while connecting; the required wifi_stop step ends it.
+    return IsStoppedOrNotInitialized(result) ||
+           result == ESP_ERR_WIFI_NOT_STARTED ||
+           result == ESP_ERR_WIFI_STATE;
+}
+
 }  // namespace
 
 WifiScanLeaseCoordinator::RecoveryProof WifiScanRecoveryExecutor::Execute(
@@ -21,7 +28,7 @@ WifiScanLeaseCoordinator::RecoveryProof WifiScanRecoveryExecutor::Execute(
         return WifiScanLeaseCoordinator::RecoveryProof{};
     }
 
-    if (!IsStoppedOrNotInitialized(esp_wifi_scan_stop())) {
+    if (!IsScanStoppedOrDriverCanStopIt(esp_wifi_scan_stop())) {
         return WifiScanLeaseCoordinator::RecoveryProof{};
     }
     if (!IsStoppedOrNotInitialized(esp_wifi_stop())) {

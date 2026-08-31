@@ -151,6 +151,8 @@ def test_shared_scan_recovery_executor_has_exact_fail_closed_choreography():
     assert positions == sorted(positions)
     assert "cfg.nvs_enable = false;" in execute
     assert "ESP_ERR_WIFI_NOT_INIT" in source
+    assert "ESP_ERR_WIFI_NOT_STARTED" in source
+    assert "ESP_ERR_WIFI_STATE" in source
     assert "esp_netif_init" not in source
     assert "esp_event_loop_create_default" not in source
     assert "nvs_flash" not in source

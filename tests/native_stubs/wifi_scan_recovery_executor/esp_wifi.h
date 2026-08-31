@@ -7,6 +7,8 @@ using esp_err_t = int32_t;
 constexpr esp_err_t ESP_OK = 0;
 constexpr esp_err_t ESP_FAIL = -1;
 constexpr esp_err_t ESP_ERR_WIFI_NOT_INIT = 0x3001;
+constexpr esp_err_t ESP_ERR_WIFI_NOT_STARTED = 0x3002;
+constexpr esp_err_t ESP_ERR_WIFI_STATE = 0x3006;
 
 struct wifi_init_config_t {
     bool nvs_enable = true;
