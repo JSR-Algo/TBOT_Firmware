@@ -366,7 +366,7 @@ void RunningAndDrainingCompletionsHaveDistinctDelivery() {
     assert(!controller.FinishCompletion(stale.request_id).start_pending);
 }
 
-void CallbackRacingCommitStartOwnsCompletionOnce() {
+void CallbackRacingCommitStartHasConsistentOwnership() {
     for (int iteration = 0; iteration < 200; ++iteration) {
         Controller controller;
         const auto request = controller.RequestScan(Request(1, 11, 101));
@@ -388,6 +388,9 @@ void CallbackRacingCommitStartOwnsCompletionOnce() {
 
         assert(commit.accepted);
         assert(!commit.draining);
+        if (!completion.owned_callback) {
+            completion = controller.BeginCompletion(1, 11, 101);
+        }
         assert(completion.owned_callback);
         assert(!completion.discard_results);
         assert(!controller.BeginCompletion(1, 11, 101).owned_callback);
@@ -398,6 +401,20 @@ void CallbackRacingCommitStartOwnsCompletionOnce() {
         assert(!late_commit.accepted);
         assert(controller.phase() == Controller::Phase::kIdle);
     }
+}
+
+void ForeignCompletionWhileStartingCannotOwnFailedSubmission() {
+    Controller controller;
+    const auto request = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, request.request_id);
+
+    const auto foreign = controller.BeginCompletion(1, 11, 101);
+    assert(!foreign.owned_callback);
+
+    const auto failed = controller.CommitStart(request.request_id, false);
+    assert(!failed.accepted);
+    assert(failed.send_failure);
+    assert(controller.phase() == Controller::Phase::kIdle);
 }
 
 void LostCallbackRecoveryAdvancesDriverBeforePendingStart() {
@@ -715,7 +732,8 @@ int main() {
     SynchronousStartFailurePromotesPendingRequest();
     ConcurrentRequestsCoalesceToLatestPendingRequest();
     RunningAndDrainingCompletionsHaveDistinctDelivery();
-    CallbackRacingCommitStartOwnsCompletionOnce();
+    CallbackRacingCommitStartHasConsistentOwnership();
+    ForeignCompletionWhileStartingCannotOwnFailedSubmission();
     LostCallbackRecoveryAdvancesDriverBeforePendingStart();
     CurrentOwnerRetriesAfterSuccessfulRecovery();
     StaleOwnerDoesNotRetryAfterSuccessfulRecovery();

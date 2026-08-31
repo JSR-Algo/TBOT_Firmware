@@ -117,13 +117,6 @@ public:
             return result;
         }
 
-        if (callback_claimed_) {
-            // Receiving SCAN_DONE proves the asynchronous start was accepted,
-            // even when the callback won the race with this commit.
-            result.accepted = true;
-            result.draining = phase_ == Phase::kDraining;
-            return result;
-        }
         if (phase_ != Phase::kStarting) {
             return result;
         }
@@ -147,16 +140,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         CompletionDecision result;
         if (callback_claimed_ || recovering_ ||
-            (phase_ != Phase::kStarting && phase_ != Phase::kRunning &&
-             phase_ != Phase::kDraining) ||
-            (phase_ == Phase::kStarting && !submission_claimed_)) {
+            (phase_ != Phase::kRunning && phase_ != Phase::kDraining)) {
             return result;
         }
 
-        // SCAN_DONE can run before esp_wifi_scan_start() returns to its caller.
-        if (phase_ == Phase::kStarting) {
-            phase_ = invalidated_ ? Phase::kDraining : Phase::kRunning;
-        }
+        // ESP scan events are global. A callback observed before CommitStart(true)
+        // may belong to WifiStation or another component, so Starting never owns it.
         callback_claimed_ = true;
         result.request_id = owner_request_id_;
         result.owned_callback = true;
