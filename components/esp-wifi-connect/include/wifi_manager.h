@@ -28,6 +28,7 @@
 #include <mutex>
 
 #include "wifi_station.h"
+#include "wifi_scan_lease_coordinator.h"
 
 class WifiStation;
 class WifiConfigurationAp;
@@ -96,6 +97,11 @@ public:
 
     const WifiManagerConfig& GetConfig() const { return config_; }
 
+    // Callback paths use this accessor without taking the manager lifecycle lock.
+    WifiScanLeaseCoordinator& ScanLeaseCoordinator() {
+        return scan_lease_coordinator_;
+    }
+
     WifiManager(const WifiManager&) = delete;
     WifiManager& operator=(const WifiManager&) = delete;
 
@@ -106,6 +112,7 @@ private:
     void NotifyEvent(WifiEvent event, const std::string& data = "");
 
     WifiManagerConfig config_;
+    WifiScanLeaseCoordinator scan_lease_coordinator_;
     std::unique_ptr<WifiStation> station_;
     std::unique_ptr<WifiConfigurationAp> config_ap_;
 

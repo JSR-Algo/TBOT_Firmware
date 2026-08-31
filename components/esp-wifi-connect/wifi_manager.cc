@@ -16,8 +16,10 @@
 #define TAG "WifiManager"
 
 WifiManager& WifiManager::GetInstance() {
-    static WifiManager instance;
-    return instance;
+    // Scanner handlers and their coordinator may be referenced by queued
+    // default-event-loop callbacks for the remainder of the process.
+    static WifiManager* instance = new WifiManager;
+    return *instance;
 }
 
 WifiManager::WifiManager() = default;
@@ -93,8 +95,8 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
         return false;
     }
 
-    station_ = std::make_unique<WifiStation>();
-    config_ap_ = std::make_unique<WifiConfigurationAp>();
+    station_ = std::make_unique<WifiStation>(scan_lease_coordinator_);
+    config_ap_ = std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_);
 
     initialized_ = true;
     ESP_LOGI(TAG, "Initialized");

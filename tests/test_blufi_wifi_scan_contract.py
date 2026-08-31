@@ -114,6 +114,118 @@ def test_default_event_loop_barrier_host_cleanup_model():
     )
 
 
+def test_wifi_manager_exposes_process_lifetime_scan_coordinator_without_locking():
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    source = read("components/esp-wifi-connect/wifi_manager.cc")
+
+    assert '#include "wifi_scan_lease_coordinator.h"' in header
+    assert "WifiScanLeaseCoordinator& ScanLeaseCoordinator()" in header
+    accessor = function_body(header, "WifiScanLeaseCoordinator& ScanLeaseCoordinator()")
+    assert "return scan_lease_coordinator_;" in accessor
+    assert "mutex_" not in accessor
+    assert "WifiScanLeaseCoordinator scan_lease_coordinator_;" in header
+    assert "static WifiManager* instance = new WifiManager" in source
+    assert "std::make_unique<WifiStation>(scan_lease_coordinator_)" in source
+    assert "std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_)" in source
+
+
+def test_station_scan_lease_uses_exact_callback_or_recovery_ownership():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    start = function_body(source, "bool WifiStation::StartOwnedScan")
+    handler = function_body(source, "void WifiStation::WifiEventHandler")
+    stop = function_body(source, "void WifiStation::Stop")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+
+    assert "std::mutex scan_mutex_;" in header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;" in header
+    assert "scan_in_progress_" not in header + source
+    assert "TryAcquire(WifiScanLeaseCoordinator::Owner::kStation)" in start
+    assert start.index("TryAcquire(") < start.index("esp_wifi_scan_start(")
+    assert start.index("esp_wifi_scan_start(") < start.index("CommitSubmission(")
+    assert "commit.consume_latched" in start
+    assert "CompleteOwnedScan(lease)" in start
+    assert handler.index("ObserveScanDone(lease)") < handler.index(
+        "CompleteOwnedScan(lease)"
+    )
+    assert completion.index("esp_wifi_scan_get_ap_num") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert completion.index("esp_wifi_clear_ap_list") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert stop.index("esp_timer_stop") < stop.index("BeginDrain(lease)")
+    assert stop.index("BeginDrain(lease)") < stop.index("esp_wifi_scan_stop")
+    assert "esp_event_handler_instance_unregister(WIFI_EVENT" not in stop
+    assert "scan_lease_.reset()" not in stop
+
+
+def test_config_ap_scan_lease_uses_one_owned_start_and_retained_handler():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    start_mode = function_body(source, "void WifiConfigurationAp::Start")
+    start_scan = function_body(source, "bool WifiConfigurationAp::StartOwnedScan")
+    handler = function_body(source, "void WifiConfigurationAp::WifiEventHandler")
+    stop = function_body(source, "void WifiConfigurationAp::Stop")
+    completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
+
+    assert "std::mutex scan_mutex_;" in header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;" in header
+    assert source.count("esp_wifi_scan_start(") == 1
+    assert "StartOwnedScan();" in start_mode
+    assert "StartOwnedScan();" in source[source.index(".callback =") : source.index(".arg = this")]
+    assert "TryAcquire(WifiScanLeaseCoordinator::Owner::kConfigAp)" in start_scan
+    assert start_scan.index("TryAcquire(") < start_scan.index("esp_wifi_scan_start(")
+    assert start_scan.index("esp_wifi_scan_start(") < start_scan.index(
+        "CommitSubmission("
+    )
+    assert "commit.consume_latched" in start_scan
+    assert handler.index("ObserveScanDone(lease)") < handler.index(
+        "CompleteOwnedScan(lease)"
+    )
+    assert completion.index("esp_wifi_scan_get_ap_num") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert completion.index("esp_wifi_clear_ap_list") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert stop.index("esp_timer_stop") < stop.index("BeginDrain(lease)")
+    assert stop.index("BeginDrain(lease)") < stop.index("esp_wifi_scan_stop")
+    assert "esp_event_handler_instance_unregister(WIFI_EVENT" not in stop
+    assert "scan_lease_.reset()" not in stop
+
+
+def test_station_and_config_stop_never_cancel_a_foreign_scan():
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    config = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    station_stop = function_body(station, "void WifiStation::Stop")
+    config_stop = function_body(config, "void WifiConfigurationAp::Stop")
+    config_connect = function_body(config, "bool WifiConfigurationAp::ConnectToWifi")
+
+    for body in (station_stop, config_stop, config_connect):
+        owned = body.index("if (lease_snapshot.has_value())")
+        scan_stop = body.index("esp_wifi_scan_stop()")
+        assert owned < scan_stop
+        assert body[owned:scan_stop].count("}") == 0
+
+
+def test_restarted_station_and_config_retry_while_old_callback_debt_drains():
+    station = function_body(
+        read("components/esp-wifi-connect/wifi_station.cc"),
+        "bool WifiStation::StartOwnedScan",
+    )
+    config = function_body(
+        read("components/esp-wifi-connect/wifi_configuration_ap.cc"),
+        "bool WifiConfigurationAp::StartOwnedScan",
+    )
+
+    for body in (station, config):
+        assert "local_callback_debt = scan_lease_.has_value()" in body
+        assert body.index("local_callback_debt = scan_lease_.has_value()") < body.index(
+            "ScheduleScanRetry("
+        )
+
+
 def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():
     header = read("main/boards/common/blufi.h")
 
@@ -620,9 +732,12 @@ def test_wifi_station_does_not_consume_blufi_owned_scan_results():
     header = read("managed_components/78__esp-wifi-connect/include/wifi_station.h")
     handler = function_body(source, "void WifiStation::WifiEventHandler")
 
-    assert "scan_in_progress_" in header
+    assert "scan_in_progress_" not in header + source
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;" in header
     assert "bool StartOwnedScan();" in header
     assert "bool WifiStation::StartOwnedScan()" in source
-    assert "!this_->scan_in_progress_" in handler
-    assert handler.index("!this_->scan_in_progress_") < handler.index("HandleScanResult();")
+    assert "ObserveScanDone(lease)" in handler
+    assert handler.index("ObserveScanDone(lease)") < handler.index(
+        "CompleteOwnedScan(lease)"
+    )
     assert "Ignoring WiFi scan done event not owned by WifiStation" in handler

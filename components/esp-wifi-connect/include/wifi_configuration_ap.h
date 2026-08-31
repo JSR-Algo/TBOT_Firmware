@@ -6,6 +6,7 @@
 #include <mutex>
 #include <memory>
 #include <functional>
+#include <optional>
 
 #include <esp_http_server.h>
 #include <esp_event.h>
@@ -15,6 +16,7 @@
 
 #include "dns_server.h"
 #include "sdkconfig.h"
+#include "wifi_scan_lease_coordinator.h"
 
 /**
  * WifiConfigurationAp - WiFi configuration access point
@@ -24,7 +26,8 @@
  */
 class WifiConfigurationAp {
 public:
-    WifiConfigurationAp();
+    explicit WifiConfigurationAp(
+        WifiScanLeaseCoordinator& scan_lease_coordinator);
     ~WifiConfigurationAp();
 
     // Delete copy constructor and assignment operator
@@ -65,6 +68,12 @@ private:
     bool is_connecting_ = false;
     esp_netif_t* ap_netif_ = nullptr;
     std::vector<wifi_ap_record_t> ap_records_;
+    WifiScanLeaseCoordinator& scan_lease_coordinator_;
+    std::mutex scan_mutex_;
+    std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
+    bool scans_enabled_ = false;
+    uint64_t scan_session_id_ = 0;
+    uint64_t lease_session_id_ = 0;
 
     // 高级配置项
     std::string ota_url_;
@@ -77,6 +86,9 @@ private:
 
     void StartAccessPoint();
     void StartWebServer();
+    bool StartOwnedScan();
+    void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
+    void ScheduleScanRetry(int64_t delay_microseconds);
 
     // Event handlers
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

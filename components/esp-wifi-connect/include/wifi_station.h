@@ -4,11 +4,15 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <mutex>
+#include <optional>
 
 #include <esp_event.h>
 #include <esp_timer.h>
 #include <esp_netif.h>
 #include <esp_wifi_types_generic.h>
+
+#include "wifi_scan_lease_coordinator.h"
 
 // WiFi power save level enumeration
 enum class WifiPowerSaveLevel {
@@ -33,7 +37,7 @@ struct WifiApRecord {
  */
 class WifiStation {
 public:
-    WifiStation();
+    explicit WifiStation(WifiScanLeaseCoordinator& scan_lease_coordinator);
     ~WifiStation();
 
     // Delete copy constructor and assignment operator
@@ -80,10 +84,17 @@ private:
     std::function<void()> on_scan_begin_;
     std::vector<WifiApRecord> connect_queue_;
     bool was_connected_ = false;  // Track if we were connected before disconnection
-    bool scan_in_progress_ = false;
+    WifiScanLeaseCoordinator& scan_lease_coordinator_;
+    std::mutex scan_mutex_;
+    std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
+    bool scans_enabled_ = false;
+    uint64_t scan_session_id_ = 0;
+    uint64_t lease_session_id_ = 0;
 
     bool StartOwnedScan();
-    void HandleScanResult();
+    void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
+    void HandleScanResult(std::vector<wifi_ap_record_t> ap_records);
+    void ScheduleScanRetry(int64_t delay_microseconds);
     void StartConnect();
     void UpdateScanInterval();  // Exponential backoff for scan interval
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

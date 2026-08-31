@@ -159,6 +159,94 @@ void SimultaneousAcquireGrantsExactlyOneLease() {
     assert(coordinator.FinishCompletion(winner));
 }
 
+void StationAndConfigTimersReachOnePhysicalSubmission() {
+    Coordinator coordinator;
+    Barrier start(3);
+    Coordinator::AcquireDecision station;
+    Coordinator::AcquireDecision config_ap;
+    unsigned station_submissions = 0;
+    unsigned config_submissions = 0;
+
+    std::thread station_timer([&]() {
+        start.ArriveAndWait();
+        station = coordinator.TryAcquire(Coordinator::Owner::kStation);
+        if (station.acquired) {
+            ++station_submissions;
+        }
+    });
+    std::thread config_timer([&]() {
+        start.ArriveAndWait();
+        config_ap = coordinator.TryAcquire(Coordinator::Owner::kConfigAp);
+        if (config_ap.acquired) {
+            ++config_submissions;
+        }
+    });
+
+    start.ArriveAndWait();
+    station_timer.join();
+    config_timer.join();
+    assert(station.acquired != config_ap.acquired);
+    assert(station_submissions + config_submissions == 1);
+
+    const auto winner = station.acquired ? station.lease : config_ap.lease;
+    assert(coordinator.CommitSubmission(winner, true).accepted);
+    assert(coordinator.ObserveScanDone(winner).consume_now);
+    assert(coordinator.FinishCompletion(winner));
+}
+
+void StationAndConfigEarlyCallbackCompletesAfterCommit() {
+    Coordinator coordinator;
+    const auto config =
+        coordinator.TryAcquire(Coordinator::Owner::kConfigAp);
+    assert(config.acquired);
+    const auto callback = coordinator.ObserveScanDone(config.lease);
+    assert(callback.deferred_until_commit);
+    assert(!callback.consume_now);
+    const auto commit = coordinator.CommitSubmission(config.lease, true);
+    assert(commit.consume_latched);
+    assert(coordinator.FinishCompletion(config.lease));
+    assert(coordinator.TryAcquire(Coordinator::Owner::kStation).acquired);
+}
+
+void StationStopDuringStartingOrRunningBlocksConfigUntilCallback() {
+    for (const bool stop_while_starting : {false, true}) {
+        Coordinator coordinator;
+        const auto station =
+            coordinator.TryAcquire(Coordinator::Owner::kStation);
+        assert(station.acquired);
+        if (!stop_while_starting) {
+            assert(coordinator.CommitSubmission(station.lease, true).accepted);
+        }
+        assert(coordinator.BeginDrain(station.lease));
+        if (stop_while_starting) {
+            const auto commit =
+                coordinator.CommitSubmission(station.lease, true);
+            assert(commit.drain_required);
+        }
+        assert(!coordinator.TryAcquire(Coordinator::Owner::kConfigAp).acquired);
+        assert(coordinator.ObserveScanDone(station.lease).consume_now);
+        assert(coordinator.FinishCompletion(station.lease));
+        assert(coordinator.TryAcquire(Coordinator::Owner::kConfigAp).acquired);
+    }
+}
+
+void MissingStationCallbackKeepsConfigBlocked() {
+    Coordinator coordinator;
+    const auto station = coordinator.TryAcquire(Coordinator::Owner::kStation);
+    assert(station.acquired);
+    assert(coordinator.CommitSubmission(station.lease, true).accepted);
+    assert(coordinator.BeginDrain(station.lease));
+
+    for (unsigned attempt = 0; attempt < 3; ++attempt) {
+        assert(!coordinator.TryAcquire(Coordinator::Owner::kConfigAp).acquired);
+    }
+
+    const auto callback = coordinator.ObserveScanDone(station.lease);
+    assert(callback.consume_now);
+    assert(coordinator.FinishCompletion(station.lease));
+    assert(coordinator.TryAcquire(Coordinator::Owner::kConfigAp).acquired);
+}
+
 void EarlyMatchingCallbackWaitsForSuccessfulCommit() {
     Coordinator coordinator;
     const auto acquired = coordinator.TryAcquire(Coordinator::Owner::kBlufi);
@@ -534,6 +622,10 @@ void ExhaustedLeaseIdsAndIncarnationsFailClosed() {
 int main() {
     ExactIdentityOwnsEveryTransition();
     SimultaneousAcquireGrantsExactlyOneLease();
+    StationAndConfigTimersReachOnePhysicalSubmission();
+    StationAndConfigEarlyCallbackCompletesAfterCommit();
+    StationStopDuringStartingOrRunningBlocksConfigUntilCallback();
+    MissingStationCallbackKeepsConfigBlocked();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();
     ErrorFirstThenQueuedCallbackRetainsOwnershipUntilConsumed();
