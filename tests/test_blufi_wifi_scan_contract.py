@@ -203,7 +203,7 @@ def test_station_and_config_stop_never_cancel_a_foreign_scan():
     config_connect = function_body(config, "bool WifiConfigurationAp::ConnectToWifi")
 
     for body in (station_stop, config_stop, config_connect):
-        owned = body.index("if (lease_snapshot.has_value())")
+        owned = body.index("if (scan_lease_.has_value())")
         scan_stop = body.index("esp_wifi_scan_stop()")
         assert owned < scan_stop
         assert body[owned:scan_stop].count("}") == 0
@@ -222,8 +222,70 @@ def test_restarted_station_and_config_retry_while_old_callback_debt_drains():
     for body in (station, config):
         assert "local_callback_debt = scan_lease_.has_value()" in body
         assert body.index("local_callback_debt = scan_lease_.has_value()") < body.index(
-            "ScheduleScanRetry("
+            "esp_timer_start_once("
         )
+
+
+def test_station_submission_stop_and_completion_share_one_lifecycle_lock():
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    start = function_body(source, "bool WifiStation::StartOwnedScan")
+    stop = function_body(source, "void WifiStation::Stop")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in start
+    assert start.index("lifecycle_lock") < start.index("TryAcquire(")
+    assert start.index("TryAcquire(") < start.index("esp_wifi_scan_start(")
+    assert start.index("esp_wifi_scan_start(") < start.index("CommitSubmission(")
+    assert start.index("CommitSubmission(") < start.index("lifecycle_lock.unlock()")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in stop
+    assert stop.index("lifecycle_lock") < stop.index("scans_enabled_ = false")
+    assert stop.index("scans_enabled_ = false") < stop.index("BeginDrain(")
+    assert stop.index("BeginDrain(") < stop.index("esp_wifi_scan_stop(")
+    assert stop.index("esp_wifi_scan_stop(") < stop.index("esp_wifi_stop(")
+    assert stop.index("esp_wifi_stop(") < stop.index("lifecycle_lock.unlock()")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in completion
+    assert completion.index("lifecycle_lock") < completion.index("esp_wifi_scan_get_ap_num")
+    assert "HandleScanResultLocked(" in completion
+    assert completion.index("HandleScanResultLocked(") < completion.index(
+        "lifecycle_lock.unlock()"
+    )
+    assert completion.index("lifecycle_lock.unlock()") < completion.index(
+        "on_connect_("
+    )
+
+
+def test_config_submission_connect_stop_and_publish_share_lifecycle_lock():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    start = function_body(source, "bool WifiConfigurationAp::StartOwnedScan")
+    connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
+    stop = function_body(source, "void WifiConfigurationAp::Stop")
+    completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in start
+    assert start.index("lifecycle_lock") < start.index("TryAcquire(")
+    assert start.index("TryAcquire(") < start.index("esp_wifi_scan_start(")
+    assert start.index("CommitSubmission(") < start.index("lifecycle_lock.unlock()")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in connect
+    assert connect.index("lifecycle_lock") < connect.index("BeginDrain(")
+    assert connect.index("BeginDrain(") < connect.index("esp_wifi_scan_stop(")
+    assert connect.index("esp_wifi_scan_stop(") < connect.index(
+        "lifecycle_lock.unlock()"
+    )
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in stop
+    assert stop.index("lifecycle_lock") < stop.index("scans_enabled_ = false")
+    assert stop.index("BeginDrain(") < stop.index("esp_wifi_scan_stop(")
+    assert stop.index("esp_wifi_stop(") < stop.index("lifecycle_lock.unlock()")
+    assert "ap_records_.clear()" in stop
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in completion
+    assert completion.index("lifecycle_lock") < completion.index("esp_wifi_scan_get_ap_num")
+    assert completion.index("ap_records_.swap(scanned_records)") < completion.index(
+        "lifecycle_lock.unlock()"
+    )
 
 
 def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():

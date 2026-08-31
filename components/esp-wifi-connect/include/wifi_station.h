@@ -93,9 +93,11 @@ private:
 
     bool StartOwnedScan();
     void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
-    void HandleScanResult(std::vector<wifi_ap_record_t> ap_records);
+    std::optional<std::string> HandleScanResultLocked(
+        std::vector<wifi_ap_record_t> ap_records);
     void ScheduleScanRetry(int64_t delay_microseconds);
     void StartConnect();
+    std::string StartConnectLocked();
     void UpdateScanInterval();  // Exponential backoff for scan interval
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

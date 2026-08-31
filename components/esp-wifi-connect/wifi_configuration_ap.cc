@@ -119,37 +119,32 @@ void WifiConfigurationAp::Start()
 bool WifiConfigurationAp::StartOwnedScan()
 {
     WifiScanLeaseCoordinator::Lease lease;
-    bool coordinator_busy = false;
-    bool local_callback_debt = false;
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        if (!scans_enabled_ || is_connecting_) {
-            return false;
-        }
-        local_callback_debt = scan_lease_.has_value();
-        if (!local_callback_debt) {
-            const auto acquired = scan_lease_coordinator_.TryAcquire(WifiScanLeaseCoordinator::Owner::kConfigAp);
-            if (!acquired.acquired) {
-                coordinator_busy = true;
-            } else {
-                lease = acquired.lease;
-                scan_lease_ = lease;
-                lease_session_id_ = scan_session_id_;
-            }
-        }
+    std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
+    if (!scans_enabled_ || is_connecting_) {
+        return false;
     }
+    const bool local_callback_debt = scan_lease_.has_value();
     if (local_callback_debt) {
-        ScheduleScanRetry(10 * 1000000);
+        if (scan_timer_ != nullptr) {
+            esp_timer_start_once(scan_timer_, 10 * 1000000);
+        }
         return false;
     }
-    if (coordinator_busy) {
-        ScheduleScanRetry(10 * 1000000);
+    const auto acquired = scan_lease_coordinator_.TryAcquire(WifiScanLeaseCoordinator::Owner::kConfigAp);
+    if (!acquired.acquired) {
+        if (scan_timer_ != nullptr) {
+            esp_timer_start_once(scan_timer_, 10 * 1000000);
+        }
         return false;
     }
+    lease = acquired.lease;
+    scan_lease_ = lease;
+    lease_session_id_ = scan_session_id_;
 
     const esp_err_t err = esp_wifi_scan_start(nullptr, false);
     const auto commit =
         scan_lease_coordinator_.CommitSubmission(lease, err == ESP_OK);
+    lifecycle_lock.unlock();
     if (commit.consume_latched) {
         CompleteOwnedScan(lease);
         return true;
@@ -165,17 +160,15 @@ bool WifiConfigurationAp::StartOwnedScan()
 void WifiConfigurationAp::CompleteOwnedScan(
         const WifiScanLeaseCoordinator::Lease& lease)
 {
-    bool consume_results = false;
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        if (!scan_lease_.has_value() ||
-            scan_lease_->owner != lease.owner ||
-            scan_lease_->lease_id != lease.lease_id ||
-            scan_lease_->driver_incarnation != lease.driver_incarnation) {
-            return;
-        }
-        consume_results = scans_enabled_ && lease_session_id_ == scan_session_id_;
+    std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
+    if (!scan_lease_.has_value() ||
+        scan_lease_->owner != lease.owner ||
+        scan_lease_->lease_id != lease.lease_id ||
+        scan_lease_->driver_incarnation != lease.driver_incarnation) {
+        return;
     }
+    const bool consume_results =
+        scans_enabled_ && lease_session_id_ == scan_session_id_;
 
     uint16_t ap_num = 0;
     std::vector<wifi_ap_record_t> scanned_records;
@@ -190,28 +183,22 @@ void WifiConfigurationAp::CompleteOwnedScan(
     }
     esp_wifi_clear_ap_list();
 
-    bool publish_results = false;
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        if (!scan_lease_coordinator_.FinishCompletion(lease)) {
-            return;
-        }
-        if (scan_lease_.has_value() &&
-            scan_lease_->lease_id == lease.lease_id &&
-            scan_lease_->driver_incarnation == lease.driver_incarnation) {
-            scan_lease_.reset();
-        }
-        publish_results = consume_results && scans_enabled_ &&
-                          lease_session_id_ == scan_session_id_;
+    if (!scan_lease_coordinator_.FinishCompletion(lease)) {
+        return;
     }
+    scan_lease_.reset();
 
-    if (publish_results) {
+    if (consume_results && scans_enabled_ &&
+        lease_session_id_ == scan_session_id_) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             ap_records_.swap(scanned_records);
         }
-        ScheduleScanRetry(10 * 1000000);
+        if (!is_connecting_ && scan_timer_ != nullptr) {
+            esp_timer_start_once(scan_timer_, 10 * 1000000);
+        }
     }
+    lifecycle_lock.unlock();
 }
 
 void WifiConfigurationAp::ScheduleScanRetry(int64_t delay_microseconds)
@@ -800,17 +787,13 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         return false;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        is_connecting_ = true;
+    std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
+    if (!scans_enabled_) {
+        return false;
     }
-    std::optional<WifiScanLeaseCoordinator::Lease> lease_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        lease_snapshot = scan_lease_;
-    }
-    if (lease_snapshot.has_value()) {
-        const auto lease = *lease_snapshot;
+    is_connecting_ = true;
+    if (scan_lease_.has_value()) {
+        const auto lease = *scan_lease_;
         scan_lease_coordinator_.BeginDrain(lease);
         esp_wifi_scan_stop();
     }
@@ -827,13 +810,12 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     auto ret = esp_wifi_connect();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to connect to WiFi: %d", ret);
-        {
-            std::lock_guard<std::mutex> lock(scan_mutex_);
-            is_connecting_ = false;
-        }
+        is_connecting_ = false;
+        lifecycle_lock.unlock();
         ScheduleScanRetry(10 * 1000000);
         return false;
     }
+    lifecycle_lock.unlock();
     ESP_LOGI(TAG, "Testing WiFi credentials");
 
     // Wait for the connection to complete for 10 or 25 seconds
@@ -992,40 +974,26 @@ void WifiConfigurationAp::Stop() {
     esp_smartconfig_stop();
 #endif
 
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        scans_enabled_ = false;
-        ++scan_session_id_;
-    }
-
     // 停止定时器
     if (scan_timer_) {
         esp_timer_stop(scan_timer_);
-        esp_timer_delete(scan_timer_);
-        scan_timer_ = nullptr;
     }
 
-    std::optional<WifiScanLeaseCoordinator::Lease> lease_snapshot;
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        lease_snapshot = scan_lease_;
-    }
-    if (lease_snapshot.has_value()) {
-        const auto lease = *lease_snapshot;
+    std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
+    scans_enabled_ = false;
+    ++scan_session_id_;
+    esp_timer_handle_t timer_to_delete = scan_timer_;
+    scan_timer_ = nullptr;
+
+    if (scan_lease_.has_value()) {
+        const auto lease = *scan_lease_;
         scan_lease_coordinator_.BeginDrain(lease);
         esp_wifi_scan_stop();
     }
 
-    // 停止Web服务器
-    if (server_) {
-        httpd_stop(server_);
-        server_ = nullptr;
-    }
-
-    // 停止DNS服务器
-    if (dns_server_) {
-        dns_server_->Stop();
-        dns_server_.reset();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ap_records_.clear();
     }
 
     // 停止WiFi（但不 deinit，WiFi 驱动由 WifiManager 管理）
@@ -1035,6 +1003,21 @@ void WifiConfigurationAp::Stop() {
     if (ap_netif_) {
         esp_netif_destroy_default_wifi(ap_netif_);
         ap_netif_ = nullptr;
+    }
+    lifecycle_lock.unlock();
+    if (timer_to_delete != nullptr) {
+        esp_timer_delete(timer_to_delete);
+    }
+
+    // Requests entering after radio teardown observe scans_enabled_ == false.
+    if (server_) {
+        httpd_stop(server_);
+        server_ = nullptr;
+    }
+
+    if (dns_server_) {
+        dns_server_->Stop();
+        dns_server_.reset();
     }
 
     ESP_LOGI(TAG, "Wifi configuration AP stopped");

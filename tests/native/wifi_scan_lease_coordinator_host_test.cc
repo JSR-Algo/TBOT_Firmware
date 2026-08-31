@@ -1,6 +1,7 @@
 #include "../../components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
 
 #include <cassert>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <thread>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 using Coordinator = WifiScanLeaseCoordinator;
@@ -245,6 +247,149 @@ void MissingStationCallbackKeepsConfigBlocked() {
     assert(callback.consume_now);
     assert(coordinator.FinishCompletion(station.lease));
     assert(coordinator.TryAcquire(Coordinator::Owner::kConfigAp).acquired);
+}
+
+class SerializedScannerModel {
+public:
+    SerializedScannerModel(Coordinator& coordinator, Coordinator::Owner owner)
+        : coordinator_(coordinator), owner_(owner) {}
+
+    bool Start(Barrier* driver_entered = nullptr,
+               Barrier* allow_driver_return = nullptr) {
+        std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+        if (!enabled_ || lease_.lease_id != 0) {
+            return false;
+        }
+        const auto acquired = coordinator_.TryAcquire(owner_);
+        if (!acquired.acquired) {
+            return false;
+        }
+        lease_ = acquired.lease;
+        ++physical_starts_;
+        if (driver_entered != nullptr) {
+            driver_entered->ArriveAndWait();
+        }
+        if (allow_driver_return != nullptr) {
+            allow_driver_return->ArriveAndWait();
+        }
+        coordinator_.CommitSubmission(lease_, true);
+        return true;
+    }
+
+    void Stop() {
+        std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+        enabled_ = false;
+        if (lease_.lease_id != 0) {
+            coordinator_.BeginDrain(lease_);
+            ++physical_stops_;
+        }
+    }
+
+    void Complete(bool publish, Barrier* completion_holds_lock = nullptr,
+                  Barrier* allow_delivery = nullptr) {
+        std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+        if (completion_holds_lock != nullptr) {
+            completion_holds_lock->ArriveAndWait();
+        }
+        if (allow_delivery != nullptr) {
+            allow_delivery->ArriveAndWait();
+        }
+        if (coordinator_.FinishCompletion(lease_)) {
+            lease_ = Coordinator::Lease{};
+            if (enabled_) {
+                if (publish) {
+                    ++published_results_;
+                } else {
+                    ++connect_starts_;
+                }
+            }
+        }
+    }
+
+    Coordinator::Lease lease() const { return lease_; }
+    unsigned physical_starts() const { return physical_starts_.load(); }
+    unsigned physical_stops() const { return physical_stops_.load(); }
+    unsigned connect_starts() const { return connect_starts_.load(); }
+    unsigned published_results() const { return published_results_.load(); }
+
+private:
+    Coordinator& coordinator_;
+    Coordinator::Owner owner_;
+    std::mutex lifecycle_mutex_;
+    bool enabled_ = true;
+    Coordinator::Lease lease_;
+    std::atomic<unsigned> physical_starts_{0};
+    std::atomic<unsigned> physical_stops_{0};
+    std::atomic<unsigned> connect_starts_{0};
+    std::atomic<unsigned> published_results_{0};
+};
+
+void StopCannotOvertakePhysicalStartAndCommit() {
+    Coordinator coordinator;
+    SerializedScannerModel scanner(coordinator, Coordinator::Owner::kStation);
+    Barrier driver_entered(2);
+    Barrier allow_driver_return(2);
+
+    std::thread start([&]() {
+        assert(scanner.Start(&driver_entered, &allow_driver_return));
+    });
+    driver_entered.ArriveAndWait();
+    std::thread stop([&]() { scanner.Stop(); });
+    assert(scanner.physical_starts() == 1);
+    assert(scanner.physical_stops() == 0);
+    allow_driver_return.ArriveAndWait();
+    start.join();
+    stop.join();
+    assert(scanner.physical_stops() == 1);
+    assert(!scanner.Start());
+    assert(scanner.physical_starts() == 1);
+}
+
+void CompletionAndStopHaveOneDeterministicWinner() {
+    for (const auto scenario : {
+             std::pair<Coordinator::Owner, bool>{
+                 Coordinator::Owner::kStation, false},
+             std::pair<Coordinator::Owner, bool>{
+                 Coordinator::Owner::kConfigAp, true},
+         }) {
+        Coordinator coordinator;
+        SerializedScannerModel scanner(coordinator, scenario.first);
+        assert(scanner.Start());
+        const auto lease = scanner.lease();
+        assert(coordinator.ObserveScanDone(lease).consume_now);
+        Barrier completion_holds_lock(2);
+        Barrier allow_delivery(2);
+        std::thread completion([&]() {
+            scanner.Complete(scenario.second, &completion_holds_lock,
+                             &allow_delivery);
+        });
+        completion_holds_lock.ArriveAndWait();
+        std::thread stop([&]() { scanner.Stop(); });
+        assert(scanner.connect_starts() == 0);
+        assert(scanner.published_results() == 0);
+        allow_delivery.ArriveAndWait();
+        completion.join();
+        stop.join();
+        assert(scanner.connect_starts() == (scenario.second ? 0U : 1U));
+        assert(scanner.published_results() == (scenario.second ? 1U : 0U));
+    }
+
+    for (const auto scenario : {
+             std::pair<Coordinator::Owner, bool>{
+                 Coordinator::Owner::kStation, false},
+             std::pair<Coordinator::Owner, bool>{
+                 Coordinator::Owner::kConfigAp, true},
+         }) {
+        Coordinator coordinator;
+        SerializedScannerModel scanner(coordinator, scenario.first);
+        assert(scanner.Start());
+        const auto lease = scanner.lease();
+        scanner.Stop();
+        assert(coordinator.ObserveScanDone(lease).consume_now);
+        scanner.Complete(scenario.second);
+        assert(scanner.connect_starts() == 0);
+        assert(scanner.published_results() == 0);
+    }
 }
 
 void EarlyMatchingCallbackWaitsForSuccessfulCommit() {
@@ -626,6 +771,8 @@ int main() {
     StationAndConfigEarlyCallbackCompletesAfterCommit();
     StationStopDuringStartingOrRunningBlocksConfigUntilCallback();
     MissingStationCallbackKeepsConfigBlocked();
+    StopCannotOvertakePhysicalStartAndCommit();
+    CompletionAndStopHaveOneDeterministicWinner();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();
     ErrorFirstThenQueuedCallbackRetainsOwnershipUntilConsumed();
