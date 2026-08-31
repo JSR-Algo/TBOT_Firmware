@@ -43,25 +43,44 @@ def test_default_event_loop_barrier_has_one_bounded_public_api():
     assert "bool barrier_drained" not in header
 
 
-def test_default_event_loop_barrier_posts_then_waits_and_always_cleans_up():
+def test_default_event_loop_barrier_registers_one_process_lifetime_handler():
     source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
     body = function_body(source, "bool DrainDefaultEventLoop")
 
-    create = body.index("xSemaphoreCreateBinary")
-    register = body.index("esp_event_handler_instance_register")
-    post = body.index("esp_event_post")
-    wait = body.index("xSemaphoreTake")
-    unregister = body.index("esp_event_handler_instance_unregister")
-    delete = body.rindex("vSemaphoreDelete")
-    assert create < register < post < wait < unregister < delete
+    state = source[
+        source.index("class DefaultEventLoopBarrier") :
+        source.index("bool DrainDefaultEventLoop")
+    ]
+    assert "xSemaphoreCreateBinary" in state
+    assert "esp_event_handler_instance_register" in state
+    assert "esp_event_handler_instance_unregister" not in source
+    assert "static DefaultEventLoopBarrier* barrier =" in body
+    assert "new (std::nothrow) DefaultEventLoopBarrier" in body
+    assert "xSemaphoreCreateBinary" not in body
+    assert "esp_event_handler_instance_register" not in body
+    assert "vSemaphoreDelete" not in body
+    assert state.count("vSemaphoreDelete") == 1
+    register_failure = state.index("register_result != ESP_OK")
+    assert register_failure < state.index("vSemaphoreDelete", register_failure)
     assert "ESP_EVENT_DEFINE_BASE" in source
     assert "ESP_EVENT_ANY_BASE" not in source
     assert "ESP_EVENT_ANY_ID" not in source
     assert "kMaximumBarrierWait{1000}" in source
-    assert "std::min(timeout, kMaximumBarrierWait)" in body
-    assert "portMAX_DELAY" not in body
-    assert body.count("vSemaphoreDelete") >= 2
-    assert "unregister_result == ESP_OK" in body
+    assert "std::min(timeout, kMaximumBarrierWait)" in source
+    assert "portMAX_DELAY" not in source
+
+
+def test_default_event_loop_barrier_serializes_and_rejects_late_generations():
+    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
+    state = source[source.index("class DefaultEventLoopBarrier") :]
+
+    assert "std::lock_guard<std::mutex> lock(mutex_)" in state
+    assert state.count("std::lock_guard<std::mutex> handler_lock(handler_mutex_)") >= 2
+    assert "std::atomic<uint64_t> active_barrier_id_" in state
+    assert "posted_barrier_id == self->active_barrier_id_.load" in state
+    assert "active_barrier_id_.store(0" in state
+    assert "esp_event_post" in state
+    assert "xSemaphoreTake" in state
 
 
 def test_default_event_loop_barrier_scan_drain_executor_is_exact_and_ordered():
@@ -95,6 +114,9 @@ def test_default_event_loop_barrier_scan_drain_executor_has_no_driver_reset():
     )
 
     assert execute.count("esp_wifi_scan_stop()") == 1
+    assert "stop_result == ESP_OK" in execute
+    assert "ESP_ERR_WIFI_STATE" not in execute
+    assert "ESP_ERR_WIFI_NOT_INIT" not in execute
     assert "esp_wifi_stop" not in execute
     assert "esp_wifi_deinit" not in execute
     assert "esp_wifi_init" not in execute
