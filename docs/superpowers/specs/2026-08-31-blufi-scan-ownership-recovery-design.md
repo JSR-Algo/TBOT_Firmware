@@ -29,6 +29,11 @@ the same error.
 
 ## Architecture
 
+> **Approved ownership amendment:** Physical scan identity is defined by
+> `docs/superpowers/specs/2026-08-31-global-wifi-scan-lease-design.md`. The
+> global lease is a prerequisite for accepting callbacks during `Starting` and
+> for the driver recovery described here.
+
 ### Scan State Machine
 
 Add one mutex-owned scan controller with these phases:

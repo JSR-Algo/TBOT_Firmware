@@ -12,6 +12,11 @@
 
 ## File Map
 
+Before continuing Task 4, execute
+`docs/superpowers/plans/2026-08-31-global-wifi-scan-lease.md`. It resolves the
+global ESP-IDF callback ambiguity discovered during Task 3 review and provides
+the shared FIFO barrier required by Task 5.
+
 - Create `main/boards/common/blufi_wifi_scan_controller.h`: mutex-owned, ESP-independent scan state machine.
 - Create `tests/native/blufi_wifi_scan_controller_host_test.cc`: deterministic request/completion/restart/recovery interleavings.
 - Create `scripts/run_host_native_blufi_wifi_scan_controller_test.sh`: compile and run the host model with warnings as errors.
