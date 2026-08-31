@@ -66,8 +66,9 @@ void TestTypedStartOwnershipDoesNotCrossConsume() {
     const auto fallback = ledger.ClaimDefaultFallback();
     assert(fallback.has_value());
     const auto default_transfer = ledger.CompleteDefaultConfig(true);
-    assert(default_transfer.forward_to_idf);
-    assert(default_transfer.owner.kind == Kind::kDefaultStart);
+    assert(default_transfer.owned);
+    assert(default_transfer.owner.kind == Kind::kDefaultAdvData);
+    assert(default_transfer.start_owner.kind == Kind::kDefaultStart);
 
     const auto default_start = ledger.CompleteStart(true);
     assert(default_start.owner.kind == Kind::kDefaultStart);
@@ -158,27 +159,62 @@ void TestActivationPrecedesImmediateInitFinishSubmission() {
     assert(init_finish_accepted);
 }
 
-void TestOnlyOwnedDefaultConfigForwardsWithStateUnlocked() {
+void TestOnlyOwnedDefaultConfigSubmitsWithStateUnlocked() {
     TbotBlufiAdvertisingLedger ledger;
     assert(ledger.ActivateAfterSuccessfulHostInit());
-    int forwards = 0;
+    int submissions = 0;
 
-    ledger.CompleteDefaultConfigAndForward(false, [&]() { ++forwards; });
-    assert(forwards == 0);
+    ledger.CompleteDefaultConfigAndSubmit(
+        false, true, [&]() { ++submissions; return true; });
+    assert(submissions == 0);
 
     const auto compact = ledger.BeginCompact(0x01);
     assert(compact.has_value());
     assert(ledger.Cancel(compact->adv_data));
     assert(ledger.ClaimDefaultFallback().has_value());
-    ledger.CompleteDefaultConfigAndForward(true, [&]() {
+    const auto result = ledger.CompleteDefaultConfigAndSubmit(true, true, [&]() {
         assert(ledger.ActiveEpoch() == compact->epoch);
-        ++forwards;
+        ++submissions;
+        return true;
     });
-    assert(forwards == 1);
+    assert(result.owned);
+    assert(result.start_submitted);
+    assert(submissions == 1);
 
     ledger.Invalidate();
-    ledger.CompleteDefaultConfigAndForward(true, [&]() { ++forwards; });
-    assert(forwards == 1);
+    ledger.CompleteDefaultConfigAndSubmit(
+        true, true, [&]() { ++submissions; return true; });
+    assert(submissions == 1);
+}
+
+void TestDefaultConfigFailureCreatesNoStartTombstone() {
+    TbotBlufiAdvertisingLedger ledger;
+    assert(ledger.ActivateAfterSuccessfulHostInit());
+    const auto compact = ledger.BeginCompact(0x01);
+    assert(compact.has_value());
+    assert(ledger.Cancel(compact->adv_data));
+    assert(ledger.ClaimDefaultFallback().has_value());
+    bool start_called = false;
+    const auto result = ledger.CompleteDefaultConfigAndSubmit(
+        true, false, [&]() { start_called = true; return true; });
+    assert(result.owned);
+    assert(!result.start_submitted);
+    assert(!start_called);
+    assert(ledger.Pending(Kind::kDefaultStart) == 0);
+}
+
+void TestDefaultStartSynchronousRejectionCancelsExactOwner() {
+    TbotBlufiAdvertisingLedger ledger;
+    assert(ledger.ActivateAfterSuccessfulHostInit());
+    const auto compact = ledger.BeginCompact(0x01);
+    assert(compact.has_value());
+    assert(ledger.Cancel(compact->adv_data));
+    assert(ledger.ClaimDefaultFallback().has_value());
+    const auto result = ledger.CompleteDefaultConfigAndSubmit(
+        true, true, []() { return false; });
+    assert(result.owned);
+    assert(!result.start_submitted);
+    assert(ledger.Pending(Kind::kDefaultStart) == 0);
 }
 
 }  // namespace
@@ -193,7 +229,9 @@ int main() {
     TestSynchronousSubmissionFailureCancelsExactOwner();
     TestNormalEitherOrderSuccess();
     TestActivationPrecedesImmediateInitFinishSubmission();
-    TestOnlyOwnedDefaultConfigForwardsWithStateUnlocked();
+    TestOnlyOwnedDefaultConfigSubmitsWithStateUnlocked();
+    TestDefaultConfigFailureCreatesNoStartTombstone();
+    TestDefaultStartSynchronousRejectionCancelsExactOwner();
     std::cout << "PASS: BluFi advertising ledger host model\n";
     return 0;
 }

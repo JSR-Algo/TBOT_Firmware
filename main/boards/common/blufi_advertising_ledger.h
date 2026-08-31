@@ -41,8 +41,10 @@ public:
     };
 
     struct DefaultConfigResult {
-        bool forward_to_idf = false;
+        bool owned = false;
+        bool start_submitted = false;
         Owner owner;
+        Owner start_owner;
     };
 
     struct StartResult {
@@ -142,27 +144,24 @@ public:
 
     DefaultConfigResult CompleteDefaultConfig(bool callback_present) {
         std::lock_guard<std::mutex> lock(mutex_);
-        DefaultConfigResult result;
-        if (!callback_present || default_adv_data_.empty()) {
-            return result;
-        }
-        result.owner = default_adv_data_.front();
-        default_adv_data_.pop_front();
-        if (!IsCurrentLocked(result.owner)) {
-            return result;
-        }
-        result.owner = PushLocked(CallbackKind::kDefaultStart, result.owner.epoch);
-        result.forward_to_idf = true;
-        return result;
+        return CompleteDefaultConfigLocked(callback_present, true);
     }
 
-    template <typename ForwardToIdf>
-    DefaultConfigResult CompleteDefaultConfigAndForward(
-            bool callback_present, ForwardToIdf&& forward_to_idf) {
+    template <typename SubmitStart>
+    DefaultConfigResult CompleteDefaultConfigAndSubmit(
+            bool callback_present, bool success, SubmitStart&& submit_start) {
         std::lock_guard<std::mutex> submission_lock(submission_mutex_);
-        DefaultConfigResult result = CompleteDefaultConfig(callback_present);
-        if (result.forward_to_idf) {
-            forward_to_idf();
+        DefaultConfigResult result;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            result = CompleteDefaultConfigLocked(callback_present, success);
+        }
+        if (result.owned && success) {
+            if (submit_start()) {
+                result.start_submitted = true;
+            } else {
+                Cancel(result.start_owner);
+            }
         }
         return result;
     }
@@ -249,6 +248,24 @@ public:
     static constexpr uint8_t kScanResponsePending = 1U << 1;
 
 private:
+    DefaultConfigResult CompleteDefaultConfigLocked(
+            bool callback_present, bool success) {
+        DefaultConfigResult result;
+        if (!callback_present || default_adv_data_.empty()) {
+            return result;
+        }
+        result.owner = default_adv_data_.front();
+        default_adv_data_.pop_front();
+        if (!IsCurrentLocked(result.owner)) {
+            return result;
+        }
+        result.owned = true;
+        if (success) {
+            result.start_owner = PushLocked(
+                CallbackKind::kDefaultStart, result.owner.epoch);
+        }
+        return result;
+    }
     std::optional<CompactSubmission> BeginCompactLocked(uint8_t pending_bits) {
         if (!accepting_submissions_ || !adv_data_.empty() || !scan_response_.empty() ||
             !default_adv_data_.empty() || !starts_.empty()) {

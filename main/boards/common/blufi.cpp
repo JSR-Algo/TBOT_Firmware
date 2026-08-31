@@ -210,8 +210,11 @@ static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
         return;
     }
     if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
-        tbot_adv_ledger.CompleteDefaultConfigAndForward(
-            true, [event, param]() { esp_blufi_gap_event_handler(event, param); });
+        tbot_adv_ledger.CompleteDefaultConfigAndSubmit(
+            true, param->adv_data_cmpl.status == ESP_BT_STATUS_SUCCESS,
+            []() {
+                return esp_ble_gap_start_advertising(&tbot_adv_params) == ESP_OK;
+            });
         return;
     }
 
@@ -258,6 +261,7 @@ static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
             break;
         }
         default:
+            esp_blufi_gap_event_handler(event, param);
             break;
     }
 }
