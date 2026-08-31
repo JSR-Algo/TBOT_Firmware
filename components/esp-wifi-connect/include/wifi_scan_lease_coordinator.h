@@ -193,7 +193,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         RecoveryDecision result;
         if (!Matches(lease) || submission_pending_ ||
-            (phase_ != Phase::kRunning && phase_ != Phase::kDraining) ||
+            (phase_ != Phase::kRunning && phase_ != Phase::kCompleting &&
+             phase_ != Phase::kDraining) ||
             last_recovery_id_ == std::numeric_limits<uint64_t>::max()) {
             return result;
         }

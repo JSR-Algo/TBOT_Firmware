@@ -634,6 +634,153 @@ void StationCallbackGateHandlesCrossThreadAndReentrantStop() {
     }
 }
 
+class StationRetryAfterPermitModel {
+public:
+    uint64_t BeginOperation() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled_) {
+            return 0;
+        }
+        ++in_flight_;
+        return session_id_;
+    }
+
+    void FinishOperation() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        assert(in_flight_ == 1);
+        in_flight_ = 0;
+        drained_.notify_all();
+    }
+
+    void ScheduleRetry(uint64_t expected_session) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (enabled_ && expected_session == session_id_) {
+            ++scheduled_retries_;
+        }
+    }
+
+    void Stop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        enabled_ = false;
+        ++session_id_;
+        drained_.wait(lock, [this]() { return in_flight_ == 0; });
+    }
+
+    unsigned scheduled_retries() const { return scheduled_retries_; }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable drained_;
+    bool enabled_ = true;
+    uint64_t session_id_ = 1;
+    unsigned in_flight_ = 0;
+    unsigned scheduled_retries_ = 0;
+};
+
+void StationRetryRunsOnlyAfterPermitAndExactSessionRevalidation() {
+    StationRetryAfterPermitModel stop_wins;
+    const uint64_t old_session = stop_wins.BeginOperation();
+    assert(old_session != 0);
+    stop_wins.FinishOperation();
+    stop_wins.Stop();
+    stop_wins.ScheduleRetry(old_session);
+    assert(stop_wins.scheduled_retries() == 0);
+
+    StationRetryAfterPermitModel retry_wins;
+    const uint64_t current_session = retry_wins.BeginOperation();
+    assert(current_session != 0);
+    retry_wins.FinishOperation();
+    retry_wins.ScheduleRetry(current_session);
+    retry_wins.Stop();
+    assert(retry_wins.scheduled_retries() == 1);
+}
+
+class ConfigAttemptIsolationModel {
+public:
+    struct Attempt {
+        uint64_t session_id = 0;
+        uint64_t attempt_id = 0;
+    };
+
+    Attempt BeginAttempt() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_ = true;
+        active_attempt_id_ = ++last_attempt_id_;
+        return Attempt{session_id_, active_attempt_id_};
+    }
+
+    void Stop() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_ = false;
+        active_attempt_id_ = 0;
+        ++session_id_;
+        cancelled_ = true;
+        wake_.notify_all();
+    }
+
+    void SignalConnected() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (active_ && active_attempt_id_ != 0) {
+            connected_ = true;
+            wake_.notify_all();
+        }
+    }
+
+    bool WaitAndDisconnect(const Attempt& attempt) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        wake_.wait(lock, [this]() { return connected_ || cancelled_; });
+        if (!active_ || attempt.session_id != session_id_ ||
+            attempt.attempt_id != active_attempt_id_ || !connected_) {
+            return false;
+        }
+        active_ = false;
+        active_attempt_id_ = 0;
+        ++disconnects_;
+        return true;
+    }
+
+    unsigned disconnects() const { return disconnects_; }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable wake_;
+    bool active_ = false;
+    bool connected_ = false;
+    bool cancelled_ = false;
+    uint64_t session_id_ = 1;
+    uint64_t last_attempt_id_ = 0;
+    uint64_t active_attempt_id_ = 0;
+    unsigned disconnects_ = 0;
+};
+
+void OldConfigWaiterCannotConsumeOrDisconnectNextStationConnection() {
+    ConfigAttemptIsolationModel model;
+    const auto old_attempt = model.BeginAttempt();
+    bool old_result = true;
+    std::thread old_waiter([&]() {
+        old_result = model.WaitAndDisconnect(old_attempt);
+    });
+    model.Stop();
+    model.SignalConnected();
+    old_waiter.join();
+    assert(!old_result);
+    assert(model.disconnects() == 0);
+}
+
+void CompletingLeaseCanEnterExactRecovery() {
+    Coordinator coordinator;
+    const auto acquired = coordinator.TryAcquire(Coordinator::Owner::kStation);
+    assert(acquired.acquired);
+    assert(coordinator.CommitSubmission(acquired.lease, true).accepted);
+    assert(coordinator.ObserveScanDone(acquired.lease).consume_now);
+
+    const auto recovery = coordinator.BeginRecovery(acquired.lease);
+    assert(recovery.begun());
+    assert(!coordinator.FinishCompletion(acquired.lease));
+    assert(coordinator.CompleteRecovery(
+        acquired.lease, RunRecovery(recovery, true, true)));
+}
+
 void EarlyMatchingCallbackWaitsForSuccessfulCommit() {
     Coordinator coordinator;
     const auto acquired = coordinator.TryAcquire(Coordinator::Owner::kBlufi);
@@ -1017,6 +1164,9 @@ int main() {
     CompletionAndStopHaveOneDeterministicWinner();
     StationSessionPermitSerializesAllEmittingPathsWithStop();
     StationCallbackGateHandlesCrossThreadAndReentrantStop();
+    StationRetryRunsOnlyAfterPermitAndExactSessionRevalidation();
+    OldConfigWaiterCannotConsumeOrDisconnectNextStationConnection();
+    CompletingLeaseCanEnterExactRecovery();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();
     ErrorFirstThenQueuedCallbackRetainsOwnershipUntilConsumed();
