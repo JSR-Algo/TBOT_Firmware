@@ -26,9 +26,14 @@
 #include <memory>
 #include <functional>
 #include <mutex>
+#include <optional>
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include "wifi_station.h"
 #include "wifi_scan_lease_coordinator.h"
+#include "wifi_scan_recovery_executor.h"
 
 class WifiStation;
 class WifiConfigurationAp;
@@ -114,9 +119,20 @@ private:
     ~WifiManager() = delete;
 
     void NotifyEvent(WifiEvent event, const std::string& data = "");
+    void ScheduleScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    static void ScanRecoveryTask(void* context);
+    void RunScanRecovery();
+
+    struct ScanRecoveryWork {
+        WifiScanLeaseCoordinator::Lease lease;
+        WifiScanLeaseCoordinator::RecoveryDecision recovery;
+        std::optional<WifiScanLeaseCoordinator::RecoveryProof> proof;
+    };
 
     WifiManagerConfig config_;
     WifiScanLeaseCoordinator scan_lease_coordinator_;
+    WifiScanRecoveryExecutor scan_recovery_executor_;
     std::unique_ptr<WifiStation> station_;
     std::unique_ptr<WifiConfigurationAp> config_ap_;
 
@@ -127,6 +143,11 @@ private:
     uint64_t lifecycle_generation_ = 0;
     bool lifecycle_transition_in_progress_ = false;
     bool wifi_teardown_faulted_ = false;
+    TaskHandle_t scan_recovery_task_ = nullptr;
+    bool scan_recovery_active_ = false;
+    bool scan_recovery_retry_pending_ = false;
+    std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_debt_;
+    std::optional<ScanRecoveryWork> scan_recovery_claim_;
 
     std::function<void(WifiEvent, const std::string&)> event_callback_;
     mutable std::string mac_address_;

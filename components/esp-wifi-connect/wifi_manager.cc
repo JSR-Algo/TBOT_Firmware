@@ -12,6 +12,8 @@
 #include <esp_event.h>
 #include <esp_mac.h>
 #include <nvs_flash.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #define TAG "WifiManager"
 
@@ -23,6 +25,192 @@ WifiManager& WifiManager::GetInstance() {
 }
 
 WifiManager::WifiManager() = default;
+
+namespace {
+
+bool SameLease(const WifiScanLeaseCoordinator::Lease& left,
+               const WifiScanLeaseCoordinator::Lease& right) {
+    return left.owner == right.owner && left.lease_id == right.lease_id &&
+           left.driver_incarnation == right.driver_incarnation;
+}
+
+}  // namespace
+
+void WifiManager::ScheduleScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    TaskHandle_t task = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_ || scan_recovery_task_ == nullptr) {
+            return;
+        }
+        if (scan_recovery_debt_.has_value() &&
+            SameLease(*scan_recovery_debt_, lease)) {
+            return;
+        }
+        if (scan_recovery_active_) {
+            if (scan_recovery_claim_.has_value()) {
+                ESP_LOGE(TAG, "Conflicting WiFi scan recovery debt rejected");
+                return;
+            }
+            // The previous callback may have released its debt before this
+            // worker claimed it. Retarget the queued wakeup to the new exact
+            // lease; a claimed recovery can never be replaced.
+            scan_recovery_debt_ = lease;
+            task = scan_recovery_task_;
+        } else {
+            scan_recovery_debt_ = lease;
+            scan_recovery_active_ = true;
+            scan_recovery_retry_pending_ = false;
+            task = scan_recovery_task_;
+        }
+    }
+    xTaskNotifyGive(task);
+}
+
+void WifiManager::ScanRecoveryTask(void* context) {
+    auto* self = static_cast<WifiManager*>(context);
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        self->RunScanRecovery();
+    }
+}
+
+void WifiManager::RunScanRecovery() {
+    for (;;) {
+        std::optional<WifiScanLeaseCoordinator::Lease> debt;
+        std::optional<ScanRecoveryWork> work;
+        bool wait_for_lifecycle = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!scan_recovery_active_ || !scan_recovery_debt_.has_value()) {
+                return;
+            }
+            debt = scan_recovery_debt_;
+            work = scan_recovery_claim_;
+            wait_for_lifecycle = lifecycle_transition_in_progress_;
+            if (wait_for_lifecycle) {
+                scan_recovery_retry_pending_ = true;
+            }
+        }
+        if (wait_for_lifecycle) {
+            vTaskDelay(pdMS_TO_TICKS(25));
+            continue;
+        }
+
+        if (!work.has_value()) {
+            if (debt->owner == WifiScanLeaseCoordinator::Owner::kStation) {
+                auto claim = station_->ClaimScanRecovery(*debt);
+                if (claim.has_value()) {
+                    work = ScanRecoveryWork{
+                        claim->lease, claim->recovery, std::nullopt};
+                }
+            } else if (debt->owner ==
+                       WifiScanLeaseCoordinator::Owner::kConfigAp) {
+                auto claim = config_ap_->ClaimScanRecovery(*debt);
+                if (claim.has_value()) {
+                    work = ScanRecoveryWork{
+                        claim->lease, claim->recovery, std::nullopt};
+                }
+            }
+            if (!work.has_value()) {
+                const bool debt_still_exists =
+                    debt->owner == WifiScanLeaseCoordinator::Owner::kStation
+                        ? station_->HasScanRecoveryDebt(*debt)
+                        : config_ap_->HasScanRecoveryDebt(*debt);
+                if (debt_still_exists) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        scan_recovery_retry_pending_ = true;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    continue;
+                }
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (scan_recovery_debt_.has_value() &&
+                    SameLease(*scan_recovery_debt_, *debt)) {
+                    scan_recovery_debt_.reset();
+                    scan_recovery_active_ = false;
+                    scan_recovery_retry_pending_ = false;
+                }
+                return;
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!scan_recovery_debt_.has_value() ||
+                !SameLease(*scan_recovery_debt_, work->lease)) {
+                return;
+            }
+            scan_recovery_claim_ = work;
+        }
+
+        if (!work->proof.has_value()) {
+            const auto proof = scan_recovery_executor_.Execute(work->recovery);
+            if (!proof.Proves(work->recovery)) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    scan_recovery_retry_pending_ = true;
+                }
+                vTaskDelay(pdMS_TO_TICKS(250));
+                continue;
+            }
+            work->proof = proof;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                scan_recovery_claim_ = work;
+            }
+        }
+
+        bool owner_ready = false;
+        if (work->lease.owner == WifiScanLeaseCoordinator::Owner::kStation) {
+            owner_ready = station_->RestoreRadioAfterRecovery();
+        } else if (work->lease.owner ==
+                   WifiScanLeaseCoordinator::Owner::kConfigAp) {
+            owner_ready = config_ap_->RestoreRadioAfterRecovery();
+        }
+        if (!owner_ready) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                scan_recovery_retry_pending_ = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
+        bool completed = false;
+        if (work->lease.owner == WifiScanLeaseCoordinator::Owner::kStation) {
+            WifiStation::ScanRecoveryClaim claim{work->lease, work->recovery};
+            completed = station_->CompleteScanRecovery(claim, *work->proof);
+        } else if (work->lease.owner ==
+                   WifiScanLeaseCoordinator::Owner::kConfigAp) {
+            WifiConfigurationAp::ScanRecoveryClaim claim{
+                work->lease, work->recovery};
+            completed = config_ap_->CompleteScanRecovery(claim, *work->proof);
+        }
+        if (!completed) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                scan_recovery_retry_pending_ = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
+        const auto owner = work->lease.owner;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            scan_recovery_claim_.reset();
+            scan_recovery_debt_.reset();
+            scan_recovery_active_ = false;
+            scan_recovery_retry_pending_ = false;
+        }
+        if (owner == WifiScanLeaseCoordinator::Owner::kStation) {
+            station_->RetryScanAfterRecovery();
+        } else if (owner == WifiScanLeaseCoordinator::Owner::kConfigAp) {
+            config_ap_->RetryScanAfterRecovery();
+        }
+        return;
+    }
+}
 
 void WifiManager::NotifyEvent(WifiEvent event, const std::string& data) {
     // Copy callback under lock, invoke without lock to avoid deadlock
@@ -84,6 +272,20 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
 
     station_ = std::make_unique<WifiStation>(scan_lease_coordinator_);
     config_ap_ = std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_);
+    station_->OnScanRecoveryNeeded([this](const auto& lease) {
+        ScheduleScanRecovery(lease);
+    });
+    config_ap_->OnScanRecoveryNeeded([this](const auto& lease) {
+        ScheduleScanRecovery(lease);
+    });
+    if (scan_recovery_task_ == nullptr &&
+        xTaskCreate(&WifiManager::ScanRecoveryTask, "wifi_scan_recover", 4096,
+                    this, 5, &scan_recovery_task_) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create WiFi scan recovery task");
+        station_.reset();
+        config_ap_.reset();
+        return false;
+    }
 
     initialized_ = true;
     wifi_teardown_faulted_ = false;
@@ -102,7 +304,7 @@ bool WifiManager::StopRadio() {
     if (wifi_teardown_faulted_) {
         return false;
     }
-    if (lifecycle_transition_in_progress_) {
+    if (lifecycle_transition_in_progress_ || scan_recovery_active_) {
         return false;
     }
     lifecycle_transition_in_progress_ = true;
@@ -181,6 +383,7 @@ void WifiManager::StartStation() {
             return;
         }
         if (station_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ ||
             wifi_teardown_faulted_) {
             return;
         }
@@ -242,7 +445,8 @@ void WifiManager::StopStation() {
     uint64_t transition_generation = 0;
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!station_active_ || lifecycle_transition_in_progress_) {
+        if (!station_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_) {
             return;
         }
         lifecycle_transition_in_progress_ = true;
@@ -324,6 +528,7 @@ void WifiManager::StartConfigAp() {
             return;
         }
         if (config_mode_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ ||
             wifi_teardown_faulted_) {
             return;
         }
@@ -370,6 +575,7 @@ void WifiManager::StopConfigAp() {
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!config_mode_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ ||
             wifi_teardown_faulted_) {
             return;
         }

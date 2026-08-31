@@ -54,10 +54,17 @@ public:
         WifiScanLeaseCoordinator::Lease lease;
         WifiScanLeaseCoordinator::RecoveryDecision recovery;
     };
-    std::optional<ScanRecoveryClaim> ClaimScanRecovery();
+    std::optional<ScanRecoveryClaim> ClaimScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& expected_lease);
+    bool HasScanRecoveryDebt(
+        const WifiScanLeaseCoordinator::Lease& expected_lease) const;
     bool CompleteScanRecovery(
         const ScanRecoveryClaim& claim,
         const WifiScanLeaseCoordinator::RecoveryProof& proof);
+    bool RestoreRadioAfterRecovery();
+    void RetryScanAfterRecovery();
+    void OnScanRecoveryNeeded(std::function<void(
+        const WifiScanLeaseCoordinator::Lease&)> callback);
 
     /**
      * Set callback for when exit is requested from config mode
@@ -96,6 +103,8 @@ private:
     std::atomic<bool> stopped_{false};
     std::atomic<bool> started_{false};
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
+    std::function<void(const WifiScanLeaseCoordinator::Lease&)>
+        scan_recovery_needed_;
 
     // 高级配置项
     std::string ota_url_;
@@ -118,6 +127,8 @@ private:
     void RetainRecoveryDebtLocked(
         const WifiScanLeaseCoordinator::Lease& lease);
     void ClearRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void NotifyScanRecoveryNeeded(
         const WifiScanLeaseCoordinator::Lease& lease);
 
     // Event handlers

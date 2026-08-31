@@ -1,6 +1,7 @@
 #include "wifi_configuration_ap.h"
 #include "default_event_loop_barrier.h"
 #include <chrono>
+#include <cstring>
 #include <cstdlib>
 #include <cstdio>
 #include <limits>
@@ -164,6 +165,9 @@ bool WifiConfigurationAp::StartOwnedScan()
         RetainRecoveryDebtLocked(lease);
     }
     lifecycle_lock.unlock();
+    if (commit.drain_required) {
+        NotifyScanRecoveryNeeded(lease);
+    }
     if (commit.consume_latched) {
         CompleteOwnedScan(lease);
         return true;
@@ -207,30 +211,35 @@ void WifiConfigurationAp::CompleteOwnedScan(
         cleanup_proven = esp_wifi_clear_ap_list() == ESP_OK;
     }
 
+    bool recovery_needed = false;
     if (!cleanup_proven) {
         ESP_LOGE(TAG, "Configuration AP scan cleanup failed; recovery required");
         if (scan_lease_coordinator_.RetainFailedCompletion(lease)) {
             RetainRecoveryDebtLocked(lease);
+            recovery_needed = true;
         }
-        return;
-    }
-    if (!scan_lease_coordinator_.FinishCompletion(lease)) {
-        return;
-    }
-    scan_lease_.reset();
-    ClearRecoveryDebtLocked(lease);
+    } else {
+        if (!scan_lease_coordinator_.FinishCompletion(lease)) {
+            return;
+        }
+        scan_lease_.reset();
+        ClearRecoveryDebtLocked(lease);
 
-    if (consume_results && scans_enabled_ && !is_connecting_ &&
-        lease_session_id_ == scan_session_id_) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ap_records_.swap(scanned_records);
-        }
-        if (!is_connecting_ && scan_timer_ != nullptr) {
-            esp_timer_start_once(scan_timer_, 10 * 1000000);
+        if (consume_results && scans_enabled_ && !is_connecting_ &&
+            lease_session_id_ == scan_session_id_) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                ap_records_.swap(scanned_records);
+            }
+            if (!is_connecting_ && scan_timer_ != nullptr) {
+                esp_timer_start_once(scan_timer_, 10 * 1000000);
+            }
         }
     }
     lifecycle_lock.unlock();
+    if (recovery_needed) {
+        NotifyScanRecoveryNeeded(lease);
+    }
 }
 
 void WifiConfigurationAp::ScheduleScanRetry(
@@ -840,10 +849,12 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     active_connection_attempt_id_ = attempt_id;
     active_connection_session_id_ = attempt_session;
     connection_waiter_active_ = true;
+    std::optional<WifiScanLeaseCoordinator::Lease> recovery_debt;
     if (scan_lease_.has_value()) {
         const auto lease = *scan_lease_;
         if (scan_lease_coordinator_.BeginDrain(lease)) {
             RetainRecoveryDebtLocked(lease);
+            recovery_debt = lease;
         }
         esp_wifi_scan_stop();
     }
@@ -866,6 +877,9 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         lifecycle_lock.unlock();
         if (FinishConnectionAttemptBoundary(attempt_session, attempt_id)) {
             ScheduleScanRetry(attempt_session, 10 * 1000000);
+        }
+        if (recovery_debt.has_value()) {
+            NotifyScanRecoveryNeeded(*recovery_debt);
         }
         return false;
     }
@@ -893,6 +907,9 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         attempt_session == scan_session_id_;
     if (!exact_attempt || (bits & WIFI_CANCEL_BIT)) {
         lifecycle_lock.unlock();
+        if (recovery_debt.has_value()) {
+            NotifyScanRecoveryNeeded(*recovery_debt);
+        }
         return false;
     }
     lifecycle_lock.unlock();
@@ -901,12 +918,18 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     if (boundary_complete && (bits & WIFI_CONNECTED_BIT)) {
         ESP_LOGI(TAG, "WiFi credential test succeeded");
         ScheduleScanRetry(attempt_session, 10 * 1000000);
+        if (recovery_debt.has_value()) {
+            NotifyScanRecoveryNeeded(*recovery_debt);
+        }
         return true;
     } else {
         if (boundary_complete) {
             ScheduleScanRetry(attempt_session, 10 * 1000000);
         }
         ESP_LOGE(TAG, "WiFi credential test failed");
+        if (recovery_debt.has_value()) {
+            NotifyScanRecoveryNeeded(*recovery_debt);
+        }
         return false;
     }
 }
@@ -1135,10 +1158,12 @@ bool WifiConfigurationAp::Stop() {
         return !connection_waiter_active_ && !connection_boundary_waiting_;
     });
     xEventGroupClearBits(event_group_, WIFI_CANCEL_BIT);
+    std::optional<WifiScanLeaseCoordinator::Lease> recovery_debt;
     if (scan_lease_.has_value()) {
         const auto lease = *scan_lease_;
         if (scan_lease_coordinator_.BeginDrain(lease)) {
             RetainRecoveryDebtLocked(lease);
+            recovery_debt = lease;
         }
         esp_wifi_scan_stop();
     }
@@ -1149,9 +1174,14 @@ bool WifiConfigurationAp::Stop() {
     const bool boundary_closed =
         FinishConnectionAttemptBoundary(0, 0, true);
     if (!boundary_closed) {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        teardown_faulted_ = true;
-        ESP_LOGE(TAG, "Configuration AP teardown proof failed; resources retained");
+        {
+            std::lock_guard<std::mutex> lock(scan_mutex_);
+            teardown_faulted_ = true;
+            ESP_LOGE(TAG, "Configuration AP teardown proof failed; resources retained");
+        }
+        if (recovery_debt.has_value()) {
+            NotifyScanRecoveryNeeded(*recovery_debt);
+        }
         return false;
     }
 
@@ -1202,6 +1232,9 @@ bool WifiConfigurationAp::Stop() {
     ESP_LOGI(TAG, "Wifi configuration AP stopped");
     stopped_.store(true);
     started_.store(false);
+    if (recovery_debt.has_value()) {
+        NotifyScanRecoveryNeeded(*recovery_debt);
+    }
     return true;
 }
 
@@ -1220,14 +1253,33 @@ void WifiConfigurationAp::ClearRecoveryDebtLocked(
     }
 }
 
+void WifiConfigurationAp::OnScanRecoveryNeeded(std::function<void(
+        const WifiScanLeaseCoordinator::Lease&)> callback) {
+    scan_recovery_needed_ = std::move(callback);
+}
+
+void WifiConfigurationAp::NotifyScanRecoveryNeeded(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    const auto callback = scan_recovery_needed_;
+    if (callback) {
+        callback(lease);
+    }
+}
+
 std::optional<WifiConfigurationAp::ScanRecoveryClaim>
-WifiConfigurationAp::ClaimScanRecovery() {
+WifiConfigurationAp::ClaimScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& expected_lease) {
     std::lock_guard<std::mutex> lock(scan_mutex_);
-    if (!scan_lease_.has_value() || !scan_recovery_lease_.has_value() ||
+    if (is_connecting_ || connection_boundary_waiting_ ||
+        !scan_lease_.has_value() || !scan_recovery_lease_.has_value() ||
         scan_lease_->owner != scan_recovery_lease_->owner ||
         scan_lease_->lease_id != scan_recovery_lease_->lease_id ||
         scan_lease_->driver_incarnation !=
-            scan_recovery_lease_->driver_incarnation) {
+            scan_recovery_lease_->driver_incarnation ||
+        scan_recovery_lease_->owner != expected_lease.owner ||
+        scan_recovery_lease_->lease_id != expected_lease.lease_id ||
+        scan_recovery_lease_->driver_incarnation !=
+            expected_lease.driver_incarnation) {
         return std::nullopt;
     }
     const auto recovery =
@@ -1236,6 +1288,16 @@ WifiConfigurationAp::ClaimScanRecovery() {
         return std::nullopt;
     }
     return ScanRecoveryClaim{*scan_recovery_lease_, recovery};
+}
+
+bool WifiConfigurationAp::HasScanRecoveryDebt(
+        const WifiScanLeaseCoordinator::Lease& expected_lease) const {
+    std::lock_guard<std::mutex> lock(scan_mutex_);
+    return scan_recovery_lease_.has_value() &&
+           scan_recovery_lease_->owner == expected_lease.owner &&
+           scan_recovery_lease_->lease_id == expected_lease.lease_id &&
+           scan_recovery_lease_->driver_incarnation ==
+               expected_lease.driver_incarnation;
 }
 
 bool WifiConfigurationAp::CompleteScanRecovery(
@@ -1256,4 +1318,49 @@ bool WifiConfigurationAp::CompleteScanRecovery(
     scan_lease_.reset();
     scan_recovery_lease_.reset();
     return true;
+}
+
+bool WifiConfigurationAp::RestoreRadioAfterRecovery() {
+    uint64_t expected_session = 0;
+    {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        if (!scans_enabled_) {
+            return true;
+        }
+        if (is_connecting_) {
+            return false;
+        }
+        expected_session = scan_session_id_;
+        scans_enabled_ = false;
+    }
+
+    wifi_config_t wifi_config = {};
+    const std::string ssid = GetSsid();
+    std::memcpy(wifi_config.ap.ssid, ssid.data(), ssid.size());
+    wifi_config.ap.ssid_len = ssid.size();
+    wifi_config.ap.max_connection = 4;
+    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+    const bool restored = esp_wifi_set_mode(WIFI_MODE_APSTA) == ESP_OK &&
+                          esp_wifi_set_config(WIFI_IF_AP, &wifi_config) == ESP_OK &&
+                          esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK &&
+                          esp_wifi_start() == ESP_OK;
+    {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        if (expected_session == scan_session_id_) {
+            scans_enabled_ = true;
+        }
+    }
+    if (!restored) {
+        return false;
+    }
+    return true;
+}
+
+void WifiConfigurationAp::RetryScanAfterRecovery() {
+    uint64_t expected_session = 0;
+    {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        expected_session = scan_session_id_;
+    }
+    ScheduleScanRetry(expected_session, 1);
 }

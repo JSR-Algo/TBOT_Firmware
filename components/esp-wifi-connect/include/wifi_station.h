@@ -59,10 +59,17 @@ public:
         WifiScanLeaseCoordinator::Lease lease;
         WifiScanLeaseCoordinator::RecoveryDecision recovery;
     };
-    std::optional<ScanRecoveryClaim> ClaimScanRecovery();
+    std::optional<ScanRecoveryClaim> ClaimScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& expected_lease);
+    bool HasScanRecoveryDebt(
+        const WifiScanLeaseCoordinator::Lease& expected_lease) const;
     bool CompleteScanRecovery(
         const ScanRecoveryClaim& claim,
         const WifiScanLeaseCoordinator::RecoveryProof& proof);
+    bool RestoreRadioAfterRecovery();
+    void RetryScanAfterRecovery();
+    void OnScanRecoveryNeeded(std::function<void(
+        const WifiScanLeaseCoordinator::Lease&)> callback);
 
     void OnConnect(std::function<void(const std::string& ssid)> on_connect);
     void OnConnected(std::function<void(const std::string& ssid)> on_connected);
@@ -106,6 +113,8 @@ private:
     size_t in_flight_session_operations_ = 0;
     std::condition_variable session_operations_drained_;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
+    std::function<void(const WifiScanLeaseCoordinator::Lease&)>
+        scan_recovery_needed_;
 
     bool StartOwnedScan();
     void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
@@ -121,11 +130,13 @@ private:
     void FinishSessionOperation();
     void DispatchSessionCallback(uint64_t expected_session,
                                  std::function<void()> callback);
-    void FinishDiscardedCompletionLocked(
+    bool FinishDiscardedCompletionLocked(
         const WifiScanLeaseCoordinator::Lease& lease);
     void RetainRecoveryDebtLocked(
         const WifiScanLeaseCoordinator::Lease& lease);
     void ClearRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void NotifyScanRecoveryNeeded(
         const WifiScanLeaseCoordinator::Lease& lease);
     void UpdateScanInterval();  // Exponential backoff for scan interval
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

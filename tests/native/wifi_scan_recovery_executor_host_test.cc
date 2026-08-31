@@ -294,6 +294,113 @@ void ProofCannotCrossCoordinatorIdentityWithTheSameRecoveryId() {
     assert(second.coordinator.CompleteRecovery(second.lease, second_proof));
 }
 
+class RecoverySchedulerModel {
+public:
+    RecoverySchedulerModel(WifiScanLeaseCoordinator::Owner owner,
+                           bool submission_accepted) {
+        const auto acquired = coordinator_.TryAcquire(owner);
+        assert(acquired.acquired);
+        lease_ = acquired.lease;
+        const auto commit = coordinator_.CommitSubmission(
+            lease_, submission_accepted);
+        assert(submission_accepted || commit.drain_required);
+    }
+
+    void StopWithDebt() {
+        assert(coordinator_.BeginDrain(lease_));
+    }
+
+    void Notify() {
+        ++notification_count_;
+        scheduled_ = true;
+    }
+
+    bool CallbackWinsBeforeClaim() {
+        const auto callback = coordinator_.ObserveScanDone(lease_);
+        assert(callback.consume_now);
+        assert(coordinator_.FinishCompletion(lease_));
+        scheduled_ = false;
+        return true;
+    }
+
+    bool RunOnce() {
+        assert(scheduled_);
+        if (!recovery_.has_value()) {
+            recovery_ = coordinator_.BeginRecovery(lease_);
+            ++claim_count_;
+        }
+        const auto proof = executor_.Execute(*recovery_);
+        if (!proof.Proves(*recovery_)) {
+            return false;
+        }
+        if (!coordinator_.CompleteRecovery(lease_, proof)) {
+            return false;
+        }
+        scheduled_ = false;
+        return true;
+    }
+
+    bool CanAcquire(WifiScanLeaseCoordinator::Owner owner) {
+        return coordinator_.TryAcquire(owner).acquired;
+    }
+
+    size_t notification_count() const { return notification_count_; }
+    size_t claim_count() const { return claim_count_; }
+
+private:
+    WifiScanLeaseCoordinator coordinator_;
+    WifiScanLeaseCoordinator::Lease lease_;
+    WifiScanRecoveryExecutor executor_;
+    std::optional<WifiScanLeaseCoordinator::RecoveryDecision> recovery_;
+    bool scheduled_ = false;
+    size_t notification_count_ = 0;
+    size_t claim_count_ = 0;
+};
+
+void DuplicateNotificationsCoalesceIntoOneExactRecovery() {
+    driver.Reset();
+    RecoverySchedulerModel model(
+        WifiScanLeaseCoordinator::Owner::kStation, false);
+    model.Notify();
+    model.Notify();
+
+    assert(model.RunOnce());
+    assert(model.notification_count() == 2);
+    assert(model.claim_count() == 1);
+    assert(model.CanAcquire(WifiScanLeaseCoordinator::Owner::kConfigAp));
+}
+
+void CallbackBeforeWorkerClaimCancelsRecoveryWithoutDriverReset() {
+    driver.Reset();
+    RecoverySchedulerModel model(
+        WifiScanLeaseCoordinator::Owner::kConfigAp, true);
+    model.StopWithDebt();
+    model.Notify();
+
+    assert(model.CallbackWinsBeforeClaim());
+    assert(Calls().empty());
+    assert(model.claim_count() == 0);
+    assert(model.CanAcquire(WifiScanLeaseCoordinator::Owner::kStation));
+}
+
+void FailedRecoveryRetainsOneDecisionAcrossRetry() {
+    driver.Reset();
+    driver.failure = FailureStep::kBarrier;
+    RecoverySchedulerModel model(
+        WifiScanLeaseCoordinator::Owner::kStation, false);
+    model.Notify();
+
+    assert(!model.RunOnce());
+    assert(model.claim_count() == 1);
+    assert(!model.CanAcquire(WifiScanLeaseCoordinator::Owner::kConfigAp));
+    driver.failure = FailureStep::kNone;
+    assert(model.RunOnce());
+    assert(model.claim_count() == 1);
+    assert((Calls() == std::vector<std::string>{
+        "scan_stop", "wifi_stop", "wifi_deinit", "barrier",
+        "scan_stop", "wifi_stop", "wifi_deinit", "barrier", "wifi_init"}));
+}
+
 static_assert(!std::is_copy_constructible<WifiScanRecoveryExecutor>::value);
 static_assert(!std::is_copy_assignable<WifiScanRecoveryExecutor>::value);
 
@@ -333,6 +440,9 @@ int main() {
     InvalidAndOverflowedRecoveryDecisionsNeverTouchTheDriver();
     ExecuteCallsAreSerialized();
     ProofCannotCrossCoordinatorIdentityWithTheSameRecoveryId();
+    DuplicateNotificationsCoalesceIntoOneExactRecovery();
+    CallbackBeforeWorkerClaimCancelsRecoveryWithoutDriverReset();
+    FailedRecoveryRetainsOneDecisionAcrossRetry();
     std::cout << "wifi scan recovery executor host tests passed\n";
     return 0;
 }

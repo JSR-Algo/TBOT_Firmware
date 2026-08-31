@@ -648,14 +648,14 @@ def test_station_and_config_retain_completion_when_driver_ap_cleanup_is_unproven
     config_header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
     config_source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
 
-    assert "ClaimScanRecovery()" in station_header
+    assert "ClaimScanRecovery(" in station_header
     assert "CompleteScanRecovery(" in station_header
     assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;" in station_header
-    assert "ClaimScanRecovery()" in config_header
+    assert "ClaimScanRecovery(" in config_header
     assert "CompleteScanRecovery(" in config_header
     assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;" in config_header
-    assert "scan_recovery_needed_" not in station_header + station_source
-    assert "scan_recovery_needed_" not in config_header + config_source
+    assert "scan_recovery_needed_" in station_header + station_source
+    assert "scan_recovery_needed_" in config_header + config_source
 
     for source, signature in (
         (station_source, "void WifiStation::CompleteOwnedScan"),
@@ -713,6 +713,80 @@ def test_station_and_config_publish_exact_recovery_debt_for_start_and_cancel():
         assert "scan_lease_.reset()" in complete
         assert "scan_recovery_lease_.reset()" in complete
         assert "ScanRecoveryClaim" in header
+
+
+def test_shared_scan_recovery_is_scheduled_by_process_lifetime_manager_worker():
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+
+    assert '#include "wifi_scan_recovery_executor.h"' in manager_header
+    assert "WifiScanRecoveryExecutor scan_recovery_executor_;" in manager_header
+    assert "TaskHandle_t scan_recovery_task_" in manager_header
+    assert "std::optional<ScanRecoveryWork> scan_recovery_claim_;" in manager_header
+    assert "void WifiManager::ScheduleScanRecovery" in manager
+    assert "void WifiManager::ScanRecoveryTask" in manager
+    assert "void WifiManager::RunScanRecovery" in manager
+    assert "xTaskCreate" in function_body(manager, "bool WifiManager::Initialize")
+    assert "vTaskDelete" not in manager
+    schedule = function_body(manager, "void WifiManager::ScheduleScanRecovery")
+    assert "xTaskNotifyGive" in schedule
+    assert "scan_recovery_executor_.Execute" not in schedule
+
+
+def test_scanners_notify_exact_debt_only_after_releasing_scan_lock():
+    for header_path, source_path, owner in (
+        (
+            "components/esp-wifi-connect/include/wifi_station.h",
+            "components/esp-wifi-connect/wifi_station.cc",
+            "WifiStation",
+        ),
+        (
+            "components/esp-wifi-connect/include/wifi_configuration_ap.h",
+            "components/esp-wifi-connect/wifi_configuration_ap.cc",
+            "WifiConfigurationAp",
+        ),
+    ):
+        header = read(header_path)
+        source = read(source_path)
+        assert "OnScanRecoveryNeeded" in header
+        assert "NotifyScanRecoveryNeeded" in header
+        notify = function_body(source, f"void {owner}::NotifyScanRecoveryNeeded")
+        assert "scan_recovery_needed_" in notify
+        assert "scan_mutex_" not in notify
+
+        start = function_body(source, f"bool {owner}::StartOwnedScan")
+        assert start.index("lifecycle_lock.unlock()") < start.index(
+            "NotifyScanRecoveryNeeded(lease)"
+        )
+
+
+def test_manager_recovery_retains_one_exact_claim_across_bounded_retries():
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+
+    assert "scan_recovery_claim_" in manager_header
+    assert "scan_recovery_active_" in manager_header
+    assert "scan_recovery_retry_pending_" in manager_header
+    assert run.count("ClaimScanRecovery(") == 2
+    assert "work = scan_recovery_claim_" in run
+    assert "vTaskDelay" in run
+    assert "CompleteScanRecovery" in run
+    assert "RetryScanAfterRecovery" in run
+    assert "wifi_teardown_faulted_ = false" not in run
+
+
+def test_manager_lifecycle_entry_points_are_blocked_during_scan_recovery():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    for signature in (
+        "void WifiManager::StartStation",
+        "void WifiManager::StopStation",
+        "void WifiManager::StartConfigAp",
+        "void WifiManager::StopConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        body = function_body(manager, signature)
+        assert "scan_recovery_active_" in body
 
 
 def test_coordinator_recovery_cannot_claim_active_completion_reader():
