@@ -27,10 +27,14 @@ def test_one_helper_owns_cancel_deinit_and_conditional_rearm():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
     public_body = function_body(source, "bool Blufi::CompleteSuccessfulProvisioningTeardown")
-    body = function_body(source, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl")
+    wrapper = function_body(source, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl")
+    body = function_body(
+        source, "bool Blufi::CompleteSuccessfulProvisioningTeardownWithLifecycleOwned"
+    )
     assert "bool CompleteSuccessfulProvisioningTeardown(const char* reason," in header
     assert "ProvisioningToken provisioning_token);" in header
     assert "CompleteSuccessfulProvisioningTeardownImpl(" in public_body
+    assert "CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(" in wrapper
     claim = body.index("provisioning_session_.Claim(provisioning_token)")
     cancel = body.index("CancelBleSetupTimeout()")
     deinit = body.index("DeinitWithLifecycleOwned()", cancel)
@@ -240,7 +244,7 @@ def test_network_connected_is_not_a_teardown_or_rearm_owner():
 def test_duplicate_success_callers_cannot_double_delete_the_timeout_timer():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    start = function_body(source, "void Blufi::StartBleSetupTimeout")
+    start = function_body(source, "bool Blufi::StartBleSetupTimeoutWithLifecycleOwned")
     cancel = function_body(source, "void Blufi::CancelBleSetupTimeout")
     assert "std::mutex ble_setup_timer_mutex_" in header
     assert "ble_setup_timer_mutex_" in start

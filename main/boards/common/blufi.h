@@ -54,15 +54,22 @@ public:
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t init();
-    esp_err_t InitForSetupGeneration(
-        uint32_t expected_generation,
-        const std::function<esp_err_t()>& prepare = {});
+    // prepare/on_current run while lifecycle ownership is held. They must not
+    // re-enter a public Blufi lifecycle API, perform network I/O, or wait for
+    // work that can require a BluFi callback.
+    bool EnsureAdvertisingForSetupGeneration(
+        uint32_t expected_generation, int timeout_seconds,
+        ProvisioningToken* provisioning_token,
+        const std::function<esp_err_t()>& prepare,
+        const std::function<void()>& on_current = {});
 
     /**
      * @brief Deinitializes Blufi and the Bluetooth stack.
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t deinit();
+    // on_current follows the lifecycle-owned callback contract documented on
+    // EnsureAdvertisingForSetupGeneration().
     esp_err_t DeinitForSetupGeneration(
         uint32_t expected_generation,
         const std::function<void()>& on_current = {});
@@ -89,6 +96,8 @@ public:
     bool AbortProvisioningSetup(ProvisioningToken token);
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);
+    // on_current follows the lifecycle-owned callback contract documented on
+    // EnsureAdvertisingForSetupGeneration().
     bool CompleteSuccessfulProvisioningTeardownForGeneration(
         const char* reason, ProvisioningToken provisioning_token,
         uint32_t expected_generation,
@@ -123,9 +132,6 @@ public:
      * @param seconds  Wall-clock budget for BLE provisioning (e.g. CONFIG_BLE_SETUP_TIMEOUT_SEC).
      */
     void StartBleSetupTimeout(int seconds);
-    bool StartBleSetupTimeoutForGeneration(
-        uint32_t expected_generation, int seconds,
-        const std::function<void()>& on_current = {});
 
     /**
      * @brief Cancel the BLE setup timeout timer (call on provisioning success or Wi-Fi connect).
@@ -171,6 +177,7 @@ private:
     // Call only while ble_lifecycle_mutex_ is owned by the current task.
     esp_err_t InitWithLifecycleOwned();
     esp_err_t DeinitWithLifecycleOwned();
+    bool StartBleSetupTimeoutWithLifecycleOwned(int seconds);
     esp_err_t _init_impl();
     esp_err_t _deinit_impl();
 
@@ -214,6 +221,9 @@ private:
     bool CompleteSuccessfulProvisioningTeardownImpl(
         const char* reason, ProvisioningToken provisioning_token,
         std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current = {});
+    bool CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+        const char* reason, ProvisioningToken provisioning_token,
         const std::function<void()>& on_current = {});
     bool ReleaseBleForStationAssociation(uint32_t expected_generation);
     void RestoreBleAfterStationFailure(uint32_t expected_generation);

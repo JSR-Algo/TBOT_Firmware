@@ -22,6 +22,8 @@
 - [ ] For generation-bound claim confirmation, apply/commit the result inside `RunIfSetupGenerationCurrent()`, then call public successful teardown only after the generation gate returns and only when both `applied` and `should_teardown` are true.
 - [ ] Reserve lifecycle ownership and briefly revalidate generation around claim worker creation. Commit confirmation poll fallback before releasing that reservation; on fetch dispatch failure, use a second generation-aware standby reservation before substate/render/BLE/poll fallback effects.
 - [ ] Add deterministic native choreography for restart immediately after failed confirmation/fetch dispatch and source contracts that reject post-reservation fallback work.
+- [ ] Add a threaded release-vs-ensure choreography. Move generation-aware standby state check, optional provisioning preparation/init, and timeout arm into one lifecycle-owned transaction; perform failure abort/rearm through an owned helper with no public lifecycle re-entry.
+- [ ] Document or remove callback-bearing generation lifecycle APIs so every remaining callback has an explicit bounded no-network/no-reentry contract.
 - [ ] Re-run the focused test and confirm it passes.
 
 ### Task 2: Own fallback advertising callbacks

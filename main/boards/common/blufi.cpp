@@ -561,19 +561,48 @@ esp_err_t Blufi::init() {
     return InitWithLifecycleOwned();
 }
 
-esp_err_t Blufi::InitForSetupGeneration(
-        uint32_t expected_generation, const std::function<esp_err_t()>& prepare) {
+bool Blufi::EnsureAdvertisingForSetupGeneration(
+        uint32_t expected_generation, int timeout_seconds,
+        ProvisioningToken* provisioning_token,
+        const std::function<esp_err_t()>& prepare,
+        const std::function<void()>& on_current) {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     {
         std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
         if (expected_generation != setup_generation_.load()) {
-            return ESP_ERR_INVALID_STATE;
+            return false;
         }
     }
-    if (prepare && prepare() != ESP_OK) {
-        return ESP_FAIL;
+
+    BleState state = GetBleState();
+    if (state == BleState::kOff) {
+        if (prepare && prepare() != ESP_OK) {
+            return false;
+        }
+        if (InitWithLifecycleOwned() != ESP_OK) {
+            if (provisioning_token != nullptr && provisioning_token->valid()) {
+                CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+                    "setup_abort", *provisioning_token);
+            }
+            return false;
+        }
+        state = GetBleState();
     }
-    return InitWithLifecycleOwned();
+    if (state == BleState::kOff) {
+        return false;
+    }
+    if (!StartBleSetupTimeoutWithLifecycleOwned(timeout_seconds)) {
+        if (provisioning_token != nullptr && provisioning_token->valid()) {
+            CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+                "setup_abort", *provisioning_token);
+        }
+        return false;
+    }
+    if (on_current) {
+        on_current();
+    }
+    return GetBleState() == BleState::kAdvertising ||
+           GetBleState() == BleState::kConnected;
 }
 
 esp_err_t Blufi::InitWithLifecycleOwned() {
@@ -916,6 +945,14 @@ bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
         }
     }
 
+    return CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+        reason, provisioning_token, on_current);
+}
+
+bool Blufi::CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+        const char* reason, ProvisioningToken provisioning_token,
+        const std::function<void()>& on_current) {
+
     constexpr uint64_t kTokenChunkBase = 1000000000ULL;
     const uint64_t token_generation = provisioning_token.generation;
     const auto token_high = static_cast<unsigned long>(
@@ -1017,7 +1054,7 @@ void Blufi::RestoreBleAfterStationFailure(uint32_t expected_generation) {
 
         WifiManager::GetInstance().StopStation();
         if (InitWithLifecycleOwned() == ESP_OK) {
-            StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
+            StartBleSetupTimeoutWithLifecycleOwned(CONFIG_BLE_SETUP_TIMEOUT_SEC);
             ESP_LOGI(BLUFI_TAG, "WiFi association failed; BLE setup restored automatically");
         } else {
             ESP_LOGE(BLUFI_TAG, "WiFi association failed and BLE setup restore failed");
@@ -2878,7 +2915,7 @@ void Blufi::_ble_setup_timeout_cb(void* arg) {
     });
 }
 
-void Blufi::StartBleSetupTimeout(int seconds) {
+bool Blufi::StartBleSetupTimeoutWithLifecycleOwned(int seconds) {
     const uint32_t generation = ble_timeout_generation_.fetch_add(1) + 1;
     std::lock_guard<std::mutex> lock(ble_setup_timer_mutex_);
     if (ble_setup_timer_ != nullptr) {
@@ -2900,33 +2937,22 @@ void Blufi::StartBleSetupTimeout(int seconds) {
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to create BLE setup timer: %s", esp_err_to_name(err));
         ble_setup_timer_ = nullptr;
-        return;
+        return false;
     }
     err = esp_timer_start_once(ble_setup_timer_, static_cast<uint64_t>(seconds) * 1000000ULL);
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to start BLE setup timer: %s", esp_err_to_name(err));
         esp_timer_delete(ble_setup_timer_);
         ble_setup_timer_ = nullptr;
-        return;
+        return false;
     }
     ESP_LOGI(BLUFI_TAG, "BLE setup timer armed %ds", seconds);
+    return true;
 }
 
-bool Blufi::StartBleSetupTimeoutForGeneration(
-        uint32_t expected_generation, int seconds,
-        const std::function<void()>& on_current) {
+void Blufi::StartBleSetupTimeout(int seconds) {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
-    {
-        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
-        if (expected_generation != setup_generation_.load()) {
-            return false;
-        }
-    }
-    StartBleSetupTimeout(seconds);
-    if (on_current) {
-        on_current();
-    }
-    return true;
+    StartBleSetupTimeoutWithLifecycleOwned(seconds);
 }
 
 void Blufi::CancelBleSetupTimeout() {

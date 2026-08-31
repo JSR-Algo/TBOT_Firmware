@@ -33,6 +33,21 @@ generation-aware standby reservation before changing claim substate, rendering,
 ensuring BLE advertising, or re-arming polling. A BOOT restart between dispatch
 failure and fallback therefore suppresses every stale fallback effect.
 
+Generation-aware standby ensure is also one lifecycle transaction. It must not
+read BLE state before acquiring lifecycle ownership: a station-association
+release may have observed active BLE and be waiting to deinitialize it. Once the
+ensure operation owns lifecycle, it briefly validates the setup generation,
+rechecks the post-release BLE state, prepares and binds the provisioning audio
+token only if initialization is required, initializes with the owned primitive,
+and arms the hard timeout before returning success. Preparation, initialization,
+or timer failure performs provisioning abort/audio rearm through an owned helper,
+without recursively entering a public lifecycle API. Success means BLE is still
+active and its setup timer is armed when lifecycle ownership is released.
+
+Callbacks accepted by public generation lifecycle APIs execute while lifecycle
+or finalization ownership is held. They are bounded, perform no network I/O, do
+not wait on BluFi callbacks, and never call another public BluFi lifecycle API.
+
 Tag every advertising start completion that the wrapper intentionally owns,
 including the default BluFi fallback path. A fallback start from an older host
 lifecycle must never consume the queued epoch for a newer compact advertising
@@ -57,3 +72,6 @@ station-association lifecycle code.
 6. Prove deterministically that restart after claim dispatch failure cannot run
    stale confirmation polling or fetch standby fallback state/render/BLE/poll
    effects.
+7. Prove with a threaded release/drain interleaving that generation-aware ensure
+   rechecks BLE state under lifecycle ownership, restores an off stack, arms the
+   timeout, and cannot report success while BLE remains off.

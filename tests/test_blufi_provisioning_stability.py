@@ -681,7 +681,7 @@ def test_ble_restore_is_scoped_to_the_originating_setup_generation():
 
     assert "expected_generation != setup_generation_.load()" in restore
     assert "InitWithLifecycleOwned()" in restore
-    assert "StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC)" in restore
+    assert "StartBleSetupTimeoutWithLifecycleOwned(CONFIG_BLE_SETUP_TIMEOUT_SEC)" in restore
 
 
 # ---------------------------------------------------------------------------
@@ -1136,6 +1136,9 @@ def test_fw21e_compound_lifecycle_transactions_use_owned_primitives_without_recu
     teardown = _function_body(
         blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl"
     )
+    teardown_owned = _function_body(
+        blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownWithLifecycleOwned"
+    )
     restore = _function_body(blufi, "void Blufi::RestoreBleAfterStationFailure")
 
     for body in (restart, release, teardown, restore):
@@ -1146,7 +1149,8 @@ def test_fw21e_compound_lifecycle_transactions_use_owned_primitives_without_recu
     assert "DeinitWithLifecycleOwned()" in restart
     assert "InitWithLifecycleOwned()" in restart
     assert "DeinitWithLifecycleOwned()" in release
-    assert "DeinitWithLifecycleOwned()" in teardown
+    assert "CompleteSuccessfulProvisioningTeardownWithLifecycleOwned" in teardown
+    assert "DeinitWithLifecycleOwned()" in teardown_owned
 
     lifecycle = restore.index("ble_lifecycle_mutex_")
     finalization = restore.index("provisioning_finalization_mutex_", lifecycle)
@@ -1193,14 +1197,19 @@ def test_fw21e_successful_teardown_validates_generation_without_locking_callback
     generation_check = teardown.index(
         "expected_generation.value() != setup_generation_.load()", generation_lock
     )
-    generation_scope_end = teardown.index("}\n\n    constexpr", generation_check)
-    claim = teardown.index("provisioning_session_.Claim", generation_scope_end)
-    deinit = teardown.index(
-        "const esp_err_t deinit_error = DeinitWithLifecycleOwned();", claim
+    generation_scope_end = teardown.index("}\n\n    return", generation_check)
+    owned_call = teardown.index(
+        "CompleteSuccessfulProvisioningTeardownWithLifecycleOwned", generation_scope_end
     )
+    owned = _function_body(
+        blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownWithLifecycleOwned"
+    )
+    claim = owned.index("provisioning_session_.Claim")
+    deinit = owned.index("const esp_err_t deinit_error = DeinitWithLifecycleOwned();", claim)
 
-    assert lifecycle_lock < generation_lock < generation_check < generation_scope_end < claim < deinit
-    assert "provisioning_finalization_mutex_" not in teardown[generation_scope_end:deinit]
+    assert lifecycle_lock < generation_lock < generation_check < generation_scope_end < owned_call
+    assert claim < deinit
+    assert "provisioning_finalization_mutex_" not in owned[:deinit]
 
 
 def test_fw21e_teardown_callers_do_not_invoke_deinit_under_generation_action_lock():
@@ -1495,12 +1504,12 @@ def test_fw21h_generation_gates_commit_state_and_defer_all_lifecycle_effects():
 def test_fw21h_generation_aware_lifecycle_apis_preserve_global_lock_order():
     header = read("main/boards/common/blufi.h")
     blufi = read("main/boards/common/blufi.cpp")
-    for name, primitive in (
-        ("InitForSetupGeneration", "InitWithLifecycleOwned()"),
-        ("DeinitForSetupGeneration", "DeinitWithLifecycleOwned()"),
+    for signature, name, primitive in (
+        ("bool Blufi::EnsureAdvertisingForSetupGeneration", "EnsureAdvertisingForSetupGeneration", "InitWithLifecycleOwned()"),
+        ("esp_err_t Blufi::DeinitForSetupGeneration", "DeinitForSetupGeneration", "DeinitWithLifecycleOwned()"),
     ):
         assert name in header
-        body = _function_body(blufi, f"esp_err_t Blufi::{name}")
+        body = _function_body(blufi, signature)
         lifecycle = body.index("ble_lifecycle_mutex_")
         finalization = body.index("provisioning_finalization_mutex_", lifecycle)
         generation = body.index("expected_generation != setup_generation_.load()", finalization)
@@ -1593,6 +1602,66 @@ def test_fw21h_fetch_dispatch_failure_fallback_is_generation_reserved():
     assert "claim_substate_ = TbotClaimSubstate::AvailableStandby" in commit
     assert "RenderClaimSubstate" in commit
     assert "StartClaimPoll" in commit
+
+
+def test_fw21h_generation_aware_ensure_checks_ble_state_only_inside_owned_transaction():
+    app = read("main/application.cc")
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    ensure = _function_body(app, "bool Application::EnsureBleAdvertisingForStandbyImpl")
+    generation_branch = ensure[
+        ensure.index("if (expected_generation.has_value())") : ensure.index(
+            "if (blufi.GetBleState()", ensure.index("if (expected_generation.has_value())")
+        )
+    ]
+    assert "EnsureAdvertisingForSetupGeneration" in header
+    assert "EnsureAdvertisingForSetupGeneration" in generation_branch
+    assert "GetBleState" not in generation_branch
+
+    transaction = _function_body(blufi, "bool Blufi::EnsureAdvertisingForSetupGeneration")
+    lifecycle = transaction.index("ble_lifecycle_mutex_")
+    finalization = transaction.index("provisioning_finalization_mutex_", lifecycle)
+    generation = transaction.index(
+        "expected_generation != setup_generation_.load()", finalization
+    )
+    scope_end = transaction.index("}\n", generation)
+    state = transaction.index("GetBleState()", scope_end)
+    init = transaction.index("InitWithLifecycleOwned()", state)
+    timer = transaction.index("StartBleSetupTimeoutWithLifecycleOwned", init)
+    assert lifecycle < finalization < generation < scope_end < state < init < timer
+
+
+def test_fw21h_generation_lifecycle_callbacks_document_no_reentry_contract():
+    header = read("main/boards/common/blufi.h")
+    ensure_contract = header[
+        header.index("// prepare/on_current run while lifecycle ownership is held.") :
+        header.index("bool EnsureAdvertisingForSetupGeneration")
+    ]
+    assert "re-enter a public Blufi lifecycle API" in ensure_contract
+    assert "perform network I/O" in ensure_contract
+    assert "require a BluFi callback" in ensure_contract
+
+    for api in (
+        "esp_err_t DeinitForSetupGeneration",
+        "bool CompleteSuccessfulProvisioningTeardownForGeneration",
+    ):
+        declaration = header.index(api)
+        contract = header.rfind("// on_current follows", 0, declaration)
+        assert contract != -1
+        assert "lifecycle-owned callback contract" in header[contract:declaration]
+
+    dispatch = header[
+        header.index("Run a bounded dispatch action") :
+        header.index("bool RunWithSetupGenerationCurrent")
+    ]
+    assert "perform network I/O" in dispatch
+    assert "re-enter a public BluFi lifecycle API" in dispatch
+
+    finalization_only = header[
+        header.index("Run a short non-network action") :
+        header.index("bool RunIfSetupGenerationCurrent")
+    ]
+    assert "lifecycle-owned callback contract" not in finalization_only
 
 
 # ---------------------------------------------------------------------------
@@ -2246,7 +2315,7 @@ def test_fw33_boot_reentry_starts_a_new_generation_and_clean_ble_session():
 
 def test_fw34_stale_timeout_and_wifi_workers_cannot_mutate_new_boot_generation():
     blufi = read("main/boards/common/blufi.cpp")
-    arm = _function_body(blufi, "void Blufi::StartBleSetupTimeout")
+    arm = _function_body(blufi, "bool Blufi::StartBleSetupTimeoutWithLifecycleOwned")
     timeout = _function_body(blufi, "void Blufi::_ble_setup_timeout_cb")
     connect = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
 

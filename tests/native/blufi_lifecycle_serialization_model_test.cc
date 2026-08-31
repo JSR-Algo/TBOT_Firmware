@@ -224,6 +224,65 @@ public:
         return restart_saw_committed_poll_v4_.load();
     }
 
+    void ReleaseActiveBleAcrossDrainV5() {
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        {
+            std::unique_lock<std::mutex> lock(ensure_gap_mutex_v5_);
+            release_started_v5_ = true;
+            ensure_gap_cv_v5_.notify_all();
+            ensure_gap_cv_v5_.wait(lock, [this]() { return ensure_observed_v5_; });
+        }
+        ble_active_v5_.store(false);
+        {
+            std::unique_lock<std::mutex> lock(ensure_gap_mutex_v5_);
+            release_deinited_v5_ = true;
+            ensure_gap_cv_v5_.notify_all();
+            ensure_gap_cv_v5_.wait(lock, [this]() { return finish_release_v5_; });
+        }
+    }
+
+    void EnsureForGenerationV5(uint32_t expected_generation) {
+        {
+            std::unique_lock<std::mutex> lock(ensure_gap_mutex_v5_);
+            ensure_gap_cv_v5_.wait(lock, [this]() { return release_started_v5_; });
+        }
+        {
+            std::lock_guard<std::mutex> lock(ensure_gap_mutex_v5_);
+            ensure_observed_v5_ = true;
+        }
+        ensure_gap_cv_v5_.notify_all();
+
+        std::lock_guard<std::timed_mutex> lifecycle(lifecycle_mutex_v2_);
+        {
+            std::lock_guard<std::timed_mutex> finalization(finalization_mutex_);
+            if (expected_generation != setup_generation_v3_.load()) {
+                return;
+            }
+        }
+        if (!ble_active_v5_.load()) {
+            ble_active_v5_.store(true);
+        }
+        timer_armed_v5_.store(true);
+        ensure_succeeded_v5_.store(true);
+    }
+
+    void WaitForReleaseDeinitV5() {
+        std::unique_lock<std::mutex> lock(ensure_gap_mutex_v5_);
+        ensure_gap_cv_v5_.wait(lock, [this]() { return release_deinited_v5_; });
+    }
+
+    void FinishReleaseV5() {
+        {
+            std::lock_guard<std::mutex> lock(ensure_gap_mutex_v5_);
+            finish_release_v5_ = true;
+        }
+        ensure_gap_cv_v5_.notify_all();
+    }
+
+    bool EnsureSucceededV5() const { return ensure_succeeded_v5_.load(); }
+    bool BleActiveV5() const { return ble_active_v5_.load(); }
+    bool TimerArmedV5() const { return timer_armed_v5_.load(); }
+
 private:
     void SignalGapAndWait() {
         std::unique_lock<std::mutex> lock(gap_mutex_);
@@ -274,6 +333,15 @@ private:
     bool confirmation_dispatch_failed_v4_ = false;
     std::atomic<bool> restart_attempted_v4_{false};
     std::atomic<bool> restart_saw_committed_poll_v4_{false};
+    std::mutex ensure_gap_mutex_v5_;
+    std::condition_variable ensure_gap_cv_v5_;
+    bool release_started_v5_ = false;
+    bool ensure_observed_v5_ = false;
+    bool release_deinited_v5_ = false;
+    bool finish_release_v5_ = false;
+    std::atomic<bool> ble_active_v5_{true};
+    std::atomic<bool> timer_armed_v5_{false};
+    std::atomic<bool> ensure_succeeded_v5_{false};
 };
 
 void ReleaseDrainBlocksConcurrentPublicInit() {
@@ -368,6 +436,22 @@ void RestartAfterFailedFetchDispatchSuppressesStandbyFallback() {
     assert(model.ClaimPollStartsV4() == 0);
 }
 
+void EnsureDuringReleaseRechecksBleStateAfterDrain() {
+    LifecycleModel model;
+    const uint32_t generation = model.CommitOriginalGenerationGate();
+    std::thread release([&model]() { model.ReleaseActiveBleAcrossDrainV5(); });
+    std::thread ensure([&model, generation]() {
+        model.EnsureForGenerationV5(generation);
+    });
+    model.WaitForReleaseDeinitV5();
+    model.FinishReleaseV5();
+    release.join();
+    ensure.join();
+    assert(model.EnsureSucceededV5());
+    assert(model.BleActiveV5());
+    assert(model.TimerArmedV5());
+}
+
 }  // namespace
 
 int main() {
@@ -379,5 +463,6 @@ int main() {
     RestartAfterOriginalGateSuppressesDeferredRefreshLaunch();
     FailedConfirmationDispatchCommitsPollBeforeRestartCanAdvanceGeneration();
     RestartAfterFailedFetchDispatchSuppressesStandbyFallback();
+    EnsureDuringReleaseRechecksBleStateAfterDrain();
     return 0;
 }

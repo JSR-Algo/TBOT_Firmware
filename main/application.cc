@@ -2571,46 +2571,50 @@ bool Application::EnsureBleAdvertisingForStandbyImpl(
             : StopBleAdvertisingImpl(std::nullopt);
     }
 
+    auto provisioning_token = blufi.CaptureProvisioningSession();
+    auto prepare = [&]() -> esp_err_t {
+        if (provisioning_token.valid()) {
+            return ESP_OK;
+        }
+        auto provisioning_reservation = blufi.TryReserveProvisioningSession();
+        if (!provisioning_reservation) {
+            ESP_LOGW(TAG, "Claim standby BLE start deferred: provisioning completion active");
+            return ESP_ERR_INVALID_STATE;
+        }
+        const auto begin_result = audio_service_.BeginWifiProvisioning();
+        if (!begin_result) {
+            ESP_LOGE(TAG, "Claim standby BLE start failed: audio lifecycle did not quiesce");
+            return ESP_FAIL;
+        }
+        provisioning_token = begin_result.token;
+        if (!provisioning_reservation.Commit(provisioning_token)) {
+            ESP_LOGE(TAG, "Claim standby BLE start failed: could not bind provisioning token");
+            audio_service_.EndWifiProvisioningAndRearm(provisioning_token);
+            provisioning_token = {};
+            return ESP_FAIL;
+        }
+        return ESP_OK;
+    };
+    if (expected_generation.has_value()) {
+        const bool ensured = blufi.EnsureAdvertisingForSetupGeneration(
+            expected_generation.value(), CONFIG_BLE_SETUP_TIMEOUT_SEC,
+            &provisioning_token, prepare, on_current);
+        if (!ensured) {
+            ESP_LOGE(TAG, "Claim standby BLE ensure failed or became stale");
+        }
+        return ensured;
+    }
+
     if (blufi.GetBleState() == Blufi::BleState::kOff) {
         // Not advertising yet -> bring BLE up. Guarded by kOff so we never call
         // init() twice without a deinit() in between (double-init would leak the
         // BT controller/host). init() resets the re-advertise cap for this fresh
         // discoverable window. init() does NOT disturb the connected station.
         ESP_LOGI(TAG, "Claim standby: starting BLE advertising (TBOT-<MAC>)");
-        auto provisioning_token = blufi.CaptureProvisioningSession();
-        auto prepare = [&]() -> esp_err_t {
-            if (provisioning_token.valid()) {
-                return ESP_OK;
-            }
-            auto provisioning_reservation = blufi.TryReserveProvisioningSession();
-            if (!provisioning_reservation) {
-                ESP_LOGW(TAG, "Claim standby BLE start deferred: provisioning completion active");
-                return ESP_ERR_INVALID_STATE;
-            }
-            const auto begin_result = audio_service_.BeginWifiProvisioning();
-            if (!begin_result) {
-                ESP_LOGE(TAG, "Claim standby BLE start failed: audio lifecycle did not quiesce");
-                return ESP_FAIL;
-            }
-            provisioning_token = begin_result.token;
-            if (!provisioning_reservation.Commit(provisioning_token)) {
-                ESP_LOGE(TAG, "Claim standby BLE start failed: could not bind provisioning token");
-                audio_service_.EndWifiProvisioningAndRearm(provisioning_token);
-                return ESP_FAIL;
-            }
-            return ESP_OK;
-        };
-        const esp_err_t init_error = expected_generation.has_value()
-            ? blufi.InitForSetupGeneration(expected_generation.value(), prepare)
-            : (prepare() == ESP_OK ? blufi.init() : ESP_FAIL);
+        const esp_err_t init_error = prepare() == ESP_OK ? blufi.init() : ESP_FAIL;
         if (init_error != ESP_OK) {
             ESP_LOGE(TAG, "Claim standby BLE start failed: BLUFI init failed");
-            if (expected_generation.has_value()) {
-                blufi.CompleteSuccessfulProvisioningTeardownForGeneration(
-                    "setup_abort", provisioning_token, expected_generation.value());
-            } else {
-                blufi.AbortProvisioningSetup(provisioning_token);
-            }
+            blufi.AbortProvisioningSetup(provisioning_token);
             return false;
         }
     }
@@ -2622,10 +2626,6 @@ bool Application::EnsureBleAdvertisingForStandbyImpl(
     // discoverable. The hard-timeout still fires (and tears BLE down) if we ever
     // stop re-arming, i.e. the moment we leave standby. The §9 re-advertise cap
     // (kMaxBleReadvertiseAttempts) is untouched and still bounds a flapping peer.
-    if (expected_generation.has_value()) {
-        return blufi.StartBleSetupTimeoutForGeneration(
-            expected_generation.value(), CONFIG_BLE_SETUP_TIMEOUT_SEC, on_current);
-    }
     blufi.StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
 #else
     if (expected_generation.has_value()) {
