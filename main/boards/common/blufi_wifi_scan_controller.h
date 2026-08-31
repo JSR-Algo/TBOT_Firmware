@@ -26,6 +26,7 @@ public:
         uint64_t request_id = 0;
         bool start_now = false;
         bool queued = false;
+        bool rejected_stale = false;
     };
 
     struct StartClaimDecision {
@@ -69,6 +70,10 @@ public:
         if (!lifecycle_initialized_) {
             RecordLifecycle(request.setup_generation, request.ble_session_state,
                             request.ble_connection_epoch);
+        }
+        if (!MatchesCurrent(request)) {
+            result.rejected_stale = true;
+            return result;
         }
         if (phase_ == Phase::kIdle) {
             owner_ = request;
@@ -321,6 +326,9 @@ private:
         }
         const Request pending = *pending_;
         pending_.reset();
+        if (!MatchesCurrent(pending)) {
+            return;
+        }
         Reserve(pending, result);
     }
 

@@ -96,6 +96,94 @@ void DelayedOldCompletionCannotSatisfyNewRequest() {
     assert(drained.pending.ble_connection_epoch == 202);
 }
 
+void DelayedStaleRequestCannotOverwriteCurrentPending() {
+    Controller controller;
+    const auto old = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, old.request_id);
+    assert(controller.CommitStart(old.request_id, true).accepted);
+
+    controller.InvalidateSession(2, 22, 202);
+    const auto current = controller.RequestScan(Request(2, 22, 202));
+    assert(current.queued);
+    const auto delayed = controller.RequestScan(Request(1, 11, 101));
+    assert(delayed.rejected_stale);
+    assert(!delayed.start_now);
+    assert(!delayed.queued);
+
+    const auto completion = controller.BeginCompletion(2, 22, 202);
+    assert(completion.owned_callback);
+    const auto promoted = controller.FinishCompletion(completion.request_id);
+    assert(promoted.start_pending);
+    assert(promoted.pending.setup_generation == 2);
+    assert(promoted.pending.ble_session_state == 22);
+    assert(promoted.pending.ble_connection_epoch == 202);
+}
+
+void IdleControllerRejectsDelayedStaleRequestAfterInvalidation() {
+    Controller controller;
+    const auto old = controller.RequestScan(Request(1, 11, 101));
+    assert(old.start_now);
+    controller.InvalidateSession(2, 22, 202);
+    assert(controller.phase() == Controller::Phase::kIdle);
+
+    const auto delayed = controller.RequestScan(Request(1, 11, 101));
+    assert(delayed.rejected_stale);
+    assert(controller.phase() == Controller::Phase::kIdle);
+
+    const auto current = controller.RequestScan(Request(2, 22, 202));
+    assert(current.start_now);
+    assert(!current.rejected_stale);
+}
+
+void CurrentRepeatedRequestStillCoalescesAndReplacesPending() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    const auto first = controller.RequestScan(Request(1, 11, 101, true));
+    const auto replacement = controller.RequestScan(Request(1, 11, 101, false));
+    assert(first.queued);
+    assert(replacement.queued);
+    assert(!replacement.rejected_stale);
+
+    const auto completion = controller.BeginCompletion(1, 11, 101);
+    const auto promoted = controller.FinishCompletion(completion.request_id);
+    assert(promoted.start_pending);
+    assert(!promoted.pending.send_list);
+}
+
+void ThreadedDelayedStaleRequestCannotReplaceCurrentPending() {
+    Controller controller;
+    const auto old = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, old.request_id);
+    assert(controller.CommitStart(old.request_id, true).accepted);
+    controller.InvalidateSession(2, 22, 202);
+
+    Barrier start(3);
+    Signal current_queued;
+    Controller::RequestDecision delayed;
+    std::thread current([&]() {
+        start.ArriveAndWait();
+        assert(controller.RequestScan(Request(2, 22, 202)).queued);
+        current_queued.Notify();
+    });
+    std::thread stale([&]() {
+        start.ArriveAndWait();
+        current_queued.Wait();
+        delayed = controller.RequestScan(Request(1, 11, 101));
+    });
+    start.ArriveAndWait();
+    current.join();
+    stale.join();
+    assert(delayed.rejected_stale);
+
+    const auto completion = controller.BeginCompletion(2, 22, 202);
+    const auto promoted = controller.FinishCompletion(completion.request_id);
+    assert(promoted.start_pending);
+    assert(promoted.pending.setup_generation == 2);
+}
+
 void InvalidateBeforeClaimRetiresReservation() {
     Controller controller;
     const auto old = controller.RequestScan(Request(1, 11, 101));
@@ -120,13 +208,14 @@ void InvalidateBeforeClaimRetiresReservation() {
 void InvalidateBeforeClaimPromotesValidPendingReservation() {
     Controller controller;
     const auto old = controller.RequestScan(Request(1, 11, 101));
-    const auto queued = controller.RequestScan(Request(2, 22, 202));
+    const auto queued = controller.RequestScan(Request(1, 11, 101, false));
     assert(queued.queued);
 
-    const auto promoted = controller.InvalidateSession(2, 22, 202);
+    const auto promoted = controller.InvalidateSession(1, 11, 101);
     assert(promoted.start_pending);
     assert(promoted.request_id != old.request_id);
-    assert(promoted.pending.setup_generation == 2);
+    assert(promoted.pending.setup_generation == 1);
+    assert(!promoted.pending.send_list);
     assert(controller.phase() == Controller::Phase::kStarting);
     assert(!controller.ClaimStart(old.request_id).claimed);
     assert(controller.ClaimStart(promoted.request_id).claimed);
@@ -184,11 +273,11 @@ void ConcurrentRequestsCoalesceToLatestPendingRequest() {
     Barrier barrier(3);
     std::thread first([&]() {
         barrier.ArriveAndWait();
-        assert(controller.RequestScan(Request(2, 22, 202)).queued);
+        assert(controller.RequestScan(Request(1, 11, 101, true)).queued);
     });
     std::thread second([&]() {
         barrier.ArriveAndWait();
-        assert(controller.RequestScan(Request(3, 33, 303)).queued);
+        assert(controller.RequestScan(Request(1, 11, 101, false)).queued);
     });
     barrier.ArriveAndWait();
     first.join();
@@ -198,8 +287,7 @@ void ConcurrentRequestsCoalesceToLatestPendingRequest() {
     assert(completion.owned_callback);
     const auto next = controller.FinishCompletion(completion.request_id);
     assert(next.start_pending);
-    assert(next.pending.setup_generation == 2 ||
-           next.pending.setup_generation == 3);
+    assert(next.pending.setup_generation == 1);
     assert(controller.phase() == Controller::Phase::kStarting);
     assert(!controller.FinishCompletion(completion.request_id).start_pending);
 }
@@ -424,14 +512,16 @@ void ValidPendingRequestWinsOverCurrentOwnerRecovery() {
     assert(recovered.pending.save_results == pending_request.save_results);
 }
 
-void StalePendingFallsBackToCurrentOwnerRecovery() {
+void RejectedStalePendingLeavesCurrentOwnerRecovery() {
     Controller controller;
     const auto owner_request = Request(1, 11, 101, true);
     const auto stale_pending = Request(2, 22, 202, false);
     const auto owner = controller.RequestScan(owner_request);
     ClaimStart(controller, owner.request_id);
     assert(controller.CommitStart(owner.request_id, true).accepted);
-    assert(controller.RequestScan(stale_pending).queued);
+    const auto rejected = controller.RequestScan(stale_pending);
+    assert(rejected.rejected_stale);
+    assert(!rejected.queued);
 
     const auto ticket = controller.BeginRecovery(owner.request_id);
     assert(ticket.valid);
@@ -562,6 +652,10 @@ void SimultaneousCallbackAndInvalidateHaveConsistentLinearization() {
 
 int main() {
     DelayedOldCompletionCannotSatisfyNewRequest();
+    DelayedStaleRequestCannotOverwriteCurrentPending();
+    IdleControllerRejectsDelayedStaleRequestAfterInvalidation();
+    CurrentRepeatedRequestStillCoalescesAndReplacesPending();
+    ThreadedDelayedStaleRequestCannotReplaceCurrentPending();
     InvalidateBeforeClaimRetiresReservation();
     InvalidateBeforeClaimPromotesValidPendingReservation();
     InvalidateAfterClaimDrainsAcceptedSubmission();
@@ -577,7 +671,7 @@ int main() {
     PendingFromNewLifecycleWinsWhenRecoveryTicketRevisionIsOld();
     ThreadedInvalidateDuringRecoveryUsesLatestLifecycle();
     ValidPendingRequestWinsOverCurrentOwnerRecovery();
-    StalePendingFallsBackToCurrentOwnerRecovery();
+    RejectedStalePendingLeavesCurrentOwnerRecovery();
     RecoveryIncarnationWrapSkipsZero();
     WrongRequestRecoveryIsRejected();
     CallbackBeforeInvalidatePreservesCurrentOwnerDelivery();
