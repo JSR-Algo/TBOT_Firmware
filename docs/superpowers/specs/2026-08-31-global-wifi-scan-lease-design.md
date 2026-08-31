@@ -147,10 +147,22 @@ posted before the barrier have run. The barrier never runs while holding the
 global coordinator, `WifiManager`, BluFi lifecycle, or BluFi finalization mutex.
 
 The coordinator issues a unique drain or recovery operation ID before external
-work starts. External work is invoked through the proof factory and returns an
-opaque proof carrying that exact ID. Completion accepts only the current proof;
-a boolean result or proof from an earlier barrier/recovery cannot be reused for
-a later operation.
+work starts. Only concrete, named executors may construct opaque proofs:
+
+- the drain executor always calls `esp_wifi_scan_stop()` after submission has
+  committed, then runs the FIFO barrier;
+- the recovery executor performs the complete driver-reset and FIFO-barrier
+  sequence.
+
+There is no public generic proof factory, callback, or boolean-to-proof adapter.
+Completion accepts only the current executor-produced proof, so cached booleans
+or results from an earlier operation cannot be reused.
+
+If Stop wins while submission is still `Starting`, it marks the lease
+`Draining` but does not run the terminal barrier yet. After submission commit,
+the drain executor repeats `esp_wifi_scan_stop()` and then posts the barrier.
+This closes the race where the first stop ran before the driver accepted the
+concurrent scan.
 
 ## Driver Recovery Compatibility
 

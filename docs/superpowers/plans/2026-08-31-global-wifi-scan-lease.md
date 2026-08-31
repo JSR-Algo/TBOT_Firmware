@@ -111,26 +111,16 @@ public:
     bool CompleteRecovery(const Lease& lease, const RecoveryProof& proof);
 };
 
-class WifiScanLeaseProofFactory {
-public:
-    template <typename BarrierOperation>
-    static WifiScanLeaseCoordinator::DrainProof RunDrainBarrier(
-        const WifiScanLeaseCoordinator::DrainDecision& drain,
-        BarrierOperation&& operation);
-
-    template <typename RecoveryOperation>
-    static WifiScanLeaseCoordinator::RecoveryProof RunRecovery(
-        const WifiScanLeaseCoordinator::RecoveryDecision& recovery,
-        RecoveryOperation&& operation);
-};
+class DefaultEventLoopScanDrainExecutor;
+class WifiScanRecoveryExecutor;
 ```
 
 Every method locks only the coordinator mutex. `TryAcquire` succeeds only from
 `Free`; all other operations require exact owner, lease ID, and incarnation.
-Drain/recovery proof constructors are private. The proof factory synchronously
-invokes external work only after receiving the current coordinator-issued
-operation ID, preventing an old boolean/barrier result from completing a newer
-ticket.
+Drain/recovery proof constructors are private and friend only the concrete drain
+and recovery executors. No generic callable may manufacture a proof. Native
+tests define test-only versions of those exact friend classes; production code
+defines them in Tasks 2 and the original recovery Task 5.
 
 - [ ] **Step 4: Add deterministic early-callback and error races**
 
@@ -200,8 +190,10 @@ bool DrainDefaultEventLoop(std::chrono::milliseconds timeout);
 Use a private `ESP_EVENT_DEFINE_BASE`, binary semaphore, instance registration,
 `esp_event_post`, bounded `xSemaphoreTake`, unregister, and semaphore deletion.
 Return false for every failed stage and never retain a handler or semaphore.
-Callers execute it through `WifiScanLeaseProofFactory::RunDrainBarrier()` or the
-recovery proof factory so the result is bound to the issued operation ID.
+`DefaultEventLoopScanDrainExecutor` receives an armed drain ticket, calls
+`esp_wifi_scan_stop()` after submission commit, runs this barrier, and returns
+the opaque proof for that exact ticket. It must not accept a precomputed boolean
+or caller-supplied callback.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -234,8 +226,8 @@ coordinator without taking `WifiManager::mutex_`. Assert every Station/Config
 preceded by `ObserveScanDone`, and Stop performs:
 
 ```text
-cancel timer -> scan_stop -> BeginDrain -> ArmDrainBarrier
--> proof-factory barrier -> CompleteDrain
+cancel timer -> BeginDrain -> await submission commit -> ArmDrainBarrier
+-> concrete executor scan_stop -> FIFO barrier -> CompleteDrain
 ```
 
 - [ ] **Step 2: Run RED**
@@ -255,8 +247,9 @@ Acquire before submission. On start error,
 commit failure and clear the optional only if released. On `SCAN_DONE`, first
 observe the exact lease; ignore foreign events without reading AP records. Stop
 prevents new timer scans, stops the scan, begins drain, waits outside locks, and
-arms a drain ticket, runs the barrier through the proof factory, and completes
-drain only with the matching opaque proof.
+arms a drain ticket after submission commit, runs the concrete executor, and
+completes drain only with the matching opaque proof. The executor repeats
+`scan_stop` even if Stop already called it before commit.
 
 - [ ] **Step 4: Migrate Config AP**
 
@@ -399,10 +392,10 @@ Expected: FAIL on the Cardputer blocking scan.
 
 Acquire `Owner::kBlockingUi` before the blocking call. If busy, return a clear
 UI-level scan failure without disturbing the current owner. After the blocking
-call and AP-list retrieval/clear, call `BeginDrain`, arm a drain ticket, run
-`DrainDefaultEventLoop` through the proof factory, then call `CompleteDrain`
-with the opaque proof. A barrier failure retains the lease and reports a
-bounded diagnostic.
+call and AP-list retrieval/clear, call `BeginDrain`, arm a drain ticket after
+submission commit, run the concrete drain executor, then call `CompleteDrain`
+with the opaque proof. A barrier failure retains the lease and reports a bounded
+diagnostic.
 
 - [ ] **Step 4: Run all lease tests and commit**
 
