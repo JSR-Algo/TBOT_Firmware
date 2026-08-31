@@ -146,6 +146,12 @@ Because the default loop is FIFO, successful completion proves all events
 posted before the barrier have run. The barrier never runs while holding the
 global coordinator, `WifiManager`, BluFi lifecycle, or BluFi finalization mutex.
 
+The coordinator issues a unique drain or recovery operation ID before external
+work starts. External work is invoked through the proof factory and returns an
+opaque proof carrying that exact ID. Completion accepts only the current proof;
+a boolean result or proof from an earlier barrier/recovery cannot be reused for
+a later operation.
+
 ## Driver Recovery Compatibility
 
 Task 4 driver reconciliation requires a valid BluFi lease and inactive

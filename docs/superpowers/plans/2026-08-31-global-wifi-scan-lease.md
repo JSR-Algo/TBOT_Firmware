@@ -92,22 +92,45 @@ public:
         bool consume_latched = false;
         bool released = false;
         bool callback_won_error = false;
+        bool drain_required = false;
     };
+
+    struct DrainDecision { bool armed = false; uint64_t drain_id = 0; };
+    class DrainProof;
+    struct RecoveryDecision { bool begun = false; uint64_t recovery_id = 0; };
+    class RecoveryProof;
 
     AcquireDecision TryAcquire(Owner owner);
     CallbackDecision ObserveScanDone(const Lease& lease);
     CommitDecision CommitSubmission(const Lease& lease, bool accepted);
     bool FinishCompletion(const Lease& lease);
     bool BeginDrain(const Lease& lease);
-    bool CompleteDrain(const Lease& lease, bool barrier_drained);
-    bool BeginRecovery(const Lease& lease);
-    bool CompleteRecovery(const Lease& lease, bool driver_ready,
-                          bool barrier_drained);
+    DrainDecision ArmDrainBarrier(const Lease& lease);
+    bool CompleteDrain(const Lease& lease, const DrainProof& proof);
+    RecoveryDecision BeginRecovery(const Lease& lease);
+    bool CompleteRecovery(const Lease& lease, const RecoveryProof& proof);
+};
+
+class WifiScanLeaseProofFactory {
+public:
+    template <typename BarrierOperation>
+    static WifiScanLeaseCoordinator::DrainProof RunDrainBarrier(
+        const WifiScanLeaseCoordinator::DrainDecision& drain,
+        BarrierOperation&& operation);
+
+    template <typename RecoveryOperation>
+    static WifiScanLeaseCoordinator::RecoveryProof RunRecovery(
+        const WifiScanLeaseCoordinator::RecoveryDecision& recovery,
+        RecoveryOperation&& operation);
 };
 ```
 
 Every method locks only the coordinator mutex. `TryAcquire` succeeds only from
 `Free`; all other operations require exact owner, lease ID, and incarnation.
+Drain/recovery proof constructors are private. The proof factory synchronously
+invokes external work only after receiving the current coordinator-issued
+operation ID, preventing an old boolean/barrier result from completing a newer
+ticket.
 
 - [ ] **Step 4: Add deterministic early-callback and error races**
 
@@ -168,7 +191,7 @@ Expected: FAIL because the helper does not exist.
 
 - [ ] **Step 3: Implement the bounded barrier**
 
-Expose:
+Expose the raw bounded barrier operation:
 
 ```cpp
 bool DrainDefaultEventLoop(std::chrono::milliseconds timeout);
@@ -177,6 +200,8 @@ bool DrainDefaultEventLoop(std::chrono::milliseconds timeout);
 Use a private `ESP_EVENT_DEFINE_BASE`, binary semaphore, instance registration,
 `esp_event_post`, bounded `xSemaphoreTake`, unregister, and semaphore deletion.
 Return false for every failed stage and never retain a handler or semaphore.
+Callers execute it through `WifiScanLeaseProofFactory::RunDrainBarrier()` or the
+recovery proof factory so the result is bound to the issued operation ID.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -209,7 +234,8 @@ coordinator without taking `WifiManager::mutex_`. Assert every Station/Config
 preceded by `ObserveScanDone`, and Stop performs:
 
 ```text
-cancel timer -> scan_stop -> BeginDrain -> DrainDefaultEventLoop -> CompleteDrain
+cancel timer -> scan_stop -> BeginDrain -> ArmDrainBarrier
+-> proof-factory barrier -> CompleteDrain
 ```
 
 - [ ] **Step 2: Run RED**
@@ -229,7 +255,8 @@ Acquire before submission. On start error,
 commit failure and clear the optional only if released. On `SCAN_DONE`, first
 observe the exact lease; ignore foreign events without reading AP records. Stop
 prevents new timer scans, stops the scan, begins drain, waits outside locks, and
-completes drain only after the barrier.
+arms a drain ticket, runs the barrier through the proof factory, and completes
+drain only with the matching opaque proof.
 
 - [ ] **Step 4: Migrate Config AP**
 
@@ -372,9 +399,10 @@ Expected: FAIL on the Cardputer blocking scan.
 
 Acquire `Owner::kBlockingUi` before the blocking call. If busy, return a clear
 UI-level scan failure without disturbing the current owner. After the blocking
-call and AP-list retrieval/clear, call `BeginDrain`, wait on
-`DrainDefaultEventLoop`, then `CompleteDrain`. A barrier failure retains the
-lease and reports a bounded diagnostic.
+call and AP-list retrieval/clear, call `BeginDrain`, arm a drain ticket, run
+`DrainDefaultEventLoop` through the proof factory, then call `CompleteDrain`
+with the opaque proof. A barrier failure retains the lease and reports a
+bounded diagnostic.
 
 - [ ] **Step 4: Run all lease tests and commit**
 
