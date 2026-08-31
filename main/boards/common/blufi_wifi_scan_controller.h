@@ -191,16 +191,13 @@ public:
                                      uint64_t current_connection) {
         std::lock_guard<std::mutex> lock(mutex_);
         FinishDecision result;
+        // Invalidation is a lifecycle boundary even when external counters have
+        // not changed. Pending work from before the boundary is never reusable.
+        pending_.reset();
         RecordLifecycle(current_generation, current_session,
                         current_connection);
-        if (pending_.has_value() &&
-            !Matches(*pending_, current_generation, current_session,
-                     current_connection)) {
-            pending_.reset();
-        }
         if (phase_ == Phase::kStarting && !submission_claimed_) {
             ResetOwner();
-            PromotePending(result);
             return result;
         }
         if (phase_ != Phase::kIdle) {

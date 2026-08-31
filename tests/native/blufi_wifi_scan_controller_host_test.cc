@@ -205,20 +205,70 @@ void InvalidateBeforeClaimRetiresReservation() {
     ClaimStart(controller, current.request_id);
 }
 
-void InvalidateBeforeClaimPromotesValidPendingReservation() {
+void SameTupleInvalidateBeforeClaimClearsPendingAndRetiresOwner() {
     Controller controller;
     const auto old = controller.RequestScan(Request(1, 11, 101));
     const auto queued = controller.RequestScan(Request(1, 11, 101, false));
     assert(queued.queued);
 
-    const auto promoted = controller.InvalidateSession(1, 11, 101);
-    assert(promoted.start_pending);
-    assert(promoted.request_id != old.request_id);
-    assert(promoted.pending.setup_generation == 1);
-    assert(!promoted.pending.send_list);
-    assert(controller.phase() == Controller::Phase::kStarting);
+    const auto invalidated = controller.InvalidateSession(1, 11, 101);
+    assert(!invalidated.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
     assert(!controller.ClaimStart(old.request_id).claimed);
-    assert(controller.ClaimStart(promoted.request_id).claimed);
+
+    const auto after_boundary =
+        controller.RequestScan(Request(1, 11, 101, false));
+    assert(after_boundary.start_now);
+    assert(after_boundary.request_id != old.request_id);
+}
+
+void SameTupleInvalidateRunningClearsPreBoundaryPending() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+    assert(controller.RequestScan(Request(1, 11, 101, false)).queued);
+
+    controller.InvalidateSession(1, 11, 101);
+    const auto completion = controller.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    assert(completion.discard_results);
+    const auto finished = controller.FinishCompletion(completion.request_id);
+    assert(!finished.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
+}
+
+void SameTupleRequestAfterRunningInvalidationCanQueue() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    controller.InvalidateSession(1, 11, 101);
+    const auto after_boundary =
+        controller.RequestScan(Request(1, 11, 101, false));
+    assert(after_boundary.queued);
+    assert(!after_boundary.rejected_stale);
+
+    const auto completion = controller.BeginCompletion(1, 11, 101);
+    const auto finished = controller.FinishCompletion(completion.request_id);
+    assert(finished.start_pending);
+    assert(!finished.pending.send_list);
+}
+
+void SameTupleInvalidateDuringRecoveryClearsPreBoundaryPending() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+    assert(controller.RequestScan(Request(1, 11, 101, false)).queued);
+
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+    controller.InvalidateSession(1, 11, 101);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
+    assert(!recovered.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
 }
 
 void InvalidateAfterClaimDrainsAcceptedSubmission() {
@@ -657,7 +707,10 @@ int main() {
     CurrentRepeatedRequestStillCoalescesAndReplacesPending();
     ThreadedDelayedStaleRequestCannotReplaceCurrentPending();
     InvalidateBeforeClaimRetiresReservation();
-    InvalidateBeforeClaimPromotesValidPendingReservation();
+    SameTupleInvalidateBeforeClaimClearsPendingAndRetiresOwner();
+    SameTupleInvalidateRunningClearsPreBoundaryPending();
+    SameTupleRequestAfterRunningInvalidationCanQueue();
+    SameTupleInvalidateDuringRecoveryClearsPreBoundaryPending();
     InvalidateAfterClaimDrainsAcceptedSubmission();
     SynchronousStartFailurePromotesPendingRequest();
     ConcurrentRequestsCoalesceToLatestPendingRequest();
