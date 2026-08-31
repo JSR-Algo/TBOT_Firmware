@@ -17,6 +17,7 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
+#include "blufi_wifi_scan_controller.h"
 #include "blufi_transition_gate.h"
 #include "audio/provisioning_session_binding.h"
 
@@ -38,15 +39,6 @@ public:
      * @brief Get the singleton instance of the Blufi class.
      */
     static Blufi &GetInstance();
-
-    /**
-     * @brief Start WiFi scan for Blufi provisioning
-     * This method intelligently handles WiFi scanning based on current WiFi state:
-     * - If WiFi config mode is active, it uses the existing scan results from WifiConfigurationAp
-     * - Otherwise, it performs a dedicated scan without interfering with normal WiFi operations
-     * @return true if a scan was started (or was already in progress); false on failure.
-     */
-    bool start_wifi_scan();
 
     /**
      * @brief Initializes the Bluetooth controller, host, and Blufi profile.
@@ -216,6 +208,11 @@ private:
     // WiFi scan methods
     bool EnsureWifiScanEventHandlerRegistered();
     bool IsWifiScanCacheFresh() const;
+    void RequestWifiListScan(bool save_results, bool send_list);
+    bool StartOwnedWifiScan(uint64_t request_id);
+    void SchedulePendingWifiScan(
+        uint64_t request_id,
+        const BlufiWifiScanController::Request& request);
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
     bool CompleteSuccessfulProvisioningTeardownImpl(
@@ -236,7 +233,6 @@ private:
                               uint64_t expected_ble_connection_epoch,
                               uint64_t expected_wifi_list_dispatch_epoch,
                               std::vector<wifi_ap_record_t> ap_records);
-    void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
 
@@ -333,17 +329,8 @@ private:
     std::vector<wifi_ap_record_t> m_ap_records;
     int64_t m_ap_records_updated_us = 0;
     static constexpr int64_t kWifiScanCacheMaxAgeUs = 10LL * 1000 * 1000;
-    bool m_scan_in_progress = false;
+    BlufiWifiScanController wifi_scan_controller_;
     esp_event_handler_instance_t scan_event_instance_ = nullptr;
-    // When true, scan results are stored in m_ap_records on scan completion.
-    // Cleared during connect-to-AP so that the connect-time scan does not
-    // overwrite the cache with results gathered for connection purposes.
-    bool m_scan_should_save_ssid = true;
-    // When true, the next scan-done event responds to a pending GET_WIFI_LIST
-    // request from the App. Set by the GET_WIFI_LIST handler when no cache is
-    // available or a scan is already in flight; cleared by the scan-done
-    // handler after dispatching the response.
-    bool m_send_list_after_scan = false;
     std::atomic<uint64_t> m_wifi_list_dispatch_epoch_{0};
     // Zero means no queued response; otherwise this is the owning dispatch token.
     std::atomic<uint64_t> m_wifi_list_dispatch_pending_epoch_{0};
