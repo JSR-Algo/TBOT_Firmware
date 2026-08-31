@@ -113,6 +113,58 @@ void DelayedOldCompletionCannotSatisfyNewRequest() {
     assert(!controller.CanUnregisterHandler());
 }
 
+void DisconnectReconnectRefreshesLifecycleWhileOldCallbackDrains() {
+    Controller controller;
+    const auto old = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, old.request_id);
+    assert(controller.CommitStart(old.request_id, true).accepted);
+
+    controller.InvalidateSession(1, 12, 101);
+    assert(controller.phase() == Controller::Phase::kDraining);
+    assert(controller.CallbackOwed());
+
+    assert(controller.UpdateSession(1, 12, 101, 1, 13, 101));
+    assert(controller.UpdateSession(1, 13, 101, 1, 14, 102));
+    assert(!controller.UpdateSession(1, 13, 101, 1, 14, 102));
+    const auto current = controller.RequestScan(Request(1, 14, 102));
+    assert(current.queued);
+    assert(!current.rejected_stale);
+    assert(controller.CallbackOwed());
+
+    const auto delayed_old = controller.BeginCompletion(1, 14, 102);
+    assert(delayed_old.owned_callback);
+    assert(delayed_old.discard_results);
+    assert(!delayed_old.send_list);
+
+    const auto drained = controller.FinishCompletion(delayed_old.request_id);
+    assert(drained.start_pending);
+    assert(drained.pending.ble_session_state == 14);
+    assert(drained.pending.ble_connection_epoch == 102);
+    assert(!controller.CallbackOwed());
+}
+
+void DelayedLifecycleRefreshCannotRegressNewGeneration() {
+    Controller controller;
+    assert(controller.UpdateSession(1, 10, 100, 1, 11, 100));
+    controller.InvalidateSession(2, 20, 100);
+
+    assert(!controller.UpdateSession(1, 11, 100, 1, 12, 101));
+    const auto current = controller.RequestScan(Request(2, 20, 100));
+    assert(current.start_now);
+    assert(!current.rejected_stale);
+}
+
+void DelayedBoundaryInvalidationCannotRegressNewGeneration() {
+    Controller controller;
+    assert(controller.UpdateSession(1, 10, 100, 1, 11, 100));
+    controller.InvalidateSession(1, 11, 100, 2, 20, 100);
+
+    controller.InvalidateSession(1, 11, 100, 1, 12, 100);
+    const auto current = controller.RequestScan(Request(2, 20, 100));
+    assert(current.start_now);
+    assert(!current.rejected_stale);
+}
+
 void DelayedStaleRequestCannotOverwriteCurrentPending() {
     Controller controller;
     const auto old = controller.RequestScan(Request(1, 11, 101));
@@ -739,6 +791,9 @@ void SimultaneousCallbackAndInvalidateHaveConsistentLinearization() {
 
 int main() {
     DelayedOldCompletionCannotSatisfyNewRequest();
+    DisconnectReconnectRefreshesLifecycleWhileOldCallbackDrains();
+    DelayedLifecycleRefreshCannotRegressNewGeneration();
+    DelayedBoundaryInvalidationCannotRegressNewGeneration();
     DelayedStaleRequestCannotOverwriteCurrentPending();
     IdleControllerRejectsDelayedStaleRequestAfterInvalidation();
     CurrentRepeatedRequestStillCoalescesAndReplacesPending();

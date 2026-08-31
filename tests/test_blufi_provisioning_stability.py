@@ -188,14 +188,31 @@ def test_fw3d_scan_invalidation_follows_lifecycle_identity_changes():
     deinit = _function_body(blufi, "esp_err_t Blufi::_deinit_impl")
 
     assert disconnect.index("ble_session_state_.compare_exchange_strong") < disconnect.index(
-        "InvalidateWifiScanSession();"
+        "InvalidateWifiScanSession("
     )
     assert restart.index("setup_generation_.fetch_add(1)") < restart.index(
-        "InvalidateWifiScanSession();"
+        "InvalidateWifiScanSession("
     )
     assert deinit.index("ble_session_state_.exchange") < deinit.index(
-        "InvalidateWifiScanSession();"
+        "InvalidateWifiScanSession("
     )
+
+
+def test_fw3d_scan_controller_lock_never_nests_finalization_lock():
+    blufi = read("main/boards/common/blufi.cpp")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    connect = _function_body(blufi, "case ESP_BLUFI_EVENT_BLE_CONNECT:")
+    disconnect = _function_body(blufi, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+
+    assert restart.index("CancelBleSetupTimeout();\n    }") < restart.index(
+        "InvalidateWifiScanSession("
+    )
+    assert connect.index("m_ble_is_connected = true;\n            }") < connect.index(
+        "UpdateWifiScanSession("
+    )
+    assert disconnect.index(
+        "m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);\n            }"
+    ) < disconnect.index("InvalidateWifiScanSession(")
 
 
 # ---------------------------------------------------------------------------
@@ -1038,7 +1055,7 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
     generation_advance = restart.index("setup_generation_.fetch_add(1)")
     transaction_take = restart.index("ssid_transaction_id_.exchange(0)")
     rollback = restart.index("RollbackSsidTransaction(stale_ssid_transaction)")
-    initial_scope_end = restart.index("}\n\n    if (GetBleState()", rollback)
+    initial_scope_end = restart.index("}\n    InvalidateWifiScanSession(", rollback)
     deinit = restart.index(
         "esp_err_t teardown_error = DeinitWithLifecycleOwned();", initial_scope_end
     )
@@ -1172,7 +1189,7 @@ def test_fw21e_compound_lifecycle_transactions_use_owned_primitives_without_recu
     lifecycle = restore.index("ble_lifecycle_mutex_")
     finalization = restore.index("provisioning_finalization_mutex_", lifecycle)
     finalization_scope_end = restore.index(
-        "}\n\n        WifiManager::GetInstance().StopStation();", finalization
+        "}\n        InvalidateWifiScanSession(", finalization
     )
     stop_station = restore.index("WifiManager::GetInstance().StopStation()")
     init = restore.index("InitWithLifecycleOwned()", finalization_scope_end)

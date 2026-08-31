@@ -126,9 +126,9 @@ def test_blufi_scan_session_is_invalidated_on_disconnect_restart_and_deinit():
     restart = function_body(source, "esp_err_t Blufi::RestartForSetup")
     deinit = function_body(source, "esp_err_t Blufi::_deinit_impl")
 
-    assert "InvalidateWifiScanSession();" in disconnect
-    assert "InvalidateWifiScanSession();" in restart
-    assert "InvalidateWifiScanSession();" in deinit
+    assert "InvalidateWifiScanSession(" in disconnect
+    assert "InvalidateWifiScanSession(" in restart
+    assert "InvalidateWifiScanSession(" in deinit
 
 
 def test_blufi_does_not_unregister_scan_handler_while_callback_is_owed():
@@ -146,9 +146,48 @@ def test_blufi_scan_invalidation_clears_deferred_list_work():
     header = read("main/boards/common/blufi.h")
     invalidation = function_body(source, "void Blufi::InvalidateWifiScanSession")
 
-    assert "void InvalidateWifiScanSession();" in header
+    assert "void InvalidateWifiScanSession(" in header
     assert "wifi_scan_controller_.InvalidateSession" in invalidation
     assert "m_wifi_list_dispatch_pending_epoch_.store(0" in invalidation
+
+
+def test_blufi_scan_lifecycle_refreshes_at_final_ble_session_tuples():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    init = function_body(source, "esp_err_t Blufi::_init_impl")
+    event = function_body(source, "void Blufi::_handle_event")
+    connect = event[
+        event.index("case ESP_BLUFI_EVENT_BLE_CONNECT:") :
+        event.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+    ]
+    disconnect = event[
+        event.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT:") :
+        event.index("case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:")
+    ]
+
+    assert "void UpdateWifiScanSession(" in header
+    assert init.index("BleSessionPhase::kAccepting") < init.index(
+        "UpdateWifiScanSession("
+    )
+    assert connect.index("ble_connection_epoch_.fetch_add(1") < connect.index(
+        "UpdateWifiScanSession("
+    )
+    assert disconnect.index("BleSessionPhase::kAccepting") < disconnect.index(
+        "UpdateWifiScanSession("
+    )
+
+
+def test_restart_invalidates_scan_after_releasing_finalization_mutex():
+    source = read("main/boards/common/blufi.cpp")
+    restart = function_body(source, "esp_err_t Blufi::RestartForSetup")
+    lock = restart.index(
+        "std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);"
+    )
+    generation = restart.index("setup_generation_.fetch_add(1)", lock)
+    scope_end = restart.index("}\n    InvalidateWifiScanSession(", generation)
+    invalidation = restart.index("InvalidateWifiScanSession(", scope_end)
+
+    assert lock < generation < scope_end < invalidation
 
 
 def test_blufi_scan_failures_are_deferred_and_exactly_owner_bound():

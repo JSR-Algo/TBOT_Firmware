@@ -181,23 +181,40 @@ public:
                                      uint64_t current_session,
                                      uint64_t current_connection) {
         std::lock_guard<std::mutex> lock(mutex_);
+        return InvalidateLocked(current_generation, current_session,
+                                current_connection);
+    }
+
+    FinishDecision InvalidateSession(
+            uint32_t expected_generation, uint64_t expected_session,
+            uint64_t expected_connection, uint32_t current_generation,
+            uint64_t current_session, uint64_t current_connection) {
+        std::lock_guard<std::mutex> lock(mutex_);
         FinishDecision result;
-        // Invalidation is a lifecycle boundary even when external counters have
-        // not changed. Pending work from before the boundary is never reusable.
-        pending_.reset();
-        RecordLifecycle(current_generation, current_session,
-                        current_connection);
-        if (phase_ == Phase::kStarting && !submission_claimed_) {
-            ResetOwner();
+        if (lifecycle_initialized_ &&
+            (expected_generation != current_generation_ ||
+             expected_session != current_session_ ||
+             expected_connection != current_connection_)) {
             return result;
         }
-        if (phase_ != Phase::kIdle) {
-            invalidated_ = true;
-            if (phase_ == Phase::kRunning) {
-                phase_ = Phase::kDraining;
-            }
+        return InvalidateLocked(current_generation, current_session,
+                                current_connection);
+    }
+
+    bool UpdateSession(uint32_t expected_generation, uint64_t expected_session,
+                       uint64_t expected_connection,
+                       uint32_t current_generation, uint64_t current_session,
+                       uint64_t current_connection) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_initialized_ &&
+            (expected_generation != current_generation_ ||
+             expected_session != current_session_ ||
+             expected_connection != current_connection_)) {
+            return false;
         }
-        return result;
+        RecordLifecycle(current_generation, current_session,
+                        current_connection);
+        return true;
     }
 
     RecoveryTicket BeginRecovery(uint64_t expected_request_id) {
@@ -289,6 +306,27 @@ public:
     }
 
 private:
+    FinishDecision InvalidateLocked(uint32_t current_generation,
+                                    uint64_t current_session,
+                                    uint64_t current_connection) {
+        FinishDecision result;
+        // Invalidation is a lifecycle boundary even when external counters have
+        // not changed. Pending work from before the boundary is never reusable.
+        pending_.reset();
+        RecordLifecycle(current_generation, current_session,
+                        current_connection);
+        if (phase_ == Phase::kStarting && !submission_claimed_) {
+            ResetOwner();
+            return result;
+        }
+        if (phase_ != Phase::kIdle) {
+            invalidated_ = true;
+            if (phase_ == Phase::kRunning) {
+                phase_ = Phase::kDraining;
+            }
+        }
+        return result;
+    }
     static bool Matches(const Request& request, uint32_t generation,
                         uint64_t session, uint64_t connection) {
         return request.setup_generation == generation &&
