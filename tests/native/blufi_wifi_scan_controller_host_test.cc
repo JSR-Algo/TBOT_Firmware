@@ -274,16 +274,14 @@ void LostCallbackRecoveryAdvancesDriverBeforePendingStart() {
     assert(ticket.valid);
     assert(!controller.BeginRecovery(owner.request_id).valid);
 
-    const auto failed =
-        controller.CompleteRecovery(ticket, false, 2, 22, 202);
+    const auto failed = controller.CompleteRecovery(ticket, false);
     assert(!failed.start_pending);
     assert(controller.phase() == Controller::Phase::kDraining);
 
     const auto retry = controller.BeginRecovery(owner.request_id);
     assert(retry.valid);
     assert(retry.driver_incarnation == ticket.driver_incarnation);
-    const auto recovered =
-        controller.CompleteRecovery(retry, true, 2, 22, 202);
+    const auto recovered = controller.CompleteRecovery(retry, true);
     assert(recovered.start_pending);
     assert(recovered.pending.setup_generation == 2);
 
@@ -302,8 +300,8 @@ void CurrentOwnerRetriesAfterSuccessfulRecovery() {
 
     const auto ticket = controller.BeginRecovery(owner.request_id);
     assert(ticket.valid);
-    const auto recovered =
-        controller.CompleteRecovery(ticket, true, 1, 11, 101);
+    assert(ticket.lifecycle_revision != 0);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
     assert(recovered.start_pending);
     assert(recovered.request_id != owner.request_id);
     assert(recovered.pending.setup_generation == owner_request.setup_generation);
@@ -325,10 +323,88 @@ void StaleOwnerDoesNotRetryAfterSuccessfulRecovery() {
 
     const auto ticket = controller.BeginRecovery(owner.request_id);
     assert(ticket.valid);
-    const auto recovered =
-        controller.CompleteRecovery(ticket, true, 2, 22, 202);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
     assert(!recovered.start_pending);
     assert(controller.phase() == Controller::Phase::kIdle);
+}
+
+void InvalidationDuringRecoveryCannotRetryOldOwner() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+    controller.InvalidateSession(2, 22, 202);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
+    assert(!recovered.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
+}
+
+void InvalidationRevisionRetiresRecoveringOwnerEvenForSameTuple() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+    controller.InvalidateSession(1, 11, 101);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
+    assert(!recovered.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
+}
+
+void PendingFromNewLifecycleWinsWhenRecoveryTicketRevisionIsOld() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+    controller.InvalidateSession(2, 22, 202);
+    assert(controller.RequestScan(Request(2, 22, 202, false)).queued);
+
+    const auto recovered = controller.CompleteRecovery(ticket, true);
+    assert(recovered.start_pending);
+    assert(recovered.pending.setup_generation == 2);
+    assert(recovered.pending.ble_session_state == 22);
+    assert(recovered.pending.ble_connection_epoch == 202);
+    assert(!recovered.pending.send_list);
+}
+
+void ThreadedInvalidateDuringRecoveryUsesLatestLifecycle() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+
+    Barrier start(3);
+    Signal invalidated;
+    Controller::FinishDecision recovered;
+    std::thread invalidator([&]() {
+        start.ArriveAndWait();
+        controller.InvalidateSession(2, 22, 202);
+        assert(controller.RequestScan(Request(2, 22, 202)).queued);
+        invalidated.Notify();
+    });
+    std::thread recovery([&]() {
+        start.ArriveAndWait();
+        invalidated.Wait();
+        recovered = controller.CompleteRecovery(ticket, true);
+    });
+    start.ArriveAndWait();
+    invalidator.join();
+    recovery.join();
+
+    assert(recovered.start_pending);
+    assert(recovered.pending.setup_generation == 2);
+    assert(recovered.pending.ble_session_state == 22);
+    assert(recovered.pending.ble_connection_epoch == 202);
 }
 
 void ValidPendingRequestWinsOverCurrentOwnerRecovery() {
@@ -342,8 +418,7 @@ void ValidPendingRequestWinsOverCurrentOwnerRecovery() {
 
     const auto ticket = controller.BeginRecovery(owner.request_id);
     assert(ticket.valid);
-    const auto recovered =
-        controller.CompleteRecovery(ticket, true, 1, 11, 101);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
     assert(recovered.start_pending);
     assert(recovered.pending.send_list == pending_request.send_list);
     assert(recovered.pending.save_results == pending_request.save_results);
@@ -360,8 +435,7 @@ void StalePendingFallsBackToCurrentOwnerRecovery() {
 
     const auto ticket = controller.BeginRecovery(owner.request_id);
     assert(ticket.valid);
-    const auto recovered =
-        controller.CompleteRecovery(ticket, true, 1, 11, 101);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
     assert(recovered.start_pending);
     assert(recovered.pending.setup_generation == owner_request.setup_generation);
     assert(recovered.pending.send_list == owner_request.send_list);
@@ -376,7 +450,7 @@ void RecoveryIncarnationWrapSkipsZero() {
     const auto ticket = controller.BeginRecovery(owner.request_id);
     assert(ticket.valid);
     assert(ticket.driver_incarnation == std::numeric_limits<uint32_t>::max());
-    controller.CompleteRecovery(ticket, true, 1, 11, 101);
+    controller.CompleteRecovery(ticket, true);
     assert(controller.driver_incarnation() == 1);
 }
 
@@ -391,16 +465,13 @@ void WrongRequestRecoveryIsRejected() {
     assert(ticket.valid);
     auto wrong_incarnation = ticket;
     ++wrong_incarnation.driver_incarnation;
-    assert(!controller
-                .CompleteRecovery(wrong_incarnation, true, 1, 11, 101)
-                .start_pending);
+    assert(!controller.CompleteRecovery(wrong_incarnation, true).start_pending);
     auto wrong = ticket;
     ++wrong.request_id;
-    assert(!controller.CompleteRecovery(wrong, true, 1, 11, 101).start_pending);
+    assert(!controller.CompleteRecovery(wrong, true).start_pending);
     assert(controller.phase() == Controller::Phase::kDraining);
     assert(!controller.BeginRecovery(owner.request_id).valid);
-    const auto recovered =
-        controller.CompleteRecovery(ticket, true, 1, 11, 101);
+    const auto recovered = controller.CompleteRecovery(ticket, true);
     assert(recovered.start_pending);
     assert(recovered.request_id != owner.request_id);
     assert(controller.phase() == Controller::Phase::kStarting);
@@ -501,6 +572,10 @@ int main() {
     LostCallbackRecoveryAdvancesDriverBeforePendingStart();
     CurrentOwnerRetriesAfterSuccessfulRecovery();
     StaleOwnerDoesNotRetryAfterSuccessfulRecovery();
+    InvalidationDuringRecoveryCannotRetryOldOwner();
+    InvalidationRevisionRetiresRecoveringOwnerEvenForSameTuple();
+    PendingFromNewLifecycleWinsWhenRecoveryTicketRevisionIsOld();
+    ThreadedInvalidateDuringRecoveryUsesLatestLifecycle();
     ValidPendingRequestWinsOverCurrentOwnerRecovery();
     StalePendingFallsBackToCurrentOwnerRecovery();
     RecoveryIncarnationWrapSkipsZero();

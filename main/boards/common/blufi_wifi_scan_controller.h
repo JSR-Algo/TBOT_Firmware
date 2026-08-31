@@ -59,12 +59,17 @@ public:
     struct RecoveryTicket {
         uint64_t request_id = 0;
         uint32_t driver_incarnation = 0;
+        uint64_t lifecycle_revision = 0;
         bool valid = false;
     };
 
     RequestDecision RequestScan(const Request& request) {
         std::lock_guard<std::mutex> lock(mutex_);
         RequestDecision result;
+        if (!lifecycle_initialized_) {
+            RecordLifecycle(request.setup_generation, request.ble_session_state,
+                            request.ble_connection_epoch);
+        }
         if (phase_ == Phase::kIdle) {
             owner_ = request;
             owner_request_id_ = NextRequestId();
@@ -181,6 +186,8 @@ public:
                                      uint64_t current_connection) {
         std::lock_guard<std::mutex> lock(mutex_);
         FinishDecision result;
+        RecordLifecycle(current_generation, current_session,
+                        current_connection);
         if (pending_.has_value() &&
             !Matches(*pending_, current_generation, current_session,
                      current_connection)) {
@@ -191,7 +198,7 @@ public:
             PromotePending(result);
             return result;
         }
-        if (phase_ == Phase::kStarting || phase_ == Phase::kRunning) {
+        if (phase_ != Phase::kIdle) {
             invalidated_ = true;
             if (phase_ == Phase::kRunning) {
                 phase_ = Phase::kDraining;
@@ -214,14 +221,12 @@ public:
         phase_ = Phase::kDraining;
         result.request_id = owner_request_id_;
         result.driver_incarnation = driver_incarnation_;
+        result.lifecycle_revision = lifecycle_revision_;
         result.valid = true;
         return result;
     }
 
-    FinishDecision CompleteRecovery(const RecoveryTicket& ticket, bool success,
-                                    uint32_t current_generation,
-                                    uint64_t current_session,
-                                    uint64_t current_connection) {
+    FinishDecision CompleteRecovery(const RecoveryTicket& ticket, bool success) {
         std::lock_guard<std::mutex> lock(mutex_);
         FinishDecision result;
         if (!ticket.valid || !recovering_ ||
@@ -241,18 +246,17 @@ public:
         }
 
         const Request recovered_owner = owner_;
+        const bool lifecycle_unchanged =
+            ticket.lifecycle_revision == lifecycle_revision_;
         std::optional<Request> valid_pending;
-        if (pending_.has_value() &&
-            Matches(*pending_, current_generation, current_session,
-                    current_connection)) {
+        if (pending_.has_value() && MatchesCurrent(*pending_)) {
             valid_pending = pending_;
         }
         pending_.reset();
         ResetOwner();
         if (valid_pending.has_value()) {
             Reserve(*valid_pending, result);
-        } else if (Matches(recovered_owner, current_generation,
-                           current_session, current_connection)) {
+        } else if (lifecycle_unchanged && MatchesCurrent(recovered_owner)) {
             Reserve(recovered_owner, result);
         }
         return result;
@@ -274,6 +278,24 @@ private:
         return request.setup_generation == generation &&
                request.ble_session_state == session &&
                request.ble_connection_epoch == connection;
+    }
+
+    bool MatchesCurrent(const Request& request) const {
+        return lifecycle_initialized_ &&
+               Matches(request, current_generation_, current_session_,
+                       current_connection_);
+    }
+
+    void RecordLifecycle(uint32_t generation, uint64_t session,
+                         uint64_t connection) {
+        current_generation_ = generation;
+        current_session_ = session;
+        current_connection_ = connection;
+        lifecycle_initialized_ = true;
+        ++lifecycle_revision_;
+        if (lifecycle_revision_ == 0) {
+            ++lifecycle_revision_;
+        }
     }
 
     uint64_t NextRequestId() {
@@ -327,6 +349,11 @@ private:
     uint64_t last_request_id_ = 0;
     uint64_t owner_request_id_ = 0;
     uint32_t driver_incarnation_ = 1;
+    uint32_t current_generation_ = 0;
+    uint64_t current_session_ = 0;
+    uint64_t current_connection_ = 0;
+    uint64_t lifecycle_revision_ = 0;
+    bool lifecycle_initialized_ = false;
     bool submission_claimed_ = false;
     bool callback_claimed_ = false;
     bool invalidated_ = false;
