@@ -94,6 +94,7 @@ private:
     bool connection_boundary_ready_ = true;
     bool teardown_faulted_ = false;
     std::atomic<bool> stopped_{false};
+    std::atomic<bool> started_{false};
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
 
     // 高级配置项

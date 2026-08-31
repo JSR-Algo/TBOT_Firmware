@@ -541,14 +541,40 @@ def test_failed_config_boundary_retains_resources_and_blocks_manager_transitions
         assert "wifi_teardown_faulted_" in body
 
     destructor = function_body(source, "WifiConfigurationAp::~WifiConfigurationAp")
-    assert "if (!Stop())" in destructor
+    assert "!Stop()" in destructor
     assert "std::abort()" in destructor
 
     manager_destructor = function_body(manager, "WifiManager::~WifiManager")
+    assert "wifi_teardown_faulted_" in manager_destructor
+    assert manager_destructor.index("wifi_teardown_faulted_") < manager_destructor.index(
+        "config_mode_active_"
+    )
     assert "config_boundary_closed" in manager_destructor
     assert "station_.release()" in manager_destructor
     assert "config_ap_.release()" in manager_destructor
     assert "deinitialize && config_boundary_closed" in manager_destructor
+
+
+def test_never_started_config_destructor_skips_wifi_teardown():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    destructor = function_body(source, "WifiConfigurationAp::~WifiConfigurationAp")
+    start = function_body(source, "void WifiConfigurationAp::Start")
+
+    assert "std::atomic<bool> started_{false};" in header
+    assert "started_.store(true)" in start
+    assert "if (started_.load()" in destructor
+    stop_call = destructor.index("Stop()")
+    assert destructor.index("if (started_.load()") < stop_call
+
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    manager_destructor = function_body(manager, "WifiManager::~WifiManager")
+    assert manager_destructor.index("station_.reset()") < manager_destructor.index(
+        "esp_wifi_deinit()"
+    )
+    assert manager_destructor.index("config_ap_.reset()") < manager_destructor.index(
+        "esp_wifi_deinit()"
+    )
 
 
 def test_config_cancelled_scan_completion_cannot_publish_during_credential_test():

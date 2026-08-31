@@ -28,13 +28,21 @@ WifiManager::~WifiManager() {
     WifiStation* station = nullptr;
     WifiConfigurationAp* config_ap = nullptr;
     bool deinitialize = false;
+    bool teardown_faulted = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        teardown_faulted = wifi_teardown_faulted_;
         station = station_active_ ? station_.get() : nullptr;
         config_ap = config_mode_active_ ? config_ap_.get() : nullptr;
         station_active_ = false;
         config_mode_active_ = false;
         deinitialize = initialized_;
+    }
+    if (teardown_faulted) {
+        ESP_LOGE(TAG, "Retaining WiFi scanners after teardown fault");
+        station_.release();
+        config_ap_.release();
+        return;
     }
     if (station != nullptr) {
         station->Stop();
@@ -47,6 +55,10 @@ WifiManager::~WifiManager() {
             config_ap_.release();
             config_boundary_closed = false;
         }
+    }
+    if (config_boundary_closed) {
+        station_.reset();
+        config_ap_.reset();
     }
     if (deinitialize && config_boundary_closed) {
         esp_wifi_deinit();

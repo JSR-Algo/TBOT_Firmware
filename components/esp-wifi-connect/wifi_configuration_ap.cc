@@ -54,7 +54,7 @@ std::vector<wifi_ap_record_t> WifiConfigurationAp::GetAccessPoints()
 
 WifiConfigurationAp::~WifiConfigurationAp()
 {
-    if (!Stop()) {
+    if (started_.load() && !Stop()) {
         ESP_LOGE(TAG, "Unsafe configuration AP destruction after teardown fault");
         std::abort();
     }
@@ -124,6 +124,7 @@ void WifiConfigurationAp::Start()
     }
 
     StartOwnedScan();
+    started_.store(true);
 }
 
 bool WifiConfigurationAp::StartOwnedScan()
@@ -1112,6 +1113,9 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
 #endif // !CONFIG_IDF_TARGET_ESP32P4
 
 bool WifiConfigurationAp::Stop() {
+    if (!started_.load()) {
+        return true;
+    }
     if (stopped_.load()) {
         return true;
     }
@@ -1192,6 +1196,7 @@ bool WifiConfigurationAp::Stop() {
 
     ESP_LOGI(TAG, "Wifi configuration AP stopped");
     stopped_.store(true);
+    started_.store(false);
     return true;
 }
 
