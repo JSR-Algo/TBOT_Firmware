@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <condition_variable>
 #include <mutex>
 #include <optional>
 
@@ -86,18 +87,27 @@ private:
     bool was_connected_ = false;  // Track if we were connected before disconnection
     WifiScanLeaseCoordinator& scan_lease_coordinator_;
     std::mutex scan_mutex_;
+    std::mutex session_operation_mutex_;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
     bool scans_enabled_ = false;
     uint64_t scan_session_id_ = 0;
     uint64_t lease_session_id_ = 0;
+    size_t in_flight_session_operations_ = 0;
+    std::condition_variable session_operations_drained_;
 
     bool StartOwnedScan();
     void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
-    std::optional<std::string> HandleScanResultLocked(
+    std::optional<WifiApRecord> HandleScanResultLocked(
         std::vector<wifi_ap_record_t> ap_records);
     void ScheduleScanRetry(int64_t delay_microseconds);
     void StartConnect();
-    std::string StartConnectLocked();
+    WifiApRecord PrepareNextConnectLocked();
+    void StartConnectForSession(WifiApRecord ap_record, uint64_t session_id,
+                                std::function<void(const std::string&)> callback);
+    bool TryBeginSessionOperationLocked(uint64_t session_id);
+    void FinishSessionOperation();
+    void FinishDiscardedCompletionLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
     void UpdateScanInterval();  // Exponential backoff for scan interval
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

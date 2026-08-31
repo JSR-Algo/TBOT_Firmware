@@ -392,6 +392,125 @@ void CompletionAndStopHaveOneDeterministicWinner() {
     }
 }
 
+enum class StationSessionPath : uint8_t {
+    kScanCompletionConnect,
+    kDisconnectedReconnect,
+    kGotIpConnected,
+};
+
+class StationSessionPermitModel {
+public:
+    bool Run(StationSessionPath path, Barrier* permit_acquired = nullptr,
+             Barrier* allow_finish = nullptr) {
+        uint64_t operation_session = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!enabled_) {
+                return false;
+            }
+            operation_session = session_id_;
+            ++in_flight_;
+        }
+        if (permit_acquired != nullptr) {
+            permit_acquired->ArriveAndWait();
+        }
+        if (allow_finish != nullptr) {
+            allow_finish->ArriveAndWait();
+        }
+
+        switch (path) {
+            case StationSessionPath::kScanCompletionConnect:
+                ++connect_actions_;
+                ++connecting_callbacks_;
+                break;
+            case StationSessionPath::kDisconnectedReconnect:
+                ++reconnect_actions_;
+                ++disconnected_callbacks_;
+                break;
+            case StationSessionPath::kGotIpConnected:
+                ++connected_callbacks_;
+                break;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            assert(operation_session != 0);
+            assert(in_flight_ != 0);
+            --in_flight_;
+            if (in_flight_ == 0) {
+                drained_.notify_all();
+            }
+        }
+        return true;
+    }
+
+    void Stop() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        enabled_ = false;
+        ++session_id_;
+        drained_.wait(lock, [this]() { return in_flight_ == 0; });
+        stop_returned_.store(true);
+    }
+
+    unsigned Emissions() const {
+        return connect_actions_.load() + reconnect_actions_.load() +
+               connecting_callbacks_.load() +
+               disconnected_callbacks_.load() +
+               connected_callbacks_.load();
+    }
+
+    bool stop_returned() const { return stop_returned_.load(); }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable drained_;
+    bool enabled_ = true;
+    uint64_t session_id_ = 1;
+    unsigned in_flight_ = 0;
+    std::atomic<unsigned> connect_actions_{0};
+    std::atomic<unsigned> reconnect_actions_{0};
+    std::atomic<unsigned> connecting_callbacks_{0};
+    std::atomic<unsigned> disconnected_callbacks_{0};
+    std::atomic<unsigned> connected_callbacks_{0};
+    std::atomic<bool> stop_returned_{false};
+};
+
+void StationSessionPermitSerializesAllEmittingPathsWithStop() {
+    for (const auto path : {
+             StationSessionPath::kScanCompletionConnect,
+             StationSessionPath::kDisconnectedReconnect,
+             StationSessionPath::kGotIpConnected,
+         }) {
+        StationSessionPermitModel model;
+        Barrier permit_acquired(2);
+        Barrier allow_finish(2);
+        std::thread operation([&]() {
+            assert(model.Run(path, &permit_acquired, &allow_finish));
+        });
+        permit_acquired.ArriveAndWait();
+        std::thread stop([&]() { model.Stop(); });
+        assert(!model.stop_returned());
+        allow_finish.ArriveAndWait();
+        operation.join();
+        stop.join();
+        assert(model.stop_returned());
+        const auto emissions_at_stop_return = model.Emissions();
+        assert(emissions_at_stop_return != 0);
+        assert(model.Emissions() == emissions_at_stop_return);
+    }
+
+    for (const auto path : {
+             StationSessionPath::kScanCompletionConnect,
+             StationSessionPath::kDisconnectedReconnect,
+             StationSessionPath::kGotIpConnected,
+         }) {
+        StationSessionPermitModel model;
+        model.Stop();
+        assert(!model.Run(path));
+        assert(model.Emissions() == 0);
+    }
+}
+
 void EarlyMatchingCallbackWaitsForSuccessfulCommit() {
     Coordinator coordinator;
     const auto acquired = coordinator.TryAcquire(Coordinator::Owner::kBlufi);
@@ -773,6 +892,7 @@ int main() {
     MissingStationCallbackKeepsConfigBlocked();
     StopCannotOvertakePhysicalStartAndCommit();
     CompletionAndStopHaveOneDeterministicWinner();
+    StationSessionPermitSerializesAllEmittingPathsWithStop();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();
     ErrorFirstThenQueuedCallbackRetainsOwnershipUntilConsumed();

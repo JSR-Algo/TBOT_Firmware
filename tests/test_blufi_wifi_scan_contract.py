@@ -248,11 +248,8 @@ def test_station_submission_stop_and_completion_share_one_lifecycle_lock():
     assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in completion
     assert completion.index("lifecycle_lock") < completion.index("esp_wifi_scan_get_ap_num")
     assert "HandleScanResultLocked(" in completion
-    assert completion.index("HandleScanResultLocked(") < completion.index(
-        "lifecycle_lock.unlock()"
-    )
     assert completion.index("lifecycle_lock.unlock()") < completion.index(
-        "on_connect_("
+        "HandleScanResultLocked("
     )
 
 
@@ -286,6 +283,75 @@ def test_config_submission_connect_stop_and_publish_share_lifecycle_lock():
     assert completion.index("ap_records_.swap(scanned_records)") < completion.index(
         "lifecycle_lock.unlock()"
     )
+
+
+def test_station_uses_session_operation_permits_for_all_emitting_handlers():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+    wifi_handler = function_body(source, "void WifiStation::WifiEventHandler")
+    ip_handler = function_body(source, "void WifiStation::IpEventHandler")
+    stop = function_body(source, "void WifiStation::Stop")
+
+    assert "std::condition_variable session_operations_drained_;" in header
+    assert "size_t in_flight_session_operations_ = 0;" in header
+    assert "bool TryBeginSessionOperationLocked(uint64_t session_id);" in header
+    assert "void FinishSessionOperation();" in header
+
+    assert "TryBeginSessionOperationLocked(lease_session_id_)" in completion
+    assert completion.index("TryBeginSessionOperationLocked") < completion.index(
+        "lifecycle_lock.unlock()"
+    )
+    assert completion.index("lifecycle_lock.unlock()") < completion.index(
+        "StartConnectForSession("
+    )
+    assert completion.index("StartConnectForSession(") < completion.index(
+        "FinishSessionOperation()"
+    )
+
+    disconnected = wifi_handler[
+        wifi_handler.index("WIFI_EVENT_STA_DISCONNECTED") :
+    ]
+    assert "TryBeginSessionOperationLocked(session_id)" in disconnected
+    assert disconnected.index("TryBeginSessionOperationLocked") < disconnected.index(
+        "esp_wifi_connect()"
+    )
+    assert disconnected.index("on_disconnected_(") < disconnected.index(
+        "FinishSessionOperation()"
+    )
+
+    assert "TryBeginSessionOperationLocked(session_id)" in ip_handler
+    assert ip_handler.index("TryBeginSessionOperationLocked") < ip_handler.index(
+        "on_connected_("
+    )
+    assert ip_handler.index("on_connected_(") < ip_handler.index(
+        "FinishSessionOperation()"
+    )
+
+    disable = stop.index("scans_enabled_ = false")
+    invalidate = stop.index("++scan_session_id_")
+    wait = stop.index("session_operations_drained_.wait(")
+    clear = stop.index("connect_queue_.clear()")
+    assert disable < invalidate < wait < clear
+
+
+def test_wifi_manager_never_waits_for_station_stop_under_manager_mutex():
+    source = read("components/esp-wifi-connect/wifi_manager.cc")
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+
+    assert "uint64_t lifecycle_generation_ = 0;" in header
+    assert "bool lifecycle_transition_in_progress_ = false;" in header
+    for signature in (
+        "void WifiManager::StopStation",
+        "void WifiManager::StartConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        body = function_body(source, signature)
+        stop = body.index("station->Stop()") if "station->Stop()" in body else body.index(
+            "station_to_stop->Stop()"
+        )
+        assert body.rfind("lock.unlock()", 0, stop) != -1
+        assert "transition_generation" in body
 
 
 def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():
@@ -518,8 +584,8 @@ def test_wifi_manager_stop_radio_releases_runtime_buffers_without_deinitializing
     body = function_body(source, "bool WifiManager::StopRadio")
 
     assert "bool StopRadio();" in header
-    assert "station_->Stop()" in body
-    assert "config_ap_->Stop()" in body
+    assert "station->Stop()" in body
+    assert "config_ap->Stop()" in body
     assert "esp_wifi_stop()" in body
     assert "esp_wifi_deinit()" not in body
     assert "station_.reset()" not in body

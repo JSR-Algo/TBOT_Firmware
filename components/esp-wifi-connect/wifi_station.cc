@@ -68,6 +68,9 @@ void WifiStation::Stop() {
     ++scan_session_id_;
     esp_timer_handle_t timer_to_delete = timer_handle_;
     timer_handle_ = nullptr;
+    session_operations_drained_.wait(lifecycle_lock, [this]() {
+        return in_flight_session_operations_ == 0;
+    });
 
     if (scan_lease_.has_value()) {
         const auto lease = *scan_lease_;
@@ -224,12 +227,16 @@ void WifiStation::CompleteOwnedScan(
         scan_lease_->driver_incarnation != lease.driver_incarnation) {
         return;
     }
-    const bool consume_results =
-        scans_enabled_ && lease_session_id_ == scan_session_id_;
+    if (!TryBeginSessionOperationLocked(lease_session_id_)) {
+        esp_wifi_clear_ap_list();
+        FinishDiscardedCompletionLocked(lease);
+        return;
+    }
+    lifecycle_lock.unlock();
 
     uint16_t ap_num = 0;
     std::vector<wifi_ap_record_t> ap_records;
-    if (consume_results && esp_wifi_scan_get_ap_num(&ap_num) == ESP_OK) {
+    if (esp_wifi_scan_get_ap_num(&ap_num) == ESP_OK) {
         ap_records.resize(ap_num);
         if (ap_num != 0 &&
             esp_wifi_scan_get_ap_records(&ap_num, ap_records.data()) != ESP_OK) {
@@ -240,20 +247,23 @@ void WifiStation::CompleteOwnedScan(
     }
     esp_wifi_clear_ap_list();
 
-    if (!scan_lease_coordinator_.FinishCompletion(lease)) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        if (scan_lease_coordinator_.FinishCompletion(lease)) {
+            scan_lease_.reset();
+        }
     }
-    scan_lease_.reset();
 
-    std::optional<std::string> connecting_ssid;
-    if (consume_results && scans_enabled_ &&
-        lease_session_id_ == scan_session_id_) {
-        connecting_ssid = HandleScanResultLocked(std::move(ap_records));
+    std::optional<WifiApRecord> connect_record;
+    {
+        std::lock_guard<std::mutex> operation_lock(session_operation_mutex_);
+        connect_record = HandleScanResultLocked(std::move(ap_records));
     }
-    lifecycle_lock.unlock();
-    if (connecting_ssid.has_value() && on_connect_) {
-        on_connect_(*connecting_ssid);
+    if (connect_record.has_value()) {
+        StartConnectForSession(std::move(*connect_record), lease_session_id_,
+                               on_connect_);
     }
+    FinishSessionOperation();
 }
 
 bool WifiStation::WaitForConnected(int timeout_ms) {
@@ -264,7 +274,7 @@ bool WifiStation::WaitForConnected(int timeout_ms) {
     return (bits & WIFI_EVENT_CONNECTED) != 0;
 }
 
-std::optional<std::string> WifiStation::HandleScanResultLocked(
+std::optional<WifiApRecord> WifiStation::HandleScanResultLocked(
         std::vector<wifi_ap_record_t> ap_records) {
     // sort by rssi descending
     std::sort(ap_records.begin(), ap_records.end(), [](const wifi_ap_record_t& a, const wifi_ap_record_t& b) {
@@ -293,14 +303,12 @@ std::optional<std::string> WifiStation::HandleScanResultLocked(
     }
     if (connect_queue_.empty()) {
         ESP_LOGI(TAG, "No AP found, next scan in %d seconds", scan_current_interval_microseconds_ / 1000 / 1000);
-        if (timer_handle_ != nullptr) {
-            esp_timer_start_once(timer_handle_, scan_current_interval_microseconds_);
-        }
+        ScheduleScanRetry(scan_current_interval_microseconds_);
         UpdateScanInterval();
         return std::nullopt;
     }
 
-    return StartConnectLocked();
+    return PrepareNextConnectLocked();
 }
 
 void WifiStation::ScheduleScanRetry(int64_t delay_microseconds) {
@@ -311,39 +319,92 @@ void WifiStation::ScheduleScanRetry(int64_t delay_microseconds) {
 }
 
 void WifiStation::StartConnect() {
-    std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
-    if (!scans_enabled_ || connect_queue_.empty()) {
+    uint64_t session_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        session_id = scan_session_id_;
+        if (!TryBeginSessionOperationLocked(session_id)) {
+            return;
+        }
+    }
+    std::optional<WifiApRecord> connect_record;
+    {
+        std::lock_guard<std::mutex> operation_lock(session_operation_mutex_);
+        if (!connect_queue_.empty()) {
+            connect_record = PrepareNextConnectLocked();
+        }
+    }
+    if (!connect_record.has_value()) {
+        FinishSessionOperation();
         return;
     }
-    const auto connecting_ssid = StartConnectLocked();
-    lifecycle_lock.unlock();
-    if (on_connect_) {
-        on_connect_(connecting_ssid);
+    StartConnectForSession(std::move(*connect_record), session_id, on_connect_);
+    FinishSessionOperation();
+}
+
+WifiApRecord WifiStation::PrepareNextConnectLocked() {
+    auto ap_record = connect_queue_.front();
+    connect_queue_.erase(connect_queue_.begin());
+    return ap_record;
+}
+
+void WifiStation::StartConnectForSession(
+        WifiApRecord ap_record, uint64_t session_id,
+        std::function<void(const std::string&)> callback) {
+    (void)session_id;
+    std::string connecting_ssid;
+    {
+        std::lock_guard<std::mutex> operation_lock(session_operation_mutex_);
+        ssid_ = ap_record.ssid;
+        password_ = ap_record.password;
+        connecting_ssid = ssid_;
+
+        wifi_config_t wifi_config;
+        bzero(&wifi_config, sizeof(wifi_config));
+        const size_t ssid_len =
+            std::min(ap_record.ssid.size(), sizeof(wifi_config.sta.ssid));
+        memcpy(wifi_config.sta.ssid, ap_record.ssid.data(), ssid_len);
+        strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
+        if (remember_bssid_) {
+            wifi_config.sta.channel = ap_record.channel;
+            memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);
+            wifi_config.sta.bssid_set = true;
+        }
+        wifi_config.sta.listen_interval = 10;
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+
+        reconnect_count_ = 0;
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    }
+    if (callback) {
+        callback(connecting_ssid);
     }
 }
 
-std::string WifiStation::StartConnectLocked() {
-    auto ap_record = connect_queue_.front();
-    connect_queue_.erase(connect_queue_.begin());
-    ssid_ = ap_record.ssid;
-    password_ = ap_record.password;
-
-    wifi_config_t wifi_config;
-    bzero(&wifi_config, sizeof(wifi_config));
-    const size_t ssid_len = std::min(ap_record.ssid.size(), sizeof(wifi_config.sta.ssid));
-    memcpy(wifi_config.sta.ssid, ap_record.ssid.data(), ssid_len);
-    strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
-    if (remember_bssid_) {
-        wifi_config.sta.channel = ap_record.channel;
-        memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);
-        wifi_config.sta.bssid_set = true;
+bool WifiStation::TryBeginSessionOperationLocked(uint64_t session_id) {
+    if (!scans_enabled_ || session_id == 0 || session_id != scan_session_id_) {
+        return false;
     }
-    wifi_config.sta.listen_interval = 10;
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ++in_flight_session_operations_;
+    return true;
+}
 
-    reconnect_count_ = 0;
-    ESP_ERROR_CHECK(esp_wifi_connect());
-    return ssid_;
+void WifiStation::FinishSessionOperation() {
+    std::lock_guard<std::mutex> lock(scan_mutex_);
+    if (in_flight_session_operations_ == 0) {
+        return;
+    }
+    --in_flight_session_operations_;
+    if (in_flight_session_operations_ == 0) {
+        session_operations_drained_.notify_all();
+    }
+}
+
+void WifiStation::FinishDiscardedCompletionLocked(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    if (scan_lease_coordinator_.FinishCompletion(lease)) {
+        scan_lease_.reset();
+    }
 }
 
 int8_t WifiStation::GetRssi() {
@@ -422,8 +483,19 @@ void WifiStation::UpdateScanInterval() {
 void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     auto* this_ = static_cast<WifiStation*>(arg);
     if (event_id == WIFI_EVENT_STA_START) {
-        if (this_->StartOwnedScan() && this_->on_scan_begin_) {
-            this_->on_scan_begin_();
+        if (this_->StartOwnedScan()) {
+            bool permitted = false;
+            {
+                std::lock_guard<std::mutex> lock(this_->scan_mutex_);
+                permitted = this_->TryBeginSessionOperationLocked(
+                    this_->scan_session_id_);
+            }
+            if (permitted) {
+                if (this_->on_scan_begin_) {
+                    this_->on_scan_begin_();
+                }
+                this_->FinishSessionOperation();
+            }
         }
     } else if (event_id == WIFI_EVENT_SCAN_DONE) {
         std::optional<WifiScanLeaseCoordinator::Lease> lease_snapshot;
@@ -444,49 +516,62 @@ void WifiStation::WifiEventHandler(void* arg, esp_event_base_t event_base, int32
         xEventGroupSetBits(this_->event_group_, WIFI_EVENT_SCAN_DONE_BIT);
         this_->CompleteOwnedScan(lease);
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        uint64_t session_id = 0;
         {
             std::lock_guard<std::mutex> lock(this_->scan_mutex_);
-            if (!this_->scans_enabled_) {
+            session_id = this_->scan_session_id_;
+            if (!this_->TryBeginSessionOperationLocked(session_id)) {
                 return;
             }
         }
-        xEventGroupClearBits(this_->event_group_, WIFI_EVENT_CONNECTED);
-
-        // Notify disconnected callback only once when transitioning from connected to disconnected
-        bool was_connected = this_->was_connected_;
-        this_->was_connected_ = false;
         wifi_event_sta_disconnected_t* event = static_cast<wifi_event_sta_disconnected_t*>(event_data);
-        ESP_LOGI(TAG, "WiFi disconnected, reason: %d", event->reason);
-        if (was_connected && this_->on_disconnected_) {
-            this_->on_disconnected_(event->reason);
+        const int reason = event->reason;
+        bool notify_disconnected = false;
+        bool reconnect = false;
+        std::optional<WifiApRecord> connect_record;
+        {
+            std::lock_guard<std::mutex> operation_lock(
+                this_->session_operation_mutex_);
+            xEventGroupClearBits(this_->event_group_, WIFI_EVENT_CONNECTED);
+            notify_disconnected = this_->was_connected_;
+            this_->was_connected_ = false;
+            if (this_->reconnect_count_ < MAX_RECONNECT_COUNT) {
+                ++this_->reconnect_count_;
+                reconnect = true;
+            } else if (!this_->connect_queue_.empty()) {
+                connect_record = this_->PrepareNextConnectLocked();
+            }
         }
-
-        if (this_->reconnect_count_ < MAX_RECONNECT_COUNT) {
+        ESP_LOGI(TAG, "WiFi disconnected, reason: %d", reason);
+        if (reconnect) {
             esp_wifi_connect();
-            this_->reconnect_count_++;
             ESP_LOGI(TAG, "Reconnecting WiFi (attempt %d / %d)",
                      this_->reconnect_count_, MAX_RECONNECT_COUNT);
-            return;
+        } else if (connect_record.has_value()) {
+            this_->StartConnectForSession(std::move(*connect_record), session_id,
+                                          this_->on_connect_);
+        } else {
+            ESP_LOGI(TAG, "No more AP to connect, next scan in %d seconds",
+                     this_->scan_current_interval_microseconds_ / 1000 / 1000);
+            this_->ScheduleScanRetry(
+                this_->scan_current_interval_microseconds_);
+            this_->UpdateScanInterval();
         }
-
-        if (!this_->connect_queue_.empty()) {
-            this_->StartConnect();
-            return;
+        if (notify_disconnected && this_->on_disconnected_) {
+            this_->on_disconnected_(reason);
         }
-
-        ESP_LOGI(TAG, "No more AP to connect, next scan in %d seconds",
-                 this_->scan_current_interval_microseconds_ / 1000 / 1000);
-        this_->ScheduleScanRetry(this_->scan_current_interval_microseconds_);
-        this_->UpdateScanInterval();
+        this_->FinishSessionOperation();
     } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
     }
 }
 
 void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     auto* this_ = static_cast<WifiStation*>(arg);
+    uint64_t session_id = 0;
     {
         std::lock_guard<std::mutex> lock(this_->scan_mutex_);
-        if (!this_->scans_enabled_) {
+        session_id = this_->scan_session_id_;
+        if (!this_->TryBeginSessionOperationLocked(session_id)) {
             return;
         }
     }
@@ -494,17 +579,22 @@ void WifiStation::IpEventHandler(void* arg, esp_event_base_t event_base, int32_t
 
     char ip_address[16];
     esp_ip4addr_ntoa(&event->ip_info.ip, ip_address, sizeof(ip_address));
-    this_->ip_address_ = ip_address;
-    ESP_LOGI(TAG, "Got IP: %s", this_->ip_address_.c_str());
-
-    xEventGroupSetBits(this_->event_group_, WIFI_EVENT_CONNECTED);
-    this_->was_connected_ = true;  // Mark as connected for disconnect notification
-    if (this_->on_connected_) {
-        this_->on_connected_(this_->ssid_);
+    std::string connected_ssid;
+    {
+        std::lock_guard<std::mutex> operation_lock(
+            this_->session_operation_mutex_);
+        this_->ip_address_ = ip_address;
+        connected_ssid = this_->ssid_;
+        xEventGroupSetBits(this_->event_group_, WIFI_EVENT_CONNECTED);
+        this_->was_connected_ = true;
+        this_->connect_queue_.clear();
+        this_->reconnect_count_ = 0;
+        this_->scan_current_interval_microseconds_ =
+            this_->scan_min_interval_microseconds_;
     }
-    this_->connect_queue_.clear();
-    this_->reconnect_count_ = 0;
-
-    // Reset scan interval to minimum for fast reconnect if disconnected later
-    this_->scan_current_interval_microseconds_ = this_->scan_min_interval_microseconds_;
+    ESP_LOGI(TAG, "Got IP: %s", ip_address);
+    if (this_->on_connected_) {
+        this_->on_connected_(connected_ssid);
+    }
+    this_->FinishSessionOperation();
 }

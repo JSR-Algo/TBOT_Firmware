@@ -25,14 +25,24 @@ WifiManager& WifiManager::GetInstance() {
 WifiManager::WifiManager() = default;
 
 WifiManager::~WifiManager() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (station_active_ && station_) {
-        station_->Stop();
+    WifiStation* station = nullptr;
+    WifiConfigurationAp* config_ap = nullptr;
+    bool deinitialize = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        station = station_active_ ? station_.get() : nullptr;
+        config_ap = config_mode_active_ ? config_ap_.get() : nullptr;
+        station_active_ = false;
+        config_mode_active_ = false;
+        deinitialize = initialized_;
     }
-    if (config_mode_active_ && config_ap_) {
-        config_ap_->Stop();
+    if (station != nullptr) {
+        station->Stop();
     }
-    if (initialized_) {
+    if (config_ap != nullptr) {
+        config_ap->Stop();
+    }
+    if (deinitialize) {
         esp_wifi_deinit();
     }
 }
@@ -104,19 +114,28 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
 }
 
 bool WifiManager::StopRadio() {
-    std::lock_guard<std::mutex> lock(mutex_);
-
+    WifiStation* station = nullptr;
+    WifiConfigurationAp* config_ap = nullptr;
+    uint64_t transition_generation = 0;
+    std::unique_lock<std::mutex> lock(mutex_);
     if (!initialized_) {
         return true;
     }
-
-    if (station_active_ && station_) {
-        station_->Stop();
-        station_active_ = false;
+    if (lifecycle_transition_in_progress_) {
+        return false;
     }
-    if (config_mode_active_ && config_ap_) {
-        config_ap_->Stop();
-        config_mode_active_ = false;
+    lifecycle_transition_in_progress_ = true;
+    transition_generation = ++lifecycle_generation_;
+    station = station_active_ ? station_.get() : nullptr;
+    config_ap = config_mode_active_ ? config_ap_.get() : nullptr;
+    station_active_ = false;
+    config_mode_active_ = false;
+    lock.unlock();
+    if (station != nullptr) {
+        station->Stop();
+    }
+    if (config_ap != nullptr) {
+        config_ap->Stop();
     }
 
     // Provisioning scans start the radio directly through esp_wifi_* and are
@@ -126,7 +145,22 @@ bool WifiManager::StopRadio() {
     const esp_err_t stop_ret = esp_wifi_stop();
     if (stop_ret != ESP_OK && stop_ret != ESP_ERR_WIFI_NOT_INIT) {
         ESP_LOGW(TAG, "WiFi radio stop returned: %s", esp_err_to_name(stop_ret));
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            (station == nullptr || station_.get() == station) &&
+            (config_ap == nullptr || config_ap_.get() == config_ap)) {
+            lifecycle_transition_in_progress_ = false;
+        }
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            (station == nullptr || station_.get() == station) &&
+            (config_ap == nullptr || config_ap_.get() == config_ap)) {
+            lifecycle_transition_in_progress_ = false;
+        }
     }
 
     ESP_LOGI(TAG, "WiFi radio stopped; driver remains initialized");
@@ -141,67 +175,89 @@ bool WifiManager::IsInitialized() const {
 // ==================== Station Mode ====================
 
 void WifiManager::StartStation() {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (!initialized_) {
-        ESP_LOGE(TAG, "Not initialized");
-        return;
-    }
-    if (station_active_) {
-        ESP_LOGW(TAG, "Station already active");
-        return;
-    }
-
-    // Auto-stop config AP if active
-    if (config_mode_active_) {
-        ESP_LOGI(TAG, "Stopping config AP before starting station");
-        config_ap_->Stop();
+    WifiStation* station = nullptr;
+    WifiConfigurationAp* config_ap_to_stop = nullptr;
+    WifiManagerConfig config;
+    uint64_t transition_generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_) {
+            ESP_LOGE(TAG, "Not initialized");
+            return;
+        }
+        if (station_active_ || lifecycle_transition_in_progress_) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station = station_.get();
+        config_ap_to_stop = config_mode_active_ ? config_ap_.get() : nullptr;
         config_mode_active_ = false;
-        // Notify outside lock
-        lock.unlock();
+        config = config_;
+    }
+    if (config_ap_to_stop != nullptr) {
+        ESP_LOGI(TAG, "Stopping config AP before starting station");
+        config_ap_to_stop->Stop();
         NotifyEvent(WifiEvent::ConfigModeExit);
-        lock.lock();
     }
 
     ESP_LOGI(TAG, "Starting station");
 
     // Apply configuration
-    station_->SetScanIntervalRange(config_.station_scan_min_interval_seconds,
-                                   config_.station_scan_max_interval_seconds);
+    station->SetScanIntervalRange(config.station_scan_min_interval_seconds,
+                                  config.station_scan_max_interval_seconds);
 
     // Setup callbacks
-    station_->OnScanBegin([this]() {
+    station->OnScanBegin([this]() {
         NotifyEvent(WifiEvent::Scanning);
     });
-    station_->OnConnect([this](const std::string& ssid) {
+    station->OnConnect([this](const std::string& ssid) {
         NotifyEvent(WifiEvent::Connecting, ssid);
     });
-    station_->OnConnected([this](const std::string& ssid) {
+    station->OnConnected([this](const std::string& ssid) {
         NotifyEvent(WifiEvent::Connected, ssid);
     });
-    station_->OnDisconnected([this](int reason) {
+    station->OnDisconnected([this](int reason) {
         NotifyEvent(WifiEvent::Disconnected, std::to_string(reason));
     });
 
-    station_->Start();
-    station_active_ = true;
+    station->Start();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            station_.get() == station) {
+            station_active_ = true;
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
 }
 
 void WifiManager::StopStation() {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (!station_active_) {
-        return;
+    WifiStation* station = nullptr;
+    uint64_t transition_generation = 0;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!station_active_ || lifecycle_transition_in_progress_) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station = station_.get();
+        station_active_ = false;
+        lock.unlock();
     }
 
     ESP_LOGI(TAG, "Stopping station");
-    station_->Stop();
+    station->Stop();
     ESP_LOGI(TAG, "Station stopped");
-    station_active_ = false;
-
-    lock.unlock();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            station_.get() == station) {
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
     NotifyEvent(WifiEvent::Disconnected);
-    lock.lock();
 }
 
 bool WifiManager::IsConnected() const {
@@ -252,60 +308,81 @@ std::string WifiManager::GetMacAddress() const {
 // ==================== Config AP Mode ====================
 
 void WifiManager::StartConfigAp() {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (!initialized_) {
-        ESP_LOGE(TAG, "Not initialized");
-        return;
-    }
-    if (config_mode_active_) {
-        ESP_LOGW(TAG, "Config AP already active");
-        return;
-    }
-
-    // Auto-stop station if active
-    if (station_active_) {
-        ESP_LOGI(TAG, "Stopping station before starting config AP");
-        station_->Stop();
+    WifiStation* station_to_stop = nullptr;
+    WifiConfigurationAp* config_ap = nullptr;
+    WifiManagerConfig config;
+    uint64_t transition_generation = 0;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!initialized_) {
+            ESP_LOGE(TAG, "Not initialized");
+            return;
+        }
+        if (config_mode_active_ || lifecycle_transition_in_progress_) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station_to_stop = station_active_ ? station_.get() : nullptr;
         station_active_ = false;
+        config_ap = config_ap_.get();
+        config = config_;
         lock.unlock();
+    }
+    if (station_to_stop != nullptr) {
+        ESP_LOGI(TAG, "Stopping station before starting config AP");
+        station_to_stop->Stop();
         NotifyEvent(WifiEvent::Disconnected);
-        lock.lock();
     }
 
     ESP_LOGI(TAG, "Starting config AP");
 
-    config_ap_->SetSsidPrefix(config_.ssid_prefix);
-    config_ap_->SetLanguage(config_.language);
+    config_ap->SetSsidPrefix(config.ssid_prefix);
+    config_ap->SetLanguage(config.language);
 
     // Web handler calls this when user submits config
-    config_ap_->OnExitRequested([this]() {
+    config_ap->OnExitRequested([this]() {
         ESP_LOGI(TAG, "Config exit requested from web");
         StopConfigAp();
     });
 
-    config_ap_->Start();
-    config_mode_active_ = true;
-
-    lock.unlock();
+    config_ap->Start();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            config_ap_.get() == config_ap) {
+            config_mode_active_ = true;
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
     NotifyEvent(WifiEvent::ConfigModeEnter);
-    lock.lock();
 }
 
 void WifiManager::StopConfigAp() {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (!config_mode_active_) {
-        return;
+    WifiConfigurationAp* config_ap = nullptr;
+    uint64_t transition_generation = 0;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!config_mode_active_ || lifecycle_transition_in_progress_) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        config_ap = config_ap_.get();
+        config_mode_active_ = false;
+        lock.unlock();
     }
 
     ESP_LOGI(TAG, "Stopping config AP");
-    config_ap_->Stop();
-    config_mode_active_ = false;
-
-    lock.unlock();
+    config_ap->Stop();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            config_ap_.get() == config_ap) {
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
     NotifyEvent(WifiEvent::ConfigModeExit);
-    lock.lock();
 }
 
 bool WifiManager::IsConfigMode() const {

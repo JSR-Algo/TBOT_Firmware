@@ -2657,7 +2657,7 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
 
     station = read("components/esp-wifi-connect/wifi_station.cc")
     start_connect = _function_body(station, "void WifiStation::StartConnect")
-    start_connect += _function_body(station, "std::string WifiStation::StartConnectLocked")
+    start_connect += _function_body(station, "void WifiStation::StartConnectForSession")
     assert "strcpy((char *)wifi_config.sta.ssid" not in start_connect
     assert "memcpy(wifi_config.sta.ssid" in start_connect
     assert "sizeof(wifi_config.sta.ssid)" in start_connect
