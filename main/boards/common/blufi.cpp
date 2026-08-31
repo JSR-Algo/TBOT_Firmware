@@ -705,6 +705,12 @@ esp_err_t Blufi::_deinit_impl() {
                                               scan_event_instance_);
         scan_event_instance_ = nullptr;
     }
+    {
+        std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
+        std::vector<wifi_ap_record_t>().swap(m_ap_records);
+        m_ap_records_updated_us = 0;
+        m_ap_records_owner_.reset();
+    }
     m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
     m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
 
@@ -794,6 +800,7 @@ esp_err_t Blufi::RestartForSetup() {
         m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
         std::vector<wifi_ap_record_t>().swap(m_ap_records);
         m_ap_records_updated_us = 0;
+        m_ap_records_owner_.reset();
         memset(&m_sta_config, 0, sizeof(m_sta_config));
         m_sta_config_ssid_len_ = 0;
         memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
@@ -2462,10 +2469,12 @@ void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int
             if (cache_scan_results && completion_owner_is_current) {
                 self->m_ap_records.swap(scanned_ap_records);
                 self->m_ap_records_updated_us = scan_results_updated_us;
+                self->m_ap_records_owner_ = completion.owner;
             }
             if (completion.send_list && completion_owner_is_current) {
                 owned_ap_records.swap(self->m_ap_records);
                 self->m_ap_records_updated_us = 0;
+                self->m_ap_records_owner_.reset();
                 expected_wifi_list_dispatch_epoch =
                     self->m_wifi_list_dispatch_epoch_.fetch_add(
                         1, std::memory_order_acq_rel) + 1;
@@ -2559,6 +2568,9 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                         std::memory_order_acq_rel, std::memory_order_acquire);
                 }
                 m_ble_is_connected = false;
+                std::vector<wifi_ap_record_t>().swap(m_ap_records);
+                m_ap_records_updated_us = 0;
+                m_ap_records_owner_.reset();
                 m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
                 m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
             }
@@ -2727,12 +2739,25 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             {
                 std::lock_guard<std::mutex> session_lock(
                     provisioning_finalization_mutex_);
-                if (!m_ap_records.empty() && IsWifiScanCacheFresh()) {
+                const uint32_t current_generation =
+                    setup_generation_.load(std::memory_order_acquire);
+                const uint64_t current_session =
+                    ble_session_state_.load(std::memory_order_acquire);
+                const uint64_t current_connection =
+                    ble_connection_epoch_.load(std::memory_order_acquire);
+                const bool cache_owner_is_current =
+                    m_ap_records_owner_.has_value() &&
+                    m_ap_records_owner_->setup_generation == current_generation &&
+                    m_ap_records_owner_->ble_session_state == current_session &&
+                    m_ap_records_owner_->ble_connection_epoch == current_connection;
+                if (cache_owner_is_current && !m_ap_records.empty() &&
+                    IsWifiScanCacheFresh()) {
                     cached_ap_records.swap(m_ap_records);
                 } else {
                     m_ap_records.clear();
                 }
                 m_ap_records_updated_us = 0;
+                m_ap_records_owner_.reset();
             }
             // Sending can stop the Wi-Fi radio and allocate BLE buffers, so it
             // must stay outside the cache/session critical section.

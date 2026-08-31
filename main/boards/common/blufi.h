@@ -328,6 +328,9 @@ private:
     // WiFi scan related
     std::vector<wifi_ap_record_t> m_ap_records;
     int64_t m_ap_records_updated_us = 0;
+    // Protected by provisioning_finalization_mutex_ together with the records
+    // and timestamp so cached APs cannot cross a BLE/setup ownership boundary.
+    std::optional<BlufiWifiScanController::Request> m_ap_records_owner_;
     static constexpr int64_t kWifiScanCacheMaxAgeUs = 10LL * 1000 * 1000;
     BlufiWifiScanController wifi_scan_controller_;
     esp_event_handler_instance_t scan_event_instance_ = nullptr;

@@ -80,6 +80,36 @@ def test_blufi_scan_cache_publish_revalidates_exact_session_under_mutex():
     assert current < publish
 
 
+def test_blufi_scan_cache_records_exact_owner_when_published():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    scan_done = function_body(source, "void Blufi::_wifi_scan_event_handler")
+
+    assert "std::optional<BlufiWifiScanController::Request> m_ap_records_owner_;" in header
+    publish = scan_done.index("self->m_ap_records.swap(scanned_ap_records)")
+    owner = scan_done.index("self->m_ap_records_owner_ = completion.owner")
+    assert publish < owner
+
+
+def test_blufi_wifi_list_rejects_stale_cache_owner_and_accepts_exact_owner():
+    source = read("main/boards/common/blufi.cpp")
+    event_body = function_body(source, "void Blufi::_handle_event")
+    get_list = event_body[
+        event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
+        event_body.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")
+    ]
+
+    assert "m_ap_records_owner_.has_value()" in get_list
+    assert "m_ap_records_owner_->setup_generation == current_generation" in get_list
+    assert "m_ap_records_owner_->ble_session_state == current_session" in get_list
+    assert "m_ap_records_owner_->ble_connection_epoch == current_connection" in get_list
+    exact_owner = get_list.index("cache_owner_is_current")
+    freshness = get_list.index("IsWifiScanCacheFresh()")
+    consume = get_list.index("cached_ap_records.swap(m_ap_records)")
+    clear_owner = get_list.index("m_ap_records_owner_.reset()")
+    assert exact_owner < freshness < consume < clear_owner
+
+
 def test_blufi_scan_request_captures_generation_session_and_connection():
     source = read("main/boards/common/blufi.cpp")
     request = function_body(source, "void Blufi::RequestWifiListScan")
@@ -374,8 +404,9 @@ def test_blufi_wifi_list_requests_refresh_stale_cached_scan_results():
     assert "kWifiScanCacheMaxAgeUs" in header
     assert "IsWifiScanCacheFresh()" in header
     assert "IsWifiScanCacheFresh()" in source
-    assert "!m_ap_records.empty() && IsWifiScanCacheFresh()" in get_list
-    fresh_idx = get_list.index("!m_ap_records.empty() && IsWifiScanCacheFresh()")
+    assert "cache_owner_is_current && !m_ap_records.empty()" in get_list
+    assert "IsWifiScanCacheFresh()" in get_list
+    fresh_idx = get_list.index("cache_owner_is_current && !m_ap_records.empty()")
     assert "_send_wifi_list(" in get_list[fresh_idx:]
     assert "m_ap_records.clear();" in get_list
 
