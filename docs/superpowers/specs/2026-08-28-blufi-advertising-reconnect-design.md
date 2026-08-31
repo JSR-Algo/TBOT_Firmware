@@ -45,8 +45,9 @@ without recursively entering a public lifecycle API. Success means BLE is still
 active and its setup timer is armed when lifecycle ownership is released.
 
 Callbacks accepted by public generation lifecycle APIs execute while lifecycle
-or finalization ownership is held. They are bounded, perform no network I/O, do
-not wait on BluFi callbacks, and never call another public BluFi lifecycle API.
+ownership is held. They are bounded, perform no network I/O, do not wait on
+BluFi callbacks, and never call another public BluFi lifecycle API. Separate
+finalization-only helpers retain their narrower per-API callback contracts.
 
 Tag every advertising start completion that the wrapper intentionally owns,
 including the default BluFi fallback path. A fallback start from an older host
