@@ -1,4 +1,5 @@
 #include "blufi.h"
+#include "blufi_advertising_ledger.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -179,18 +180,8 @@ static std::string GetBlufiDeviceName() {
 //   Scan RSP: complete local name (TBOT-<MAC>)
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
 namespace {
-constexpr uint8_t kTbotAdvDataPending = 1U << 0;
-constexpr uint8_t kTbotScanRspPending = 1U << 1;
-std::atomic<uint8_t> tbot_adv_config_pending{0};
-std::atomic<bool> tbot_adv_lifecycle_active{false};
-std::atomic<bool> tbot_adv_start_pending{false};
-std::atomic<uint32_t> tbot_adv_lifecycle_epoch{0};
-std::atomic<uint32_t> tbot_adv_active_epoch{0};
-std::mutex tbot_adv_callback_mutex;
-std::deque<uint32_t> tbot_adv_data_callback_epochs;
-std::deque<uint32_t> tbot_scan_rsp_callback_epochs;
-std::deque<uint32_t> tbot_default_adv_data_callback_epochs;
-std::deque<uint32_t> tbot_adv_start_callback_epochs;
+using AdvertisingCallbackKind = TbotBlufiAdvertisingLedger::CallbackKind;
+TbotBlufiAdvertisingLedger tbot_adv_ledger;
 
 esp_ble_adv_params_t tbot_adv_params = {
     .adv_int_min = 0x100,
@@ -202,139 +193,71 @@ esp_ble_adv_params_t tbot_adv_params = {
 };
 
 void InvalidateTbotBlufiAdvertising() {
-    tbot_adv_lifecycle_active.store(false, std::memory_order_release);
-    tbot_adv_active_epoch.store(0, std::memory_order_release);
-    tbot_adv_config_pending.store(0, std::memory_order_release);
-    tbot_adv_start_pending.store(false, std::memory_order_release);
+    tbot_adv_ledger.Invalidate();
 }
 
-void QueueTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs, uint32_t epoch) {
-    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
-    epochs.push_back(epoch);
+void ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit() {
+    tbot_adv_ledger.ResetAfterSuccessfulHostDeinit();
 }
 
-uint32_t PopTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs) {
-    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
-    if (epochs.empty()) {
-        return 0;
-    }
-    const uint32_t epoch = epochs.front();
-    epochs.pop_front();
-    return epoch;
-}
-
-void CancelTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs, uint32_t epoch) {
-    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
-    if (!epochs.empty() && epochs.back() == epoch) {
-        epochs.pop_back();
-    }
-}
-
-void FallbackToDefaultBlufiAdvertising(const char* reason) {
-    if (!tbot_adv_lifecycle_active.exchange(false, std::memory_order_acq_rel)) {
-        return;
-    }
-    const uint32_t callback_epoch =
-        tbot_adv_active_epoch.load(std::memory_order_acquire);
-    tbot_adv_config_pending.store(0, std::memory_order_release);
-    tbot_adv_start_pending.store(false, std::memory_order_release);
-    ESP_LOGW(BLUFI_TAG, "compact advertising unavailable (%s); using BluFi default", reason);
-    QueueTbotAdvertisingCallbackEpoch(tbot_default_adv_data_callback_epochs,
-                                      callback_epoch);
-    esp_blufi_adv_start();
-}
-
-bool TransferDefaultBlufiAdvertisingEpochToStart() {
-    const uint32_t callback_epoch = PopTbotAdvertisingCallbackEpoch(
-        tbot_default_adv_data_callback_epochs);
-    if (callback_epoch == 0 ||
-        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
-        return false;
-    }
-    QueueTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
-    return true;
-}
-
-void MaybeStartTbotBlufiAdvertising(uint32_t callback_epoch, uint8_t completed_bit,
-                                    esp_bt_status_t status) {
-    if (!tbot_adv_lifecycle_active.load(std::memory_order_acquire) ||
-        callback_epoch == 0 ||
-        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
-        return;
-    }
-    if (status != ESP_BT_STATUS_SUCCESS) {
-        FallbackToDefaultBlufiAdvertising("payload configuration failed");
-        return;
-    }
-
-    const uint8_t previous = tbot_adv_config_pending.fetch_and(
-        static_cast<uint8_t>(~completed_bit), std::memory_order_acq_rel);
-    if ((previous & completed_bit) == 0 || (previous & ~completed_bit) != 0) {
-        return;
-    }
-
-    tbot_adv_start_pending.store(true, std::memory_order_release);
-    QueueTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
-    const esp_err_t err = esp_ble_gap_start_advertising(&tbot_adv_params);
-    if (err != ESP_OK) {
-        CancelTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
-        ESP_LOGW(BLUFI_TAG, "start compact advertising failed: %s", esp_err_to_name(err));
-        FallbackToDefaultBlufiAdvertising("start failed");
-    }
-}
-
-void HandleTbotBlufiAdvertisingStartComplete(uint32_t callback_epoch,
-                                              esp_bt_status_t status) {
-    if (callback_epoch == 0 ||
-        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
-        return;
-    }
-    if (!tbot_adv_start_pending.exchange(false, std::memory_order_acq_rel)) {
-        return;
-    }
-    if (status != ESP_BT_STATUS_SUCCESS) {
-        FallbackToDefaultBlufiAdvertising("asynchronous start failed");
-        return;
-    }
-    if (tbot_adv_lifecycle_active.exchange(false, std::memory_order_acq_rel)) {
-        ESP_LOGI(BLUFI_TAG, "TBOT compact ADV ready: UUID16 0xFFFF + name in primary ADV/RSP");
-    }
+bool ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit() {
+    return tbot_adv_ledger.ActivateAfterSuccessfulHostInit();
 }
 
 static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
                                      esp_ble_gap_cb_param_t* param) {
+    if (param == nullptr) {
+        return;
+    }
     if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
-        if (TransferDefaultBlufiAdvertisingEpochToStart()) {
-            esp_blufi_gap_event_handler(event, param);
-        }
+        tbot_adv_ledger.CompleteDefaultConfigAndForward(
+            true, [event, param]() { esp_blufi_gap_event_handler(event, param); });
         return;
     }
 
     esp_blufi_gap_event_handler(event, param);
-    if (param == nullptr) {
-        return;
-    }
-
     switch (event) {
-        case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
-            MaybeStartTbotBlufiAdvertising(
-                                           PopTbotAdvertisingCallbackEpoch(
-                                               tbot_adv_data_callback_epochs),
-                                           kTbotAdvDataPending,
-                                           param->adv_data_raw_cmpl.status);
+        case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT: {
+            esp_err_t start_error = ESP_OK;
+            const auto result = tbot_adv_ledger.CompleteCompactConfigAndSubmit(
+                AdvertisingCallbackKind::kCompactAdvData, true,
+                param->adv_data_raw_cmpl.status == ESP_BT_STATUS_SUCCESS,
+                [&start_error]() {
+                    start_error = esp_ble_gap_start_advertising(&tbot_adv_params);
+                    return start_error == ESP_OK;
+                },
+                []() { esp_blufi_adv_start(); });
+            if (result.fallback_started) {
+                ESP_LOGW(BLUFI_TAG, "compact ADV configuration/start failed; using BluFi default");
+            } else if (start_error != ESP_OK) {
+                ESP_LOGW(BLUFI_TAG, "start compact advertising failed: %s",
+                         esp_err_to_name(start_error));
+            }
             break;
-        case ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT:
-            MaybeStartTbotBlufiAdvertising(
-                                           PopTbotAdvertisingCallbackEpoch(
-                                               tbot_scan_rsp_callback_epochs),
-                                           kTbotScanRspPending,
-                                           param->scan_rsp_data_raw_cmpl.status);
+        }
+        case ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT: {
+            const auto result = tbot_adv_ledger.CompleteCompactConfigAndSubmit(
+                AdvertisingCallbackKind::kCompactScanResponse, true,
+                param->scan_rsp_data_raw_cmpl.status == ESP_BT_STATUS_SUCCESS,
+                []() { return esp_ble_gap_start_advertising(&tbot_adv_params) == ESP_OK; },
+                []() { esp_blufi_adv_start(); });
+            if (result.fallback_started) {
+                ESP_LOGW(BLUFI_TAG, "compact scan response/start failed; using BluFi default");
+            }
             break;
-        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-            HandleTbotBlufiAdvertisingStartComplete(
-                PopTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs),
-                param->adv_start_cmpl.status);
+        }
+        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT: {
+            const auto result = tbot_adv_ledger.CompleteStartAndMaybeFallback(
+                true, param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS,
+                []() { esp_blufi_adv_start(); });
+            if (result.fallback_started) {
+                ESP_LOGW(BLUFI_TAG, "compact advertising start failed; using BluFi default");
+            } else if (result.compact_completed) {
+                ESP_LOGI(BLUFI_TAG,
+                         "TBOT compact ADV ready: UUID16 0xFFFF + name in primary ADV/RSP");
+            }
             break;
+        }
         default:
             break;
     }
@@ -344,6 +267,8 @@ static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
 
 #ifndef CONFIG_BT_BLUEDROID_ENABLED
 static void InvalidateTbotBlufiAdvertising() {}
+static void ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit() {}
+static bool ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit() { return true; }
 #endif
 
 static void StartTbotBlufiAdvertising(const char* device_name) {
@@ -385,30 +310,27 @@ static void StartTbotBlufiAdvertising(const char* device_name) {
     }
 
     const uint8_t pending = static_cast<uint8_t>(
-        kTbotAdvDataPending | (rsp_len > 0 ? kTbotScanRspPending : 0));
-    const uint32_t lifecycle_epoch =
-        tbot_adv_lifecycle_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-    tbot_adv_active_epoch.store(lifecycle_epoch, std::memory_order_release);
-    tbot_adv_lifecycle_active.store(true, std::memory_order_release);
-    tbot_adv_start_pending.store(false, std::memory_order_release);
-    tbot_adv_config_pending.store(pending, std::memory_order_release);
-
-    QueueTbotAdvertisingCallbackEpoch(tbot_adv_data_callback_epochs, lifecycle_epoch);
-    esp_err_t err = esp_ble_gap_config_adv_data_raw(adv_raw, adv_len);
-    if (err != ESP_OK) {
-        CancelTbotAdvertisingCallbackEpoch(tbot_adv_data_callback_epochs, lifecycle_epoch);
-        ESP_LOGW(BLUFI_TAG, "raw ADV configuration failed: %s", esp_err_to_name(err));
-        FallbackToDefaultBlufiAdvertising("ADV configuration rejected");
-        return;
-    }
-    if (rsp_len > 0) {
-        QueueTbotAdvertisingCallbackEpoch(tbot_scan_rsp_callback_epochs, lifecycle_epoch);
-        err = esp_ble_gap_config_scan_rsp_data_raw(scan_rsp, rsp_len);
-        if (err != ESP_OK) {
-            CancelTbotAdvertisingCallbackEpoch(tbot_scan_rsp_callback_epochs, lifecycle_epoch);
-            ESP_LOGW(BLUFI_TAG, "raw scan RSP configuration failed: %s", esp_err_to_name(err));
-            FallbackToDefaultBlufiAdvertising("scan response configuration rejected");
-        }
+        TbotBlufiAdvertisingLedger::kAdvDataPending |
+        (rsp_len > 0 ? TbotBlufiAdvertisingLedger::kScanResponsePending : 0));
+    esp_err_t adv_error = ESP_OK;
+    esp_err_t scan_error = ESP_OK;
+    const auto submission = tbot_adv_ledger.BeginCompactAndSubmit(
+        pending,
+        [&]() {
+            adv_error = esp_ble_gap_config_adv_data_raw(adv_raw, adv_len);
+            return adv_error == ESP_OK;
+        },
+        [&]() {
+            scan_error = esp_ble_gap_config_scan_rsp_data_raw(scan_rsp, rsp_len);
+            return scan_error == ESP_OK;
+        },
+        []() { esp_blufi_adv_start(); });
+    if (!submission) {
+        ESP_LOGW(BLUFI_TAG, "advertising callback ledger busy; waiting for host reset");
+    } else if (adv_error != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "raw ADV configuration failed: %s", esp_err_to_name(adv_error));
+    } else if (scan_error != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "raw scan RSP configuration failed: %s", esp_err_to_name(scan_error));
     }
 #else
     (void)device_name;
@@ -722,6 +644,27 @@ esp_err_t Blufi::_init_impl() {
     }
 
     ESP_LOGI(BLUFI_TAG, "BLUFI VERSION %04x", esp_blufi_get_version());
+    if (!ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit()) {
+        ESP_LOGE(BLUFI_TAG, "BLUFI advertising ledger still owns stale callbacks after init");
+        const esp_err_t host_cleanup_error = _host_deinit();
+        if (host_cleanup_error != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "BLUFI host cleanup after ledger rejection failed: %s",
+                     esp_err_to_name(host_cleanup_error));
+        }
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+        if (!host_active_) {
+            const esp_err_t controller_cleanup_error = _controller_deinit();
+            if (controller_cleanup_error != ESP_OK) {
+                ESP_LOGE(BLUFI_TAG,
+                         "BLUFI controller cleanup after ledger rejection failed: %s",
+                         esp_err_to_name(controller_cleanup_error));
+            }
+        }
+#endif
+        inited_ = false;
+        m_deinited = !host_active_ && !controller_active_;
+        return ESP_ERR_INVALID_STATE;
+    }
     teardown_failed_.store(false);
     inited_ = true;
     ble_session_state_.store(
@@ -1128,6 +1071,7 @@ esp_err_t Blufi::_host_deinit() {
             return ret;
         }
         host_initialized_ = false;
+        ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit();
     }
     host_active_ = profile_active_ || host_enabled_ || host_initialized_;
     return ESP_OK;
