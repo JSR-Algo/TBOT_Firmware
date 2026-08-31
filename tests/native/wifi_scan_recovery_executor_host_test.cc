@@ -436,6 +436,20 @@ public:
         return true;
     }
 
+    bool CallbackWinsAndResume() {
+        assert(scheduled_);
+        const auto callback = coordinator_.ObserveScanDone(lease_);
+        assert(callback.consume_now);
+        assert(coordinator_.FinishCompletion(lease_));
+        scheduled_ = false;
+        driver_ready_before_target_ = true;
+        if (lifecycle_generation_ == pending_generation_) {
+            ++target_start_count_;
+        }
+        pending_generation_ = 0;
+        return true;
+    }
+
     void MakePendingGenerationStale() { ++lifecycle_generation_; }
     size_t target_start_count() const { return target_start_count_; }
     size_t claim_count() const { return claim_count_; }
@@ -501,6 +515,36 @@ void StaleTransitionGenerationNeverStartsTarget() {
     assert(model.target_start_count() == 0);
 }
 
+void CallbackBeforeClaimResumesBothPendingModeDirectionsExactlyOnce() {
+    for (const auto source : {
+             WifiScanLeaseCoordinator::Owner::kStation,
+             WifiScanLeaseCoordinator::Owner::kConfigAp}) {
+        driver.Reset();
+        PendingTransitionRecoveryModel model(source);
+        model.NotifyDebt();
+        model.NotifyDebt();
+
+        assert(model.CallbackWinsAndResume());
+        assert(model.claim_count() == 0);
+        assert(model.driver_ready_before_target());
+        assert(model.target_start_count() == 1);
+        assert(Calls().empty());
+    }
+}
+
+void CallbackBeforeClaimDiscardsStalePendingGeneration() {
+    driver.Reset();
+    PendingTransitionRecoveryModel model(
+        WifiScanLeaseCoordinator::Owner::kConfigAp);
+    model.NotifyDebt();
+    model.MakePendingGenerationStale();
+
+    assert(model.CallbackWinsAndResume());
+    assert(model.claim_count() == 0);
+    assert(model.target_start_count() == 0);
+    assert(Calls().empty());
+}
+
 static_assert(!std::is_copy_constructible<WifiScanRecoveryExecutor>::value);
 static_assert(!std::is_copy_assignable<WifiScanRecoveryExecutor>::value);
 
@@ -546,6 +590,8 @@ int main() {
     BothModeDirectionsStartTargetOnlyAfterExactProofAndDriverReady();
     RecoveryFailureKeepsTargetDeferredAndRetryUsesSameClaim();
     StaleTransitionGenerationNeverStartsTarget();
+    CallbackBeforeClaimResumesBothPendingModeDirectionsExactlyOnce();
+    CallbackBeforeClaimDiscardsStalePendingGeneration();
     std::cout << "wifi scan recovery executor host tests passed\n";
     return 0;
 }

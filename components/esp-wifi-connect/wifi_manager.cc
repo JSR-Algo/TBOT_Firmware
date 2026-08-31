@@ -108,6 +108,9 @@ void WifiManager::ResumePendingLifecycleTransition() {
     WifiManagerConfig config;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (scan_recovery_active_) {
+            return;
+        }
         target = pending_lifecycle_target_;
         pending_generation = pending_lifecycle_generation_;
         pending_lifecycle_target_ = PendingLifecycleTarget::kNone;
@@ -133,6 +136,7 @@ void WifiManager::RunScanRecovery() {
         std::optional<WifiScanLeaseCoordinator::Lease> debt;
         std::optional<ScanRecoveryWork> work;
         bool wait_for_lifecycle = false;
+        bool resume_pending_transition = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!scan_recovery_active_ || !scan_recovery_debt_.has_value()) {
@@ -178,12 +182,18 @@ void WifiManager::RunScanRecovery() {
                     vTaskDelay(pdMS_TO_TICKS(250));
                     continue;
                 }
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (scan_recovery_debt_.has_value() &&
-                    SameLease(*scan_recovery_debt_, *debt)) {
-                    scan_recovery_debt_.reset();
-                    scan_recovery_active_ = false;
-                    scan_recovery_retry_pending_ = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (scan_recovery_debt_.has_value() &&
+                        SameLease(*scan_recovery_debt_, *debt)) {
+                        scan_recovery_debt_.reset();
+                        scan_recovery_active_ = false;
+                        scan_recovery_retry_pending_ = false;
+                        resume_pending_transition = true;
+                    }
+                }
+                if (resume_pending_transition) {
+                    ResumePendingLifecycleTransition();
                 }
                 return;
             }

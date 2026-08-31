@@ -827,9 +827,8 @@ def test_mode_transitions_defer_target_start_until_exact_scan_recovery_finishes(
         "station_active_ = false"
     )
 
-    assert run.index("CompleteScanRecovery") < run.index(
-        "ResumePendingLifecycleTransition"
-    )
+    complete = run.index("CompleteScanRecovery")
+    assert complete < run.index("ResumePendingLifecycleTransition", complete)
 
 
 def test_pending_transition_is_generation_bound_and_consumed_once():
@@ -849,6 +848,43 @@ def test_pending_transition_is_generation_bound_and_consumed_once():
     assert "lifecycle_generation_ != pending_generation" in resume
     assert resume.count("StartStationTarget(") == 1
     assert resume.count("StartConfigApTarget(") == 1
+
+
+def test_callback_wins_before_claim_resumes_only_the_exact_pending_transition():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+    no_claim = run[
+        run.index("if (!work.has_value())", run.index("if (!work.has_value())") + 1) :
+        run.index("scan_recovery_claim_ = work")
+    ]
+
+    assert "bool resume_pending_transition = false" in run
+    assert "SameLease(*scan_recovery_debt_, *debt)" in no_claim
+    assert "scan_recovery_active_ = false" in no_claim
+    assert "resume_pending_transition = true" in no_claim
+    assert no_claim.index("scan_recovery_active_ = false") < no_claim.index(
+        "ResumePendingLifecycleTransition()"
+    )
+    assert "ResumePendingLifecycleTransition()" in no_claim
+    assert no_claim.index("}") < no_claim.index("ResumePendingLifecycleTransition()")
+
+
+def test_callback_wins_does_not_resume_when_exact_debt_still_exists_or_changed():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+    no_claim = run[
+        run.index("if (!work.has_value())", run.index("if (!work.has_value())") + 1) :
+        run.index("scan_recovery_claim_ = work")
+    ]
+
+    still_exists = no_claim[
+        no_claim.index("if (debt_still_exists)") :
+        no_claim.index("std::lock_guard<std::mutex> lock(mutex_)",
+                       no_claim.index("if (debt_still_exists)"))
+    ]
+    assert "ResumePendingLifecycleTransition" not in still_exists
+    exact_clear = no_claim[no_claim.index("SameLease(*scan_recovery_debt_, *debt)") :]
+    assert "resume_pending_transition = true" in exact_clear
 
 
 def test_manager_active_flags_stay_false_while_target_transition_is_pending():
