@@ -189,6 +189,7 @@ std::atomic<uint32_t> tbot_adv_active_epoch{0};
 std::mutex tbot_adv_callback_mutex;
 std::deque<uint32_t> tbot_adv_data_callback_epochs;
 std::deque<uint32_t> tbot_scan_rsp_callback_epochs;
+std::deque<uint32_t> tbot_default_adv_data_callback_epochs;
 std::deque<uint32_t> tbot_adv_start_callback_epochs;
 
 esp_ble_adv_params_t tbot_adv_params = {
@@ -233,10 +234,25 @@ void FallbackToDefaultBlufiAdvertising(const char* reason) {
     if (!tbot_adv_lifecycle_active.exchange(false, std::memory_order_acq_rel)) {
         return;
     }
+    const uint32_t callback_epoch =
+        tbot_adv_active_epoch.load(std::memory_order_acquire);
     tbot_adv_config_pending.store(0, std::memory_order_release);
     tbot_adv_start_pending.store(false, std::memory_order_release);
     ESP_LOGW(BLUFI_TAG, "compact advertising unavailable (%s); using BluFi default", reason);
+    QueueTbotAdvertisingCallbackEpoch(tbot_default_adv_data_callback_epochs,
+                                      callback_epoch);
     esp_blufi_adv_start();
+}
+
+bool TransferDefaultBlufiAdvertisingEpochToStart() {
+    const uint32_t callback_epoch = PopTbotAdvertisingCallbackEpoch(
+        tbot_default_adv_data_callback_epochs);
+    if (callback_epoch == 0 ||
+        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
+        return false;
+    }
+    QueueTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
+    return true;
 }
 
 void MaybeStartTbotBlufiAdvertising(uint32_t callback_epoch, uint8_t completed_bit,
@@ -287,6 +303,13 @@ void HandleTbotBlufiAdvertisingStartComplete(uint32_t callback_epoch,
 
 static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
                                      esp_ble_gap_cb_param_t* param) {
+    if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
+        if (TransferDefaultBlufiAdvertisingEpochToStart()) {
+            esp_blufi_gap_event_handler(event, param);
+        }
+        return;
+    }
+
     esp_blufi_gap_event_handler(event, param);
     if (param == nullptr) {
         return;

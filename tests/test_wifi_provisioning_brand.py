@@ -95,6 +95,36 @@ def test_blufi_compact_advertising_ignores_callbacks_from_prior_lifecycle():
     assert "callback_epoch != tbot_adv_active_epoch" in start_complete
 
 
+def test_blufi_default_fallback_owns_config_and_start_callback_epochs():
+    blufi = read("main/boards/common/blufi.cpp")
+
+    assert "tbot_default_adv_data_callback_epochs" in blufi
+
+    fallback = function_body(blufi, "void FallbackToDefaultBlufiAdvertising")
+    queue_default_epoch = fallback.index(
+        "QueueTbotAdvertisingCallbackEpoch(tbot_default_adv_data_callback_epochs"
+    )
+    start_default = fallback.index("esp_blufi_adv_start();")
+    assert queue_default_epoch < start_default
+
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+    assert "if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT)" in handler
+    assert "ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT && param" not in handler
+    structured_complete = handler.index("ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT")
+    transfer_epoch = handler.index("TransferDefaultBlufiAdvertisingEpochToStart", structured_complete)
+    forward_to_idf = handler.index("esp_blufi_gap_event_handler(event, param);", structured_complete)
+    assert transfer_epoch < forward_to_idf
+
+    transfer = function_body(blufi, "bool TransferDefaultBlufiAdvertisingEpochToStart")
+    pop_default_epoch = transfer.index("PopTbotAdvertisingCallbackEpoch(")
+    assert "tbot_default_adv_data_callback_epochs" in transfer[pop_default_epoch:]
+    reject_stale_epoch = transfer.index("callback_epoch != tbot_adv_active_epoch")
+    queue_start_epoch = transfer.index(
+        "QueueTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch)"
+    )
+    assert pop_default_epoch < reject_stale_epoch < queue_start_epoch
+
+
 def test_blufi_never_logs_wifi_password_values():
     blufi = read("main/boards/common/blufi.cpp")
 
