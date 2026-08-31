@@ -7,6 +7,7 @@
 #include <memory>
 #include <functional>
 #include <optional>
+#include <condition_variable>
 
 #include <esp_http_server.h>
 #include <esp_event.h>
@@ -48,6 +49,7 @@ public:
     std::vector<wifi_ap_record_t> GetAccessPoints();
     std::string GetSsid();
     std::string GetWebServerUrl();
+    bool ScanRecoveryNeeded() const;
 
     /**
      * Set callback for when exit is requested from config mode
@@ -69,11 +71,17 @@ private:
     esp_netif_t* ap_netif_ = nullptr;
     std::vector<wifi_ap_record_t> ap_records_;
     WifiScanLeaseCoordinator& scan_lease_coordinator_;
-    std::mutex scan_mutex_;
+    mutable std::mutex scan_mutex_;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
     bool scans_enabled_ = false;
     uint64_t scan_session_id_ = 0;
     uint64_t lease_session_id_ = 0;
+    uint64_t connection_attempt_id_ = 0;
+    uint64_t active_connection_attempt_id_ = 0;
+    uint64_t active_connection_session_id_ = 0;
+    bool connection_waiter_active_ = false;
+    std::condition_variable connection_waiter_drained_;
+    bool scan_recovery_needed_ = false;
 
     // 高级配置项
     std::string ota_url_;
@@ -88,7 +96,8 @@ private:
     void StartWebServer();
     bool StartOwnedScan();
     void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
-    void ScheduleScanRetry(int64_t delay_microseconds);
+    void ScheduleScanRetry(uint64_t expected_session,
+                           int64_t delay_microseconds);
 
     // Event handlers
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

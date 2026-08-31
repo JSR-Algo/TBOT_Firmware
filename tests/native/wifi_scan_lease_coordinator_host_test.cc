@@ -704,18 +704,22 @@ public:
 
     Attempt BeginAttempt() {
         std::lock_guard<std::mutex> lock(mutex_);
+        connected_ = false;
+        cancelled_ = false;
         active_ = true;
         active_attempt_id_ = ++last_attempt_id_;
+        waiter_active_ = true;
         return Attempt{session_id_, active_attempt_id_};
     }
 
     void Stop() {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         active_ = false;
         active_attempt_id_ = 0;
         ++session_id_;
         cancelled_ = true;
         wake_.notify_all();
+        drained_.wait(lock, [this]() { return !waiter_active_; });
     }
 
     void SignalConnected() {
@@ -729,6 +733,8 @@ public:
     bool WaitAndDisconnect(const Attempt& attempt) {
         std::unique_lock<std::mutex> lock(mutex_);
         wake_.wait(lock, [this]() { return connected_ || cancelled_; });
+        waiter_active_ = false;
+        drained_.notify_all();
         if (!active_ || attempt.session_id != session_id_ ||
             attempt.attempt_id != active_attempt_id_ || !connected_) {
             return false;
@@ -744,9 +750,11 @@ public:
 private:
     std::mutex mutex_;
     std::condition_variable wake_;
+    std::condition_variable drained_;
     bool active_ = false;
     bool connected_ = false;
     bool cancelled_ = false;
+    bool waiter_active_ = false;
     uint64_t session_id_ = 1;
     uint64_t last_attempt_id_ = 0;
     uint64_t active_attempt_id_ = 0;
@@ -765,6 +773,11 @@ void OldConfigWaiterCannotConsumeOrDisconnectNextStationConnection() {
     old_waiter.join();
     assert(!old_result);
     assert(model.disconnects() == 0);
+
+    const auto next_attempt = model.BeginAttempt();
+    model.SignalConnected();
+    assert(model.WaitAndDisconnect(next_attempt));
+    assert(model.disconnects() == 1);
 }
 
 void CompletingLeaseCanEnterExactRecovery() {

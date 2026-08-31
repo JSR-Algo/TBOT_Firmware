@@ -1,5 +1,6 @@
 #include "wifi_configuration_ap.h"
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
@@ -23,6 +24,7 @@
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+#define WIFI_CANCEL_BIT    BIT2
 
 extern const char index_html_start[] asm("_binary_wifi_configuration_html_start");
 extern const char done_html_start[] asm("_binary_wifi_configuration_done_html_start");
@@ -168,27 +170,37 @@ void WifiConfigurationAp::CompleteOwnedScan(
         return;
     }
     const bool consume_results =
-        scans_enabled_ && lease_session_id_ == scan_session_id_;
+        scans_enabled_ && !is_connecting_ &&
+        lease_session_id_ == scan_session_id_;
 
     uint16_t ap_num = 0;
     std::vector<wifi_ap_record_t> scanned_records;
-    if (consume_results && esp_wifi_scan_get_ap_num(&ap_num) == ESP_OK) {
+    bool cleanup_proven = false;
+    if (consume_results && esp_wifi_scan_get_ap_num(&ap_num) == ESP_OK &&
+        ap_num != 0) {
         scanned_records.resize(ap_num);
-        if (ap_num != 0 &&
-            esp_wifi_scan_get_ap_records(&ap_num, scanned_records.data()) != ESP_OK) {
+        if (esp_wifi_scan_get_ap_records(&ap_num, scanned_records.data()) != ESP_OK) {
             scanned_records.clear();
         } else {
             scanned_records.resize(ap_num);
+            cleanup_proven = true;
         }
     }
-    esp_wifi_clear_ap_list();
+    if (!cleanup_proven) {
+        cleanup_proven = esp_wifi_clear_ap_list() == ESP_OK;
+    }
 
+    if (!cleanup_proven) {
+        ESP_LOGE(TAG, "Configuration AP scan cleanup failed; recovery required");
+        scan_recovery_needed_ = true;
+        return;
+    }
     if (!scan_lease_coordinator_.FinishCompletion(lease)) {
         return;
     }
     scan_lease_.reset();
 
-    if (consume_results && scans_enabled_ &&
+    if (consume_results && scans_enabled_ && !is_connecting_ &&
         lease_session_id_ == scan_session_id_) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -201,10 +213,12 @@ void WifiConfigurationAp::CompleteOwnedScan(
     lifecycle_lock.unlock();
 }
 
-void WifiConfigurationAp::ScheduleScanRetry(int64_t delay_microseconds)
+void WifiConfigurationAp::ScheduleScanRetry(
+        uint64_t expected_session, int64_t delay_microseconds)
 {
     std::lock_guard<std::mutex> lock(scan_mutex_);
-    if (scans_enabled_ && !is_connecting_ && scan_timer_ != nullptr) {
+    if (scans_enabled_ && expected_session == scan_session_id_ &&
+        !is_connecting_ && scan_timer_ != nullptr) {
         esp_timer_start_once(scan_timer_, delay_microseconds);
     }
 }
@@ -791,13 +805,25 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     if (!scans_enabled_) {
         return false;
     }
+    if (is_connecting_) {
+        return false;
+    }
+    if (connection_attempt_id_ == std::numeric_limits<uint64_t>::max()) {
+        return false;
+    }
     is_connecting_ = true;
+    const uint64_t attempt_session = scan_session_id_;
+    const uint64_t attempt_id = ++connection_attempt_id_;
+    active_connection_attempt_id_ = attempt_id;
+    active_connection_session_id_ = attempt_session;
+    connection_waiter_active_ = true;
     if (scan_lease_.has_value()) {
         const auto lease = *scan_lease_;
         scan_lease_coordinator_.BeginDrain(lease);
         esp_wifi_scan_stop();
     }
-    xEventGroupClearBits(event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    xEventGroupClearBits(
+        event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | WIFI_CANCEL_BIT);
 
     wifi_config_t wifi_config;
     bzero(&wifi_config, sizeof(wifi_config));
@@ -811,8 +837,12 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to connect to WiFi: %d", ret);
         is_connecting_ = false;
+        active_connection_attempt_id_ = 0;
+        active_connection_session_id_ = 0;
+        connection_waiter_active_ = false;
+        connection_waiter_drained_.notify_all();
         lifecycle_lock.unlock();
-        ScheduleScanRetry(10 * 1000000);
+        ScheduleScanRetry(attempt_session, 10 * 1000000);
         return false;
     }
     lifecycle_lock.unlock();
@@ -821,7 +851,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     // Wait for the connection to complete for 10 or 25 seconds
     EventBits_t bits = xEventGroupWaitBits(
         event_group_,
-        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+        WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | WIFI_CANCEL_BIT,
         pdTRUE,
         pdFALSE,
 #ifdef CONFIG_SOC_WIFI_SUPPORT_5G
@@ -830,17 +860,30 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
         pdMS_TO_TICKS(10000)
 #endif
     );
-    {
-        std::lock_guard<std::mutex> lock(scan_mutex_);
-        is_connecting_ = false;
+    lifecycle_lock.lock();
+    connection_waiter_active_ = false;
+    connection_waiter_drained_.notify_all();
+    const bool exact_attempt =
+        scans_enabled_ && attempt_id == active_connection_attempt_id_ &&
+        attempt_session == active_connection_session_id_ &&
+        attempt_session == scan_session_id_;
+    if (!exact_attempt || (bits & WIFI_CANCEL_BIT)) {
+        lifecycle_lock.unlock();
+        return false;
     }
-    ScheduleScanRetry(10 * 1000000);
+    is_connecting_ = false;
+    active_connection_attempt_id_ = 0;
+    active_connection_session_id_ = 0;
 
     if (bits & WIFI_CONNECTED_BIT) {
         ESP_LOGI(TAG, "WiFi credential test succeeded");
         esp_wifi_disconnect();
+        lifecycle_lock.unlock();
+        ScheduleScanRetry(attempt_session, 10 * 1000000);
         return true;
     } else {
+        lifecycle_lock.unlock();
+        ScheduleScanRetry(attempt_session, 10 * 1000000);
         ESP_LOGE(TAG, "WiFi credential test failed");
         return false;
     }
@@ -868,9 +911,17 @@ void WifiConfigurationAp::WifiEventHandler(void* arg, esp_event_base_t event_bas
         wifi_event_ap_stadisconnected_t* event = (wifi_event_ap_stadisconnected_t*) event_data;
         ESP_LOGI(TAG, "Station left configuration AP, AID=%d", event->aid);
     } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
-        xEventGroupSetBits(self->event_group_, WIFI_CONNECTED_BIT);
+        std::lock_guard<std::mutex> lock(self->scan_mutex_);
+        if (self->active_connection_attempt_id_ != 0 &&
+            self->active_connection_session_id_ == self->scan_session_id_) {
+            xEventGroupSetBits(self->event_group_, WIFI_CONNECTED_BIT);
+        }
     } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupSetBits(self->event_group_, WIFI_FAIL_BIT);
+        std::lock_guard<std::mutex> lock(self->scan_mutex_);
+        if (self->active_connection_attempt_id_ != 0 &&
+            self->active_connection_session_id_ == self->scan_session_id_) {
+            xEventGroupSetBits(self->event_group_, WIFI_FAIL_BIT);
+        }
     } else if (event_id == WIFI_EVENT_SCAN_DONE) {
         std::optional<WifiScanLeaseCoordinator::Lease> lease_snapshot;
         {
@@ -897,7 +948,11 @@ void WifiConfigurationAp::IpEventHandler(void* arg, esp_event_base_t event_base,
     if (event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Got IP:" IPSTR, IP2STR(&event->ip_info.ip));
-        xEventGroupSetBits(self->event_group_, WIFI_CONNECTED_BIT);
+        std::lock_guard<std::mutex> lock(self->scan_mutex_);
+        if (self->active_connection_attempt_id_ != 0 &&
+            self->active_connection_session_id_ == self->scan_session_id_) {
+            xEventGroupSetBits(self->event_group_, WIFI_CONNECTED_BIT);
+        }
     }
 }
 
@@ -982,6 +1037,13 @@ void WifiConfigurationAp::Stop() {
     std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
     scans_enabled_ = false;
     ++scan_session_id_;
+    is_connecting_ = false;
+    active_connection_attempt_id_ = 0;
+    active_connection_session_id_ = 0;
+    xEventGroupSetBits(event_group_, WIFI_CANCEL_BIT);
+    connection_waiter_drained_.wait(lifecycle_lock, [this]() {
+        return !connection_waiter_active_;
+    });
     esp_timer_handle_t timer_to_delete = scan_timer_;
     scan_timer_ = nullptr;
 
@@ -1021,4 +1083,9 @@ void WifiConfigurationAp::Stop() {
     }
 
     ESP_LOGI(TAG, "Wifi configuration AP stopped");
+}
+
+bool WifiConfigurationAp::ScanRecoveryNeeded() const {
+    std::lock_guard<std::mutex> lock(scan_mutex_);
+    return scan_recovery_needed_;
 }

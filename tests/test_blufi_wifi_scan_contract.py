@@ -396,6 +396,125 @@ def test_station_external_callbacks_use_reentrant_session_gate_after_permit_fini
             assert "DispatchSessionCallback(" in prefix
 
 
+def test_station_retry_is_post_permit_and_exact_session_scoped():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+    handler = function_body(source, "void WifiStation::WifiEventHandler")
+    retry = function_body(source, "void WifiStation::ScheduleScanRetry")
+
+    assert "void ScheduleScanRetry(uint64_t expected_session" in header
+    assert "expected_session == scan_session_id_" in retry
+    assert completion.index("FinishSessionOperation()") < completion.index(
+        "ScheduleScanRetry("
+    )
+    disconnected = handler[handler.index("WIFI_EVENT_STA_DISCONNECTED") :]
+    assert disconnected.index("FinishSessionOperation()") < disconnected.index(
+        "ScheduleScanRetry("
+    )
+
+    scan_result = function_body(source, "WifiStation::HandleScanResultLocked")
+    assert "ScheduleScanRetry(" not in scan_result
+    assert "scan_mutex_" not in scan_result
+
+
+def test_config_connect_waiter_is_exact_attempt_scoped_and_cancelled_by_stop():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
+    stop = function_body(source, "void WifiConfigurationAp::Stop")
+    wifi_handler = function_body(source, "void WifiConfigurationAp::WifiEventHandler")
+    ip_handler = function_body(source, "void WifiConfigurationAp::IpEventHandler")
+
+    assert "WIFI_CANCEL_BIT" in source
+    assert "uint64_t connection_attempt_id_ = 0;" in header
+    assert "uint64_t active_connection_attempt_id_ = 0;" in header
+    assert "uint64_t active_connection_session_id_ = 0;" in header
+    assert "std::condition_variable connection_waiter_drained_;" in header
+    assert "WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | WIFI_CANCEL_BIT" in connect
+    assert "attempt_id == active_connection_attempt_id_" in connect
+    assert "attempt_session == active_connection_session_id_" in connect
+    assert "ScheduleScanRetry(attempt_session" in connect
+    assert connect.index("attempt_id == active_connection_attempt_id_") < connect.index(
+        "esp_wifi_disconnect()"
+    )
+    assert "active_connection_attempt_id_ = 0" in stop
+    assert "xEventGroupSetBits(event_group_, WIFI_CANCEL_BIT)" in stop
+    assert "connection_waiter_drained_.wait(" in stop
+    for handler in (wifi_handler, ip_handler):
+        assert "active_connection_attempt_id_ != 0" in handler
+        assert "active_connection_session_id_ == self->scan_session_id_" in handler
+
+
+def test_config_cancelled_scan_completion_cannot_publish_during_credential_test():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
+
+    consume_guard = completion[
+        completion.index("const bool consume_results") : completion.index("uint16_t ap_num")
+    ]
+    publish_guard = completion[
+        completion.index("if (consume_results && scans_enabled_") : completion.index(
+            "ap_records_.swap(scanned_records)"
+        )
+    ]
+    assert "!is_connecting_" in consume_guard
+    assert "!is_connecting_" in publish_guard
+
+
+def test_station_and_config_retain_completion_when_driver_ap_cleanup_is_unproven():
+    station_header = read("components/esp-wifi-connect/include/wifi_station.h")
+    station_source = read("components/esp-wifi-connect/wifi_station.cc")
+    config_header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    config_source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+
+    assert "bool ScanRecoveryNeeded() const;" in station_header
+    assert "bool scan_recovery_needed_ = false;" in station_header
+    assert "bool ScanRecoveryNeeded() const;" in config_header
+    assert "bool scan_recovery_needed_ = false;" in config_header
+
+    for source, signature in (
+        (station_source, "void WifiStation::CompleteOwnedScan"),
+        (config_source, "void WifiConfigurationAp::CompleteOwnedScan"),
+    ):
+        completion = function_body(source, signature)
+        assert "esp_wifi_scan_get_ap_num" in completion
+        assert "esp_wifi_scan_get_ap_records" in completion
+        assert "esp_wifi_clear_ap_list" in completion
+        assert "cleanup_proven" in completion
+        assert completion.index("if (!cleanup_proven)") < completion.index(
+            "FinishCompletion(lease)"
+        )
+        failure = completion[
+            completion.index("if (!cleanup_proven)") : completion.index(
+                "FinishCompletion(lease)"
+            )
+        ]
+        assert "scan_recovery_needed_ = true" in failure
+        assert "scan_lease_.reset()" not in failure
+
+
+def test_station_session_data_has_one_mutex_and_driver_calls_use_snapshots():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    stop = function_body(source, "void WifiStation::Stop")
+    connect = function_body(source, "std::string WifiStation::StartConnectForSession")
+
+    assert "mutable std::mutex session_data_mutex_;" in header
+    assert "session_operation_mutex_" not in header + source
+    assert "std::string GetSsid() const;" in header
+    assert "std::string GetIpAddress() const;" in header
+    for getter in ("std::string WifiStation::GetSsid", "std::string WifiStation::GetIpAddress"):
+        assert "session_data_mutex_" in function_body(source, getter)
+
+    assert "session_data_mutex_" in stop
+    assert "std::fill(password_.begin(), password_.end(), '\\0')" in stop
+    assert connect.index("session_data_mutex_") < connect.index("esp_wifi_set_config(")
+    data_scope = connect[connect.index("session_data_mutex_") : connect.index("esp_wifi_set_config(")]
+    assert data_scope.count("}") >= 1
+    assert "std::fill(password_.begin(), password_.end(), '\\0')" in connect
+
+
 def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():
     header = read("main/boards/common/blufi.h")
 
