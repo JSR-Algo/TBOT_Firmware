@@ -3311,6 +3311,9 @@ void Application::InitializeProtocol() {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig() || has_configured_websocket_url) {
         auto websocket_protocol = std::make_unique<WebsocketProtocol>();
+        websocket_protocol->SetTransientConfig(
+            ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
+            ota_->GetTransientEvidenceJourneyId());
         websocket_protocol->SetUnclaimedPublicLessonOnly(!IsDeviceClaimed());
         protocol_ = std::move(websocket_protocol);
         is_websocket_protocol = true;
@@ -3321,7 +3324,8 @@ void Application::InitializeProtocol() {
 #else
     auto websocket_protocol = std::make_unique<WebsocketProtocol>();
     websocket_protocol->SetTransientConfig(
-        ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken());
+        ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
+        ota_->GetTransientEvidenceJourneyId());
     websocket_protocol->SetUnclaimedPublicLessonOnly(false);
     protocol_ = std::move(websocket_protocol);
     is_websocket_protocol = true;

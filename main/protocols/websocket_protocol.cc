@@ -19,6 +19,8 @@
 #include <cstdio>
 #include <inttypes.h>
 #include <memory>
+#include <string_view>
+#include <utility>
 #include <esp_random.h>
 #include <esp_timer.h>
 
@@ -44,6 +46,22 @@ static bool IsUrlUnreserved(char ch) {
     return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
            (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' ||
            ch == '.' || ch == '~';
+}
+
+static bool IsValidEvidenceJourneyId(std::string_view value) {
+    if (value.empty() || value.size() > 64) {
+        return false;
+    }
+    for (const char byte : value) {
+        const bool allowed =
+            (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+            (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' ||
+            byte == ':' || byte == '-';
+        if (!allowed) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static std::string UrlEncodeQueryValue(const std::string& value) {
@@ -146,12 +164,19 @@ WebsocketProtocol::WebsocketProtocol() {
     RefreshSettings();
 }
 
-void WebsocketProtocol::SetTransientConfig(std::string url, std::string token) {
+void WebsocketProtocol::SetTransientConfig(std::string url,
+                                           std::string token,
+                                           std::string evidence_journey_id) {
+    transient_evidence_journey_id_.clear();
+    if (IsValidEvidenceJourneyId(evidence_journey_id)) {
+        transient_evidence_journey_id_ = std::move(evidence_journey_id);
+    }
 #if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     // Local OTA failures may leave the strictly compiled route without a token.
     if (!IsValidCourseModeWebsocketUrl(url) || url != CONFIG_WEBSOCKET_URL) {
         url_.clear();
         token_.clear();
+        transient_evidence_journey_id_.clear();
         transient_configured_ = false;
         return;
     }
@@ -616,10 +641,22 @@ bool WebsocketProtocol::OpenAudioChannel() {
 }
 
 std::string WebsocketProtocol::GetHelloMessage() {
+    std::string evidence_journey_id = std::move(transient_evidence_journey_id_);
+    transient_evidence_journey_id_.clear();
+
     // keys: message type, version, audio_params (format, sample_rate, channels)
     cJSON* root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return {};
+    }
     cJSON_AddStringToObject(root, "type", "hello");
     cJSON_AddNumberToObject(root, "version", version_);
+    if (IsValidEvidenceJourneyId(evidence_journey_id) &&
+        cJSON_AddStringToObject(root, "evidence_journey_id",
+                                evidence_journey_id.c_str()) == nullptr) {
+        cJSON_Delete(root);
+        return {};
+    }
     cJSON* features = cJSON_CreateObject();
 #if CONFIG_USE_SERVER_AEC
     cJSON_AddBoolToObject(features, "aec", true);
@@ -643,6 +680,10 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddNumberToObject(audio_params, "frame_duration", OPUS_FRAME_DURATION_MS);
     cJSON_AddItemToObject(root, "audio_params", audio_params);
     auto json_str = cJSON_PrintUnformatted(root);
+    if (json_str == nullptr) {
+        cJSON_Delete(root);
+        return {};
+    }
     std::string message(json_str);
     cJSON_free(json_str);
     cJSON_Delete(root);
