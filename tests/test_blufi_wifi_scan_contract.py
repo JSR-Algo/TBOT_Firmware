@@ -112,9 +112,73 @@ def test_blufi_scan_reinitializes_wifi_after_list_dispatch_teardown():
 
     initialize = body.index("wifi_manager.Initialize()")
     get_mode = body.index("esp_wifi_get_mode")
-    null_mode = body.index("current_mode == WIFI_MODE_NULL")
+    station_capable = body.index(
+        "current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA"
+    )
 
-    assert initialize < get_mode < null_mode
+    assert initialize < get_mode < station_capable
+
+
+def test_blufi_scan_recovers_when_wifi_mode_read_fails():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::start_wifi_scan")
+
+    get_mode = body.index("esp_wifi_get_mode(&current_mode)")
+    read_failure = body.index("if (err != ESP_OK)", get_mode)
+    set_fallback = body.index("current_mode = WIFI_MODE_NULL;", read_failure)
+    set_station = body.index("esp_wifi_set_mode(WIFI_MODE_STA)", set_fallback)
+
+    assert get_mode < read_failure < set_fallback < set_station
+    assert "Failed to read WiFi mode before scan" in body
+    assert "Failed to get WiFi mode" not in body
+
+
+def test_blufi_scan_uses_one_passive_start_after_mode_is_station_capable():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::start_wifi_scan")
+
+    assert "current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA" in body
+    assert "Unexpected WiFi mode" not in body
+    assert body.count("esp_wifi_scan_start(&scan_config, false)") == 1
+    assert body.index("esp_wifi_set_mode(WIFI_MODE_STA)") < body.index(
+        "esp_wifi_scan_start(&scan_config, false)"
+    )
+    assert body.count("err != ESP_OK && err != ESP_ERR_WIFI_STATE") == 2
+
+
+def test_blufi_wifi_scan_failures_log_start_and_empty_result_separately():
+    source = read("main/boards/common/blufi.cpp")
+    send_list = function_body(source, "void Blufi::_send_wifi_list")
+    handler = function_body(source, "void Blufi::_handle_event")
+    get_list = handler[
+        handler.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
+        handler.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")
+    ]
+
+    assert "WiFi scan fail reason=scan_completed_without_ap_records" in send_list
+    assert "WiFi scan fail reason=scan_start_failed" in get_list
+
+
+def test_blufi_logs_heap_around_connection_and_wifi_list_dispatch():
+    source = read("main/boards/common/blufi.cpp")
+    send_list = function_body(source, "void Blufi::_send_wifi_list")
+    handler = function_body(source, "void Blufi::_handle_event")
+    init_event = handler[
+        handler.index("case ESP_BLUFI_EVENT_INIT_FINISH") :
+        handler.index("case ESP_BLUFI_EVENT_DEINIT_FINISH")
+    ]
+    connect_event = handler[
+        handler.index("case ESP_BLUFI_EVENT_BLE_CONNECT") :
+        handler.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT")
+    ]
+
+    assert 'LogBlufiHeapSnapshot("blufi_init_finish")' in init_event
+    assert 'LogBlufiHeapSnapshot("ble_connect")' in connect_event
+    assert 'LogBlufiHeapSnapshot("wifi_list_before_dispatch")' in send_list
+    assert 'LogBlufiHeapSnapshot("wifi_list_after_dispatch")' in send_list
+    assert send_list.index("wifi_list_before_dispatch") < send_list.index(
+        "esp_err_t err = esp_blufi_send_wifi_list"
+    ) < send_list.index("wifi_list_after_dispatch")
 
 
 def test_blufi_wifi_scan_caps_application_owned_candidates():

@@ -2176,74 +2176,49 @@ bool Blufi::start_wifi_scan() {
     scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
     scan_config.scan_time.passive = WIFI_PASSIVE_SCAN_DEFAULT_TIME;
 
-    // Get current WiFi mode
+    // A failed mode read must not strand the phone with an empty list. The
+    // manager has initialized the driver above, but a concurrent radio reset can
+    // still make this read fail; treat that as a station-mode recovery case.
     wifi_mode_t current_mode = WIFI_MODE_NULL;
     esp_err_t err = esp_wifi_get_mode(&current_mode);
     if (err != ESP_OK) {
-        ESP_LOGE(BLUFI_TAG, "Failed to get WiFi mode: %s", esp_err_to_name(err));
-        m_scan_in_progress = false;
-        return false;
+        ESP_LOGW(BLUFI_TAG, "Failed to read WiFi mode before scan: %s",
+                 esp_err_to_name(err));
+        current_mode = WIFI_MODE_NULL;
     }
 
-    if (current_mode == WIFI_MODE_NULL) {
-        ESP_LOGI(BLUFI_TAG, "WiFi driver reinitialized for provisioning scan");
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        err = esp_wifi_start();
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after reinit: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        err = esp_wifi_scan_start(&scan_config, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-    } else if (current_mode == WIFI_MODE_AP) {
-        // If in AP mode, temporarily switch to APSTA to allow scanning
-        ESP_LOGI(BLUFI_TAG, "WiFi in AP mode");
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        // Need to restart WiFi for mode change to take effect
-        err = esp_wifi_start();
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after mode switch: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        // Start scan
-        err = esp_wifi_scan_start(&scan_config, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-    } else if (current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA) {
-        // Ensure WiFi driver is started (may have been stopped during config mode transition)
+    if (current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA) {
+        // The driver may remain initialized after StopRadio(). Starting an
+        // already-running driver is harmless and reported as WIFI_STATE.
         err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi before scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        err = esp_wifi_scan_start(&scan_config, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
+            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi before scan: %s",
+                     esp_err_to_name(err));
             m_scan_in_progress = false;
             return false;
         }
     } else {
-        ESP_LOGE(BLUFI_TAG, "Unexpected WiFi mode: %d", current_mode);
+        // NULL/AP/unknown modes are not station-capable. Move to STA before the
+        // passive scan; config-mode list dispatch stops the idle radio later.
+        ESP_LOGI(BLUFI_TAG, "Switching WiFi to STA for scan (mode=%d)", current_mode);
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
+            m_scan_in_progress = false;
+            return false;
+        }
+        err = esp_wifi_start();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
+            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after mode switch: %s",
+                     esp_err_to_name(err));
+            m_scan_in_progress = false;
+            return false;
+        }
+    }
+
+    err = esp_wifi_scan_start(&scan_config, false);
+    if (err != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
         m_scan_in_progress = false;
         return false;
     }
@@ -2254,7 +2229,8 @@ bool Blufi::start_wifi_scan() {
 
 void Blufi::_send_wifi_list(std::vector<wifi_ap_record_t> m_ap_records) {
     if (m_ap_records.empty()) {
-        ESP_LOGW(BLUFI_TAG, "No AP records available, sending WiFi scan fail");
+        ESP_LOGW(BLUFI_TAG,
+                 "WiFi scan fail reason=scan_completed_without_ap_records");
         esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
         return;
     }
@@ -2324,6 +2300,7 @@ void Blufi::_send_wifi_list(std::vector<wifi_ap_record_t> m_ap_records) {
     }
     LogBlufiHeapSnapshot("wifi_list_before_dispatch");
     esp_err_t err = esp_blufi_send_wifi_list(blufi_ap_count, blufi_ap_list.data());
+    LogBlufiHeapSnapshot("wifi_list_after_dispatch");
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to dispatch WiFi list: %s", esp_err_to_name(err));
     }
@@ -2451,6 +2428,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
     switch (event) {
         case ESP_BLUFI_EVENT_INIT_FINISH:
             ESP_LOGI(BLUFI_TAG, "BLUFI init finish");
+            LogBlufiHeapSnapshot("blufi_init_finish");
             {
                 static const std::string device_name = GetBlufiDeviceName();
                 ESP_LOGI(BLUFI_TAG, "BLUFI advertising started");
@@ -2482,6 +2460,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 m_ble_is_connected = true;
             }
             ESP_LOGI(BLUFI_TAG, "BLUFI ble connect");
+            LogBlufiHeapSnapshot("ble_connect");
             // A successful client connect proves re-advertising still works, so
             // clear the re-advertise cap. This makes the cap count CONSECUTIVE
             // failed auto-readvertises (a flapping peer that never connects),
@@ -2704,6 +2683,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             m_scan_should_save_ssid = true;
             m_send_list_after_scan = true;
             if (!start_wifi_scan()) {
+                ESP_LOGW(BLUFI_TAG, "WiFi scan fail reason=scan_start_failed");
                 m_send_list_after_scan = false;
                 esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
             }
