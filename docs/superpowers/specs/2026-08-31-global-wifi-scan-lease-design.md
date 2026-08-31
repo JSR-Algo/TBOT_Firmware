@@ -31,10 +31,7 @@ lifetime by `WifiManager`. Every direct `esp_wifi_scan_start()` caller must hold
 a lease before submission and retain it until one of these terminal proofs:
 
 1. the matching callback was claimed and its AP-list ownership was finished;
-2. a synchronous submission failure was followed by a default-event-loop FIFO
-   barrier proving no callback remains queued;
-3. the scan was stopped and a default-event-loop FIFO barrier completed;
-4. lost-callback recovery reset the driver, drained the event loop, and advanced
+2. lost-callback recovery reset the driver, drained the event loop, and advanced
    the driver incarnation.
 
 The coordinator is separate from BluFi's logical controller:
@@ -67,7 +64,7 @@ accepted. A stale lease is always rejected.
 - `Completing`: the matching callback was claimed; no other component may
   access or clear driver AP records.
 - `Draining`: submission or ownership was cancelled; the lease remains held
-  until callback consumption or FIFO-barrier proof.
+  until callback consumption or full driver-recovery proof.
 - `Recovering`: the driver is being reset for a lost callback; ownership is not
   released until reset and barrier completion.
 
@@ -84,8 +81,8 @@ returns:
 
 - `ESP_OK`: commit the lease and consume the latched callback exactly once;
 - synchronous error with no callback observed: move to `Draining`, report the
-  owner-bound failure, and release only after a FIFO barrier proves no callback
-  remains queued;
+  owner-bound failure, and retain the lease for callback consumption or full
+  driver recovery;
 - synchronous error with a latched callback: treat the callback as authoritative,
   suppress duplicate start failure, consume it once, and log an invariant
   diagnostic without secrets.
@@ -119,17 +116,18 @@ Their local `scan_in_progress_` flags are not ownership proof. Each scan timer o
 start event must acquire a lease before submission, and each event handler must
 claim that exact lease before reading AP records.
 
-Stop cancels future timers first, stops the current scan, marks the lease
-`Draining`, posts a FIFO barrier, and releases ownership only after the barrier.
-If the barrier times out, the lease remains `Draining` and other scanners stay
-blocked until recovery.
+Stop cancels future timers first, marks the lease `Draining`, calls
+`esp_wifi_scan_stop()`, and keeps the scan event handler registered. The lease
+is released only when that owner's callback is consumed. If no callback arrives,
+the lost-callback watchdog performs full driver recovery; other scanners remain
+blocked until one of those terminal proofs.
 
 ### Blocking Board UI
 
 The board-specific blocking scan also acquires a lease. After the blocking call
-and AP-list handling, it drains any queued `SCAN_DONE` through the shared FIFO
-barrier before releasing the lease. It cannot overlap Station, Config AP, or
-BluFi scans.
+and AP-list handling, it consumes its queued `SCAN_DONE` before releasing the
+lease. If the callback is missing, the same recovery path applies. It cannot
+overlap Station, Config AP, or BluFi scans.
 
 ## Default-Event-Loop Barrier
 
@@ -153,27 +151,13 @@ Because the default loop is FIFO, successful completion proves all events
 posted before the barrier have run. The barrier never runs while holding the
 global coordinator, `WifiManager`, BluFi lifecycle, or BluFi finalization mutex.
 
-The coordinator issues a unique drain or recovery operation ID before external
-work starts. Only concrete, named executors may construct opaque proofs:
-
-- the drain executor always calls `esp_wifi_scan_stop()` after submission has
-  committed, requires `ESP_OK`, then runs the FIFO barrier;
-- the recovery executor performs the complete driver-reset and FIFO-barrier
-  sequence.
-
-There is no public generic proof factory, callback, or boolean-to-proof adapter.
-Completion accepts only the current executor-produced proof, so cached booleans
-or results from an earlier operation cannot be reused.
-
-If Stop wins while submission is still `Starting`, it marks the lease
-`Draining` but does not run the terminal barrier yet. After submission commit,
-the drain executor repeats `esp_wifi_scan_stop()` and then posts the barrier.
-This closes the race where the first stop ran before the driver accepted the
-concurrent scan.
-
-`ESP_ERR_WIFI_STATE`, `ESP_ERR_WIFI_NOT_INIT`, and every other scan-stop error
-are not terminal proof. They retain the lease fail-closed for callback
-consumption or the later driver-recovery executor.
+The coordinator issues a unique recovery operation ID before external work
+starts. Only the concrete recovery executor may construct the opaque recovery
+proof after driver deinitialization and the FIFO barrier. There is no
+`DrainProof`: `esp_wifi_scan_stop()` plus a barrier is not terminal proof because
+ESP-IDF does not guarantee the resulting `SCAN_DONE` was posted before the
+private barrier. Stop errors and successful stops alike retain the lease until
+callback consumption or recovery.
 
 ## Driver Recovery Compatibility
 

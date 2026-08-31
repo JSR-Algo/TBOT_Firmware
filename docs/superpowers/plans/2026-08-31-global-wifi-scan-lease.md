@@ -95,16 +95,6 @@ public:
         bool drain_required = false;
     };
 
-    class DrainDecision {
-    public:
-        bool armed() const;
-        uint64_t drain_id() const;
-    private:
-        DrainDecision();
-        DrainDecision(bool armed, uint64_t drain_id);
-        friend class WifiScanLeaseCoordinator;
-    };
-    class DrainProof;
     class RecoveryDecision {
     public:
         bool begun() const;
@@ -121,22 +111,19 @@ public:
     CommitDecision CommitSubmission(const Lease& lease, bool accepted);
     bool FinishCompletion(const Lease& lease);
     bool BeginDrain(const Lease& lease);
-    DrainDecision ArmDrainBarrier(const Lease& lease);
-    bool CompleteDrain(const Lease& lease, const DrainProof& proof);
     RecoveryDecision BeginRecovery(const Lease& lease);
     bool CompleteRecovery(const Lease& lease, const RecoveryProof& proof);
 };
 
-class DefaultEventLoopScanDrainExecutor;
 class WifiScanRecoveryExecutor;
 ```
 
 Every method locks only the coordinator mutex. `TryAcquire` succeeds only from
 `Free`; all other operations require exact owner, lease ID, and incarnation.
-Drain/recovery proof constructors are private and friend only the concrete drain
-and recovery executors. No generic callable may manufacture a proof. Native
-tests define test-only versions of those exact friend classes; production code
-defines them in Tasks 2 and the original recovery Task 5.
+Recovery decision/proof constructors are private. Only the concrete recovery
+executor may manufacture proof after driver reset plus FIFO barrier. There is
+no drain proof: normal cancellation remains `Draining` until its callback is
+consumed, or until full recovery completes.
 
 - [ ] **Step 4: Add deterministic early-callback and error races**
 
@@ -209,11 +196,11 @@ one lazily registered instance, a serialization mutex, `esp_event_post`, and a
 bounded `xSemaphoreTake`. Return false for allocation, initial registration,
 post, or wait failure. Never unregister/delete per call; repeated failures must
 not accumulate registrations.
-`DefaultEventLoopScanDrainExecutor` receives an armed drain ticket, calls
-`esp_wifi_scan_stop()` after submission commit, requires exactly `ESP_OK`, runs
-this barrier, and returns the opaque proof for that exact ticket. It must not
-accept a precomputed boolean or caller-supplied callback. `ESP_ERR_WIFI_STATE`
-and `ESP_ERR_WIFI_NOT_INIT` leave the proof unsuccessful and the lease held.
+Task 2 does not create a drain executor or proof. `esp_wifi_scan_stop()` plus a
+FIFO barrier cannot release a lease because ESP-IDF does not guarantee the
+resulting `SCAN_DONE` was posted before the private barrier. The barrier becomes
+terminal proof only inside Task 5 recovery after `esp_wifi_deinit()` prevents
+future callbacks from that driver incarnation.
 
 - [ ] **Step 4: Run GREEN and commit**
 
@@ -246,8 +233,8 @@ coordinator without taking `WifiManager::mutex_`. Assert every Station/Config
 preceded by `ObserveScanDone`, and Stop performs:
 
 ```text
-cancel timer -> BeginDrain -> await submission commit -> ArmDrainBarrier
--> concrete executor scan_stop -> FIFO barrier -> CompleteDrain
+cancel timer -> BeginDrain -> scan_stop -> keep handler registered
+-> consume matching callback, or full driver recovery
 ```
 
 - [ ] **Step 2: Run RED**
@@ -263,25 +250,25 @@ Expected: FAIL on the current boolean/direct-scan paths.
 
 Add a dedicated Station scan-lease mutex and replace `scan_in_progress_` with
 `std::optional<WifiScanLeaseCoordinator::Lease>` protected by that mutex.
-Acquire before submission. On start error,
-commit failure and clear the optional only if released. On `SCAN_DONE`, first
+Acquire before submission. On start error, commit the failure and retain the
+optional in `Draining`. On `SCAN_DONE`, first
 observe the exact lease; ignore foreign events without reading AP records. Stop
-prevents new timer scans, stops the scan, begins drain, waits outside locks, and
-arms a drain ticket after submission commit, runs the concrete executor, and
-completes drain only with the matching opaque proof. The executor repeats
-`scan_stop` even if Stop already called it before commit.
+prevents new timer scans, begins drain, calls `esp_wifi_scan_stop()`, and keeps
+the handler registered. The matching callback finishes ownership normally; a
+missing callback retains the lease for full driver recovery.
 
 - [ ] **Step 4: Migrate Config AP**
 
 Route initial and timer scans through one `StartOwnedScan()` helper with the same
 lease protocol. Its event handler claims the exact Config AP lease before AP
-record access. Stop uses the same bounded drain order as Station.
+record access. Stop uses the same callback-or-recovery drain rule as Station.
 
 - [ ] **Step 5: Add deterministic manager integration tests**
 
 Prove a Station timer and Config AP timer cannot both reach physical submission,
-and a barrier timeout keeps the second owner blocked. Use host stubs or an
-ESP-independent integration model; do not rely only on source ordering.
+and a missing cancellation callback keeps the second owner blocked until full
+recovery. Use host stubs or an ESP-independent integration model; do not rely
+only on source ordering.
 
 - [ ] **Step 6: Run GREEN and commit**
 
@@ -396,8 +383,8 @@ git commit -m "fix(blufi): bind scans to global lease"
 
 Use `rg` from pytest to enumerate every non-generated direct
 `esp_wifi_scan_start()` call. Require each call site to appear inside a helper
-that acquires an exact lease and reaches either callback completion, synchronous
-failure release, or stop-plus-barrier drain.
+that acquires an exact lease and reaches callback completion or full driver
+recovery; synchronous failure alone never releases physical ownership.
 
 - [ ] **Step 2: Run RED**
 
@@ -410,12 +397,13 @@ Expected: FAIL on the Cardputer blocking scan.
 
 - [ ] **Step 3: Lease the blocking scan**
 
-Acquire `Owner::kBlockingUi` before the blocking call. If busy, return a clear
+Acquire `Owner::kBlockingUi` before the blocking call and register an
+owner-specific completion latch before submission. If busy, return a clear
 UI-level scan failure without disturbing the current owner. After the blocking
-call and AP-list retrieval/clear, call `BeginDrain`, arm a drain ticket after
-submission commit, run the concrete drain executor, then call `CompleteDrain`
-with the opaque proof. A barrier failure retains the lease and reports a bounded
-diagnostic.
+call and AP-list retrieval/clear, wait boundedly for the matching global
+`SCAN_DONE` to be claimed before `FinishCompletion`. If it is missing, retain
+the lease and enter the shared recovery path; never release from blocking-call
+return or a standalone FIFO barrier.
 
 - [ ] **Step 4: Run all lease tests and commit**
 
