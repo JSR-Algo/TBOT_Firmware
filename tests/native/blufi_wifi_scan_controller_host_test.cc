@@ -48,6 +48,25 @@ private:
     unsigned generation_ = 0;
 };
 
+class Signal {
+public:
+    void Notify() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ready_ = true;
+        condition_.notify_one();
+    }
+
+    void Wait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this]() { return ready_; });
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool ready_ = false;
+};
+
 void DelayedOldCompletionCannotSatisfyNewRequest() {
     Controller controller;
     const auto first = controller.RequestScan(Request(1, 11, 101));
@@ -223,7 +242,57 @@ void WrongRequestRecoveryIsRejected() {
     assert(controller.phase() == Controller::Phase::kIdle);
 }
 
-void CallbackAndInvalidateSerializeWithoutCrossSessionDelivery() {
+void CallbackBeforeInvalidatePreservesCurrentOwnerDelivery() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    Signal callback_claimed;
+    Controller::CompletionDecision completion;
+    std::thread callback([&]() {
+        completion = controller.BeginCompletion(1, 11, 101);
+        callback_claimed.Notify();
+    });
+    std::thread invalidator([&]() {
+        callback_claimed.Wait();
+        controller.InvalidateSession(2, 22, 202);
+    });
+    callback.join();
+    invalidator.join();
+
+    assert(completion.owned_callback);
+    assert(!completion.discard_results);
+    assert(completion.save_results);
+    assert(completion.send_list);
+    controller.FinishCompletion(completion.request_id);
+}
+
+void InvalidateBeforeCallbackDiscardsCurrentOwnerDelivery() {
+    Controller controller;
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    Signal invalidated;
+    Controller::CompletionDecision completion;
+    std::thread invalidator([&]() {
+        controller.InvalidateSession(2, 22, 202);
+        invalidated.Notify();
+    });
+    std::thread callback([&]() {
+        invalidated.Wait();
+        completion = controller.BeginCompletion(1, 11, 101);
+    });
+    invalidator.join();
+    callback.join();
+
+    assert(completion.owned_callback);
+    assert(completion.discard_results);
+    assert(!completion.save_results);
+    assert(!completion.send_list);
+    controller.FinishCompletion(completion.request_id);
+}
+
+void SimultaneousCallbackAndInvalidateHaveConsistentLinearization() {
     for (int iteration = 0; iteration < 200; ++iteration) {
         Controller controller;
         const auto owner = controller.RequestScan(Request(1, 11, 101));
@@ -233,7 +302,7 @@ void CallbackAndInvalidateSerializeWithoutCrossSessionDelivery() {
         Controller::CompletionDecision completion;
         std::thread callback([&]() {
             barrier.ArriveAndWait();
-            completion = controller.BeginCompletion(2, 22, 202);
+            completion = controller.BeginCompletion(1, 11, 101);
         });
         std::thread invalidator([&]() {
             barrier.ArriveAndWait();
@@ -244,8 +313,9 @@ void CallbackAndInvalidateSerializeWithoutCrossSessionDelivery() {
         invalidator.join();
 
         assert(completion.owned_callback);
-        assert(completion.discard_results);
-        assert(!completion.send_list);
+        const bool delivered = !completion.discard_results;
+        assert(completion.save_results == delivered);
+        assert(completion.send_list == delivered);
         controller.FinishCompletion(completion.request_id);
     }
 }
@@ -260,7 +330,9 @@ int main() {
     CallbackRacingCommitStartOwnsCompletionOnce();
     LostCallbackRecoveryAdvancesDriverBeforePendingStart();
     WrongRequestRecoveryIsRejected();
-    CallbackAndInvalidateSerializeWithoutCrossSessionDelivery();
+    CallbackBeforeInvalidatePreservesCurrentOwnerDelivery();
+    InvalidateBeforeCallbackDiscardsCurrentOwnerDelivery();
+    SimultaneousCallbackAndInvalidateHaveConsistentLinearization();
     std::cout << "PASS: BluFi WiFi scan controller host model\n";
     return 0;
 }
