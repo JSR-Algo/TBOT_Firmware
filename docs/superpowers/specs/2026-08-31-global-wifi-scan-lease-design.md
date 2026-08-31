@@ -31,7 +31,8 @@ lifetime by `WifiManager`. Every direct `esp_wifi_scan_start()` caller must hold
 a lease before submission and retain it until one of these terminal proofs:
 
 1. the matching callback was claimed and its AP-list ownership was finished;
-2. a synchronous submission failure occurred before any callback was claimed;
+2. a synchronous submission failure was followed by a default-event-loop FIFO
+   barrier proving no callback remains queued;
 3. the scan was stopped and a default-event-loop FIFO barrier completed;
 4. lost-callback recovery reset the driver, drained the event loop, and advanced
    the driver incarnation.
@@ -82,7 +83,9 @@ callback is latched, but driver AP records are not touched yet. When submission
 returns:
 
 - `ESP_OK`: commit the lease and consume the latched callback exactly once;
-- synchronous error with no callback: release the lease and report failure;
+- synchronous error with no callback observed: move to `Draining`, report the
+  owner-bound failure, and release only after a FIFO barrier proves no callback
+  remains queued;
 - synchronous error with a latched callback: treat the callback as authoritative,
   suppress duplicate start failure, consume it once, and log an invariant
   diagnostic without secrets.
@@ -172,7 +175,7 @@ a new physical scan.
 
 - Lease busy is backpressure, not a phone-visible scan failure.
 - Synchronous start error sends an owner-bound failure only when no matching
-  callback was latched.
+  callback was latched, but retains physical ownership through a FIFO drain.
 - Callback plus synchronous error produces one completion and no duplicate
   failure.
 - Barrier failure retains draining ownership and logs only owner, lease ID, and

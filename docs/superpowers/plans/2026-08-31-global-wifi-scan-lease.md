@@ -116,13 +116,15 @@ Add tests proving:
 ```cpp
 void EarlyMatchingCallbackWaitsForSuccessfulCommit();
 void CallbackRacingSynchronousErrorWinsExactlyOnce();
-void SynchronousErrorWithoutCallbackReleasesLease();
+void SynchronousErrorWithoutCallbackRequiresBarrierBeforeRelease();
 void ForeignOrStaleCallbackCannotClaimLease();
 void BarrierFailureRetainsDrainingLease();
 void RecoveryAdvancesIncarnationBeforeNextAcquire();
 ```
 
-Use condition variables/barriers, never sleeps.
+Use condition variables/barriers, never sleeps. Also prove `BeginDrain()` may
+win while submission is still `Starting`, and a later commit cannot resurrect
+`Running` or release before callback/barrier proof.
 
 - [ ] **Step 5: Run GREEN and sanitizer variants**
 
