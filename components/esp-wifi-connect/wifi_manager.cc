@@ -76,6 +76,58 @@ void WifiManager::ScanRecoveryTask(void* context) {
     }
 }
 
+bool WifiManager::DeferLifecycleTransitionForRecovery(
+        PendingLifecycleTarget target, uint64_t transition_generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (lifecycle_generation_ != transition_generation) {
+        return true;
+    }
+    if (!scan_recovery_active_) {
+        return false;
+    }
+    if (pending_lifecycle_target_ != PendingLifecycleTarget::kNone &&
+        (pending_lifecycle_target_ != target ||
+         pending_lifecycle_generation_ != transition_generation)) {
+        ESP_LOGE(TAG, "Conflicting pending WiFi lifecycle transition rejected");
+        lifecycle_transition_in_progress_ = false;
+        return true;
+    }
+    pending_lifecycle_target_ = target;
+    pending_lifecycle_generation_ = transition_generation;
+    station_active_ = false;
+    config_mode_active_ = false;
+    lifecycle_transition_in_progress_ = false;
+    return true;
+}
+
+void WifiManager::ResumePendingLifecycleTransition() {
+    PendingLifecycleTarget target = PendingLifecycleTarget::kNone;
+    uint64_t pending_generation = 0;
+    WifiStation* station = nullptr;
+    WifiConfigurationAp* config_ap = nullptr;
+    WifiManagerConfig config;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        target = pending_lifecycle_target_;
+        pending_generation = pending_lifecycle_generation_;
+        pending_lifecycle_target_ = PendingLifecycleTarget::kNone;
+        pending_lifecycle_generation_ = 0;
+        if (target == PendingLifecycleTarget::kNone ||
+            lifecycle_generation_ != pending_generation) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        station = station_.get();
+        config_ap = config_ap_.get();
+        config = config_;
+    }
+    if (target == PendingLifecycleTarget::kStation) {
+        StartStationTarget(station, config, pending_generation);
+    } else if (target == PendingLifecycleTarget::kConfigAp) {
+        StartConfigApTarget(config_ap, config, pending_generation);
+    }
+}
+
 void WifiManager::RunScanRecovery() {
     for (;;) {
         std::optional<WifiScanLeaseCoordinator::Lease> debt;
@@ -208,6 +260,7 @@ void WifiManager::RunScanRecovery() {
         } else if (owner == WifiScanLeaseCoordinator::Owner::kConfigAp) {
             config_ap_->RetryScanAfterRecovery();
         }
+        ResumePendingLifecycleTransition();
         return;
     }
 }
@@ -304,7 +357,8 @@ bool WifiManager::StopRadio() {
     if (wifi_teardown_faulted_) {
         return false;
     }
-    if (lifecycle_transition_in_progress_ || scan_recovery_active_) {
+    if (lifecycle_transition_in_progress_ || scan_recovery_active_ ||
+        pending_lifecycle_target_ != PendingLifecycleTarget::kNone) {
         return false;
     }
     lifecycle_transition_in_progress_ = true;
@@ -384,6 +438,7 @@ void WifiManager::StartStation() {
         }
         if (station_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
             wifi_teardown_faulted_) {
             return;
         }
@@ -391,7 +446,6 @@ void WifiManager::StartStation() {
         transition_generation = ++lifecycle_generation_;
         station = station_.get();
         config_ap_to_stop = config_mode_active_ ? config_ap_.get() : nullptr;
-        config_mode_active_ = false;
         config = config_;
     }
     if (config_ap_to_stop != nullptr) {
@@ -406,9 +460,26 @@ void WifiManager::StartStation() {
             }
             return;
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ != transition_generation) {
+                return;
+            }
+            config_mode_active_ = false;
+        }
         NotifyEvent(WifiEvent::ConfigModeExit);
     }
+    if (DeferLifecycleTransitionForRecovery(
+            PendingLifecycleTarget::kStation, transition_generation)) {
+        return;
+    }
 
+    StartStationTarget(station, config, transition_generation);
+}
+
+void WifiManager::StartStationTarget(
+        WifiStation* station, const WifiManagerConfig& config,
+        uint64_t transition_generation) {
     ESP_LOGI(TAG, "Starting station");
 
     // Apply configuration
@@ -446,7 +517,8 @@ void WifiManager::StopStation() {
     {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!station_active_ || lifecycle_transition_in_progress_ ||
-            scan_recovery_active_) {
+            scan_recovery_active_ ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone) {
             return;
         }
         lifecycle_transition_in_progress_ = true;
@@ -529,13 +601,13 @@ void WifiManager::StartConfigAp() {
         }
         if (config_mode_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
             wifi_teardown_faulted_) {
             return;
         }
         lifecycle_transition_in_progress_ = true;
         transition_generation = ++lifecycle_generation_;
         station_to_stop = station_active_ ? station_.get() : nullptr;
-        station_active_ = false;
         config_ap = config_ap_.get();
         config = config_;
         lock.unlock();
@@ -543,9 +615,26 @@ void WifiManager::StartConfigAp() {
     if (station_to_stop != nullptr) {
         ESP_LOGI(TAG, "Stopping station before starting config AP");
         station_to_stop->Stop();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ != transition_generation) {
+                return;
+            }
+            station_active_ = false;
+        }
         NotifyEvent(WifiEvent::Disconnected);
     }
+    if (DeferLifecycleTransitionForRecovery(
+            PendingLifecycleTarget::kConfigAp, transition_generation)) {
+        return;
+    }
 
+    StartConfigApTarget(config_ap, config, transition_generation);
+}
+
+void WifiManager::StartConfigApTarget(
+        WifiConfigurationAp* config_ap, const WifiManagerConfig& config,
+        uint64_t transition_generation) {
     ESP_LOGI(TAG, "Starting config AP");
 
     config_ap->SetSsidPrefix(config.ssid_prefix);
@@ -576,6 +665,7 @@ void WifiManager::StopConfigAp() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!config_mode_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
             wifi_teardown_faulted_) {
             return;
         }

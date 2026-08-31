@@ -551,7 +551,7 @@ def test_config_stop_runs_closed_two_sided_connection_boundary():
     start_station = function_body(manager, "void WifiManager::StartStation")
     assert "if (!config_ap_to_stop->Stop())" in start_station
     assert start_station.index("if (!config_ap_to_stop->Stop())") < start_station.index(
-        "station->Start()"
+        "StartStationTarget("
     )
     stop_config = function_body(manager, "void WifiManager::StopConfigAp")
     assert "if (!config_ap->Stop())" in stop_config
@@ -787,6 +787,115 @@ def test_manager_lifecycle_entry_points_are_blocked_during_scan_recovery():
     ):
         body = function_body(manager, signature)
         assert "scan_recovery_active_" in body
+
+
+def test_mode_transitions_defer_target_start_until_exact_scan_recovery_finishes():
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+
+    assert "enum class PendingLifecycleTarget" in header
+    assert "pending_lifecycle_target_" in header
+    assert "pending_lifecycle_generation_" in header
+    assert "ResumePendingLifecycleTransition" in header
+
+    for signature, stopped_source, target_start in (
+        (
+            "void WifiManager::StartStation",
+            "config_ap_to_stop->Stop()",
+            "StartStationTarget(",
+        ),
+        (
+            "void WifiManager::StartConfigAp",
+            "station_to_stop->Stop()",
+            "StartConfigApTarget(",
+        ),
+    ):
+        body = function_body(manager, signature)
+        source_stop = body.index(stopped_source)
+        defer = body.index("DeferLifecycleTransitionForRecovery", source_stop)
+        target = body.index(target_start)
+        assert source_stop < defer < target
+        assert "return" in body[defer:target]
+
+    start_station = function_body(manager, "void WifiManager::StartStation")
+    assert start_station.index("config_ap_to_stop->Stop()") < start_station.index(
+        "config_mode_active_ = false"
+    )
+    start_config = function_body(manager, "void WifiManager::StartConfigAp")
+    assert start_config.index("station_to_stop->Stop()") < start_config.index(
+        "station_active_ = false"
+    )
+
+    assert run.index("CompleteScanRecovery") < run.index(
+        "ResumePendingLifecycleTransition"
+    )
+
+
+def test_pending_transition_is_generation_bound_and_consumed_once():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    defer = function_body(
+        manager, "bool WifiManager::DeferLifecycleTransitionForRecovery"
+    )
+    resume = function_body(
+        manager, "void WifiManager::ResumePendingLifecycleTransition"
+    )
+
+    assert "lifecycle_generation_ != transition_generation" in defer
+    assert "pending_lifecycle_generation_ = transition_generation" in defer
+    assert "pending_lifecycle_target_ = target" in defer
+    assert "pending_lifecycle_target_ = PendingLifecycleTarget::kNone" in resume
+    assert "pending_lifecycle_generation_ = 0" in resume
+    assert "lifecycle_generation_ != pending_generation" in resume
+    assert resume.count("StartStationTarget(") == 1
+    assert resume.count("StartConfigApTarget(") == 1
+
+
+def test_manager_active_flags_stay_false_while_target_transition_is_pending():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    defer = function_body(
+        manager, "bool WifiManager::DeferLifecycleTransitionForRecovery"
+    )
+    assert "station_active_ = false" in defer
+    assert "config_mode_active_ = false" in defer
+    assert "lifecycle_transition_in_progress_ = false" in defer
+    for signature in (
+        "void WifiManager::StartStation",
+        "void WifiManager::StopStation",
+        "void WifiManager::StartConfigAp",
+        "void WifiManager::StopConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        assert "pending_lifecycle_target_" in function_body(manager, signature)
+
+
+def test_recovery_restore_reapplies_start_time_wifi_runtime_settings():
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    config = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    station_restore = function_body(
+        station, "bool WifiStation::RestoreRadioAfterRecovery"
+    )
+    config_restore = function_body(
+        config, "bool WifiConfigurationAp::RestoreRadioAfterRecovery"
+    )
+
+    assert "esp_wifi_set_mode(WIFI_MODE_STA)" in station_restore
+    assert "esp_wifi_start()" in station_restore
+    assert "esp_wifi_set_max_tx_power(max_tx_power_)" in station_restore
+    assert "esp_wifi_set_ps(power_save_type)" in station_restore
+    assert "power_save_type_ = ps_type" in function_body(
+        station, "void WifiStation::SetPowerSaveLevel"
+    )
+    assert station_restore.index("esp_wifi_start()") < station_restore.index(
+        "esp_wifi_set_max_tx_power(max_tx_power_)"
+    )
+
+    assert "esp_wifi_set_mode(WIFI_MODE_APSTA)" in config_restore
+    assert "esp_wifi_set_config(WIFI_IF_AP" in config_restore
+    assert "esp_wifi_set_ps(WIFI_PS_NONE)" in config_restore
+    assert "esp_wifi_start()" in config_restore
+    assert "esp_wifi_set_band_mode" in config_restore
+    assert "esp_wifi_set_max_tx_power(max_tx_power_)" in config_restore
 
 
 def test_coordinator_recovery_cannot_claim_active_completion_reader():

@@ -87,6 +87,7 @@ private:
     std::string password_;
     std::string ip_address_;
     int8_t max_tx_power_;
+    wifi_ps_type_t power_save_type_ = WIFI_PS_MIN_MODEM;
     uint8_t remember_bssid_;
     int reconnect_count_ = 0;
 

@@ -124,6 +124,21 @@ private:
     static void ScanRecoveryTask(void* context);
     void RunScanRecovery();
 
+    enum class PendingLifecycleTarget : uint8_t {
+        kNone,
+        kStation,
+        kConfigAp,
+    };
+    bool DeferLifecycleTransitionForRecovery(
+        PendingLifecycleTarget target, uint64_t transition_generation);
+    void ResumePendingLifecycleTransition();
+    void StartStationTarget(WifiStation* station,
+                            const WifiManagerConfig& config,
+                            uint64_t transition_generation);
+    void StartConfigApTarget(WifiConfigurationAp* config_ap,
+                             const WifiManagerConfig& config,
+                             uint64_t transition_generation);
+
     struct ScanRecoveryWork {
         WifiScanLeaseCoordinator::Lease lease;
         WifiScanLeaseCoordinator::RecoveryDecision recovery;
@@ -148,6 +163,9 @@ private:
     bool scan_recovery_retry_pending_ = false;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_debt_;
     std::optional<ScanRecoveryWork> scan_recovery_claim_;
+    PendingLifecycleTarget pending_lifecycle_target_ =
+        PendingLifecycleTarget::kNone;
+    uint64_t pending_lifecycle_generation_ = 0;
 
     std::function<void(WifiEvent, const std::string&)> event_callback_;
     mutable std::string mac_address_;

@@ -581,6 +581,7 @@ bool WifiStation::CompleteScanRecovery(
 
 bool WifiStation::RestoreRadioAfterRecovery() {
     uint64_t expected_session = 0;
+    wifi_ps_type_t power_save_type = WIFI_PS_MIN_MODEM;
     {
         std::lock_guard<std::mutex> lock(scan_mutex_);
         if (!scans_enabled_) {
@@ -589,8 +590,18 @@ bool WifiStation::RestoreRadioAfterRecovery() {
         expected_session = scan_session_id_;
         scans_enabled_ = false;
     }
-    const bool restored = esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK &&
-                          esp_wifi_start() == ESP_OK;
+    {
+        std::lock_guard<std::mutex> data_lock(session_data_mutex_);
+        power_save_type = power_save_type_;
+    }
+    bool restored = esp_wifi_set_mode(WIFI_MODE_STA) == ESP_OK &&
+                    esp_wifi_start() == ESP_OK;
+    if (restored && max_tx_power_ != 0) {
+        restored = esp_wifi_set_max_tx_power(max_tx_power_) == ESP_OK;
+    }
+    if (restored) {
+        restored = esp_wifi_set_ps(power_save_type) == ESP_OK;
+    }
     {
         std::lock_guard<std::mutex> lock(scan_mutex_);
         if (expected_session == scan_session_id_) {
@@ -681,6 +692,10 @@ void WifiStation::SetPowerSaveLevel(WifiPowerSaveLevel level) {
             ps_type = WIFI_PS_NONE;       // No power saving
             ESP_LOGI(TAG, "Setting WiFi power save level: PERFORMANCE (NONE)");
             break;
+    }
+    {
+        std::lock_guard<std::mutex> data_lock(session_data_mutex_);
+        power_save_type_ = ps_type;
     }
     ESP_ERROR_CHECK(esp_wifi_set_ps(ps_type));
 }

@@ -1340,10 +1340,20 @@ bool WifiConfigurationAp::RestoreRadioAfterRecovery() {
     wifi_config.ap.ssid_len = ssid.size();
     wifi_config.ap.max_connection = 4;
     wifi_config.ap.authmode = WIFI_AUTH_OPEN;
-    const bool restored = esp_wifi_set_mode(WIFI_MODE_APSTA) == ESP_OK &&
-                          esp_wifi_set_config(WIFI_IF_AP, &wifi_config) == ESP_OK &&
-                          esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK &&
-                          esp_wifi_start() == ESP_OK;
+    bool restored = esp_wifi_set_mode(WIFI_MODE_APSTA) == ESP_OK &&
+                    esp_wifi_set_config(WIFI_IF_AP, &wifi_config) == ESP_OK &&
+                    esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK &&
+                    esp_wifi_start() == ESP_OK;
+    if (restored) {
+#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
+        restored = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO) == ESP_OK;
+#else
+        restored = esp_wifi_set_band_mode(WIFI_BAND_MODE_2G_ONLY) == ESP_OK;
+#endif
+    }
+    if (restored && max_tx_power_ != 0) {
+        restored = esp_wifi_set_max_tx_power(max_tx_power_) == ESP_OK;
+    }
     {
         std::lock_guard<std::mutex> lock(scan_mutex_);
         if (expected_session == scan_session_id_) {
