@@ -146,6 +146,41 @@ void TestNormalEitherOrderSuccess() {
     assert(start.compact_completed);
 }
 
+void TestActivationPrecedesImmediateInitFinishSubmission() {
+    TbotBlufiAdvertisingLedger ledger;
+    ledger.Invalidate();
+    bool init_finish_accepted = false;
+    assert(ledger.ActivateAfterSuccessfulHostInit());
+    auto synchronous_profile_init = [&]() {
+        init_finish_accepted = ledger.BeginCompact(0x01).has_value();
+    };
+    synchronous_profile_init();
+    assert(init_finish_accepted);
+}
+
+void TestOnlyOwnedDefaultConfigForwardsWithStateUnlocked() {
+    TbotBlufiAdvertisingLedger ledger;
+    assert(ledger.ActivateAfterSuccessfulHostInit());
+    int forwards = 0;
+
+    ledger.CompleteDefaultConfigAndForward(false, [&]() { ++forwards; });
+    assert(forwards == 0);
+
+    const auto compact = ledger.BeginCompact(0x01);
+    assert(compact.has_value());
+    assert(ledger.Cancel(compact->adv_data));
+    assert(ledger.ClaimDefaultFallback().has_value());
+    ledger.CompleteDefaultConfigAndForward(true, [&]() {
+        assert(ledger.ActiveEpoch() == compact->epoch);
+        ++forwards;
+    });
+    assert(forwards == 1);
+
+    ledger.Invalidate();
+    ledger.CompleteDefaultConfigAndForward(true, [&]() { ++forwards; });
+    assert(forwards == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -157,6 +192,8 @@ int main() {
     TestExactCancellationPreservesOtherOwnership();
     TestSynchronousSubmissionFailureCancelsExactOwner();
     TestNormalEitherOrderSuccess();
+    TestActivationPrecedesImmediateInitFinishSubmission();
+    TestOnlyOwnedDefaultConfigForwardsWithStateUnlocked();
     std::cout << "PASS: BluFi advertising ledger host model\n";
     return 0;
 }

@@ -215,7 +215,6 @@ static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
         return;
     }
 
-    esp_blufi_gap_event_handler(event, param);
     switch (event) {
         case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT: {
             esp_err_t start_error = ESP_OK;
@@ -644,27 +643,6 @@ esp_err_t Blufi::_init_impl() {
     }
 
     ESP_LOGI(BLUFI_TAG, "BLUFI VERSION %04x", esp_blufi_get_version());
-    if (!ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit()) {
-        ESP_LOGE(BLUFI_TAG, "BLUFI advertising ledger still owns stale callbacks after init");
-        const esp_err_t host_cleanup_error = _host_deinit();
-        if (host_cleanup_error != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "BLUFI host cleanup after ledger rejection failed: %s",
-                     esp_err_to_name(host_cleanup_error));
-        }
-#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
-        if (!host_active_) {
-            const esp_err_t controller_cleanup_error = _controller_deinit();
-            if (controller_cleanup_error != ESP_OK) {
-                ESP_LOGE(BLUFI_TAG,
-                         "BLUFI controller cleanup after ledger rejection failed: %s",
-                         esp_err_to_name(controller_cleanup_error));
-            }
-        }
-#endif
-        inited_ = false;
-        m_deinited = !host_active_ && !controller_active_;
-        return ESP_ERR_INVALID_STATE;
-    }
     teardown_failed_.store(false);
     inited_ = true;
     ble_session_state_.store(
@@ -1082,7 +1060,16 @@ esp_err_t Blufi::_gap_register_callback() {
     if (rc) {
         return rc;
     }
-    return esp_blufi_profile_init();
+    if (!ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit()) {
+        ESP_LOGE(BLUFI_TAG, "BLUFI advertising ledger still owns stale callbacks before profile init");
+        InvalidateTbotBlufiAdvertising();
+        return ESP_ERR_INVALID_STATE;
+    }
+    rc = esp_blufi_profile_init();
+    if (rc != ESP_OK) {
+        InvalidateTbotBlufiAdvertising();
+    }
+    return rc;
 }
 
 esp_err_t Blufi::_host_and_cb_init() {

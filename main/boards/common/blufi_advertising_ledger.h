@@ -8,6 +8,10 @@
 
 class TbotBlufiAdvertisingLedger {
 public:
+    // Submission callbacks must be enqueue-only and must not synchronously
+    // re-enter GAP completion handling. They run with the submission-order gate
+    // held but never with the ledger state mutex held. Bluedroid GAP APIs satisfy
+    // the no-reentry contract by posting to BTC and completing in a later event.
     enum class CallbackKind : uint8_t {
         kCompactAdvData,
         kCompactScanResponse,

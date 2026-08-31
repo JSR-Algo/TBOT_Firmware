@@ -127,7 +127,26 @@ def test_blufi_advertising_ledger_resets_only_after_successful_host_deinit():
     success = host_deinit.index("host_initialized_ = false;")
     assert deinit < success < reset
     init = function_body(blufi, "esp_err_t Blufi::_init_impl")
-    assert "ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit" in init
+    gap_register = function_body(blufi, "esp_err_t Blufi::_gap_register_callback")
+    assert "ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit" not in init
+    register = gap_register.index("esp_ble_gap_register_callback")
+    activate = gap_register.index("ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit")
+    profile_init = gap_register.index("esp_blufi_profile_init()")
+    assert register < activate < profile_init
+    activation_failure = gap_register[activate:profile_init]
+    assert "InvalidateTbotBlufiAdvertising()" in activation_failure
+
+
+def test_blufi_gap_handler_forwards_only_owned_default_configuration_callbacks():
+    blufi = read("main/boards/common/blufi.cpp")
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+
+    assert handler.count("esp_blufi_gap_event_handler(event, param)") == 1
+    structured = handler.index("ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT")
+    owned_forward = handler.index("CompleteDefaultConfigAndForward", structured)
+    raw = handler.index("ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT")
+    start = handler.index("ESP_GAP_BLE_ADV_START_COMPLETE_EVT")
+    assert structured < owned_forward < raw < start
 
 
 def test_blufi_never_logs_wifi_password_values():
