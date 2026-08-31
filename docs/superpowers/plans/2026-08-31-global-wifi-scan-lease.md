@@ -95,9 +95,25 @@ public:
         bool drain_required = false;
     };
 
-    struct DrainDecision { bool armed = false; uint64_t drain_id = 0; };
+    class DrainDecision {
+    public:
+        bool armed() const;
+        uint64_t drain_id() const;
+    private:
+        DrainDecision();
+        DrainDecision(bool armed, uint64_t drain_id);
+        friend class WifiScanLeaseCoordinator;
+    };
     class DrainProof;
-    struct RecoveryDecision { bool begun = false; uint64_t recovery_id = 0; };
+    class RecoveryDecision {
+    public:
+        bool begun() const;
+        uint64_t recovery_id() const;
+    private:
+        RecoveryDecision();
+        RecoveryDecision(bool begun, uint64_t recovery_id);
+        friend class WifiScanLeaseCoordinator;
+    };
     class RecoveryProof;
 
     AcquireDecision TryAcquire(Owner owner);
