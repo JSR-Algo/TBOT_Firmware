@@ -63,34 +63,52 @@ public:
 
     private:
         RecoveryDecision() = default;
-        RecoveryDecision(bool begun, uint64_t recovery_id)
-            : begun_(begun), recovery_id_(recovery_id) {}
+        RecoveryDecision(bool begun, uint64_t recovery_id,
+                         const WifiScanLeaseCoordinator* coordinator_identity)
+            : begun_(begun), recovery_id_(recovery_id),
+              coordinator_identity_(coordinator_identity) {}
 
         bool begun_ = false;
         uint64_t recovery_id_ = 0;
+        const WifiScanLeaseCoordinator* coordinator_identity_ = nullptr;
 
         friend class WifiScanLeaseCoordinator;
+        friend class WifiScanRecoveryExecutor;
+        friend class RecoveryProof;
     };
 
     class RecoveryProof {
     public:
-        bool Proves(uint64_t recovery_id) const {
-            return recovery_id != 0 && recovery_id_ == recovery_id &&
+        bool Proves(const RecoveryDecision& recovery) const {
+            return recovery.begun_ && recovery.recovery_id_ != 0 &&
+                   recovery_id_ == recovery.recovery_id_ &&
+                   coordinator_identity_ == recovery.coordinator_identity_ &&
                    driver_ready_ && barrier_drained_;
         }
 
     private:
         RecoveryProof() = default;
-        RecoveryProof(uint64_t recovery_id, bool driver_ready,
-                      bool barrier_drained)
+        RecoveryProof(uint64_t recovery_id,
+                      const WifiScanLeaseCoordinator* coordinator_identity,
+                      bool driver_ready, bool barrier_drained)
             : recovery_id_(recovery_id),
+              coordinator_identity_(coordinator_identity),
               driver_ready_(driver_ready),
               barrier_drained_(barrier_drained) {}
 
+        bool Proves(uint64_t recovery_id,
+                    const WifiScanLeaseCoordinator* coordinator_identity) const {
+            return recovery_id != 0 && recovery_id_ == recovery_id &&
+                   coordinator_identity_ == coordinator_identity &&
+                   driver_ready_ && barrier_drained_;
+        }
+
         uint64_t recovery_id_ = 0;
+        const WifiScanLeaseCoordinator* coordinator_identity_ = nullptr;
         bool driver_ready_ = false;
         bool barrier_drained_ = false;
 
+        friend class WifiScanLeaseCoordinator;
         friend class WifiScanRecoveryExecutor;
     };
 
@@ -211,14 +229,14 @@ public:
         ++last_recovery_id_;
         active_recovery_id_ = last_recovery_id_;
         phase_ = Phase::kRecovering;
-        result = RecoveryDecision{true, active_recovery_id_};
+        result = RecoveryDecision{true, active_recovery_id_, this};
         return result;
     }
 
     bool CompleteRecovery(const Lease& lease, const RecoveryProof& proof) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(lease) || phase_ != Phase::kRecovering ||
-            !proof.Proves(active_recovery_id_)) {
+            !proof.Proves(active_recovery_id_, this)) {
             return false;
         }
 

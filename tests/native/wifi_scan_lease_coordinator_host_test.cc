@@ -44,6 +44,7 @@ public:
         environment.steps.push_back(ExecutorStep::kWifiInit);
         return Coordinator::RecoveryProof{
             recovery.recovery_id(),
+            recovery.coordinator_identity_,
             environment.driver_will_recover,
             environment.barrier_will_drain,
         };

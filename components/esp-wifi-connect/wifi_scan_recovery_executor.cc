@@ -21,9 +21,14 @@ bool IsScanStoppedOrDriverCanStopIt(esp_err_t result) {
 
 }  // namespace
 
+std::mutex& WifiScanRecoveryExecutor::ProcessMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
 WifiScanLeaseCoordinator::RecoveryProof WifiScanRecoveryExecutor::Execute(
         const WifiScanLeaseCoordinator::RecoveryDecision& recovery) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(ProcessMutex());
     if (!recovery.begun() || recovery.recovery_id() == 0) {
         return WifiScanLeaseCoordinator::RecoveryProof{};
     }
@@ -48,5 +53,5 @@ WifiScanLeaseCoordinator::RecoveryProof WifiScanRecoveryExecutor::Execute(
     }
 
     return WifiScanLeaseCoordinator::RecoveryProof{
-        recovery.recovery_id(), true, true};
+        recovery.recovery_id(), recovery.coordinator_identity_, true, true};
 }

@@ -127,10 +127,14 @@ def test_shared_scan_recovery_executor_is_the_only_proof_factory():
     assert "class WifiScanRecoveryExecutor" in header
     assert "WifiScanLeaseCoordinator::RecoveryProof Execute(" in header
     assert "WifiScanRecoveryExecutor(const WifiScanRecoveryExecutor&) = delete" in header
-    assert "std::mutex mutex_;" in header
+    assert "static std::mutex& ProcessMutex();" in header
+    assert "std::mutex mutex_;" not in header
     assert "friend class WifiScanRecoveryExecutor;" in coordinator
-    assert coordinator.count("friend class WifiScanRecoveryExecutor;") == 1
-    assert source.count("recovery.recovery_id(), true, true") == 1
+    assert coordinator.count("friend class WifiScanRecoveryExecutor;") == 2
+    assert "const WifiScanLeaseCoordinator* coordinator_identity_" in coordinator
+    assert source.count(
+        "recovery.recovery_id(), recovery.coordinator_identity_, true, true"
+    ) == 1
     assert '"wifi_scan_recovery_executor.cc"' in cmake
 
 
@@ -153,6 +157,7 @@ def test_shared_scan_recovery_executor_has_exact_fail_closed_choreography():
     assert "ESP_ERR_WIFI_NOT_INIT" in source
     assert "ESP_ERR_WIFI_NOT_STARTED" in source
     assert "ESP_ERR_WIFI_STATE" in source
+    assert "ProcessMutex()" in source
     assert "esp_netif_init" not in source
     assert "esp_event_loop_create_default" not in source
     assert "nvs_flash" not in source

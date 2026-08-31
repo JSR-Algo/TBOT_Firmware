@@ -15,5 +15,5 @@ public:
         const WifiScanLeaseCoordinator::RecoveryDecision& recovery);
 
 private:
-    std::mutex mutex_;
+    static std::mutex& ProcessMutex();
 };

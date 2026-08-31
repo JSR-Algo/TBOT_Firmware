@@ -120,7 +120,7 @@ void SuccessfulRecoveryUsesExactChoreography() {
 
     assert((Calls() == std::vector<std::string>{
         "scan_stop", "wifi_stop", "wifi_deinit", "barrier", "wifi_init"}));
-    assert(proof.Proves(fixture.recovery.recovery_id()));
+    assert(proof.Proves(fixture.recovery));
     assert(!driver.init_nvs_enabled);
     assert(fixture.coordinator.CompleteRecovery(fixture.lease, proof));
     assert(fixture.coordinator.TryAcquire(
@@ -148,7 +148,7 @@ void EveryFailureReturnsNoProofAndStopsChoreography() {
         const auto proof = executor.Execute(fixture.recovery);
 
         assert(Calls() == test_case.second);
-        assert(!proof.Proves(fixture.recovery.recovery_id()));
+        assert(!proof.Proves(fixture.recovery));
         assert(!fixture.coordinator.CompleteRecovery(fixture.lease, proof));
         assert(!fixture.coordinator.TryAcquire(
             WifiScanLeaseCoordinator::Owner::kBlufi).acquired);
@@ -165,7 +165,7 @@ void NotInitializedShutdownStatesAreBenign() {
 
         const auto proof = executor.Execute(fixture.recovery);
 
-        assert(proof.Proves(fixture.recovery.recovery_id()));
+        assert(proof.Proves(fixture.recovery));
         assert((Calls() == std::vector<std::string>{
             "scan_stop", "wifi_stop", "wifi_deinit", "barrier", "wifi_init"}));
     }
@@ -184,7 +184,7 @@ void ScanStopTransientStatesContinueThroughDriverStop() {
 
         const auto proof = executor.Execute(fixture.recovery);
 
-        assert(proof.Proves(fixture.recovery.recovery_id()));
+        assert(proof.Proves(fixture.recovery));
         assert((Calls() == std::vector<std::string>{
             "scan_stop", "wifi_stop", "wifi_deinit", "barrier", "wifi_init"}));
     }
@@ -205,7 +205,7 @@ void ScanStopTransientStatesAreNotBenignForLaterStages() {
 
             const auto proof = executor.Execute(fixture.recovery);
 
-            assert(!proof.Proves(fixture.recovery.recovery_id()));
+            assert(!proof.Proves(fixture.recovery));
             const std::vector<std::string> expected =
                 step == FailureStep::kWifiStop
                     ? std::vector<std::string>{"scan_stop", "wifi_stop"}
@@ -233,7 +233,7 @@ void InvalidAndOverflowedRecoveryDecisionsNeverTouchTheDriver() {
     const auto proof = executor.Execute(overflowed);
 
     assert(Calls().empty());
-    assert(!proof.Proves(std::numeric_limits<uint64_t>::max()));
+    assert(!proof.Proves(overflowed));
     assert(!coordinator.TryAcquire(
         WifiScanLeaseCoordinator::Owner::kBlufi).acquired);
 }
@@ -243,19 +243,20 @@ void ExecuteCallsAreSerialized() {
     driver.block_scan_stop = true;
     RecoveryFixture first;
     RecoveryFixture second;
-    WifiScanRecoveryExecutor executor;
+    WifiScanRecoveryExecutor first_executor;
+    WifiScanRecoveryExecutor second_executor;
     std::optional<WifiScanLeaseCoordinator::RecoveryProof> first_proof;
     std::optional<WifiScanLeaseCoordinator::RecoveryProof> second_proof;
 
     std::thread first_thread([&]() {
-        first_proof = executor.Execute(first.recovery);
+        first_proof = first_executor.Execute(first.recovery);
     });
     {
         std::unique_lock<std::mutex> lock(driver.mutex);
         driver.condition.wait(lock, []() { return driver.scan_stop_entered; });
     }
     std::thread second_thread([&]() {
-        second_proof = executor.Execute(second.recovery);
+        second_proof = second_executor.Execute(second.recovery);
     });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -269,11 +270,28 @@ void ExecuteCallsAreSerialized() {
     first_thread.join();
     second_thread.join();
 
-    assert(first_proof->Proves(first.recovery.recovery_id()));
-    assert(second_proof->Proves(second.recovery.recovery_id()));
+    assert(first_proof->Proves(first.recovery));
+    assert(second_proof->Proves(second.recovery));
     assert((Calls() == std::vector<std::string>{
         "scan_stop", "wifi_stop", "wifi_deinit", "barrier", "wifi_init",
         "scan_stop", "wifi_stop", "wifi_deinit", "barrier", "wifi_init"}));
+}
+
+void ProofCannotCrossCoordinatorIdentityWithTheSameRecoveryId() {
+    driver.Reset();
+    RecoveryFixture first;
+    RecoveryFixture second;
+    assert(first.recovery.recovery_id() == second.recovery.recovery_id());
+    WifiScanRecoveryExecutor executor;
+
+    const auto first_proof = executor.Execute(first.recovery);
+
+    assert(!first_proof.Proves(second.recovery));
+    assert(!second.coordinator.CompleteRecovery(second.lease, first_proof));
+    assert(!second.coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi).acquired);
+    const auto second_proof = executor.Execute(second.recovery);
+    assert(second.coordinator.CompleteRecovery(second.lease, second_proof));
 }
 
 static_assert(!std::is_copy_constructible<WifiScanRecoveryExecutor>::value);
@@ -314,6 +332,7 @@ int main() {
     ScanStopTransientStatesAreNotBenignForLaterStages();
     InvalidAndOverflowedRecoveryDecisionsNeverTouchTheDriver();
     ExecuteCallsAreSerialized();
+    ProofCannotCrossCoordinatorIdentityWithTheSameRecoveryId();
     std::cout << "wifi scan recovery executor host tests passed\n";
     return 0;
 }
