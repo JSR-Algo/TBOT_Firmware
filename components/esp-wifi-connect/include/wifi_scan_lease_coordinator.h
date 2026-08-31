@@ -4,7 +4,6 @@
 #include <limits>
 #include <mutex>
 
-class DefaultEventLoopScanDrainExecutor;
 class WifiScanRecoveryExecutor;
 
 // Serializes ownership of the process-global ESP-IDF Wi-Fi scan callback.
@@ -12,10 +11,8 @@ class WifiScanLeaseCoordinator {
 public:
     explicit WifiScanLeaseCoordinator(uint64_t last_lease_id = 0,
                                       uint32_t driver_incarnation = 1,
-                                      uint64_t last_drain_id = 0,
                                       uint64_t last_recovery_id = 0)
         : last_lease_id_(last_lease_id),
-          last_drain_id_(last_drain_id),
           last_recovery_id_(last_recovery_id),
           driver_incarnation_(driver_incarnation) {}
 
@@ -57,40 +54,6 @@ public:
         bool released = false;
         bool callback_won_error = false;
         bool drain_required = false;
-    };
-
-    class DrainDecision {
-    public:
-        bool armed() const { return armed_; }
-        uint64_t drain_id() const { return drain_id_; }
-
-    private:
-        DrainDecision() = default;
-        DrainDecision(bool armed, uint64_t drain_id)
-            : armed_(armed), drain_id_(drain_id) {}
-
-        bool armed_ = false;
-        uint64_t drain_id_ = 0;
-
-        friend class WifiScanLeaseCoordinator;
-    };
-
-    class DrainProof {
-    public:
-        bool Proves(uint64_t drain_id) const {
-            return drain_id != 0 && drain_id_ == drain_id &&
-                   barrier_drained_;
-        }
-
-    private:
-        DrainProof() = default;
-        DrainProof(uint64_t drain_id, bool barrier_drained)
-            : drain_id_(drain_id), barrier_drained_(barrier_drained) {}
-
-        uint64_t drain_id_ = 0;
-        bool barrier_drained_ = false;
-
-        friend class DefaultEventLoopScanDrainExecutor;
     };
 
     class RecoveryDecision {
@@ -226,40 +189,6 @@ public:
         return true;
     }
 
-    DrainDecision ArmDrainBarrier(const Lease& lease) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        DrainDecision result;
-        if (!Matches(lease) || phase_ != Phase::kDraining ||
-            submission_pending_ ||
-            last_drain_id_ == std::numeric_limits<uint64_t>::max()) {
-            return result;
-        }
-
-        ++last_drain_id_;
-        armed_drain_id_ = last_drain_id_;
-        result = DrainDecision{true, armed_drain_id_};
-        return result;
-    }
-
-    bool IsCurrentDrain(const Lease& lease,
-                        const DrainDecision& drain) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return Matches(lease) && phase_ == Phase::kDraining &&
-               !submission_pending_ && drain.armed_ &&
-               drain.drain_id_ != 0 &&
-               drain.drain_id_ == armed_drain_id_;
-    }
-
-    bool CompleteDrain(const Lease& lease, const DrainProof& proof) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!Matches(lease) || phase_ != Phase::kDraining ||
-            submission_pending_ || !proof.Proves(armed_drain_id_)) {
-            return false;
-        }
-        ReleaseLocked();
-        return true;
-    }
-
     RecoveryDecision BeginRecovery(const Lease& lease) {
         std::lock_guard<std::mutex> lock(mutex_);
         RecoveryDecision result;
@@ -319,17 +248,14 @@ private:
         current_ = Lease{};
         callback_latched_ = false;
         submission_pending_ = false;
-        armed_drain_id_ = 0;
         active_recovery_id_ = 0;
         phase_ = Phase::kFree;
     }
 
-    mutable std::mutex mutex_;
+    std::mutex mutex_;
     Phase phase_ = Phase::kFree;
     Lease current_;
     uint64_t last_lease_id_ = 0;
-    uint64_t last_drain_id_ = 0;
-    uint64_t armed_drain_id_ = 0;
     uint64_t last_recovery_id_ = 0;
     uint64_t active_recovery_id_ = 0;
     uint32_t driver_incarnation_ = 1;
