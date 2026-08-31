@@ -189,12 +189,21 @@ public:
         return true;
     }
 
+    bool RetainFailedCompletion(const Lease& lease) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!Matches(lease) || submission_pending_ ||
+            phase_ != Phase::kCompleting) {
+            return false;
+        }
+        phase_ = Phase::kDraining;
+        return true;
+    }
+
     RecoveryDecision BeginRecovery(const Lease& lease) {
         std::lock_guard<std::mutex> lock(mutex_);
         RecoveryDecision result;
         if (!Matches(lease) || submission_pending_ ||
-            (phase_ != Phase::kRunning && phase_ != Phase::kCompleting &&
-             phase_ != Phase::kDraining) ||
+            (phase_ != Phase::kRunning && phase_ != Phase::kDraining) ||
             last_recovery_id_ == std::numeric_limits<uint64_t>::max()) {
             return result;
         }

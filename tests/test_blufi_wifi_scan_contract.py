@@ -206,7 +206,9 @@ def test_station_and_config_stop_never_cancel_a_foreign_scan():
         owned = body.index("if (scan_lease_.has_value())")
         scan_stop = body.index("esp_wifi_scan_stop()")
         assert owned < scan_stop
-        assert body[owned:scan_stop].count("}") == 0
+        guarded = body[owned:scan_stop]
+        assert "const auto lease = *scan_lease_" in guarded
+        assert "BeginDrain(lease)" in guarded
 
 
 def test_restarted_station_and_config_retry_while_old_callback_debt_drains():
@@ -435,12 +437,27 @@ def test_config_connect_waiter_is_exact_attempt_scoped_and_cancelled_by_stop():
     assert "attempt_id == active_connection_attempt_id_" in connect
     assert "attempt_session == active_connection_session_id_" in connect
     assert "ScheduleScanRetry(attempt_session" in connect
-    assert connect.index("attempt_id == active_connection_attempt_id_") < connect.index(
-        "esp_wifi_disconnect()"
-    )
     assert "active_connection_attempt_id_ = 0" in stop
     assert "xEventGroupSetBits(event_group_, WIFI_CANCEL_BIT)" in stop
     assert "connection_waiter_drained_.wait(" in stop
+    assert "FinishConnectionAttemptBoundary(" in connect
+    assert "if (!connection_boundary_ready_)" in connect
+    boundary = function_body(
+        source, "bool WifiConfigurationAp::FinishConnectionAttemptBoundary"
+    )
+    assert boundary.index("esp_wifi_disconnect()") < boundary.index(
+        "DrainDefaultEventLoop("
+    )
+    assert "WIFI_ATTEMPT_BOUNDARY_BIT" in boundary
+    assert boundary.index("xEventGroupWaitBits(") < boundary.index(
+        "DrainDefaultEventLoop("
+    )
+    assert "active_connection_attempt_id_ = 0" in boundary
+    assert "attempt_id != active_connection_attempt_id_" in boundary
+    assert "attempt_session != active_connection_session_id_" in boundary
+    assert boundary.index("active_connection_attempt_id_ = 0") < boundary.index(
+        "esp_wifi_disconnect()"
+    )
     for handler in (wifi_handler, ip_handler):
         assert "active_connection_attempt_id_ != 0" in handler
         assert "active_connection_session_id_ == self->scan_session_id_" in handler
@@ -468,10 +485,14 @@ def test_station_and_config_retain_completion_when_driver_ap_cleanup_is_unproven
     config_header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
     config_source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
 
-    assert "bool ScanRecoveryNeeded() const;" in station_header
-    assert "bool scan_recovery_needed_ = false;" in station_header
-    assert "bool ScanRecoveryNeeded() const;" in config_header
-    assert "bool scan_recovery_needed_ = false;" in config_header
+    assert "ClaimScanRecovery()" in station_header
+    assert "CompleteScanRecovery(" in station_header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;" in station_header
+    assert "ClaimScanRecovery()" in config_header
+    assert "CompleteScanRecovery(" in config_header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;" in config_header
+    assert "scan_recovery_needed_" not in station_header + station_source
+    assert "scan_recovery_needed_" not in config_header + config_source
 
     for source, signature in (
         (station_source, "void WifiStation::CompleteOwnedScan"),
@@ -490,8 +511,58 @@ def test_station_and_config_retain_completion_when_driver_ap_cleanup_is_unproven
                 "FinishCompletion(lease)"
             )
         ]
-        assert "scan_recovery_needed_ = true" in failure
+        assert "RetainFailedCompletion(lease)" in failure
+        assert "RetainRecoveryDebtLocked(lease)" in failure
         assert "scan_lease_.reset()" not in failure
+
+
+def test_station_and_config_publish_exact_recovery_debt_for_start_and_cancel():
+    for header_path, source_path, owner in (
+        (
+            "components/esp-wifi-connect/include/wifi_station.h",
+            "components/esp-wifi-connect/wifi_station.cc",
+            "WifiStation",
+        ),
+        (
+            "components/esp-wifi-connect/include/wifi_configuration_ap.h",
+            "components/esp-wifi-connect/wifi_configuration_ap.cc",
+            "WifiConfigurationAp",
+        ),
+    ):
+        header = read(header_path)
+        source = read(source_path)
+        start = function_body(source, f"bool {owner}::StartOwnedScan")
+        stop = function_body(source, f"void {owner}::Stop")
+        claim = function_body(source, f"{owner}::ClaimScanRecovery")
+        complete = function_body(source, f"bool {owner}::CompleteScanRecovery")
+
+        assert "commit.drain_required" in start
+        assert "RetainRecoveryDebtLocked(lease)" in start
+        assert "RetainRecoveryDebtLocked(lease)" in stop
+        assert "scan_recovery_lease_" in claim
+        assert "BeginRecovery(" in claim
+        assert "CompleteRecovery(" in complete
+        assert "scan_lease_.reset()" in complete
+        assert "scan_recovery_lease_.reset()" in complete
+        assert "ScanRecoveryClaim" in header
+
+
+def test_coordinator_recovery_cannot_claim_active_completion_reader():
+    coordinator = read(
+        "components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
+    )
+    begin = function_body(
+        coordinator, "RecoveryDecision BeginRecovery"
+    )
+    retain = function_body(
+        coordinator, "bool RetainFailedCompletion"
+    )
+
+    assert "Phase::kCompleting" not in begin
+    assert "phase_ != Phase::kRunning" in begin
+    assert "phase_ != Phase::kDraining" in begin
+    assert "phase_ != Phase::kCompleting" in retain
+    assert "phase_ = Phase::kDraining" in retain
 
 
 def test_station_session_data_has_one_mutex_and_driver_calls_use_snapshots():

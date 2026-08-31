@@ -704,8 +704,12 @@ public:
 
     Attempt BeginAttempt() {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!boundary_complete_) {
+            return Attempt{};
+        }
         connected_ = false;
         cancelled_ = false;
+        boundary_complete_ = false;
         active_ = true;
         active_attempt_id_ = ++last_attempt_id_;
         waiter_active_ = true;
@@ -730,6 +734,19 @@ public:
         }
     }
 
+    void BeginTerminalBoundary() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        active_ = false;
+        active_attempt_id_ = 0;
+        connected_ = false;
+        boundary_complete_ = false;
+    }
+
+    void FinishTerminalBoundary() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        boundary_complete_ = true;
+    }
+
     bool WaitAndDisconnect(const Attempt& attempt) {
         std::unique_lock<std::mutex> lock(mutex_);
         wake_.wait(lock, [this]() { return connected_ || cancelled_; });
@@ -739,8 +756,6 @@ public:
             attempt.attempt_id != active_attempt_id_ || !connected_) {
             return false;
         }
-        active_ = false;
-        active_attempt_id_ = 0;
         ++disconnects_;
         return true;
     }
@@ -755,6 +770,7 @@ private:
     bool connected_ = false;
     bool cancelled_ = false;
     bool waiter_active_ = false;
+    bool boundary_complete_ = true;
     uint64_t session_id_ = 1;
     uint64_t last_attempt_id_ = 0;
     uint64_t active_attempt_id_ = 0;
@@ -774,9 +790,28 @@ void OldConfigWaiterCannotConsumeOrDisconnectNextStationConnection() {
     assert(!old_result);
     assert(model.disconnects() == 0);
 
+    model.BeginTerminalBoundary();
+    model.FinishTerminalBoundary();
     const auto next_attempt = model.BeginAttempt();
     model.SignalConnected();
     assert(model.WaitAndDisconnect(next_attempt));
+    assert(model.disconnects() == 1);
+}
+
+void DelayedConfigEventCannotCrossAttemptTerminalBoundary() {
+    ConfigAttemptIsolationModel model;
+    const auto timed_out = model.BeginAttempt();
+    assert(timed_out.attempt_id != 0);
+    model.BeginTerminalBoundary();
+    assert(model.BeginAttempt().attempt_id == 0);
+
+    // A delayed event from attempt A is ignored while B remains blocked.
+    model.SignalConnected();
+    model.FinishTerminalBoundary();
+    const auto next = model.BeginAttempt();
+    assert(next.attempt_id != 0);
+    model.SignalConnected();
+    assert(model.WaitAndDisconnect(next));
     assert(model.disconnects() == 1);
 }
 
@@ -787,6 +822,8 @@ void CompletingLeaseCanEnterExactRecovery() {
     assert(coordinator.CommitSubmission(acquired.lease, true).accepted);
     assert(coordinator.ObserveScanDone(acquired.lease).consume_now);
 
+    assert(!coordinator.BeginRecovery(acquired.lease).begun());
+    assert(coordinator.RetainFailedCompletion(acquired.lease));
     const auto recovery = coordinator.BeginRecovery(acquired.lease);
     assert(recovery.begun());
     assert(!coordinator.FinishCompletion(acquired.lease));
@@ -1179,6 +1216,7 @@ int main() {
     StationCallbackGateHandlesCrossThreadAndReentrantStop();
     StationRetryRunsOnlyAfterPermitAndExactSessionRevalidation();
     OldConfigWaiterCannotConsumeOrDisconnectNextStationConnection();
+    DelayedConfigEventCannotCrossAttemptTerminalBoundary();
     CompletingLeaseCanEnterExactRecovery();
     EarlyMatchingCallbackWaitsForSuccessfulCommit();
     CallbackRacingSynchronousErrorWinsExactlyOnce();

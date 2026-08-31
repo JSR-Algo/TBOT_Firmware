@@ -76,7 +76,9 @@ void WifiStation::Stop() {
 
     if (scan_lease_.has_value()) {
         const auto lease = *scan_lease_;
-        scan_lease_coordinator_.BeginDrain(lease);
+        if (scan_lease_coordinator_.BeginDrain(lease)) {
+            RetainRecoveryDebtLocked(lease);
+        }
         esp_wifi_scan_stop();
     }
 
@@ -216,6 +218,9 @@ bool WifiStation::StartOwnedScan() {
     const esp_err_t err = esp_wifi_scan_start(nullptr, false);
     const auto commit =
         scan_lease_coordinator_.CommitSubmission(lease, err == ESP_OK);
+    if (commit.drain_required) {
+        RetainRecoveryDebtLocked(lease);
+    }
     lifecycle_lock.unlock();
     if (commit.consume_latched) {
         CompleteOwnedScan(lease);
@@ -278,10 +283,13 @@ void WifiStation::CompleteOwnedScan(
         std::lock_guard<std::mutex> lifecycle_lock(scan_mutex_);
         if (!cleanup_proven) {
             ESP_LOGE(TAG, "WiFi scan AP-list cleanup failed; recovery required");
-            scan_recovery_needed_ = true;
+            if (scan_lease_coordinator_.RetainFailedCompletion(lease)) {
+                RetainRecoveryDebtLocked(lease);
+            }
             return;
         }
         if (scan_lease_coordinator_.FinishCompletion(lease)) {
+            ClearRecoveryDebtLocked(lease);
             scan_lease_.reset();
         }
     }
@@ -456,17 +464,68 @@ void WifiStation::FinishDiscardedCompletionLocked(
         const WifiScanLeaseCoordinator::Lease& lease) {
     if (esp_wifi_clear_ap_list() != ESP_OK) {
         ESP_LOGE(TAG, "Discarded scan AP-list cleanup failed; recovery required");
-        scan_recovery_needed_ = true;
+        if (scan_lease_coordinator_.RetainFailedCompletion(lease)) {
+            RetainRecoveryDebtLocked(lease);
+        }
         return;
     }
     if (scan_lease_coordinator_.FinishCompletion(lease)) {
+        ClearRecoveryDebtLocked(lease);
         scan_lease_.reset();
     }
 }
 
-bool WifiStation::ScanRecoveryNeeded() const {
+void WifiStation::RetainRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    scan_recovery_lease_ = lease;
+}
+
+void WifiStation::ClearRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    if (scan_recovery_lease_.has_value() &&
+        scan_recovery_lease_->owner == lease.owner &&
+        scan_recovery_lease_->lease_id == lease.lease_id &&
+        scan_recovery_lease_->driver_incarnation == lease.driver_incarnation) {
+        scan_recovery_lease_.reset();
+    }
+}
+
+std::optional<WifiStation::ScanRecoveryClaim>
+WifiStation::ClaimScanRecovery() {
     std::lock_guard<std::mutex> lock(scan_mutex_);
-    return scan_recovery_needed_;
+    if (!scan_lease_.has_value() || !scan_recovery_lease_.has_value() ||
+        scan_lease_->owner != scan_recovery_lease_->owner ||
+        scan_lease_->lease_id != scan_recovery_lease_->lease_id ||
+        scan_lease_->driver_incarnation !=
+            scan_recovery_lease_->driver_incarnation) {
+        return std::nullopt;
+    }
+    const auto recovery =
+        scan_lease_coordinator_.BeginRecovery(*scan_recovery_lease_);
+    if (!recovery.begun()) {
+        return std::nullopt;
+    }
+    return ScanRecoveryClaim{*scan_recovery_lease_, recovery};
+}
+
+bool WifiStation::CompleteScanRecovery(
+        const ScanRecoveryClaim& claim,
+        const WifiScanLeaseCoordinator::RecoveryProof& proof) {
+    std::lock_guard<std::mutex> lock(scan_mutex_);
+    if (!scan_lease_.has_value() || !scan_recovery_lease_.has_value() ||
+        scan_lease_->owner != claim.lease.owner ||
+        scan_lease_->lease_id != claim.lease.lease_id ||
+        scan_lease_->driver_incarnation != claim.lease.driver_incarnation ||
+        scan_recovery_lease_->owner != claim.lease.owner ||
+        scan_recovery_lease_->lease_id != claim.lease.lease_id ||
+        scan_recovery_lease_->driver_incarnation !=
+            claim.lease.driver_incarnation ||
+        !scan_lease_coordinator_.CompleteRecovery(claim.lease, proof)) {
+        return false;
+    }
+    scan_lease_.reset();
+    scan_recovery_lease_.reset();
+    return true;
 }
 
 std::string WifiStation::GetSsid() const {

@@ -55,7 +55,14 @@ public:
     std::string GetIpAddress() const;
     uint8_t GetChannel();
     void SetPowerSaveLevel(WifiPowerSaveLevel level);
-    bool ScanRecoveryNeeded() const;
+    struct ScanRecoveryClaim {
+        WifiScanLeaseCoordinator::Lease lease;
+        WifiScanLeaseCoordinator::RecoveryDecision recovery;
+    };
+    std::optional<ScanRecoveryClaim> ClaimScanRecovery();
+    bool CompleteScanRecovery(
+        const ScanRecoveryClaim& claim,
+        const WifiScanLeaseCoordinator::RecoveryProof& proof);
 
     void OnConnect(std::function<void(const std::string& ssid)> on_connect);
     void OnConnected(std::function<void(const std::string& ssid)> on_connected);
@@ -98,7 +105,7 @@ private:
     uint64_t lease_session_id_ = 0;
     size_t in_flight_session_operations_ = 0;
     std::condition_variable session_operations_drained_;
-    bool scan_recovery_needed_ = false;
+    std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
 
     bool StartOwnedScan();
     void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
@@ -115,6 +122,10 @@ private:
     void DispatchSessionCallback(uint64_t expected_session,
                                  std::function<void()> callback);
     void FinishDiscardedCompletionLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void RetainRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void ClearRecoveryDebtLocked(
         const WifiScanLeaseCoordinator::Lease& lease);
     void UpdateScanInterval();  // Exponential backoff for scan interval
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

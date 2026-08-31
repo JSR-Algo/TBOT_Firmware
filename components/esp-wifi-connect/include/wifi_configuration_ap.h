@@ -49,7 +49,14 @@ public:
     std::vector<wifi_ap_record_t> GetAccessPoints();
     std::string GetSsid();
     std::string GetWebServerUrl();
-    bool ScanRecoveryNeeded() const;
+    struct ScanRecoveryClaim {
+        WifiScanLeaseCoordinator::Lease lease;
+        WifiScanLeaseCoordinator::RecoveryDecision recovery;
+    };
+    std::optional<ScanRecoveryClaim> ClaimScanRecovery();
+    bool CompleteScanRecovery(
+        const ScanRecoveryClaim& claim,
+        const WifiScanLeaseCoordinator::RecoveryProof& proof);
 
     /**
      * Set callback for when exit is requested from config mode
@@ -81,7 +88,9 @@ private:
     uint64_t active_connection_session_id_ = 0;
     bool connection_waiter_active_ = false;
     std::condition_variable connection_waiter_drained_;
-    bool scan_recovery_needed_ = false;
+    bool connection_boundary_waiting_ = false;
+    bool connection_boundary_ready_ = true;
+    std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
 
     // 高级配置项
     std::string ota_url_;
@@ -98,6 +107,12 @@ private:
     void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
     void ScheduleScanRetry(uint64_t expected_session,
                            int64_t delay_microseconds);
+    bool FinishConnectionAttemptBoundary(uint64_t attempt_session,
+                                         uint64_t attempt_id);
+    void RetainRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void ClearRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
 
     // Event handlers
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
