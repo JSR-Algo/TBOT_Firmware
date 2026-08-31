@@ -3,9 +3,9 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
-#include <utility>
 
-class WifiScanLeaseProofFactory;
+class DefaultEventLoopScanDrainExecutor;
+class WifiScanRecoveryExecutor;
 
 // Serializes ownership of the process-global ESP-IDF Wi-Fi scan callback.
 class WifiScanLeaseCoordinator {
@@ -59,12 +59,29 @@ public:
         bool drain_required = false;
     };
 
-    struct DrainDecision {
-        bool armed = false;
-        uint64_t drain_id = 0;
+    class DrainDecision {
+    public:
+        bool armed() const { return armed_; }
+        uint64_t drain_id() const { return drain_id_; }
+
+    private:
+        DrainDecision() = default;
+        DrainDecision(bool armed, uint64_t drain_id)
+            : armed_(armed), drain_id_(drain_id) {}
+
+        bool armed_ = false;
+        uint64_t drain_id_ = 0;
+
+        friend class WifiScanLeaseCoordinator;
     };
 
     class DrainProof {
+    public:
+        bool Proves(uint64_t drain_id) const {
+            return drain_id != 0 && drain_id_ == drain_id &&
+                   barrier_drained_;
+        }
+
     private:
         DrainProof() = default;
         DrainProof(uint64_t drain_id, bool barrier_drained)
@@ -73,16 +90,32 @@ public:
         uint64_t drain_id_ = 0;
         bool barrier_drained_ = false;
 
-        friend class WifiScanLeaseCoordinator;
-        friend class WifiScanLeaseProofFactory;
+        friend class DefaultEventLoopScanDrainExecutor;
     };
 
-    struct RecoveryDecision {
-        bool begun = false;
-        uint64_t recovery_id = 0;
+    class RecoveryDecision {
+    public:
+        bool begun() const { return begun_; }
+        uint64_t recovery_id() const { return recovery_id_; }
+
+    private:
+        RecoveryDecision() = default;
+        RecoveryDecision(bool begun, uint64_t recovery_id)
+            : begun_(begun), recovery_id_(recovery_id) {}
+
+        bool begun_ = false;
+        uint64_t recovery_id_ = 0;
+
+        friend class WifiScanLeaseCoordinator;
     };
 
     class RecoveryProof {
+    public:
+        bool Proves(uint64_t recovery_id) const {
+            return recovery_id != 0 && recovery_id_ == recovery_id &&
+                   driver_ready_ && barrier_drained_;
+        }
+
     private:
         RecoveryProof() = default;
         RecoveryProof(uint64_t recovery_id, bool driver_ready,
@@ -95,8 +128,7 @@ public:
         bool driver_ready_ = false;
         bool barrier_drained_ = false;
 
-        friend class WifiScanLeaseCoordinator;
-        friend class WifiScanLeaseProofFactory;
+        friend class WifiScanRecoveryExecutor;
     };
 
     AcquireDecision TryAcquire(Owner owner) {
@@ -205,16 +237,14 @@ public:
 
         ++last_drain_id_;
         armed_drain_id_ = last_drain_id_;
-        result.armed = true;
-        result.drain_id = armed_drain_id_;
+        result = DrainDecision{true, armed_drain_id_};
         return result;
     }
 
     bool CompleteDrain(const Lease& lease, const DrainProof& proof) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(lease) || phase_ != Phase::kDraining ||
-            submission_pending_ || proof.drain_id_ == 0 ||
-            proof.drain_id_ != armed_drain_id_ || !proof.barrier_drained_) {
+            submission_pending_ || !proof.Proves(armed_drain_id_)) {
             return false;
         }
         ReleaseLocked();
@@ -233,17 +263,14 @@ public:
         ++last_recovery_id_;
         active_recovery_id_ = last_recovery_id_;
         phase_ = Phase::kRecovering;
-        result.begun = true;
-        result.recovery_id = active_recovery_id_;
+        result = RecoveryDecision{true, active_recovery_id_};
         return result;
     }
 
     bool CompleteRecovery(const Lease& lease, const RecoveryProof& proof) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(lease) || phase_ != Phase::kRecovering ||
-            proof.recovery_id_ == 0 ||
-            proof.recovery_id_ != active_recovery_id_ ||
-            !proof.driver_ready_ || !proof.barrier_drained_) {
+            !proof.Proves(active_recovery_id_)) {
             return false;
         }
 
@@ -299,42 +326,4 @@ private:
     uint32_t driver_incarnation_ = 1;
     bool callback_latched_ = false;
     bool submission_pending_ = false;
-};
-
-// Executes external proof work only after receiving the coordinator-issued ID.
-class WifiScanLeaseProofFactory {
-public:
-    struct RecoveryOutcome {
-        bool driver_ready = false;
-        bool barrier_drained = false;
-    };
-
-    template <typename BarrierOperation>
-    static WifiScanLeaseCoordinator::DrainProof RunDrainBarrier(
-            const WifiScanLeaseCoordinator::DrainDecision& drain,
-            BarrierOperation&& operation) {
-        if (!drain.armed || drain.drain_id == 0) {
-            return WifiScanLeaseCoordinator::DrainProof{};
-        }
-        return WifiScanLeaseCoordinator::DrainProof{
-            drain.drain_id,
-            std::forward<BarrierOperation>(operation)(),
-        };
-    }
-
-    template <typename RecoveryOperation>
-    static WifiScanLeaseCoordinator::RecoveryProof RunRecovery(
-            const WifiScanLeaseCoordinator::RecoveryDecision& recovery,
-            RecoveryOperation&& operation) {
-        if (!recovery.begun || recovery.recovery_id == 0) {
-            return WifiScanLeaseCoordinator::RecoveryProof{};
-        }
-        const RecoveryOutcome outcome =
-            std::forward<RecoveryOperation>(operation)();
-        return WifiScanLeaseCoordinator::RecoveryProof{
-            recovery.recovery_id,
-            outcome.driver_ready,
-            outcome.barrier_drained,
-        };
-    }
 };
