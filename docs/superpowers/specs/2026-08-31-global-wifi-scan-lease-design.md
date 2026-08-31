@@ -133,14 +133,21 @@ BluFi scans.
 
 ## Default-Event-Loop Barrier
 
-Move the FIFO barrier into a reusable Wi-Fi component helper so Station, Config
-AP, board UI, and BluFi recovery use identical semantics. The helper:
+Move the FIFO barrier into a reusable process-lifetime Wi-Fi component so
+Station, Config AP, board UI, and BluFi recovery use identical semantics. The
+component owns one serialization mutex, one binary semaphore, and one private
+event handler for the process lifetime:
 
-1. registers a private event handler on the default loop;
-2. posts a private barrier event;
-3. waits at most 1000 ms for a binary semaphore;
-4. unregisters the handler and destroys the semaphore;
-5. returns false on allocation, registration, post, wait, or unregister failure.
+1. lazily allocate the semaphore and register the handler exactly once;
+2. serialize calls and clear any stale semaphore signal;
+3. post a private barrier event;
+4. wait at most 1000 ms for the semaphore;
+5. return false on allocation, registration, post, or wait failure.
+
+The handler and semaphore are intentionally retained after successful lazy
+initialization. Per-call unregister/delete is forbidden because an ESP-IDF
+unregister cleanup failure can retain an inactive handler that still references
+its context; retrying would accumulate registrations or risk use-after-free.
 
 Because the default loop is FIFO, successful completion proves all events
 posted before the barrier have run. The barrier never runs while holding the
@@ -150,7 +157,7 @@ The coordinator issues a unique drain or recovery operation ID before external
 work starts. Only concrete, named executors may construct opaque proofs:
 
 - the drain executor always calls `esp_wifi_scan_stop()` after submission has
-  committed, then runs the FIFO barrier;
+  committed, requires `ESP_OK`, then runs the FIFO barrier;
 - the recovery executor performs the complete driver-reset and FIFO-barrier
   sequence.
 
@@ -163,6 +170,10 @@ If Stop wins while submission is still `Starting`, it marks the lease
 the drain executor repeats `esp_wifi_scan_stop()` and then posts the barrier.
 This closes the race where the first stop ran before the driver accepted the
 concurrent scan.
+
+`ESP_ERR_WIFI_STATE`, `ESP_ERR_WIFI_NOT_INIT`, and every other scan-stop error
+are not terminal proof. They retain the lease fail-closed for callback
+consumption or the later driver-recovery executor.
 
 ## Driver Recovery Compatibility
 

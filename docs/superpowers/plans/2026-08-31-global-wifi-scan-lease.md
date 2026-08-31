@@ -182,9 +182,10 @@ git commit -m "test(wifi): model global scan lease"
 - [ ] **Step 1: Write failing source contracts**
 
 Require a `DrainDefaultEventLoop(std::chrono::milliseconds timeout)` API and
-assert registration, private event post, bounded semaphore wait, unregister,
-and cleanup order. Assert that the helper contains no Wi-Fi driver reset and no
-scanner-specific state.
+assert one-time lazy registration, a process-lifetime semaphore/handler,
+serialized private event posts, stale-signal clearing, and bounded wait order.
+Assert that the helper contains no Wi-Fi driver reset, scanner-specific state,
+per-call unregister, or per-call semaphore deletion.
 
 - [ ] **Step 2: Run RED**
 
@@ -203,13 +204,16 @@ Expose the raw bounded barrier operation:
 bool DrainDefaultEventLoop(std::chrono::milliseconds timeout);
 ```
 
-Use a private `ESP_EVENT_DEFINE_BASE`, binary semaphore, instance registration,
-`esp_event_post`, bounded `xSemaphoreTake`, unregister, and semaphore deletion.
-Return false for every failed stage and never retain a handler or semaphore.
+Use a private `ESP_EVENT_DEFINE_BASE`, one process-lifetime binary semaphore,
+one lazily registered instance, a serialization mutex, `esp_event_post`, and a
+bounded `xSemaphoreTake`. Return false for allocation, initial registration,
+post, or wait failure. Never unregister/delete per call; repeated failures must
+not accumulate registrations.
 `DefaultEventLoopScanDrainExecutor` receives an armed drain ticket, calls
-`esp_wifi_scan_stop()` after submission commit, runs this barrier, and returns
-the opaque proof for that exact ticket. It must not accept a precomputed boolean
-or caller-supplied callback.
+`esp_wifi_scan_stop()` after submission commit, requires exactly `ESP_OK`, runs
+this barrier, and returns the opaque proof for that exact ticket. It must not
+accept a precomputed boolean or caller-supplied callback. `ESP_ERR_WIFI_STATE`
+and `ESP_ERR_WIFI_NOT_INIT` leave the proof unsuccessful and the lease held.
 
 - [ ] **Step 4: Run GREEN and commit**
 
