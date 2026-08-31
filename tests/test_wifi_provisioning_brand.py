@@ -176,6 +176,20 @@ def test_blufi_default_start_uses_idf_equivalent_params_with_exact_cancellation(
     assert ".adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY" in params
 
 
+def test_blufi_default_start_async_failure_is_terminal_and_visible():
+    blufi = read("main/boards/common/blufi.cpp")
+    ledger = read("main/boards/common/blufi_advertising_ledger.h")
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+
+    assert "bool default_failed = false" in ledger
+    assert "result.default_failed" in handler
+    assert '"BluFi default advertising start failed"' in handler
+    start_case = handler[handler.index("ESP_GAP_BLE_ADV_START_COMPLETE_EVT"):]
+    fallback = start_case.index("result.fallback_started")
+    terminal = start_case.index("result.default_failed")
+    assert fallback < terminal
+
+
 def test_blufi_never_logs_wifi_password_values():
     blufi = read("main/boards/common/blufi.cpp")
 

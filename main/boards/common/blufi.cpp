@@ -254,6 +254,8 @@ static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
                 []() { esp_blufi_adv_start(); });
             if (result.fallback_started) {
                 ESP_LOGW(BLUFI_TAG, "compact advertising start failed; using BluFi default");
+            } else if (result.default_failed) {
+                ESP_LOGW(BLUFI_TAG, "BluFi default advertising start failed");
             } else if (result.compact_completed) {
                 ESP_LOGI(BLUFI_TAG,
                          "TBOT compact ADV ready: UUID16 0xFFFF + name in primary ADV/RSP");

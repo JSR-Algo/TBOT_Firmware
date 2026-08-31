@@ -51,6 +51,7 @@ public:
         bool owned = false;
         bool compact_completed = false;
         bool fallback_started = false;
+        bool default_failed = false;
         Owner owner;
     };
 
@@ -333,6 +334,9 @@ private:
             return result;
         }
         result.owned = true;
+        if (result.owner.kind == CallbackKind::kDefaultStart && !success) {
+            result.default_failed = true;
+        }
         if (result.owner.kind == CallbackKind::kCompactStart && compact_active_) {
             if (success) {
                 compact_active_ = false;

@@ -73,6 +73,7 @@ void TestTypedStartOwnershipDoesNotCrossConsume() {
     const auto default_start = ledger.CompleteStart(true);
     assert(default_start.owner.kind == Kind::kDefaultStart);
     assert(!default_start.compact_completed);
+    assert(!default_start.default_failed);
 
     const auto second = ledger.BeginCompact(0x01);
     assert(second.has_value());
@@ -217,6 +218,46 @@ void TestDefaultStartSynchronousRejectionCancelsExactOwner() {
     assert(ledger.Pending(Kind::kDefaultStart) == 0);
 }
 
+void TestDefaultStartAsynchronousFailureIsTerminalWithoutFallbackLeak() {
+    TbotBlufiAdvertisingLedger ledger;
+    assert(ledger.ActivateAfterSuccessfulHostInit());
+    const auto compact = ledger.BeginCompact(0x01);
+    assert(compact.has_value());
+    assert(ledger.Cancel(compact->adv_data));
+    assert(ledger.ClaimDefaultFallback().has_value());
+    const auto config = ledger.CompleteDefaultConfigAndSubmit(
+        true, true, []() { return true; });
+    assert(config.start_submitted);
+
+    bool fallback_called = false;
+    const auto start = ledger.CompleteStartAndMaybeFallback(
+        true, false, [&]() { fallback_called = true; });
+    assert(start.owned);
+    assert(start.owner.kind == Kind::kDefaultStart);
+    assert(start.default_failed);
+    assert(!start.fallback_started);
+    assert(!fallback_called);
+    assert(ledger.Pending(Kind::kDefaultStart) == 0);
+}
+
+void TestCompactStartFailureStillClaimsDefaultFallback() {
+    TbotBlufiAdvertisingLedger ledger;
+    assert(ledger.ActivateAfterSuccessfulHostInit());
+    assert(ledger.BeginCompact(0x01).has_value());
+    const auto config = ledger.CompleteCompactConfig(Kind::kCompactAdvData, true);
+    assert(config.start_compact);
+
+    bool fallback_called = false;
+    const auto start = ledger.CompleteStartAndMaybeFallback(
+        true, false, [&]() { fallback_called = true; });
+    assert(start.owned);
+    assert(start.owner.kind == Kind::kCompactStart);
+    assert(!start.default_failed);
+    assert(start.fallback_started);
+    assert(fallback_called);
+    assert(ledger.Pending(Kind::kDefaultAdvData) == 1);
+}
+
 }  // namespace
 
 int main() {
@@ -232,6 +273,8 @@ int main() {
     TestOnlyOwnedDefaultConfigSubmitsWithStateUnlocked();
     TestDefaultConfigFailureCreatesNoStartTombstone();
     TestDefaultStartSynchronousRejectionCancelsExactOwner();
+    TestDefaultStartAsynchronousFailureIsTerminalWithoutFallbackLeak();
+    TestCompactStartFailureStillClaimsDefaultFallback();
     std::cout << "PASS: BluFi advertising ledger host model\n";
     return 0;
 }
