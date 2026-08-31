@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -20,6 +21,10 @@ Controller::Request Request(uint32_t generation, uint64_t session,
         true,
         send,
     };
+}
+
+void ClaimStart(Controller& controller, uint64_t request_id) {
+    assert(controller.ClaimStart(request_id).claimed);
 }
 
 class Barrier {
@@ -71,6 +76,7 @@ void DelayedOldCompletionCannotSatisfyNewRequest() {
     Controller controller;
     const auto first = controller.RequestScan(Request(1, 11, 101));
     assert(first.start_now);
+    ClaimStart(controller, first.request_id);
     assert(controller.CommitStart(first.request_id, true).accepted);
 
     controller.InvalidateSession(2, 22, 202);
@@ -90,9 +96,66 @@ void DelayedOldCompletionCannotSatisfyNewRequest() {
     assert(drained.pending.ble_connection_epoch == 202);
 }
 
+void InvalidateBeforeClaimRetiresReservation() {
+    Controller controller;
+    const auto old = controller.RequestScan(Request(1, 11, 101));
+    assert(old.start_now);
+    assert(!controller.BeginCompletion(1, 11, 101).owned_callback);
+    assert(!controller.CommitStart(old.request_id, true).accepted);
+    assert(controller.phase() == Controller::Phase::kStarting);
+
+    const auto retired = controller.InvalidateSession(2, 22, 202);
+    assert(!retired.start_pending);
+    assert(controller.phase() == Controller::Phase::kIdle);
+    assert(!controller.ClaimStart(old.request_id).claimed);
+    assert(!controller.CommitStart(old.request_id, true).accepted);
+    assert(!controller.BeginCompletion(2, 22, 202).owned_callback);
+
+    const auto current = controller.RequestScan(Request(2, 22, 202));
+    assert(current.start_now);
+    assert(current.request_id != old.request_id);
+    ClaimStart(controller, current.request_id);
+}
+
+void InvalidateBeforeClaimPromotesValidPendingReservation() {
+    Controller controller;
+    const auto old = controller.RequestScan(Request(1, 11, 101));
+    const auto queued = controller.RequestScan(Request(2, 22, 202));
+    assert(queued.queued);
+
+    const auto promoted = controller.InvalidateSession(2, 22, 202);
+    assert(promoted.start_pending);
+    assert(promoted.request_id != old.request_id);
+    assert(promoted.pending.setup_generation == 2);
+    assert(controller.phase() == Controller::Phase::kStarting);
+    assert(!controller.ClaimStart(old.request_id).claimed);
+    assert(controller.ClaimStart(promoted.request_id).claimed);
+}
+
+void InvalidateAfterClaimDrainsAcceptedSubmission() {
+    Controller controller;
+    const auto old = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, old.request_id);
+    assert(!controller.ClaimStart(old.request_id).claimed);
+
+    const auto invalidated = controller.InvalidateSession(2, 22, 202);
+    assert(!invalidated.start_pending);
+    const auto committed = controller.CommitStart(old.request_id, true);
+    assert(committed.accepted);
+    assert(committed.draining);
+
+    const auto completion = controller.BeginCompletion(2, 22, 202);
+    assert(completion.owned_callback);
+    assert(completion.discard_results);
+    assert(!completion.save_results);
+    assert(!completion.send_list);
+    controller.FinishCompletion(completion.request_id);
+}
+
 void SynchronousStartFailurePromotesPendingRequest() {
     Controller controller;
     const auto first = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, first.request_id);
     controller.InvalidateSession(2, 22, 202);
     const auto queued = controller.RequestScan(Request(2, 22, 202));
     assert(queued.queued);
@@ -104,6 +167,7 @@ void SynchronousStartFailurePromotesPendingRequest() {
     assert(failure.pending_request_id != first.request_id);
     assert(failure.pending.setup_generation == 2);
 
+    ClaimStart(controller, failure.pending_request_id);
     const auto current_failure =
         controller.CommitStart(failure.pending_request_id, false);
     assert(current_failure.send_failure);
@@ -114,6 +178,7 @@ void SynchronousStartFailurePromotesPendingRequest() {
 void ConcurrentRequestsCoalesceToLatestPendingRequest() {
     Controller controller;
     const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
     assert(controller.CommitStart(owner.request_id, true).accepted);
 
     Barrier barrier(3);
@@ -142,6 +207,7 @@ void ConcurrentRequestsCoalesceToLatestPendingRequest() {
 void RunningAndDrainingCompletionsHaveDistinctDelivery() {
     Controller controller;
     const auto running = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, running.request_id);
     assert(controller.CommitStart(running.request_id, true).accepted);
     const auto current = controller.BeginCompletion(1, 11, 101);
     assert(current.owned_callback);
@@ -151,6 +217,7 @@ void RunningAndDrainingCompletionsHaveDistinctDelivery() {
     assert(!controller.FinishCompletion(current.request_id).start_pending);
 
     const auto draining = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, draining.request_id);
     assert(controller.CommitStart(draining.request_id, true).accepted);
     controller.InvalidateSession(2, 22, 202);
     const auto stale = controller.BeginCompletion(2, 22, 202);
@@ -165,6 +232,7 @@ void CallbackRacingCommitStartOwnsCompletionOnce() {
     for (int iteration = 0; iteration < 200; ++iteration) {
         Controller controller;
         const auto request = controller.RequestScan(Request(1, 11, 101));
+        ClaimStart(controller, request.request_id);
         Barrier barrier(3);
         Controller::StartDecision commit;
         Controller::CompletionDecision completion;
@@ -197,6 +265,7 @@ void CallbackRacingCommitStartOwnsCompletionOnce() {
 void LostCallbackRecoveryAdvancesDriverBeforePendingStart() {
     Controller controller;
     const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
     assert(controller.CommitStart(owner.request_id, true).accepted);
     controller.InvalidateSession(2, 22, 202);
     assert(controller.RequestScan(Request(2, 22, 202)).queued);
@@ -222,9 +291,23 @@ void LostCallbackRecoveryAdvancesDriverBeforePendingStart() {
     assert(controller.driver_incarnation() == ticket.driver_incarnation + 1);
 }
 
+void RecoveryIncarnationWrapSkipsZero() {
+    Controller controller(std::numeric_limits<uint32_t>::max());
+    const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
+    assert(controller.CommitStart(owner.request_id, true).accepted);
+
+    const auto ticket = controller.BeginRecovery(owner.request_id);
+    assert(ticket.valid);
+    assert(ticket.driver_incarnation == std::numeric_limits<uint32_t>::max());
+    controller.CompleteRecovery(ticket, true);
+    assert(controller.driver_incarnation() == 1);
+}
+
 void WrongRequestRecoveryIsRejected() {
     Controller controller;
     const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
     assert(controller.CommitStart(owner.request_id, true).accepted);
     assert(!controller.BeginRecovery(owner.request_id + 1).valid);
 
@@ -245,6 +328,7 @@ void WrongRequestRecoveryIsRejected() {
 void CallbackBeforeInvalidatePreservesCurrentOwnerDelivery() {
     Controller controller;
     const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
     assert(controller.CommitStart(owner.request_id, true).accepted);
 
     Signal callback_claimed;
@@ -270,6 +354,7 @@ void CallbackBeforeInvalidatePreservesCurrentOwnerDelivery() {
 void InvalidateBeforeCallbackDiscardsCurrentOwnerDelivery() {
     Controller controller;
     const auto owner = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, owner.request_id);
     assert(controller.CommitStart(owner.request_id, true).accepted);
 
     Signal invalidated;
@@ -296,6 +381,7 @@ void SimultaneousCallbackAndInvalidateHaveConsistentLinearization() {
     for (int iteration = 0; iteration < 200; ++iteration) {
         Controller controller;
         const auto owner = controller.RequestScan(Request(1, 11, 101));
+        ClaimStart(controller, owner.request_id);
         assert(controller.CommitStart(owner.request_id, true).accepted);
 
         Barrier barrier(3);
@@ -324,11 +410,15 @@ void SimultaneousCallbackAndInvalidateHaveConsistentLinearization() {
 
 int main() {
     DelayedOldCompletionCannotSatisfyNewRequest();
+    InvalidateBeforeClaimRetiresReservation();
+    InvalidateBeforeClaimPromotesValidPendingReservation();
+    InvalidateAfterClaimDrainsAcceptedSubmission();
     SynchronousStartFailurePromotesPendingRequest();
     ConcurrentRequestsCoalesceToLatestPendingRequest();
     RunningAndDrainingCompletionsHaveDistinctDelivery();
     CallbackRacingCommitStartOwnsCompletionOnce();
     LostCallbackRecoveryAdvancesDriverBeforePendingStart();
+    RecoveryIncarnationWrapSkipsZero();
     WrongRequestRecoveryIsRejected();
     CallbackBeforeInvalidatePreservesCurrentOwnerDelivery();
     InvalidateBeforeCallbackDiscardsCurrentOwnerDelivery();

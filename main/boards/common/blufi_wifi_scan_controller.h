@@ -7,6 +7,11 @@
 // Serializes ownership of asynchronous Wi-Fi scans across BluFi lifecycle changes.
 class BlufiWifiScanController {
 public:
+    explicit BlufiWifiScanController(uint32_t initial_driver_incarnation = 1)
+        : driver_incarnation_(initial_driver_incarnation == 0
+                                  ? 1
+                                  : initial_driver_incarnation) {}
+
     enum class Phase : uint8_t { kIdle, kStarting, kRunning, kDraining };
 
     struct Request {
@@ -21,6 +26,10 @@ public:
         uint64_t request_id = 0;
         bool start_now = false;
         bool queued = false;
+    };
+
+    struct StartClaimDecision {
+        bool claimed = false;
     };
 
     struct StartDecision {
@@ -60,6 +69,7 @@ public:
             owner_ = request;
             owner_request_id_ = NextRequestId();
             phase_ = Phase::kStarting;
+            submission_claimed_ = false;
             callback_claimed_ = false;
             invalidated_ = false;
             result.request_id = owner_request_id_;
@@ -75,10 +85,25 @@ public:
         return result;
     }
 
+    StartClaimDecision ClaimStart(uint64_t request_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        StartClaimDecision result;
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            phase_ != Phase::kStarting || invalidated_ ||
+            submission_claimed_) {
+            return result;
+        }
+
+        submission_claimed_ = true;
+        result.claimed = true;
+        return result;
+    }
+
     StartDecision CommitStart(uint64_t request_id, bool accepted) {
         std::lock_guard<std::mutex> lock(mutex_);
         StartDecision result;
-        if (request_id == 0 || request_id != owner_request_id_) {
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            !submission_claimed_) {
             return result;
         }
 
@@ -113,7 +138,8 @@ public:
         CompletionDecision result;
         if (callback_claimed_ || recovering_ ||
             (phase_ != Phase::kStarting && phase_ != Phase::kRunning &&
-             phase_ != Phase::kDraining)) {
+             phase_ != Phase::kDraining) ||
+            (phase_ == Phase::kStarting && !submission_claimed_)) {
             return result;
         }
 
@@ -150,14 +176,20 @@ public:
         return result;
     }
 
-    void InvalidateSession(uint32_t current_generation,
-                           uint64_t current_session,
-                           uint64_t current_connection) {
+    FinishDecision InvalidateSession(uint32_t current_generation,
+                                     uint64_t current_session,
+                                     uint64_t current_connection) {
         std::lock_guard<std::mutex> lock(mutex_);
+        FinishDecision result;
         if (pending_.has_value() &&
             !Matches(*pending_, current_generation, current_session,
                      current_connection)) {
             pending_.reset();
+        }
+        if (phase_ == Phase::kStarting && !submission_claimed_) {
+            ResetOwner();
+            PromotePending(result);
+            return result;
         }
         if (phase_ == Phase::kStarting || phase_ == Phase::kRunning) {
             invalidated_ = true;
@@ -165,6 +197,7 @@ public:
                 phase_ = Phase::kDraining;
             }
         }
+        return result;
     }
 
     RecoveryTicket BeginRecovery(uint64_t expected_request_id) {
@@ -201,6 +234,9 @@ public:
         }
 
         ++driver_incarnation_;
+        if (driver_incarnation_ == 0) {
+            ++driver_incarnation_;
+        }
         ResetOwner();
         PromotePending(result);
         return result;
@@ -236,6 +272,7 @@ private:
         phase_ = Phase::kIdle;
         owner_ = Request{};
         owner_request_id_ = 0;
+        submission_claimed_ = false;
         callback_claimed_ = false;
         invalidated_ = false;
     }
@@ -248,6 +285,7 @@ private:
         pending_.reset();
         owner_request_id_ = NextRequestId();
         phase_ = Phase::kStarting;
+        submission_claimed_ = false;
         result.start_pending = true;
         result.request_id = owner_request_id_;
         result.pending = owner_;
@@ -268,6 +306,7 @@ private:
     uint64_t last_request_id_ = 0;
     uint64_t owner_request_id_ = 0;
     uint32_t driver_incarnation_ = 1;
+    bool submission_claimed_ = false;
     bool callback_claimed_ = false;
     bool invalidated_ = false;
     bool recovering_ = false;
