@@ -1,4 +1,5 @@
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,6 +29,93 @@ def function_body(text: str, signature: str) -> str:
             if depth == 0:
                 return text[brace:index]
     raise AssertionError(f"unterminated function {signature}")
+
+
+def test_default_event_loop_barrier_has_one_bounded_public_api():
+    header = read(
+        "components/esp-wifi-connect/include/default_event_loop_barrier.h"
+    )
+
+    assert "bool DrainDefaultEventLoop(std::chrono::milliseconds timeout);" in header
+    assert "DefaultEventLoopScanDrainExecutor" in header
+    assert "std::function" not in header
+    assert "template <" not in header
+    assert "bool barrier_drained" not in header
+
+
+def test_default_event_loop_barrier_posts_then_waits_and_always_cleans_up():
+    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
+    body = function_body(source, "bool DrainDefaultEventLoop")
+
+    create = body.index("xSemaphoreCreateBinary")
+    register = body.index("esp_event_handler_instance_register")
+    post = body.index("esp_event_post")
+    wait = body.index("xSemaphoreTake")
+    unregister = body.index("esp_event_handler_instance_unregister")
+    delete = body.rindex("vSemaphoreDelete")
+    assert create < register < post < wait < unregister < delete
+    assert "ESP_EVENT_DEFINE_BASE" in source
+    assert "ESP_EVENT_ANY_BASE" not in source
+    assert "ESP_EVENT_ANY_ID" not in source
+    assert "kMaximumBarrierWait{1000}" in source
+    assert "std::min(timeout, kMaximumBarrierWait)" in body
+    assert "portMAX_DELAY" not in body
+    assert body.count("vSemaphoreDelete") >= 2
+    assert "unregister_result == ESP_OK" in body
+
+
+def test_default_event_loop_barrier_scan_drain_executor_is_exact_and_ordered():
+    header = read(
+        "components/esp-wifi-connect/include/default_event_loop_barrier.h"
+    )
+    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
+    execute = function_body(
+        source, "WifiScanLeaseCoordinator::DrainProof "
+        "DefaultEventLoopScanDrainExecutor::Execute"
+    )
+
+    assert "WifiScanLeaseCoordinator& coordinator" in header
+    assert "const WifiScanLeaseCoordinator::Lease& lease" in header
+    assert "const WifiScanLeaseCoordinator::DrainDecision& drain" in header
+    assert "IsCurrentDrain(lease, drain)" in execute
+    assert execute.index("IsCurrentDrain(lease, drain)") < execute.index(
+        "esp_wifi_scan_stop()"
+    ) < execute.index("DrainDefaultEventLoop(")
+    assert "WifiScanLeaseProofFactory" not in header + source
+    assert "std::function" not in header + source
+    assert "callback" not in header.lower()
+    assert "barrier_drained" not in header
+
+
+def test_default_event_loop_barrier_scan_drain_executor_has_no_driver_reset():
+    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
+    execute = function_body(
+        source, "WifiScanLeaseCoordinator::DrainProof "
+        "DefaultEventLoopScanDrainExecutor::Execute"
+    )
+
+    assert execute.count("esp_wifi_scan_stop()") == 1
+    assert "esp_wifi_stop" not in execute
+    assert "esp_wifi_deinit" not in execute
+    assert "esp_wifi_init" not in execute
+    assert "esp_wifi_restore" not in execute
+    assert "WifiStation" not in execute
+    assert "WifiConfigurationAp" not in execute
+    assert "Blufi" not in execute
+
+
+def test_default_event_loop_barrier_is_built_by_wifi_component():
+    cmake = read("components/esp-wifi-connect/CMakeLists.txt")
+
+    assert cmake.count('"default_event_loop_barrier.cc"') == 2
+
+
+def test_default_event_loop_barrier_host_cleanup_model():
+    subprocess.run(
+        [str(ROOT / "scripts/run_host_native_default_event_loop_barrier_test.sh")],
+        cwd=ROOT,
+        check=True,
+    )
 
 
 def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():

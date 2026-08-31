@@ -241,6 +241,15 @@ public:
         return result;
     }
 
+    bool IsCurrentDrain(const Lease& lease,
+                        const DrainDecision& drain) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return Matches(lease) && phase_ == Phase::kDraining &&
+               !submission_pending_ && drain.armed_ &&
+               drain.drain_id_ != 0 &&
+               drain.drain_id_ == armed_drain_id_;
+    }
+
     bool CompleteDrain(const Lease& lease, const DrainProof& proof) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(lease) || phase_ != Phase::kDraining ||
@@ -315,7 +324,7 @@ private:
         phase_ = Phase::kFree;
     }
 
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     Phase phase_ = Phase::kFree;
     Lease current_;
     uint64_t last_lease_id_ = 0;

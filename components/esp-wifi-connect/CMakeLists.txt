@@ -6,6 +6,7 @@ if(${IDF_VER} STRGREATER_EQUAL "v6.0")
 
     idf_component_register(
         SRCS
+            "default_event_loop_barrier.cc"
             "wifi_manager.cc"
             "wifi_configuration_ap.cc"
             "wifi_station.cc"
@@ -24,6 +25,7 @@ else()
 
     idf_component_register(
         SRCS
+            "default_event_loop_barrier.cc"
             "wifi_manager.cc"
             "wifi_configuration_ap.cc"
             "wifi_station.cc"
