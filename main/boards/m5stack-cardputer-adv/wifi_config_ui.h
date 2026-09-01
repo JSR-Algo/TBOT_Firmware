@@ -83,6 +83,7 @@ private:
     std::string input_password_;
     std::string selected_ssid_;
     bool input_focus_on_password_;  // For manual input: true = password field, false = ssid field
+    bool scan_failed_ = false;
 
     // Cursor blinking
     bool cursor_visible_;

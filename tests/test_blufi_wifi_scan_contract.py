@@ -37,6 +37,61 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def test_all_wifi_scan_start_calls_use_global_lease():
+    result = subprocess.run(
+        [
+            "rg", "-n", "--glob", "!build/**", "--glob", "!managed_components/**",
+            "--glob", "!docs/**", "--glob", "!tests/**", "--glob", "!scripts/**",
+            r"esp_wifi_scan_start\s*\(", ".",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    callers = {line.split(":", 1)[0].removeprefix("./") for line in result.stdout.splitlines()}
+    assert callers == {
+        "components/esp-wifi-connect/wifi_station.cc",
+        "components/esp-wifi-connect/wifi_configuration_ap.cc",
+        "main/boards/common/blufi.cpp",
+        "main/boards/m5stack-cardputer-adv/wifi_config_ui.cc",
+    }
+
+    cardputer = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    scan = function_body(cardputer, "void WifiConfigUI::DoWifiScan")
+    assert "Owner::kBlockingUi" in cardputer
+    assert "RegisterScanRecoveryOwner" in cardputer
+    assert "esp_event_handler_instance_register" in cardputer
+    assert cardputer.index("esp_event_handler_instance_register") < cardputer.index(
+        "esp_wifi_scan_start("
+    )
+    assert scan.index("TryAcquire(") < scan.index("esp_wifi_scan_start(")
+    assert scan.index("esp_wifi_scan_start(") < scan.index("CommitSubmission(")
+    assert "ObserveScanDone" in cardputer
+    assert "commit.consume_latched" in scan
+    assert "WaitForMatchingCompletion" in scan
+    assert scan.index("WaitForMatchingCompletion") < scan.index("CleanupScanList")
+    cleanup = function_body(cardputer, "bool CleanupScanList")
+    assert cleanup.index("esp_wifi_scan_get_ap_num") < cleanup.index(
+        "esp_wifi_scan_get_ap_records"
+    )
+    assert scan.index("CleanupScanList") < scan.index("FinishNormally")
+    assert "esp_wifi_clear_ap_list" in cleanup
+    assert "RequestScanRecovery" in cardputer
+    assert "BeginRecovery" in cardputer
+    assert "CompleteRecovery" in cardputer
+    assert "DrainDefaultEventLoop" not in cardputer
+    assert "password" not in scan.lower()
+
+
+def test_blocking_wifi_scan_owner_native_model():
+    subprocess.run(
+        [str(ROOT / "scripts/run_host_native_blocking_wifi_scan_lease_test.sh")],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def test_default_event_loop_barrier_has_one_bounded_public_api():
     header = read(
         "components/esp-wifi-connect/include/default_event_loop_barrier.h"
