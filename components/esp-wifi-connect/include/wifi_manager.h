@@ -240,6 +240,7 @@ private:
         bool idle_restore_ap_config_valid = false;
         wifi_ps_type_t idle_restore_power_save = WIFI_PS_MIN_MODEM;
         int8_t idle_restore_max_tx_power = 0;
+        bool idle_restore_max_tx_power_valid = false;
         wifi_band_mode_t idle_restore_band_mode = WIFI_BAND_MODE_2G_ONLY;
     };
 

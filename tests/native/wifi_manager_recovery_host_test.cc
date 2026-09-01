@@ -76,6 +76,8 @@ std::vector<std::string> direct_wifi_calls;
 wifi_mode_t direct_wifi_mode = WIFI_MODE_NULL;
 esp_err_t direct_wifi_start_result = ESP_OK;
 esp_err_t direct_wifi_inactive_time_result = ESP_ERR_WIFI_NOT_STARTED;
+esp_err_t direct_wifi_get_config_result = ESP_OK;
+WifiManager* direct_wifi_lifecycle_probe_manager = nullptr;
 
 struct DelayAbort : std::runtime_error {
     DelayAbort() : std::runtime_error("retry") {}
@@ -384,7 +386,11 @@ void BlockingUiRecoveryRestoresConfigApAndIdleRolesExactly() {
         WifiScanLeaseCoordinator::Owner::kBlockingUi,
         std::move(idle_hooks)));
     idle_manager->TestScheduleScanRecovery(idle_lease);
+    direct_wifi_calls.clear();
     idle_manager->TestRunScanRecovery();
+    assert((direct_wifi_calls == std::vector<std::string>{
+        "stop", "set_mode_sta", "set_ps", "start", "set_band", "stop",
+        "set_mode_restore"}));
     assert(idle_manager->TestStation()->ExternalRestoreCalls() == 0);
     assert(idle_manager->TestConfigAp()->ExternalRestoreCalls() == 0);
     assert(idle_retry_calls == 1);
@@ -430,12 +436,12 @@ void IdleBlockingUiPreparationStartsAndRestoresStoppedRadio() {
     direct_wifi_calls.clear();
     assert(manager->PrepareExternalScanRadio(lease));
     assert((direct_wifi_calls == std::vector<std::string>{
-        "get_mode", "get_ps", "get_tx", "get_band", "set_mode_sta",
+        "get_mode", "get_ps", "get_band", "set_mode_sta",
         "start"}));
     assert(manager->FinishExternalScanRadio(lease));
     assert(manager->ReleaseExternalScanRadioToken(lease));
     assert((direct_wifi_calls == std::vector<std::string>{
-        "get_mode", "get_ps", "get_tx", "get_band", "set_mode_sta",
+        "get_mode", "get_ps", "get_band", "set_mode_sta",
         "start", "stop", "set_mode_restore"}));
     assert(coordinator.AbandonUnsubmitted(lease));
 }
@@ -452,7 +458,7 @@ void IdleBlockingUiPreparationRollsBackModeWhenStartFails() {
     assert(!manager->PrepareExternalScanRadio(lease));
     direct_wifi_start_result = ESP_OK;
     assert((direct_wifi_calls == std::vector<std::string>{
-        "get_mode", "get_ps", "get_tx", "get_band", "set_mode_sta",
+        "get_mode", "get_ps", "get_band", "set_mode_sta",
         "start", "stop", "set_mode_restore"}));
     assert(coordinator.AbandonUnsubmitted(lease));
 }
@@ -470,8 +476,8 @@ void IdleBlockingUiPreparationLeavesRunningStaUndisrupted() {
     assert(manager->FinishExternalScanRadio(lease));
     assert(manager->ReleaseExternalScanRadioToken(lease));
     assert((direct_wifi_calls == std::vector<std::string>{
-        "get_mode", "get_sta", "get_ps", "get_tx", "get_band",
-        "get_inactive_sta"}));
+        "get_mode", "get_sta", "get_ps", "get_band",
+        "get_inactive_sta", "get_tx"}));
     direct_wifi_mode = WIFI_MODE_NULL;
     direct_wifi_inactive_time_result = ESP_ERR_WIFI_NOT_STARTED;
     assert(coordinator.AbandonUnsubmitted(lease));
@@ -490,11 +496,46 @@ void IdleBlockingUiPreparationRestoresRunningApMode() {
     assert(manager->FinishExternalScanRadio(lease));
     assert(manager->ReleaseExternalScanRadioToken(lease));
     assert((direct_wifi_calls == std::vector<std::string>{
-        "get_mode", "get_ap", "get_ps", "get_tx", "get_band",
-        "get_inactive_ap", "set_mode_apsta", "stop", "set_mode_ap",
+        "get_mode", "get_ap", "get_ps", "get_band",
+        "get_inactive_ap", "get_tx", "set_mode_apsta", "stop", "set_mode_ap",
         "start"}));
     direct_wifi_mode = WIFI_MODE_NULL;
     direct_wifi_inactive_time_result = ESP_ERR_WIFI_NOT_STARTED;
+    assert(coordinator.AbandonUnsubmitted(lease));
+}
+
+void IdlePreparationReservationBlocksLifecycleTransitions() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto& coordinator = manager->ScanLeaseCoordinator();
+    const auto lease = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi).lease;
+    direct_wifi_calls.clear();
+    direct_wifi_lifecycle_probe_manager = manager;
+    assert(manager->PrepareExternalScanRadio(lease));
+    direct_wifi_lifecycle_probe_manager = nullptr;
+    assert(!manager->TestStationActive());
+    assert(manager->FinishExternalScanRadio(lease));
+    assert(manager->ReleaseExternalScanRadioToken(lease));
+    assert(coordinator.AbandonUnsubmitted(lease));
+}
+
+void IdlePreparationRejectsIncompleteInterfaceSnapshot() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto& coordinator = manager->ScanLeaseCoordinator();
+    const auto lease = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi).lease;
+    direct_wifi_calls.clear();
+    direct_wifi_mode = WIFI_MODE_STA;
+    direct_wifi_get_config_result = ESP_FAIL;
+    assert(!manager->PrepareExternalScanRadio(lease));
+    direct_wifi_mode = WIFI_MODE_NULL;
+    direct_wifi_get_config_result = ESP_OK;
+    assert((direct_wifi_calls == std::vector<std::string>{
+        "get_mode", "get_sta"}));
+    manager->StartStation();
+    assert(manager->TestStationActive());
     assert(coordinator.AbandonUnsubmitted(lease));
 }
 
@@ -602,13 +643,16 @@ esp_err_t esp_wifi_init(const wifi_init_config_t*) {
 }
 esp_err_t esp_wifi_get_mode(wifi_mode_t* mode) {
     direct_wifi_calls.push_back("get_mode");
+    if (direct_wifi_lifecycle_probe_manager != nullptr) {
+        direct_wifi_lifecycle_probe_manager->StartStation();
+    }
     *mode = direct_wifi_mode;
     return ESP_OK;
 }
 esp_err_t esp_wifi_get_config(wifi_interface_t interface, wifi_config_t*) {
     direct_wifi_calls.push_back(
         interface == WIFI_IF_STA ? "get_sta" : "get_ap");
-    return ESP_OK;
+    return direct_wifi_get_config_result;
 }
 esp_err_t esp_wifi_get_ps(wifi_ps_type_t* ps) {
     direct_wifi_calls.push_back("get_ps");
@@ -617,6 +661,9 @@ esp_err_t esp_wifi_get_ps(wifi_ps_type_t* ps) {
 }
 esp_err_t esp_wifi_get_max_tx_power(int8_t* power) {
     direct_wifi_calls.push_back("get_tx");
+    if (direct_wifi_inactive_time_result == ESP_ERR_WIFI_NOT_STARTED) {
+        return ESP_ERR_WIFI_NOT_STARTED;
+    }
     *power = 72;
     return ESP_OK;
 }
@@ -883,6 +930,8 @@ int main() {
     IdleBlockingUiPreparationRollsBackModeWhenStartFails();
     IdleBlockingUiPreparationLeavesRunningStaUndisrupted();
     IdleBlockingUiPreparationRestoresRunningApMode();
+    IdlePreparationReservationBlocksLifecycleTransitions();
+    IdlePreparationRejectsIncompleteInterfaceSnapshot();
     NewUnclaimedDebtRetargetsButClaimedDebtRejectsReplacement();
     RecoveryHooksRunWithoutManagerMutex();
     BothPendingTransitionsResumeOnlyAfterRecovery();

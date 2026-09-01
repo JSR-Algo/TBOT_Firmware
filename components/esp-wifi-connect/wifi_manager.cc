@@ -66,7 +66,7 @@ bool WifiManager::PrepareExternalScanRadio(
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_ || lifecycle_transition_in_progress_ ||
-            scan_recovery_active_) {
+            scan_recovery_active_ || HasActiveExternalScanLocked()) {
             return false;
         }
         snapshot.lease = lease;
@@ -77,7 +77,12 @@ bool WifiManager::PrepareExternalScanRadio(
         } else if (config_mode_active_) {
             snapshot.role = ExternalScanRecoveryRole::kConfigAp;
         }
+        external_scan_recovery_snapshots_[
+            static_cast<size_t>(lease.owner)] = snapshot;
     }
+    const auto release_reservation = [this, &lease]() {
+        ReleaseExternalScanRadioToken(lease);
+    };
     if (station != nullptr) {
         snapshot.station_was_connected = station->IsConnected();
     }
@@ -89,20 +94,24 @@ bool WifiManager::PrepareExternalScanRadio(
         int8_t max_tx_power = 0;
         wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
         if (esp_wifi_get_mode(&mode) != ESP_OK) {
+            release_reservation();
             return false;
         }
         snapshot.idle_restore_mode = mode;
         const bool has_sta = mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA;
         const bool has_ap = mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA;
-        snapshot.idle_restore_sta_config_valid =
-            has_sta && esp_wifi_get_config(WIFI_IF_STA, &sta) == ESP_OK;
-        snapshot.idle_restore_ap_config_valid =
-            has_ap && esp_wifi_get_config(WIFI_IF_AP, &ap) == ESP_OK;
+        if ((has_sta && esp_wifi_get_config(WIFI_IF_STA, &sta) != ESP_OK) ||
+            (has_ap && esp_wifi_get_config(WIFI_IF_AP, &ap) != ESP_OK)) {
+            release_reservation();
+            return false;
+        }
+        snapshot.idle_restore_sta_config_valid = has_sta;
+        snapshot.idle_restore_ap_config_valid = has_ap;
         snapshot.idle_restore_sta_config = sta;
         snapshot.idle_restore_ap_config = ap;
         if (esp_wifi_get_ps(&power_save) != ESP_OK ||
-            esp_wifi_get_max_tx_power(&max_tx_power) != ESP_OK ||
             esp_wifi_get_band_mode(&band_mode) != ESP_OK) {
+            release_reservation();
             return false;
         }
         snapshot.idle_restore_power_save = power_save;
@@ -117,13 +126,23 @@ bool WifiManager::PrepareExternalScanRadio(
             if (probe == ESP_OK) {
                 snapshot.idle_restore_radio_started = true;
             } else if (probe != ESP_ERR_WIFI_NOT_STARTED) {
+                release_reservation();
                 return false;
             }
+        }
+        if (snapshot.idle_restore_radio_started) {
+            if (esp_wifi_get_max_tx_power(&max_tx_power) != ESP_OK) {
+                release_reservation();
+                return false;
+            }
+            snapshot.idle_restore_max_tx_power = max_tx_power;
+            snapshot.idle_restore_max_tx_power_valid = true;
         }
         const wifi_mode_t scan_mode = has_ap ? WIFI_MODE_APSTA : WIFI_MODE_STA;
         snapshot.idle_scan_changed_mode = scan_mode != mode;
         if (snapshot.idle_scan_changed_mode &&
             esp_wifi_set_mode(scan_mode) != ESP_OK) {
+            release_reservation();
             return false;
         }
         snapshot.idle_radio_prepared = true;
@@ -135,6 +154,7 @@ bool WifiManager::PrepareExternalScanRadio(
                 if (snapshot.idle_scan_changed_mode) {
                     RestoreIdleExternalScanRadio(snapshot, false);
                 }
+                release_reservation();
                 return false;
             }
         }
@@ -144,15 +164,19 @@ bool WifiManager::PrepareExternalScanRadio(
         std::lock_guard<std::mutex> lock(mutex_);
         current = snapshot.lifecycle_generation == lifecycle_generation_ &&
             !lifecycle_transition_in_progress_ && !scan_recovery_active_;
+        auto& reserved = external_scan_recovery_snapshots_[
+            static_cast<size_t>(lease.owner)];
+        current = current && reserved.has_value() &&
+            SameLease(reserved->lease, lease);
         if (current) {
-            external_scan_recovery_snapshots_[
-                static_cast<size_t>(lease.owner)] = snapshot;
+            reserved = snapshot;
         }
     }
     if (!current) {
         if (snapshot.idle_radio_prepared) {
             RestoreIdleExternalScanRadio(snapshot, false);
         }
+        release_reservation();
         return false;
     }
     return true;
@@ -196,26 +220,39 @@ bool WifiManager::RestoreIdleExternalScanRadio(
         return true;
     }
     const esp_err_t stop = esp_wifi_stop();
-    if ((stop != ESP_OK && stop != ESP_ERR_WIFI_NOT_STARTED) ||
-        esp_wifi_set_mode(snapshot.idle_restore_mode) != ESP_OK) {
+    if (stop != ESP_OK && stop != ESP_ERR_WIFI_NOT_STARTED) {
         return false;
     }
     if (after_driver_reset) {
-        if ((snapshot.idle_restore_sta_config_valid &&
+        const wifi_mode_t runtime_mode =
+            snapshot.idle_restore_mode == WIFI_MODE_NULL
+                ? WIFI_MODE_STA
+                : snapshot.idle_restore_mode;
+        if (esp_wifi_set_mode(runtime_mode) != ESP_OK ||
+            (snapshot.idle_restore_sta_config_valid &&
              esp_wifi_set_config(WIFI_IF_STA, &sta) != ESP_OK) ||
             (snapshot.idle_restore_ap_config_valid &&
              esp_wifi_set_config(WIFI_IF_AP, &ap) != ESP_OK) ||
-            (snapshot.idle_restore_radio_started &&
-             esp_wifi_start() != ESP_OK) ||
+            esp_wifi_set_ps(snapshot.idle_restore_power_save) != ESP_OK ||
+            esp_wifi_start() != ESP_OK ||
             esp_wifi_set_band_mode(snapshot.idle_restore_band_mode) != ESP_OK ||
-            esp_wifi_set_max_tx_power(snapshot.idle_restore_max_tx_power) !=
-                ESP_OK ||
-            (snapshot.idle_restore_radio_started &&
-             esp_wifi_set_ps(snapshot.idle_restore_power_save) != ESP_OK)) {
+            (snapshot.idle_restore_max_tx_power_valid &&
+             esp_wifi_set_max_tx_power(snapshot.idle_restore_max_tx_power) !=
+                 ESP_OK)) {
             return false;
         }
-    } else if (snapshot.idle_restore_radio_started &&
-               esp_wifi_start() != ESP_OK) {
+        if (snapshot.idle_restore_radio_started) {
+            return true;
+        }
+        if (esp_wifi_stop() != ESP_OK ||
+            (runtime_mode != snapshot.idle_restore_mode &&
+             esp_wifi_set_mode(snapshot.idle_restore_mode) != ESP_OK)) {
+            return false;
+        }
+        return true;
+    }
+    if (esp_wifi_set_mode(snapshot.idle_restore_mode) != ESP_OK ||
+        (snapshot.idle_restore_radio_started && esp_wifi_start() != ESP_OK)) {
         return false;
     }
     return true;
