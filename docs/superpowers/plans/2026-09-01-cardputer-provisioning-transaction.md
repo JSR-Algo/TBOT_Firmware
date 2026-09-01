@@ -53,4 +53,4 @@
 - [x] Run both native sanitizer runners.
 - [x] Run focused provisioning, Application, and Wi-Fi pytest gates.
 - [x] Rebuild Cardputer, Wi-Fi manager/station, and Application objects.
-- [ ] Run `git diff --check`, request review, fix all Critical/Important findings, and create a new follow-up commit without amend.
+- [x] Run `git diff --check`, request review, fix all Critical/Important findings, and create a new follow-up commit without amend.
