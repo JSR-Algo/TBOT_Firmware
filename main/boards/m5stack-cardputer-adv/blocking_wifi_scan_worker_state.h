@@ -35,13 +35,23 @@ public:
     bool NeedsNotification() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return worker_created_ && pending_.has_value() &&
-            !notification_delivered_;
+            !notification_delivered_ && !in_flight_.has_value();
     }
 
-    void ObserveNotification(bool delivered) {
+    std::optional<Request> ArmNotification() {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (pending_.has_value() && delivered) {
-            notification_delivered_ = true;
+        if (!worker_created_ || !pending_.has_value() ||
+            notification_delivered_ || in_flight_.has_value()) {
+            return std::nullopt;
+        }
+        notification_delivered_ = true;
+        return pending_;
+    }
+
+    void RollbackNotification(const Request& request) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (Matches(pending_, request)) {
+            notification_delivered_ = false;
         }
     }
 

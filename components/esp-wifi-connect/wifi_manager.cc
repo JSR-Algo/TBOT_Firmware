@@ -826,7 +826,30 @@ bool WifiManager::HasActiveExternalScan() const {
 
 // ==================== Station Mode ====================
 
+bool WifiManager::StartStationIfScanIdle() {
+    const auto acquired = scan_lease_coordinator_.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kLifecycle);
+    if (!acquired.acquired) {
+        return false;
+    }
+#ifdef TBOT_WIFI_MANAGER_TESTING
+    if (before_reserved_station_start_hook_) {
+        auto hook = std::move(before_reserved_station_start_hook_);
+        before_reserved_station_start_hook_ = nullptr;
+        hook();
+    }
+#endif
+    const bool started_this_generation = TryStartStationTransition();
+    const bool released =
+        scan_lease_coordinator_.AbandonUnsubmitted(acquired.lease);
+    return started_this_generation && released;
+}
+
 void WifiManager::StartStation() {
+    (void)TryStartStationTransition();
+}
+
+bool WifiManager::TryStartStationTransition() {
     WifiStation* station = nullptr;
     WifiConfigurationAp* config_ap_to_stop = nullptr;
     WifiManagerConfig config;
@@ -835,14 +858,14 @@ void WifiManager::StartStation() {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_) {
             ESP_LOGE(TAG, "Not initialized");
-            return;
+            return false;
         }
         if (station_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
             HasActiveExternalScanLocked() ||
             pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
             wifi_teardown_faulted_) {
-            return;
+            return false;
         }
         lifecycle_transition_in_progress_ = true;
         transition_generation = ++lifecycle_generation_;
@@ -860,12 +883,12 @@ void WifiManager::StartStation() {
                 wifi_teardown_faulted_ = true;
                 lifecycle_transition_in_progress_ = false;
             }
-            return;
+            return false;
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (lifecycle_generation_ != transition_generation) {
-                return;
+                return false;
             }
             config_mode_active_ = false;
         }
@@ -873,10 +896,12 @@ void WifiManager::StartStation() {
     }
     if (DeferLifecycleTransitionForRecovery(
             PendingLifecycleTarget::kStation, transition_generation)) {
-        return;
+        return false;
     }
 
     StartStationTarget(station, config, transition_generation);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return station_active_ && lifecycle_generation_ == transition_generation;
 }
 
 void WifiManager::StartStationTarget(

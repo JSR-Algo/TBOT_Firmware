@@ -99,6 +99,7 @@ public:
     // ==================== Station Mode ====================
 
     void StartStation();   // Non-blocking, auto-stops config AP if active
+    bool StartStationIfScanIdle();
     void StopStation();    // Non-blocking
 
     bool IsConnected() const;
@@ -183,6 +184,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++lifecycle_generation_;
     }
+    void TestSetBeforeReservedStationStartHook(std::function<void()> hook) {
+        before_reserved_station_start_hook_ = std::move(hook);
+    }
     void TestSetScanRecoveryTaskAvailable(bool available) {
         std::lock_guard<std::mutex> lock(mutex_);
         scan_recovery_task_ = available ? reinterpret_cast<TaskHandle_t>(1)
@@ -265,6 +269,7 @@ private:
         const ExternalScanRecoverySnapshot& snapshot,
         bool after_driver_reset);
     bool HasActiveExternalScanLocked() const;
+    bool TryStartStationTransition();
 
     WifiManagerConfig config_;
     WifiScanLeaseCoordinator scan_lease_coordinator_;
@@ -287,13 +292,17 @@ private:
     bool scan_recovery_retry_pending_ = false;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_debt_;
     std::optional<ScanRecoveryWork> scan_recovery_claim_;
-    std::array<std::optional<ScanRecoveryOwnerHooks>, 4>
+    std::array<std::optional<ScanRecoveryOwnerHooks>, 5>
         external_scan_recovery_hooks_;
-    std::array<std::optional<ExternalScanRecoverySnapshot>, 4>
+    std::array<std::optional<ExternalScanRecoverySnapshot>, 5>
         external_scan_recovery_snapshots_;
     PendingLifecycleTarget pending_lifecycle_target_ =
         PendingLifecycleTarget::kNone;
     uint64_t pending_lifecycle_generation_ = 0;
+
+#ifdef TBOT_WIFI_MANAGER_TESTING
+    std::function<void()> before_reserved_station_start_hook_;
+#endif
 
     std::function<void(WifiEvent, const std::string&)> event_callback_;
     mutable std::string mac_address_;

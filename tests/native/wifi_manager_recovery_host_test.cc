@@ -782,6 +782,42 @@ void StalePendingGenerationDoesNotStartTarget() {
     assert(!manager->TestConfigActive());
 }
 
+void LifecycleReservationStartsOnlyFreshGenerationAndReleasesExactly() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto& coordinator = manager->ScanLeaseCoordinator();
+    const auto scan = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(scan.acquired);
+    assert(!manager->StartStationIfScanIdle());
+    assert(coordinator.AbandonUnsubmitted(scan.lease));
+
+    assert(manager->StartStationIfScanIdle());
+    assert(manager->TestStationActive());
+    const auto after_start = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(after_start.acquired);
+    assert(coordinator.AbandonUnsubmitted(after_start.lease));
+
+    assert(!manager->StartStationIfScanIdle());
+    const auto after_stale = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(after_stale.acquired);
+}
+
+void LifecycleReservationRejectsAnotherCallersGeneration() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    manager->TestSetBeforeReservedStationStartHook([manager]() {
+        manager->StartStation();
+    });
+    assert(!manager->StartStationIfScanIdle());
+    assert(manager->TestStationActive());
+    const auto after_foreign_start = manager->ScanLeaseCoordinator().TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(after_foreign_start.acquired);
+}
+
 }  // namespace
 
 WifiRadioRecoveryRestorer::Driver& TestWifiRecoveryDriver() {
@@ -1118,4 +1154,6 @@ int main() {
     RecoveryHooksRunWithoutManagerMutex();
     BothPendingTransitionsResumeOnlyAfterRecovery();
     StalePendingGenerationDoesNotStartTarget();
+    LifecycleReservationStartsOnlyFreshGenerationAndReleasesExactly();
+    LifecycleReservationRejectsAnotherCallersGeneration();
 }

@@ -58,7 +58,7 @@ protected:
     /**
      * Start WiFi connection attempt
      */
-    void TryWifiConnect();
+    bool TryWifiConnect();
 
     /**
      * Enter WiFi configuration mode

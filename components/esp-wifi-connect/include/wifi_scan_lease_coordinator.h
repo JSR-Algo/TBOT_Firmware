@@ -21,6 +21,7 @@ public:
         kConfigAp,
         kBlufi,
         kBlockingUi,
+        kLifecycle,
     };
 
     enum class Phase : uint8_t {
@@ -136,7 +137,7 @@ public:
     CallbackDecision ObserveScanDone(const Lease& lease) {
         std::lock_guard<std::mutex> lock(mutex_);
         CallbackDecision result;
-        if (!Matches(lease)) {
+        if (!Matches(lease) || current_.owner == Owner::kLifecycle) {
             return result;
         }
 

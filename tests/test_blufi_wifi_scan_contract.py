@@ -610,7 +610,7 @@ def test_config_stop_runs_closed_two_sided_connection_boundary():
     assert "event_group_, WIFI_ATTEMPT_BOUNDARY_BIT," in stop_wait
 
     manager = read("components/esp-wifi-connect/wifi_manager.cc")
-    start_station = function_body(manager, "void WifiManager::StartStation")
+    start_station = function_body(manager, "bool WifiManager::TryStartStationTransition")
     assert "if (!config_ap_to_stop->Stop())" in start_station
     assert start_station.index("if (!config_ap_to_stop->Stop())") < start_station.index(
         "StartStationTarget("
@@ -648,7 +648,12 @@ def test_failed_config_boundary_retains_resources_and_blocks_manager_transitions
         "void WifiManager::StartConfigAp",
         "bool WifiManager::StopRadio",
     ):
-        body = function_body(manager, signature)
+        body = function_body(
+            manager,
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature,
+        )
         assert "wifi_teardown_faulted_" in body
 
     destructor = function_body(source, "WifiConfigurationAp::~WifiConfigurationAp")
@@ -848,7 +853,12 @@ def test_manager_lifecycle_entry_points_are_blocked_during_scan_recovery():
         "void WifiManager::StopConfigAp",
         "bool WifiManager::StopRadio",
     ):
-        body = function_body(manager, signature)
+        body = function_body(
+            manager,
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature,
+        )
         assert "scan_recovery_active_" in body
 
 
@@ -874,14 +884,19 @@ def test_mode_transitions_defer_target_start_until_exact_scan_recovery_finishes(
             "StartConfigApTarget(",
         ),
     ):
-        body = function_body(manager, signature)
+        body = function_body(
+            manager,
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature,
+        )
         source_stop = body.index(stopped_source)
         defer = body.index("DeferLifecycleTransitionForRecovery", source_stop)
         target = body.index(target_start)
         assert source_stop < defer < target
         assert "return" in body[defer:target]
 
-    start_station = function_body(manager, "void WifiManager::StartStation")
+    start_station = function_body(manager, "bool WifiManager::TryStartStationTransition")
     assert start_station.index("config_ap_to_stop->Stop()") < start_station.index(
         "config_mode_active_ = false"
     )
@@ -965,7 +980,14 @@ def test_manager_active_flags_stay_false_while_target_transition_is_pending():
         "void WifiManager::StopConfigAp",
         "bool WifiManager::StopRadio",
     ):
-        assert "pending_lifecycle_target_" in function_body(manager, signature)
+        inspected_signature = (
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature
+        )
+        assert "pending_lifecycle_target_" in function_body(
+            manager, inspected_signature
+        )
 
 
 def test_recovery_restore_reapplies_start_time_wifi_runtime_settings():
@@ -1308,18 +1330,30 @@ def test_cardputer_board_has_real_ui_poll_timer_caller():
     assert "RunWifiScanWorker" in board
     assert "CompleteWifiScanWorker" in board
     assert "RetryInFlight" in board
+    assert "WifiConnectionWorkerTask" in board
+    assert "ProcessLifetimeWorkerHandle<TaskHandle_t>" in board
     timer = function_body(board, "void InitializeWifiConfigUiPoller")
     assert "NotifyWifiScanWorker()" in timer
     assert "xTaskCreate" not in timer
     ensure = function_body(board, "void EnsureWifiScanWorker")
     assert "xTaskCreate" in ensure
     exit_mode = function_body(board, "void ExitWifiConfigMode")
-    assert "wifi_reconnect_after_scan_" in exit_mode
+    assert "PublishReconnect" in exit_mode
     assert "HasActiveExternalScan" in board
     connect = function_body(board, "void AttemptWifiConnection")
-    assert connect.index("HasActiveExternalScan") < connect.index("AddSsid")
-    assert "pending_wifi_connection_after_scan_" in connect
-    assert "pending_wifi_connection_after_scan_" in timer
+    assert "PublishCredentials" in connect
+    assert "AddSsid" not in connect
+    assert "vTaskDelay" not in connect
+    connection_worker = function_body(board, "static void WifiConnectionWorkerTask")
+    assert "AddSsid" in connection_worker
+    assert "vTaskDelay" in connection_worker
+    assert "TryWifiConnect" in connection_worker
+    assert "StoreConnectionResult" in connection_worker
+    assert "OnConnectResult" not in connection_worker
+    assert "AttemptWifiConnection" not in timer
+    assert "TryWifiConnect" not in timer
+    assert "NotifyWifiConnectionWorker" in timer
+    assert "ScheduleWifiConnectionResult" in timer
     scanning_key = function_body(source, "void WifiConfigUI::HandleScanningKey")
     assert "DismissPendingScanResult()" in scanning_key
     assert "state_ == WifiConfigState::Scanning" in poll
