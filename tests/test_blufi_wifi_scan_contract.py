@@ -1414,7 +1414,9 @@ def test_cardputer_success_releases_ui_before_generation_bound_app_completion():
     assert "wifi_config_ui_" in scheduler
     assert "last_exited_wifi_config_generation_ != ui_generation" in scheduler
     assert "Application::GetInstance().Schedule" in scheduler
-    assert "CompleteCardputerWifiProvisioning" in scheduler
+    completion_idx = scheduler.index("CompleteCardputerWifiProvisioning")
+    lock_idx = scheduler.index("wifi_config_ui_mutex_")
+    assert lock_idx < completion_idx
     assert "Schedule(" not in completion
 
 

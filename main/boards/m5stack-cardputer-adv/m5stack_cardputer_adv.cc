@@ -57,13 +57,11 @@ private:
     void ScheduleWifiProvisioningCompletion(uint64_t ui_generation) {
         try {
             Application::GetInstance().Schedule([this, ui_generation]() {
-                {
-                    std::lock_guard<std::recursive_mutex> lock(
-                        wifi_config_ui_mutex_);
-                    if (wifi_config_mode_ || wifi_config_ui_ ||
-                        last_exited_wifi_config_generation_ != ui_generation) {
-                        return;
-                    }
+                std::lock_guard<std::recursive_mutex> lock(
+                    wifi_config_ui_mutex_);
+                if (wifi_config_mode_ || wifi_config_ui_ ||
+                    last_exited_wifi_config_generation_ != ui_generation) {
+                    return;
                 }
                 Application::GetInstance().CompleteCardputerWifiProvisioning(
                     ui_generation);
