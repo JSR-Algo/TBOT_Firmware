@@ -21,6 +21,10 @@ public:
     explicit WifiRadioRecoveryRestorer(Driver& driver);
 
     bool RestoreStation(wifi_ps_type_t power_save, int8_t max_tx_power);
+    bool RestoreStationRuntime(const wifi_config_t* config,
+                               wifi_band_mode_t band_mode,
+                               wifi_ps_type_t power_save,
+                               int8_t max_tx_power);
     bool RestoreConfigAp(wifi_config_t config, wifi_band_mode_t band_mode,
                          int8_t max_tx_power);
 

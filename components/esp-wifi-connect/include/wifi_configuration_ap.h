@@ -62,6 +62,8 @@ public:
         const WifiScanLeaseCoordinator::RecoveryProof& proof);
     bool RestoreRadioAfterRecovery(const ScanRecoveryClaim& claim);
     void RetryScanAfterRecovery();
+    bool RestoreRadioAfterExternalScanRecovery();
+    void RetryAfterExternalScanRecovery();
     void OnScanRecoveryNeeded(std::function<void(
         const WifiScanLeaseCoordinator::Lease&)> callback);
 

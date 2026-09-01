@@ -113,6 +113,8 @@ void WifiStation::Stop() {
         ssid_.clear();
         ip_address_.clear();
         reconnect_count_ = 0;
+        active_station_config_ = {};
+        active_station_config_valid_ = false;
     }
     lifecycle_lock.unlock();
     if (timer_to_delete != nullptr) {
@@ -441,6 +443,11 @@ std::string WifiStation::StartConnectForSession(WifiApRecord ap_record) {
     }
     wifi_config.sta.listen_interval = 10;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    {
+        std::lock_guard<std::mutex> data_lock(session_data_mutex_);
+        active_station_config_ = wifi_config;
+        active_station_config_valid_ = true;
+    }
     bzero(&wifi_config, sizeof(wifi_config));
     std::fill(ap_record.password.begin(), ap_record.password.end(), '\0');
     ESP_ERROR_CHECK(esp_wifi_connect());
@@ -582,6 +589,41 @@ void WifiStation::RetryScanAfterRecovery() {
         expected_session = scan_session_id_;
     }
     ScheduleScanRetry(expected_session, 1);
+}
+
+bool WifiStation::RestoreRadioAfterExternalScanRecovery() {
+    wifi_ps_type_t power_save_type = WIFI_PS_MIN_MODEM;
+    wifi_config_t config{};
+    bool config_valid = false;
+    {
+        std::lock_guard<std::mutex> data_lock(session_data_mutex_);
+        power_save_type = power_save_type_;
+        config = active_station_config_;
+        config_valid = active_station_config_valid_;
+    }
+#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
+    const wifi_band_mode_t band_mode = WIFI_BAND_MODE_AUTO;
+#else
+    const wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
+#endif
+    return radio_recovery_restorer_.RestoreStationRuntime(
+        config_valid ? &config : nullptr, band_mode, power_save_type,
+        max_tx_power_);
+}
+
+void WifiStation::RetryAfterExternalScanRecovery(bool reconnect) {
+    wifi_config_t config{};
+    bool config_valid = false;
+    {
+        std::lock_guard<std::mutex> data_lock(session_data_mutex_);
+        config = active_station_config_;
+        config_valid = active_station_config_valid_;
+    }
+    if (reconnect && config_valid &&
+        esp_wifi_set_config(WIFI_IF_STA, &config) == ESP_OK) {
+        esp_wifi_connect();
+    }
+    RetryScanAfterRecovery();
 }
 
 std::string WifiStation::GetSsid() const {

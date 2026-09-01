@@ -1337,3 +1337,23 @@ void WifiConfigurationAp::RetryScanAfterRecovery() {
     }
     ScheduleScanRetry(expected_session, 1);
 }
+
+bool WifiConfigurationAp::RestoreRadioAfterExternalScanRecovery() {
+    wifi_config_t wifi_config = {};
+    const std::string ssid = GetSsid();
+    std::memcpy(wifi_config.ap.ssid, ssid.data(), ssid.size());
+    wifi_config.ap.ssid_len = ssid.size();
+    wifi_config.ap.max_connection = 4;
+    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
+    const wifi_band_mode_t band_mode = WIFI_BAND_MODE_AUTO;
+#else
+    const wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
+#endif
+    return radio_recovery_restorer_.RestoreConfigAp(
+        wifi_config, band_mode, max_tx_power_);
+}
+
+void WifiConfigurationAp::RetryAfterExternalScanRecovery() {
+    RetryScanAfterRecovery();
+}

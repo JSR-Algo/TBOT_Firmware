@@ -1237,6 +1237,27 @@ def test_blufi_scan_recovery_uses_shared_manager_executor():
     assert "DrainDefaultEventLoop" not in header + source
 
 
+def test_cardputer_blocking_scan_uses_nonblocking_idf_callback_semantics():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    scan = function_body(source, "void WifiConfigUI::DoWifiScan")
+    assert "esp_wifi_scan_start(&scan_config, false)" in scan
+    assert "esp_wifi_scan_start(&scan_config, true)" not in scan
+    assert "BlockingWifiScanPolicy::CompletionWaitMs" in source
+    assert "!manager.IsInitialized() && !manager.Initialize()" in scan
+
+
+def test_cardputer_recovery_is_manager_owned_and_has_durable_exact_retry():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    assert "esp_wifi_get_mode" not in source
+    assert "esp_wifi_get_config" not in source
+    assert "esp_wifi_set_mode" not in source
+    assert "esp_wifi_set_config" not in source
+    assert "CaptureExternalScanRecoveryRole" in source + header
+    assert "ReleaseExternalScanRecoveryRole" in source + header
+    assert ".retry = [this]" in source
+
+
 def test_blufi_ap_cleanup_failure_retains_exact_recovery_debt():
     source = read("main/boards/common/blufi.cpp")
     handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")

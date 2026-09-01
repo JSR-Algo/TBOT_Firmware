@@ -255,6 +255,167 @@ void RegisteredBlufiOwnerUsesSharedRecoveryExecutor() {
         WifiScanLeaseCoordinator::Owner::kStation).acquired);
 }
 
+void BlockingUiRecoveryRestoresManagerStationRoleAndRetriesAfterProof() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    manager->StartStation();
+    auto& coordinator = manager->ScanLeaseCoordinator();
+    const auto acquired = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi);
+    assert(acquired.acquired);
+    assert(manager->CaptureExternalScanRecoveryRole(acquired.lease));
+    assert(coordinator.CommitSubmission(acquired.lease, false).drain_required);
+
+    bool debt = true;
+    int owner_retry_calls = 0;
+    WifiManager::ScanRecoveryOwnerHooks hooks;
+    hooks.claim = [&](const auto& lease)
+                -> std::optional<WifiScanLeaseCoordinator::RecoveryDecision> {
+                const auto recovery = coordinator.BeginRecovery(lease);
+                return recovery.begun()
+                    ? std::optional<WifiScanLeaseCoordinator::RecoveryDecision>(
+                          recovery)
+                    : std::nullopt;
+            };
+    hooks.has_debt = [&](const auto&) { return debt; };
+    hooks.restore_radio = [](const auto&) { return true; };
+    hooks.complete = [&](const auto& lease, const auto& proof) {
+                assert(manager->TestStation()->ExternalReconnectCalls() == 0);
+                if (!coordinator.CompleteRecovery(lease, proof)) {
+                    return false;
+                }
+                debt = false;
+                return true;
+            };
+    hooks.retry = [&](const auto& lease) {
+                assert(lease.lease_id == acquired.lease.lease_id);
+                ++owner_retry_calls;
+            };
+    assert(manager->RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi, std::move(hooks)));
+
+    manager->TestScheduleScanRecovery(acquired.lease);
+    recovery_driver.ClearCalls();
+    manager->TestRunScanRecovery();
+    assert((recovery_driver.Calls() == std::vector<std::string>{
+        "stop", "mode", "config", "start", "band", "max_tx", "ps"}));
+    assert(manager->TestStation()->ExternalRestoreCalls() == 1);
+    assert(manager->TestStation()->ExternalReconnectCalls() == 1);
+    assert(manager->TestStation()->RetryCalls() == 1);
+    assert(owner_retry_calls == 1);
+}
+
+void BlockingUiRecoveryRestoresConfigApAndIdleRolesExactly() {
+    auto* config_manager = new WifiManager;
+    assert(config_manager->Initialize());
+    config_manager->StartConfigAp();
+    auto& config_coordinator = config_manager->ScanLeaseCoordinator();
+    const auto config_lease = config_coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi).lease;
+    assert(config_manager->CaptureExternalScanRecoveryRole(config_lease));
+    assert(config_manager->TestExternalRecoveryRole(config_lease) ==
+           WifiManager::ExternalScanRecoveryRole::kConfigAp);
+    assert(config_coordinator.CommitSubmission(config_lease, false)
+               .drain_required);
+    bool config_debt = true;
+    WifiManager::ScanRecoveryOwnerHooks config_hooks;
+    config_hooks.claim = [&](const auto& lease)
+            -> std::optional<WifiScanLeaseCoordinator::RecoveryDecision> {
+        const auto recovery = config_coordinator.BeginRecovery(lease);
+        return recovery.begun()
+            ? std::optional<WifiScanLeaseCoordinator::RecoveryDecision>(
+                  recovery)
+            : std::nullopt;
+    };
+    config_hooks.has_debt = [&](const auto&) { return config_debt; };
+    config_hooks.restore_radio = [](const auto&) { return true; };
+    config_hooks.complete = [&](const auto& lease, const auto& proof) {
+        if (!config_coordinator.CompleteRecovery(lease, proof)) {
+            return false;
+        }
+        config_debt = false;
+        return true;
+    };
+    config_hooks.retry = [](const auto&) {};
+    assert(config_manager->RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi,
+        std::move(config_hooks)));
+    config_manager->TestScheduleScanRecovery(config_lease);
+    config_manager->TestRunScanRecovery();
+    assert(config_manager->TestConfigAp()->ExternalRestoreCalls() == 1);
+    assert(config_manager->TestConfigAp()->RetryCalls() == 1);
+
+    auto* idle_manager = new WifiManager;
+    assert(idle_manager->Initialize());
+    auto& idle_coordinator = idle_manager->ScanLeaseCoordinator();
+    const auto idle_lease = idle_coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi).lease;
+    assert(idle_manager->CaptureExternalScanRecoveryRole(idle_lease));
+    assert(idle_manager->TestExternalRecoveryRole(idle_lease) ==
+           WifiManager::ExternalScanRecoveryRole::kIdle);
+    assert(idle_coordinator.CommitSubmission(idle_lease, false)
+               .drain_required);
+    bool idle_debt = true;
+    int idle_retry_calls = 0;
+    WifiManager::ScanRecoveryOwnerHooks idle_hooks;
+    idle_hooks.claim = [&](const auto& lease)
+            -> std::optional<WifiScanLeaseCoordinator::RecoveryDecision> {
+        const auto recovery = idle_coordinator.BeginRecovery(lease);
+        return recovery.begun()
+            ? std::optional<WifiScanLeaseCoordinator::RecoveryDecision>(
+                  recovery)
+            : std::nullopt;
+    };
+    idle_hooks.has_debt = [&](const auto&) { return idle_debt; };
+    idle_hooks.restore_radio = [](const auto&) { return false; };
+    idle_hooks.complete = [&](const auto& lease, const auto& proof) {
+        if (!idle_coordinator.CompleteRecovery(lease, proof)) {
+            return false;
+        }
+        idle_debt = false;
+        return true;
+    };
+    idle_hooks.retry = [&](const auto&) { ++idle_retry_calls; };
+    assert(idle_manager->RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi,
+        std::move(idle_hooks)));
+    idle_manager->TestScheduleScanRecovery(idle_lease);
+    idle_manager->TestRunScanRecovery();
+    assert(idle_manager->TestStation()->ExternalRestoreCalls() == 0);
+    assert(idle_manager->TestConfigAp()->ExternalRestoreCalls() == 0);
+    assert(idle_retry_calls == 1);
+}
+
+void RecoveryDebtSurvivesTemporarilyUnavailableTask() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto* station = manager->TestStation();
+    manager->TestSetScanRecoveryTaskAvailable(false);
+    const auto lease = station->PublishDebt();
+    assert(lease.lease_id != 0);
+    assert(manager->TestRecoveryActive());
+    manager->TestSetScanRecoveryTaskAvailable(true);
+    manager->TestRunScanRecovery();
+    assert(!manager->TestRecoveryActive());
+    assert(station->RestoreCalls() == 1);
+}
+
+void LifecycleTransitionCannotInvalidateCapturedExternalRole() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    manager->StartStation();
+    auto& coordinator = manager->ScanLeaseCoordinator();
+    const auto lease = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi).lease;
+    assert(manager->CaptureExternalScanRecoveryRole(lease));
+    manager->StopStation();
+    assert(manager->TestStationActive());
+    assert(manager->TestExternalRecoveryRole(lease) ==
+           WifiManager::ExternalScanRecoveryRole::kStation);
+    assert(manager->ReleaseExternalScanRecoveryRole(lease));
+    assert(coordinator.AbandonUnsubmitted(lease));
+}
+
 void NewUnclaimedDebtRetargetsButClaimedDebtRejectsReplacement() {
     auto* manager = new WifiManager;
     assert(manager->Initialize());
@@ -415,15 +576,29 @@ bool WifiStation::CompleteScanRecovery(
         scan_session_id_, true, scans_enabled_, restore_state_);
 }
 void WifiStation::RetryScanAfterRecovery() { ++retry_calls_; }
+bool WifiStation::RestoreRadioAfterExternalScanRecovery() {
+    ++external_restore_calls_;
+    wifi_config_t config = {};
+    return restorer_.RestoreStationRuntime(
+        &config, WIFI_BAND_MODE_2G_ONLY, WIFI_PS_MIN_MODEM, 72);
+}
+void WifiStation::RetryAfterExternalScanRecovery(bool reconnect) {
+    if (reconnect) {
+        ++external_reconnect_calls_;
+    }
+    RetryScanAfterRecovery();
+}
 void WifiStation::Start() {
     ++starts_;
     ++scan_session_id_;
     scans_enabled_ = true;
+    connected_ = true;
 }
 void WifiStation::Stop() {
     ++stops_;
     ++scan_session_id_;
     scans_enabled_ = false;
+    connected_ = false;
     if (publish_debt_on_stop_) {
         publish_debt_on_stop_ = false;
         PublishDebt(false);
@@ -497,6 +672,15 @@ bool WifiConfigurationAp::CompleteScanRecovery(
         scan_session_id_, true, scans_enabled_, restore_state_);
 }
 void WifiConfigurationAp::RetryScanAfterRecovery() { ++retry_calls_; }
+bool WifiConfigurationAp::RestoreRadioAfterExternalScanRecovery() {
+    ++external_restore_calls_;
+    wifi_config_t config = {};
+    return restorer_.RestoreConfigAp(
+        config, WIFI_BAND_MODE_2G_ONLY, 72);
+}
+void WifiConfigurationAp::RetryAfterExternalScanRecovery() {
+    RetryScanAfterRecovery();
+}
 void WifiConfigurationAp::Start() {
     ++starts_;
     ++scan_session_id_;
@@ -547,6 +731,10 @@ int main() {
     ProofCompletionFailureKeepsScansGatedAndRestoresAgain();
     CallbackBeforeClaimCancelsRecoveryWithoutRestore();
     RegisteredBlufiOwnerUsesSharedRecoveryExecutor();
+    BlockingUiRecoveryRestoresManagerStationRoleAndRetriesAfterProof();
+    BlockingUiRecoveryRestoresConfigApAndIdleRolesExactly();
+    RecoveryDebtSurvivesTemporarilyUnavailableTask();
+    LifecycleTransitionCannotInvalidateCapturedExternalRole();
     NewUnclaimedDebtRetargetsButClaimedDebtRejectsReplacement();
     RecoveryHooksRunWithoutManagerMutex();
     BothPendingTransitionsResumeOnlyAfterRecovery();

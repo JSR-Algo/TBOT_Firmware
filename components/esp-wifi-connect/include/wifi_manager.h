@@ -69,6 +69,12 @@ struct WifiManagerConfig {
  */
 class WifiManager {
 public:
+    enum class ExternalScanRecoveryRole : uint8_t {
+        kIdle,
+        kStation,
+        kConfigAp,
+    };
+
     struct ScanRecoveryOwnerHooks {
         std::function<std::optional<WifiScanLeaseCoordinator::RecoveryDecision>(
             const WifiScanLeaseCoordinator::Lease&)> claim;
@@ -131,6 +137,10 @@ public:
         const WifiScanLeaseCoordinator::Lease& lease) {
         return ScheduleScanRecovery(lease);
     }
+    bool CaptureExternalScanRecoveryRole(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    bool ReleaseExternalScanRecoveryRole(
+        const WifiScanLeaseCoordinator::Lease& lease);
     using ScanLeaseRetryPoller = void (*)(void*) noexcept;
     bool RegisterScanLeaseRetryPoller(
         void* context, ScanLeaseRetryPoller poller);
@@ -165,6 +175,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++lifecycle_generation_;
     }
+    void TestSetScanRecoveryTaskAvailable(bool available) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        scan_recovery_task_ = available ? reinterpret_cast<TaskHandle_t>(1)
+                                        : nullptr;
+    }
+    ExternalScanRecoveryRole TestExternalRecoveryRole(
+            const WifiScanLeaseCoordinator::Lease& lease) const;
 #endif
 
 private:
@@ -206,6 +223,22 @@ private:
         bool scans_were_enabled = false;
     };
 
+    struct ExternalScanRecoverySnapshot {
+        WifiScanLeaseCoordinator::Lease lease;
+        ExternalScanRecoveryRole role = ExternalScanRecoveryRole::kIdle;
+        uint64_t lifecycle_generation = 0;
+        bool station_was_connected = false;
+    };
+
+    std::optional<ExternalScanRecoverySnapshot>
+        ExternalRecoverySnapshotFor(
+            const WifiScanLeaseCoordinator::Lease& lease) const;
+    bool RestoreExternalRecoveryRole(
+        const ExternalScanRecoverySnapshot& snapshot);
+    void RetryExternalRecoveryRole(
+        const ExternalScanRecoverySnapshot& snapshot);
+    bool HasActiveExternalScanLocked() const;
+
     WifiManagerConfig config_;
     WifiScanLeaseCoordinator scan_lease_coordinator_;
     WifiScanRecoveryExecutor scan_recovery_executor_;
@@ -229,6 +262,8 @@ private:
     std::optional<ScanRecoveryWork> scan_recovery_claim_;
     std::array<std::optional<ScanRecoveryOwnerHooks>, 4>
         external_scan_recovery_hooks_;
+    std::array<std::optional<ExternalScanRecoverySnapshot>, 4>
+        external_scan_recovery_snapshots_;
     PendingLifecycleTarget pending_lifecycle_target_ =
         PendingLifecycleTarget::kNone;
     uint64_t pending_lifecycle_generation_ = 0;

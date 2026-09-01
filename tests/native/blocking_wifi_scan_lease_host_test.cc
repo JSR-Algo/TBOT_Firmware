@@ -1,4 +1,5 @@
 #include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_lease_state.h"
+#include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_policy.h"
 
 #include <cassert>
 #include <condition_variable>
@@ -160,6 +161,21 @@ void RepeatedScansResetAllState() {
     }
 }
 
+void FullChannelActiveScanWaitIncludesEveryChannelAndSchedulingMargin() {
+    constexpr uint32_t wait_ms = BlockingWifiScanPolicy::CompletionWaitMs(
+        14, 300, 1000);
+    static_assert(wait_ms == 5200);
+    assert(wait_ms > 14 * 300);
+}
+
+void SlowFullChannelCallbackAtBoundaryIsNotClassifiedAsLost() {
+    const auto wait_ms = BlockingWifiScanPolicy::CompletionWaitMs(14, 300, 1000);
+    assert(BlockingWifiScanPolicy::CallbackArrivedBeforeDeadline(
+        wait_ms - 1, wait_ms));
+    assert(!BlockingWifiScanPolicy::CallbackArrivedBeforeDeadline(
+        wait_ms, wait_ms));
+}
+
 }  // namespace
 
 int main() {
@@ -172,6 +188,8 @@ int main() {
     CallbackAndTimeoutChooseOneCompletionOwner();
     CleanupFailureAndRecoveryRemainExact();
     RepeatedScansResetAllState();
+    FullChannelActiveScanWaitIncludesEveryChannelAndSchedulingMargin();
+    SlowFullChannelCallbackAtBoundaryIsNotClassifiedAsLost();
     std::cout << "blocking wifi scan lease host tests: PASS\n";
     return 0;
 }

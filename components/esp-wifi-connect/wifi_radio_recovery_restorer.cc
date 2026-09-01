@@ -52,6 +52,24 @@ bool WifiRadioRecoveryRestorer::RestoreStation(
     return driver_.SetPowerSave(power_save) == ESP_OK;
 }
 
+bool WifiRadioRecoveryRestorer::RestoreStationRuntime(
+        const wifi_config_t* config, wifi_band_mode_t band_mode,
+        wifi_ps_type_t power_save, int8_t max_tx_power) {
+    wifi_config_t config_copy = config != nullptr ? *config : wifi_config_t{};
+    if (!Normalized(driver_.Stop()) ||
+        driver_.SetMode(WIFI_MODE_STA) != ESP_OK ||
+        (config != nullptr &&
+         driver_.SetConfig(WIFI_IF_STA, &config_copy) != ESP_OK) ||
+        driver_.Start() != ESP_OK ||
+        driver_.SetBandMode(band_mode) != ESP_OK) {
+        return false;
+    }
+    if (max_tx_power != 0 && driver_.SetMaxTxPower(max_tx_power) != ESP_OK) {
+        return false;
+    }
+    return driver_.SetPowerSave(power_save) == ESP_OK;
+}
+
 bool WifiRadioRecoveryRestorer::RestoreConfigAp(
         wifi_config_t config, wifi_band_mode_t band_mode,
         int8_t max_tx_power) {

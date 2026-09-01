@@ -67,6 +67,8 @@ public:
         const WifiScanLeaseCoordinator::RecoveryProof& proof);
     bool RestoreRadioAfterRecovery(const ScanRecoveryClaim& claim);
     void RetryScanAfterRecovery();
+    bool RestoreRadioAfterExternalScanRecovery();
+    void RetryAfterExternalScanRecovery(bool reconnect);
     void OnScanRecoveryNeeded(std::function<void(
         const WifiScanLeaseCoordinator::Lease&)> callback);
 
@@ -100,6 +102,8 @@ private:
     std::function<void()> on_scan_begin_;
     std::vector<WifiApRecord> connect_queue_;
     bool was_connected_ = false;  // Track if we were connected before disconnection
+    wifi_config_t active_station_config_{};
+    bool active_station_config_valid_ = false;
     WifiScanLeaseCoordinator& scan_lease_coordinator_;
     WifiRadioRecoveryRestorer radio_recovery_restorer_;
     // When nested: callback -> scan -> data. Never acquire scan while holding

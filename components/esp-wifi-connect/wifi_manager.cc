@@ -55,6 +55,111 @@ bool WifiManager::RegisterScanRecoveryOwner(
     return true;
 }
 
+bool WifiManager::CaptureExternalScanRecoveryRole(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    if (lease.owner != WifiScanLeaseCoordinator::Owner::kBlockingUi ||
+        !scan_lease_coordinator_.OwnsExactLease(lease)) {
+        return false;
+    }
+    WifiStation* station = nullptr;
+    ExternalScanRecoverySnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_) {
+            return false;
+        }
+        snapshot.lease = lease;
+        snapshot.lifecycle_generation = lifecycle_generation_;
+        if (station_active_) {
+            snapshot.role = ExternalScanRecoveryRole::kStation;
+            station = station_.get();
+        } else if (config_mode_active_) {
+            snapshot.role = ExternalScanRecoveryRole::kConfigAp;
+        }
+    }
+    if (station != nullptr) {
+        snapshot.station_was_connected = station->IsConnected();
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (snapshot.lifecycle_generation != lifecycle_generation_ ||
+        lifecycle_transition_in_progress_ || scan_recovery_active_) {
+        return false;
+    }
+    external_scan_recovery_snapshots_[static_cast<size_t>(lease.owner)] =
+        snapshot;
+    return true;
+}
+
+bool WifiManager::ReleaseExternalScanRecoveryRole(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& snapshot =
+        external_scan_recovery_snapshots_[static_cast<size_t>(lease.owner)];
+    if (!snapshot.has_value() || !SameLease(snapshot->lease, lease)) {
+        return false;
+    }
+    snapshot.reset();
+    return true;
+}
+
+std::optional<WifiManager::ExternalScanRecoverySnapshot>
+WifiManager::ExternalRecoverySnapshotFor(
+        const WifiScanLeaseCoordinator::Lease& lease) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto& snapshot =
+        external_scan_recovery_snapshots_[static_cast<size_t>(lease.owner)];
+    if (!snapshot.has_value() || !SameLease(snapshot->lease, lease)) {
+        return std::nullopt;
+    }
+    return snapshot;
+}
+
+bool WifiManager::RestoreExternalRecoveryRole(
+        const ExternalScanRecoverySnapshot& snapshot) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (snapshot.lifecycle_generation != lifecycle_generation_) {
+            return false;
+        }
+    }
+    if (snapshot.role == ExternalScanRecoveryRole::kStation) {
+        return station_->RestoreRadioAfterExternalScanRecovery();
+    }
+    if (snapshot.role == ExternalScanRecoveryRole::kConfigAp) {
+        return config_ap_->RestoreRadioAfterExternalScanRecovery();
+    }
+    return true;
+}
+
+void WifiManager::RetryExternalRecoveryRole(
+        const ExternalScanRecoverySnapshot& snapshot) {
+    if (snapshot.role == ExternalScanRecoveryRole::kStation) {
+        station_->RetryAfterExternalScanRecovery(
+            snapshot.station_was_connected);
+    } else if (snapshot.role == ExternalScanRecoveryRole::kConfigAp) {
+        config_ap_->RetryAfterExternalScanRecovery();
+    }
+}
+
+bool WifiManager::HasActiveExternalScanLocked() const {
+    for (const auto& snapshot : external_scan_recovery_snapshots_) {
+        if (snapshot.has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#ifdef TBOT_WIFI_MANAGER_TESTING
+WifiManager::ExternalScanRecoveryRole WifiManager::TestExternalRecoveryRole(
+        const WifiScanLeaseCoordinator::Lease& lease) const {
+    const auto snapshot = ExternalRecoverySnapshotFor(lease);
+    return snapshot.has_value() ? snapshot->role
+                                : ExternalScanRecoveryRole::kIdle;
+}
+#endif
+
 bool WifiManager::RegisterScanLeaseRetryPoller(
         void* context, ScanLeaseRetryPoller poller) {
     if (poller == nullptr) {
@@ -103,7 +208,7 @@ bool WifiManager::ScheduleScanRecovery(
     TaskHandle_t task = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!initialized_ || scan_recovery_task_ == nullptr) {
+        if (!initialized_) {
             return false;
         }
         if (scan_recovery_debt_.has_value() &&
@@ -126,7 +231,7 @@ bool WifiManager::ScheduleScanRecovery(
             task = scan_recovery_task_;
         }
     }
-    return xTaskNotifyGive(task) == pdPASS;
+    return task != nullptr && xTaskNotifyGive(task) == pdPASS;
 }
 
 void WifiManager::ScanRecoveryTask(void* context) {
@@ -203,6 +308,7 @@ void WifiManager::RunScanRecovery() {
         bool resume_pending_transition = false;
         ScanRecoveryOwnerHooks external_hooks;
         bool external_owner = false;
+        std::optional<ExternalScanRecoverySnapshot> external_snapshot;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!scan_recovery_active_ || !scan_recovery_debt_.has_value()) {
@@ -219,6 +325,10 @@ void WifiManager::RunScanRecovery() {
                 external_scan_recovery_hooks_[owner_index].has_value();
             if (external_owner) {
                 external_hooks = *external_scan_recovery_hooks_[owner_index];
+            }
+            const auto& snapshot = external_scan_recovery_snapshots_[owner_index];
+            if (snapshot.has_value() && SameLease(snapshot->lease, *debt)) {
+                external_snapshot = snapshot;
             }
         }
         if (wait_for_lifecycle) {
@@ -320,7 +430,9 @@ void WifiManager::RunScanRecovery() {
                 work->scans_were_enabled};
             owner_ready = config_ap_->RestoreRadioAfterRecovery(claim);
         } else if (external_owner) {
-            owner_ready = external_hooks.restore_radio(work->lease);
+            owner_ready = external_snapshot.has_value()
+                ? RestoreExternalRecoveryRole(*external_snapshot)
+                : external_hooks.restore_radio(work->lease);
         }
         if (!owner_ready) {
             {
@@ -368,6 +480,10 @@ void WifiManager::RunScanRecovery() {
         } else if (owner == WifiScanLeaseCoordinator::Owner::kConfigAp) {
             config_ap_->RetryScanAfterRecovery();
         } else if (external_owner) {
+            if (external_snapshot.has_value()) {
+                RetryExternalRecoveryRole(*external_snapshot);
+                ReleaseExternalScanRecoveryRole(work->lease);
+            }
             external_hooks.retry(work->lease);
         }
         ResumePendingLifecycleTransition();
@@ -468,6 +584,7 @@ bool WifiManager::StopRadio() {
         return false;
     }
     if (lifecycle_transition_in_progress_ || scan_recovery_active_ ||
+        HasActiveExternalScanLocked() ||
         pending_lifecycle_target_ != PendingLifecycleTarget::kNone) {
         return false;
     }
@@ -548,6 +665,7 @@ void WifiManager::StartStation() {
         }
         if (station_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
             pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
             wifi_teardown_faulted_) {
             return;
@@ -628,6 +746,7 @@ void WifiManager::StopStation() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!station_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
             pending_lifecycle_target_ != PendingLifecycleTarget::kNone) {
             return;
         }
@@ -711,6 +830,7 @@ void WifiManager::StartConfigAp() {
         }
         if (config_mode_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
             pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
             wifi_teardown_faulted_) {
             return;
@@ -775,6 +895,7 @@ void WifiManager::StopConfigAp() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!config_mode_active_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
             pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
             wifi_teardown_faulted_) {
             return;

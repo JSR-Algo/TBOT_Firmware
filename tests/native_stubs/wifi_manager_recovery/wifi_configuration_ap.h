@@ -25,6 +25,9 @@ public:
     void PublishDebtOnStop();
     int RestoreCalls() const;
     int RetryCalls() const;
+    bool RestoreRadioAfterExternalScanRecovery();
+    void RetryAfterExternalScanRecovery();
+    int ExternalRestoreCalls() const { return external_restore_calls_; }
     bool ScansEnabled() const { return scans_enabled_; }
     std::string GetSsid() const { return {}; }
     std::string GetWebServerUrl() const { return {}; }
@@ -42,6 +45,7 @@ private:
     int retry_calls_ = 0;
     int starts_ = 0;
     int stops_ = 0;
+    int external_restore_calls_ = 0;
     std::function<void(const WifiScanLeaseCoordinator::Lease&)> recovery_cb_;
     std::function<void()> exit_cb_;
 };
