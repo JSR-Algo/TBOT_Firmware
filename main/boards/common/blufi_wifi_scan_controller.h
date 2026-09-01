@@ -88,7 +88,8 @@ public:
             return result;
         }
 
-        if (phase_ == Phase::kStarting && !submission_claimed_) {
+        if (phase_ == Phase::kStarting && !submission_claimed_ &&
+            !invalidated_ && MatchesCurrent(owner_)) {
             // A busy physical lease has not submitted anything yet. Fold all
             // current-session callers into that reservation so one eventual
             // scan satisfies the latest requested delivery semantics.
@@ -127,6 +128,22 @@ public:
 
         submission_claimed_ = true;
         result.claimed = true;
+        return result;
+    }
+
+    FinishDecision ReleaseStartClaimForRetry(uint64_t request_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        FinishDecision result;
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            phase_ != Phase::kStarting || !submission_claimed_) {
+            return result;
+        }
+        if (invalidated_ || !MatchesCurrent(owner_)) {
+            ResetOwner();
+            PromotePending(result);
+            return result;
+        }
+        submission_claimed_ = false;
         return result;
     }
 

@@ -55,6 +55,49 @@ bool WifiManager::RegisterScanRecoveryOwner(
     return true;
 }
 
+bool WifiManager::RegisterScanLeaseRetryPoller(
+        void* context, ScanLeaseRetryPoller poller) {
+    if (poller == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (scan_lease_retry_poller_ != nullptr) {
+        return scan_lease_retry_poller_ == poller &&
+            scan_lease_retry_context_ == context;
+    }
+    scan_lease_retry_context_ = context;
+    scan_lease_retry_poller_ = poller;
+    return true;
+}
+
+bool WifiManager::RequestScanLeaseRetryPoll() {
+    TaskHandle_t task = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_ || scan_recovery_task_ == nullptr ||
+            scan_lease_retry_poller_ == nullptr) {
+            return false;
+        }
+        task = scan_recovery_task_;
+    }
+    return xTaskNotifyGive(task) == pdPASS;
+}
+
+void WifiManager::PollScanLeaseRetry() noexcept {
+    void* context = nullptr;
+    ScanLeaseRetryPoller poller = nullptr;
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        context = scan_lease_retry_context_;
+        poller = scan_lease_retry_poller_;
+    } catch (...) {
+        return;
+    }
+    if (poller != nullptr) {
+        poller(context);
+    }
+}
+
 bool WifiManager::ScheduleScanRecovery(
         const WifiScanLeaseCoordinator::Lease& lease) {
     TaskHandle_t task = nullptr;
@@ -93,6 +136,7 @@ void WifiManager::ScanRecoveryTask(void* context) {
         // Periodic polling is the allocation-free, process-lifetime fallback.
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
         self->RunScanRecovery();
+        self->PollScanLeaseRetry();
     }
 }
 

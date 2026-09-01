@@ -976,15 +976,18 @@ def test_blufi_scan_binds_logical_request_to_exact_global_lease():
     header = read("main/boards/common/blufi.h")
     source = read("main/boards/common/blufi.cpp")
     start = function_body(source, "void Blufi::ScheduleOwnedWifiScanStart")
+    start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
     submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
     handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
     assert "std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_lease_;" in header
-    assert "TryAcquire(" in start
-    assert "WifiScanLeaseCoordinator::Owner::kBlufi" in start
-    assert start.index("TryAcquire(") < start.index("ClaimStart(")
-    assert start.index("SynchronizeDriverIncarnation(") < start.index("ClaimStart(")
-    assert "RetryOwnedWifiScanAfterLeaseBusy" in start
+    assert "wifi_scan_retry_state_.Publish" in start
+    assert "RequestScanLeaseRetryPoll" in start
+    assert "TryAcquire(" in start_now
+    assert "WifiScanLeaseCoordinator::Owner::kBlufi" in start_now
+    assert start_now.index("TryAcquire(") < start_now.index("ClaimStart(")
+    assert start_now.index("SynchronizeDriverIncarnation(") < start_now.index("ClaimStart(")
+    assert "RetryOwnedWifiScanAfterLeaseBusy" in start_now
     assert "ObserveScanDone(*lease)" in handler
     assert "CommitSubmission(" in submit
     assert "*lease, scan_error == ESP_OK" in submit
@@ -1024,13 +1027,43 @@ def test_blufi_busy_retry_has_process_lifetime_timer_and_failure_fallback():
     assert "esp_timer_handle_t wifi_scan_retry_timer_" in header
     assert "xTaskCreate" not in retry
     assert "new (std::nothrow)" not in retry
-    assert "esp_timer_create" in retry
+    constructor = function_body(source, "Blufi::Blufi()")
+    assert "esp_timer_create" in constructor
+    assert "esp_timer_create" not in retry
     assert "esp_timer_start_once" in retry
-    assert "ScheduleWifiScanRetryFallback" in retry
+    assert "xTimerCreateStatic" in retry
+    assert "xTimerChangePeriod" in retry
+    assert "RequestScanLeaseRetryPoll" in retry
+    assert "Application::GetInstance().Schedule" not in retry
     assert "UnclaimedRequestIfCurrent" in retry
-    fallback = function_body(source, "void Blufi::ScheduleWifiScanRetryFallback")
-    assert "xTimerCreateStatic" in fallback
-    assert "xTimerChangePeriod" in fallback
+
+
+def test_blufi_retry_exception_cleanup_releases_exact_unsubmitted_claim():
+    source = read("main/boards/common/blufi.cpp")
+    start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
+
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> acquired_lease" in start_now
+    assert "AbandonUnsubmitted(*acquired_lease)" in start_now
+    assert "ReleaseStartClaimForRetry" in start_now
+    assert "RepublishIfUnchanged(exact)" in start_now
+    assert "BeginDrain(*acquired_lease)" in start_now
+    assert "RequestOwnedWifiScanRecovery(*acquired_lease)" in start_now
+    assert "wifi_scan_driver_submission_request_id_.load" in start_now
+    submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    assert submit.index("esp_wifi_scan_start") < submit.index(
+        "wifi_scan_driver_submission_request_id_.store"
+    )
+    accepted_marker = submit.index("wifi_scan_driver_submission_request_id_.store")
+    assert accepted_marker < submit.index("CommitSubmission(", accepted_marker)
+
+
+def test_manager_poller_busy_retry_does_not_self_notify_hot_loop():
+    source = read("main/boards/common/blufi.cpp")
+    dispatch = function_body(source, "void Blufi::DispatchOwnedWifiScanRetry")
+    retry = function_body(source, "void Blufi::RetryOwnedWifiScanAfterLeaseBusy")
+
+    assert "TryStartOwnedWifiScanNow(*exact, false)" in dispatch
+    assert "notify_manager" in retry
 
 
 def test_blufi_watchdog_failures_enter_shared_recovery_immediately():

@@ -71,6 +71,7 @@ bool fail_task_notify_once = false;
 bool fail_executor_once = false;
 WifiManager* lock_probe_manager = nullptr;
 int lock_probe_calls = 0;
+int scan_retry_poll_calls = 0;
 
 struct DelayAbort : std::runtime_error {
     DelayAbort() : std::runtime_error("retry") {}
@@ -123,6 +124,17 @@ void OneShotStationDebtSurvivesWorkerNotificationFailure() {
     assert(!manager->TestRecoveryActive());
     assert(station->RestoreCalls() == 1);
     assert(station->RetryCalls() == 1);
+}
+
+void ScanRetryPollerSurvivesNotificationFailure() {
+    auto* manager = new WifiManager;
+    assert(manager->RegisterScanLeaseRetryPoller(
+        nullptr, [](void*) noexcept { ++scan_retry_poll_calls; }));
+    assert(manager->Initialize());
+    fail_task_notify_once = true;
+    assert(!manager->RequestScanLeaseRetryPoll());
+    manager->TestPollScanLeaseRetry();
+    assert(scan_retry_poll_calls == 1);
 }
 
 void DuplicateDebtCoalescesAndProductionRestoreRetries() {
@@ -529,6 +541,7 @@ WifiScanLeaseCoordinator::RecoveryProof WifiScanRecoveryExecutor::Execute(
 int main() {
     TaskCreationFailureRetriesOnlyFailedStage();
     OneShotStationDebtSurvivesWorkerNotificationFailure();
+    ScanRetryPollerSurvivesNotificationFailure();
     DuplicateDebtCoalescesAndProductionRestoreRetries();
     ExecutorFailureRetainsClaimAndRetriesWithoutReclaiming();
     ProofCompletionFailureKeepsScansGatedAndRestoresAgain();

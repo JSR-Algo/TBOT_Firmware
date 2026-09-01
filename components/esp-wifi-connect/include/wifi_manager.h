@@ -131,6 +131,10 @@ public:
         const WifiScanLeaseCoordinator::Lease& lease) {
         return ScheduleScanRecovery(lease);
     }
+    using ScanLeaseRetryPoller = void (*)(void*) noexcept;
+    bool RegisterScanLeaseRetryPoller(
+        void* context, ScanLeaseRetryPoller poller);
+    bool RequestScanLeaseRetryPoll();
 
     WifiManager(const WifiManager&) = delete;
     WifiManager& operator=(const WifiManager&) = delete;
@@ -142,6 +146,7 @@ public:
         ScheduleScanRecovery(lease);
     }
     void TestRunScanRecovery() { RunScanRecovery(); }
+    void TestPollScanLeaseRetry() { PollScanLeaseRetry(); }
     WifiStation* TestStation() { return station_.get(); }
     WifiConfigurationAp* TestConfigAp() { return config_ap_.get(); }
     bool TestRecoveryActive() const {
@@ -176,6 +181,7 @@ private:
         const WifiScanLeaseCoordinator::Lease& lease);
     static void ScanRecoveryTask(void* context);
     void RunScanRecovery();
+    void PollScanLeaseRetry() noexcept;
 
     enum class PendingLifecycleTarget : uint8_t {
         kNone,
@@ -215,6 +221,8 @@ private:
     bool lifecycle_transition_in_progress_ = false;
     bool wifi_teardown_faulted_ = false;
     TaskHandle_t scan_recovery_task_ = nullptr;
+    void* scan_lease_retry_context_ = nullptr;
+    ScanLeaseRetryPoller scan_lease_retry_poller_ = nullptr;
     bool scan_recovery_active_ = false;
     bool scan_recovery_retry_pending_ = false;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_debt_;

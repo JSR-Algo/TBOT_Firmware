@@ -74,6 +74,40 @@ void LeaseBusyCoalescesOneUnclaimedCurrentRequest() {
     assert(!logical.FinishCompletion(completion.request_id).start_pending);
 }
 
+void ClaimedStartCanReturnToUnclaimedAfterPhysicalAbandon() {
+    Controller controller;
+    const auto request = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, request.request_id);
+    assert(!controller.ReleaseStartClaimForRetry(request.request_id).start_pending);
+    assert(controller.UnclaimedRequestIfCurrent(
+        request.request_id, 1, 11, 101).has_value());
+    assert(controller.ClaimStart(request.request_id).claimed);
+}
+
+void RollbackAfterInvalidationPromotesCurrentPending() {
+    Controller controller;
+    const auto stale = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, stale.request_id);
+    controller.InvalidateSession(2, 22, 202);
+    const auto current = controller.RequestScan(Request(2, 22, 202));
+    assert(current.queued);
+    const auto rollback = controller.ReleaseStartClaimForRetry(stale.request_id);
+    assert(rollback.start_pending);
+    assert(rollback.pending.setup_generation == 2);
+    assert(controller.UnclaimedRequestIfCurrent(
+        rollback.request_id, 2, 22, 202).has_value());
+}
+
+void RollbackAfterInvalidationLetsNextCurrentRequestStart() {
+    Controller controller;
+    const auto stale = controller.RequestScan(Request(1, 11, 101));
+    ClaimStart(controller, stale.request_id);
+    controller.InvalidateSession(2, 22, 202);
+    assert(!controller.ReleaseStartClaimForRetry(stale.request_id).start_pending);
+    const auto current = controller.RequestScan(Request(2, 22, 202));
+    assert(current.start_now);
+}
+
 void SynchronousFailureRecoveryDoesNotRetryFailedOwner() {
     Controller controller;
     const auto owner = controller.RequestScan(Request(1, 11, 101));
@@ -1106,6 +1140,9 @@ void CallbackWinningWatchdogRecoveryNeedsNoReset() {
 int main() {
     EarlyPhysicalCallbackIsConsumedAfterBothCommits();
     LeaseBusyCoalescesOneUnclaimedCurrentRequest();
+    ClaimedStartCanReturnToUnclaimedAfterPhysicalAbandon();
+    RollbackAfterInvalidationPromotesCurrentPending();
+    RollbackAfterInvalidationLetsNextCurrentRequestStart();
     SynchronousFailureRecoveryDoesNotRetryFailedOwner();
     CleanupFailureCanEnterRecoveryAfterCallbackClaim();
     ClaimedStartMustRevalidateExactLifecycleBeforeSubmission();

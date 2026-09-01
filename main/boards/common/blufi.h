@@ -19,6 +19,7 @@
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
 #include "blufi_wifi_scan_lease_timer.h"
+#include "blufi_wifi_scan_retry_state.h"
 #include "blufi_wifi_scan_controller.h"
 #include "blufi_transition_gate.h"
 #include "audio/provisioning_session_binding.h"
@@ -222,10 +223,13 @@ private:
         uint64_t request_id,
         BlufiWifiScanController::Request request);
     void RetryOwnedWifiScanAfterLeaseBusy(
-        uint64_t request_id,
-        BlufiWifiScanController::Request request);
-    void DispatchOwnedWifiScanRetry();
-    void ScheduleWifiScanRetryFallback();
+        BlufiWifiScanRetryState::ExactRequest exact,
+        BlufiWifiScanController::Request request, bool notify_manager);
+    static void PollOwnedWifiScanRetry(void* context) noexcept;
+    void DispatchOwnedWifiScanRetry() noexcept;
+    void TryStartOwnedWifiScanNow(
+        BlufiWifiScanRetryState::ExactRequest exact,
+        bool notify_manager = true) noexcept;
     bool StartOwnedWifiScan(uint64_t request_id);
     void ConsumeOwnedWifiScanCompletion(uint64_t request_id);
     void ScheduleOwnedWifiScanWatchdog(
@@ -383,13 +387,12 @@ private:
     wifi_config_t wifi_scan_restore_ap_config_{};
     bool wifi_scan_restore_sta_config_valid_ = false;
     bool wifi_scan_restore_ap_config_valid_ = false;
-    std::atomic<bool> wifi_scan_retry_scheduled_{false};
-    uint64_t wifi_scan_retry_request_id_ = 0;
-    std::optional<BlufiWifiScanController::Request> wifi_scan_retry_request_;
+    BlufiWifiScanRetryState wifi_scan_retry_state_;
+    std::mutex wifi_scan_retry_timer_mutex_;
+    std::atomic<uint64_t> wifi_scan_driver_submission_request_id_{0};
     esp_timer_handle_t wifi_scan_retry_timer_ = nullptr;
     StaticTimer_t wifi_scan_retry_fallback_storage_{};
     TimerHandle_t wifi_scan_retry_fallback_timer_ = nullptr;
-    std::atomic<bool> wifi_scan_retry_fallback_scheduled_{false};
     BlufiWifiScanLeaseTimer wifi_scan_watchdog_timer_;
     BlufiWifiScanLeaseTimer wifi_scan_recovery_retry_timer_;
     esp_event_handler_instance_t scan_event_instance_ = nullptr;
