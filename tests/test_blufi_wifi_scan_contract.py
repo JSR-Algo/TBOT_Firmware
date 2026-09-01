@@ -1101,13 +1101,15 @@ def test_post_release_followups_are_contained_outside_ownership_rollback():
     assert "ScheduleOwnedWifiScanStart" in followup
 
 
-def test_completion_releases_physical_before_logical_and_durable_pending_handoff():
+def test_completion_commits_logical_before_physical_and_durable_pending_handoff():
     source = read("main/boards/common/blufi.cpp")
     completion = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
+    logical = completion.index("CommitPreparedCompletion(")
     physical = completion.index(".FinishCompletion(*lease)")
-    logical = completion.index("wifi_scan_controller_.FinishCompletion(")
-    assert physical < logical
+    release = completion.index("ReleaseCommittedCompletion(", physical)
+    assert logical < physical < release
+    assert "RetainCommittedCompletionForRecovery" in completion
     assert "SchedulePendingWifiScan" not in completion
     assert "ScheduleOwnedWifiScanStart" in completion
 
@@ -1117,8 +1119,23 @@ def test_manager_poller_busy_retry_does_not_self_notify_hot_loop():
     dispatch = function_body(source, "void Blufi::DispatchOwnedWifiScanRetry")
     retry = function_body(source, "void Blufi::RetryOwnedWifiScanAfterLeaseBusy")
 
-    assert "TryStartOwnedWifiScanNow(*exact, false)" in dispatch
+    assert "EnqueueOwnedWifiScanRetry" in dispatch
     assert "notify_manager" in retry
+
+
+def test_manager_poller_only_enqueues_exact_application_dispatch():
+    source = read("main/boards/common/blufi.cpp")
+    poll = function_body(source, "void Blufi::PollOwnedWifiScanRetry")
+    dispatch = function_body(source, "void Blufi::DispatchOwnedWifiScanRetry")
+    enqueue = function_body(source, "bool Blufi::EnqueueOwnedWifiScanRetry")
+
+    assert "TryStartOwnedWifiScanNow" not in poll + dispatch
+    assert "esp_wifi_scan_start" not in poll + dispatch
+    assert "Application::GetInstance().Schedule" in enqueue
+    assert "BeginDispatch" in enqueue
+    assert "CompleteDispatch" in enqueue
+    assert "TryStartOwnedWifiScanNow(exact" in enqueue
+    assert "catch (...)" in enqueue
 
 
 def test_blufi_watchdog_failures_enter_shared_recovery_immediately():

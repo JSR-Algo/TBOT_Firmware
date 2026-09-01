@@ -4,6 +4,7 @@
 #include "../../components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
 
 #include <cassert>
+#include <functional>
 #include <stdexcept>
 
 class WifiScanRecoveryExecutor {
@@ -324,6 +325,76 @@ void ReleasedPhysicalLeaseResumesLogicalRollbackAfterException() {
         requested.request_id, 1, 11, 101).has_value());
 }
 
+void ManagerPollOnlyQueuesApplicationAndRetriesScheduleThrow() {
+    State state;
+    state.Publish(Exact(7, 1, 11, 101));
+    std::function<void()> queued;
+    int schedule_attempts = 0;
+    int application_starts = 0;
+    bool on_manager_worker = false;
+
+    auto start_on_application = [&](State::ExactRequest exact) {
+        assert(!on_manager_worker);
+        if (!state.IsCurrentRevision(exact)) {
+            return;
+        }
+        ++application_starts;
+        assert(state.ClearIfExact(exact));
+    };
+    auto manager_poll = [&]() {
+        on_manager_worker = true;
+        const auto exact = state.BeginDispatch();
+        if (exact.has_value()) {
+            bool scheduled = false;
+            try {
+                ++schedule_attempts;
+                if (schedule_attempts == 1) {
+                    throw std::bad_alloc();
+                }
+                queued = [&, exact = *exact]() {
+                    start_on_application(exact);
+                };
+                scheduled = true;
+            } catch (...) {
+            }
+            state.CompleteDispatch(*exact, scheduled);
+        }
+        on_manager_worker = false;
+    };
+
+    manager_poll();
+    assert(schedule_attempts == 1);
+    assert(application_starts == 0);
+    assert(state.Snapshot().has_value());
+    assert(!state.Snapshot()->dispatch_scheduled);
+
+    manager_poll();
+    manager_poll();
+    assert(schedule_attempts == 2);
+    assert(application_starts == 0);
+    assert(queued);
+    queued();
+    assert(application_starts == 1);
+    assert(!state.Snapshot().has_value());
+}
+
+void LifecycleReplacementMakesQueuedApplicationCallbackNoop() {
+    State state;
+    state.Publish(Exact(7, 1, 11, 101));
+    const auto stale = state.BeginDispatch();
+    assert(stale.has_value());
+    state.CompleteDispatch(*stale, true);
+    state.Publish(Exact(8, 2, 22, 202));
+
+    int starts = 0;
+    if (state.IsCurrentRevision(*stale)) {
+        ++starts;
+    }
+    assert(starts == 0);
+    assert(state.Snapshot()->request_id == 8);
+    assert(!state.Snapshot()->dispatch_scheduled);
+}
+
 }  // namespace
 
 int main() {
@@ -341,4 +412,6 @@ int main() {
     ReleasedUnsubmittedRollbackMayRetryWithoutOwningLease();
     AcceptedDriverProgressCannotBecomeUnsubmittedAgain();
     ReleasedPhysicalLeaseResumesLogicalRollbackAfterException();
+    ManagerPollOnlyQueuesApplicationAndRetriesScheduleThrow();
+    LifecycleReplacementMakesQueuedApplicationCallbackNoop();
 }

@@ -2418,11 +2418,7 @@ void Blufi::ScheduleOwnedWifiScanStart(
     }
     wifi_scan_retry_state_.SignalPublished(
         []() { return false; }, []() { return false; },
-        [this, exact = *durable]() {
-            Application::GetInstance().Schedule(
-                [this, exact]() { TryStartOwnedWifiScanNow(exact); });
-            return true;
-        },
+        [this]() { return EnqueueOwnedWifiScanRetry(); },
         []() { return WifiManager::GetInstance().RequestScanLeaseRetryPoll(); });
 }
 
@@ -2574,11 +2570,27 @@ void Blufi::RetryOwnedWifiScanAfterLeaseBusy(
 }
 
 void Blufi::DispatchOwnedWifiScanRetry() noexcept {
-    const auto exact = wifi_scan_retry_state_.Snapshot();
+    EnqueueOwnedWifiScanRetry();
+}
+
+bool Blufi::EnqueueOwnedWifiScanRetry() noexcept {
+    const auto exact = wifi_scan_retry_state_.BeginDispatch();
     if (!exact.has_value()) {
-        return;
+        return false;
     }
-    TryStartOwnedWifiScanNow(*exact, false);
+    bool scheduled = false;
+    try {
+        Application::GetInstance().Schedule([this, exact = *exact]() {
+            if (!wifi_scan_retry_state_.IsCurrentRevision(exact)) {
+                return;
+            }
+            TryStartOwnedWifiScanNow(exact, false);
+        });
+        scheduled = true;
+    } catch (...) {
+    }
+    wifi_scan_retry_state_.CompleteDispatch(*exact, scheduled);
+    return scheduled;
 }
 
 BlufiWifiScanStartOutcome Blufi::CommitOwnedWifiScanStart(
@@ -3052,7 +3064,9 @@ bool Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) noexcept {
         Blufi* self = this;
         std::optional<WifiScanLeaseCoordinator::Lease> lease;
         bool physical_released = false;
-        bool logical_finished = false;
+        bool logical_prepared = false;
+        bool logical_committed = false;
+        bool logical_released = false;
         BlufiWifiScanController::FinishDecision finished;
         try {
         {
@@ -3171,20 +3185,62 @@ bool Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) noexcept {
 
         auto& coordinator =
             WifiManager::GetInstance().ScanLeaseCoordinator();
-        if (!coordinator.FinishCompletion(*lease)) {
-            if (coordinator.OwnsExactLease(*lease)) {
-                if (coordinator.RetainFailedCompletion(*lease) &&
-                    wifi_scan_controller_.RetainFailedCompletion(
-                        completion.request_id)) {
-                    RequestOwnedWifiScanRecovery(*lease);
+        bool retain_completion_for_recovery = false;
+        {
+            std::lock_guard<std::mutex> submission_lock(
+                wifi_scan_submission_mutex_);
+            logical_prepared =
+                self->wifi_scan_controller_.PrepareCompletion(
+                    completion.request_id);
+            if (!logical_prepared) {
+                const bool physical_retained =
+                    coordinator.RetainFailedCompletion(*lease);
+                const bool logical_retained = self->wifi_scan_controller_
+                    .RetainFailedCompletion(completion.request_id);
+                retain_completion_for_recovery =
+                    physical_retained && logical_retained;
+            } else {
+                logical_committed =
+                    self->wifi_scan_controller_.CommitPreparedCompletion(
+                        completion.request_id);
+            }
+            if (logical_prepared && !logical_committed) {
+                const bool physical_retained =
+                    coordinator.RetainFailedCompletion(*lease);
+                const bool logical_retained = self->wifi_scan_controller_
+                    .RetainFailedCompletion(completion.request_id);
+                retain_completion_for_recovery =
+                    physical_retained && logical_retained;
+            } else if (logical_committed &&
+                       !coordinator.FinishCompletion(*lease)) {
+                if (coordinator.OwnsExactLease(*lease)) {
+                    const bool physical_retained =
+                        coordinator.RetainFailedCompletion(*lease);
+                    const bool logical_retained = self->wifi_scan_controller_
+                        .RetainCommittedCompletionForRecovery(
+                            completion.request_id);
+                    retain_completion_for_recovery =
+                        physical_retained && logical_retained;
+                } else {
+                    physical_released = true;
+                    finished = self->wifi_scan_controller_
+                        .ReleaseCommittedCompletion(completion.request_id);
+                    logical_released = finished.completion_released;
                 }
-                return false;
+            } else if (logical_committed) {
+                physical_released = true;
+                finished = self->wifi_scan_controller_
+                    .ReleaseCommittedCompletion(completion.request_id);
+                logical_released = finished.completion_released;
             }
         }
-        physical_released = true;
-        finished = self->wifi_scan_controller_.FinishCompletion(
-            completion.request_id);
-        logical_finished = true;
+        if (retain_completion_for_recovery) {
+            RequestOwnedWifiScanRecovery(*lease);
+            return false;
+        }
+        if (!physical_released || !logical_released) {
+            return false;
+        }
         bool released_exact_lease = false;
         {
             std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
@@ -3229,11 +3285,11 @@ bool Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) noexcept {
         return true;
         } catch (...) {
             if (physical_released) {
-                if (!logical_finished) {
+                if (logical_committed && !logical_released) {
                     try {
-                        finished = wifi_scan_controller_.FinishCompletion(
-                            request_id);
-                        logical_finished = true;
+                        finished = wifi_scan_controller_
+                            .ReleaseCommittedCompletion(request_id);
+                        logical_released = finished.completion_released;
                         if (finished.start_pending) {
                             ScheduleOwnedWifiScanStart(
                                 finished.request_id, finished.pending);
@@ -3258,9 +3314,14 @@ bool Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) noexcept {
                 if (lease.has_value()) {
                     auto& coordinator =
                         WifiManager::GetInstance().ScanLeaseCoordinator();
-                    if (coordinator.RetainFailedCompletion(*lease) &&
-                        wifi_scan_controller_.RetainFailedCompletion(
-                            request_id)) {
+                    const bool physical_retained =
+                        coordinator.RetainFailedCompletion(*lease);
+                    const bool logical_retained = logical_committed
+                        ? wifi_scan_controller_
+                            .RetainCommittedCompletionForRecovery(request_id)
+                        : wifi_scan_controller_.RetainFailedCompletion(
+                            request_id);
+                    if (physical_retained && logical_retained) {
                         RequestOwnedWifiScanRecovery(*lease);
                     }
                 }

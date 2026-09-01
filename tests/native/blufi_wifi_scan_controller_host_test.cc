@@ -1176,6 +1176,66 @@ void CallbackWinningWatchdogRecoveryNeedsNoReset() {
     assert(physical.FinishCompletion(lease.lease));
 }
 
+void LogicalCompletionCommitsBeforePhysicalReleaseAndPendingPublication() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    const auto owner = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    ClaimStart(logical, owner.request_id);
+    assert(physical.CommitSubmission(lease.lease, true).accepted);
+    assert(logical.CommitStart(owner.request_id, true).accepted);
+    assert(physical.ObserveScanDone(lease.lease).consume_now);
+    const auto completion = logical.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    const auto pending = logical.RequestScan(Request(1, 11, 101));
+    assert(pending.queued);
+
+    assert(logical.PrepareCompletion(completion.request_id));
+    assert(logical.CommitPreparedCompletion(completion.request_id));
+    assert(logical.phase() == Controller::Phase::kCompleting);
+    assert(!logical.UnclaimedRequestIfCurrent(
+        pending.request_id, 1, 11, 101).has_value());
+    assert(!physical.TryAcquire(WifiScanLeaseCoordinator::Owner::kStation)
+                .acquired);
+
+    assert(physical.FinishCompletion(lease.lease));
+    const auto released =
+        logical.ReleaseCommittedCompletion(completion.request_id);
+    assert(released.completion_released);
+    assert(released.start_pending);
+    assert(logical.UnclaimedRequestIfCurrent(
+        released.request_id, 1, 11, 101).has_value());
+}
+
+void PhysicalFinishFailureRetainsLogicalAndPhysicalRecoveryDebt() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    const auto owner = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    ClaimStart(logical, owner.request_id);
+    assert(physical.CommitSubmission(lease.lease, true).accepted);
+    assert(logical.CommitStart(owner.request_id, true).accepted);
+    assert(physical.ObserveScanDone(lease.lease).consume_now);
+    const auto completion = logical.BeginCompletion(1, 11, 101);
+    assert(completion.owned_callback);
+    assert(logical.PrepareCompletion(completion.request_id));
+    assert(logical.CommitPreparedCompletion(completion.request_id));
+
+    auto wrong = lease.lease;
+    ++wrong.lease_id;
+    assert(!physical.FinishCompletion(wrong));
+    assert(physical.RetainFailedCompletion(lease.lease));
+    assert(logical.RetainCommittedCompletionForRecovery(
+        completion.request_id));
+    assert(logical.phase() == Controller::Phase::kDraining);
+    assert(!physical.TryAcquire(WifiScanLeaseCoordinator::Owner::kStation)
+                .acquired);
+    assert(logical.BeginRecovery(completion.request_id).valid);
+    assert(physical.BeginRecovery(lease.lease).begun());
+}
+
 }  // namespace
 
 int main() {
@@ -1231,6 +1291,8 @@ int main() {
     CallbackLatchedBeforePreSubmissionFailureCannotStrandLease();
     WatchdogArmFailureEntersExactRecoveryAndRetriesNotification();
     CallbackWinningWatchdogRecoveryNeedsNoReset();
+    LogicalCompletionCommitsBeforePhysicalReleaseAndPendingPublication();
+    PhysicalFinishFailureRetainsLogicalAndPhysicalRecoveryDebt();
     std::cout << "PASS: BluFi WiFi scan controller host model\n";
     return 0;
 }

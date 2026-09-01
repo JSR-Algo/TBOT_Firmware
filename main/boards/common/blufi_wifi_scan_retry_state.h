@@ -16,6 +16,8 @@ public:
         bool save_results = false;
         bool send_list = false;
         uint64_t revision = 0;
+        bool dispatch_enqueuing = false;
+        bool dispatch_scheduled = false;
     };
 
     bool Publish(ExactRequest exact) noexcept {
@@ -53,6 +55,46 @@ public:
             return active_;
         } catch (...) {
             return std::nullopt;
+        }
+    }
+
+    std::optional<ExactRequest> BeginDispatch() noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!active_.has_value() || active_->dispatch_enqueuing ||
+                active_->dispatch_scheduled) {
+                return std::nullopt;
+            }
+            active_->dispatch_enqueuing = true;
+            return active_;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    bool CompleteDispatch(const ExactRequest& exact, bool scheduled) noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!active_.has_value() || exact.revision == 0 ||
+                active_->revision != exact.revision ||
+                !active_->dispatch_enqueuing) {
+                return false;
+            }
+            active_->dispatch_enqueuing = false;
+            active_->dispatch_scheduled = scheduled;
+            return true;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    bool IsCurrentRevision(const ExactRequest& exact) const noexcept {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            return active_.has_value() && exact.revision != 0 &&
+                active_->revision == exact.revision;
+        } catch (...) {
+            return false;
         }
     }
 
@@ -104,6 +146,8 @@ private:
             ++last_revision_;
         }
         exact.revision = last_revision_;
+        exact.dispatch_enqueuing = false;
+        exact.dispatch_scheduled = false;
         active_ = exact;
     }
 

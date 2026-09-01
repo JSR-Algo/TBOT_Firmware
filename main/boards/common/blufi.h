@@ -227,6 +227,7 @@ private:
         BlufiWifiScanRetryState::ExactRequest exact,
         BlufiWifiScanController::Request request, bool notify_manager);
     static void PollOwnedWifiScanRetry(void* context) noexcept;
+    bool EnqueueOwnedWifiScanRetry() noexcept;
     void DispatchOwnedWifiScanRetry() noexcept;
     void TryStartOwnedWifiScanNow(
         BlufiWifiScanRetryState::ExactRequest exact,

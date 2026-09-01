@@ -12,7 +12,13 @@ public:
                                   ? 1
                                   : initial_driver_incarnation) {}
 
-    enum class Phase : uint8_t { kIdle, kStarting, kRunning, kDraining };
+    enum class Phase : uint8_t {
+        kIdle,
+        kStarting,
+        kRunning,
+        kCompleting,
+        kDraining,
+    };
 
     struct Request {
         uint32_t setup_generation = 0;
@@ -53,6 +59,7 @@ public:
     };
 
     struct FinishDecision {
+        bool completion_released = false;
         bool start_pending = false;
         uint64_t request_id = 0;
         Request pending;
@@ -243,17 +250,50 @@ public:
         return result;
     }
 
-    FinishDecision FinishCompletion(uint64_t request_id) {
+    bool PrepareCompletion(uint64_t request_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            !callback_claimed_ || recovering_ || completion_prepared_ ||
+            (phase_ != Phase::kRunning && phase_ != Phase::kDraining)) {
+            return false;
+        }
+        completion_prepared_ = true;
+        phase_ = Phase::kCompleting;
+        return true;
+    }
+
+    bool CommitPreparedCompletion(uint64_t request_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            !callback_claimed_ || !completion_prepared_ ||
+            completion_committed_ || phase_ != Phase::kCompleting) {
+            return false;
+        }
+        completion_committed_ = true;
+        return true;
+    }
+
+    FinishDecision ReleaseCommittedCompletion(uint64_t request_id) {
         std::lock_guard<std::mutex> lock(mutex_);
         FinishDecision result;
         if (request_id == 0 || request_id != owner_request_id_ ||
-            !callback_claimed_) {
+            !callback_claimed_ || !completion_prepared_ ||
+            !completion_committed_ || phase_ != Phase::kCompleting) {
             return result;
         }
 
+        result.completion_released = true;
         ResetOwner();
         PromotePending(result);
         return result;
+    }
+
+    FinishDecision FinishCompletion(uint64_t request_id) {
+        if (!PrepareCompletion(request_id) ||
+            !CommitPreparedCompletion(request_id)) {
+            return FinishDecision{};
+        }
+        return ReleaseCommittedCompletion(request_id);
     }
 
     bool RetainFailedCompletion(uint64_t request_id) {
@@ -263,6 +303,25 @@ public:
             return false;
         }
         callback_claimed_ = false;
+        invalidated_ = true;
+        retry_owner_after_recovery_ = false;
+        phase_ = Phase::kDraining;
+        completion_prepared_ = false;
+        completion_committed_ = false;
+        return true;
+    }
+
+    bool RetainCommittedCompletionForRecovery(uint64_t request_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (request_id == 0 || request_id != owner_request_id_ ||
+            !callback_claimed_ || !completion_prepared_ ||
+            !completion_committed_ || recovering_ ||
+            phase_ != Phase::kCompleting) {
+            return false;
+        }
+        callback_claimed_ = false;
+        completion_prepared_ = false;
+        completion_committed_ = false;
         invalidated_ = true;
         retry_owner_after_recovery_ = false;
         phase_ = Phase::kDraining;
@@ -460,6 +519,8 @@ private:
         owner_request_id_ = 0;
         submission_claimed_ = false;
         callback_claimed_ = false;
+        completion_prepared_ = false;
+        completion_committed_ = false;
         invalidated_ = false;
         retry_owner_after_recovery_ = true;
     }
@@ -508,6 +569,8 @@ private:
     bool lifecycle_initialized_ = false;
     bool submission_claimed_ = false;
     bool callback_claimed_ = false;
+    bool completion_prepared_ = false;
+    bool completion_committed_ = false;
     bool invalidated_ = false;
     bool recovering_ = false;
     bool retry_owner_after_recovery_ = true;
