@@ -94,6 +94,7 @@ public:
     bool StopRadio();
     bool IsInitialized() const;
     bool HasTeardownFault() const;
+    bool HasActiveExternalScan() const;
 
     // ==================== Station Mode ====================
 
@@ -137,9 +138,14 @@ public:
         const WifiScanLeaseCoordinator::Lease& lease) {
         return ScheduleScanRecovery(lease);
     }
-    bool PrepareExternalScanRadio(
+    enum class ExternalScanRadioResult : uint8_t {
+        kReady,
+        kCleanFailure,
+        kRecoveryRequired,
+    };
+    ExternalScanRadioResult PrepareExternalScanRadio(
         const WifiScanLeaseCoordinator::Lease& lease);
-    bool FinishExternalScanRadio(
+    ExternalScanRadioResult FinishExternalScanRadio(
         const WifiScanLeaseCoordinator::Lease& lease);
     bool ReleaseExternalScanRadioToken(
         const WifiScanLeaseCoordinator::Lease& lease);
@@ -184,6 +190,10 @@ public:
     }
     ExternalScanRecoveryRole TestExternalRecoveryRole(
             const WifiScanLeaseCoordinator::Lease& lease) const;
+    bool TestOwnsExternalScanToken(
+            const WifiScanLeaseCoordinator::Lease& lease) const {
+        return ExternalRecoverySnapshotFor(lease).has_value();
+    }
 #endif
 
 private:

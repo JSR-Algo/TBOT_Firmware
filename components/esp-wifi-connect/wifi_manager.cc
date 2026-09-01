@@ -55,11 +55,11 @@ bool WifiManager::RegisterScanRecoveryOwner(
     return true;
 }
 
-bool WifiManager::PrepareExternalScanRadio(
+WifiManager::ExternalScanRadioResult WifiManager::PrepareExternalScanRadio(
         const WifiScanLeaseCoordinator::Lease& lease) {
     if (lease.owner != WifiScanLeaseCoordinator::Owner::kBlockingUi ||
         !scan_lease_coordinator_.OwnsExactLease(lease)) {
-        return false;
+        return ExternalScanRadioResult::kCleanFailure;
     }
     WifiStation* station = nullptr;
     ExternalScanRecoverySnapshot snapshot;
@@ -67,7 +67,7 @@ bool WifiManager::PrepareExternalScanRadio(
         std::lock_guard<std::mutex> lock(mutex_);
         if (!initialized_ || lifecycle_transition_in_progress_ ||
             scan_recovery_active_ || HasActiveExternalScanLocked()) {
-            return false;
+            return ExternalScanRadioResult::kCleanFailure;
         }
         snapshot.lease = lease;
         snapshot.lifecycle_generation = lifecycle_generation_;
@@ -95,7 +95,7 @@ bool WifiManager::PrepareExternalScanRadio(
         wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
         if (esp_wifi_get_mode(&mode) != ESP_OK) {
             release_reservation();
-            return false;
+            return ExternalScanRadioResult::kCleanFailure;
         }
         snapshot.idle_restore_mode = mode;
         const bool has_sta = mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA;
@@ -103,7 +103,7 @@ bool WifiManager::PrepareExternalScanRadio(
         if ((has_sta && esp_wifi_get_config(WIFI_IF_STA, &sta) != ESP_OK) ||
             (has_ap && esp_wifi_get_config(WIFI_IF_AP, &ap) != ESP_OK)) {
             release_reservation();
-            return false;
+            return ExternalScanRadioResult::kCleanFailure;
         }
         snapshot.idle_restore_sta_config_valid = has_sta;
         snapshot.idle_restore_ap_config_valid = has_ap;
@@ -112,7 +112,7 @@ bool WifiManager::PrepareExternalScanRadio(
         if (esp_wifi_get_ps(&power_save) != ESP_OK ||
             esp_wifi_get_band_mode(&band_mode) != ESP_OK) {
             release_reservation();
-            return false;
+            return ExternalScanRadioResult::kCleanFailure;
         }
         snapshot.idle_restore_power_save = power_save;
         snapshot.idle_restore_max_tx_power = max_tx_power;
@@ -127,13 +127,13 @@ bool WifiManager::PrepareExternalScanRadio(
                 snapshot.idle_restore_radio_started = true;
             } else if (probe != ESP_ERR_WIFI_NOT_STARTED) {
                 release_reservation();
-                return false;
+                return ExternalScanRadioResult::kCleanFailure;
             }
         }
         if (snapshot.idle_restore_radio_started) {
             if (esp_wifi_get_max_tx_power(&max_tx_power) != ESP_OK) {
                 release_reservation();
-                return false;
+                return ExternalScanRadioResult::kCleanFailure;
             }
             snapshot.idle_restore_max_tx_power = max_tx_power;
             snapshot.idle_restore_max_tx_power_valid = true;
@@ -143,7 +143,7 @@ bool WifiManager::PrepareExternalScanRadio(
         if (snapshot.idle_scan_changed_mode &&
             esp_wifi_set_mode(scan_mode) != ESP_OK) {
             release_reservation();
-            return false;
+            return ExternalScanRadioResult::kCleanFailure;
         }
         snapshot.idle_radio_prepared = true;
         if (!snapshot.idle_restore_radio_started) {
@@ -151,11 +151,15 @@ bool WifiManager::PrepareExternalScanRadio(
             if (start == ESP_ERR_WIFI_STATE) {
                 snapshot.idle_restore_radio_started = true;
             } else if (start != ESP_OK) {
-                if (snapshot.idle_scan_changed_mode) {
-                    RestoreIdleExternalScanRadio(snapshot, false);
+                if (snapshot.idle_scan_changed_mode &&
+                    !RestoreIdleExternalScanRadio(snapshot, false)) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    external_scan_recovery_snapshots_[
+                        static_cast<size_t>(lease.owner)] = snapshot;
+                    return ExternalScanRadioResult::kRecoveryRequired;
                 }
                 release_reservation();
-                return false;
+                return ExternalScanRadioResult::kCleanFailure;
             }
         }
     }
@@ -173,26 +177,30 @@ bool WifiManager::PrepareExternalScanRadio(
         }
     }
     if (!current) {
-        if (snapshot.idle_radio_prepared) {
-            RestoreIdleExternalScanRadio(snapshot, false);
+        if (snapshot.idle_radio_prepared &&
+            !RestoreIdleExternalScanRadio(snapshot, false)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            external_scan_recovery_snapshots_[
+                static_cast<size_t>(lease.owner)] = snapshot;
+            return ExternalScanRadioResult::kRecoveryRequired;
         }
         release_reservation();
-        return false;
+        return ExternalScanRadioResult::kCleanFailure;
     }
-    return true;
+    return ExternalScanRadioResult::kReady;
 }
 
-bool WifiManager::FinishExternalScanRadio(
+WifiManager::ExternalScanRadioResult WifiManager::FinishExternalScanRadio(
         const WifiScanLeaseCoordinator::Lease& lease) {
     const auto snapshot = ExternalRecoverySnapshotFor(lease);
     if (!snapshot.has_value()) {
-        return false;
+        return ExternalScanRadioResult::kRecoveryRequired;
     }
     if (snapshot->role == ExternalScanRecoveryRole::kIdle &&
         !RestoreIdleExternalScanRadio(*snapshot, false)) {
-        return false;
+        return ExternalScanRadioResult::kRecoveryRequired;
     }
-    return true;
+    return ExternalScanRadioResult::kReady;
 }
 
 bool WifiManager::ReleaseExternalScanRadioToken(
@@ -809,6 +817,11 @@ bool WifiManager::IsInitialized() const {
 bool WifiManager::HasTeardownFault() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return wifi_teardown_faulted_;
+}
+
+bool WifiManager::HasActiveExternalScan() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return scan_recovery_active_ || HasActiveExternalScanLocked();
 }
 
 // ==================== Station Mode ====================

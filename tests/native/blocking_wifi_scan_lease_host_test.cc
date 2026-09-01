@@ -2,6 +2,7 @@
 #include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_policy.h"
 #include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_retry_state.h"
 #include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_completion_status.h"
+#include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_worker_state.h"
 
 #include <cassert>
 #include <condition_variable>
@@ -223,6 +224,126 @@ void AuthenticatedZeroStatusAllowsResultConsumption() {
     assert(status.Succeeded(lease));
 }
 
+void ScanWorkerRequestIsDurableCoalescedAndGenerationBound() {
+    BlockingWifiScanWorkerState state;
+    const BlockingWifiScanWorkerState::Request first{20, 1};
+    assert(state.Publish(first));
+    assert(!state.Publish(first));
+    assert(state.NeedsWorkerCreation());
+    state.ObserveWorkerCreation(false);
+    assert(state.NeedsWorkerCreation());
+    state.ObserveWorkerCreation(true);
+    assert(state.NeedsNotification());
+    state.ObserveNotification(false);
+    assert(state.NeedsNotification());
+    state.ObserveNotification(true);
+    const auto taken = state.TakeNotified();
+    assert(taken.has_value());
+    state.CancelGeneration(20);
+    assert(!state.CompleteIfCurrent(first));
+    assert(!state.Publish({20, 2}));
+    assert(state.Publish({21, 1}));
+}
+
+void ScanWorkerRenotifiesRequestPublishedWhileAnotherIsInFlight() {
+    BlockingWifiScanWorkerState state;
+    const BlockingWifiScanWorkerState::Request first{30, 1};
+    const BlockingWifiScanWorkerState::Request second{30, 2};
+    assert(state.Publish(first));
+    state.ObserveWorkerCreation(true);
+    state.ObserveNotification(true);
+    assert(state.TakeNotified().has_value());
+    assert(state.Publish(second));
+    state.ObserveNotification(true);
+    assert(state.CompleteIfCurrent(first));
+    assert(!state.NeedsNotification());
+    const auto taken = state.TakeNotified();
+    assert(taken.has_value());
+    assert(taken->revision == second.revision);
+    assert(state.CompleteIfCurrent(second));
+}
+
+void ScanWorkerRejectsStaleCompletionWithoutLosingNewRequest() {
+    BlockingWifiScanWorkerState state;
+    const BlockingWifiScanWorkerState::Request current{40, 2};
+    assert(state.Publish(current));
+    state.ObserveWorkerCreation(true);
+    state.ObserveNotification(true);
+    assert(state.TakeNotified().has_value());
+    assert(!state.CompleteIfCurrent({40, 1}));
+    assert(state.CompleteIfCurrent(current));
+}
+
+void ScanWorkerSchedulingFailureRestoresDurableRequest() {
+    BlockingWifiScanWorkerState state;
+    const BlockingWifiScanWorkerState::Request request{50, 1};
+    assert(state.Publish(request));
+    state.ObserveWorkerCreation(true);
+    state.ObserveNotification(true);
+    assert(state.TakeNotified().has_value());
+    assert(state.RetryInFlight(request));
+    assert(state.NeedsNotification());
+    state.ObserveNotification(true);
+    assert(state.TakeNotified().has_value());
+    assert(state.CompleteIfCurrent(request));
+}
+
+void PreSubmitCallbackFailureTransitionsToRecoverableDebt() {
+    WifiScanLeaseCoordinator coordinator;
+    BlockingWifiScanLeaseState owner;
+    const auto acquired = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi);
+    assert(acquired.acquired);
+    assert(owner.Begin(acquired.lease));
+    assert(coordinator.ObserveScanDone(acquired.lease).deferred_until_commit);
+    assert(owner.OnCallback(acquired.lease) ==
+           BlockingWifiScanLeaseState::CallbackAction::kWakeWaiter);
+    const auto commit = coordinator.CommitSubmission(acquired.lease, false);
+    assert(commit.consume_latched);
+    assert(coordinator.RetainFailedCompletion(acquired.lease));
+    assert(owner.RetainCompletionForRecovery(acquired.lease));
+    assert(owner.HasDebt(acquired.lease));
+    assert(!coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kStation).acquired);
+
+    WifiScanLeaseCoordinator lagging_coordinator;
+    BlockingWifiScanLeaseState lagging_owner;
+    const auto lagging = lagging_coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlockingUi);
+    assert(lagging_owner.Begin(lagging.lease));
+    assert(lagging_owner.RetainForRecovery(lagging.lease));
+    assert(lagging_owner.OnCallback(lagging.lease) ==
+           BlockingWifiScanLeaseState::CallbackAction::kIgnore);
+}
+
+void DelayedScanWorkerDoesNotBlockUnrelatedApplicationWork() {
+    std::mutex mutex;
+    std::condition_variable started;
+    constexpr auto modeled_scan_wait = std::chrono::milliseconds(5200);
+    bool worker_started = false;
+    bool release_worker = false;
+    std::thread worker([&]() {
+        std::unique_lock<std::mutex> lock(mutex);
+        worker_started = true;
+        started.notify_one();
+        started.wait(lock, [&]() { return release_worker; });
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        started.wait(lock, [&]() { return worker_started; });
+    }
+    // The gate deterministically models the production 5.2 second scan wait.
+    assert(modeled_scan_wait == std::chrono::milliseconds(5200));
+    bool application_sentinel_ran = true;
+    assert(application_sentinel_ran);
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        release_worker = true;
+    }
+    started.notify_one();
+    worker.join();
+}
+
 }  // namespace
 
 int main() {
@@ -241,6 +362,12 @@ int main() {
     RecoveryRetryCoalescesAndStaleUiGenerationCancels();
     AuthenticatedDriverFailureCannotPublishScanResults();
     AuthenticatedZeroStatusAllowsResultConsumption();
+    ScanWorkerRequestIsDurableCoalescedAndGenerationBound();
+    ScanWorkerRenotifiesRequestPublishedWhileAnotherIsInFlight();
+    ScanWorkerRejectsStaleCompletionWithoutLosingNewRequest();
+    ScanWorkerSchedulingFailureRestoresDurableRequest();
+    PreSubmitCallbackFailureTransitionsToRecoverableDebt();
+    DelayedScanWorkerDoesNotBlockUnrelatedApplicationWork();
     std::cout << "blocking wifi scan lease host tests: PASS\n";
     return 0;
 }

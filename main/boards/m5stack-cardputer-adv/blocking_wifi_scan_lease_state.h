@@ -23,13 +23,14 @@ public:
         waiter_attached_ = true;
         callback_claimed_ = false;
         recovery_debt_ = false;
+        ignore_callbacks_ = false;
         return true;
     }
 
     CallbackAction OnCallback(
             const WifiScanLeaseCoordinator::Lease& lease) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!MatchesLocked(lease) || callback_claimed_) {
+        if (!MatchesLocked(lease) || callback_claimed_ || ignore_callbacks_) {
             return CallbackAction::kIgnore;
         }
         callback_claimed_ = true;
@@ -72,6 +73,18 @@ public:
         }
         waiter_attached_ = false;
         recovery_debt_ = true;
+        return true;
+    }
+
+    bool RetainForRecovery(
+            const WifiScanLeaseCoordinator::Lease& lease) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!MatchesLocked(lease)) {
+            return false;
+        }
+        waiter_attached_ = false;
+        recovery_debt_ = true;
+        ignore_callbacks_ = true;
         return true;
     }
 
@@ -120,6 +133,7 @@ private:
         waiter_attached_ = false;
         callback_claimed_ = false;
         recovery_debt_ = false;
+        ignore_callbacks_ = false;
     }
 
     mutable std::mutex mutex_;
@@ -127,4 +141,5 @@ private:
     bool waiter_attached_ = false;
     bool callback_claimed_ = false;
     bool recovery_debt_ = false;
+    bool ignore_callbacks_ = false;
 };

@@ -1,5 +1,6 @@
 #include "wifi_board.h"
 #include "wifi_config_ui.h"
+#include "blocking_wifi_scan_worker_state.h"
 #include "codecs/es8311_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
@@ -10,6 +11,8 @@
 
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <driver/i2c_master.h>
 #include <driver/i2s_common.h>
 #include <driver/spi_common.h>
@@ -22,6 +25,8 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <utility>
 
 #define TAG "CardputerAdv"
 
@@ -36,22 +41,102 @@ private:
     esp_lcd_panel_io_handle_t panel_io_ = nullptr;
     esp_lcd_panel_handle_t panel_ = nullptr;
     Tca8418Keyboard* keyboard_ = nullptr;
-    std::unique_ptr<WifiConfigUI> wifi_config_ui_;
+    std::shared_ptr<WifiConfigUI> wifi_config_ui_;
     bool wifi_config_mode_ = false;
     std::recursive_mutex wifi_config_ui_mutex_;
     esp_timer_handle_t wifi_config_ui_poll_timer_ = nullptr;
     std::atomic<bool> wifi_config_ui_poll_enqueued_{false};
+    BlockingWifiScanWorkerState wifi_scan_worker_state_;
+    TaskHandle_t wifi_scan_worker_task_ = nullptr;
+    bool wifi_reconnect_after_scan_ = false;
+    std::optional<std::pair<std::string, std::string>>
+        pending_wifi_connection_after_scan_;
+
+    static void WifiScanWorkerTask(void* context) {
+        auto* board = static_cast<M5StackCardputerAdvBoard*>(context);
+        for (;;) {
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            const auto request = board->wifi_scan_worker_state_.TakeNotified();
+            if (!request.has_value()) {
+                continue;
+            }
+            auto result = WifiConfigUI::RunWifiScanWorker(
+                request->ui_generation);
+            try {
+                Application::GetInstance().Schedule(
+                    [board, request = *request, result = std::move(result)]() mutable {
+                        try {
+                            std::lock_guard<std::recursive_mutex> lock(
+                                board->wifi_config_ui_mutex_);
+                            if (board->wifi_config_ui_ &&
+                                board->wifi_config_ui_->Generation() ==
+                                    request.ui_generation) {
+                                board->wifi_config_ui_->CompleteWifiScanWorker(
+                                    request.revision, std::move(result));
+                            }
+                        } catch (...) {
+                        }
+                    });
+            } catch (...) {
+                board->wifi_scan_worker_state_.RetryInFlight(*request);
+                continue;
+            }
+            board->wifi_scan_worker_state_.CompleteIfCurrent(*request);
+        }
+    }
+
+    bool SubmitWifiScan(uint64_t ui_generation, uint64_t revision) {
+        return wifi_scan_worker_state_.Publish({ui_generation, revision});
+    }
+
+    void EnsureWifiScanWorker() {
+        if (wifi_scan_worker_state_.NeedsWorkerCreation()) {
+            TaskHandle_t task = nullptr;
+            const bool created = xTaskCreate(
+                &M5StackCardputerAdvBoard::WifiScanWorkerTask,
+                "cardputer_wifi_scan", 6144, this, 5, &task) == pdPASS;
+            if (created) {
+                wifi_scan_worker_task_ = task;
+            }
+            wifi_scan_worker_state_.ObserveWorkerCreation(created);
+        }
+    }
+
+    void NotifyWifiScanWorker() {
+        if (wifi_scan_worker_state_.NeedsNotification()) {
+            const bool delivered = wifi_scan_worker_task_ != nullptr &&
+                xTaskNotifyGive(wifi_scan_worker_task_) == pdPASS;
+            wifi_scan_worker_state_.ObserveNotification(delivered);
+        }
+    }
 
     void InitializeWifiConfigUiPoller() {
         const esp_timer_create_args_t args{
             .callback = [](void* context) {
                 auto* board = static_cast<M5StackCardputerAdvBoard*>(context);
+                board->NotifyWifiScanWorker();
                 if (board->wifi_config_ui_poll_enqueued_.exchange(true)) {
                     return;
                 }
                 try {
                     Application::GetInstance().Schedule([board]() {
                         try {
+                            board->EnsureWifiScanWorker();
+                            board->NotifyWifiScanWorker();
+                            auto& manager = WifiManager::GetInstance();
+                            if (board->pending_wifi_connection_after_scan_ &&
+                                !manager.HasActiveExternalScan()) {
+                                auto credentials = std::move(
+                                    *board->pending_wifi_connection_after_scan_);
+                                board->pending_wifi_connection_after_scan_.reset();
+                                board->AttemptWifiConnection(
+                                    credentials.first, credentials.second);
+                            }
+                            if (board->wifi_reconnect_after_scan_ &&
+                                !manager.HasActiveExternalScan()) {
+                                board->wifi_reconnect_after_scan_ = false;
+                                board->TryWifiConnect();
+                            }
                             std::lock_guard<std::recursive_mutex> lock(
                                 board->wifi_config_ui_mutex_);
                             if (board->wifi_config_mode_ &&
@@ -291,10 +376,14 @@ private:
         ESP_LOGI(TAG, "Starting keyboard WiFi config UI");
         std::lock_guard<std::recursive_mutex> lock(wifi_config_ui_mutex_);
         wifi_config_mode_ = true;
-        wifi_config_ui_ = std::make_unique<WifiConfigUI>(display_);
+        wifi_config_ui_ = std::make_shared<WifiConfigUI>(display_);
         wifi_config_ui_->SetConnectCallback([this](const std::string& ssid, const std::string& password) {
             AttemptWifiConnection(ssid, password);
         });
+        wifi_config_ui_->SetScanRequestCallback(
+            [this](uint64_t generation, uint64_t revision) {
+                return SubmitWifiScan(generation, revision);
+            });
         wifi_config_ui_->Start();
     }
 
@@ -302,10 +391,14 @@ private:
         ESP_LOGI(TAG, "Starting keyboard WiFi config UI (saved list)");
         std::lock_guard<std::recursive_mutex> lock(wifi_config_ui_mutex_);
         wifi_config_mode_ = true;
-        wifi_config_ui_ = std::make_unique<WifiConfigUI>(display_);
+        wifi_config_ui_ = std::make_shared<WifiConfigUI>(display_);
         wifi_config_ui_->SetConnectCallback([this](const std::string& ssid, const std::string& password) {
             AttemptWifiConnection(ssid, password);
         });
+        wifi_config_ui_->SetScanRequestCallback(
+            [this](uint64_t generation, uint64_t revision) {
+                return SubmitWifiScan(generation, revision);
+            });
         wifi_config_ui_->StartWithSavedList();
     }
 
@@ -313,12 +406,18 @@ private:
         ESP_LOGI(TAG, "Attempting WiFi connection (ssid_len=%u)",
                  static_cast<unsigned>(ssid.size()));
 
+        auto& wifi_manager = WifiManager::GetInstance();
+        if (wifi_manager.HasActiveExternalScan()) {
+            pending_wifi_connection_after_scan_ = {ssid, password};
+            ESP_LOGI(TAG, "Deferring WiFi connection until scan recovery completes");
+            return;
+        }
+
         // Add to SSID manager (will be saved and used for connection)
         auto& ssid_manager = SsidManager::GetInstance();
         ssid_manager.AddSsid(ssid, password);
 
         // Stop config AP mode and trigger reconnection with new credentials
-        auto& wifi_manager = WifiManager::GetInstance();
         if (wifi_manager.IsConfigMode()) {
             wifi_manager.StopConfigAp();
         }
@@ -348,13 +447,23 @@ private:
         ESP_LOGI(TAG, "Exiting keyboard WiFi config mode");
         std::lock_guard<std::recursive_mutex> lock(wifi_config_ui_mutex_);
         wifi_config_mode_ = false;
+        if (wifi_config_ui_) {
+            wifi_scan_worker_state_.CancelGeneration(
+                wifi_config_ui_->Generation());
+            wifi_config_ui_->CancelPendingScan();
+        }
         wifi_config_ui_.reset();
 
         // Restart normal WiFi connection flow
         auto& app = Application::GetInstance();
         if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
             // Try to connect with saved credentials
-            TryWifiConnect();
+            auto& manager = WifiManager::GetInstance();
+            if (manager.HasActiveExternalScan()) {
+                wifi_reconnect_after_scan_ = true;
+            } else {
+                TryWifiConnect();
+            }
         }
     }
 

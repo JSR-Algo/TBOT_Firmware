@@ -58,7 +58,8 @@ def test_all_wifi_scan_start_calls_use_global_lease():
     }
 
     cardputer = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
-    scan = function_body(cardputer, "bool WifiConfigUI::DoWifiScan")
+    scan = function_body(
+        cardputer, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
     assert "Owner::kBlockingUi" in cardputer
     assert "RegisterScanRecoveryOwner" in cardputer
     assert "esp_event_handler_instance_register" in cardputer
@@ -1239,7 +1240,7 @@ def test_blufi_scan_recovery_uses_shared_manager_executor():
 
 def test_cardputer_blocking_scan_uses_nonblocking_idf_callback_semantics():
     source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
-    scan = function_body(source, "bool WifiConfigUI::DoWifiScan")
+    scan = function_body(source, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
     assert "esp_wifi_scan_start(&scan_config, false)" in scan
     assert "esp_wifi_scan_start(&scan_config, true)" not in scan
     assert "BlockingWifiScanPolicy::CompletionWaitMs" in source
@@ -1261,7 +1262,7 @@ def test_cardputer_recovery_is_manager_owned_and_has_durable_exact_retry():
 def test_cardputer_ui_prepares_idle_radio_and_finishes_exact_transaction():
     source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
     manager = read("components/esp-wifi-connect/wifi_manager.cc")
-    scan = function_body(source, "bool WifiConfigUI::DoWifiScan")
+    scan = function_body(source, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
     assert "PrepareExternalScanRadio(lease)" in scan
     assert "FinishExternalScanRadio(lease)" in source
     assert "esp_wifi_start" not in scan
@@ -1295,15 +1296,48 @@ def test_cardputer_board_has_real_ui_poll_timer_caller():
     source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
     poll = function_body(source, "void WifiConfigUI::Poll")
     assert "PeekRecoveryRetry" in poll
-    assert "ConsumeRecoveryRetry" in poll
     assert "StartScanning()" in poll
-    scan = function_body(source, "bool WifiConfigUI::DoWifiScan")
-    assert "PublishBusyRetry(ui_generation_)" in scan
-
+    complete = function_body(source, "void WifiConfigUI::CompleteWifiScanWorker")
+    assert "ConsumeRecoveryRetry" in complete
+    scan = function_body(source, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
+    assert "PublishBusyRetry(ui_generation)" in scan
+    start = function_body(source, "bool WifiConfigUI::StartScanning")
+    assert "scan_request_callback_" in start
+    assert "DoWifiScan()" not in start
+    assert "WifiScanWorkerTask" in board
+    assert "RunWifiScanWorker" in board
+    assert "CompleteWifiScanWorker" in board
+    assert "RetryInFlight" in board
+    timer = function_body(board, "void InitializeWifiConfigUiPoller")
+    assert "NotifyWifiScanWorker()" in timer
+    assert "xTaskCreate" not in timer
+    ensure = function_body(board, "void EnsureWifiScanWorker")
+    assert "xTaskCreate" in ensure
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+    assert "wifi_reconnect_after_scan_" in exit_mode
+    assert "HasActiveExternalScan" in board
+    connect = function_body(board, "void AttemptWifiConnection")
+    assert connect.index("HasActiveExternalScan") < connect.index("AddSsid")
+    assert "pending_wifi_connection_after_scan_" in connect
+    assert "pending_wifi_connection_after_scan_" in timer
+    scanning_key = function_body(source, "void WifiConfigUI::HandleScanningKey")
+    assert "DismissPendingScanResult()" in scanning_key
+    assert "state_ == WifiConfigState::Scanning" in poll
     key_handler = function_body(board, "void HandleKeyEvent")
     assert key_handler.index("wifi_config_ui_mutex_") < key_handler.index(
         "wifi_config_mode_")
 
+
+def test_cardputer_preparation_failure_handles_callback_winner_fail_closed():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    recovery = function_body(
+        source, "bool RecoverPreparationFailure")
+    assert recovery.index("CommitSubmission(lease, false)") < recovery.index(
+        "RetainFailedCompletion")
+    assert "consume_latched" in recovery
+    assert "RetainForRecovery" in recovery
+    assert recovery.index("AbandonUnsubmitted(lease)") < recovery.index(
+        "CommitSubmission(lease, false)")
 
 def test_blufi_ap_cleanup_failure_retains_exact_recovery_debt():
     source = read("main/boards/common/blufi.cpp")
