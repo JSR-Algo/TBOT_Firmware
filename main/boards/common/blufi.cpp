@@ -2001,6 +2001,10 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         ESP_LOGE(BLUFI_TAG, "Failed to stage WiFi credentials");
         m_wifi_connect_task_started.store(false);
         m_sta_is_connecting.store(false);
+        ssid_transaction_id_.store(0);
+        m_sta_connected = false;
+        m_sta_got_ip = false;
+        SendStationConnectFailureReport();
         return;
     }
     ssid_transaction_id_.store(ssid_transaction);

@@ -2457,6 +2457,19 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     assert "CommitSsidTransaction" not in begin_failure
     assert "m_wifi_connect_task_started.store(false)" in begin_failure
     assert "m_sta_is_connecting.store(false)" in begin_failure
+    assert "ssid_transaction_id_.store(0)" in begin_failure
+    assert "m_sta_connected = false" in begin_failure
+    assert "m_sta_got_ip = false" in begin_failure
+    assert begin_failure.count("SendStationConnectFailureReport()") == 1
+    assert begin_failure.index("m_wifi_connect_task_started.store(false)") < begin_failure.index(
+        "SendStationConnectFailureReport()"
+    )
+    assert "RollbackSsidTransaction" not in begin_failure
+    assert "CommitSsidTransaction" not in begin_failure
+    assert "ReleaseBleForStationAssociation" not in begin_failure
+    assert "provisioning_finalization_mutex_" not in begin_failure
+    assert "ssid.c_str()" not in begin_failure
+    assert "password.c_str()" not in begin_failure
 
     stage_idx = helper.index("BeginSsidTransaction(ssid, password)")
     station_idx = helper.index("wifi.StartStation()")

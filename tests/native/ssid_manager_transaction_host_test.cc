@@ -1,4 +1,5 @@
 #include "ssid_manager.h"
+#include "../../main/boards/m5stack-cardputer-adv/cardputer_wifi_deferred_intent_state.h"
 
 #include <nvs_flash.h>
 
@@ -100,6 +101,25 @@ int main() {
     const uint32_t owner =
         manager.BeginSsidTransaction("owner", "owner-password");
     assert(owner != 0);
+
+    CardputerWifiDeferredIntentState cardputer;
+    assert(cardputer.PublishCredentials(1, "cardputer", "cardputer-password"));
+    cardputer.ObserveWorkerCreation(true);
+    assert(cardputer.ArmNotification());
+    const auto cardputer_intent = cardputer.TakeNotified();
+    assert(cardputer_intent.has_value());
+    const uint32_t cardputer_transaction = manager.BeginSsidTransaction(
+        cardputer_intent->ssid, cardputer_intent->password);
+    assert(cardputer_transaction == 0);
+    assert(cardputer.StoreConnectionResult(*cardputer_intent, false));
+    assert(!cardputer.RetryInFlight(*cardputer_intent));
+    const auto cardputer_result = cardputer.ClaimResultForDelivery();
+    assert(cardputer_result.has_value() && !cardputer_result->connected);
+    assert(cardputer.CompleteResult(*cardputer_result));
+    const auto owner_still_active = manager.GetSsidList();
+    assert(owner_still_active.front().ssid == "owner");
+    assert(owner_still_active.front().password == "owner-password");
+
     const uint32_t blocked =
         manager.BeginSsidTransaction("blocked", "blocked-password");
     assert(blocked == 0);

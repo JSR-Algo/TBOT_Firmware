@@ -2045,3 +2045,18 @@ def test_cardputer_station_start_runs_without_credential_transaction_lock():
     assert after_start.index("CredentialTransaction") < after_start.index(
         "CardputerWifiStartAction::kRetry"
     )
+
+
+def test_cardputer_busy_transaction_is_terminal_without_retry_or_rollback():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    begin = worker.index("BeginSsidTransaction")
+    busy = worker.index("transaction_id == 0", begin)
+    busy_path = worker[busy:worker.index("} else if", busy)]
+    assert "StoreConnectionResult" in busy_path
+    assert "*intent, false" in busy_path
+    assert "RetryInFlight" not in busy_path
+    assert "RollbackSsidTransaction" not in busy_path
+    schedule = worker.index("ScheduleWifiConnectionResult", busy)
+    transaction_scope_end = worker.index("if (credential_transaction_busy)", busy)
+    assert transaction_scope_end < schedule

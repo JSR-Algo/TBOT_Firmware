@@ -141,6 +141,7 @@ private:
                 }
 
                 auto& ssid_manager = SsidManager::GetInstance();
+                bool credential_transaction_busy = false;
                 {
                     std::lock_guard<std::mutex> transaction_lock(
                         board->wifi_credential_transaction_mutex_);
@@ -149,17 +150,23 @@ private:
                         const uint32_t transaction_id =
                             ssid_manager.BeginSsidTransaction(
                                 intent->ssid, intent->password);
-                        if (!board->wifi_connection_state_
+                        if (transaction_id == 0) {
+                            board->wifi_connection_state_.StoreConnectionResult(
+                                *intent, false);
+                            credential_transaction_busy = true;
+                        } else if (!board->wifi_connection_state_
                                 .BindCredentialTransaction(
                                     *intent, transaction_id)) {
-                            if (transaction_id != 0) {
-                                ssid_manager.RollbackSsidTransaction(
-                                    transaction_id);
-                            }
+                            ssid_manager.RollbackSsidTransaction(
+                                transaction_id);
                             board->wifi_connection_state_.RetryInFlight(*intent);
                             continue;
                         }
                     }
+                }
+                if (credential_transaction_busy) {
+                    board->ScheduleWifiConnectionResult();
+                    continue;
                 }
                 auto& wifi_manager = WifiManager::GetInstance();
                 if (!board->wifi_connection_state_.CredentialTransaction(
