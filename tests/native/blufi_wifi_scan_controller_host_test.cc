@@ -256,6 +256,11 @@ public:
         condition_.wait(lock, [this]() { return ready_; });
     }
 
+    bool IsNotified() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ready_;
+    }
+
 private:
     std::mutex mutex_;
     std::condition_variable condition_;
@@ -1059,6 +1064,42 @@ void CallbackCannotEnterBetweenPhysicalAndLogicalCommit() {
     assert(physical.FinishCompletion(lease.lease));
 }
 
+void CallbackCannotEnterBetweenRollbackPhysicalAndLogicalCommit() {
+    Controller logical;
+    WifiScanLeaseCoordinator physical;
+    std::mutex submission_mutex;
+    const auto request = logical.RequestScan(Request(1, 11, 101));
+    const auto lease = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    ClaimStart(logical, request.request_id);
+
+    Signal physical_committed;
+    Signal callback_finished;
+    WifiScanLeaseCoordinator::CallbackDecision callback;
+    std::thread event([&]() {
+        physical_committed.Wait();
+        std::lock_guard<std::mutex> lock(submission_mutex);
+        callback = physical.ObserveScanDone(lease.lease);
+        callback_finished.Notify();
+    });
+
+    WifiScanLeaseCoordinator::CommitDecision physical_commit;
+    Controller::StartDecision logical_commit;
+    {
+        std::lock_guard<std::mutex> lock(submission_mutex);
+        physical_commit = physical.CommitSubmission(lease.lease, false);
+        physical_committed.Notify();
+        assert(!callback_finished.IsNotified());
+        logical_commit = logical.CommitStart(
+            request.request_id, physical_commit.callback_won_error,
+            physical_commit.drain_required);
+    }
+    event.join();
+    assert(physical_commit.drain_required);
+    assert(logical.phase() == Controller::Phase::kDraining);
+    assert(callback.consume_now);
+}
+
 void CallbackLatchedBeforePreSubmissionFailureCannotStrandLease() {
     Controller logical;
     WifiScanLeaseCoordinator physical;
@@ -1186,6 +1227,7 @@ int main() {
     SimultaneousCallbackAndInvalidateHaveConsistentLinearization();
     CallbackBetweenDriverReturnAndCommitsCannotStrandEitherOwner();
     CallbackCannotEnterBetweenPhysicalAndLogicalCommit();
+    CallbackCannotEnterBetweenRollbackPhysicalAndLogicalCommit();
     CallbackLatchedBeforePreSubmissionFailureCannotStrandLease();
     WatchdogArmFailureEntersExactRecoveryAndRetriesNotification();
     CallbackWinningWatchdogRecoveryNeedsNoReset();

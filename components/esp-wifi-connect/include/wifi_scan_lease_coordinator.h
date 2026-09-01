@@ -207,6 +207,11 @@ public:
         return true;
     }
 
+    bool OwnsExactLease(const Lease& lease) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return Matches(lease);
+    }
+
     bool BeginDrain(const Lease& lease) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(lease) ||

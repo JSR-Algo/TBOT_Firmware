@@ -1,5 +1,6 @@
 #include "../../main/boards/common/blufi_wifi_scan_retry_state.h"
 #include "../../main/boards/common/blufi_wifi_scan_controller.h"
+#include "../../main/boards/common/blufi_wifi_scan_start_outcome.h"
 #include "../../components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
 
 #include <cassert>
@@ -210,6 +211,119 @@ void ExceptionAfterSubmissionRoutesThroughRecovery() {
     assert(finish.start_pending);
 }
 
+void ReleasedOutcomeCannotResurrectLeaseOrRetryDebt() {
+    BlufiWifiScanStartOutcome released;
+    released.disposition =
+        BlufiWifiScanStartOutcome::LeaseDisposition::kReleased;
+    assert(!released.OwnsLease());
+    assert(!released.ShouldRecover());
+    assert(!released.ShouldRetryUnsubmitted());
+}
+
+void SubmittedOutcomeRecoversButNeverRepublishes() {
+    BlufiWifiScanStartOutcome submitted;
+    submitted.disposition =
+        BlufiWifiScanStartOutcome::LeaseDisposition::kSubmitted;
+    submitted.physical.drain_required = true;
+    assert(submitted.OwnsLease());
+    assert(submitted.ShouldRecover());
+    assert(!submitted.ShouldRetryUnsubmitted());
+}
+
+void UnsubmittedOutcomeMayRetryWithoutRecovery() {
+    BlufiWifiScanStartOutcome unsubmitted;
+    unsubmitted.disposition =
+        BlufiWifiScanStartOutcome::LeaseDisposition::kUnsubmitted;
+    unsubmitted.retry_unsubmitted = true;
+    assert(unsubmitted.OwnsLease());
+    assert(!unsubmitted.ShouldRecover());
+    assert(unsubmitted.ShouldRetryUnsubmitted());
+}
+
+void ReleasedUnsubmittedRollbackMayRetryWithoutOwningLease() {
+    BlufiWifiScanStartOutcome rollback;
+    rollback.disposition =
+        BlufiWifiScanStartOutcome::LeaseDisposition::kReleased;
+    rollback.retry_unsubmitted = true;
+    assert(!rollback.OwnsLease());
+    assert(!rollback.ShouldRecover());
+    assert(rollback.ShouldRetryUnsubmitted());
+}
+
+void AcceptedDriverProgressCannotBecomeUnsubmittedAgain() {
+    BlufiWifiScanStartOutcome progress;
+    progress.driver_attempted = true;
+    progress.driver_accepted = true;
+    progress.disposition =
+        BlufiWifiScanStartOutcome::LeaseDisposition::kSubmitted;
+    assert(progress.OwnsLease());
+    assert(!progress.ShouldRetryUnsubmitted());
+    progress.physical_committed = true;
+    assert(progress.driver_accepted);
+    assert(progress.physical_committed);
+}
+
+void ReleasedPhysicalLeaseResumesLogicalRollbackAfterException() {
+    BlufiWifiScanController logical;
+    WifiScanLeaseCoordinator physical;
+    const auto requested = logical.RequestScan({1, 11, 101, true, true});
+    const auto acquired = physical.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(acquired.acquired);
+    assert(logical.SynchronizeDriverIncarnation(
+        requested.request_id, acquired.lease.driver_incarnation));
+    assert(logical.ClaimStart(requested.request_id).claimed);
+
+    bool throw_logical_rollback = true;
+    BlufiWifiScanStartOutcome outcome;
+    outcome = AdvanceBlufiWifiScanStartCommit(
+        outcome, true,
+        [&]() { return physical.AbandonUnsubmitted(acquired.lease); },
+        [&](bool accepted) {
+            return physical.CommitSubmission(acquired.lease, accepted);
+        },
+        [&](bool accepted, bool drain_required) {
+            return logical.CommitStart(
+                requested.request_id, accepted, drain_required);
+        },
+        [&]() {
+            if (throw_logical_rollback) {
+                throw_logical_rollback = false;
+                throw std::runtime_error("injected logical rollback failure");
+            }
+            return logical.ReleaseStartClaimForRetry(requested.request_id);
+        });
+
+    assert(outcome.abandoned);
+    assert(outcome.disposition ==
+           BlufiWifiScanStartOutcome::LeaseDisposition::kReleased);
+    assert(!outcome.logical_committed);
+    assert(!outcome.ShouldRetryUnsubmitted());
+    assert(physical.TryAcquire(WifiScanLeaseCoordinator::Owner::kStation)
+               .acquired);
+
+    outcome = AdvanceBlufiWifiScanStartCommit(
+        outcome, false,
+        [&]() { return physical.AbandonUnsubmitted(acquired.lease); },
+        [&](bool accepted) {
+            return physical.CommitSubmission(acquired.lease, accepted);
+        },
+        [&](bool accepted, bool drain_required) {
+            return logical.CommitStart(
+                requested.request_id, accepted, drain_required);
+        },
+        [&]() {
+            return logical.ReleaseStartClaimForRetry(requested.request_id);
+        });
+
+    assert(outcome.disposition ==
+           BlufiWifiScanStartOutcome::LeaseDisposition::kReleased);
+    assert(outcome.logical_committed);
+    assert(outcome.ShouldRetryUnsubmitted());
+    assert(logical.UnclaimedRequestIfCurrent(
+        requested.request_id, 1, 11, 101).has_value());
+}
+
 }  // namespace
 
 int main() {
@@ -221,4 +335,10 @@ int main() {
     ProductionLifecycleReplacementDropsStaleTuple();
     ExceptionAfterClaimRollsBackAndRetriesExactlyOnce();
     ExceptionAfterSubmissionRoutesThroughRecovery();
+    ReleasedOutcomeCannotResurrectLeaseOrRetryDebt();
+    SubmittedOutcomeRecoversButNeverRepublishes();
+    UnsubmittedOutcomeMayRetryWithoutRecovery();
+    ReleasedUnsubmittedRollbackMayRetryWithoutOwningLease();
+    AcceptedDriverProgressCannotBecomeUnsubmittedAgain();
+    ReleasedPhysicalLeaseResumesLogicalRollbackAfterException();
 }

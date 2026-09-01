@@ -20,6 +20,7 @@
 #include "wifi_manager.h"
 #include "blufi_wifi_scan_lease_timer.h"
 #include "blufi_wifi_scan_retry_state.h"
+#include "blufi_wifi_scan_start_outcome.h"
 #include "blufi_wifi_scan_controller.h"
 #include "blufi_transition_gate.h"
 #include "audio/provisioning_session_binding.h"
@@ -230,8 +231,17 @@ private:
     void TryStartOwnedWifiScanNow(
         BlufiWifiScanRetryState::ExactRequest exact,
         bool notify_manager = true) noexcept;
-    bool StartOwnedWifiScan(uint64_t request_id);
-    void ConsumeOwnedWifiScanCompletion(uint64_t request_id);
+    BlufiWifiScanStartOutcome StartOwnedWifiScan(
+        uint64_t request_id,
+        const WifiScanLeaseCoordinator::Lease& lease) noexcept;
+    BlufiWifiScanStartOutcome CommitOwnedWifiScanStart(
+        uint64_t request_id, const WifiScanLeaseCoordinator::Lease& lease,
+        BlufiWifiScanStartOutcome outcome,
+        bool retry_on_abandon) noexcept;
+    BlufiWifiScanStartOutcome RunOwnedWifiScanFollowupNoexcept(
+        uint64_t request_id, const WifiScanLeaseCoordinator::Lease& lease,
+        const BlufiWifiScanStartOutcome& outcome) noexcept;
+    bool ConsumeOwnedWifiScanCompletion(uint64_t request_id) noexcept;
     void ScheduleOwnedWifiScanWatchdog(
         uint64_t request_id,
         WifiScanLeaseCoordinator::Lease lease);
@@ -389,7 +399,6 @@ private:
     bool wifi_scan_restore_ap_config_valid_ = false;
     BlufiWifiScanRetryState wifi_scan_retry_state_;
     std::mutex wifi_scan_retry_timer_mutex_;
-    std::atomic<uint64_t> wifi_scan_driver_submission_request_id_{0};
     esp_timer_handle_t wifi_scan_retry_timer_ = nullptr;
     StaticTimer_t wifi_scan_retry_fallback_storage_{};
     TimerHandle_t wifi_scan_retry_fallback_timer_ = nullptr;

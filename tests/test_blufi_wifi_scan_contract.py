@@ -17,6 +17,12 @@ def read(path: str) -> str:
 
 
 def function_body(text: str, signature: str) -> str:
+    signature = {
+        "bool Blufi::StartOwnedWifiScan":
+            "BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan",
+        "void Blufi::ConsumeOwnedWifiScanCompletion":
+            "bool Blufi::ConsumeOwnedWifiScanCompletion",
+    }.get(signature, signature)
     start = text.index(signature)
     brace = text.index("{", start)
     depth = 0
@@ -978,6 +984,8 @@ def test_blufi_scan_binds_logical_request_to_exact_global_lease():
     start = function_body(source, "void Blufi::ScheduleOwnedWifiScanStart")
     start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
     submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    commit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
     handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
     assert "std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_lease_;" in header
@@ -989,34 +997,30 @@ def test_blufi_scan_binds_logical_request_to_exact_global_lease():
     assert start_now.index("SynchronizeDriverIncarnation(") < start_now.index("ClaimStart(")
     assert "RetryOwnedWifiScanAfterLeaseBusy" in start_now
     assert "ObserveScanDone(*lease)" in handler
-    assert "CommitSubmission(" in submit
-    assert "*lease, scan_error == ESP_OK" in submit
-    assert "physical_commit.consume_latched" in submit
-    assert "physical_commit.callback_won_error" in submit
+    assert "CommitSubmission(" in commit
+    assert "driver_accepted" in commit
+    assert "outcome.physical.consume_latched" in followup
+    assert "outcome.physical.callback_won_error" in followup
 
 
 def test_blufi_scan_commits_are_hidden_from_callback_until_logical_is_ready():
     header = read("main/boards/common/blufi.h")
     source = read("main/boards/common/blufi.cpp")
-    submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    submit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+    transaction = read("main/boards/common/blufi_wifi_scan_start_outcome.h")
     handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
     assert "std::mutex wifi_scan_submission_mutex_;" in header
     submit_lock = submit.index("wifi_scan_submission_mutex_")
     physical = submit.index("CommitSubmission(", submit_lock)
-    logical = submit.index("wifi_scan_controller_.CommitStart(", submit_lock)
+    logical = submit.index("wifi_scan_controller_.CommitStart(", physical)
     assert submit_lock < physical < logical
     assert "wifi_scan_submission_mutex_" in handler
     assert handler.index("wifi_scan_submission_mutex_") < handler.index(
         "ObserveScanDone"
     )
-    failure = submit[submit.index("auto commit_failure") : submit.index(
-        "if (!EnsureWifiScanEventHandlerRegistered())"
-    )]
-    assert "wifi_scan_submission_mutex_" in failure
-    assert "CommitSubmission" in failure
-    assert "callback_won_error" in failure
-    assert "consume_latched" in failure
+    assert "AbandonUnsubmitted" in submit
+    assert "callback_won_error" in transaction
 
 
 def test_blufi_busy_retry_has_process_lifetime_timer_and_failure_fallback():
@@ -1041,20 +1045,71 @@ def test_blufi_busy_retry_has_process_lifetime_timer_and_failure_fallback():
 def test_blufi_retry_exception_cleanup_releases_exact_unsubmitted_claim():
     source = read("main/boards/common/blufi.cpp")
     start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
+    commit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+    transaction = read("main/boards/common/blufi_wifi_scan_start_outcome.h")
 
     assert "std::optional<WifiScanLeaseCoordinator::Lease> acquired_lease" in start_now
-    assert "AbandonUnsubmitted(*acquired_lease)" in start_now
-    assert "ReleaseStartClaimForRetry" in start_now
+    assert "AbandonUnsubmitted(lease)" in commit
+    assert "ReleaseStartClaimForRetry" in commit
     assert "RepublishIfUnchanged(exact)" in start_now
-    assert "BeginDrain(*acquired_lease)" in start_now
-    assert "RequestOwnedWifiScanRecovery(*acquired_lease)" in start_now
-    assert "wifi_scan_driver_submission_request_id_.load" in start_now
+    assert "RunOwnedWifiScanFollowupNoexcept" in start_now
     submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
-    assert submit.index("esp_wifi_scan_start") < submit.index(
-        "wifi_scan_driver_submission_request_id_.store"
-    )
-    accepted_marker = submit.index("wifi_scan_driver_submission_request_id_.store")
-    assert accepted_marker < submit.index("CommitSubmission(", accepted_marker)
+    scan_call = submit.index("esp_wifi_scan_start")
+    assert submit.index("progress.driver_attempted = true") < scan_call
+    assert scan_call < submit.index("progress.driver_accepted = scan_error == ESP_OK")
+    assert scan_call < submit.index("CommitOwnedWifiScanStart(", scan_call)
+    assert "outcome.driver_attempted" in transaction
+    assert "outcome.driver_accepted" in transaction
+    assert "outcome.physical_committed" in transaction
+    assert "outcome.logical_committed" in transaction
+    assert "outcome.PreserveDispositionAfterFailure()" in commit
+    outcome = read("main/boards/common/blufi_wifi_scan_start_outcome.h")
+    assert "if (abandoned)" in outcome
+    assert "LeaseDisposition::kReleased" in outcome
+    assert "rollback_intent_set" in outcome
+    assert "rollback_for_retry" in outcome
+
+
+def test_blufi_start_outcome_is_noexcept_and_all_commit_pairs_are_serialized():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
+    start = function_body(source, "BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan")
+    commit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+
+    assert "BlufiWifiScanStartOutcome StartOwnedWifiScan(" in header
+    assert "const WifiScanLeaseCoordinator::Lease& lease) noexcept" in header
+    assert "CommitOwnedWifiScanStart" in header
+    assert "std::lock_guard<std::mutex> submission_lock" in commit
+    physical_commit = commit.index("CommitSubmission(")
+    assert physical_commit < commit.index("CommitStart(", physical_commit)
+    assert "CommitSubmission(" not in start_now
+    assert "CommitStart(" not in start_now
+    assert "CommitOwnedWifiScanStart" in start
+
+
+def test_post_release_followups_are_contained_outside_ownership_rollback():
+    source = read("main/boards/common/blufi.cpp")
+    start = function_body(source, "BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan")
+
+    assert "RunOwnedWifiScanFollowupNoexcept" in source
+    assert "ScheduleWifiScanFailure" not in start
+    assert "SchedulePendingWifiScan" not in start
+    assert "ScheduleOwnedWifiScanWatchdog" not in start
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
+    assert "SchedulePendingWifiScan" not in followup
+    assert "ScheduleOwnedWifiScanStart" in followup
+
+
+def test_completion_releases_physical_before_logical_and_durable_pending_handoff():
+    source = read("main/boards/common/blufi.cpp")
+    completion = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    physical = completion.index(".FinishCompletion(*lease)")
+    logical = completion.index("wifi_scan_controller_.FinishCompletion(")
+    assert physical < logical
+    assert "SchedulePendingWifiScan" not in completion
+    assert "ScheduleOwnedWifiScanStart" in completion
 
 
 def test_manager_poller_busy_retry_does_not_self_notify_hot_loop():
@@ -1280,6 +1335,7 @@ def test_blufi_scan_failures_are_deferred_and_exactly_owner_bound():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
     start = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
     failure = function_body(source, "void Blufi::ScheduleWifiScanFailure")
 
     assert "void ScheduleWifiScanFailure(" in header
@@ -1290,7 +1346,7 @@ def test_blufi_scan_failures_are_deferred_and_exactly_owner_bound():
     stale_return = failure.index("if (!failure_owner_is_current)")
     send_error = failure.index("esp_blufi_send_error_info")
     assert stale_return < send_error
-    assert "ScheduleWifiScanFailure(committed.owner" in start
+    assert "ScheduleWifiScanFailure(outcome.logical.owner" in followup
     assert "esp_blufi_send_error_info" not in start
 
 
@@ -1300,7 +1356,8 @@ def test_empty_scan_completion_uses_owner_bound_failure_helper():
     send_list = function_body(source, "void Blufi::_send_wifi_list")
 
     assert "owned_ap_records.empty()" in scan_done
-    assert "ScheduleWifiScanFailure(completion.owner" in scan_done
+    assert "ScheduleWifiScanFailure(" in scan_done
+    assert "completion.owner" in scan_done
     assert "esp_blufi_send_error_info" not in send_list
 
 
@@ -1423,9 +1480,10 @@ def test_blufi_scan_uses_one_passive_start_after_mode_is_station_capable():
 def test_blufi_wifi_scan_failures_log_start_and_empty_result_separately():
     source = read("main/boards/common/blufi.cpp")
     start = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
     scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
-    assert 'ScheduleWifiScanFailure(committed.owner, "scan_start_failed")' in start
+    assert '"scan_start_failed"' in followup
     assert '"scan_completed_without_ap_records"' in scan_done
 
 

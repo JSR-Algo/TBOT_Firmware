@@ -26,6 +26,8 @@ def _start_wifi_config_body(wifi_board: str) -> str:
     return wifi_board[start:end]
 
 def _function_body(text: str, signature: str) -> str:
+    if signature == "void Blufi::ConsumeOwnedWifiScanCompletion":
+        signature = "bool Blufi::ConsumeOwnedWifiScanCompletion"
     start = text.index(signature)
     brace = text.index("{", start)
     depth = 0
