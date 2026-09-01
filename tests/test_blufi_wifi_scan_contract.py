@@ -58,7 +58,7 @@ def test_all_wifi_scan_start_calls_use_global_lease():
     }
 
     cardputer = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
-    scan = function_body(cardputer, "void WifiConfigUI::DoWifiScan")
+    scan = function_body(cardputer, "bool WifiConfigUI::DoWifiScan")
     assert "Owner::kBlockingUi" in cardputer
     assert "RegisterScanRecoveryOwner" in cardputer
     assert "esp_event_handler_instance_register" in cardputer
@@ -75,7 +75,7 @@ def test_all_wifi_scan_start_calls_use_global_lease():
     assert cleanup.index("esp_wifi_scan_get_ap_num") < cleanup.index(
         "esp_wifi_scan_get_ap_records"
     )
-    assert scan.index("CleanupScanList") < scan.index("FinishNormally")
+    assert scan.index("CleanupScanList") < scan.rindex("FinishNormally")
     assert "esp_wifi_clear_ap_list" in cleanup
     assert "RequestScanRecovery" in cardputer
     assert "BeginRecovery" in cardputer
@@ -1239,7 +1239,7 @@ def test_blufi_scan_recovery_uses_shared_manager_executor():
 
 def test_cardputer_blocking_scan_uses_nonblocking_idf_callback_semantics():
     source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
-    scan = function_body(source, "void WifiConfigUI::DoWifiScan")
+    scan = function_body(source, "bool WifiConfigUI::DoWifiScan")
     assert "esp_wifi_scan_start(&scan_config, false)" in scan
     assert "esp_wifi_scan_start(&scan_config, true)" not in scan
     assert "BlockingWifiScanPolicy::CompletionWaitMs" in source
@@ -1253,9 +1253,56 @@ def test_cardputer_recovery_is_manager_owned_and_has_durable_exact_retry():
     assert "esp_wifi_get_config" not in source
     assert "esp_wifi_set_mode" not in source
     assert "esp_wifi_set_config" not in source
-    assert "CaptureExternalScanRecoveryRole" in source + header
-    assert "ReleaseExternalScanRecoveryRole" in source + header
+    assert "PrepareExternalScanRadio" in source + header
+    assert "FinishExternalScanRadio" in source + header
     assert ".retry = [this]" in source
+
+
+def test_cardputer_ui_prepares_idle_radio_and_finishes_exact_transaction():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    scan = function_body(source, "bool WifiConfigUI::DoWifiScan")
+    assert "PrepareExternalScanRadio(lease)" in scan
+    assert "FinishExternalScanRadio(lease)" in source
+    assert "esp_wifi_start" not in scan
+    assert "ExternalScanRecoveryRole::kIdle" in manager
+    assert "scan_mode = has_ap ? WIFI_MODE_APSTA : WIFI_MODE_STA" in manager
+    assert "esp_wifi_set_mode(scan_mode)" in manager
+    assert "esp_wifi_start()" in manager
+    assert "esp_wifi_stop()" in manager
+
+
+def test_cardputer_scan_done_status_gates_ap_result_consumption():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    handler = function_body(source, "static void HandleScanDone")
+    callback = function_body(source, "void OnScanDone")
+    assert "wifi_event_sta_scan_done_t" in handler
+    assert "event->status" in handler
+    assert "scan_status" in callback
+    assert "esp_wifi_clear_ap_list" in callback
+    status = read(
+        "main/boards/m5stack-cardputer-adv/"
+        "blocking_wifi_scan_completion_status.h")
+    assert "observed_->status == 0" in status
+    assert "callback_status_.Succeeded(lease)" in source
+
+
+def test_cardputer_board_has_real_ui_poll_timer_caller():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    assert "wifi_config_ui_->Poll()" in board
+    assert "esp_timer_start_periodic" in board
+    assert "Application::GetInstance().Schedule" in board
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    poll = function_body(source, "void WifiConfigUI::Poll")
+    assert "PeekRecoveryRetry" in poll
+    assert "ConsumeRecoveryRetry" in poll
+    assert "StartScanning()" in poll
+    scan = function_body(source, "bool WifiConfigUI::DoWifiScan")
+    assert "PublishBusyRetry(ui_generation_)" in scan
+
+    key_handler = function_body(board, "void HandleKeyEvent")
+    assert key_handler.index("wifi_config_ui_mutex_") < key_handler.index(
+        "wifi_config_mode_")
 
 
 def test_blufi_ap_cleanup_failure_retains_exact_recovery_debt():

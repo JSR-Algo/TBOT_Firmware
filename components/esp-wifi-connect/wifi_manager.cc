@@ -55,7 +55,7 @@ bool WifiManager::RegisterScanRecoveryOwner(
     return true;
 }
 
-bool WifiManager::CaptureExternalScanRecoveryRole(
+bool WifiManager::PrepareExternalScanRadio(
         const WifiScanLeaseCoordinator::Lease& lease) {
     if (lease.owner != WifiScanLeaseCoordinator::Owner::kBlockingUi ||
         !scan_lease_coordinator_.OwnsExactLease(lease)) {
@@ -81,17 +81,97 @@ bool WifiManager::CaptureExternalScanRecoveryRole(
     if (station != nullptr) {
         snapshot.station_was_connected = station->IsConnected();
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (snapshot.lifecycle_generation != lifecycle_generation_ ||
-        lifecycle_transition_in_progress_ || scan_recovery_active_) {
+    if (snapshot.role == ExternalScanRecoveryRole::kIdle) {
+        wifi_mode_t mode = WIFI_MODE_NULL;
+        wifi_config_t sta{};
+        wifi_config_t ap{};
+        wifi_ps_type_t power_save = WIFI_PS_MIN_MODEM;
+        int8_t max_tx_power = 0;
+        wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
+        if (esp_wifi_get_mode(&mode) != ESP_OK) {
+            return false;
+        }
+        snapshot.idle_restore_mode = mode;
+        const bool has_sta = mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA;
+        const bool has_ap = mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA;
+        snapshot.idle_restore_sta_config_valid =
+            has_sta && esp_wifi_get_config(WIFI_IF_STA, &sta) == ESP_OK;
+        snapshot.idle_restore_ap_config_valid =
+            has_ap && esp_wifi_get_config(WIFI_IF_AP, &ap) == ESP_OK;
+        snapshot.idle_restore_sta_config = sta;
+        snapshot.idle_restore_ap_config = ap;
+        if (esp_wifi_get_ps(&power_save) != ESP_OK ||
+            esp_wifi_get_max_tx_power(&max_tx_power) != ESP_OK ||
+            esp_wifi_get_band_mode(&band_mode) != ESP_OK) {
+            return false;
+        }
+        snapshot.idle_restore_power_save = power_save;
+        snapshot.idle_restore_max_tx_power = max_tx_power;
+        snapshot.idle_restore_band_mode = band_mode;
+        if (has_sta || has_ap) {
+            uint16_t inactive_seconds = 0;
+            const wifi_interface_t probe_interface =
+                has_sta ? WIFI_IF_STA : WIFI_IF_AP;
+            const esp_err_t probe = esp_wifi_get_inactive_time(
+                probe_interface, &inactive_seconds);
+            if (probe == ESP_OK) {
+                snapshot.idle_restore_radio_started = true;
+            } else if (probe != ESP_ERR_WIFI_NOT_STARTED) {
+                return false;
+            }
+        }
+        const wifi_mode_t scan_mode = has_ap ? WIFI_MODE_APSTA : WIFI_MODE_STA;
+        snapshot.idle_scan_changed_mode = scan_mode != mode;
+        if (snapshot.idle_scan_changed_mode &&
+            esp_wifi_set_mode(scan_mode) != ESP_OK) {
+            return false;
+        }
+        snapshot.idle_radio_prepared = true;
+        if (!snapshot.idle_restore_radio_started) {
+            const esp_err_t start = esp_wifi_start();
+            if (start == ESP_ERR_WIFI_STATE) {
+                snapshot.idle_restore_radio_started = true;
+            } else if (start != ESP_OK) {
+                if (snapshot.idle_scan_changed_mode) {
+                    RestoreIdleExternalScanRadio(snapshot, false);
+                }
+                return false;
+            }
+        }
+    }
+    bool current = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current = snapshot.lifecycle_generation == lifecycle_generation_ &&
+            !lifecycle_transition_in_progress_ && !scan_recovery_active_;
+        if (current) {
+            external_scan_recovery_snapshots_[
+                static_cast<size_t>(lease.owner)] = snapshot;
+        }
+    }
+    if (!current) {
+        if (snapshot.idle_radio_prepared) {
+            RestoreIdleExternalScanRadio(snapshot, false);
+        }
         return false;
     }
-    external_scan_recovery_snapshots_[static_cast<size_t>(lease.owner)] =
-        snapshot;
     return true;
 }
 
-bool WifiManager::ReleaseExternalScanRecoveryRole(
+bool WifiManager::FinishExternalScanRadio(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    const auto snapshot = ExternalRecoverySnapshotFor(lease);
+    if (!snapshot.has_value()) {
+        return false;
+    }
+    if (snapshot->role == ExternalScanRecoveryRole::kIdle &&
+        !RestoreIdleExternalScanRadio(*snapshot, false)) {
+        return false;
+    }
+    return true;
+}
+
+bool WifiManager::ReleaseExternalScanRadioToken(
         const WifiScanLeaseCoordinator::Lease& lease) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto& snapshot =
@@ -100,6 +180,44 @@ bool WifiManager::ReleaseExternalScanRecoveryRole(
         return false;
     }
     snapshot.reset();
+    return true;
+}
+
+bool WifiManager::RestoreIdleExternalScanRadio(
+        const ExternalScanRecoverySnapshot& snapshot,
+        bool after_driver_reset) {
+    wifi_config_t sta = snapshot.idle_restore_sta_config;
+    wifi_config_t ap = snapshot.idle_restore_ap_config;
+    if (!snapshot.idle_radio_prepared) {
+        return false;
+    }
+    if (!after_driver_reset && snapshot.idle_restore_radio_started &&
+        !snapshot.idle_scan_changed_mode) {
+        return true;
+    }
+    const esp_err_t stop = esp_wifi_stop();
+    if ((stop != ESP_OK && stop != ESP_ERR_WIFI_NOT_STARTED) ||
+        esp_wifi_set_mode(snapshot.idle_restore_mode) != ESP_OK) {
+        return false;
+    }
+    if (after_driver_reset) {
+        if ((snapshot.idle_restore_sta_config_valid &&
+             esp_wifi_set_config(WIFI_IF_STA, &sta) != ESP_OK) ||
+            (snapshot.idle_restore_ap_config_valid &&
+             esp_wifi_set_config(WIFI_IF_AP, &ap) != ESP_OK) ||
+            (snapshot.idle_restore_radio_started &&
+             esp_wifi_start() != ESP_OK) ||
+            esp_wifi_set_band_mode(snapshot.idle_restore_band_mode) != ESP_OK ||
+            esp_wifi_set_max_tx_power(snapshot.idle_restore_max_tx_power) !=
+                ESP_OK ||
+            (snapshot.idle_restore_radio_started &&
+             esp_wifi_set_ps(snapshot.idle_restore_power_save) != ESP_OK)) {
+            return false;
+        }
+    } else if (snapshot.idle_restore_radio_started &&
+               esp_wifi_start() != ESP_OK) {
+        return false;
+    }
     return true;
 }
 
@@ -129,7 +247,7 @@ bool WifiManager::RestoreExternalRecoveryRole(
     if (snapshot.role == ExternalScanRecoveryRole::kConfigAp) {
         return config_ap_->RestoreRadioAfterExternalScanRecovery();
     }
-    return true;
+    return RestoreIdleExternalScanRadio(snapshot, true);
 }
 
 void WifiManager::RetryExternalRecoveryRole(
@@ -482,7 +600,13 @@ void WifiManager::RunScanRecovery() {
         } else if (external_owner) {
             if (external_snapshot.has_value()) {
                 RetryExternalRecoveryRole(*external_snapshot);
-                ReleaseExternalScanRecoveryRole(work->lease);
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto& snapshot = external_scan_recovery_snapshots_[
+                    static_cast<size_t>(work->lease.owner)];
+                if (snapshot.has_value() &&
+                    SameLease(snapshot->lease, work->lease)) {
+                    snapshot.reset();
+                }
             }
             external_hooks.retry(work->lease);
         }

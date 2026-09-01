@@ -1,6 +1,8 @@
 #include "wifi_config_ui.h"
 #include "blocking_wifi_scan_lease_state.h"
 #include "blocking_wifi_scan_policy.h"
+#include "blocking_wifi_scan_retry_state.h"
+#include "blocking_wifi_scan_completion_status.h"
 #include <esp_log.h>
 #include <esp_wifi.h>
 #include <esp_event.h>
@@ -9,6 +11,7 @@
 #include <wifi_manager.h>
 #include <ssid_manager.h>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -19,6 +22,7 @@
 namespace {
 
 using Coordinator = WifiScanLeaseCoordinator;
+std::atomic<uint64_t> next_wifi_ui_generation{1};
 
 class BlockingWifiScanOwner {
 public:
@@ -69,14 +73,15 @@ public:
                         },
                         .retry = [this](const auto& lease) {
                             std::lock_guard<std::mutex> lock(retry_mutex_);
-                            recovery_retry_ = lease;
+                            retry_state_.Publish(
+                                {lease, recovery_ui_generation_});
                         },
                     });
         }
         return event_handler_ != nullptr && recovery_hooks_registered_;
     }
 
-    bool Begin(const Coordinator::Lease& lease) {
+    bool Begin(const Coordinator::Lease& lease, uint64_t ui_generation) {
         if (!EnsureRegistered()) {
             return false;
         }
@@ -85,6 +90,8 @@ public:
         if (!state_.Begin(lease)) {
             return false;
         }
+        std::lock_guard<std::mutex> lock(retry_mutex_);
+        active_ui_generation_ = ui_generation;
         return true;
     }
 
@@ -111,6 +118,7 @@ public:
         auto& manager = WifiManager::GetInstance();
         auto& coordinator = manager.ScanLeaseCoordinator();
         if (state_.DetachWaiterForRecovery(lease)) {
+            RememberRecoveryGeneration(lease);
             coordinator.BeginDrain(lease);
             manager.RequestScanRecovery(lease);
             return true;
@@ -125,40 +133,59 @@ public:
             !state_.RetainCompletionForRecovery(lease)) {
             return false;
         }
+        RememberRecoveryGeneration(lease);
         return manager.RequestScanRecovery(lease);
     }
 
     bool FinishNormally(const Coordinator::Lease& lease) {
-        auto& coordinator = WifiManager::GetInstance().ScanLeaseCoordinator();
-        if (!coordinator.FinishCompletion(lease) ||
-            !state_.FinishNormally(lease)) {
+        auto& manager = WifiManager::GetInstance();
+        auto& coordinator = manager.ScanLeaseCoordinator();
+        if (!manager.FinishExternalScanRadio(lease) ||
+            !coordinator.FinishCompletion(lease) ||
+            !state_.FinishNormally(lease) ||
+            !manager.ReleaseExternalScanRadioToken(lease)) {
             return false;
         }
-        WifiManager::GetInstance().ReleaseExternalScanRecoveryRole(lease);
         return true;
     }
 
-    bool TakeRecoveryRetry() {
-        std::lock_guard<std::mutex> lock(retry_mutex_);
-        if (!recovery_retry_.has_value()) {
-            return false;
-        }
-        recovery_retry_.reset();
-        return true;
+    std::optional<BlockingWifiScanRetryState::Token> PeekRecoveryRetry(
+            uint64_t ui_generation) const {
+        return retry_state_.Peek(ui_generation);
+    }
+
+    bool ConsumeRecoveryRetry(
+            const BlockingWifiScanRetryState::Token& token) {
+        return retry_state_.ConsumeIfExact(token);
+    }
+
+    void CancelUiGeneration(uint64_t ui_generation) {
+        retry_state_.CancelGeneration(ui_generation);
+    }
+
+    void PublishBusyRetry(uint64_t ui_generation) {
+        retry_state_.PublishIfAbsent({Coordinator::Lease{}, ui_generation});
+    }
+
+    bool ScanSucceeded(const Coordinator::Lease& lease) const {
+        return callback_status_.Succeeded(lease);
     }
 
 private:
     BlockingWifiScanOwner() = default;
 
     static void HandleScanDone(void* context, esp_event_base_t event_base,
-                               int32_t event_id, void*) {
+                               int32_t event_id, void* event_data) {
         if (event_base != WIFI_EVENT || event_id != WIFI_EVENT_SCAN_DONE) {
             return;
         }
-        static_cast<BlockingWifiScanOwner*>(context)->OnScanDone();
+        const auto* event =
+            static_cast<const wifi_event_sta_scan_done_t*>(event_data);
+        const uint32_t scan_status = event != nullptr ? event->status : 1;
+        static_cast<BlockingWifiScanOwner*>(context)->OnScanDone(scan_status);
     }
 
-    void OnScanDone() {
+    void OnScanDone(uint32_t scan_status) {
         const auto lease = state_.LeaseSnapshot();
         if (!lease.has_value()) {
             return;
@@ -168,6 +195,7 @@ private:
         if (!callback.consume_now && !callback.deferred_until_commit) {
             return;
         }
+        callback_status_.Observe(*lease, scan_status);
         const auto action = state_.OnCallback(*lease);
         if (action == BlockingWifiScanLeaseState::CallbackAction::kWakeWaiter) {
             xSemaphoreGive(completion_semaphore_);
@@ -200,13 +228,24 @@ private:
         return state_.HasDebt(lease);
     }
 
+    void RememberRecoveryGeneration(const Coordinator::Lease& lease) {
+        if (!state_.Owns(lease)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(retry_mutex_);
+        recovery_ui_generation_ = active_ui_generation_;
+    }
+
     std::mutex registration_mutex_;
-    std::mutex retry_mutex_;
+    mutable std::mutex retry_mutex_;
     BlockingWifiScanLeaseState state_;
     SemaphoreHandle_t completion_semaphore_ = nullptr;
     esp_event_handler_instance_t event_handler_ = nullptr;
     bool recovery_hooks_registered_ = false;
-    std::optional<Coordinator::Lease> recovery_retry_;
+    BlockingWifiScanRetryState retry_state_;
+    uint64_t active_ui_generation_ = 0;
+    uint64_t recovery_ui_generation_ = 0;
+    BlockingWifiScanCompletionStatus callback_status_;
 };
 
 bool CleanupScanList(std::vector<wifi_ap_record_t>& records) {
@@ -238,11 +277,13 @@ WifiConfigUI::WifiConfigUI(LcdDisplay* display)
       saved_selected_index_(0),
       saved_scroll_offset_(0),
       input_focus_on_password_(false),
+      ui_generation_(next_wifi_ui_generation.fetch_add(1)),
       cursor_visible_(true),
       last_cursor_toggle_(0) {
 }
 
 WifiConfigUI::~WifiConfigUI() {
+    BlockingWifiScanOwner::GetInstance().CancelUiGeneration(ui_generation_);
 }
 
 void WifiConfigUI::Start() {
@@ -275,7 +316,7 @@ void WifiConfigUI::StartWithSavedList() {
     ShowSavedList();
 }
 
-void WifiConfigUI::StartScanning() {
+bool WifiConfigUI::StartScanning() {
     state_ = WifiConfigState::Scanning;
     scan_failed_ = false;
 
@@ -285,7 +326,10 @@ void WifiConfigUI::StartScanning() {
     DrawFooter("请稍候...");
 
     // Perform WiFi scan
-    DoWifiScan();
+    const bool scan_started = DoWifiScan();
+    if (!scan_started) {
+        return false;
+    }
 
     // Show results
     if (scan_failed_) {
@@ -300,38 +344,40 @@ void WifiConfigUI::StartScanning() {
         state_ = WifiConfigState::SelectWifi;
         ShowScanResults();
     }
+    return true;
 }
 
-void WifiConfigUI::DoWifiScan() {
+bool WifiConfigUI::DoWifiScan() {
     scan_results_.clear();
     auto& manager = WifiManager::GetInstance();
     if (!manager.IsInitialized() && !manager.Initialize()) {
         scan_failed_ = true;
         ESP_LOGE(TAG, "WiFi manager initialization failed");
-        return;
+        return true;
     }
     auto& coordinator = manager.ScanLeaseCoordinator();
     auto& owner = BlockingWifiScanOwner::GetInstance();
     const auto acquired =
         coordinator.TryAcquire(Coordinator::Owner::kBlockingUi);
     if (!acquired.acquired) {
-        scan_failed_ = true;
+        owner.PublishBusyRetry(ui_generation_);
         ESP_LOGW(TAG, "WiFi scan is busy");
-        return;
+        return false;
     }
     const auto lease = acquired.lease;
-    if (!manager.CaptureExternalScanRecoveryRole(lease)) {
+    if (!manager.PrepareExternalScanRadio(lease)) {
         coordinator.AbandonUnsubmitted(lease);
         scan_failed_ = true;
         ESP_LOGE(TAG, "WiFi manager role capture failed");
-        return;
+        return true;
     }
-    if (!owner.Begin(lease)) {
-        manager.ReleaseExternalScanRecoveryRole(lease);
+    if (!owner.Begin(lease, ui_generation_)) {
+        manager.FinishExternalScanRadio(lease);
+        manager.ReleaseExternalScanRadioToken(lease);
         coordinator.AbandonUnsubmitted(lease);
         scan_failed_ = true;
         ESP_LOGE(TAG, "WiFi scan owner initialization failed");
-        return;
+        return true;
     }
 
     // Use WifiManager's scan capability if available, otherwise do direct scan
@@ -351,7 +397,7 @@ void WifiConfigUI::DoWifiScan() {
         owner.DetachAndRecover(lease);
         scan_failed_ = true;
         ESP_LOGE(TAG, "WiFi scan failed: %s", esp_err_to_name(err));
-        return;
+        return false;
     }
     if (commit.callback_won_error) {
         ESP_LOGW(TAG, "WiFi scan completion arrived before start returned");
@@ -361,15 +407,25 @@ void WifiConfigUI::DoWifiScan() {
         if (owner.DetachAndRecover(lease)) {
             scan_failed_ = true;
             ESP_LOGE(TAG, "WiFi scan completion timed out; recovery scheduled");
-            return;
+            return true;
         }
         // A matching callback may win after the bounded wait but before the
         // waiter detaches. In that case this caller still owns completion.
         if (!owner.WaitForMatchingCompletion(lease)) {
             scan_failed_ = true;
             ESP_LOGE(TAG, "WiFi scan completion ownership was lost");
-            return;
+            return true;
         }
+    }
+
+    if (!owner.ScanSucceeded(lease)) {
+        if (esp_wifi_clear_ap_list() != ESP_OK ||
+            !owner.FinishNormally(lease)) {
+            owner.RetainCompletionAndRecover(lease);
+        }
+        scan_failed_ = true;
+        ESP_LOGE(TAG, "WiFi scan completed with driver error");
+        return true;
     }
 
     // Get scan results
@@ -378,7 +434,7 @@ void WifiConfigUI::DoWifiScan() {
         owner.RetainCompletionAndRecover(lease);
         scan_failed_ = true;
         ESP_LOGE(TAG, "WiFi scan result cleanup failed; recovery scheduled");
-        return;
+        return true;
     }
 
     try {
@@ -403,10 +459,11 @@ void WifiConfigUI::DoWifiScan() {
         scan_results_.clear();
         scan_failed_ = true;
         ESP_LOGE(TAG, "WiFi scan ownership completion failed");
-        return;
+        return true;
     }
 
     ESP_LOGI(TAG, "Found %d WiFi networks", (int)scan_results_.size());
+    return true;
 }
 
 void WifiConfigUI::ShowScanResults() {
@@ -978,10 +1035,13 @@ void WifiConfigUI::HandleResultKey(const KeyEvent& event) {
     }
 }
 
-void WifiConfigUI::UpdateCursor() {
-    if (is_active_ &&
-        BlockingWifiScanOwner::GetInstance().TakeRecoveryRetry()) {
-        StartScanning();
+void WifiConfigUI::Poll() {
+    auto& owner = BlockingWifiScanOwner::GetInstance();
+    const auto retry = owner.PeekRecoveryRetry(ui_generation_);
+    if (is_active_ && retry.has_value()) {
+        if (StartScanning()) {
+            owner.ConsumeRecoveryRetry(*retry);
+        }
         return;
     }
     uint32_t now = esp_log_timestamp();

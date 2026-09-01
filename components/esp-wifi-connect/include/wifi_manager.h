@@ -137,9 +137,11 @@ public:
         const WifiScanLeaseCoordinator::Lease& lease) {
         return ScheduleScanRecovery(lease);
     }
-    bool CaptureExternalScanRecoveryRole(
+    bool PrepareExternalScanRadio(
         const WifiScanLeaseCoordinator::Lease& lease);
-    bool ReleaseExternalScanRecoveryRole(
+    bool FinishExternalScanRadio(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    bool ReleaseExternalScanRadioToken(
         const WifiScanLeaseCoordinator::Lease& lease);
     using ScanLeaseRetryPoller = void (*)(void*) noexcept;
     bool RegisterScanLeaseRetryPoller(
@@ -228,6 +230,17 @@ private:
         ExternalScanRecoveryRole role = ExternalScanRecoveryRole::kIdle;
         uint64_t lifecycle_generation = 0;
         bool station_was_connected = false;
+        bool idle_radio_prepared = false;
+        bool idle_restore_radio_started = false;
+        bool idle_scan_changed_mode = false;
+        wifi_mode_t idle_restore_mode = WIFI_MODE_NULL;
+        wifi_config_t idle_restore_sta_config{};
+        wifi_config_t idle_restore_ap_config{};
+        bool idle_restore_sta_config_valid = false;
+        bool idle_restore_ap_config_valid = false;
+        wifi_ps_type_t idle_restore_power_save = WIFI_PS_MIN_MODEM;
+        int8_t idle_restore_max_tx_power = 0;
+        wifi_band_mode_t idle_restore_band_mode = WIFI_BAND_MODE_2G_ONLY;
     };
 
     std::optional<ExternalScanRecoverySnapshot>
@@ -237,6 +250,9 @@ private:
         const ExternalScanRecoverySnapshot& snapshot);
     void RetryExternalRecoveryRole(
         const ExternalScanRecoverySnapshot& snapshot);
+    bool RestoreIdleExternalScanRadio(
+        const ExternalScanRecoverySnapshot& snapshot,
+        bool after_driver_reset);
     bool HasActiveExternalScanLocked() const;
 
     WifiManagerConfig config_;

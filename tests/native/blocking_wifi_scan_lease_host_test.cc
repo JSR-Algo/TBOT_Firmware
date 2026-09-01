@@ -1,5 +1,7 @@
 #include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_lease_state.h"
 #include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_policy.h"
+#include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_retry_state.h"
+#include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_completion_status.h"
 
 #include <cassert>
 #include <condition_variable>
@@ -176,6 +178,51 @@ void SlowFullChannelCallbackAtBoundaryIsNotClassifiedAsLost() {
         wait_ms, wait_ms));
 }
 
+void RecoveryRetrySurvivesBusyAndConsumesOnlyAfterStart() {
+    BlockingWifiScanRetryState retry;
+    const BlockingWifiScanRetryState::Token token{Lease(40), 9};
+    retry.Publish(token);
+    assert(retry.Peek(9).has_value());
+    // A role scanner winning the lease must leave the UI retry durable.
+    retry.PublishIfAbsent({Coordinator::Lease{}, 9});
+    assert(retry.Peek(9).has_value());
+    assert(retry.Peek(9)->recovered_lease.lease_id == 40);
+    assert(retry.ConsumeIfExact(token));
+    assert(!retry.Peek(9).has_value());
+    assert(!retry.ConsumeIfExact(token));
+}
+
+void RecoveryRetryCoalescesAndStaleUiGenerationCancels() {
+    BlockingWifiScanRetryState retry;
+    const BlockingWifiScanRetryState::Token token{Lease(41), 10};
+    retry.Publish(token);
+    retry.Publish(token);
+    assert(retry.Peek(10).has_value());
+    retry.CancelGeneration(9);
+    assert(retry.Peek(10).has_value());
+    retry.CancelGeneration(10);
+    assert(!retry.Peek(10).has_value());
+    // A recovery callback arriving after UI destruction must not resurrect it.
+    retry.Publish(token);
+    assert(!retry.Peek(10).has_value());
+}
+
+void AuthenticatedDriverFailureCannotPublishScanResults() {
+    BlockingWifiScanCompletionStatus status;
+    const auto lease = Lease(50);
+    status.Observe(lease, 1);
+    assert(status.IsObserved(lease));
+    assert(!status.Succeeded(lease));
+    assert(!status.Succeeded(Lease(51)));
+}
+
+void AuthenticatedZeroStatusAllowsResultConsumption() {
+    BlockingWifiScanCompletionStatus status;
+    const auto lease = Lease(52);
+    status.Observe(lease, 0);
+    assert(status.Succeeded(lease));
+}
+
 }  // namespace
 
 int main() {
@@ -190,6 +237,10 @@ int main() {
     RepeatedScansResetAllState();
     FullChannelActiveScanWaitIncludesEveryChannelAndSchedulingMargin();
     SlowFullChannelCallbackAtBoundaryIsNotClassifiedAsLost();
+    RecoveryRetrySurvivesBusyAndConsumesOnlyAfterStart();
+    RecoveryRetryCoalescesAndStaleUiGenerationCancels();
+    AuthenticatedDriverFailureCannotPublishScanResults();
+    AuthenticatedZeroStatusAllowsResultConsumption();
     std::cout << "blocking wifi scan lease host tests: PASS\n";
     return 0;
 }
