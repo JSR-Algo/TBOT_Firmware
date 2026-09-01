@@ -826,11 +826,11 @@ bool WifiManager::HasActiveExternalScan() const {
 
 // ==================== Station Mode ====================
 
-bool WifiManager::StartStationIfScanIdle() {
+WifiManager::StationStartResult WifiManager::StartStationIfScanIdle() {
     const auto acquired = scan_lease_coordinator_.TryAcquire(
         WifiScanLeaseCoordinator::Owner::kLifecycle);
     if (!acquired.acquired) {
-        return false;
+        return StationStartResult::kBusyOrFailed;
     }
 #ifdef TBOT_WIFI_MANAGER_TESTING
     if (before_reserved_station_start_hook_) {
@@ -840,9 +840,20 @@ bool WifiManager::StartStationIfScanIdle() {
     }
 #endif
     const bool started_this_generation = TryStartStationTransition();
+    const bool already_active = [this]() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return station_active_;
+    }();
     const bool released =
         scan_lease_coordinator_.AbandonUnsubmitted(acquired.lease);
-    return started_this_generation && released;
+    if (!released) {
+        return StationStartResult::kBusyOrFailed;
+    }
+    if (started_this_generation) {
+        return StationStartResult::kStartedNow;
+    }
+    return already_active ? StationStartResult::kAlreadyActive
+                          : StationStartResult::kBusyOrFailed;
 }
 
 void WifiManager::StartStation() {

@@ -2,6 +2,7 @@
 #include "wifi_config_ui.h"
 #include "blocking_wifi_scan_worker_state.h"
 #include "cardputer_wifi_deferred_intent_state.h"
+#include "cardputer_wifi_connection_policy.h"
 #include "process_lifetime_worker_handle.h"
 #include "codecs/es8311_audio_codec.h"
 #include "display/lcd_display.h"
@@ -95,7 +96,10 @@ private:
             try {
                 if (intent->kind ==
                     CardputerWifiDeferredIntentState::Kind::kReconnect) {
-                    if (!board->TryWifiConnect()) {
+                    const auto start_result = board->TryWifiConnect();
+                    const auto action = ResolveCardputerWifiStartAction(
+                        true, start_result);
+                    if (action == CardputerWifiStartAction::kRetry) {
                         board->wifi_connection_state_.RetryInFlight(*intent);
                         continue;
                     }
@@ -104,9 +108,28 @@ private:
                 }
 
                 auto& ssid_manager = SsidManager::GetInstance();
-                ssid_manager.AddSsid(intent->ssid, intent->password);
+                if (board->wifi_connection_state_.NeedsCredentialPersistence(
+                        *intent)) {
+                    ssid_manager.AddSsid(intent->ssid, intent->password);
+                    if (!board->wifi_connection_state_.MarkCredentialsPersisted(
+                            *intent)) {
+                        board->wifi_connection_state_.RetryInFlight(*intent);
+                        continue;
+                    }
+                }
                 auto& wifi_manager = WifiManager::GetInstance();
-                if (!wifi_manager.StartStationIfScanIdle()) {
+                const auto start_result = wifi_manager.StartStationIfScanIdle();
+                const auto action = ResolveCardputerWifiStartAction(
+                    false, start_result);
+                if (action == CardputerWifiStartAction::kRetry) {
+                    board->wifi_connection_state_.RetryInFlight(*intent);
+                    continue;
+                }
+                if (start_result ==
+                        WifiManager::StationStartResult::kAlreadyActive &&
+                    wifi_manager.IsConnected() &&
+                    wifi_manager.GetSsid() != intent->ssid) {
+                    wifi_manager.StopStation();
                     board->wifi_connection_state_.RetryInFlight(*intent);
                     continue;
                 }
@@ -114,7 +137,8 @@ private:
                 bool connected = false;
                 for (int i = 0; i < 100; ++i) {
                     vTaskDelay(pdMS_TO_TICKS(100));
-                    if (wifi_manager.IsConnected()) {
+                    if (wifi_manager.IsConnected() &&
+                        wifi_manager.GetSsid() == intent->ssid) {
                         connected = true;
                         break;
                     }

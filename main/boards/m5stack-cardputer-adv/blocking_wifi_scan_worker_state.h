@@ -78,14 +78,16 @@ public:
 
     bool RetryInFlight(const Request& request) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!Matches(in_flight_, request) || pending_.has_value() ||
-            request.ui_generation <= cancelled_through_generation_) {
+        if (!Matches(in_flight_, request)) {
             return false;
         }
-        pending_ = request;
+        if (!pending_.has_value() &&
+            request.ui_generation > cancelled_through_generation_) {
+            pending_ = request;
+        }
         in_flight_.reset();
         notification_delivered_ = false;
-        return true;
+        return pending_.has_value();
     }
 
     void CancelGeneration(uint64_t ui_generation) {

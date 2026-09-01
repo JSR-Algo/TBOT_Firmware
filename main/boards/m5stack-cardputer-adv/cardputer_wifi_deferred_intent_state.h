@@ -84,10 +84,29 @@ public:
         return in_flight_;
     }
 
+    bool NeedsCredentialPersistence(const Intent& intent) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return Matches(in_flight_, intent) && intent.kind == Kind::kCredentials &&
+            persisted_credentials_revision_ != intent.revision;
+    }
+
+    bool MarkCredentialsPersisted(const Intent& intent) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!Matches(in_flight_, intent) || intent.kind != Kind::kCredentials) {
+            return false;
+        }
+        persisted_credentials_revision_ = intent.revision;
+        return true;
+    }
+
     bool StoreConnectionResult(const Intent& intent, bool connected) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(in_flight_, intent) || intent.kind != Kind::kCredentials) {
             return false;
+        }
+        if (pending_.has_value() && pending_->revision > intent.revision) {
+            in_flight_.reset();
+            return true;
         }
         if (intent.ui_generation <= cancelled_through_generation_) {
             in_flight_.reset();
@@ -194,4 +213,5 @@ private:
     bool worker_created_ = false;
     bool notification_delivered_ = false;
     bool result_delivery_scheduled_ = false;
+    uint64_t persisted_credentials_revision_ = 0;
 };

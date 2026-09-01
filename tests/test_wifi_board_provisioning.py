@@ -549,7 +549,7 @@ def test_wb11_start_network_short_circuits_when_already_in_config_mode():
     body = _func_body(
         wifi_board,
         "void WifiBoard::StartNetwork()",
-        "bool WifiBoard::TryWifiConnect()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
     )
 
     guard_idx = body.index("if (in_config_mode_)")
@@ -576,7 +576,7 @@ def test_wb12_try_wifi_connect_branches_on_stored_ssids():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _func_body(
         wifi_board,
-        "bool WifiBoard::TryWifiConnect()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
         "void WifiBoard::OnNetworkEvent(",
     )
 
@@ -591,6 +591,7 @@ def test_wb12_try_wifi_connect_branches_on_stored_ssids():
         "TryWifiConnect() must reserve/start station before arming its timeout, "
         "and fall back to StartWifiConfigMode() when none are stored"
     )
+    assert "ShouldArmWifiConnectTimeout(start_result)" in body[start_idx:arm_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -604,7 +605,7 @@ def test_wb12b_unclaimed_saved_ssid_keeps_ble_advertising_before_station_connect
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _func_body(
         wifi_board,
-        "bool WifiBoard::TryWifiConnect()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
         "void WifiBoard::OnNetworkEvent(",
     )
 

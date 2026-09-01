@@ -789,17 +789,26 @@ void LifecycleReservationStartsOnlyFreshGenerationAndReleasesExactly() {
     const auto scan = coordinator.TryAcquire(
         WifiScanLeaseCoordinator::Owner::kBlufi);
     assert(scan.acquired);
-    assert(!manager->StartStationIfScanIdle());
+    assert(manager->StartStationIfScanIdle() ==
+           WifiManager::StationStartResult::kBusyOrFailed);
     assert(coordinator.AbandonUnsubmitted(scan.lease));
 
-    assert(manager->StartStationIfScanIdle());
+    assert(manager->StartStationIfScanIdle() ==
+           WifiManager::StationStartResult::kStartedNow);
     assert(manager->TestStationActive());
+    const auto active_scan = coordinator.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kBlufi);
+    assert(active_scan.acquired);
+    assert(manager->StartStationIfScanIdle() ==
+           WifiManager::StationStartResult::kBusyOrFailed);
+    assert(coordinator.AbandonUnsubmitted(active_scan.lease));
     const auto after_start = coordinator.TryAcquire(
         WifiScanLeaseCoordinator::Owner::kBlufi);
     assert(after_start.acquired);
     assert(coordinator.AbandonUnsubmitted(after_start.lease));
 
-    assert(!manager->StartStationIfScanIdle());
+    assert(manager->StartStationIfScanIdle() ==
+           WifiManager::StationStartResult::kAlreadyActive);
     const auto after_stale = coordinator.TryAcquire(
         WifiScanLeaseCoordinator::Owner::kBlufi);
     assert(after_stale.acquired);
@@ -811,7 +820,8 @@ void LifecycleReservationRejectsAnotherCallersGeneration() {
     manager->TestSetBeforeReservedStationStartHook([manager]() {
         manager->StartStation();
     });
-    assert(!manager->StartStationIfScanIdle());
+    assert(manager->StartStationIfScanIdle() ==
+           WifiManager::StationStartResult::kAlreadyActive);
     assert(manager->TestStationActive());
     const auto after_foreign_start = manager->ScanLeaseCoordinator().TryAcquire(
         WifiScanLeaseCoordinator::Owner::kBlufi);

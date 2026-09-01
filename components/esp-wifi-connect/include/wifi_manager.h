@@ -40,6 +40,7 @@
 #include "wifi_scan_recovery_executor.h"
 #endif
 #include "wifi_scan_lease_coordinator.h"
+#include "wifi_station_start_result.h"
 
 class WifiStation;
 class WifiConfigurationAp;
@@ -69,6 +70,8 @@ struct WifiManagerConfig {
  */
 class WifiManager {
 public:
+    using StationStartResult = WifiStationStartResult;
+
     enum class ExternalScanRecoveryRole : uint8_t {
         kIdle,
         kStation,
@@ -99,7 +102,7 @@ public:
     // ==================== Station Mode ====================
 
     void StartStation();   // Non-blocking, auto-stops config AP if active
-    bool StartStationIfScanIdle();
+    StationStartResult StartStationIfScanIdle();
     void StopStation();    // Non-blocking
 
     bool IsConnected() const;

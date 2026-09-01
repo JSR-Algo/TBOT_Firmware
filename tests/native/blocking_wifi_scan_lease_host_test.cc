@@ -5,6 +5,7 @@
 #include "../../main/boards/m5stack-cardputer-adv/blocking_wifi_scan_worker_state.h"
 #include "../../main/boards/m5stack-cardputer-adv/process_lifetime_worker_handle.h"
 #include "../../main/boards/m5stack-cardputer-adv/cardputer_wifi_deferred_intent_state.h"
+#include "../../main/boards/m5stack-cardputer-adv/cardputer_wifi_connection_policy.h"
 
 #include <cassert>
 #include <condition_variable>
@@ -293,6 +294,50 @@ void ScanWorkerSchedulingFailureRestoresDurableRequest() {
     assert(state.CompleteIfCurrent(request));
 }
 
+void ScanWorkerSchedulingFailurePromotesNewerPendingRequest() {
+    BlockingWifiScanWorkerState state;
+    const BlockingWifiScanWorkerState::Request first{51, 1};
+    const BlockingWifiScanWorkerState::Request newer{52, 1};
+    assert(state.Publish(first));
+    state.ObserveWorkerCreation(true);
+    assert(state.ArmNotification());
+    const auto in_flight = state.TakeNotified();
+    assert(in_flight.has_value());
+    assert(state.Publish(newer));
+
+    // Models Application::Schedule throwing after the newer UI request lands.
+    assert(state.RetryInFlight(*in_flight));
+    assert(state.NeedsNotification());
+    assert(state.ArmNotification());
+    const auto executed = state.TakeNotified();
+    assert(executed.has_value());
+    assert(executed->ui_generation == newer.ui_generation);
+    assert(executed->revision == newer.revision);
+    assert(state.CompleteIfCurrent(*executed));
+    assert(!state.NeedsNotification());
+    assert(!state.TakeNotified().has_value());
+}
+
+void ScanWorkerSchedulingFailureClearsCancelledInFlightRequest() {
+    BlockingWifiScanWorkerState state;
+    const BlockingWifiScanWorkerState::Request stale{53, 1};
+    const BlockingWifiScanWorkerState::Request current{54, 1};
+    assert(state.Publish(stale));
+    state.ObserveWorkerCreation(true);
+    assert(state.ArmNotification());
+    const auto in_flight = state.TakeNotified();
+    assert(in_flight.has_value());
+    state.CancelGeneration(53);
+    assert(!state.RetryInFlight(*in_flight));
+    assert(state.Publish(current));
+    assert(state.NeedsNotification());
+    assert(state.ArmNotification());
+    const auto executed = state.TakeNotified();
+    assert(executed.has_value());
+    assert(executed->ui_generation == current.ui_generation);
+    assert(state.CompleteIfCurrent(*executed));
+}
+
 void PreSubmitCallbackFailureTransitionsToRecoverableDebt() {
     WifiScanLeaseCoordinator coordinator;
     BlockingWifiScanLeaseState owner;
@@ -502,6 +547,46 @@ void DeferredWifiIntentSupersedesBlockedInFlightWithoutWedging() {
     assert(new_intent->ssid == "new");
 }
 
+void CorrectedCredentialsSupersedeEarlierFailedAttempt() {
+    CardputerWifiDeferredIntentState state;
+    assert(state.PublishCredentials(99, "SUMI_LAU1", "wrong-password"));
+    state.ObserveWorkerCreation(true);
+    assert(state.ArmNotification());
+    const auto wrong = state.TakeNotified();
+    assert(wrong.has_value());
+    assert(state.PublishCredentials(99, "SUMI_LAU1", "hongvantruong"));
+    assert(state.StoreConnectionResult(*wrong, false));
+    assert(!state.ClaimResultForDelivery().has_value());
+    assert(state.NeedsNotification());
+    assert(state.ArmNotification());
+    const auto corrected = state.TakeNotified();
+    assert(corrected.has_value());
+    assert(corrected->password == "hongvantruong");
+    assert(state.StoreConnectionResult(*corrected, true));
+    const auto result = state.ClaimResultForDelivery();
+    assert(result.has_value() && result->connected);
+    assert(state.CompleteResult(*result));
+    assert(!state.NeedsNotification());
+}
+
+void CredentialPersistenceIsExactlyOnceAcrossBusyRetry() {
+    CardputerWifiDeferredIntentState state;
+    assert(state.PublishCredentials(100, "SUMI_LAU1", "hongvantruong"));
+    state.ObserveWorkerCreation(true);
+    assert(state.ArmNotification());
+    const auto first = state.TakeNotified();
+    assert(first.has_value());
+    assert(state.NeedsCredentialPersistence(*first));
+    assert(state.MarkCredentialsPersisted(*first));
+    assert(!state.NeedsCredentialPersistence(*first));
+    assert(state.RetryInFlight(*first));
+    assert(state.ArmNotification());
+    const auto retry = state.TakeNotified();
+    assert(retry.has_value());
+    assert(!state.NeedsCredentialPersistence(*retry));
+    assert(state.StoreConnectionResult(*retry, true));
+}
+
 void ArmedNotificationRollsBackAfterGiveFailure() {
     CardputerWifiDeferredIntentState state;
     assert(state.PublishReconnect(98));
@@ -538,6 +623,26 @@ void DeferredWifiIntentIsThreadSafeAndExactlyOnce() {
         assert(state.StoreConnectionResult(*intent, true));
         assert(!state.StoreConnectionResult(*intent, true));
     }
+}
+
+void ConnectionStartPolicyDoesNotLoopOnActiveStation() {
+    assert(ResolveCardputerWifiStartAction(
+               true, WifiStationStartResult::kAlreadyActive) ==
+           CardputerWifiStartAction::kCompleteReconnect);
+    assert(ResolveCardputerWifiStartAction(
+               false, WifiStationStartResult::kAlreadyActive) ==
+           CardputerWifiStartAction::kMonitorCredentials);
+    assert(ResolveCardputerWifiStartAction(
+               false, WifiStationStartResult::kStartedNow) ==
+           CardputerWifiStartAction::kMonitorCredentials);
+    assert(ResolveCardputerWifiStartAction(
+               true, WifiStationStartResult::kBusyOrFailed) ==
+           CardputerWifiStartAction::kRetry);
+    assert(ShouldArmWifiConnectTimeout(WifiStationStartResult::kStartedNow));
+    assert(!ShouldArmWifiConnectTimeout(
+        WifiStationStartResult::kAlreadyActive));
+    assert(!ShouldArmWifiConnectTimeout(
+        WifiStationStartResult::kBusyOrFailed));
 }
 
 void DelayedConnectionWorkerDoesNotBlockApplicationSentinel() {
@@ -589,6 +694,8 @@ int main() {
     ScanWorkerRenotifiesRequestPublishedWhileAnotherIsInFlight();
     ScanWorkerRejectsStaleCompletionWithoutLosingNewRequest();
     ScanWorkerSchedulingFailureRestoresDurableRequest();
+    ScanWorkerSchedulingFailurePromotesNewerPendingRequest();
+    ScanWorkerSchedulingFailureClearsCancelledInFlightRequest();
     PreSubmitCallbackFailureTransitionsToRecoverableDebt();
     DelayedScanWorkerDoesNotBlockUnrelatedApplicationWork();
     WorkerHandlePublicationSurvivesNotifyBeforePublish();
@@ -597,9 +704,12 @@ int main() {
     LifecycleReservationIgnoresScanCallbacksAndReleasesExactly();
     DeferredWifiIntentIsTypedCoalescedAndGenerationBound();
     DeferredWifiIntentIsThreadSafeAndExactlyOnce();
+    ConnectionStartPolicyDoesNotLoopOnActiveStation();
     DeferredWifiIntentDropsOnlyStaleUiResult();
     DeferredWifiIntentRetriesIfScanOwnershipReturnsAfterNotification();
     DeferredWifiIntentSupersedesBlockedInFlightWithoutWedging();
+    CorrectedCredentialsSupersedeEarlierFailedAttempt();
+    CredentialPersistenceIsExactlyOnceAcrossBusyRetry();
     ArmedNotificationRollsBackAfterGiveFailure();
     DelayedConnectionWorkerDoesNotBlockApplicationSentinel();
     std::cout << "blocking wifi scan lease host tests: PASS\n";

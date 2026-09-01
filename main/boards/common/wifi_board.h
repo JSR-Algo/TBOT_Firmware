@@ -2,6 +2,7 @@
 #define WIFI_BOARD_H
 
 #include "board.h"
+#include "wifi_station_start_result.h"
 #include <atomic>
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
@@ -58,7 +59,7 @@ protected:
     /**
      * Start WiFi connection attempt
      */
-    bool TryWifiConnect();
+    WifiStationStartResult TryWifiConnect();
 
     /**
      * Enter WiFi configuration mode

@@ -101,7 +101,7 @@ void WifiBoard::StartNetwork() {
     TryWifiConnect();
 }
 
-bool WifiBoard::TryWifiConnect() {
+WifiStationStartResult WifiBoard::TryWifiConnect() {
     auto& ssid_manager = SsidManager::GetInstance();
     bool have_ssid = !ssid_manager.GetSsidList().empty();
 
@@ -110,17 +110,21 @@ bool WifiBoard::TryWifiConnect() {
         app.EnsureBleAdvertisingForUnclaimedSavedWifi();
         // Start connection attempt with timeout
         ESP_LOGI(TAG, "Starting WiFi connection attempt");
-        if (!WifiManager::GetInstance().StartStationIfScanIdle()) {
-            return false;
+        const auto start_result =
+            WifiManager::GetInstance().StartStationIfScanIdle();
+        if (start_result == WifiStationStartResult::kBusyOrFailed) {
+            return start_result;
         }
-        esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
-        return true;
+        if (ShouldArmWifiConnectTimeout(start_result)) {
+            esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+        }
+        return start_result;
     } else {
         // No SSID configured, enter config mode
         // Wait for the board version to be shown
         vTaskDelay(pdMS_TO_TICKS(1500));
         RequestWifiConfigMode();
-        return true;
+        return WifiStationStartResult::kStartedNow;
     }
 }
 

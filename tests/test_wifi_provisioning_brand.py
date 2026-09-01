@@ -363,7 +363,9 @@ def test_runtime_state_machine_can_interrupt_backend_connect_for_wifi_config():
 def test_start_network_preserves_boot_reprovisioning_during_startup():
     wifi_board = read("main/boards/common/wifi_board.cc")
     start = wifi_board.index("void WifiBoard::StartNetwork()")
-    start_body = wifi_board[start : wifi_board.index("bool WifiBoard::TryWifiConnect()", start)]
+    start_body = wifi_board[start : wifi_board.index(
+        "WifiStationStartResult WifiBoard::TryWifiConnect()", start
+    )]
 
     assert "StartNetwork skipped auto-connect because config mode is already active" in start_body
     assert "if (in_config_mode_)" in start_body
