@@ -1,4 +1,5 @@
 #include "wifi_station.h"
+#include "wifi_credential_limits.h"
 #include <cstring>
 #include <algorithm>
 #include <cstdlib>
@@ -210,8 +211,7 @@ void WifiStation::StartWithScanPolicy(bool automatic_scans_enabled) {
 
 bool WifiStation::ConnectExact(const std::string& ssid,
                                const std::string& password) {
-    if (ssid.empty() || ssid.size() > sizeof(wifi_config_t{}.sta.ssid) ||
-        password.size() >= sizeof(wifi_config_t{}.sta.password)) {
+    if (!IsValidWifiCredentials(ssid, password)) {
         return false;
     }
     uint64_t session_id = 0;

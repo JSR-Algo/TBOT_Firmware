@@ -110,8 +110,6 @@ private:
 
     // Display constants
     static constexpr int MAX_VISIBLE_ITEMS = 4;
-    static constexpr int MAX_INPUT_LENGTH = 64;
-
     // State handlers
     bool StartScanning();
     void ShowScanResults();

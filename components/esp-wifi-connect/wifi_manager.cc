@@ -5,6 +5,7 @@
 #include "wifi_manager.h"
 #include "wifi_station.h"
 #include "wifi_configuration_ap.h"
+#include "wifi_credential_limits.h"
 
 #include <esp_log.h>
 #include <esp_wifi.h>
@@ -859,8 +860,8 @@ WifiManager::StationStartResult WifiManager::StartStationIfScanIdle() {
 WifiManager::StationStartResult
 WifiManager::StartStationWithCredentialsIfScanIdle(
         const std::string& ssid, const std::string& password) {
-    if (ssid.empty()) {
-        return StationStartResult::kBusyOrFailed;
+    if (!IsValidWifiCredentials(ssid, password)) {
+        return StationStartResult::kInvalidCredentials;
     }
     const auto acquired = scan_lease_coordinator_.TryAcquire(
         WifiScanLeaseCoordinator::Owner::kLifecycle);
@@ -1007,6 +1008,9 @@ void WifiManager::StartStationTarget(
     const bool exact_connection_started =
         !credentials.has_value() ||
         station->ConnectExact(credentials->first, credentials->second);
+    if (credentials.has_value() && !exact_connection_started) {
+        station->Stop();
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (exact_connection_started &&

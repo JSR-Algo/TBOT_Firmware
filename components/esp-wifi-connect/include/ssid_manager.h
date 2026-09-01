@@ -20,6 +20,8 @@ public:
     }
 
     void AddSsid(const std::string& ssid, const std::string& password);
+    // Returns 0 for invalid input or while another transaction owns the
+    // provisional credential list. Commit/rollback releases that ownership.
     uint32_t BeginSsidTransaction(const std::string& ssid, const std::string& password);
     bool CommitSsidTransaction(uint32_t transaction_id);
     bool RollbackSsidTransaction(uint32_t transaction_id);

@@ -162,22 +162,37 @@ private:
                     }
                 }
                 auto& wifi_manager = WifiManager::GetInstance();
-                WifiManager::StationStartResult start_result;
-                {
-                    std::lock_guard<std::mutex> transaction_lock(
-                        board->wifi_credential_transaction_mutex_);
-                    if (!board->wifi_connection_state_.CredentialTransaction(
-                            *intent).has_value()) {
-                        continue;
-                    }
-                    start_result =
-                        wifi_manager.StartStationWithCredentialsIfScanIdle(
-                            intent->ssid, intent->password);
+                if (!board->wifi_connection_state_.CredentialTransaction(
+                        *intent).has_value()) {
+                    continue;
+                }
+                const auto start_result =
+                    wifi_manager.StartStationWithCredentialsIfScanIdle(
+                        intent->ssid, intent->password);
+                if (!board->wifi_connection_state_.CredentialTransaction(
+                        *intent).has_value()) {
+                    wifi_manager.StopStation();
+                    continue;
                 }
                 const auto action = ResolveCardputerWifiStartAction(
                     false, start_result);
                 if (action == CardputerWifiStartAction::kRetry) {
                     board->wifi_connection_state_.RetryInFlight(*intent);
+                    continue;
+                }
+                if (action == CardputerWifiStartAction::kRejectCredentials) {
+                    std::lock_guard<std::mutex> transaction_lock(
+                        board->wifi_credential_transaction_mutex_);
+                    const auto finalization = board->wifi_connection_state_
+                        .ClaimCredentialFinalization(*intent, false);
+                    if (finalization.has_value()) {
+                        const bool rolled_back =
+                            ssid_manager.RollbackSsidTransaction(
+                                finalization->transaction_id);
+                        board->wifi_connection_state_
+                            .CompleteCredentialFinalization(
+                                *finalization, rolled_back);
+                    }
                     continue;
                 }
                 bool connected = false;

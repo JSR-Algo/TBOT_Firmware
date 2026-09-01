@@ -7,6 +7,7 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -96,22 +97,49 @@ int main() {
     assert(nvs_commit_calls == 0);
     AssertOriginalList(manager.GetSsidList());
 
-    const uint32_t stale =
-        manager.BeginSsidTransaction("stale", "stale-password");
-    assert(stale != 0);
-    const uint32_t winner =
-        manager.BeginSsidTransaction("winner", "winner-password");
-    assert(winner != 0 && winner != stale);
-    assert(!manager.CommitSsidTransaction(stale));
-    assert(manager.CommitSsidTransaction(winner));
+    const uint32_t owner =
+        manager.BeginSsidTransaction("owner", "owner-password");
+    assert(owner != 0);
+    const uint32_t blocked =
+        manager.BeginSsidTransaction("blocked", "blocked-password");
+    assert(blocked == 0);
+    assert(manager.CommitSsidTransaction(owner));
     assert(nvs_commit_calls == 1);
     const auto committed = manager.GetSsidList();
     assert(committed.size() == 10);
-    assert(committed.front().ssid == "winner");
-    assert(committed.front().password == "winner-password");
+    assert(committed.front().ssid == "owner");
+    assert(committed.front().password == "owner-password");
     for (const auto& item : committed) {
-        assert(item.ssid != "stale");
+        assert(item.ssid != "blocked");
     }
+
+    const uint32_t cancelled =
+        manager.BeginSsidTransaction("cancelled", "cancelled-password");
+    assert(cancelled != 0);
+    assert(manager.RollbackSsidTransaction(cancelled));
+    const uint32_t after_cancel =
+        manager.BeginSsidTransaction("after-cancel", "new-password");
+    assert(after_cancel != 0);
+    assert(manager.RollbackSsidTransaction(after_cancel));
+
+    uint32_t first = 0;
+    uint32_t second = 0;
+    std::thread first_owner([&]() {
+        first = manager.BeginSsidTransaction("concurrent-a", "password-a");
+    });
+    std::thread second_owner([&]() {
+        second = manager.BeginSsidTransaction("concurrent-b", "password-b");
+    });
+    first_owner.join();
+    second_owner.join();
+    assert((first == 0) != (second == 0));
+    const uint32_t concurrent_owner = first != 0 ? first : second;
+    assert(manager.RollbackSsidTransaction(concurrent_owner));
+
+    const uint32_t after_success =
+        manager.BeginSsidTransaction("after-success", "final-password");
+    assert(after_success != 0);
+    assert(manager.RollbackSsidTransaction(after_success));
 
     std::cout << "ssid manager transaction host tests: PASS\n";
     return 0;

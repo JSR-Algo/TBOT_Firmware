@@ -1423,8 +1423,7 @@ def test_cardputer_success_releases_ui_before_generation_bound_app_completion():
 def test_cardputer_exact_credentials_are_bounded_and_cancel_stops_exact_station():
     station = read("components/esp-wifi-connect/wifi_station.cc")
     exact = function_body(station, "bool WifiStation::ConnectExact")
-    assert "ssid.size() > sizeof(wifi_config_t{}.sta.ssid)" in exact
-    assert "password.size() >= sizeof(wifi_config_t{}.sta.password)" in exact
+    assert "IsValidWifiCredentials(ssid, password)" in exact
 
     board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
     exit_mode = function_body(board, "void ExitWifiConfigMode")
@@ -1996,3 +1995,53 @@ def test_wifi_station_does_not_consume_blufi_owned_scan_results():
         "CompleteOwnedScan(lease)"
     )
     assert "Ignoring WiFi scan done event not owned by WifiStation" in handler
+
+
+def test_cardputer_uses_field_specific_wifi_credential_byte_limits():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    header = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.h")
+    password = function_body(source, "void WifiConfigUI::HandlePasswordInputKey")
+    manual = function_body(source, "void WifiConfigUI::HandleManualInputKey")
+
+    assert "MAX_INPUT_LENGTH" not in header
+    assert "kMaxWifiPasswordBytes" in password
+    assert "kMaxWifiSsidBytes" in manual
+    assert "AppendWifiFieldIfFits" in password
+    assert "AppendWifiFieldIfFits" in manual
+
+
+def test_cardputer_invalid_credentials_are_terminal_not_retried():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    invalid = worker.index("CardputerWifiStartAction::kRejectCredentials")
+    retry = worker.index("CardputerWifiStartAction::kRetry")
+    assert invalid > retry
+    invalid_path = worker[invalid:worker.index("bool connected", invalid)]
+    assert "ClaimCredentialFinalization" in invalid_path
+    assert "RollbackSsidTransaction" in invalid_path
+    assert "RetryInFlight" not in invalid_path
+
+
+def test_cardputer_transaction_ownership_is_released_on_all_terminal_paths():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+
+    assert "CommitSsidTransaction" in worker
+    assert worker.count("RollbackSsidTransaction") >= 2
+    cancel = exit_mode[exit_mode.index("CancelGeneration"):]
+    assert "RollbackSsidTransaction(*transaction)" in cancel
+
+
+def test_cardputer_station_start_runs_without_credential_transaction_lock():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    start = worker.index("StartStationWithCredentialsIfScanIdle")
+    preceding_lock = worker.rfind("wifi_credential_transaction_mutex_", 0, start)
+    preceding_scope_end = worker.rfind("}", 0, start)
+    assert preceding_scope_end > preceding_lock
+    after_start = worker[start:]
+    assert "CredentialTransaction" in after_start
+    assert after_start.index("CredentialTransaction") < after_start.index(
+        "CardputerWifiStartAction::kRetry"
+    )

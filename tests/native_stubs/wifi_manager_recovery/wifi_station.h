@@ -33,8 +33,13 @@ public:
         exact_ssid_ = ssid;
         exact_password_ = password;
         connected_ = false;
+        if (fail_exact_connection_once_) {
+            fail_exact_connection_once_ = false;
+            return false;
+        }
         return true;
     }
+    void FailExactConnectionOnce() { fail_exact_connection_once_ = true; }
     void EnableAutomaticScans() { automatic_scans_enabled_ = true; }
     int Starts() const { return starts_; }
     int ExactModeStarts() const { return exact_mode_starts_; }
@@ -83,6 +88,7 @@ private:
     std::string exact_ssid_;
     std::string exact_password_;
     bool automatic_scans_enabled_ = false;
+    bool fail_exact_connection_once_ = false;
     std::function<void(const WifiScanLeaseCoordinator::Lease&)> recovery_cb_;
     std::function<void()> on_scan_begin_;
 };

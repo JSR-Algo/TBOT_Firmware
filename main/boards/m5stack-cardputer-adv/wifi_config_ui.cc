@@ -1,4 +1,5 @@
 #include "wifi_config_ui.h"
+#include "wifi_credential_limits.h"
 #include "blocking_wifi_scan_lease_state.h"
 #include "blocking_wifi_scan_policy.h"
 #include "blocking_wifi_scan_retry_state.h"
@@ -956,16 +957,16 @@ void WifiConfigUI::HandlePasswordInputKey(const KeyEvent& event) {
             break;
 
         case KC_SPACE:
-            if (input_password_.length() < MAX_INPUT_LENGTH) {
-                input_password_ += ' ';
+            if (AppendWifiFieldIfFits(input_password_, " ",
+                                      kMaxWifiPasswordBytes)) {
                 RedrawPasswordInput();
             }
             break;
 
         default:
             // Add character if it's a printable key
-            if (event.key_char && strlen(event.key_char) > 0 && input_password_.length() < MAX_INPUT_LENGTH) {
-                input_password_ += event.key_char;
+            if (AppendWifiFieldIfFits(input_password_, event.key_char,
+                                      kMaxWifiPasswordBytes)) {
                 RedrawPasswordInput();
             }
             break;
@@ -974,6 +975,9 @@ void WifiConfigUI::HandlePasswordInputKey(const KeyEvent& event) {
 
 void WifiConfigUI::HandleManualInputKey(const KeyEvent& event) {
     std::string* current_input = input_focus_on_password_ ? &input_password_ : &input_ssid_;
+    const size_t max_input_bytes = input_focus_on_password_
+        ? kMaxWifiPasswordBytes
+        : kMaxWifiSsidBytes;
 
     switch (event.key_code) {
         case KC_TAB:
@@ -1006,16 +1010,15 @@ void WifiConfigUI::HandleManualInputKey(const KeyEvent& event) {
             break;
 
         case KC_SPACE:
-            if (current_input->length() < MAX_INPUT_LENGTH) {
-                *current_input += ' ';
+            if (AppendWifiFieldIfFits(*current_input, " ", max_input_bytes)) {
                 RedrawManualInput();
             }
             break;
 
         default:
             // Add character if it's a printable key
-            if (event.key_char && strlen(event.key_char) > 0 && current_input->length() < MAX_INPUT_LENGTH) {
-                *current_input += event.key_char;
+            if (AppendWifiFieldIfFits(*current_input, event.key_char,
+                                      max_input_bytes)) {
                 RedrawManualInput();
             }
             break;

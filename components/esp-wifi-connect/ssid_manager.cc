@@ -152,8 +152,9 @@ uint32_t SsidManager::BeginSsidTransaction(const std::string& ssid,
 
     std::lock_guard<std::mutex> lock(transaction_mutex_);
     if (active_transaction_id_ != 0) {
-        RestoreActiveTransaction();
-        ClearTransactionBackup();
+        // The active transaction owns the provisional list until its exact
+        // commit or rollback releases ownership.
+        return 0;
     }
 
     ClearTransactionBackup();

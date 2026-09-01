@@ -6,6 +6,7 @@
 #include "../../main/boards/m5stack-cardputer-adv/process_lifetime_worker_handle.h"
 #include "../../main/boards/m5stack-cardputer-adv/cardputer_wifi_deferred_intent_state.h"
 #include "../../main/boards/m5stack-cardputer-adv/cardputer_wifi_connection_policy.h"
+#include "wifi_credential_limits.h"
 
 #include <cassert>
 #include <condition_variable>
@@ -691,11 +692,30 @@ void ConnectionStartPolicyDoesNotLoopOnActiveStation() {
     assert(ResolveCardputerWifiStartAction(
                true, WifiStationStartResult::kBusyOrFailed) ==
            CardputerWifiStartAction::kRetry);
+    assert(ResolveCardputerWifiStartAction(
+               false, WifiStationStartResult::kInvalidCredentials) ==
+           CardputerWifiStartAction::kRejectCredentials);
     assert(ShouldArmWifiConnectTimeout(WifiStationStartResult::kStartedNow));
     assert(!ShouldArmWifiConnectTimeout(
         WifiStationStartResult::kAlreadyActive));
     assert(!ShouldArmWifiConnectTimeout(
         WifiStationStartResult::kBusyOrFailed));
+}
+
+void CredentialFieldLimitsAreByteExact() {
+    assert(IsValidWifiCredentials(std::string(32, 's'),
+                                  std::string(63, 'p')));
+    assert(!IsValidWifiCredentials(std::string(33, 's'), "password"));
+    assert(!IsValidWifiCredentials("ssid", std::string(64, 'p')));
+
+    std::string ssid(31, 's');
+    assert(!AppendWifiFieldIfFits(ssid, "\xC3\xA9", kMaxWifiSsidBytes));
+    assert(ssid.size() == 31);
+    assert(AppendWifiFieldIfFits(ssid, "x", kMaxWifiSsidBytes));
+    assert(ssid.size() == 32);
+    std::string oversized(33, 's');
+    assert(!AppendWifiFieldIfFits(oversized, "x", kMaxWifiSsidBytes));
+    assert(oversized.size() == 33);
 }
 
 void SetupCompletionIsGenerationBoundAndExactlyOnce() {
@@ -779,6 +799,7 @@ int main() {
     DeferredWifiIntentIsTypedCoalescedAndGenerationBound();
     DeferredWifiIntentIsThreadSafeAndExactlyOnce();
     ConnectionStartPolicyDoesNotLoopOnActiveStation();
+    CredentialFieldLimitsAreByteExact();
     SetupCompletionIsGenerationBoundAndExactlyOnce();
     DeferredWifiIntentDropsOnlyStaleUiResult();
     DeferredWifiIntentRetriesIfScanOwnershipReturnsAfterNotification();

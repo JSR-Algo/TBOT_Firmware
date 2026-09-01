@@ -850,6 +850,39 @@ void ExactCredentialsRestartActiveStationUnderLifecycleLease() {
     assert(station->AutomaticScansEnabled());
 }
 
+void InvalidExactCredentialsAreRejectedBeforeStationStart() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto* station = manager->TestStation();
+
+    assert(manager->StartStationWithCredentialsIfScanIdle(
+               std::string(33, 's'), "password") ==
+           WifiManager::StationStartResult::kInvalidCredentials);
+    assert(manager->StartStationWithCredentialsIfScanIdle(
+               "target", std::string(64, 'p')) ==
+           WifiManager::StationStartResult::kInvalidCredentials);
+    assert(station->Starts() == 0);
+    assert(station->ExactModeStarts() == 0);
+    assert(station->ExactCredentialStarts() == 0);
+    assert(station->Stops() == 0);
+    assert(!manager->TestStationActive());
+}
+
+void ExactConnectionFailureStopsPartiallyStartedStationExactlyOnce() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto* station = manager->TestStation();
+    station->FailExactConnectionOnce();
+
+    assert(manager->StartStationWithCredentialsIfScanIdle(
+               "target", "password") ==
+           WifiManager::StationStartResult::kBusyOrFailed);
+    assert(station->ExactModeStarts() == 1);
+    assert(station->ExactCredentialStarts() == 1);
+    assert(station->Stops() == 1);
+    assert(!manager->TestStationActive());
+}
+
 }  // namespace
 
 WifiRadioRecoveryRestorer::Driver& TestWifiRecoveryDriver() {
@@ -1193,4 +1226,6 @@ int main() {
     LifecycleReservationStartsOnlyFreshGenerationAndReleasesExactly();
     LifecycleReservationRejectsAnotherCallersGeneration();
     ExactCredentialsRestartActiveStationUnderLifecycleLease();
+    InvalidExactCredentialsAreRejectedBeforeStationStart();
+    ExactConnectionFailureStopsPartiallyStartedStationExactlyOnce();
 }
