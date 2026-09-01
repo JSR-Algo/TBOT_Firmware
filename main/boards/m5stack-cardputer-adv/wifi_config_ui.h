@@ -143,7 +143,6 @@ private:
     void DrawSavedWifiList();
     std::string GetSignalBars(int8_t rssi);
     void LoadSavedWifiList();
-    void SaveWifiCredentials(const std::string& ssid, const std::string& password);
     void DeleteSavedWifi(int index);
     static ScanWorkerResult DoWifiScan(uint64_t ui_generation);
     void DismissPendingScanResult();

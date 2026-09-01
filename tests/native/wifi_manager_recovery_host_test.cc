@@ -828,6 +828,28 @@ void LifecycleReservationRejectsAnotherCallersGeneration() {
     assert(after_foreign_start.acquired);
 }
 
+void ExactCredentialsRestartActiveStationUnderLifecycleLease() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    assert(manager->StartStationIfScanIdle() ==
+           WifiManager::StationStartResult::kStartedNow);
+    auto* station = manager->TestStation();
+    const int starts_before = station->Starts();
+    const int stops_before = station->Stops();
+    assert(manager->StartStationWithCredentialsIfScanIdle(
+               "target", "corrected-password") ==
+           WifiManager::StationStartResult::kStartedNow);
+    assert(station->Stops() == stops_before + 1);
+    assert(station->Starts() == starts_before + 1);
+    assert(station->ExactModeStarts() == 1);
+    assert(station->ExactCredentialStarts() == 1);
+    assert(station->ExactSsid() == "target");
+    assert(station->ExactPassword() == "corrected-password");
+    assert(!station->AutomaticScansEnabled());
+    manager->EnableStationAutomaticScans();
+    assert(station->AutomaticScansEnabled());
+}
+
 }  // namespace
 
 WifiRadioRecoveryRestorer::Driver& TestWifiRecoveryDriver() {
@@ -1010,6 +1032,10 @@ void WifiStation::Start() {
     scans_enabled_ = true;
     connected_ = true;
 }
+void WifiStation::StartForExactConnection() {
+    ++exact_mode_starts_;
+    Start();
+}
 void WifiStation::Stop() {
     ++stops_;
     ++scan_session_id_;
@@ -1166,4 +1192,5 @@ int main() {
     StalePendingGenerationDoesNotStartTarget();
     LifecycleReservationStartsOnlyFreshGenerationAndReleasesExactly();
     LifecycleReservationRejectsAnotherCallersGeneration();
+    ExactCredentialsRestartActiveStationUnderLifecycleLease();
 }

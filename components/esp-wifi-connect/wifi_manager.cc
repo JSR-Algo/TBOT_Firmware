@@ -856,6 +856,66 @@ WifiManager::StationStartResult WifiManager::StartStationIfScanIdle() {
                           : StationStartResult::kBusyOrFailed;
 }
 
+WifiManager::StationStartResult
+WifiManager::StartStationWithCredentialsIfScanIdle(
+        const std::string& ssid, const std::string& password) {
+    if (ssid.empty()) {
+        return StationStartResult::kBusyOrFailed;
+    }
+    const auto acquired = scan_lease_coordinator_.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kLifecycle);
+    if (!acquired.acquired) {
+        return StationStartResult::kBusyOrFailed;
+    }
+
+    WifiStation* station = nullptr;
+    WifiManagerConfig config;
+    uint64_t transition_generation = 0;
+    bool stop_active_station = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ || HasActiveExternalScanLocked() ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
+            wifi_teardown_faulted_ || config_mode_active_) {
+            scan_lease_coordinator_.AbandonUnsubmitted(acquired.lease);
+            return StationStartResult::kBusyOrFailed;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station = station_.get();
+        config = config_;
+        stop_active_station = station_active_;
+        station_active_ = false;
+    }
+    if (stop_active_station) {
+        station->Stop();
+    }
+    StartStationTarget(station, config, transition_generation,
+                       std::make_pair(ssid, password));
+    const bool started = [this, transition_generation]() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return station_active_ && lifecycle_generation_ == transition_generation;
+    }();
+    const bool released =
+        scan_lease_coordinator_.AbandonUnsubmitted(acquired.lease);
+    return started && released ? StationStartResult::kStartedNow
+                               : StationStartResult::kBusyOrFailed;
+}
+
+void WifiManager::EnableStationAutomaticScans() {
+    WifiStation* station = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (station_active_) {
+            station = station_.get();
+        }
+    }
+    if (station != nullptr) {
+        station->EnableAutomaticScans();
+    }
+}
+
 void WifiManager::StartStation() {
     (void)TryStartStationTransition();
 }
@@ -917,7 +977,8 @@ bool WifiManager::TryStartStationTransition() {
 
 void WifiManager::StartStationTarget(
         WifiStation* station, const WifiManagerConfig& config,
-        uint64_t transition_generation) {
+        uint64_t transition_generation,
+        const std::optional<std::pair<std::string, std::string>>& credentials) {
     ESP_LOGI(TAG, "Starting station");
 
     // Apply configuration
@@ -938,12 +999,22 @@ void WifiManager::StartStationTarget(
         NotifyEvent(WifiEvent::Disconnected, std::to_string(reason));
     });
 
-    station->Start();
+    if (credentials.has_value()) {
+        station->StartForExactConnection();
+    } else {
+        station->Start();
+    }
+    const bool exact_connection_started =
+        !credentials.has_value() ||
+        station->ConnectExact(credentials->first, credentials->second);
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (lifecycle_generation_ == transition_generation &&
+        if (exact_connection_started &&
+            lifecycle_generation_ == transition_generation &&
             station_.get() == station) {
             station_active_ = true;
+        }
+        if (lifecycle_generation_ == transition_generation) {
             lifecycle_transition_in_progress_ = false;
         }
     }

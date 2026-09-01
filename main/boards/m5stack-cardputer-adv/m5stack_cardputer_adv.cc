@@ -51,6 +51,26 @@ private:
     ProcessLifetimeWorkerHandle<TaskHandle_t> wifi_scan_worker_task_;
     CardputerWifiDeferredIntentState wifi_connection_state_;
     ProcessLifetimeWorkerHandle<TaskHandle_t> wifi_connection_worker_task_;
+    std::mutex wifi_credential_transaction_mutex_;
+    uint64_t last_exited_wifi_config_generation_ = 0;
+
+    void ScheduleWifiProvisioningCompletion(uint64_t ui_generation) {
+        try {
+            Application::GetInstance().Schedule([this, ui_generation]() {
+                {
+                    std::lock_guard<std::recursive_mutex> lock(
+                        wifi_config_ui_mutex_);
+                    if (wifi_config_mode_ || wifi_config_ui_ ||
+                        last_exited_wifi_config_generation_ != ui_generation) {
+                        return;
+                    }
+                }
+                Application::GetInstance().CompleteCardputerWifiProvisioning(
+                    ui_generation);
+            });
+        } catch (...) {
+        }
+    }
 
     static void WifiScanWorkerTask(void* context) {
         auto* board = static_cast<M5StackCardputerAdvBoard*>(context);
@@ -103,56 +123,120 @@ private:
                         board->wifi_connection_state_.RetryInFlight(*intent);
                         continue;
                     }
+                    if (intent->setup_completion_generation != 0) {
+                        auto& wifi_manager = WifiManager::GetInstance();
+                        for (int i = 0;
+                             i < 100 && !wifi_manager.IsConnected(); ++i) {
+                            vTaskDelay(pdMS_TO_TICKS(100));
+                        }
+                        if (!wifi_manager.IsConnected()) {
+                            board->wifi_connection_state_.RetryInFlight(*intent);
+                            continue;
+                        }
+                    }
                     board->wifi_connection_state_.CompleteReconnect(*intent);
+                    if (intent->setup_completion_generation != 0) {
+                        board->ScheduleWifiProvisioningCompletion(
+                            intent->setup_completion_generation);
+                    }
                     continue;
                 }
 
                 auto& ssid_manager = SsidManager::GetInstance();
-                if (board->wifi_connection_state_.NeedsCredentialPersistence(
-                        *intent)) {
-                    ssid_manager.AddSsid(intent->ssid, intent->password);
-                    if (!board->wifi_connection_state_.MarkCredentialsPersisted(
-                            *intent)) {
-                        board->wifi_connection_state_.RetryInFlight(*intent);
-                        continue;
+                {
+                    std::lock_guard<std::mutex> transaction_lock(
+                        board->wifi_credential_transaction_mutex_);
+                    if (!board->wifi_connection_state_.CredentialTransaction(
+                            *intent).has_value()) {
+                        const uint32_t transaction_id =
+                            ssid_manager.BeginSsidTransaction(
+                                intent->ssid, intent->password);
+                        if (!board->wifi_connection_state_
+                                .BindCredentialTransaction(
+                                    *intent, transaction_id)) {
+                            if (transaction_id != 0) {
+                                ssid_manager.RollbackSsidTransaction(
+                                    transaction_id);
+                            }
+                            board->wifi_connection_state_.RetryInFlight(*intent);
+                            continue;
+                        }
                     }
                 }
                 auto& wifi_manager = WifiManager::GetInstance();
-                const auto start_result = wifi_manager.StartStationIfScanIdle();
+                WifiManager::StationStartResult start_result;
+                {
+                    std::lock_guard<std::mutex> transaction_lock(
+                        board->wifi_credential_transaction_mutex_);
+                    if (!board->wifi_connection_state_.CredentialTransaction(
+                            *intent).has_value()) {
+                        continue;
+                    }
+                    start_result =
+                        wifi_manager.StartStationWithCredentialsIfScanIdle(
+                            intent->ssid, intent->password);
+                }
                 const auto action = ResolveCardputerWifiStartAction(
                     false, start_result);
                 if (action == CardputerWifiStartAction::kRetry) {
                     board->wifi_connection_state_.RetryInFlight(*intent);
                     continue;
                 }
-                if (start_result ==
-                        WifiManager::StationStartResult::kAlreadyActive &&
-                    wifi_manager.IsConnected() &&
-                    wifi_manager.GetSsid() != intent->ssid) {
-                    wifi_manager.StopStation();
-                    board->wifi_connection_state_.RetryInFlight(*intent);
-                    continue;
-                }
-
                 bool connected = false;
                 for (int i = 0; i < 100; ++i) {
                     vTaskDelay(pdMS_TO_TICKS(100));
-                    if (wifi_manager.IsConnected() &&
-                        wifi_manager.GetSsid() == intent->ssid) {
-                        connected = true;
+                    if (wifi_manager.IsConnected()) {
+                        if (wifi_manager.GetSsid() == intent->ssid) {
+                            connected = true;
+                            wifi_manager.EnableStationAutomaticScans();
+                        } else {
+                            wifi_manager.StopStation();
+                        }
                         break;
                     }
                 }
-                board->wifi_connection_state_.StoreConnectionResult(
-                    *intent, connected);
+                if (!connected) {
+                    wifi_manager.StopStation();
+                }
+                {
+                    std::lock_guard<std::mutex> transaction_lock(
+                        board->wifi_credential_transaction_mutex_);
+                    const auto finalization = board->wifi_connection_state_
+                        .ClaimCredentialFinalization(*intent, connected);
+                    if (finalization.has_value()) {
+                        const bool finalized = finalization->commit
+                            ? ssid_manager.CommitSsidTransaction(
+                                  finalization->transaction_id)
+                            : ssid_manager.RollbackSsidTransaction(
+                                  finalization->transaction_id);
+                        board->wifi_connection_state_
+                            .CompleteCredentialFinalization(
+                                *finalization, finalized);
+                    }
+                }
             } catch (...) {
                 if (intent->kind ==
                     CardputerWifiDeferredIntentState::Kind::kReconnect) {
                     board->wifi_connection_state_.RetryInFlight(*intent);
                     continue;
                 }
-                board->wifi_connection_state_.StoreConnectionResult(
-                    *intent, false);
+                auto& ssid_manager = SsidManager::GetInstance();
+                std::lock_guard<std::mutex> transaction_lock(
+                    board->wifi_credential_transaction_mutex_);
+                const auto finalization =
+                    board->wifi_connection_state_.ClaimCredentialFinalization(
+                        *intent, false);
+                if (finalization.has_value()) {
+                    const bool rolled_back =
+                        ssid_manager.RollbackSsidTransaction(
+                            finalization->transaction_id);
+                    board->wifi_connection_state_
+                        .CompleteCredentialFinalization(
+                            *finalization, rolled_back);
+                } else {
+                    board->wifi_connection_state_.StoreConnectionResult(
+                        *intent, false);
+                }
             }
             board->ScheduleWifiConnectionResult();
         }
@@ -397,10 +481,10 @@ private:
             auto result = wifi_config_ui_->HandleKeyEvent(event);
             if (result == WifiConfigResult::Connected) {
                 ESP_LOGI(TAG, "WiFi connected via keyboard config");
-                ExitWifiConfigMode();
+                ExitWifiConfigMode(true);
             } else if (result == WifiConfigResult::Cancelled) {
                 ESP_LOGI(TAG, "WiFi config cancelled");
-                ExitWifiConfigMode();
+                ExitWifiConfigMode(false);
             }
             return;
         }
@@ -525,30 +609,50 @@ private:
         ESP_LOGI(TAG, "Attempting WiFi connection (ssid_len=%u)",
                  static_cast<unsigned>(ssid.size()));
         std::lock_guard<std::recursive_mutex> lock(wifi_config_ui_mutex_);
+        std::lock_guard<std::mutex> transaction_lock(
+            wifi_credential_transaction_mutex_);
         if (wifi_config_ui_) {
             wifi_connection_state_.PublishCredentials(
                 wifi_config_ui_->Generation(), ssid, password);
         }
     }
 
-    void ExitWifiConfigMode() {
+    void ExitWifiConfigMode(bool provisioning_succeeded) {
         ESP_LOGI(TAG, "Exiting keyboard WiFi config mode");
         std::lock_guard<std::recursive_mutex> lock(wifi_config_ui_mutex_);
+        std::lock_guard<std::mutex> transaction_lock(
+            wifi_credential_transaction_mutex_);
         wifi_config_mode_ = false;
         uint64_t exiting_generation = 0;
         if (wifi_config_ui_) {
             exiting_generation = wifi_config_ui_->Generation();
             wifi_scan_worker_state_.CancelGeneration(
                 exiting_generation);
-            wifi_connection_state_.CancelGeneration(exiting_generation);
+            const auto transaction =
+                wifi_connection_state_.CancelGeneration(exiting_generation);
+            if (transaction.has_value()) {
+                SsidManager::GetInstance().RollbackSsidTransaction(*transaction);
+            }
             wifi_config_ui_->CancelPendingScan();
         }
         wifi_config_ui_.reset();
+        last_exited_wifi_config_generation_ = exiting_generation;
+
+        if (provisioning_succeeded &&
+            wifi_connection_state_.ClaimSetupCompletion(exiting_generation)) {
+            ScheduleWifiProvisioningCompletion(exiting_generation);
+        }
+
+        if (!provisioning_succeeded) {
+            WifiManager::GetInstance().StopStation();
+        }
 
         // Restart normal WiFi connection flow
         auto& app = Application::GetInstance();
         if (app.GetDeviceState() == kDeviceStateWifiConfiguring) {
-            wifi_connection_state_.PublishReconnect(exiting_generation + 1);
+            wifi_connection_state_.PublishReconnect(
+                exiting_generation + 1,
+                provisioning_succeeded ? exiting_generation : 0);
         }
     }
 

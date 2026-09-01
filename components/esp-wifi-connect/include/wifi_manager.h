@@ -103,6 +103,9 @@ public:
 
     void StartStation();   // Non-blocking, auto-stops config AP if active
     StationStartResult StartStationIfScanIdle();
+    StationStartResult StartStationWithCredentialsIfScanIdle(
+        const std::string& ssid, const std::string& password);
+    void EnableStationAutomaticScans();
     void StopStation();    // Non-blocking
 
     bool IsConnected() const;
@@ -229,7 +232,9 @@ private:
     void ResumePendingLifecycleTransition();
     void StartStationTarget(WifiStation* station,
                             const WifiManagerConfig& config,
-                            uint64_t transition_generation);
+                            uint64_t transition_generation,
+                            const std::optional<std::pair<std::string, std::string>>&
+                                credentials = std::nullopt);
     void StartConfigApTarget(WifiConfigurationAp* config_ap,
                              const WifiManagerConfig& config,
                              uint64_t transition_generation);

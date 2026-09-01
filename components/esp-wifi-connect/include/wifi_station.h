@@ -49,6 +49,9 @@ public:
 
     void AddAuth(const std::string &&ssid, const std::string &&password);
     void Start();
+    void StartForExactConnection();
+    bool ConnectExact(const std::string& ssid, const std::string& password);
+    void EnableAutomaticScans();
     void Stop();
     bool IsConnected();
     bool WaitForConnected(int timeout_ms = 10000);
@@ -113,6 +116,7 @@ private:
     mutable std::mutex session_data_mutex_;
     std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
     bool scans_enabled_ = false;
+    bool automatic_scans_enabled_ = false;
     uint64_t scan_session_id_ = 0;
     uint64_t lease_session_id_ = 0;
     size_t in_flight_session_operations_ = 0;
@@ -123,6 +127,7 @@ private:
         scan_recovery_needed_;
 
     bool StartOwnedScan();
+    void StartWithScanPolicy(bool automatic_scans_enabled);
     void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
     std::optional<WifiApRecord> HandleScanResultLocked(
         std::vector<wifi_ap_record_t> ap_records,
@@ -131,7 +136,8 @@ private:
                            int64_t delay_microseconds);
     void StartConnect();
     WifiApRecord PrepareNextConnectLocked();
-    std::string StartConnectForSession(WifiApRecord ap_record);
+    std::string StartConnectForSession(WifiApRecord ap_record,
+                                       bool use_remembered_bssid = true);
     bool TryBeginSessionOperationLocked(uint64_t session_id);
     void FinishSessionOperation();
     void DispatchSessionCallback(uint64_t expected_session,

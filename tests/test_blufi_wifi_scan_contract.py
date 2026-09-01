@@ -1339,13 +1339,15 @@ def test_cardputer_board_has_real_ui_poll_timer_caller():
     assert "xTaskCreate" in ensure
     exit_mode = function_body(board, "void ExitWifiConfigMode")
     assert "PublishReconnect" in exit_mode
+    assert "wifi_credential_transaction_mutex_" in exit_mode
     assert "HasActiveExternalScan" in board
     connect = function_body(board, "void AttemptWifiConnection")
     assert "PublishCredentials" in connect
+    assert "wifi_credential_transaction_mutex_" in connect
     assert "AddSsid" not in connect
     assert "vTaskDelay" not in connect
     connection_worker = function_body(board, "static void WifiConnectionWorkerTask")
-    assert "AddSsid" in connection_worker
+    assert "AddSsid" not in connection_worker
     assert "vTaskDelay" in connection_worker
     assert "TryWifiConnect" in connection_worker
     assert "StoreConnectionResult" in connection_worker
@@ -1354,12 +1356,79 @@ def test_cardputer_board_has_real_ui_poll_timer_caller():
     assert "TryWifiConnect" not in timer
     assert "NotifyWifiConnectionWorker" in timer
     assert "ScheduleWifiConnectionResult" in timer
+    on_result = function_body(source, "void WifiConfigUI::OnConnectResult")
+    assert "SaveWifiCredentials" not in on_result
+    assert "AddSsid" not in on_result
+    assert "BeginSsidTransaction" in connection_worker
+    assert "CommitSsidTransaction" in connection_worker
+    assert "RollbackSsidTransaction" in connection_worker
+    assert "StartStationWithCredentialsIfScanIdle" in connection_worker
+    exact_match = connection_worker.index(
+        "wifi_manager.GetSsid() == intent->ssid"
+    )
+    enable_scans = connection_worker.index("EnableStationAutomaticScans")
+    assert exact_match < enable_scans
+    finalization_idx = connection_worker.index("ClaimCredentialFinalization")
+    transaction_lock_idx = connection_worker.rfind(
+        "wifi_credential_transaction_mutex_", 0, finalization_idx
+    )
+    assert transaction_lock_idx >= 0
     scanning_key = function_body(source, "void WifiConfigUI::HandleScanningKey")
     assert "DismissPendingScanResult()" in scanning_key
     assert "state_ == WifiConfigState::Scanning" in poll
     key_handler = function_body(board, "void HandleKeyEvent")
     assert key_handler.index("wifi_config_ui_mutex_") < key_handler.index(
         "wifi_config_mode_")
+
+
+def test_cardputer_success_releases_ui_before_generation_bound_app_completion():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    app_header = read("main/application.h")
+    app = read("main/application.cc")
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+    completion = function_body(
+        app, "void Application::CompleteCardputerWifiProvisioning"
+    )
+
+    reset_idx = exit_mode.index("wifi_config_ui_.reset()")
+    schedule_idx = exit_mode.index("ScheduleWifiProvisioningCompletion")
+    assert reset_idx < schedule_idx
+    assert "ClaimSetupCompletion(exiting_generation)" in exit_mode
+    assert "CompleteCardputerWifiProvisioning(uint64_t ui_generation)" in app_header
+    assert "cardputer_wifi_completion_generation_" in app_header
+    assert "PromoteFromWifiConfigAfterProvisioning()" in completion
+    assert "HandleNetworkConnectedEvent()" in completion
+    promote_idx = completion.index("PromoteFromWifiConfigAfterProvisioning()")
+    consume_idx = completion.index("compare_exchange_weak")
+    assert promote_idx < consume_idx
+    connection_worker = function_body(
+        board, "static void WifiConnectionWorkerTask"
+    )
+    assert "intent->setup_completion_generation" in connection_worker
+    assert "ScheduleWifiProvisioningCompletion" in connection_worker
+    connected_idx = connection_worker.index("wifi_manager.IsConnected()")
+    reconnect_complete_idx = connection_worker.index("CompleteReconnect")
+    assert connected_idx < reconnect_complete_idx
+    scheduler = function_body(board, "void ScheduleWifiProvisioningCompletion")
+    assert "wifi_config_mode_" in scheduler
+    assert "wifi_config_ui_" in scheduler
+    assert "last_exited_wifi_config_generation_ != ui_generation" in scheduler
+    assert "Application::GetInstance().Schedule" in scheduler
+    assert "CompleteCardputerWifiProvisioning" in scheduler
+    assert "Schedule(" not in completion
+
+
+def test_cardputer_exact_credentials_are_bounded_and_cancel_stops_exact_station():
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    exact = function_body(station, "bool WifiStation::ConnectExact")
+    assert "ssid.size() > sizeof(wifi_config_t{}.sta.ssid)" in exact
+    assert "password.size() >= sizeof(wifi_config_t{}.sta.password)" in exact
+
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+    stop_idx = exit_mode.index("WifiManager::GetInstance().StopStation()")
+    reconnect_idx = exit_mode.index("PublishReconnect")
+    assert stop_idx < reconnect_idx
 
 
 def test_cardputer_preparation_failure_handles_callback_winner_fail_closed():

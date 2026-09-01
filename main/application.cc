@@ -1884,6 +1884,25 @@ void Application::SchedulePendingTbotClaimRefresh(uint32_t expected_setup_genera
     });
 }
 
+void Application::CompleteCardputerWifiProvisioning(uint64_t ui_generation) {
+    uint64_t completed =
+        cardputer_wifi_completion_generation_.load(std::memory_order_acquire);
+    if (ui_generation <= completed ||
+        GetDeviceState() != kDeviceStateWifiConfiguring) {
+        return;
+    }
+    PromoteFromWifiConfigAfterProvisioning();
+    if (GetDeviceState() == kDeviceStateWifiConfiguring) {
+        return;
+    }
+    while (ui_generation > completed &&
+           !cardputer_wifi_completion_generation_.compare_exchange_weak(
+               completed, ui_generation, std::memory_order_acq_rel,
+               std::memory_order_acquire)) {
+    }
+    HandleNetworkConnectedEvent();
+}
+
 void Application::ExecuteClaimDeferredEffects(
         const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
         WakeWordLifecycleController::ProvisioningToken provisioning_token) {

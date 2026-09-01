@@ -510,7 +510,7 @@ void DeferredWifiIntentDropsOnlyStaleUiResult() {
     const auto intent = state.TakeNotified();
     assert(intent.has_value());
     state.CancelGeneration(90);
-    assert(state.StoreConnectionResult(*intent, true));
+    assert(!state.StoreConnectionResult(*intent, true));
     assert(!state.ClaimResultForDelivery().has_value());
     assert(state.PublishReconnect(91));
     assert(state.NeedsNotification());
@@ -576,15 +576,68 @@ void CredentialPersistenceIsExactlyOnceAcrossBusyRetry() {
     assert(state.ArmNotification());
     const auto first = state.TakeNotified();
     assert(first.has_value());
-    assert(state.NeedsCredentialPersistence(*first));
-    assert(state.MarkCredentialsPersisted(*first));
-    assert(!state.NeedsCredentialPersistence(*first));
+    assert(state.BindCredentialTransaction(*first, 701));
+    assert(!state.BindCredentialTransaction(*first, 702));
     assert(state.RetryInFlight(*first));
     assert(state.ArmNotification());
     const auto retry = state.TakeNotified();
     assert(retry.has_value());
-    assert(!state.NeedsCredentialPersistence(*retry));
-    assert(state.StoreConnectionResult(*retry, true));
+    assert(state.CredentialTransaction(*retry).value() == 701);
+    int commits = 0;
+    const auto finalization =
+        state.ClaimCredentialFinalization(*retry, true);
+    assert(finalization.has_value());
+    assert(finalization->transaction_id == 701 && finalization->commit);
+    ++commits;
+    assert(state.CompleteCredentialFinalization(*finalization, true));
+    assert(commits == 1);
+}
+
+void CredentialTransactionsRollbackFailureCancelAndSupersession() {
+    CardputerWifiDeferredIntentState state;
+    state.ObserveWorkerCreation(true);
+
+    assert(state.PublishCredentials(101, "target", "wrong"));
+    assert(state.ArmNotification());
+    const auto failed = state.TakeNotified();
+    assert(failed.has_value());
+    assert(state.BindCredentialTransaction(*failed, 801));
+    int rollbacks = 0;
+    const auto failed_finalization =
+        state.ClaimCredentialFinalization(*failed, false);
+    assert(failed_finalization.has_value());
+    assert(failed_finalization->transaction_id == 801 &&
+           !failed_finalization->commit);
+    ++rollbacks;
+    assert(state.CompleteCredentialFinalization(*failed_finalization, true));
+    const auto failed_result = state.ClaimResultForDelivery();
+    assert(failed_result.has_value() && !failed_result->connected);
+    assert(state.CompleteResult(*failed_result));
+
+    assert(state.PublishCredentials(102, "target", "candidate"));
+    assert(state.ArmNotification());
+    const auto cancelled = state.TakeNotified();
+    assert(cancelled.has_value());
+    assert(state.BindCredentialTransaction(*cancelled, 802));
+    const auto cancelled_transaction = state.CancelGeneration(102);
+    assert(cancelled_transaction.has_value());
+    assert(*cancelled_transaction == 802);
+
+    assert(state.PublishCredentials(103, "old", "old-password"));
+    assert(state.ArmNotification());
+    const auto old = state.TakeNotified();
+    assert(old.has_value());
+    assert(state.BindCredentialTransaction(*old, 803));
+    assert(state.PublishCredentials(104, "new", "new-password"));
+    const auto stale_finalization =
+        state.ClaimCredentialFinalization(*old, true);
+    assert(stale_finalization.has_value());
+    assert(stale_finalization->transaction_id == 803 &&
+           !stale_finalization->commit);
+    ++rollbacks;
+    assert(state.CompleteCredentialFinalization(*stale_finalization, true));
+    assert(rollbacks == 2);
+    assert(state.NeedsNotification());
 }
 
 void ArmedNotificationRollsBackAfterGiveFailure() {
@@ -643,6 +696,27 @@ void ConnectionStartPolicyDoesNotLoopOnActiveStation() {
         WifiStationStartResult::kAlreadyActive));
     assert(!ShouldArmWifiConnectTimeout(
         WifiStationStartResult::kBusyOrFailed));
+}
+
+void SetupCompletionIsGenerationBoundAndExactlyOnce() {
+    CardputerWifiDeferredIntentState state;
+    assert(state.ClaimSetupCompletion(120));
+    assert(!state.ClaimSetupCompletion(120));
+    assert(!state.ClaimSetupCompletion(119));
+    assert(state.ClaimSetupCompletion(121));
+
+    assert(state.PublishReconnect(122, 121));
+    state.ObserveWorkerCreation(true);
+    assert(state.ArmNotification());
+    const auto reconnect = state.TakeNotified();
+    assert(reconnect.has_value());
+    assert(reconnect->setup_completion_generation == 121);
+    assert(state.RetryInFlight(*reconnect));
+    assert(state.ArmNotification());
+    const auto retry = state.TakeNotified();
+    assert(retry.has_value());
+    assert(retry->setup_completion_generation == 121);
+    assert(state.CompleteReconnect(*retry));
 }
 
 void DelayedConnectionWorkerDoesNotBlockApplicationSentinel() {
@@ -705,11 +779,13 @@ int main() {
     DeferredWifiIntentIsTypedCoalescedAndGenerationBound();
     DeferredWifiIntentIsThreadSafeAndExactlyOnce();
     ConnectionStartPolicyDoesNotLoopOnActiveStation();
+    SetupCompletionIsGenerationBoundAndExactlyOnce();
     DeferredWifiIntentDropsOnlyStaleUiResult();
     DeferredWifiIntentRetriesIfScanOwnershipReturnsAfterNotification();
     DeferredWifiIntentSupersedesBlockedInFlightWithoutWedging();
     CorrectedCredentialsSupersedeEarlierFailedAttempt();
     CredentialPersistenceIsExactlyOnceAcrossBusyRetry();
+    CredentialTransactionsRollbackFailureCancelAndSupersession();
     ArmedNotificationRollsBackAfterGiveFailure();
     DelayedConnectionWorkerDoesNotBlockApplicationSentinel();
     std::cout << "blocking wifi scan lease host tests: PASS\n";

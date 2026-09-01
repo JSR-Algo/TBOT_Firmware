@@ -193,6 +193,7 @@ public:
      */
     void ResetProtocol();
     void SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation);
+    void CompleteCardputerWifiProvisioning(uint64_t ui_generation);
     void PromoteCourseModeFromWifiConfigAfterProvisioning();
     void EnsureBleAdvertisingForUnclaimedSavedWifi();
     // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
@@ -239,6 +240,7 @@ private:
     std::deque<std::function<void()>> main_tasks_;
     std::unique_ptr<Protocol> protocol_;
     std::atomic<uint64_t> protocol_generation_{0};
+    std::atomic<uint64_t> cardputer_wifi_completion_generation_{0};
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;

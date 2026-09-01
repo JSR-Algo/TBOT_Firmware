@@ -72,6 +72,7 @@ void WifiStation::Stop() {
     }
     std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
     scans_enabled_ = false;
+    automatic_scans_enabled_ = false;
     ++scan_session_id_;
     esp_timer_handle_t timer_to_delete = timer_handle_;
     timer_handle_ = nullptr;
@@ -149,6 +150,14 @@ void WifiStation::OnDisconnected(std::function<void(int reason)> on_disconnected
 }
 
 void WifiStation::Start() {
+    StartWithScanPolicy(true);
+}
+
+void WifiStation::StartForExactConnection() {
+    StartWithScanPolicy(false);
+}
+
+void WifiStation::StartWithScanPolicy(bool automatic_scans_enabled) {
     // Note: esp_netif_init() and esp_wifi_init() should be called once before calling this method
     // WiFi driver is initialized by WifiManager::Initialize() and kept alive
 
@@ -188,6 +197,7 @@ void WifiStation::Start() {
     {
         std::lock_guard<std::mutex> lock(scan_mutex_);
         scans_enabled_ = true;
+        automatic_scans_enabled_ = automatic_scans_enabled;
         ++scan_session_id_;
     }
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -195,6 +205,45 @@ void WifiStation::Start() {
 
     if (max_tx_power_ != 0) {
         ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(max_tx_power_));
+    }
+}
+
+bool WifiStation::ConnectExact(const std::string& ssid,
+                               const std::string& password) {
+    if (ssid.empty() || ssid.size() > sizeof(wifi_config_t{}.sta.ssid) ||
+        password.size() >= sizeof(wifi_config_t{}.sta.password)) {
+        return false;
+    }
+    uint64_t session_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(scan_mutex_);
+        session_id = scan_session_id_;
+        if (!TryBeginSessionOperationLocked(session_id)) {
+            return false;
+        }
+    }
+    WifiApRecord record{
+        .ssid = ssid,
+        .password = password,
+        .channel = 0,
+        .authmode = WIFI_AUTH_OPEN,
+        .bssid = {0},
+    };
+    const std::string connecting_ssid =
+        StartConnectForSession(std::move(record), false);
+    FinishSessionOperation();
+    DispatchSessionCallback(session_id, [this, connecting_ssid]() {
+        if (on_connect_) {
+            on_connect_(connecting_ssid);
+        }
+    });
+    return true;
+}
+
+void WifiStation::EnableAutomaticScans() {
+    std::lock_guard<std::mutex> lock(scan_mutex_);
+    if (scans_enabled_) {
+        automatic_scans_enabled_ = true;
     }
 }
 
@@ -206,7 +255,7 @@ bool WifiStation::StartOwnedScan() {
     }
     WifiScanLeaseCoordinator::Lease lease;
     std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_);
-    if (!scans_enabled_) {
+    if (!scans_enabled_ || !automatic_scans_enabled_) {
         return false;
     }
     const bool local_callback_debt = scan_lease_.has_value();
@@ -420,7 +469,8 @@ WifiApRecord WifiStation::PrepareNextConnectLocked() {
     return ap_record;
 }
 
-std::string WifiStation::StartConnectForSession(WifiApRecord ap_record) {
+std::string WifiStation::StartConnectForSession(WifiApRecord ap_record,
+                                                bool use_remembered_bssid) {
     const std::string connecting_ssid = ap_record.ssid;
     {
         std::lock_guard<std::mutex> data_lock(session_data_mutex_);
@@ -436,7 +486,7 @@ std::string WifiStation::StartConnectForSession(WifiApRecord ap_record) {
         std::min(ap_record.ssid.size(), sizeof(wifi_config.sta.ssid));
     memcpy(wifi_config.sta.ssid, ap_record.ssid.data(), ssid_len);
     strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
-    if (remember_bssid_) {
+    if (use_remembered_bssid && remember_bssid_) {
         wifi_config.sta.channel = ap_record.channel;
         memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);
         wifi_config.sta.bssid_set = true;

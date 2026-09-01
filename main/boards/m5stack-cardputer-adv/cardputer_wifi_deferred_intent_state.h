@@ -17,6 +17,7 @@ public:
         Kind kind = Kind::kReconnect;
         uint64_t ui_generation = 0;
         uint64_t revision = 0;
+        uint64_t setup_completion_generation = 0;
         std::string ssid;
         std::string password;
     };
@@ -27,14 +28,23 @@ public:
         bool connected = false;
     };
 
+    struct CredentialFinalization {
+        uint64_t ui_generation = 0;
+        uint64_t revision = 0;
+        uint32_t transaction_id = 0;
+        bool commit = false;
+    };
+
     bool PublishCredentials(uint64_t ui_generation, std::string ssid,
                             std::string password) {
         return Publish(Intent{Kind::kCredentials, ui_generation, 0,
-                              std::move(ssid), std::move(password)});
+                              0, std::move(ssid), std::move(password)});
     }
 
-    bool PublishReconnect(uint64_t ui_generation) {
-        return Publish(Intent{Kind::kReconnect, ui_generation, 0, {}, {}});
+    bool PublishReconnect(uint64_t ui_generation,
+                          uint64_t setup_completion_generation = 0) {
+        return Publish(Intent{Kind::kReconnect, ui_generation, 0,
+                              setup_completion_generation, {}, {}});
     }
 
     bool NeedsWorkerCreation() const {
@@ -84,18 +94,67 @@ public:
         return in_flight_;
     }
 
-    bool NeedsCredentialPersistence(const Intent& intent) const {
+    bool BindCredentialTransaction(const Intent& intent,
+                                   uint32_t transaction_id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        return Matches(in_flight_, intent) && intent.kind == Kind::kCredentials &&
-            persisted_credentials_revision_ != intent.revision;
-    }
-
-    bool MarkCredentialsPersisted(const Intent& intent) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!Matches(in_flight_, intent) || intent.kind != Kind::kCredentials) {
+        if (transaction_id == 0 || !Matches(in_flight_, intent) ||
+            intent.kind != Kind::kCredentials ||
+            credential_transaction_id_ != 0) {
             return false;
         }
-        persisted_credentials_revision_ = intent.revision;
+        credential_transaction_id_ = transaction_id;
+        credential_transaction_revision_ = intent.revision;
+        return true;
+    }
+
+    std::optional<uint32_t> CredentialTransaction(
+            const Intent& intent) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!Matches(in_flight_, intent) ||
+            credential_transaction_revision_ != intent.revision ||
+            credential_transaction_id_ == 0) {
+            return std::nullopt;
+        }
+        return credential_transaction_id_;
+    }
+
+    std::optional<CredentialFinalization> ClaimCredentialFinalization(
+            const Intent& intent, bool connected) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!Matches(in_flight_, intent) ||
+            credential_transaction_revision_ != intent.revision ||
+            credential_transaction_id_ == 0 ||
+            credential_finalization_.has_value()) {
+            return std::nullopt;
+        }
+        const bool current = intent.ui_generation > cancelled_through_generation_ &&
+            (!pending_.has_value() || pending_->revision <= intent.revision);
+        credential_finalization_ = CredentialFinalization{
+            intent.ui_generation, intent.revision,
+            credential_transaction_id_, connected && current};
+        credential_transaction_id_ = 0;
+        credential_transaction_revision_ = 0;
+        in_flight_.reset();
+        return credential_finalization_;
+    }
+
+    bool CompleteCredentialFinalization(
+            const CredentialFinalization& finalization, bool finalized) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!Matches(credential_finalization_, finalization)) {
+            return false;
+        }
+        credential_finalization_.reset();
+        const bool current =
+            finalization.ui_generation > cancelled_through_generation_ &&
+            (!pending_.has_value() ||
+             pending_->revision <= finalization.revision);
+        if (current) {
+            result_ = Result{finalization.ui_generation,
+                             finalization.revision,
+                             finalization.commit && finalized};
+            result_delivery_scheduled_ = false;
+        }
         return true;
     }
 
@@ -153,6 +212,16 @@ public:
         return true;
     }
 
+    bool ClaimSetupCompletion(uint64_t ui_generation) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ui_generation == 0 ||
+            ui_generation <= completed_setup_generation_) {
+            return false;
+        }
+        completed_setup_generation_ = ui_generation;
+        return true;
+    }
+
     bool RetryInFlight(const Intent& intent) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!Matches(in_flight_, intent)) {
@@ -167,7 +236,7 @@ public:
         return pending_.has_value();
     }
 
-    void CancelGeneration(uint64_t ui_generation) {
+    std::optional<uint32_t> CancelGeneration(uint64_t ui_generation) {
         std::lock_guard<std::mutex> lock(mutex_);
         cancelled_through_generation_ =
             std::max(cancelled_through_generation_, ui_generation);
@@ -176,6 +245,17 @@ public:
             pending_.reset();
             notification_delivered_ = false;
         }
+        if (in_flight_.has_value() &&
+            in_flight_->ui_generation == ui_generation) {
+            const uint32_t transaction_id = credential_transaction_id_;
+            in_flight_.reset();
+            credential_transaction_id_ = 0;
+            credential_transaction_revision_ = 0;
+            return transaction_id == 0
+                ? std::nullopt
+                : std::optional<uint32_t>(transaction_id);
+        }
+        return std::nullopt;
     }
 
 private:
@@ -204,14 +284,27 @@ private:
             value->revision == result.revision;
     }
 
+    static bool Matches(
+            const std::optional<CredentialFinalization>& value,
+            const CredentialFinalization& finalization) {
+        return value.has_value() &&
+            value->ui_generation == finalization.ui_generation &&
+            value->revision == finalization.revision &&
+            value->transaction_id == finalization.transaction_id &&
+            value->commit == finalization.commit;
+    }
+
     mutable std::mutex mutex_;
     std::optional<Intent> pending_;
     std::optional<Intent> in_flight_;
     std::optional<Result> result_;
+    std::optional<CredentialFinalization> credential_finalization_;
     uint64_t last_revision_ = 0;
     uint64_t cancelled_through_generation_ = 0;
     bool worker_created_ = false;
     bool notification_delivered_ = false;
     bool result_delivery_scheduled_ = false;
-    uint64_t persisted_credentials_revision_ = 0;
+    uint32_t credential_transaction_id_ = 0;
+    uint64_t credential_transaction_revision_ = 0;
+    uint64_t completed_setup_generation_ = 0;
 };

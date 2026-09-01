@@ -26,7 +26,23 @@ public:
     void OnConnected(std::function<void(const std::string&)>) {}
     void OnDisconnected(std::function<void(int)>) {}
     void Start();
+    void StartForExactConnection();
     void Stop();
+    bool ConnectExact(const std::string& ssid, const std::string& password) {
+        ++exact_credential_starts_;
+        exact_ssid_ = ssid;
+        exact_password_ = password;
+        connected_ = false;
+        return true;
+    }
+    void EnableAutomaticScans() { automatic_scans_enabled_ = true; }
+    int Starts() const { return starts_; }
+    int ExactModeStarts() const { return exact_mode_starts_; }
+    int Stops() const { return stops_; }
+    int ExactCredentialStarts() const { return exact_credential_starts_; }
+    const std::string& ExactSsid() const { return exact_ssid_; }
+    const std::string& ExactPassword() const { return exact_password_; }
+    bool AutomaticScansEnabled() const { return automatic_scans_enabled_; }
     WifiScanLeaseCoordinator::Lease PublishDebt(bool scans_enabled = true);
     void CallbackWins();
     void FailCompletionOnce();
@@ -58,10 +74,15 @@ private:
     int restore_calls_ = 0;
     int retry_calls_ = 0;
     int starts_ = 0;
+    int exact_mode_starts_ = 0;
     int stops_ = 0;
     int external_restore_calls_ = 0;
     int external_reconnect_calls_ = 0;
     bool connected_ = false;
+    int exact_credential_starts_ = 0;
+    std::string exact_ssid_;
+    std::string exact_password_;
+    bool automatic_scans_enabled_ = false;
     std::function<void(const WifiScanLeaseCoordinator::Lease&)> recovery_cb_;
     std::function<void()> on_scan_begin_;
 };
