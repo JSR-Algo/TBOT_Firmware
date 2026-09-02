@@ -2017,8 +2017,8 @@ def test_blufi_wifi_list_coalesces_inflight_scan_with_app_visible_request():
     assert "wifi_scan_controller_.RequestScan(request)" in request
 
 def test_wifi_station_does_not_consume_blufi_owned_scan_results():
-    source = read("managed_components/78__esp-wifi-connect/wifi_station.cc")
-    header = read("managed_components/78__esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
     handler = function_body(source, "void WifiStation::WifiEventHandler")
 
     assert "scan_in_progress_" not in header + source
