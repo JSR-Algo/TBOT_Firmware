@@ -883,6 +883,22 @@ void ExactConnectionFailureStopsPartiallyStartedStationExactlyOnce() {
     assert(!manager->TestStationActive());
 }
 
+void ExactCandidateConnectBypassesSavedNetworkScanning() {
+    auto* manager = new WifiManager;
+    assert(manager->Initialize());
+    auto* station = manager->TestStation();
+    station->SetSavedScanWinner("stronger-saved-network");
+
+    assert(manager->StartStationWithCredentialsIfScanIdle(
+               "hidden-candidate", "candidate-password") ==
+           WifiManager::StationStartResult::kStartedNow);
+    assert(station->ExactModeStarts() == 1);
+    assert(station->ExactCredentialStarts() == 1);
+    assert(station->ExactSsid() == "hidden-candidate");
+    assert(station->SavedScanSelections() == 0);
+    assert(!station->AutomaticScansEnabled());
+}
+
 }  // namespace
 
 WifiRadioRecoveryRestorer::Driver& TestWifiRecoveryDriver() {
@@ -1064,10 +1080,16 @@ void WifiStation::Start() {
     ++scan_session_id_;
     scans_enabled_ = true;
     connected_ = true;
+    if (!saved_scan_winner_.empty()) {
+        ++saved_scan_selections_;
+    }
 }
 void WifiStation::StartForExactConnection() {
     ++exact_mode_starts_;
-    Start();
+    ++starts_;
+    ++scan_session_id_;
+    scans_enabled_ = true;
+    connected_ = true;
 }
 void WifiStation::Stop() {
     ++stops_;
@@ -1228,4 +1250,5 @@ int main() {
     ExactCredentialsRestartActiveStationUnderLifecycleLease();
     InvalidExactCredentialsAreRejectedBeforeStationStart();
     ExactConnectionFailureStopsPartiallyStartedStationExactlyOnce();
+    ExactCandidateConnectBypassesSavedNetworkScanning();
 }

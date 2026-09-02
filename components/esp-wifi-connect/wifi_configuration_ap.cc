@@ -418,7 +418,14 @@ void WifiConfigurationAp::StartWebServer()
                 int index = -1;
                 sscanf(&req->uri[pos+7], "%d", &index);
                 ESP_LOGI(TAG, "Set default item %d", index);
-                SsidManager::GetInstance().SetDefaultSsid(index);
+                const auto result =
+                    SsidManager::GetInstance().SetDefaultSsid(index);
+                if (result != SsidMutationResult::kApplied) {
+                    httpd_resp_set_type(req, "application/json");
+                    httpd_resp_send(req, "{\"success\":false}",
+                                    HTTPD_RESP_USE_STRLEN);
+                    return ESP_OK;
+                }
             }
             // send {}
             httpd_resp_set_type(req, "application/json");
@@ -441,7 +448,13 @@ void WifiConfigurationAp::StartWebServer()
                 int index = -1;
                 sscanf(&req->uri[pos+7], "%d", &index);
                 ESP_LOGI(TAG, "Delete saved list item %d", index);
-                SsidManager::GetInstance().RemoveSsid(index);
+                const auto result = SsidManager::GetInstance().RemoveSsid(index);
+                if (result != SsidMutationResult::kApplied) {
+                    httpd_resp_set_type(req, "application/json");
+                    httpd_resp_send(req, "{\"success\":false}",
+                                    HTTPD_RESP_USE_STRLEN);
+                    return ESP_OK;
+                }
             }
             // send {}
             httpd_resp_set_type(req, "application/json");
@@ -498,6 +511,7 @@ void WifiConfigurationAp::StartWebServer()
         .uri = "/submit",
         .method = HTTP_POST,
         .handler = [](httpd_req_t *req) -> esp_err_t {
+            httpd_resp_set_type(req, "application/json");
             char *buf;
             size_t buf_len = req->content_len;
             if (buf_len > 1024) { // 限制最大请求体大小
@@ -554,10 +568,17 @@ void WifiConfigurationAp::StartWebServer()
                 return ESP_OK;
             }
 
-            this_->Save(ssid_str, password_str);
+            if (this_->Save(ssid_str, password_str) !=
+                SsidMutationResult::kApplied) {
+                cJSON_Delete(json);
+                httpd_resp_send(
+                    req,
+                    "{\"success\":false,\"error\":\"Failed to save WiFi credentials\"}",
+                    HTTPD_RESP_USE_STRLEN);
+                return ESP_OK;
+            }
             cJSON_Delete(json);
             // 设置成功响应
-            httpd_resp_set_type(req, "application/json");
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
             return ESP_OK;
@@ -998,11 +1019,12 @@ bool WifiConfigurationAp::FinishConnectionAttemptBoundary(
         (stop_wifi || (scans_enabled_ && attempt_session == scan_session_id_));
 }
 
-void WifiConfigurationAp::Save(const std::string &ssid, const std::string &password)
+SsidMutationResult WifiConfigurationAp::Save(
+        const std::string &ssid, const std::string &password)
 {
     ESP_LOGI(TAG, "Saving WiFi credentials (ssid_len=%u)",
              static_cast<unsigned>(ssid.length()));
-    SsidManager::GetInstance().AddSsid(ssid, password);
+    return SsidManager::GetInstance().AddSsid(ssid, password);
 }
 
 void WifiConfigurationAp::OnExitRequested(std::function<void()> callback)
@@ -1118,7 +1140,10 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
                      static_cast<unsigned>(strnlen(ssid, sizeof(ssid))),
                      static_cast<unsigned>(strnlen(password, sizeof(password))));
             // 尝试连接WiFi会失败，故不连接
-            self->Save(ssid, password);
+            if (self->Save(ssid, password) != SsidMutationResult::kApplied) {
+                ESP_LOGW(TAG, "SmartConfig credentials were not saved");
+                break;
+            }
             // 延迟退出配网模式
             xTaskCreate([](void *ctx){
                 ESP_LOGI(TAG, "Exiting config mode in 1 second");

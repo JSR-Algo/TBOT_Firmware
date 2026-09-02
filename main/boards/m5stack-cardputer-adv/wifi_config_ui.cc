@@ -797,9 +797,12 @@ void WifiConfigUI::LoadSavedWifiList() {
 void WifiConfigUI::DeleteSavedWifi(int index) {
     if (index >= 0 && index < (int)saved_wifi_list_.size()) {
         auto& ssid_manager = SsidManager::GetInstance();
-        ssid_manager.RemoveSsid(index);
-        ESP_LOGI(TAG, "Deleted saved WiFi at index: %d", index);
-        LoadSavedWifiList();
+        if (ssid_manager.RemoveSsid(index) == SsidMutationResult::kApplied) {
+            ESP_LOGI(TAG, "Deleted saved WiFi at index: %d", index);
+            LoadSavedWifiList();
+        } else {
+            ESP_LOGW(TAG, "Saved WiFi delete rejected at index: %d", index);
+        }
     }
 }
 

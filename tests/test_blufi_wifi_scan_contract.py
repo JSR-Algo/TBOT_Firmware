@@ -709,6 +709,18 @@ def test_config_cancelled_scan_completion_cannot_publish_during_credential_test(
     assert "!is_connecting_" in publish_guard
 
 
+def test_config_submit_marks_busy_and_persistence_failures_as_json():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    submit = source[
+        source.index('httpd_uri_t form_submit = {'):
+        source.index('ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &form_submit));')
+    ]
+    response_type = submit.index('httpd_resp_set_type(req, "application/json")')
+    save = submit.index('this_->Save(ssid_str, password_str)')
+    save_failure = submit.index('Failed to save WiFi credentials')
+    assert response_type < save < save_failure
+
+
 def test_station_and_config_retain_completion_when_driver_ap_cleanup_is_unproven():
     station_header = read("components/esp-wifi-connect/include/wifi_station.h")
     station_source = read("components/esp-wifi-connect/wifi_station.cc")

@@ -593,7 +593,7 @@ def test_receive_saves_then_stops_ap_then_returns():
     fn = _normalize(_function_body(read(AFSK_SRC), "void ReceiveWifiCredentialsFromAudio"))
     add = fn.find("ssid_manager.AddSsid(wifi_ssid, wifi_password)")
     stop = fn.find("wifi_manager->StopConfigAp()")
-    reset = fn.find("data_buffer.decoded_text.reset()")
+    reset = fn.find("data_buffer.decoded_text.reset()", stop)
     assert add != -1 and stop != -1 and reset != -1
     assert add < stop < reset, "order must be AddSsid -> StopConfigAp -> reset"
     ret = fn[reset:]

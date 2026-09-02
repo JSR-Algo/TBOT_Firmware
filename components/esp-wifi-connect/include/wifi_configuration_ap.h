@@ -21,6 +21,7 @@
 #include "wifi_scan_lease_coordinator.h"
 #include "wifi_radio_recovery_restorer.h"
 #include "wifi_scan_recovery_gate.h"
+#include "ssid_manager.h"
 
 /**
  * WifiConfigurationAp - WiFi configuration access point
@@ -48,7 +49,7 @@ public:
     void StartSmartConfig();
 #endif
     bool ConnectToWifi(const std::string &ssid, const std::string &password);
-    void Save(const std::string &ssid, const std::string &password);
+    SsidMutationResult Save(const std::string &ssid, const std::string &password);
     std::vector<wifi_ap_record_t> GetAccessPoints();
     std::string GetSsid();
     std::string GetWebServerUrl();

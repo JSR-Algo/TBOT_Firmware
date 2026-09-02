@@ -16,6 +16,7 @@
 #include "wifi_scan_lease_coordinator.h"
 #include "wifi_radio_recovery_restorer.h"
 #include "wifi_scan_recovery_gate.h"
+#include "ssid_manager.h"
 
 // WiFi power save level enumeration
 enum class WifiPowerSaveLevel {
@@ -47,7 +48,7 @@ public:
     WifiStation(const WifiStation&) = delete;
     WifiStation& operator=(const WifiStation&) = delete;
 
-    void AddAuth(const std::string &&ssid, const std::string &&password);
+    SsidMutationResult AddAuth(const std::string &&ssid, const std::string &&password);
     void Start();
     void StartForExactConnection();
     bool ConnectExact(const std::string& ssid, const std::string& password);

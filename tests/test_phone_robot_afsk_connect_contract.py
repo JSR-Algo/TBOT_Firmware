@@ -109,7 +109,7 @@ def test_robot_persists_decoded_phone_credentials_then_exits_config_mode():
 
     save_idx = afsk.index("ssid_manager.AddSsid(wifi_ssid, wifi_password)")
     stop_idx = afsk.index("wifi_manager->StopConfigAp()")
-    reset_idx = afsk.index("data_buffer.decoded_text.reset()")
+    reset_idx = afsk.index("data_buffer.decoded_text.reset()", stop_idx)
     return_idx = afsk.index("return", reset_idx)
     assert save_idx < stop_idx < reset_idx < return_idx
 

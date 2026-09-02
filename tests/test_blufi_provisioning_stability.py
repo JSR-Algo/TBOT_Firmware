@@ -293,7 +293,7 @@ def test_fw4_ble_teardown_precedes_station_association():
     helper = _station_connect_helper_body()
 
     release_idx = helper.index("ReleaseBleForStationAssociation")
-    station_idx = helper.index("wifi.StartStation()")
+    station_idx = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert release_idx < station_idx
     assert "ESP_BLUFI_STA_CONN_SUCCESS" not in helper
 
@@ -698,7 +698,7 @@ def test_wifi_credentials_release_ble_before_station_association():
     helper = _station_connect_helper_body()
 
     release = helper.index("ReleaseBleForStationAssociation")
-    station = helper.index("wifi.StartStation()")
+    station = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert release < station
 
 
@@ -906,7 +906,7 @@ def test_fw20_ble_active_defer_skips_reschedule_during_wifi_connect():
 def test_fw21_ble_release_precedes_station_and_claim_continuation():
     req = _station_connect_helper_body()
     release_idx = req.index("ReleaseBleForStationAssociation")
-    station_idx = req.index("wifi.StartStation()")
+    station_idx = req.index("wifi.StartStationWithCredentialsIfScanIdle")
     success_idx = req.index("if (credentials_committed)")
     sched_idx = req.index("Application::GetInstance().Schedule(", success_idx)
     sched_body = req[sched_idx:]
@@ -934,7 +934,7 @@ def test_fw21_ble_release_precedes_station_and_claim_continuation():
 def test_fw21b_station_association_has_no_ble_delivery_grace_or_report():
     req = _station_connect_helper_body()
     release_idx = req.index("ReleaseBleForStationAssociation")
-    station_idx = req.index("wifi.StartStation()")
+    station_idx = req.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert release_idx < station_idx
     assert "kBlufiSuccessReportDeliveryGraceMs" not in req
     assert "esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS" not in req
@@ -954,7 +954,7 @@ def test_fw21c_ble_release_and_station_worker_are_generation_fenced():
     generation_check_idx = req.index(
         "if (generation != self->setup_generation_.load())", release_idx
     )
-    station_idx = req.index("wifi.StartStation()", generation_check_idx)
+    station_idx = req.index("wifi.StartStationWithCredentialsIfScanIdle", generation_check_idx)
     assert release_idx < generation_check_idx < station_idx
 
     header = read("main/boards/common/blufi.h")
@@ -2395,7 +2395,7 @@ def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_
     settle_delay = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
     spawn = helper.index("xTaskCreate(", capture)
     release = helper.index("ReleaseBleForStationAssociation", spawn)
-    start_station = helper.index("wifi.StartStation();", release)
+    start_station = helper.index("wifi.StartStationWithCredentialsIfScanIdle", release)
     assert capture < settle_delay < spawn < release < start_station
     post_delay = helper[settle_delay:spawn]
     assert "generation != setup_generation_.load()" in post_delay
@@ -2471,8 +2471,21 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     assert "ssid.c_str()" not in begin_failure
     assert "password.c_str()" not in begin_failure
 
+    exact_start = helper.index("StartStationWithCredentialsIfScanIdle")
+    assert "wifi.StartStation();" not in helper
+    assert helper.index("ReleaseBleForStationAssociation") < exact_start
+    exact_slice = helper[exact_start:helper.index("constexpr int kConnectTimeoutMs", exact_start)]
+    assert "candidate_password" in exact_slice
+    assert "kStartedNow" in exact_slice
+    assert "exact_station_started" in exact_slice
+    assert "RollbackSsidTransaction" not in exact_slice
+    success = helper[helper.index("if (credentials_committed)"):]
+    assert success.index("EnableStationAutomaticScans") < success.index(
+        "m_sta_connected = true"
+    )
+
     stage_idx = helper.index("BeginSsidTransaction(ssid, password)")
-    station_idx = helper.index("wifi.StartStation()")
+    station_idx = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     commit_idx = helper.index("CommitSsidTransaction(ssid_transaction)")
     success_idx = helper.index("if (credentials_committed)")
     failure_branch_idx = helper.index("} else {", success_idx)
@@ -2532,7 +2545,7 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     assert "if (!SaveToNvs())" in commit
     assert "RestoreActiveTransaction();" in commit
     persistence_guard = helper[
-        helper.index("if (wifi.IsConnected())") : helper.index(
+        helper.index("if (exact_station_started && wifi.IsConnected())") : helper.index(
             "if (credentials_committed)"
         )
     ]
@@ -2556,7 +2569,7 @@ def test_fw40_only_exact_candidate_wifi_can_commit_and_report_success():
     context_idx = helper.index("WifiConnectTaskContext")
     capture_idx = helper.index("memcpy(ctx->candidate_ssid.data()")
     delay_idx = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
-    station_idx = helper.index("wifi.StartStation()")
+    station_idx = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert context_idx < capture_idx < delay_idx < station_idx
 
     commit_guard = helper[
@@ -2598,6 +2611,25 @@ def test_fw41_early_connect_setup_failures_report_deterministic_sta_fail():
     blufi = read("main/boards/common/blufi.cpp")
     report = _function_body(blufi, "void Blufi::SendStationConnectFailureReport")
     assert "ESP_BLUFI_STA_CONN_FAIL" in report
+
+
+def test_fw41b_exact_start_rejection_uses_the_single_terminal_failure_lane():
+    helper = _station_connect_helper_body()
+    exact_start = helper.index("StartStationWithCredentialsIfScanIdle")
+    timeout = helper.index("constexpr int kConnectTimeoutMs", exact_start)
+    exact_start_lane = helper[exact_start:timeout]
+
+    assert "exact_station_started" in exact_start_lane
+    assert "RollbackSsidTransaction" not in exact_start_lane
+    assert "RestoreBleAfterStationFailure" not in exact_start_lane
+    assert "vTaskDelete(nullptr)" not in exact_start_lane
+
+    terminal_start = helper.index(
+        "} else {", helper.index("if (credentials_committed)")
+    )
+    terminal = helper[terminal_start:helper.index("vTaskDelete(nullptr);", terminal_start)]
+    assert terminal.count("ProvisioningStatusReporter::Report(") == 1
+    assert terminal.count("RestoreBleAfterStationFailure(generation)") == 1
 
 
 def test_fw42_wifi_connect_single_flight_is_atomic_and_teardown_errors_are_preserved():
@@ -2642,13 +2674,13 @@ def test_fw43_ssid_transactions_compensate_persist_failure_and_lock_all_list_acc
     get_list = _function_body(source, "std::vector<SsidItem> SsidManager::GetSsidList() const")
     assert "std::lock_guard<std::mutex>" in get_list
     for signature in (
-        "void SsidManager::Clear",
-        "void SsidManager::AddSsid",
+        "SsidMutationResult SsidManager::Clear",
+        "SsidMutationResult SsidManager::AddSsid",
         "uint32_t SsidManager::BeginSsidTransaction",
         "bool SsidManager::CommitSsidTransaction",
         "bool SsidManager::RollbackSsidTransaction",
-        "void SsidManager::RemoveSsid",
-        "void SsidManager::SetDefaultSsid",
+        "SsidMutationResult SsidManager::RemoveSsid",
+        "SsidMutationResult SsidManager::SetDefaultSsid",
     ):
         assert "std::lock_guard<std::mutex>" in _function_body(source, signature)
 

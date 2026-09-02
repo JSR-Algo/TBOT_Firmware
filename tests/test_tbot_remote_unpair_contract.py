@@ -8,6 +8,20 @@ def app_source() -> str:
     return (ROOT / "main/application.cc").read_text(encoding="utf-8")
 
 
+def function_body(source: str, signature: str) -> str:
+    start = source.index(signature)
+    brace = source.index("{", start)
+    depth = 0
+    for index in range(brace, len(source)):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace:index]
+    raise AssertionError(f"unterminated function: {signature}")
+
+
 def system_command_body() -> str:
     source = app_source()
     start = source.index('strcmp(type->valuestring, "system") == 0')
@@ -54,9 +68,9 @@ def test_repair_flow_shows_initializing_before_wifi_is_cleared_and_robot_restart
         "SystemReset::ReleaseCloudOwnership()"
     )
     assert body.index("display->SetStatus(Lang::Strings::INITIALIZING);") < body.index(
-        "SsidManager::GetInstance().Clear();"
+        "SsidManager::GetInstance().ForceClearAndCancelTransaction()"
     )
-    assert body.index("SsidManager::GetInstance().Clear();") < body.index("esp_restart();")
+    assert body.index("SsidManager::GetInstance().ForceClearAndCancelTransaction()") < body.index("esp_restart();")
 
 
 def test_heartbeat_revocation_forgets_identity_and_wifi_then_reboots_into_setup():
@@ -71,9 +85,23 @@ def test_heartbeat_revocation_forgets_identity_and_wifi_then_reboots_into_setup(
     assert 'backend_settings.SetString("device_secret", "");' in body
     assert 'websocket_settings.SetString("token", "");' in body
     assert 'websocket_settings.SetString("url", "");' in body
-    assert "SsidManager::GetInstance().Clear();" in body
+    assert "SsidManager::GetInstance().ForceClearAndCancelTransaction()" in body
     assert "esp_restart();" in body
     assert body.index('backend_settings.SetString("device_secret", "");') < body.index(
-        "SsidManager::GetInstance().Clear();"
+        "SsidManager::GetInstance().ForceClearAndCancelTransaction()"
     )
-    assert body.index("SsidManager::GetInstance().Clear();") < body.index("esp_restart();")
+    assert body.index("SsidManager::GetInstance().ForceClearAndCancelTransaction()") < body.index("esp_restart();")
+
+
+def test_destructive_wifi_clear_failure_blocks_reboot_at_both_boundaries():
+    source = app_source()
+    for signature in (
+        "void Application::HandleHeartbeatAuthFailure",
+        "void Application::EnterRepairPairingMode",
+    ):
+        body = function_body(source, signature)
+        clear = body.index("ForceClearAndCancelTransaction")
+        failure = body.index("SsidMutationResult::kApplied", clear)
+        early_return = body.index("return;", failure)
+        restart = body.index("esp_restart();", early_return)
+        assert clear < failure < early_return < restart

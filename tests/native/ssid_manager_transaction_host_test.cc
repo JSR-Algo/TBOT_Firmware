@@ -15,6 +15,7 @@ namespace {
 
 std::map<std::string, std::string> durable_nvs;
 int nvs_commit_calls = 0;
+bool fail_next_commit = false;
 
 std::string IndexedKey(const char* prefix, int index) {
     return index == 0 ? prefix : std::string(prefix) + std::to_string(index);
@@ -35,6 +36,15 @@ void AssertOriginalList(const std::vector<SsidItem>& list) {
         assert(list[index].ssid == "saved-" + std::to_string(index));
         assert(list[index].password ==
                "password-" + std::to_string(index));
+    }
+}
+
+void AssertSameList(const std::vector<SsidItem>& left,
+                    const std::vector<SsidItem>& right) {
+    assert(left.size() == right.size());
+    for (size_t index = 0; index < left.size(); ++index) {
+        assert(left[index].ssid == right[index].ssid);
+        assert(left[index].password == right[index].password);
     }
 }
 
@@ -72,6 +82,10 @@ esp_err_t nvs_erase_key(nvs_handle_t, const char* key) {
 
 esp_err_t nvs_commit(nvs_handle_t) {
     ++nvs_commit_calls;
+    if (fail_next_commit) {
+        fail_next_commit = false;
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
@@ -160,6 +174,92 @@ int main() {
         manager.BeginSsidTransaction("after-success", "final-password");
     assert(after_success != 0);
     assert(manager.RollbackSsidTransaction(after_success));
+
+    const auto before_failed_add = manager.GetSsidList();
+    const auto durable_before_failed_add = durable_nvs;
+    fail_next_commit = true;
+    assert(manager.AddSsid("failed-add", "failed-password") ==
+           SsidMutationResult::kPersistenceFailed);
+    AssertSameList(manager.GetSsidList(), before_failed_add);
+    assert(durable_nvs == durable_before_failed_add);
+
+    const auto before_failed_remove = manager.GetSsidList();
+    const auto durable_before_failed_remove = durable_nvs;
+    fail_next_commit = true;
+    assert(manager.RemoveSsid(4) == SsidMutationResult::kPersistenceFailed);
+    AssertSameList(manager.GetSsidList(), before_failed_remove);
+    assert(durable_nvs == durable_before_failed_remove);
+
+    const auto before_failed_default = manager.GetSsidList();
+    const auto durable_before_failed_default = durable_nvs;
+    fail_next_commit = true;
+    assert(manager.SetDefaultSsid(6) ==
+           SsidMutationResult::kPersistenceFailed);
+    AssertSameList(manager.GetSsidList(), before_failed_default);
+    assert(durable_nvs == durable_before_failed_default);
+
+    const auto before_failed_clear = manager.GetSsidList();
+    const auto durable_before_failed_clear = durable_nvs;
+    fail_next_commit = true;
+    assert(manager.Clear() == SsidMutationResult::kPersistenceFailed);
+    AssertSameList(manager.GetSsidList(), before_failed_clear);
+    assert(durable_nvs == durable_before_failed_clear);
+
+    const uint32_t existing_owner = manager.BeginSsidTransaction(
+        "saved-4", "provisional-existing-password");
+    assert(existing_owner != 0);
+    const auto existing_provisional = manager.GetSsidList();
+    const auto durable_before_busy_mutations = durable_nvs;
+    assert(manager.AddSsid("legacy-add", "legacy-password") ==
+           SsidMutationResult::kBusy);
+    assert(manager.RemoveSsid(2) == SsidMutationResult::kBusy);
+    assert(manager.SetDefaultSsid(6) == SsidMutationResult::kBusy);
+    assert(manager.Clear() == SsidMutationResult::kBusy);
+    AssertSameList(manager.GetSsidList(), existing_provisional);
+    assert(durable_nvs == durable_before_busy_mutations);
+    assert(manager.RollbackSsidTransaction(existing_owner));
+
+    const uint32_t mutation_owner = manager.BeginSsidTransaction(
+        "saved-4", "concurrent-provisional-password");
+    assert(mutation_owner != 0);
+    SsidMutationResult concurrent_add = SsidMutationResult::kApplied;
+    SsidMutationResult concurrent_remove = SsidMutationResult::kApplied;
+    std::thread add_mutation([&]() {
+        concurrent_add = manager.AddSsid("concurrent-add", "password");
+    });
+    std::thread remove_mutation([&]() {
+        concurrent_remove = manager.RemoveSsid(3);
+    });
+    add_mutation.join();
+    remove_mutation.join();
+    assert(concurrent_add == SsidMutationResult::kBusy);
+    assert(concurrent_remove == SsidMutationResult::kBusy);
+    assert(manager.CommitSsidTransaction(mutation_owner));
+    const auto committed_existing = manager.GetSsidList();
+    assert(committed_existing[5].ssid == "saved-4");
+    assert(committed_existing[5].password ==
+           "concurrent-provisional-password");
+
+    const auto before_failed_force_clear = manager.GetSsidList();
+    const auto durable_before_failed_force_clear = durable_nvs;
+    const uint32_t failed_force_cancel = manager.BeginSsidTransaction(
+        "failed-force-clear", "failed-force-password");
+    assert(failed_force_cancel != 0);
+    fail_next_commit = true;
+    assert(manager.ForceClearAndCancelTransaction() ==
+           SsidMutationResult::kPersistenceFailed);
+    AssertSameList(manager.GetSsidList(), before_failed_force_clear);
+    assert(durable_nvs == durable_before_failed_force_clear);
+    assert(!manager.RollbackSsidTransaction(failed_force_cancel));
+
+    const uint32_t force_cancelled = manager.BeginSsidTransaction(
+        "force-cleared", "force-clear-password");
+    assert(force_cancelled != 0);
+    assert(manager.ForceClearAndCancelTransaction() ==
+           SsidMutationResult::kApplied);
+    assert(manager.GetSsidList().empty());
+    assert(!manager.RollbackSsidTransaction(force_cancelled));
+    assert(durable_nvs.empty());
 
     std::cout << "ssid manager transaction host tests: PASS\n";
     return 0;

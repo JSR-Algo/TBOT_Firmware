@@ -127,7 +127,12 @@ namespace audio_wifi_config
                     
                     // Save WiFi credentials using SsidManager
                     auto& ssid_manager = SsidManager::GetInstance();
-                    ssid_manager.AddSsid(wifi_ssid, wifi_password);
+                    if (ssid_manager.AddSsid(wifi_ssid, wifi_password) !=
+                        SsidMutationResult::kApplied) {
+                        ESP_LOGW(kLogTag, "WiFi credential save rejected");
+                        data_buffer.decoded_text.reset();
+                        continue;
+                    }
                     ESP_LOGI(kLogTag, "WiFi credentials saved successfully");
                     
                     // Exit config mode (triggers ConfigModeExit event)

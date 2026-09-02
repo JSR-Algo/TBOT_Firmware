@@ -2900,7 +2900,12 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
     // A revoked heartbeat is the durable fallback when the backend invalidates
     // ownership before its WebSocket unpair command reaches the robot. Forget
     // the old network so the normal boot path opens BLUFI without a BOOT press.
-    SsidManager::GetInstance().Clear();
+    const auto wifi_clear_result =
+        SsidManager::GetInstance().ForceClearAndCancelTransaction();
+    if (wifi_clear_result != SsidMutationResult::kApplied) {
+        ESP_LOGE(TAG, "Heartbeat auth recovery could not clear saved WiFi");
+        return;
+    }
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
 }
@@ -2994,7 +2999,12 @@ void Application::EnterRepairPairingMode() {
         // networks (the reported "can't set a different Wi-Fi"). The cloud row was freed
         // synchronously above (while still online); the offline case keeps
         // release_pending so the deferred release fires once the NEW network connects.
-        SsidManager::GetInstance().Clear();
+        const auto wifi_clear_result =
+            SsidManager::GetInstance().ForceClearAndCancelTransaction();
+        if (wifi_clear_result != SsidMutationResult::kApplied) {
+            ESP_LOGE(TAG, "BOOT re-pair could not clear saved WiFi");
+            return;
+        }
         ESP_LOGW(TAG, "BOOT re-pair: Wi-Fi forgotten; rebooting into Wi-Fi setup for a new network");
         vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();

@@ -40,6 +40,9 @@ public:
         return true;
     }
     void FailExactConnectionOnce() { fail_exact_connection_once_ = true; }
+    void SetSavedScanWinner(std::string ssid) {
+        saved_scan_winner_ = std::move(ssid);
+    }
     void EnableAutomaticScans() { automatic_scans_enabled_ = true; }
     int Starts() const { return starts_; }
     int ExactModeStarts() const { return exact_mode_starts_; }
@@ -48,6 +51,7 @@ public:
     const std::string& ExactSsid() const { return exact_ssid_; }
     const std::string& ExactPassword() const { return exact_password_; }
     bool AutomaticScansEnabled() const { return automatic_scans_enabled_; }
+    int SavedScanSelections() const { return saved_scan_selections_; }
     WifiScanLeaseCoordinator::Lease PublishDebt(bool scans_enabled = true);
     void CallbackWins();
     void FailCompletionOnce();
@@ -89,6 +93,8 @@ private:
     std::string exact_password_;
     bool automatic_scans_enabled_ = false;
     bool fail_exact_connection_once_ = false;
+    std::string saved_scan_winner_;
+    int saved_scan_selections_ = 0;
     std::function<void(const WifiScanLeaseCoordinator::Lease&)> recovery_cb_;
     std::function<void()> on_scan_begin_;
 };

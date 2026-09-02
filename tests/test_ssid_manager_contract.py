@@ -54,12 +54,12 @@ def test_ssid_manager_rejects_empty_ssids_before_persisting():
     src = read("managed_components/78__esp-wifi-connect/ssid_manager.cc")
     body = _function_body(
         src,
-        "void SsidManager::AddSsid(const std::string& ssid, const std::string& password)",
-        "void SsidManager::RemoveSsid(int index)",
+        "SsidMutationResult SsidManager::AddSsid(",
+        "uint32_t SsidManager::BeginSsidTransaction",
     )
 
     empty_guard = body.index("ssid.empty()")
-    save_idx = body.index("SaveToNvs();")
+    save_idx = body.index("PersistMutationOrRestore")
 
     assert empty_guard < save_idx
-    assert "return;" in body[empty_guard:save_idx]
+    assert "SsidMutationResult::kInvalid" in body[empty_guard:save_idx]

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -1996,8 +1997,8 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     const uint32_t ssid_transaction =
         ssid_manager.BeginSsidTransaction(ssid, password);
     SecureClearLocalString(ssid);
-    SecureClearLocalString(password);
     if (ssid_transaction == 0) {
+        SecureClearLocalString(password);
         ESP_LOGE(BLUFI_TAG, "Failed to stage WiFi credentials");
         m_wifi_connect_task_started.store(false);
         m_sta_is_connecting.store(false);
@@ -2026,6 +2027,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     }
 
     if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
+        SecureClearLocalString(password);
         ESP_LOGE(BLUFI_TAG, "Failed to initialize WifiManager");
         ssid_manager.RollbackSsidTransaction(ssid_transaction);
         uint32_t expected_transaction = ssid_transaction;
@@ -2043,11 +2045,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         ProvisioningToken provisioning_token;
         std::array<uint8_t, 32> candidate_ssid;
         size_t candidate_ssid_len;
+        std::string candidate_password;
     };
     auto* ctx = new (std::nothrow) WifiConnectTaskContext{
         this, generation, ssid_transaction, provisioning_token, {},
-        static_cast<size_t>(m_sta_ssid_len)};
+        static_cast<size_t>(m_sta_ssid_len), std::move(password)};
     if (ctx == nullptr) {
+        SecureClearLocalString(password);
         ESP_LOGE(BLUFI_TAG, "Failed to allocate BluFi WiFi completion context");
         m_wifi_connect_task_started.store(false);
         m_sta_is_connecting.store(false);
@@ -2064,6 +2068,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
 
     if (generation != setup_generation_.load()) {
         ESP_LOGI(BLUFI_TAG, "Ignoring stale BluFi WiFi connect before station start");
+        SecureClearLocalString(ctx->candidate_password);
         delete ctx;
         ssid_manager.RollbackSsidTransaction(ssid_transaction);
         uint32_t expected_transaction = ssid_transaction;
@@ -2080,10 +2085,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             const auto provisioning_token = task_ctx->provisioning_token;
             const auto candidate_ssid = task_ctx->candidate_ssid;
             const size_t candidate_ssid_len = task_ctx->candidate_ssid_len;
+            std::string candidate_password =
+                std::move(task_ctx->candidate_password);
             delete task_ctx;
             auto& wifi = WifiManager::GetInstance();
 
             if (!self->ReleaseBleForStationAssociation(generation)) {
+                SecureClearLocalString(candidate_password);
                 ESP_LOGE(BLUFI_TAG, "Unable to release BLE before WiFi association");
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
                 uint32_t expected_transaction = ssid_transaction;
@@ -2098,6 +2106,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             }
 
             if (generation != self->setup_generation_.load()) {
+                SecureClearLocalString(candidate_password);
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
                 uint32_t expected_transaction = ssid_transaction;
                 self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
@@ -2105,12 +2114,25 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 return;
             }
 
-            wifi.StartStation();
+            const std::string candidate_ssid_string(
+                reinterpret_cast<const char*>(candidate_ssid.data()),
+                candidate_ssid_len);
+            const auto exact_start_result =
+                wifi.StartStationWithCredentialsIfScanIdle(
+                    candidate_ssid_string, candidate_password);
+            SecureClearLocalString(candidate_password);
+            const bool exact_station_started =
+                exact_start_result == WifiManager::StationStartResult::kStartedNow;
+            if (!exact_station_started) {
+                ESP_LOGE(BLUFI_TAG, "Exact provisioning candidate start failed: %d",
+                         static_cast<int>(exact_start_result));
+            }
             constexpr int kConnectTimeoutMs = 60000;
             constexpr TickType_t kDelayTick = pdMS_TO_TICKS(200);
             int waited_ms = 0;
 
-            while (waited_ms < kConnectTimeoutMs && !wifi.IsConnected()) {
+            while (waited_ms < kConnectTimeoutMs && !wifi.IsConnected() &&
+                   exact_station_started) {
                 vTaskDelay(kDelayTick);
                 waited_ms += 200;
             }
@@ -2133,7 +2155,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
 
             bool connected_to_candidate = false;
             bool credentials_committed = false;
-            if (wifi.IsConnected()) {
+            if (exact_station_started && wifi.IsConnected()) {
                 const std::string connected_ssid = wifi.GetSsid();
                 connected_to_candidate =
                     connected_ssid.size() == candidate_ssid_len &&
@@ -2189,6 +2211,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             }
 
             if (credentials_committed) {
+                wifi.EnableStationAutomaticScans();
                 self->m_sta_connected = true;
                 self->m_sta_got_ip = true;
                 self->m_provisioned = true;
@@ -2311,6 +2334,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         },
         "blufi_wifi_conn", 4096, ctx, 5, nullptr);
     if (created != pdPASS) {
+        SecureClearLocalString(ctx->candidate_password);
         delete ctx;
         ESP_LOGE(BLUFI_TAG, "Failed to create BluFi WiFi completion task");
         m_wifi_connect_task_started.store(false);
@@ -2694,8 +2718,7 @@ BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan(
         const WifiScanLeaseCoordinator::Lease& lease) noexcept {
     BlufiWifiScanStartOutcome progress;
     try {
-    ESP_LOGI(BLUFI_TAG, "Starting owned WiFi scan id=%llu",
-             static_cast<unsigned long long>(request_id));
+    ESP_LOGI(BLUFI_TAG, "Starting owned WiFi scan id=%" PRIu64, request_id);
 
     auto commit_failure = [this, request_id, lease, &progress]() noexcept {
         progress = CommitOwnedWifiScanStart(

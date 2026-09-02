@@ -58,9 +58,10 @@ WifiStation::~WifiStation() {
     }
 }
 
-void WifiStation::AddAuth(const std::string &&ssid, const std::string &&password) {
+SsidMutationResult WifiStation::AddAuth(const std::string &&ssid,
+                                        const std::string &&password) {
     auto& ssid_manager = SsidManager::GetInstance();
-    ssid_manager.AddSsid(ssid, password);
+    return ssid_manager.AddSsid(ssid, password);
 }
 
 void WifiStation::Stop() {
