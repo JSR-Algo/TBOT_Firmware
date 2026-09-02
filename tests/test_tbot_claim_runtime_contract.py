@@ -442,12 +442,16 @@ def test_blufi_wifi_success_tears_down_ble_before_claim_refresh():
     branch_start = source.index("if (credentials_committed)")
     helper_start = source.index("void Blufi::StartStationConnectFromCredentials")
     release_idx = source.index("ReleaseBleForStationAssociation", helper_start)
-    station_idx = source.index("wifi.StartStation()", release_idx)
+    station_idx = source.index("wifi.StartStationWithCredentialsIfScanIdle(", release_idx)
     connected_log_idx = source.index('"connected to WiFi"', station_idx)
     failure_log_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", connected_log_idx)
     success_body = source[branch_start:failure_log_idx]
 
     assert "ReleaseBleForStationAssociation" in source[helper_start:station_idx]
+    exact_start = source[station_idx:branch_start]
+    assert "candidate_ssid_string" in exact_start
+    assert "candidate_password" in exact_start
+    assert "WifiManager::StationStartResult::kStartedNow" in exact_start
     assert "CompleteSuccessfulProvisioningTeardown" in success_body
     assert '"wifi_credentials_connected"' in success_body
     assert "const bool code_based_provisioning" in success_body
@@ -509,7 +513,7 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
     success_start = source.index("if (credentials_committed)")
     helper_start = source.index("void Blufi::StartStationConnectFromCredentials")
     release_idx = source.index("ReleaseBleForStationAssociation", helper_start)
-    station_idx = source.index("wifi.StartStation()", release_idx)
+    station_idx = source.index("wifi.StartStationWithCredentialsIfScanIdle(", release_idx)
     failure_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", station_idx)
     success_body = source[success_start:failure_idx]
     helper_body = function_body(source, "void Blufi::TryReportProvisioningAuthenticated")
@@ -518,6 +522,7 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
     assert "void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);" in header
     assert '"wifi_success_after_ble_teardown", generation' in success_body
     assert release_idx < station_idx
+    assert station_idx < success_start
     assert success_body.index("CompleteSuccessfulProvisioningTeardown") < success_body.index(
         '"wifi_success_after_ble_teardown", generation'
     )
