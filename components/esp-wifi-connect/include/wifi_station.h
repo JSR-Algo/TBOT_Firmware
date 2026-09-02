@@ -4,11 +4,19 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include <condition_variable>
+#include <mutex>
+#include <optional>
 
 #include <esp_event.h>
 #include <esp_timer.h>
 #include <esp_netif.h>
 #include <esp_wifi_types_generic.h>
+
+#include "wifi_scan_lease_coordinator.h"
+#include "wifi_radio_recovery_restorer.h"
+#include "wifi_scan_recovery_gate.h"
+#include "ssid_manager.h"
 
 // WiFi power save level enumeration
 enum class WifiPowerSaveLevel {
@@ -33,23 +41,40 @@ struct WifiApRecord {
  */
 class WifiStation {
 public:
-    WifiStation();
+    explicit WifiStation(WifiScanLeaseCoordinator& scan_lease_coordinator);
     ~WifiStation();
 
     // Delete copy constructor and assignment operator
     WifiStation(const WifiStation&) = delete;
     WifiStation& operator=(const WifiStation&) = delete;
 
-    void AddAuth(const std::string &&ssid, const std::string &&password);
+    SsidMutationResult AddAuth(const std::string &&ssid, const std::string &&password);
     void Start();
+    void StartForExactConnection();
+    bool ConnectExact(const std::string& ssid, const std::string& password);
+    void EnableAutomaticScans();
     void Stop();
     bool IsConnected();
     bool WaitForConnected(int timeout_ms = 10000);
     int8_t GetRssi();
-    std::string GetSsid() const { return ssid_; }
-    std::string GetIpAddress() const { return ip_address_; }
+    std::string GetSsid() const;
+    std::string GetIpAddress() const;
     uint8_t GetChannel();
     void SetPowerSaveLevel(WifiPowerSaveLevel level);
+    using ScanRecoveryClaim = WifiScanRecoveryGate::Claim;
+    std::optional<ScanRecoveryClaim> ClaimScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& expected_lease);
+    bool HasScanRecoveryDebt(
+        const WifiScanLeaseCoordinator::Lease& expected_lease) const;
+    bool CompleteScanRecovery(
+        const ScanRecoveryClaim& claim,
+        const WifiScanLeaseCoordinator::RecoveryProof& proof);
+    bool RestoreRadioAfterRecovery(const ScanRecoveryClaim& claim);
+    void RetryScanAfterRecovery();
+    bool RestoreRadioAfterExternalScanRecovery();
+    void RetryAfterExternalScanRecovery(bool reconnect);
+    void OnScanRecoveryNeeded(std::function<void(
+        const WifiScanLeaseCoordinator::Lease&)> callback);
 
     void OnConnect(std::function<void(const std::string& ssid)> on_connect);
     void OnConnected(std::function<void(const std::string& ssid)> on_connected);
@@ -67,6 +92,7 @@ private:
     std::string password_;
     std::string ip_address_;
     int8_t max_tx_power_;
+    wifi_ps_type_t power_save_type_ = WIFI_PS_MIN_MODEM;
     uint8_t remember_bssid_;
     int reconnect_count_ = 0;
 
@@ -80,11 +106,51 @@ private:
     std::function<void()> on_scan_begin_;
     std::vector<WifiApRecord> connect_queue_;
     bool was_connected_ = false;  // Track if we were connected before disconnection
-    bool scan_in_progress_ = false;
+    wifi_config_t active_station_config_{};
+    bool active_station_config_valid_ = false;
+    WifiScanLeaseCoordinator& scan_lease_coordinator_;
+    WifiRadioRecoveryRestorer radio_recovery_restorer_;
+    // When nested: callback -> scan -> data. Never acquire scan while holding
+    // data, and never hold data across driver calls or external callbacks.
+    std::recursive_mutex session_callback_mutex_;
+    mutable std::mutex scan_mutex_;
+    mutable std::mutex session_data_mutex_;
+    std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;
+    bool scans_enabled_ = false;
+    bool automatic_scans_enabled_ = false;
+    uint64_t scan_session_id_ = 0;
+    uint64_t lease_session_id_ = 0;
+    size_t in_flight_session_operations_ = 0;
+    std::condition_variable session_operations_drained_;
+    std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;
+    WifiScanRecoveryGate::RestoreState scan_recovery_restore_state_;
+    std::function<void(const WifiScanLeaseCoordinator::Lease&)>
+        scan_recovery_needed_;
 
     bool StartOwnedScan();
-    void HandleScanResult();
+    void StartWithScanPolicy(bool automatic_scans_enabled);
+    void CompleteOwnedScan(const WifiScanLeaseCoordinator::Lease& lease);
+    std::optional<WifiApRecord> HandleScanResultLocked(
+        std::vector<wifi_ap_record_t> ap_records,
+        std::optional<int64_t>& retry_delay_microseconds);
+    void ScheduleScanRetry(uint64_t expected_session,
+                           int64_t delay_microseconds);
     void StartConnect();
+    WifiApRecord PrepareNextConnectLocked();
+    std::string StartConnectForSession(WifiApRecord ap_record,
+                                       bool use_remembered_bssid = true);
+    bool TryBeginSessionOperationLocked(uint64_t session_id);
+    void FinishSessionOperation();
+    void DispatchSessionCallback(uint64_t expected_session,
+                                 std::function<void()> callback);
+    bool FinishDiscardedCompletionLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void RetainRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void ClearRecoveryDebtLocked(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void NotifyScanRecoveryNeeded(
+        const WifiScanLeaseCoordinator::Lease& lease);
     void UpdateScanInterval();  // Exponential backoff for scan interval
     static void WifiEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
     static void IpEventHandler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);

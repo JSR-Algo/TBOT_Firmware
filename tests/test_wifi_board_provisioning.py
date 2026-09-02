@@ -549,7 +549,7 @@ def test_wb11_start_network_short_circuits_when_already_in_config_mode():
     body = _func_body(
         wifi_board,
         "void WifiBoard::StartNetwork()",
-        "void WifiBoard::TryWifiConnect()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
     )
 
     guard_idx = body.index("if (in_config_mode_)")
@@ -576,21 +576,22 @@ def test_wb12_try_wifi_connect_branches_on_stored_ssids():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _func_body(
         wifi_board,
-        "void WifiBoard::TryWifiConnect()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
         "void WifiBoard::OnNetworkEvent(",
     )
 
     assert "bool have_ssid = !ssid_manager.GetSsidList().empty();" in body
     have_idx = body.index("if (have_ssid)")
-    # Connect lane: arm timeout + start station.
+    # Connect lane: reserve/start station, then arm its timeout.
     arm_idx = body.index("esp_timer_start_once(connect_timer_,")
-    start_idx = body.index("WifiManager::GetInstance().StartStation();")
+    start_idx = body.index("WifiManager::GetInstance().StartStationIfScanIdle()")
     # Fallback lane: enter config mode.
     cfg_idx = body.index("RequestWifiConfigMode();")
-    assert have_idx < arm_idx < start_idx < cfg_idx, (
-        "TryWifiConnect() must arm the timeout + start station when SSIDs exist, "
+    assert have_idx < start_idx < arm_idx < cfg_idx, (
+        "TryWifiConnect() must reserve/start station before arming its timeout, "
         "and fall back to StartWifiConfigMode() when none are stored"
     )
+    assert "ShouldArmWifiConnectTimeout(start_result)" in body[start_idx:arm_idx]
 
 
 # ---------------------------------------------------------------------------
@@ -604,13 +605,14 @@ def test_wb12b_unclaimed_saved_ssid_keeps_ble_advertising_before_station_connect
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _func_body(
         wifi_board,
-        "void WifiBoard::TryWifiConnect()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
         "void WifiBoard::OnNetworkEvent(",
     )
 
     have_idx = body.index("if (have_ssid)")
     ensure_idx = body.index("app.EnsureBleAdvertisingForUnclaimedSavedWifi();", have_idx)
-    start_idx = body.index("WifiManager::GetInstance().StartStation();", ensure_idx)
+    start_idx = body.index(
+        "WifiManager::GetInstance().StartStationIfScanIdle()", ensure_idx)
 
     assert "auto& app = Application::GetInstance();" in body[have_idx:ensure_idx]
     assert "IsDeviceClaimed()" not in body

@@ -5,6 +5,7 @@
 #include "wifi_manager.h"
 #include "wifi_station.h"
 #include "wifi_configuration_ap.h"
+#include "wifi_credential_limits.h"
 
 #include <esp_log.h>
 #include <esp_wifi.h>
@@ -12,26 +13,651 @@
 #include <esp_event.h>
 #include <esp_mac.h>
 #include <nvs_flash.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #define TAG "WifiManager"
 
 WifiManager& WifiManager::GetInstance() {
-    static WifiManager instance;
-    return instance;
+    // Scanner handlers and their coordinator may be referenced by queued
+    // default-event-loop callbacks for the remainder of the process.
+    static WifiManager* instance = new WifiManager;
+    return *instance;
 }
 
 WifiManager::WifiManager() = default;
 
-WifiManager::~WifiManager() {
+namespace {
+
+bool SameLease(const WifiScanLeaseCoordinator::Lease& left,
+               const WifiScanLeaseCoordinator::Lease& right) {
+    return left.owner == right.owner && left.lease_id == right.lease_id &&
+           left.driver_incarnation == right.driver_incarnation;
+}
+
+}  // namespace
+
+bool WifiManager::RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner owner,
+        ScanRecoveryOwnerHooks hooks) {
+    if ((owner != WifiScanLeaseCoordinator::Owner::kBlufi &&
+         owner != WifiScanLeaseCoordinator::Owner::kBlockingUi) ||
+        !hooks.claim || !hooks.has_debt || !hooks.restore_radio ||
+        !hooks.complete || !hooks.retry) {
+        return false;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (station_active_ && station_) {
-        station_->Stop();
+    if (scan_recovery_active_ && scan_recovery_debt_.has_value() &&
+        scan_recovery_debt_->owner == owner) {
+        return false;
     }
-    if (config_mode_active_ && config_ap_) {
-        config_ap_->Stop();
+    external_scan_recovery_hooks_[static_cast<size_t>(owner)] =
+        std::move(hooks);
+    return true;
+}
+
+WifiManager::ExternalScanRadioResult WifiManager::PrepareExternalScanRadio(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    if (lease.owner != WifiScanLeaseCoordinator::Owner::kBlockingUi ||
+        !scan_lease_coordinator_.OwnsExactLease(lease)) {
+        return ExternalScanRadioResult::kCleanFailure;
     }
-    if (initialized_) {
-        esp_wifi_deinit();
+    WifiStation* station = nullptr;
+    ExternalScanRecoverySnapshot snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ || HasActiveExternalScanLocked()) {
+            return ExternalScanRadioResult::kCleanFailure;
+        }
+        snapshot.lease = lease;
+        snapshot.lifecycle_generation = lifecycle_generation_;
+        if (station_active_) {
+            snapshot.role = ExternalScanRecoveryRole::kStation;
+            station = station_.get();
+        } else if (config_mode_active_) {
+            snapshot.role = ExternalScanRecoveryRole::kConfigAp;
+        }
+        external_scan_recovery_snapshots_[
+            static_cast<size_t>(lease.owner)] = snapshot;
+    }
+    const auto release_reservation = [this, &lease]() {
+        ReleaseExternalScanRadioToken(lease);
+    };
+    if (station != nullptr) {
+        snapshot.station_was_connected = station->IsConnected();
+    }
+    if (snapshot.role == ExternalScanRecoveryRole::kIdle) {
+        wifi_mode_t mode = WIFI_MODE_NULL;
+        wifi_config_t sta{};
+        wifi_config_t ap{};
+        wifi_ps_type_t power_save = WIFI_PS_MIN_MODEM;
+        int8_t max_tx_power = 0;
+        wifi_band_mode_t band_mode = WIFI_BAND_MODE_2G_ONLY;
+        if (esp_wifi_get_mode(&mode) != ESP_OK) {
+            release_reservation();
+            return ExternalScanRadioResult::kCleanFailure;
+        }
+        snapshot.idle_restore_mode = mode;
+        const bool has_sta = mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA;
+        const bool has_ap = mode == WIFI_MODE_AP || mode == WIFI_MODE_APSTA;
+        if ((has_sta && esp_wifi_get_config(WIFI_IF_STA, &sta) != ESP_OK) ||
+            (has_ap && esp_wifi_get_config(WIFI_IF_AP, &ap) != ESP_OK)) {
+            release_reservation();
+            return ExternalScanRadioResult::kCleanFailure;
+        }
+        snapshot.idle_restore_sta_config_valid = has_sta;
+        snapshot.idle_restore_ap_config_valid = has_ap;
+        snapshot.idle_restore_sta_config = sta;
+        snapshot.idle_restore_ap_config = ap;
+        if (esp_wifi_get_ps(&power_save) != ESP_OK ||
+            esp_wifi_get_band_mode(&band_mode) != ESP_OK) {
+            release_reservation();
+            return ExternalScanRadioResult::kCleanFailure;
+        }
+        snapshot.idle_restore_power_save = power_save;
+        snapshot.idle_restore_max_tx_power = max_tx_power;
+        snapshot.idle_restore_band_mode = band_mode;
+        if (has_sta || has_ap) {
+            uint16_t inactive_seconds = 0;
+            const wifi_interface_t probe_interface =
+                has_sta ? WIFI_IF_STA : WIFI_IF_AP;
+            const esp_err_t probe = esp_wifi_get_inactive_time(
+                probe_interface, &inactive_seconds);
+            if (probe == ESP_OK) {
+                snapshot.idle_restore_radio_started = true;
+            } else if (probe != ESP_ERR_WIFI_NOT_STARTED) {
+                release_reservation();
+                return ExternalScanRadioResult::kCleanFailure;
+            }
+        }
+        if (snapshot.idle_restore_radio_started) {
+            if (esp_wifi_get_max_tx_power(&max_tx_power) != ESP_OK) {
+                release_reservation();
+                return ExternalScanRadioResult::kCleanFailure;
+            }
+            snapshot.idle_restore_max_tx_power = max_tx_power;
+            snapshot.idle_restore_max_tx_power_valid = true;
+        }
+        const wifi_mode_t scan_mode = has_ap ? WIFI_MODE_APSTA : WIFI_MODE_STA;
+        snapshot.idle_scan_changed_mode = scan_mode != mode;
+        if (snapshot.idle_scan_changed_mode &&
+            esp_wifi_set_mode(scan_mode) != ESP_OK) {
+            release_reservation();
+            return ExternalScanRadioResult::kCleanFailure;
+        }
+        snapshot.idle_radio_prepared = true;
+        if (!snapshot.idle_restore_radio_started) {
+            const esp_err_t start = esp_wifi_start();
+            if (start == ESP_ERR_WIFI_STATE) {
+                snapshot.idle_restore_radio_started = true;
+            } else if (start != ESP_OK) {
+                if (snapshot.idle_scan_changed_mode &&
+                    !RestoreIdleExternalScanRadio(snapshot, false)) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    external_scan_recovery_snapshots_[
+                        static_cast<size_t>(lease.owner)] = snapshot;
+                    return ExternalScanRadioResult::kRecoveryRequired;
+                }
+                release_reservation();
+                return ExternalScanRadioResult::kCleanFailure;
+            }
+        }
+    }
+    bool current = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        current = snapshot.lifecycle_generation == lifecycle_generation_ &&
+            !lifecycle_transition_in_progress_ && !scan_recovery_active_;
+        auto& reserved = external_scan_recovery_snapshots_[
+            static_cast<size_t>(lease.owner)];
+        current = current && reserved.has_value() &&
+            SameLease(reserved->lease, lease);
+        if (current) {
+            reserved = snapshot;
+        }
+    }
+    if (!current) {
+        if (snapshot.idle_radio_prepared &&
+            !RestoreIdleExternalScanRadio(snapshot, false)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            external_scan_recovery_snapshots_[
+                static_cast<size_t>(lease.owner)] = snapshot;
+            return ExternalScanRadioResult::kRecoveryRequired;
+        }
+        release_reservation();
+        return ExternalScanRadioResult::kCleanFailure;
+    }
+    return ExternalScanRadioResult::kReady;
+}
+
+WifiManager::ExternalScanRadioResult WifiManager::FinishExternalScanRadio(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    const auto snapshot = ExternalRecoverySnapshotFor(lease);
+    if (!snapshot.has_value()) {
+        return ExternalScanRadioResult::kRecoveryRequired;
+    }
+    if (snapshot->role == ExternalScanRecoveryRole::kIdle &&
+        !RestoreIdleExternalScanRadio(*snapshot, false)) {
+        return ExternalScanRadioResult::kRecoveryRequired;
+    }
+    return ExternalScanRadioResult::kReady;
+}
+
+bool WifiManager::ReleaseExternalScanRadioToken(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto& snapshot =
+        external_scan_recovery_snapshots_[static_cast<size_t>(lease.owner)];
+    if (!snapshot.has_value() || !SameLease(snapshot->lease, lease)) {
+        return false;
+    }
+    snapshot.reset();
+    return true;
+}
+
+bool WifiManager::RestoreIdleExternalScanRadio(
+        const ExternalScanRecoverySnapshot& snapshot,
+        bool after_driver_reset) {
+    wifi_config_t sta = snapshot.idle_restore_sta_config;
+    wifi_config_t ap = snapshot.idle_restore_ap_config;
+    if (!snapshot.idle_radio_prepared) {
+        return false;
+    }
+    if (!after_driver_reset && snapshot.idle_restore_radio_started &&
+        !snapshot.idle_scan_changed_mode) {
+        return true;
+    }
+    const esp_err_t stop = esp_wifi_stop();
+    if (stop != ESP_OK && stop != ESP_ERR_WIFI_NOT_STARTED) {
+        return false;
+    }
+    if (after_driver_reset) {
+        const wifi_mode_t runtime_mode =
+            snapshot.idle_restore_mode == WIFI_MODE_NULL
+                ? WIFI_MODE_STA
+                : snapshot.idle_restore_mode;
+        if (esp_wifi_set_mode(runtime_mode) != ESP_OK ||
+            (snapshot.idle_restore_sta_config_valid &&
+             esp_wifi_set_config(WIFI_IF_STA, &sta) != ESP_OK) ||
+            (snapshot.idle_restore_ap_config_valid &&
+             esp_wifi_set_config(WIFI_IF_AP, &ap) != ESP_OK) ||
+            esp_wifi_set_ps(snapshot.idle_restore_power_save) != ESP_OK ||
+            esp_wifi_start() != ESP_OK ||
+            esp_wifi_set_band_mode(snapshot.idle_restore_band_mode) != ESP_OK ||
+            (snapshot.idle_restore_max_tx_power_valid &&
+             esp_wifi_set_max_tx_power(snapshot.idle_restore_max_tx_power) !=
+                 ESP_OK)) {
+            return false;
+        }
+        if (snapshot.idle_restore_radio_started) {
+            return true;
+        }
+        if (esp_wifi_stop() != ESP_OK ||
+            (runtime_mode != snapshot.idle_restore_mode &&
+             esp_wifi_set_mode(snapshot.idle_restore_mode) != ESP_OK)) {
+            return false;
+        }
+        return true;
+    }
+    if (esp_wifi_set_mode(snapshot.idle_restore_mode) != ESP_OK ||
+        (snapshot.idle_restore_radio_started && esp_wifi_start() != ESP_OK)) {
+        return false;
+    }
+    return true;
+}
+
+std::optional<WifiManager::ExternalScanRecoverySnapshot>
+WifiManager::ExternalRecoverySnapshotFor(
+        const WifiScanLeaseCoordinator::Lease& lease) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto& snapshot =
+        external_scan_recovery_snapshots_[static_cast<size_t>(lease.owner)];
+    if (!snapshot.has_value() || !SameLease(snapshot->lease, lease)) {
+        return std::nullopt;
+    }
+    return snapshot;
+}
+
+bool WifiManager::RestoreExternalRecoveryRole(
+        const ExternalScanRecoverySnapshot& snapshot) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (snapshot.lifecycle_generation != lifecycle_generation_) {
+            return false;
+        }
+    }
+    if (snapshot.role == ExternalScanRecoveryRole::kStation) {
+        return station_->RestoreRadioAfterExternalScanRecovery();
+    }
+    if (snapshot.role == ExternalScanRecoveryRole::kConfigAp) {
+        return config_ap_->RestoreRadioAfterExternalScanRecovery();
+    }
+    return RestoreIdleExternalScanRadio(snapshot, true);
+}
+
+void WifiManager::RetryExternalRecoveryRole(
+        const ExternalScanRecoverySnapshot& snapshot) {
+    if (snapshot.role == ExternalScanRecoveryRole::kStation) {
+        station_->RetryAfterExternalScanRecovery(
+            snapshot.station_was_connected);
+    } else if (snapshot.role == ExternalScanRecoveryRole::kConfigAp) {
+        config_ap_->RetryAfterExternalScanRecovery();
+    }
+}
+
+bool WifiManager::HasActiveExternalScanLocked() const {
+    for (const auto& snapshot : external_scan_recovery_snapshots_) {
+        if (snapshot.has_value()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+#ifdef TBOT_WIFI_MANAGER_TESTING
+WifiManager::ExternalScanRecoveryRole WifiManager::TestExternalRecoveryRole(
+        const WifiScanLeaseCoordinator::Lease& lease) const {
+    const auto snapshot = ExternalRecoverySnapshotFor(lease);
+    return snapshot.has_value() ? snapshot->role
+                                : ExternalScanRecoveryRole::kIdle;
+}
+#endif
+
+bool WifiManager::RegisterScanLeaseRetryPoller(
+        void* context, ScanLeaseRetryPoller poller) {
+    if (poller == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (scan_lease_retry_poller_ != nullptr) {
+        return scan_lease_retry_poller_ == poller &&
+            scan_lease_retry_context_ == context;
+    }
+    scan_lease_retry_context_ = context;
+    scan_lease_retry_poller_ = poller;
+    return true;
+}
+
+bool WifiManager::RequestScanLeaseRetryPoll() {
+    TaskHandle_t task = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_ || scan_recovery_task_ == nullptr ||
+            scan_lease_retry_poller_ == nullptr) {
+            return false;
+        }
+        task = scan_recovery_task_;
+    }
+    return xTaskNotifyGive(task) == pdPASS;
+}
+
+void WifiManager::PollScanLeaseRetry() noexcept {
+    void* context = nullptr;
+    ScanLeaseRetryPoller poller = nullptr;
+    try {
+        std::lock_guard<std::mutex> lock(mutex_);
+        context = scan_lease_retry_context_;
+        poller = scan_lease_retry_poller_;
+    } catch (...) {
+        return;
+    }
+    if (poller != nullptr) {
+        poller(context);
+    }
+}
+
+bool WifiManager::ScheduleScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    TaskHandle_t task = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_) {
+            return false;
+        }
+        if (scan_recovery_debt_.has_value() &&
+            SameLease(*scan_recovery_debt_, lease)) {
+            task = scan_recovery_task_;
+        } else if (scan_recovery_active_) {
+            if (scan_recovery_claim_.has_value()) {
+                ESP_LOGE(TAG, "Conflicting WiFi scan recovery debt rejected");
+                return false;
+            }
+            // The previous callback may have released its debt before this
+            // worker claimed it. Retarget the queued wakeup to the new exact
+            // lease; a claimed recovery can never be replaced.
+            scan_recovery_debt_ = lease;
+            task = scan_recovery_task_;
+        } else {
+            scan_recovery_debt_ = lease;
+            scan_recovery_active_ = true;
+            scan_recovery_retry_pending_ = false;
+            task = scan_recovery_task_;
+        }
+    }
+    return task != nullptr && xTaskNotifyGive(task) == pdPASS;
+}
+
+void WifiManager::ScanRecoveryTask(void* context) {
+    auto* self = static_cast<WifiManager*>(context);
+    for (;;) {
+        // A failed task notification must not strand one-shot recovery debt.
+        // Periodic polling is the allocation-free, process-lifetime fallback.
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+        self->RunScanRecovery();
+        self->PollScanLeaseRetry();
+    }
+}
+
+bool WifiManager::DeferLifecycleTransitionForRecovery(
+        PendingLifecycleTarget target, uint64_t transition_generation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (lifecycle_generation_ != transition_generation) {
+        return true;
+    }
+    if (!scan_recovery_active_) {
+        return false;
+    }
+    if (pending_lifecycle_target_ != PendingLifecycleTarget::kNone &&
+        (pending_lifecycle_target_ != target ||
+         pending_lifecycle_generation_ != transition_generation)) {
+        ESP_LOGE(TAG, "Conflicting pending WiFi lifecycle transition rejected");
+        lifecycle_transition_in_progress_ = false;
+        return true;
+    }
+    pending_lifecycle_target_ = target;
+    pending_lifecycle_generation_ = transition_generation;
+    station_active_ = false;
+    config_mode_active_ = false;
+    lifecycle_transition_in_progress_ = false;
+    return true;
+}
+
+void WifiManager::ResumePendingLifecycleTransition() {
+    PendingLifecycleTarget target = PendingLifecycleTarget::kNone;
+    uint64_t pending_generation = 0;
+    WifiStation* station = nullptr;
+    WifiConfigurationAp* config_ap = nullptr;
+    WifiManagerConfig config;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (scan_recovery_active_) {
+            return;
+        }
+        target = pending_lifecycle_target_;
+        pending_generation = pending_lifecycle_generation_;
+        pending_lifecycle_target_ = PendingLifecycleTarget::kNone;
+        pending_lifecycle_generation_ = 0;
+        if (target == PendingLifecycleTarget::kNone ||
+            lifecycle_generation_ != pending_generation) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        station = station_.get();
+        config_ap = config_ap_.get();
+        config = config_;
+    }
+    if (target == PendingLifecycleTarget::kStation) {
+        StartStationTarget(station, config, pending_generation);
+    } else if (target == PendingLifecycleTarget::kConfigAp) {
+        StartConfigApTarget(config_ap, config, pending_generation);
+    }
+}
+
+void WifiManager::RunScanRecovery() {
+    for (;;) {
+        std::optional<WifiScanLeaseCoordinator::Lease> debt;
+        std::optional<ScanRecoveryWork> work;
+        bool wait_for_lifecycle = false;
+        bool resume_pending_transition = false;
+        ScanRecoveryOwnerHooks external_hooks;
+        bool external_owner = false;
+        std::optional<ExternalScanRecoverySnapshot> external_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!scan_recovery_active_ || !scan_recovery_debt_.has_value()) {
+                return;
+            }
+            debt = scan_recovery_debt_;
+            work = scan_recovery_claim_;
+            wait_for_lifecycle = lifecycle_transition_in_progress_;
+            if (wait_for_lifecycle) {
+                scan_recovery_retry_pending_ = true;
+            }
+            const size_t owner_index = static_cast<size_t>(debt->owner);
+            external_owner = owner_index < external_scan_recovery_hooks_.size() &&
+                external_scan_recovery_hooks_[owner_index].has_value();
+            if (external_owner) {
+                external_hooks = *external_scan_recovery_hooks_[owner_index];
+            }
+            const auto& snapshot = external_scan_recovery_snapshots_[owner_index];
+            if (snapshot.has_value() && SameLease(snapshot->lease, *debt)) {
+                external_snapshot = snapshot;
+            }
+        }
+        if (wait_for_lifecycle) {
+            vTaskDelay(pdMS_TO_TICKS(25));
+            continue;
+        }
+
+        if (!work.has_value()) {
+            if (debt->owner == WifiScanLeaseCoordinator::Owner::kStation) {
+                auto claim = station_->ClaimScanRecovery(*debt);
+                if (claim.has_value()) {
+                    work = ScanRecoveryWork{
+                        claim->lease, claim->recovery, std::nullopt,
+                        claim->scan_session_id, claim->scans_were_enabled};
+                }
+            } else if (debt->owner ==
+                       WifiScanLeaseCoordinator::Owner::kConfigAp) {
+                auto claim = config_ap_->ClaimScanRecovery(*debt);
+                if (claim.has_value()) {
+                    work = ScanRecoveryWork{
+                        claim->lease, claim->recovery, std::nullopt,
+                        claim->scan_session_id, claim->scans_were_enabled};
+                }
+            } else if (external_owner) {
+                const auto recovery = external_hooks.claim(*debt);
+                if (recovery.has_value()) {
+                    work = ScanRecoveryWork{
+                        *debt, *recovery, std::nullopt, 0, false};
+                }
+            }
+            if (!work.has_value()) {
+                bool debt_still_exists = false;
+                if (debt->owner == WifiScanLeaseCoordinator::Owner::kStation) {
+                    debt_still_exists = station_->HasScanRecoveryDebt(*debt);
+                } else if (debt->owner ==
+                           WifiScanLeaseCoordinator::Owner::kConfigAp) {
+                    debt_still_exists = config_ap_->HasScanRecoveryDebt(*debt);
+                } else if (external_owner) {
+                    debt_still_exists = external_hooks.has_debt(*debt);
+                }
+                if (debt_still_exists) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        scan_recovery_retry_pending_ = true;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    continue;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (scan_recovery_debt_.has_value() &&
+                        SameLease(*scan_recovery_debt_, *debt)) {
+                        scan_recovery_debt_.reset();
+                        scan_recovery_active_ = false;
+                        scan_recovery_retry_pending_ = false;
+                        resume_pending_transition = true;
+                    }
+                }
+                if (resume_pending_transition) {
+                    ResumePendingLifecycleTransition();
+                }
+                return;
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!scan_recovery_debt_.has_value() ||
+                !SameLease(*scan_recovery_debt_, work->lease)) {
+                return;
+            }
+            scan_recovery_claim_ = work;
+        }
+
+        if (!work->proof.has_value()) {
+            const auto proof = scan_recovery_executor_.Execute(work->recovery);
+            if (!proof.Proves(work->recovery)) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    scan_recovery_retry_pending_ = true;
+                }
+                vTaskDelay(pdMS_TO_TICKS(250));
+                continue;
+            }
+            work->proof = proof;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                scan_recovery_claim_ = work;
+            }
+        }
+
+        bool owner_ready = false;
+        if (work->lease.owner == WifiScanLeaseCoordinator::Owner::kStation) {
+            WifiStation::ScanRecoveryClaim claim{
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
+            owner_ready = station_->RestoreRadioAfterRecovery(claim);
+        } else if (work->lease.owner ==
+                   WifiScanLeaseCoordinator::Owner::kConfigAp) {
+            WifiConfigurationAp::ScanRecoveryClaim claim{
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
+            owner_ready = config_ap_->RestoreRadioAfterRecovery(claim);
+        } else if (external_owner) {
+            owner_ready = external_snapshot.has_value()
+                ? RestoreExternalRecoveryRole(*external_snapshot)
+                : external_hooks.restore_radio(work->lease);
+        }
+        if (!owner_ready) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                scan_recovery_retry_pending_ = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
+        bool completed = false;
+        if (work->lease.owner == WifiScanLeaseCoordinator::Owner::kStation) {
+            WifiStation::ScanRecoveryClaim claim{
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
+            completed = station_->CompleteScanRecovery(claim, *work->proof);
+        } else if (work->lease.owner ==
+                   WifiScanLeaseCoordinator::Owner::kConfigAp) {
+            WifiConfigurationAp::ScanRecoveryClaim claim{
+                work->lease, work->recovery, work->scan_session_id,
+                work->scans_were_enabled};
+            completed = config_ap_->CompleteScanRecovery(claim, *work->proof);
+        } else if (external_owner) {
+            completed = external_hooks.complete(work->lease, *work->proof);
+        }
+        if (!completed) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                scan_recovery_retry_pending_ = true;
+            }
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+
+        const auto owner = work->lease.owner;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            scan_recovery_claim_.reset();
+            scan_recovery_debt_.reset();
+            scan_recovery_active_ = false;
+            scan_recovery_retry_pending_ = false;
+        }
+        if (owner == WifiScanLeaseCoordinator::Owner::kStation) {
+            station_->RetryScanAfterRecovery();
+        } else if (owner == WifiScanLeaseCoordinator::Owner::kConfigAp) {
+            config_ap_->RetryScanAfterRecovery();
+        } else if (external_owner) {
+            if (external_snapshot.has_value()) {
+                RetryExternalRecoveryRole(*external_snapshot);
+                std::lock_guard<std::mutex> lock(mutex_);
+                auto& snapshot = external_scan_recovery_snapshots_[
+                    static_cast<size_t>(work->lease.owner)];
+                if (snapshot.has_value() &&
+                    SameLease(snapshot->lease, work->lease)) {
+                    snapshot.reset();
+                }
+            }
+            external_hooks.retry(work->lease);
+        }
+        ResumePendingLifecycleTransition();
+        return;
     }
 }
 
@@ -58,63 +684,101 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
     config_ = config;
     ESP_LOGI(TAG, "Initializing...");
 
-    // Initialize NVS
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "Erasing NVS...");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
+    if (!wifi_runtime_ready_) {
+        // Initialize NVS
+        esp_err_t ret = nvs_flash_init();
+        if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+            ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+            ESP_LOGW(TAG, "Erasing NVS...");
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            ret = nvs_flash_init();
+        }
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        ret = esp_netif_init();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Netif init failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        ret = esp_event_loop_create_default();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Event loop create failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+        cfg.nvs_enable = false;
+        ret = esp_wifi_init(&cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "WiFi init failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        station_ = std::make_unique<WifiStation>(scan_lease_coordinator_);
+        config_ap_ =
+            std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_);
+        station_->OnScanRecoveryNeeded([this](const auto& lease) {
+            ScheduleScanRecovery(lease);
+        });
+        config_ap_->OnScanRecoveryNeeded([this](const auto& lease) {
+            ScheduleScanRecovery(lease);
+        });
+        wifi_runtime_ready_ = true;
     }
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
+    if (scan_recovery_task_ == nullptr &&
+        xTaskCreate(&WifiManager::ScanRecoveryTask, "wifi_scan_recover", 4096,
+                    this, 5, &scan_recovery_task_) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create WiFi scan recovery task");
         return false;
     }
-
-    // Initialize netif
-    ret = esp_netif_init();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "Netif init failed: %s", esp_err_to_name(ret));
-        return false;
-    }
-
-    // Create event loop
-    ret = esp_event_loop_create_default();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "Event loop create failed: %s", esp_err_to_name(ret));
-        return false;
-    }
-
-    // Initialize WiFi driver
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    cfg.nvs_enable = false;
-    ret = esp_wifi_init(&cfg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "WiFi init failed: %s", esp_err_to_name(ret));
-        return false;
-    }
-
-    station_ = std::make_unique<WifiStation>();
-    config_ap_ = std::make_unique<WifiConfigurationAp>();
 
     initialized_ = true;
+    wifi_teardown_faulted_ = false;
     ESP_LOGI(TAG, "Initialized");
     return true;
 }
 
 bool WifiManager::StopRadio() {
-    std::lock_guard<std::mutex> lock(mutex_);
-
+    WifiStation* station = nullptr;
+    WifiConfigurationAp* config_ap = nullptr;
+    uint64_t transition_generation = 0;
+    std::unique_lock<std::mutex> lock(mutex_);
     if (!initialized_) {
         return true;
     }
-
-    if (station_active_ && station_) {
-        station_->Stop();
-        station_active_ = false;
+    if (wifi_teardown_faulted_) {
+        return false;
     }
-    if (config_mode_active_ && config_ap_) {
-        config_ap_->Stop();
-        config_mode_active_ = false;
+    if (lifecycle_transition_in_progress_ || scan_recovery_active_ ||
+        HasActiveExternalScanLocked() ||
+        pending_lifecycle_target_ != PendingLifecycleTarget::kNone) {
+        return false;
+    }
+    lifecycle_transition_in_progress_ = true;
+    transition_generation = ++lifecycle_generation_;
+    station = station_active_ ? station_.get() : nullptr;
+    config_ap = config_mode_active_ ? config_ap_.get() : nullptr;
+    station_active_ = false;
+    config_mode_active_ = false;
+    lock.unlock();
+    if (station != nullptr) {
+        station->Stop();
+    }
+    if (config_ap != nullptr) {
+        if (!config_ap->Stop()) {
+            ESP_LOGE(TAG, "Config AP teardown boundary failed; radio stop remains blocked");
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ == transition_generation &&
+                config_ap_.get() == config_ap) {
+                wifi_teardown_faulted_ = true;
+                lifecycle_transition_in_progress_ = false;
+            }
+            return false;
+        }
     }
 
     // Provisioning scans start the radio directly through esp_wifi_* and are
@@ -124,7 +788,22 @@ bool WifiManager::StopRadio() {
     const esp_err_t stop_ret = esp_wifi_stop();
     if (stop_ret != ESP_OK && stop_ret != ESP_ERR_WIFI_NOT_INIT) {
         ESP_LOGW(TAG, "WiFi radio stop returned: %s", esp_err_to_name(stop_ret));
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            (station == nullptr || station_.get() == station) &&
+            (config_ap == nullptr || config_ap_.get() == config_ap)) {
+            lifecycle_transition_in_progress_ = false;
+        }
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            (station == nullptr || station_.get() == station) &&
+            (config_ap == nullptr || config_ap_.get() == config_ap)) {
+            lifecycle_transition_in_progress_ = false;
+        }
     }
 
     ESP_LOGI(TAG, "WiFi radio stopped; driver remains initialized");
@@ -136,70 +815,244 @@ bool WifiManager::IsInitialized() const {
     return initialized_;
 }
 
+bool WifiManager::HasTeardownFault() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return wifi_teardown_faulted_;
+}
+
+bool WifiManager::HasActiveExternalScan() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return scan_recovery_active_ || HasActiveExternalScanLocked();
+}
+
 // ==================== Station Mode ====================
 
+WifiManager::StationStartResult WifiManager::StartStationIfScanIdle() {
+    const auto acquired = scan_lease_coordinator_.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kLifecycle);
+    if (!acquired.acquired) {
+        return StationStartResult::kBusyOrFailed;
+    }
+#ifdef TBOT_WIFI_MANAGER_TESTING
+    if (before_reserved_station_start_hook_) {
+        auto hook = std::move(before_reserved_station_start_hook_);
+        before_reserved_station_start_hook_ = nullptr;
+        hook();
+    }
+#endif
+    const bool started_this_generation = TryStartStationTransition();
+    const bool already_active = [this]() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return station_active_;
+    }();
+    const bool released =
+        scan_lease_coordinator_.AbandonUnsubmitted(acquired.lease);
+    if (!released) {
+        return StationStartResult::kBusyOrFailed;
+    }
+    if (started_this_generation) {
+        return StationStartResult::kStartedNow;
+    }
+    return already_active ? StationStartResult::kAlreadyActive
+                          : StationStartResult::kBusyOrFailed;
+}
+
+WifiManager::StationStartResult
+WifiManager::StartStationWithCredentialsIfScanIdle(
+        const std::string& ssid, const std::string& password) {
+    if (!IsValidWifiCredentials(ssid, password)) {
+        return StationStartResult::kInvalidCredentials;
+    }
+    const auto acquired = scan_lease_coordinator_.TryAcquire(
+        WifiScanLeaseCoordinator::Owner::kLifecycle);
+    if (!acquired.acquired) {
+        return StationStartResult::kBusyOrFailed;
+    }
+
+    WifiStation* station = nullptr;
+    WifiManagerConfig config;
+    uint64_t transition_generation = 0;
+    bool stop_active_station = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ || HasActiveExternalScanLocked() ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
+            wifi_teardown_faulted_ || config_mode_active_) {
+            scan_lease_coordinator_.AbandonUnsubmitted(acquired.lease);
+            return StationStartResult::kBusyOrFailed;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station = station_.get();
+        config = config_;
+        stop_active_station = station_active_;
+        station_active_ = false;
+    }
+    if (stop_active_station) {
+        station->Stop();
+    }
+    StartStationTarget(station, config, transition_generation,
+                       std::make_pair(ssid, password));
+    const bool started = [this, transition_generation]() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return station_active_ && lifecycle_generation_ == transition_generation;
+    }();
+    const bool released =
+        scan_lease_coordinator_.AbandonUnsubmitted(acquired.lease);
+    return started && released ? StationStartResult::kStartedNow
+                               : StationStartResult::kBusyOrFailed;
+}
+
+void WifiManager::EnableStationAutomaticScans() {
+    WifiStation* station = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (station_active_) {
+            station = station_.get();
+        }
+    }
+    if (station != nullptr) {
+        station->EnableAutomaticScans();
+    }
+}
+
 void WifiManager::StartStation() {
-    std::unique_lock<std::mutex> lock(mutex_);
+    (void)TryStartStationTransition();
+}
 
-    if (!initialized_) {
-        ESP_LOGE(TAG, "Not initialized");
-        return;
+bool WifiManager::TryStartStationTransition() {
+    WifiStation* station = nullptr;
+    WifiConfigurationAp* config_ap_to_stop = nullptr;
+    WifiManagerConfig config;
+    uint64_t transition_generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!initialized_) {
+            ESP_LOGE(TAG, "Not initialized");
+            return false;
+        }
+        if (station_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
+            wifi_teardown_faulted_) {
+            return false;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station = station_.get();
+        config_ap_to_stop = config_mode_active_ ? config_ap_.get() : nullptr;
+        config = config_;
     }
-    if (station_active_) {
-        ESP_LOGW(TAG, "Station already active");
-        return;
-    }
-
-    // Auto-stop config AP if active
-    if (config_mode_active_) {
+    if (config_ap_to_stop != nullptr) {
         ESP_LOGI(TAG, "Stopping config AP before starting station");
-        config_ap_->Stop();
-        config_mode_active_ = false;
-        // Notify outside lock
-        lock.unlock();
+        if (!config_ap_to_stop->Stop()) {
+            ESP_LOGE(TAG, "Config AP teardown boundary failed; station remains blocked");
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ == transition_generation &&
+                config_ap_.get() == config_ap_to_stop) {
+                wifi_teardown_faulted_ = true;
+                lifecycle_transition_in_progress_ = false;
+            }
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ != transition_generation) {
+                return false;
+            }
+            config_mode_active_ = false;
+        }
         NotifyEvent(WifiEvent::ConfigModeExit);
-        lock.lock();
+    }
+    if (DeferLifecycleTransitionForRecovery(
+            PendingLifecycleTarget::kStation, transition_generation)) {
+        return false;
     }
 
+    StartStationTarget(station, config, transition_generation);
+    std::lock_guard<std::mutex> lock(mutex_);
+    return station_active_ && lifecycle_generation_ == transition_generation;
+}
+
+void WifiManager::StartStationTarget(
+        WifiStation* station, const WifiManagerConfig& config,
+        uint64_t transition_generation,
+        const std::optional<std::pair<std::string, std::string>>& credentials) {
     ESP_LOGI(TAG, "Starting station");
 
     // Apply configuration
-    station_->SetScanIntervalRange(config_.station_scan_min_interval_seconds,
-                                   config_.station_scan_max_interval_seconds);
+    station->SetScanIntervalRange(config.station_scan_min_interval_seconds,
+                                  config.station_scan_max_interval_seconds);
 
     // Setup callbacks
-    station_->OnScanBegin([this]() {
+    station->OnScanBegin([this]() {
         NotifyEvent(WifiEvent::Scanning);
     });
-    station_->OnConnect([this](const std::string& ssid) {
+    station->OnConnect([this](const std::string& ssid) {
         NotifyEvent(WifiEvent::Connecting, ssid);
     });
-    station_->OnConnected([this](const std::string& ssid) {
+    station->OnConnected([this](const std::string& ssid) {
         NotifyEvent(WifiEvent::Connected, ssid);
     });
-    station_->OnDisconnected([this](int reason) {
+    station->OnDisconnected([this](int reason) {
         NotifyEvent(WifiEvent::Disconnected, std::to_string(reason));
     });
 
-    station_->Start();
-    station_active_ = true;
+    if (credentials.has_value()) {
+        station->StartForExactConnection();
+    } else {
+        station->Start();
+    }
+    const bool exact_connection_started =
+        !credentials.has_value() ||
+        station->ConnectExact(credentials->first, credentials->second);
+    if (credentials.has_value() && !exact_connection_started) {
+        station->Stop();
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (exact_connection_started &&
+            lifecycle_generation_ == transition_generation &&
+            station_.get() == station) {
+            station_active_ = true;
+        }
+        if (lifecycle_generation_ == transition_generation) {
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
 }
 
 void WifiManager::StopStation() {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (!station_active_) {
-        return;
+    WifiStation* station = nullptr;
+    uint64_t transition_generation = 0;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!station_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station = station_.get();
+        station_active_ = false;
+        lock.unlock();
     }
 
     ESP_LOGI(TAG, "Stopping station");
-    station_->Stop();
+    station->Stop();
     ESP_LOGI(TAG, "Station stopped");
-    station_active_ = false;
-
-    lock.unlock();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            station_.get() == station) {
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
     NotifyEvent(WifiEvent::Disconnected);
-    lock.lock();
 }
 
 bool WifiManager::IsConnected() const {
@@ -250,60 +1103,114 @@ std::string WifiManager::GetMacAddress() const {
 // ==================== Config AP Mode ====================
 
 void WifiManager::StartConfigAp() {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (!initialized_) {
-        ESP_LOGE(TAG, "Not initialized");
-        return;
-    }
-    if (config_mode_active_) {
-        ESP_LOGW(TAG, "Config AP already active");
-        return;
-    }
-
-    // Auto-stop station if active
-    if (station_active_) {
-        ESP_LOGI(TAG, "Stopping station before starting config AP");
-        station_->Stop();
-        station_active_ = false;
+    WifiStation* station_to_stop = nullptr;
+    WifiConfigurationAp* config_ap = nullptr;
+    WifiManagerConfig config;
+    uint64_t transition_generation = 0;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!initialized_) {
+            ESP_LOGE(TAG, "Not initialized");
+            return;
+        }
+        if (config_mode_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
+            wifi_teardown_faulted_) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        station_to_stop = station_active_ ? station_.get() : nullptr;
+        config_ap = config_ap_.get();
+        config = config_;
         lock.unlock();
+    }
+    if (station_to_stop != nullptr) {
+        ESP_LOGI(TAG, "Stopping station before starting config AP");
+        station_to_stop->Stop();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (lifecycle_generation_ != transition_generation) {
+                return;
+            }
+            station_active_ = false;
+        }
         NotifyEvent(WifiEvent::Disconnected);
-        lock.lock();
+    }
+    if (DeferLifecycleTransitionForRecovery(
+            PendingLifecycleTarget::kConfigAp, transition_generation)) {
+        return;
     }
 
+    StartConfigApTarget(config_ap, config, transition_generation);
+}
+
+void WifiManager::StartConfigApTarget(
+        WifiConfigurationAp* config_ap, const WifiManagerConfig& config,
+        uint64_t transition_generation) {
     ESP_LOGI(TAG, "Starting config AP");
 
-    config_ap_->SetSsidPrefix(config_.ssid_prefix);
-    config_ap_->SetLanguage(config_.language);
+    config_ap->SetSsidPrefix(config.ssid_prefix);
+    config_ap->SetLanguage(config.language);
 
     // Web handler calls this when user submits config
-    config_ap_->OnExitRequested([this]() {
+    config_ap->OnExitRequested([this]() {
         ESP_LOGI(TAG, "Config exit requested from web");
         StopConfigAp();
     });
 
-    config_ap_->Start();
-    config_mode_active_ = true;
-
-    lock.unlock();
+    config_ap->Start();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            config_ap_.get() == config_ap) {
+            config_mode_active_ = true;
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
     NotifyEvent(WifiEvent::ConfigModeEnter);
-    lock.lock();
 }
 
 void WifiManager::StopConfigAp() {
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    if (!config_mode_active_) {
-        return;
+    WifiConfigurationAp* config_ap = nullptr;
+    uint64_t transition_generation = 0;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!config_mode_active_ || lifecycle_transition_in_progress_ ||
+            scan_recovery_active_ ||
+            HasActiveExternalScanLocked() ||
+            pending_lifecycle_target_ != PendingLifecycleTarget::kNone ||
+            wifi_teardown_faulted_) {
+            return;
+        }
+        lifecycle_transition_in_progress_ = true;
+        transition_generation = ++lifecycle_generation_;
+        config_ap = config_ap_.get();
+        config_mode_active_ = false;
+        lock.unlock();
     }
 
     ESP_LOGI(TAG, "Stopping config AP");
-    config_ap_->Stop();
-    config_mode_active_ = false;
-
-    lock.unlock();
+    if (!config_ap->Stop()) {
+        ESP_LOGE(TAG, "Config AP teardown boundary failed; mode remains blocked");
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            config_ap_.get() == config_ap) {
+            wifi_teardown_faulted_ = true;
+            lifecycle_transition_in_progress_ = false;
+        }
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (lifecycle_generation_ == transition_generation &&
+            config_ap_.get() == config_ap) {
+            lifecycle_transition_in_progress_ = false;
+        }
+    }
     NotifyEvent(WifiEvent::ConfigModeExit);
-    lock.lock();
 }
 
 bool WifiManager::IsConfigMode() const {

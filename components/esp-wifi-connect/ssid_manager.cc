@@ -1,4 +1,5 @@
 #include "ssid_manager.h"
+#include "wifi_credential_limits.h"
 
 #include <algorithm>
 #include <esp_log.h>
@@ -20,16 +21,32 @@ SsidManager::~SsidManager() {
     ClearTransactionBackup();
 }
 
-void SsidManager::Clear() {
+SsidMutationResult SsidManager::Clear() {
     std::lock_guard<std::mutex> lock(transaction_mutex_);
+    if (active_transaction_id_ != 0) {
+        return SsidMutationResult::kBusy;
+    }
+    return ClearLocked();
+}
+
+SsidMutationResult SsidManager::ForceClearAndCancelTransaction() {
+    std::lock_guard<std::mutex> lock(transaction_mutex_);
+    if (active_transaction_id_ != 0) {
+        RestoreActiveTransaction();
+    }
     ClearTransactionBackup();
     active_transaction_id_ = 0;
+    return ClearLocked();
+}
+
+SsidMutationResult SsidManager::ClearLocked() {
+    auto previous_list = ssid_list_;
     for (auto& item : ssid_list_) {
         SecureClearString(item.ssid);
         SecureClearString(item.password);
     }
     ssid_list_.clear();
-    SaveToNvs();
+    return PersistMutationOrRestore(previous_list);
 }
 
 std::vector<SsidItem> SsidManager::GetSsidList() const {
@@ -70,11 +87,14 @@ void SsidManager::LoadFromNvs() {
         if (nvs_get_str(nvs_handle, password_key.c_str(), password, &length) != ESP_OK) {
             continue;
         }
-        if (ssid[0] == '\0') {
-            ESP_LOGW(TAG, "Ignore empty SSID in NVS key %s", ssid_key.c_str());
+        const std::string loaded_ssid(ssid);
+        const std::string loaded_password(password);
+        if (!IsValidWifiCredentials(loaded_ssid, loaded_password)) {
+            ESP_LOGW(TAG, "Ignore invalid credentials in NVS key %s",
+                     ssid_key.c_str());
             continue;
         }
-        ssid_list_.push_back({ssid, password});
+        ssid_list_.push_back({loaded_ssid, loaded_password});
     }
     nvs_close(nvs_handle);
 }
@@ -127,33 +147,54 @@ bool SsidManager::SaveToNvs() {
     return true;
 }
 
-void SsidManager::AddSsid(const std::string& ssid, const std::string& password) {
-    if (ssid.empty()) {
-        ESP_LOGW(TAG, "Ignore empty SSID");
-        return;
+SsidMutationResult SsidManager::PersistMutationOrRestore(
+        std::vector<SsidItem>& previous_list) {
+    if (SaveToNvs()) {
+        for (auto& item : previous_list) {
+            SecureClearString(item.ssid);
+            SecureClearString(item.password);
+        }
+        return SsidMutationResult::kApplied;
     }
 
+    for (auto& item : ssid_list_) {
+        SecureClearString(item.ssid);
+        SecureClearString(item.password);
+    }
+    ssid_list_.swap(previous_list);
+    if (!SaveToNvs()) {
+        ESP_LOGE(TAG, "Compensating WiFi credential restore failed");
+    }
+    return SsidMutationResult::kPersistenceFailed;
+}
+
+SsidMutationResult SsidManager::AddSsid(const std::string& ssid,
+                                        const std::string& password) {
     std::lock_guard<std::mutex> lock(transaction_mutex_);
     if (active_transaction_id_ != 0) {
-        RestoreActiveTransaction();
-        ClearTransactionBackup();
-        active_transaction_id_ = 0;
+        return SsidMutationResult::kBusy;
     }
+    if (!IsValidWifiCredentials(ssid, password)) {
+        ESP_LOGW(TAG, "Ignore invalid WiFi credentials");
+        return SsidMutationResult::kInvalid;
+    }
+    auto previous_list = ssid_list_;
     UpsertSsid(ssid, password);
-    SaveToNvs();
+    return PersistMutationOrRestore(previous_list);
 }
 
 uint32_t SsidManager::BeginSsidTransaction(const std::string& ssid,
                                            const std::string& password) {
-    if (ssid.empty()) {
-        ESP_LOGW(TAG, "Ignore empty SSID transaction");
+    if (!IsValidWifiCredentials(ssid, password)) {
+        ESP_LOGW(TAG, "Ignore invalid WiFi credential transaction");
         return 0;
     }
 
     std::lock_guard<std::mutex> lock(transaction_mutex_);
     if (active_transaction_id_ != 0) {
-        RestoreActiveTransaction();
-        ClearTransactionBackup();
+        // The active transaction owns the provisional list until its exact
+        // commit or rollback releases ownership.
+        return 0;
     }
 
     ClearTransactionBackup();
@@ -279,27 +320,35 @@ void SsidManager::SecureClearString(std::string& value) {
     value.clear();
 }
 
-void SsidManager::RemoveSsid(int index) {
+SsidMutationResult SsidManager::RemoveSsid(int index) {
     std::lock_guard<std::mutex> lock(transaction_mutex_);
+    if (active_transaction_id_ != 0) {
+        return SsidMutationResult::kBusy;
+    }
     if (index < 0 || index >= ssid_list_.size()) {
         ESP_LOGW(TAG, "Invalid index %d", index);
-        return;
+        return SsidMutationResult::kInvalid;
     }
+    auto previous_list = ssid_list_;
     SecureClearString(ssid_list_[index].ssid);
     SecureClearString(ssid_list_[index].password);
     ssid_list_.erase(ssid_list_.begin() + index);
-    SaveToNvs();
+    return PersistMutationOrRestore(previous_list);
 }
 
-void SsidManager::SetDefaultSsid(int index) {
+SsidMutationResult SsidManager::SetDefaultSsid(int index) {
     std::lock_guard<std::mutex> lock(transaction_mutex_);
+    if (active_transaction_id_ != 0) {
+        return SsidMutationResult::kBusy;
+    }
     if (index < 0 || index >= ssid_list_.size()) {
         ESP_LOGW(TAG, "Invalid index %d", index);
-        return;
+        return SsidMutationResult::kInvalid;
     }
+    auto previous_list = ssid_list_;
     // Move the ssid at index to the front of the list
     auto item = std::move(ssid_list_[index]);
     ssid_list_.erase(ssid_list_.begin() + index);
     ssid_list_.insert(ssid_list_.begin(), item);
-    SaveToNvs();
+    return PersistMutationOrRestore(previous_list);
 }

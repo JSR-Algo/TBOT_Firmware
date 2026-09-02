@@ -1,7 +1,11 @@
 #include "blufi.h"
+#include "blufi_wifi_scan_result_collector.h"
+#include "blufi_advertising_ledger.h"
+#include "wifi_credential_limits.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -179,17 +183,8 @@ static std::string GetBlufiDeviceName() {
 //   Scan RSP: complete local name (TBOT-<MAC>)
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
 namespace {
-constexpr uint8_t kTbotAdvDataPending = 1U << 0;
-constexpr uint8_t kTbotScanRspPending = 1U << 1;
-std::atomic<uint8_t> tbot_adv_config_pending{0};
-std::atomic<bool> tbot_adv_lifecycle_active{false};
-std::atomic<bool> tbot_adv_start_pending{false};
-std::atomic<uint32_t> tbot_adv_lifecycle_epoch{0};
-std::atomic<uint32_t> tbot_adv_active_epoch{0};
-std::mutex tbot_adv_callback_mutex;
-std::deque<uint32_t> tbot_adv_data_callback_epochs;
-std::deque<uint32_t> tbot_scan_rsp_callback_epochs;
-std::deque<uint32_t> tbot_adv_start_callback_epochs;
+using AdvertisingCallbackKind = TbotBlufiAdvertisingLedger::CallbackKind;
+TbotBlufiAdvertisingLedger tbot_adv_ledger;
 
 esp_ble_adv_params_t tbot_adv_params = {
     .adv_int_min = 0x100,
@@ -201,118 +196,77 @@ esp_ble_adv_params_t tbot_adv_params = {
 };
 
 void InvalidateTbotBlufiAdvertising() {
-    tbot_adv_lifecycle_active.store(false, std::memory_order_release);
-    tbot_adv_active_epoch.store(0, std::memory_order_release);
-    tbot_adv_config_pending.store(0, std::memory_order_release);
-    tbot_adv_start_pending.store(false, std::memory_order_release);
+    tbot_adv_ledger.Invalidate();
 }
 
-void QueueTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs, uint32_t epoch) {
-    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
-    epochs.push_back(epoch);
+void ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit() {
+    tbot_adv_ledger.ResetAfterSuccessfulHostDeinit();
 }
 
-uint32_t PopTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs) {
-    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
-    if (epochs.empty()) {
-        return 0;
-    }
-    const uint32_t epoch = epochs.front();
-    epochs.pop_front();
-    return epoch;
-}
-
-void CancelTbotAdvertisingCallbackEpoch(std::deque<uint32_t>& epochs, uint32_t epoch) {
-    std::lock_guard<std::mutex> lock(tbot_adv_callback_mutex);
-    if (!epochs.empty() && epochs.back() == epoch) {
-        epochs.pop_back();
-    }
-}
-
-void FallbackToDefaultBlufiAdvertising(const char* reason) {
-    if (!tbot_adv_lifecycle_active.exchange(false, std::memory_order_acq_rel)) {
-        return;
-    }
-    tbot_adv_config_pending.store(0, std::memory_order_release);
-    tbot_adv_start_pending.store(false, std::memory_order_release);
-    ESP_LOGW(BLUFI_TAG, "compact advertising unavailable (%s); using BluFi default", reason);
-    esp_blufi_adv_start();
-}
-
-void MaybeStartTbotBlufiAdvertising(uint32_t callback_epoch, uint8_t completed_bit,
-                                    esp_bt_status_t status) {
-    if (!tbot_adv_lifecycle_active.load(std::memory_order_acquire) ||
-        callback_epoch == 0 ||
-        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
-        return;
-    }
-    if (status != ESP_BT_STATUS_SUCCESS) {
-        FallbackToDefaultBlufiAdvertising("payload configuration failed");
-        return;
-    }
-
-    const uint8_t previous = tbot_adv_config_pending.fetch_and(
-        static_cast<uint8_t>(~completed_bit), std::memory_order_acq_rel);
-    if ((previous & completed_bit) == 0 || (previous & ~completed_bit) != 0) {
-        return;
-    }
-
-    tbot_adv_start_pending.store(true, std::memory_order_release);
-    QueueTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
-    const esp_err_t err = esp_ble_gap_start_advertising(&tbot_adv_params);
-    if (err != ESP_OK) {
-        CancelTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs, callback_epoch);
-        ESP_LOGW(BLUFI_TAG, "start compact advertising failed: %s", esp_err_to_name(err));
-        FallbackToDefaultBlufiAdvertising("start failed");
-    }
-}
-
-void HandleTbotBlufiAdvertisingStartComplete(uint32_t callback_epoch,
-                                              esp_bt_status_t status) {
-    if (callback_epoch == 0 ||
-        callback_epoch != tbot_adv_active_epoch.load(std::memory_order_acquire)) {
-        return;
-    }
-    if (!tbot_adv_start_pending.exchange(false, std::memory_order_acq_rel)) {
-        return;
-    }
-    if (status != ESP_BT_STATUS_SUCCESS) {
-        FallbackToDefaultBlufiAdvertising("asynchronous start failed");
-        return;
-    }
-    if (tbot_adv_lifecycle_active.exchange(false, std::memory_order_acq_rel)) {
-        ESP_LOGI(BLUFI_TAG, "TBOT compact ADV ready: UUID16 0xFFFF + name in primary ADV/RSP");
-    }
+bool ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit() {
+    return tbot_adv_ledger.ActivateAfterSuccessfulHostInit();
 }
 
 static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
                                      esp_ble_gap_cb_param_t* param) {
-    esp_blufi_gap_event_handler(event, param);
     if (param == nullptr) {
+        return;
+    }
+    if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
+        tbot_adv_ledger.CompleteDefaultConfigAndSubmit(
+            true, param->adv_data_cmpl.status == ESP_BT_STATUS_SUCCESS,
+            []() {
+                return esp_ble_gap_start_advertising(&tbot_adv_params) == ESP_OK;
+            });
         return;
     }
 
     switch (event) {
-        case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT:
-            MaybeStartTbotBlufiAdvertising(
-                                           PopTbotAdvertisingCallbackEpoch(
-                                               tbot_adv_data_callback_epochs),
-                                           kTbotAdvDataPending,
-                                           param->adv_data_raw_cmpl.status);
+        case ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT: {
+            esp_err_t start_error = ESP_OK;
+            const auto result = tbot_adv_ledger.CompleteCompactConfigAndSubmit(
+                AdvertisingCallbackKind::kCompactAdvData, true,
+                param->adv_data_raw_cmpl.status == ESP_BT_STATUS_SUCCESS,
+                [&start_error]() {
+                    start_error = esp_ble_gap_start_advertising(&tbot_adv_params);
+                    return start_error == ESP_OK;
+                },
+                []() { esp_blufi_adv_start(); });
+            if (result.fallback_started) {
+                ESP_LOGW(BLUFI_TAG, "compact ADV configuration/start failed; using BluFi default");
+            } else if (start_error != ESP_OK) {
+                ESP_LOGW(BLUFI_TAG, "start compact advertising failed: %s",
+                         esp_err_to_name(start_error));
+            }
             break;
-        case ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT:
-            MaybeStartTbotBlufiAdvertising(
-                                           PopTbotAdvertisingCallbackEpoch(
-                                               tbot_scan_rsp_callback_epochs),
-                                           kTbotScanRspPending,
-                                           param->scan_rsp_data_raw_cmpl.status);
+        }
+        case ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT: {
+            const auto result = tbot_adv_ledger.CompleteCompactConfigAndSubmit(
+                AdvertisingCallbackKind::kCompactScanResponse, true,
+                param->scan_rsp_data_raw_cmpl.status == ESP_BT_STATUS_SUCCESS,
+                []() { return esp_ble_gap_start_advertising(&tbot_adv_params) == ESP_OK; },
+                []() { esp_blufi_adv_start(); });
+            if (result.fallback_started) {
+                ESP_LOGW(BLUFI_TAG, "compact scan response/start failed; using BluFi default");
+            }
             break;
-        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT:
-            HandleTbotBlufiAdvertisingStartComplete(
-                PopTbotAdvertisingCallbackEpoch(tbot_adv_start_callback_epochs),
-                param->adv_start_cmpl.status);
+        }
+        case ESP_GAP_BLE_ADV_START_COMPLETE_EVT: {
+            const auto result = tbot_adv_ledger.CompleteStartAndMaybeFallback(
+                true, param->adv_start_cmpl.status == ESP_BT_STATUS_SUCCESS,
+                []() { esp_blufi_adv_start(); });
+            if (result.fallback_started) {
+                ESP_LOGW(BLUFI_TAG, "compact advertising start failed; using BluFi default");
+            } else if (result.default_failed) {
+                ESP_LOGW(BLUFI_TAG, "BluFi default advertising start failed");
+            } else if (result.compact_completed) {
+                ESP_LOGI(BLUFI_TAG,
+                         "TBOT compact ADV ready: UUID16 0xFFFF + name in primary ADV/RSP");
+            }
             break;
+        }
         default:
+            esp_blufi_gap_event_handler(event, param);
             break;
     }
 }
@@ -321,6 +275,8 @@ static void TbotBlufiGapEventHandler(esp_gap_ble_cb_event_t event,
 
 #ifndef CONFIG_BT_BLUEDROID_ENABLED
 static void InvalidateTbotBlufiAdvertising() {}
+static void ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit() {}
+static bool ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit() { return true; }
 #endif
 
 static void StartTbotBlufiAdvertising(const char* device_name) {
@@ -362,30 +318,27 @@ static void StartTbotBlufiAdvertising(const char* device_name) {
     }
 
     const uint8_t pending = static_cast<uint8_t>(
-        kTbotAdvDataPending | (rsp_len > 0 ? kTbotScanRspPending : 0));
-    const uint32_t lifecycle_epoch =
-        tbot_adv_lifecycle_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-    tbot_adv_active_epoch.store(lifecycle_epoch, std::memory_order_release);
-    tbot_adv_lifecycle_active.store(true, std::memory_order_release);
-    tbot_adv_start_pending.store(false, std::memory_order_release);
-    tbot_adv_config_pending.store(pending, std::memory_order_release);
-
-    QueueTbotAdvertisingCallbackEpoch(tbot_adv_data_callback_epochs, lifecycle_epoch);
-    esp_err_t err = esp_ble_gap_config_adv_data_raw(adv_raw, adv_len);
-    if (err != ESP_OK) {
-        CancelTbotAdvertisingCallbackEpoch(tbot_adv_data_callback_epochs, lifecycle_epoch);
-        ESP_LOGW(BLUFI_TAG, "raw ADV configuration failed: %s", esp_err_to_name(err));
-        FallbackToDefaultBlufiAdvertising("ADV configuration rejected");
-        return;
-    }
-    if (rsp_len > 0) {
-        QueueTbotAdvertisingCallbackEpoch(tbot_scan_rsp_callback_epochs, lifecycle_epoch);
-        err = esp_ble_gap_config_scan_rsp_data_raw(scan_rsp, rsp_len);
-        if (err != ESP_OK) {
-            CancelTbotAdvertisingCallbackEpoch(tbot_scan_rsp_callback_epochs, lifecycle_epoch);
-            ESP_LOGW(BLUFI_TAG, "raw scan RSP configuration failed: %s", esp_err_to_name(err));
-            FallbackToDefaultBlufiAdvertising("scan response configuration rejected");
-        }
+        TbotBlufiAdvertisingLedger::kAdvDataPending |
+        (rsp_len > 0 ? TbotBlufiAdvertisingLedger::kScanResponsePending : 0));
+    esp_err_t adv_error = ESP_OK;
+    esp_err_t scan_error = ESP_OK;
+    const auto submission = tbot_adv_ledger.BeginCompactAndSubmit(
+        pending,
+        [&]() {
+            adv_error = esp_ble_gap_config_adv_data_raw(adv_raw, adv_len);
+            return adv_error == ESP_OK;
+        },
+        [&]() {
+            scan_error = esp_ble_gap_config_scan_rsp_data_raw(scan_rsp, rsp_len);
+            return scan_error == ESP_OK;
+        },
+        []() { esp_blufi_adv_start(); });
+    if (!submission) {
+        ESP_LOGW(BLUFI_TAG, "advertising callback ledger busy; waiting for host reset");
+    } else if (adv_error != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "raw ADV configuration failed: %s", esp_err_to_name(adv_error));
+    } else if (scan_error != ESP_OK) {
+        ESP_LOGW(BLUFI_TAG, "raw scan RSP configuration failed: %s", esp_err_to_name(scan_error));
     }
 #else
     (void)device_name;
@@ -531,6 +484,65 @@ Blufi& Blufi::GetInstance() {
     return instance;
 }
 
+BlufiWifiScanLeaseTimer::Ops Blufi::WifiScanLeaseTimerOps() {
+    return BlufiWifiScanLeaseTimer::Ops{
+        .context = nullptr,
+        .create = [](void*, void (*callback)(void*), void* callback_arg,
+                     void** handle) noexcept {
+            const esp_timer_create_args_t args{
+                .callback = callback,
+                .arg = callback_arg,
+                .dispatch_method = ESP_TIMER_TASK,
+                .name = "blufi_scan_lease",
+                .skip_unhandled_events = true,
+            };
+            esp_timer_handle_t timer = nullptr;
+            if (esp_timer_create(&args, &timer) != ESP_OK) {
+                return false;
+            }
+            *handle = timer;
+            return true;
+        },
+        .stop = [](void*, void* handle) noexcept {
+            esp_timer_stop(static_cast<esp_timer_handle_t>(handle));
+        },
+        .start_once = [](void*, void* handle, int64_t timeout_us) noexcept {
+            return esp_timer_start_once(
+                       static_cast<esp_timer_handle_t>(handle), timeout_us) ==
+                ESP_OK;
+        },
+        .now_us = [](void*) noexcept { return esp_timer_get_time(); },
+    };
+}
+
+void Blufi::SignalWifiScanWatchdog(
+        void* context, BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        static_cast<Blufi*>(context)->HandleWifiScanWatchdog(exact);
+    } catch (...) {
+        // Never allow a C timer callback to unwind through esp_timer.
+        try {
+            auto& manager = WifiManager::GetInstance();
+            if (manager.ScanLeaseCoordinator().BeginDrain(exact.lease)) {
+                manager.RequestScanRecovery(exact.lease);
+            }
+        } catch (...) {
+        }
+    }
+}
+
+void Blufi::SignalWifiScanRecoveryRetry(
+        void* context, BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        static_cast<Blufi*>(context)->HandleWifiScanRecoveryRetry(exact);
+    } catch (...) {
+        try {
+            WifiManager::GetInstance().RequestScanRecovery(exact.lease);
+        } catch (...) {
+        }
+    }
+}
+
 Blufi::Blufi()
     : m_sec(nullptr),
       m_blufi_security_negotiated(false),
@@ -543,14 +555,143 @@ Blufi::Blufi()
       m_sta_is_connecting(false),
       m_wifi_connect_task_started(false),
       ble_setup_timer_(nullptr),
-      ble_timed_out_(false) {
+      ble_timed_out_(false),
+      wifi_scan_watchdog_timer_(
+          WifiScanLeaseTimerOps(), this, &Blufi::SignalWifiScanWatchdog),
+      wifi_scan_recovery_retry_timer_(
+          WifiScanLeaseTimerOps(), this,
+          &Blufi::SignalWifiScanRecoveryRetry) {
     memset(&m_sta_config, 0, sizeof(m_sta_config));
     memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
     memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
     memset(&m_sta_conn_info, 0, sizeof(m_sta_conn_info));
+    const esp_timer_create_args_t retry_timer_args{
+        .callback = [](void* opaque) {
+            (void)opaque;
+            try {
+                WifiManager::GetInstance().RequestScanLeaseRetryPoll();
+            } catch (...) {
+            }
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "blufi_scan_retry",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&retry_timer_args, &wifi_scan_retry_timer_);
+    WifiManager::GetInstance().RegisterScanLeaseRetryPoller(
+        this, &Blufi::PollOwnedWifiScanRetry);
+    WifiManager::GetInstance().RegisterScanRecoveryOwner(
+        WifiScanLeaseCoordinator::Owner::kBlufi,
+        WifiManager::ScanRecoveryOwnerHooks{
+            .claim = [this](const auto& lease)
+                -> std::optional<WifiScanLeaseCoordinator::RecoveryDecision> {
+                std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+                if (!wifi_scan_lease_.has_value() ||
+                    wifi_scan_lease_->lease_id != lease.lease_id ||
+                    wifi_scan_lease_->driver_incarnation !=
+                        lease.driver_incarnation) {
+                    return std::nullopt;
+                }
+                const auto expected_ticket =
+                    wifi_scan_controller_.RecoveryTicketIfOwned(
+                        wifi_scan_request_id_, lease.driver_incarnation);
+                if (!expected_ticket.has_value()) {
+                    return std::nullopt;
+                }
+                const auto recovery =
+                    WifiManager::GetInstance().ScanLeaseCoordinator()
+                        .BeginRecovery(lease);
+                if (!recovery.begun()) {
+                    return std::nullopt;
+                }
+                const auto ticket = wifi_scan_controller_.BeginRecovery(
+                    wifi_scan_request_id_);
+                if (!ticket.valid) {
+                    return std::nullopt;
+                }
+                wifi_scan_recovery_ticket_ = ticket;
+                return recovery;
+            },
+            .has_debt = [this](const auto& lease) {
+                std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+                return wifi_scan_lease_.has_value() &&
+                    wifi_scan_lease_->lease_id == lease.lease_id &&
+                    wifi_scan_lease_->driver_incarnation ==
+                        lease.driver_incarnation;
+            },
+            .restore_radio = [this](const auto&) {
+                wifi_mode_t restore_mode = WIFI_MODE_STA;
+                wifi_config_t sta_config{};
+                wifi_config_t ap_config{};
+                bool restore_sta_config = false;
+                bool restore_ap_config = false;
+                {
+                    std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+                    restore_mode = wifi_scan_restore_mode_;
+                    sta_config = wifi_scan_restore_sta_config_;
+                    ap_config = wifi_scan_restore_ap_config_;
+                    restore_sta_config = wifi_scan_restore_sta_config_valid_;
+                    restore_ap_config = wifi_scan_restore_ap_config_valid_;
+                }
+                const wifi_mode_t mode = restore_mode == WIFI_MODE_APSTA
+                    ? WIFI_MODE_APSTA : WIFI_MODE_STA;
+                if (esp_wifi_set_mode(mode) != ESP_OK ||
+                    (restore_sta_config &&
+                     esp_wifi_set_config(WIFI_IF_STA, &sta_config) != ESP_OK) ||
+                    (restore_ap_config &&
+                     esp_wifi_set_config(WIFI_IF_AP, &ap_config) != ESP_OK)) {
+                    return false;
+                }
+                return esp_wifi_start() == ESP_OK;
+            },
+            .complete = [this](const auto& lease, const auto& proof) {
+                auto& coordinator =
+                    WifiManager::GetInstance().ScanLeaseCoordinator();
+                if (!coordinator.CompleteRecovery(lease, proof)) {
+                    return false;
+                }
+                BlufiWifiScanLeaseTimer::ExactTuple exact;
+                {
+                    std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+                    exact = {wifi_scan_request_id_, lease};
+                    if (wifi_scan_recovery_ticket_.has_value()) {
+                        wifi_scan_recovery_finish_ =
+                            wifi_scan_controller_.CompleteRecovery(
+                                *wifi_scan_recovery_ticket_, true);
+                    }
+                    wifi_scan_recovery_ticket_.reset();
+                    wifi_scan_lease_.reset();
+                    wifi_scan_request_id_ = 0;
+                    wifi_scan_restore_sta_config_ = {};
+                    wifi_scan_restore_ap_config_ = {};
+                    wifi_scan_restore_sta_config_valid_ = false;
+                    wifi_scan_restore_ap_config_valid_ = false;
+                }
+                wifi_scan_watchdog_timer_.Disarm(exact);
+                wifi_scan_recovery_retry_timer_.Disarm(exact);
+                return true;
+            },
+            .retry = [this](const auto&) {
+                std::optional<BlufiWifiScanController::FinishDecision> finish;
+                {
+                    std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+                    finish = wifi_scan_recovery_finish_;
+                    wifi_scan_recovery_finish_.reset();
+                }
+                if (finish.has_value() && finish->start_pending) {
+                    SchedulePendingWifiScan(finish->request_id, finish->pending);
+                }
+            },
+        });
 }
 
 Blufi::~Blufi() {
+    if (wifi_scan_retry_timer_ != nullptr) {
+        esp_timer_stop(wifi_scan_retry_timer_);
+        esp_timer_delete(wifi_scan_retry_timer_);
+        wifi_scan_retry_timer_ = nullptr;
+    }
     if (m_sec) {
         _security_deinit();
     }
@@ -559,6 +700,50 @@ Blufi::~Blufi() {
 esp_err_t Blufi::init() {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     return InitWithLifecycleOwned();
+}
+
+bool Blufi::EnsureAdvertisingForSetupGeneration(
+        uint32_t expected_generation, int timeout_seconds,
+        ProvisioningToken* provisioning_token,
+        const std::function<esp_err_t()>& prepare,
+        const std::function<void()>& on_current) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return false;
+        }
+    }
+
+    BleState state = GetBleState();
+    if (state == BleState::kOff) {
+        if (prepare && prepare() != ESP_OK) {
+            return false;
+        }
+        if (InitWithLifecycleOwned() != ESP_OK) {
+            if (provisioning_token != nullptr && provisioning_token->valid()) {
+                CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+                    "setup_abort", *provisioning_token);
+            }
+            return false;
+        }
+        state = GetBleState();
+    }
+    if (state == BleState::kOff) {
+        return false;
+    }
+    if (!StartBleSetupTimeoutWithLifecycleOwned(timeout_seconds)) {
+        if (provisioning_token != nullptr && provisioning_token->valid()) {
+            CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+                "setup_abort", *provisioning_token);
+        }
+        return false;
+    }
+    if (on_current) {
+        on_current();
+    }
+    return GetBleState() == BleState::kAdvertising ||
+           GetBleState() == BleState::kConnected;
 }
 
 esp_err_t Blufi::InitWithLifecycleOwned() {
@@ -599,7 +784,6 @@ esp_err_t Blufi::_init_impl() {
     m_deinited = false;
     ble_timed_out_ = false;
     ble_readvertise_count_ = 0;  // fresh setup window -> reset the re-adv cap
-    m_scan_should_save_ssid = true;
     m_wifi_connect_task_started.store(false);
     m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
     m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
@@ -657,15 +841,40 @@ esp_err_t Blufi::_init_impl() {
     ESP_LOGI(BLUFI_TAG, "BLUFI VERSION %04x", esp_blufi_get_version());
     teardown_failed_.store(false);
     inited_ = true;
-    ble_session_state_.store(
-        EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kAccepting),
-        std::memory_order_release);
+    const uint32_t accepting_generation = setup_generation_.load();
+    const uint64_t stopping_state = EncodeBleSessionState(
+        accepting_generation, BleSessionPhase::kStopping);
+    const uint64_t accepting_state = EncodeBleSessionState(
+        accepting_generation, BleSessionPhase::kAccepting);
+    const uint64_t accepting_connection_epoch =
+        ble_connection_epoch_.load(std::memory_order_acquire);
+    ble_session_state_.store(accepting_state, std::memory_order_release);
+    UpdateWifiScanSession(
+        accepting_generation, stopping_state, accepting_connection_epoch,
+        accepting_generation, accepting_state, accepting_connection_epoch);
     return ESP_OK;
 }
 
 esp_err_t Blufi::deinit() {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     return DeinitWithLifecycleOwned();
+}
+
+esp_err_t Blufi::DeinitForSetupGeneration(
+        uint32_t expected_generation, const std::function<void()>& on_current) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+    CancelBleSetupTimeout();
+    const esp_err_t result = DeinitWithLifecycleOwned();
+    if (result == ESP_OK && on_current) {
+        on_current();
+    }
+    return result;
 }
 
 esp_err_t Blufi::DeinitWithLifecycleOwned() {
@@ -682,21 +891,32 @@ esp_err_t Blufi::DeinitWithLifecycleOwned() {
 
 esp_err_t Blufi::_deinit_impl() {
     InvalidateTbotBlufiAdvertising();
+    const uint32_t stopping_generation = setup_generation_.load();
+    const uint64_t stopping_state = EncodeBleSessionState(
+        stopping_generation, BleSessionPhase::kStopping);
     ble_session_state_.exchange(
-        EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
+        EncodeBleSessionState(stopping_generation, BleSessionPhase::kStopping),
         std::memory_order_acq_rel);
+    InvalidateWifiScanSession(
+        stopping_generation, stopping_state,
+        ble_connection_epoch_.load(std::memory_order_acquire));
     esp_err_t first_error = ESP_OK;
 
     if (m_deinited && !host_active_ && !controller_active_) {
         return teardown_failed_.load() ? ESP_ERR_INVALID_STATE : ESP_OK;
     }
-    if (scan_event_instance_ != nullptr) {
+    if (scan_event_instance_ != nullptr &&
+        wifi_scan_controller_.CanUnregisterHandler()) {
         esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_SCAN_DONE,
                                               scan_event_instance_);
         scan_event_instance_ = nullptr;
     }
-    m_scan_in_progress = false;
-    m_send_list_after_scan = false;
+    {
+        std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
+        std::vector<wifi_ap_record_t>().swap(m_ap_records);
+        m_ap_records_updated_us = 0;
+        m_ap_records_owner_.reset();
+    }
     m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
     m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
 
@@ -746,19 +966,30 @@ esp_err_t Blufi::RestartForSetup() {
         return ESP_ERR_INVALID_STATE;
     }
 
+    uint32_t restart_generation = 0;
+    uint64_t restart_state = 0;
+    uint64_t restart_connection_epoch = 0;
     {
         std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);
         // Invalidate completion workers from the prior BOOT generation before
         // touching the controller/host or shared station flags.
         ble_session_state_.exchange(
-            EncodeBleSessionState(setup_generation_.load(), BleSessionPhase::kStopping),
+            EncodeBleSessionState(
+                setup_generation_.load(), BleSessionPhase::kStopping),
             std::memory_order_acq_rel);
-        setup_generation_.fetch_add(1);
+        restart_generation = setup_generation_.fetch_add(1) + 1;
+        restart_state = EncodeBleSessionState(
+            restart_generation, BleSessionPhase::kStopping);
+        ble_session_state_.store(restart_state, std::memory_order_release);
+        restart_connection_epoch =
+            ble_connection_epoch_.load(std::memory_order_acquire);
         provisioning_report_owner_generation_.reset();
         const uint32_t stale_ssid_transaction = ssid_transaction_id_.exchange(0);
         SsidManager::GetInstance().RollbackSsidTransaction(stale_ssid_transaction);
         CancelBleSetupTimeout();
     }
+    InvalidateWifiScanSession(
+        restart_generation, restart_state, restart_connection_epoch);
 
     if (GetBleState() != BleState::kOff) {
         esp_blufi_adv_stop();
@@ -782,15 +1013,14 @@ esp_err_t Blufi::RestartForSetup() {
         m_sta_is_connecting.store(false);
         m_wifi_connect_task_started.store(false);
         m_provisioned = false;
-        m_scan_in_progress = false;
-        m_send_list_after_scan = false;
         m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
         m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
-        m_scan_should_save_ssid = true;
         std::vector<wifi_ap_record_t>().swap(m_ap_records);
         m_ap_records_updated_us = 0;
+        m_ap_records_owner_.reset();
         memset(&m_sta_config, 0, sizeof(m_sta_config));
         m_sta_config_ssid_len_ = 0;
+        staged_wifi_credentials_.Invalidate();
         memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
         memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
         m_sta_ssid_len = 0;
@@ -816,6 +1046,19 @@ bool Blufi::RunIfSetupGenerationCurrent(uint32_t expected_generation,
     std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
     if (expected_generation != setup_generation_.load()) {
         return false;
+    }
+    action();
+    return true;
+}
+
+bool Blufi::RunWithSetupGenerationCurrent(uint32_t expected_generation,
+                                          const std::function<void()>& action) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    {
+        std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
+        if (expected_generation != setup_generation_.load()) {
+            return false;
+        }
     }
     action();
     return true;
@@ -849,19 +1092,20 @@ bool Blufi::AbortProvisioningSetup(ProvisioningToken token) {
 bool Blufi::CompleteSuccessfulProvisioningTeardown(
         const char* reason, ProvisioningToken provisioning_token) {
     return CompleteSuccessfulProvisioningTeardownImpl(
-        reason, provisioning_token, std::nullopt);
+        reason, provisioning_token, std::nullopt, {});
 }
 
 bool Blufi::CompleteSuccessfulProvisioningTeardownForGeneration(
         const char* reason, ProvisioningToken provisioning_token,
-        uint32_t expected_generation) {
+        uint32_t expected_generation, const std::function<void()>& on_current) {
     return CompleteSuccessfulProvisioningTeardownImpl(
-        reason, provisioning_token, expected_generation);
+        reason, provisioning_token, expected_generation, on_current);
 }
 
 bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
         const char* reason, ProvisioningToken provisioning_token,
-        std::optional<uint32_t> expected_generation) {
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current) {
     std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
     if (expected_generation.has_value()) {
         std::lock_guard<std::mutex> generation_lock(provisioning_finalization_mutex_);
@@ -869,6 +1113,14 @@ bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
             return false;
         }
     }
+
+    return CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+        reason, provisioning_token, on_current);
+}
+
+bool Blufi::CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+        const char* reason, ProvisioningToken provisioning_token,
+        const std::function<void()>& on_current) {
 
     constexpr uint64_t kTokenChunkBase = 1000000000ULL;
     const uint64_t token_generation = provisioning_token.generation;
@@ -913,6 +1165,9 @@ bool Blufi::CompleteSuccessfulProvisioningTeardownImpl(
                  token_high, token_middle, token_low);
         return false;
     }
+    if (on_current) {
+        on_current();
+    }
     ESP_LOGI(BLUFI_TAG, "Successful provisioning teardown complete: reason=%s rearmed=%d",
              reason ? reason : "unknown", static_cast<int>(rearmed));
     return true;
@@ -950,6 +1205,9 @@ bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
 void Blufi::RestoreBleAfterStationFailure(uint32_t expected_generation) {
     Application::GetInstance().Schedule([this, expected_generation]() {
         std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+        uint32_t restore_generation = 0;
+        uint64_t restore_state = 0;
+        uint64_t restore_connection_epoch = 0;
         {
             std::lock_guard<std::mutex> finalization_lock(provisioning_finalization_mutex_);
             if (expected_generation != setup_generation_.load()) {
@@ -962,13 +1220,20 @@ void Blufi::RestoreBleAfterStationFailure(uint32_t expected_generation) {
             m_sta_got_ip = false;
             m_provisioned = false;
             m_ble_is_connected = false;
-            setup_generation_.fetch_add(1);
+            restore_generation = setup_generation_.fetch_add(1) + 1;
+            restore_state = EncodeBleSessionState(
+                restore_generation, BleSessionPhase::kStopping);
+            ble_session_state_.store(restore_state, std::memory_order_release);
+            restore_connection_epoch =
+                ble_connection_epoch_.load(std::memory_order_acquire);
             provisioning_report_owner_generation_.reset();
         }
+        InvalidateWifiScanSession(
+            restore_generation, restore_state, restore_connection_epoch);
 
         WifiManager::GetInstance().StopStation();
         if (InitWithLifecycleOwned() == ESP_OK) {
-            StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);
+            StartBleSetupTimeoutWithLifecycleOwned(CONFIG_BLE_SETUP_TIMEOUT_SEC);
             ESP_LOGI(BLUFI_TAG, "WiFi association failed; BLE setup restored automatically");
         } else {
             ESP_LOGE(BLUFI_TAG, "WiFi association failed and BLE setup restore failed");
@@ -1019,6 +1284,7 @@ esp_err_t Blufi::_host_deinit() {
             return ret;
         }
         host_initialized_ = false;
+        ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit();
     }
     host_active_ = profile_active_ || host_enabled_ || host_initialized_;
     return ESP_OK;
@@ -1029,7 +1295,16 @@ esp_err_t Blufi::_gap_register_callback() {
     if (rc) {
         return rc;
     }
-    return esp_blufi_profile_init();
+    if (!ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit()) {
+        ESP_LOGE(BLUFI_TAG, "BLUFI advertising ledger still owns stale callbacks before profile init");
+        InvalidateTbotBlufiAdvertising();
+        return ESP_ERR_INVALID_STATE;
+    }
+    rc = esp_blufi_profile_init();
+    if (rc != ESP_OK) {
+        InvalidateTbotBlufiAdvertising();
+    }
+    return rc;
 }
 
 esp_err_t Blufi::_host_and_cb_init() {
@@ -1476,6 +1751,22 @@ bool Blufi::EnsureWifiScanEventHandlerRegistered() {
     return true;
 }
 
+void Blufi::InvalidateWifiScanSession(uint32_t generation, uint64_t session,
+                                      uint64_t connection_epoch) {
+    wifi_scan_controller_.InvalidateSession(
+        generation, session, connection_epoch);
+    m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
+}
+
+void Blufi::UpdateWifiScanSession(
+        uint32_t expected_generation, uint64_t expected_session,
+        uint64_t expected_connection_epoch, uint32_t generation,
+        uint64_t session, uint64_t connection_epoch) {
+    wifi_scan_controller_.UpdateSession(
+        expected_generation, expected_session, expected_connection_epoch,
+        generation, session, connection_epoch);
+}
+
 bool Blufi::IsWifiScanCacheFresh() const {
     if (m_ap_records.empty() || m_ap_records_updated_us <= 0) {
         return false;
@@ -1674,11 +1965,22 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
 #endif
 }
 
-void Blufi::StartStationConnectFromCredentials(const char* reason) {
+void Blufi::StartStationConnectFromCredentials(
+        const char* reason, std::optional<uint64_t> expected_candidate_epoch) {
     bool expected_not_started = false;
     if (!m_wifi_connect_task_started.compare_exchange_strong(expected_not_started, true)) {
         ESP_LOGI(BLUFI_TAG, "WiFi connect already started; ignoring duplicate trigger: %s",
                  reason ? reason : "unknown");
+        return;
+    }
+
+    auto candidate = expected_candidate_epoch.has_value()
+        ? staged_wifi_credentials_.Claim(*expected_candidate_epoch)
+        : staged_wifi_credentials_.ClaimCurrent();
+    if (!candidate.has_value()) {
+        ESP_LOGW(BLUFI_TAG, "Ignoring stale, claimed, or incomplete WiFi candidate: %s",
+                 reason ? reason : "unknown");
+        m_wifi_connect_task_started.store(false);
         return;
     }
 
@@ -1688,17 +1990,9 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     const uint32_t generation = setup_generation_.load();
     const auto provisioning_token = CaptureProvisioningSession();
 
-    std::string ssid(reinterpret_cast<const char*>(m_sta_config.sta.ssid),
-                     m_sta_config_ssid_len_);
-    std::string password(reinterpret_cast<const char*>(m_sta_config.sta.password));
-    if (ssid.empty()) {
-        ESP_LOGW(BLUFI_TAG, "Ignoring WiFi connect trigger with empty SSID: %s",
-                 reason ? reason : "unknown");
-        SecureClearLocalString(password);
-        m_wifi_connect_task_started.store(false);
-        m_sta_is_connecting.store(false);
-        return;
-    }
+    std::string ssid = candidate->ssid;
+    std::string password = candidate->password;
+    candidate.reset();
     ESP_LOGI(BLUFI_TAG, "Starting WiFi connect from BluFi credentials: %s",
              reason ? reason : "unknown");
     m_sta_ssid_len = static_cast<int>(std::min(ssid.size(), sizeof(m_sta_ssid)));
@@ -1708,16 +2002,18 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     const uint32_t ssid_transaction =
         ssid_manager.BeginSsidTransaction(ssid, password);
     SecureClearLocalString(ssid);
-    SecureClearLocalString(password);
     if (ssid_transaction == 0) {
+        SecureClearLocalString(password);
         ESP_LOGE(BLUFI_TAG, "Failed to stage WiFi credentials");
         m_wifi_connect_task_started.store(false);
         m_sta_is_connecting.store(false);
+        ssid_transaction_id_.store(0);
+        m_sta_connected = false;
+        m_sta_got_ip = false;
+        SendStationConnectFailureReport();
         return;
     }
     ssid_transaction_id_.store(ssid_transaction);
-    m_scan_should_save_ssid = false;
-
     memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
     m_sta_connected = false;
     m_sta_got_ip = false;
@@ -1736,6 +2032,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     }
 
     if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
+        SecureClearLocalString(password);
         ESP_LOGE(BLUFI_TAG, "Failed to initialize WifiManager");
         ssid_manager.RollbackSsidTransaction(ssid_transaction);
         uint32_t expected_transaction = ssid_transaction;
@@ -1753,11 +2050,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         ProvisioningToken provisioning_token;
         std::array<uint8_t, 32> candidate_ssid;
         size_t candidate_ssid_len;
+        std::string candidate_password;
     };
     auto* ctx = new (std::nothrow) WifiConnectTaskContext{
         this, generation, ssid_transaction, provisioning_token, {},
-        static_cast<size_t>(m_sta_ssid_len)};
+        static_cast<size_t>(m_sta_ssid_len), password};
     if (ctx == nullptr) {
+        SecureClearLocalString(password);
         ESP_LOGE(BLUFI_TAG, "Failed to allocate BluFi WiFi completion context");
         m_wifi_connect_task_started.store(false);
         m_sta_is_connecting.store(false);
@@ -1768,12 +2067,14 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         SendStationConnectFailureReport();
         return;
     }
+    SecureClearLocalString(password);
     memcpy(ctx->candidate_ssid.data(), m_sta_ssid, ctx->candidate_ssid_len);
 
     vTaskDelay(pdMS_TO_TICKS(500));
 
     if (generation != setup_generation_.load()) {
         ESP_LOGI(BLUFI_TAG, "Ignoring stale BluFi WiFi connect before station start");
+        SecureClearLocalString(ctx->candidate_password);
         delete ctx;
         ssid_manager.RollbackSsidTransaction(ssid_transaction);
         uint32_t expected_transaction = ssid_transaction;
@@ -1790,10 +2091,13 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             const auto provisioning_token = task_ctx->provisioning_token;
             const auto candidate_ssid = task_ctx->candidate_ssid;
             const size_t candidate_ssid_len = task_ctx->candidate_ssid_len;
+            std::string candidate_password = task_ctx->candidate_password;
+            SecureClearLocalString(task_ctx->candidate_password);
             delete task_ctx;
             auto& wifi = WifiManager::GetInstance();
 
             if (!self->ReleaseBleForStationAssociation(generation)) {
+                SecureClearLocalString(candidate_password);
                 ESP_LOGE(BLUFI_TAG, "Unable to release BLE before WiFi association");
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
                 uint32_t expected_transaction = ssid_transaction;
@@ -1808,6 +2112,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             }
 
             if (generation != self->setup_generation_.load()) {
+                SecureClearLocalString(candidate_password);
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
                 uint32_t expected_transaction = ssid_transaction;
                 self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
@@ -1815,12 +2120,25 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
                 return;
             }
 
-            wifi.StartStation();
+            const std::string candidate_ssid_string(
+                reinterpret_cast<const char*>(candidate_ssid.data()),
+                candidate_ssid_len);
+            const auto exact_start_result =
+                wifi.StartStationWithCredentialsIfScanIdle(
+                    candidate_ssid_string, candidate_password);
+            SecureClearLocalString(candidate_password);
+            const bool exact_station_started =
+                exact_start_result == WifiManager::StationStartResult::kStartedNow;
+            if (!exact_station_started) {
+                ESP_LOGE(BLUFI_TAG, "Exact provisioning candidate start failed: %d",
+                         static_cast<int>(exact_start_result));
+            }
             constexpr int kConnectTimeoutMs = 60000;
             constexpr TickType_t kDelayTick = pdMS_TO_TICKS(200);
             int waited_ms = 0;
 
-            while (waited_ms < kConnectTimeoutMs && !wifi.IsConnected()) {
+            while (waited_ms < kConnectTimeoutMs && !wifi.IsConnected() &&
+                   exact_station_started) {
                 vTaskDelay(kDelayTick);
                 waited_ms += 200;
             }
@@ -1843,7 +2161,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
 
             bool connected_to_candidate = false;
             bool credentials_committed = false;
-            if (wifi.IsConnected()) {
+            if (exact_station_started && wifi.IsConnected()) {
                 const std::string connected_ssid = wifi.GetSsid();
                 connected_to_candidate =
                     connected_ssid.size() == candidate_ssid_len &&
@@ -1899,6 +2217,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             }
 
             if (credentials_committed) {
+                wifi.EnableStationAutomaticScans();
                 self->m_sta_connected = true;
                 self->m_sta_got_ip = true;
                 self->m_provisioned = true;
@@ -2021,6 +2340,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         },
         "blufi_wifi_conn", 4096, ctx, 5, nullptr);
     if (created != pdPASS) {
+        SecureClearLocalString(ctx->candidate_password);
         delete ctx;
         ESP_LOGE(BLUFI_TAG, "Failed to create BluFi WiFi completion task");
         m_wifi_connect_task_started.store(false);
@@ -2049,20 +2369,23 @@ void Blufi::SendStationConnectFailureReport() {
                                     _get_softap_conn_num(), &info);
 }
 
-void Blufi::ScheduleStationConnectFallback() {
+void Blufi::ScheduleStationConnectFallback(uint64_t candidate_epoch) {
     const uint32_t generation = setup_generation_.load();
     struct StationConnectFallbackContext {
         Blufi* self;
         uint32_t generation;
+        uint64_t candidate_epoch;
     };
-    auto* ctx = new (std::nothrow) StationConnectFallbackContext{this, generation};
+    auto* ctx = new (std::nothrow) StationConnectFallbackContext{
+        this, generation, candidate_epoch};
     if (ctx == nullptr) {
         ESP_LOGE(BLUFI_TAG, "Failed to allocate password fallback context");
-        Application::GetInstance().Schedule([this, generation]() {
+        Application::GetInstance().Schedule([this, generation, candidate_epoch]() {
             if (generation != setup_generation_.load()) {
                 return;
             }
-            StartStationConnectFromCredentials("password_fallback_task_create_failed");
+            StartStationConnectFromCredentials(
+                "password_fallback_task_create_failed", candidate_epoch);
         });
         return;
     }
@@ -2072,6 +2395,7 @@ void Blufi::ScheduleStationConnectFallback() {
             auto* task_ctx = static_cast<StationConnectFallbackContext*>(ctx);
             auto* self = task_ctx->self;
             const uint32_t generation = task_ctx->generation;
+            const uint64_t candidate_epoch = task_ctx->candidate_epoch;
             delete task_ctx;
             vTaskDelay(pdMS_TO_TICKS(500));
             if (generation != self->setup_generation_.load()) {
@@ -2079,50 +2403,349 @@ void Blufi::ScheduleStationConnectFallback() {
                 vTaskDelete(nullptr);
                 return;
             }
-            if (!self->m_sta_is_connecting.load() || self->m_wifi_connect_task_started.load() ||
-                self->m_sta_config_ssid_len_ == 0) {
+            if (!self->m_sta_is_connecting.load() ||
+                self->m_wifi_connect_task_started.load()) {
                 vTaskDelete(nullptr);
                 return;
             }
             ESP_LOGW(BLUFI_TAG,
                      "CONNECT_TO_AP not observed after password; starting WiFi fallback");
-            self->StartStationConnectFromCredentials("password_fallback");
+            self->StartStationConnectFromCredentials(
+                "password_fallback", candidate_epoch);
             vTaskDelete(nullptr);
         },
         "blufi_conn_fb", 3072, ctx, 5, nullptr);
     if (created != pdPASS) {
         delete ctx;
         ESP_LOGE(BLUFI_TAG, "Failed to create password fallback task");
-        Application::GetInstance().Schedule([this, generation]() {
+        Application::GetInstance().Schedule([this, generation, candidate_epoch]() {
             if (generation != setup_generation_.load()) {
                 return;
             }
-            StartStationConnectFromCredentials("password_fallback_task_create_failed");
+            StartStationConnectFromCredentials(
+                "password_fallback_task_create_failed", candidate_epoch);
         });
     }
 }
 
-bool Blufi::start_wifi_scan() {
-    ESP_LOGI(BLUFI_TAG, "Starting dedicated WiFi scan");
-
-    // Already running: caller can rely on the in-flight scan and await its done event.
-    if (m_scan_in_progress) {
-        ESP_LOGW(BLUFI_TAG, "Scan already in progress, skipping");
-        return true;
+void Blufi::RequestWifiListScan(bool save_results, bool send_list) {
+    BlufiWifiScanController::Request request{
+        .setup_generation = setup_generation_.load(std::memory_order_acquire),
+        .ble_session_state = ble_session_state_.load(std::memory_order_acquire),
+        .ble_connection_epoch = ble_connection_epoch_.load(std::memory_order_acquire),
+        .save_results = save_results,
+        .send_list = send_list,
+    };
+    const auto decision = wifi_scan_controller_.RequestScan(request);
+    if (decision.rejected_stale) {
+        ESP_LOGI(BLUFI_TAG, "Ignoring stale WiFi scan request");
+        return;
     }
+    if (decision.start_now) {
+        ScheduleOwnedWifiScanStart(decision.request_id, request);
+    }
+}
 
-    m_scan_in_progress = true;
+void Blufi::ScheduleOwnedWifiScanStart(
+        uint64_t request_id, BlufiWifiScanController::Request request) {
+    BlufiWifiScanRetryState::ExactRequest exact{
+        request_id, request.setup_generation, request.ble_session_state,
+        request.ble_connection_epoch, request.save_results, request.send_list};
+    wifi_scan_retry_state_.Publish(exact);
+    const auto durable = wifi_scan_retry_state_.Snapshot();
+    if (!durable.has_value()) {
+        return;
+    }
+    wifi_scan_retry_state_.SignalPublished(
+        []() { return false; }, []() { return false; },
+        [this]() { return EnqueueOwnedWifiScanRetry(); },
+        []() { return WifiManager::GetInstance().RequestScanLeaseRetryPoll(); });
+}
+
+void Blufi::PollOwnedWifiScanRetry(void* context) noexcept {
+    try {
+        static_cast<Blufi*>(context)->DispatchOwnedWifiScanRetry();
+    } catch (...) {
+    }
+}
+
+void Blufi::TryStartOwnedWifiScanNow(
+        BlufiWifiScanRetryState::ExactRequest exact,
+        bool notify_manager) noexcept {
+    std::optional<WifiScanLeaseCoordinator::Lease> acquired_lease;
+    bool logical_claimed = false;
+    try {
+        const auto request = wifi_scan_controller_.UnclaimedRequestIfCurrent(
+            exact.request_id, exact.setup_generation, exact.ble_session_state,
+            exact.ble_connection_epoch);
+        if (!request.has_value()) {
+            if (exact.revision != 0) {
+                wifi_scan_retry_state_.ClearIfExact(exact);
+            }
+            return;
+        }
+        auto& coordinator = WifiManager::GetInstance().ScanLeaseCoordinator();
+        const auto acquired = coordinator.TryAcquire(
+            WifiScanLeaseCoordinator::Owner::kBlufi);
+        if (!acquired.acquired) {
+            RetryOwnedWifiScanAfterLeaseBusy(exact, *request, notify_manager);
+            return;
+        }
+        acquired_lease = acquired.lease;
+        if (exact.revision != 0 &&
+            !wifi_scan_retry_state_.ClearIfExact(exact)) {
+            coordinator.AbandonUnsubmitted(acquired.lease);
+            acquired_lease.reset();
+            return;
+        }
+        if (!wifi_scan_controller_.SynchronizeDriverIncarnation(
+                exact.request_id, acquired.lease.driver_incarnation)) {
+            coordinator.AbandonUnsubmitted(acquired.lease);
+            acquired_lease.reset();
+            return;
+        }
+        if (!wifi_scan_controller_.ClaimStart(exact.request_id).claimed) {
+            coordinator.AbandonUnsubmitted(acquired.lease);
+            acquired_lease.reset();
+            return;
+        }
+        logical_claimed = true;
+        {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            wifi_scan_lease_ = acquired.lease;
+            wifi_scan_request_id_ = exact.request_id;
+        }
+        auto outcome = StartOwnedWifiScan(exact.request_id, acquired.lease);
+        if (!outcome.physical_committed || !outcome.logical_committed) {
+            outcome = CommitOwnedWifiScanStart(
+                exact.request_id, acquired.lease, outcome, true);
+        }
+        acquired_lease.reset();
+        outcome = RunOwnedWifiScanFollowupNoexcept(
+            exact.request_id, acquired.lease, outcome);
+        if (outcome.ShouldRetryUnsubmitted() &&
+            wifi_scan_controller_.UnclaimedRequestIfCurrent(
+                exact.request_id, exact.setup_generation,
+                exact.ble_session_state,
+                exact.ble_connection_epoch).has_value()) {
+            wifi_scan_retry_state_.RepublishIfUnchanged(exact);
+        }
+    } catch (...) {
+        bool retry_unclaimed = !logical_claimed;
+        if (acquired_lease.has_value()) {
+            BlufiWifiScanStartOutcome initial;
+            auto outcome = CommitOwnedWifiScanStart(
+                exact.request_id, *acquired_lease, initial, true);
+            outcome = RunOwnedWifiScanFollowupNoexcept(
+                exact.request_id, *acquired_lease, outcome);
+            retry_unclaimed = outcome.ShouldRetryUnsubmitted();
+        }
+        if (retry_unclaimed) {
+            try {
+                if (wifi_scan_controller_.UnclaimedRequestIfCurrent(
+                        exact.request_id, exact.setup_generation,
+                        exact.ble_session_state,
+                        exact.ble_connection_epoch).has_value()) {
+                    wifi_scan_retry_state_.RepublishIfUnchanged(exact);
+                }
+            } catch (...) {
+            }
+        }
+        if (notify_manager) {
+            try {
+                WifiManager::GetInstance().RequestScanLeaseRetryPoll();
+            } catch (...) {
+            }
+        }
+    }
+}
+
+void Blufi::RetryOwnedWifiScanAfterLeaseBusy(
+        BlufiWifiScanRetryState::ExactRequest exact,
+        BlufiWifiScanController::Request request, bool notify_manager) {
+    if (!wifi_scan_controller_.UnclaimedRequestIfCurrent(
+            exact.request_id, request.setup_generation, request.ble_session_state,
+            request.ble_connection_epoch).has_value()) {
+        return;
+    }
+    exact.save_results = request.save_results;
+    exact.send_list = request.send_list;
+    if (!wifi_scan_retry_state_.RepublishIfUnchanged(exact)) {
+        return;
+    }
+    wifi_scan_retry_state_.SignalPublished(
+        [this]() {
+            std::lock_guard<std::mutex> lock(wifi_scan_retry_timer_mutex_);
+            if (wifi_scan_retry_timer_ == nullptr) {
+                return false;
+            }
+            esp_timer_stop(wifi_scan_retry_timer_);
+            return esp_timer_start_once(
+                       wifi_scan_retry_timer_, 50LL * 1000) == ESP_OK;
+        },
+        [this]() {
+            std::lock_guard<std::mutex> lock(wifi_scan_retry_timer_mutex_);
+            if (wifi_scan_retry_fallback_timer_ == nullptr) {
+                wifi_scan_retry_fallback_timer_ = xTimerCreateStatic(
+                    "blufi_scan_retry_fb", pdMS_TO_TICKS(50), pdFALSE, this,
+                    [](TimerHandle_t timer) {
+                        (void)timer;
+                        try {
+                            WifiManager::GetInstance()
+                                .RequestScanLeaseRetryPoll();
+                        } catch (...) {
+                        }
+                    },
+                    &wifi_scan_retry_fallback_storage_);
+            }
+            return wifi_scan_retry_fallback_timer_ != nullptr &&
+                xTimerChangePeriod(wifi_scan_retry_fallback_timer_,
+                                   pdMS_TO_TICKS(50), 0) == pdPASS;
+        },
+        []() { return false; },
+        [notify_manager]() {
+            return notify_manager &&
+                WifiManager::GetInstance().RequestScanLeaseRetryPoll();
+        });
+}
+
+void Blufi::DispatchOwnedWifiScanRetry() noexcept {
+    EnqueueOwnedWifiScanRetry();
+}
+
+bool Blufi::EnqueueOwnedWifiScanRetry() noexcept {
+    const auto exact = wifi_scan_retry_state_.BeginDispatch();
+    if (!exact.has_value()) {
+        return false;
+    }
+    bool scheduled = false;
+    try {
+        Application::GetInstance().Schedule([this, exact = *exact]() {
+            if (!wifi_scan_retry_state_.IsCurrentRevision(exact)) {
+                return;
+            }
+            TryStartOwnedWifiScanNow(exact, false);
+        });
+        scheduled = true;
+    } catch (...) {
+    }
+    wifi_scan_retry_state_.CompleteDispatch(*exact, scheduled);
+    return scheduled;
+}
+
+BlufiWifiScanStartOutcome Blufi::CommitOwnedWifiScanStart(
+        uint64_t request_id, const WifiScanLeaseCoordinator::Lease& lease,
+        BlufiWifiScanStartOutcome outcome,
+        bool retry_on_abandon) noexcept {
+    try {
+        std::lock_guard<std::mutex> submission_lock(
+            wifi_scan_submission_mutex_);
+        auto& coordinator = WifiManager::GetInstance().ScanLeaseCoordinator();
+        return AdvanceBlufiWifiScanStartCommit(
+            outcome, retry_on_abandon,
+            [&]() { return coordinator.AbandonUnsubmitted(lease); },
+            [&](bool driver_accepted) {
+                return coordinator.CommitSubmission(lease, driver_accepted);
+            },
+            [&](bool accepted, bool drain_required) {
+                return wifi_scan_controller_.CommitStart(
+                    request_id, accepted, drain_required);
+            },
+            [&]() {
+                return wifi_scan_controller_.ReleaseStartClaimForRetry(
+                    request_id);
+            });
+    } catch (...) {
+        outcome.PreserveDispositionAfterFailure();
+    }
+    return outcome;
+}
+
+BlufiWifiScanStartOutcome Blufi::RunOwnedWifiScanFollowupNoexcept(
+        uint64_t request_id, const WifiScanLeaseCoordinator::Lease& lease,
+        const BlufiWifiScanStartOutcome& initial) noexcept {
+    auto outcome = initial;
+    if (outcome.disposition ==
+            BlufiWifiScanStartOutcome::LeaseDisposition::kReleased &&
+        outcome.logical_committed) {
+        try {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            if (wifi_scan_lease_.has_value() &&
+                wifi_scan_lease_->lease_id == lease.lease_id &&
+                wifi_scan_lease_->driver_incarnation ==
+                    lease.driver_incarnation) {
+                wifi_scan_lease_.reset();
+                wifi_scan_request_id_ = 0;
+                wifi_scan_restore_sta_config_ = {};
+                wifi_scan_restore_ap_config_ = {};
+                wifi_scan_restore_sta_config_valid_ = false;
+                wifi_scan_restore_ap_config_valid_ = false;
+            }
+        } catch (...) {
+        }
+    }
+    if (outcome.logical.send_failure &&
+        !outcome.physical.callback_won_error) {
+        try {
+            ScheduleWifiScanFailure(outcome.logical.owner,
+                                    "scan_start_failed");
+        } catch (...) {
+        }
+    }
+    if (outcome.logical.start_pending) {
+        try {
+            ScheduleOwnedWifiScanStart(outcome.logical.pending_request_id,
+                                       outcome.logical.pending);
+        } catch (...) {
+        }
+    }
+    if (outcome.rollback.start_pending) {
+        try {
+            ScheduleOwnedWifiScanStart(outcome.rollback.request_id,
+                                       outcome.rollback.pending);
+        } catch (...) {
+        }
+    }
+    if (outcome.physical.consume_latched) {
+        if (ConsumeOwnedWifiScanCompletion(request_id)) {
+            outcome.disposition =
+                BlufiWifiScanStartOutcome::LeaseDisposition::kReleased;
+        }
+    } else if (outcome.physical.drain_required) {
+        try {
+            RequestOwnedWifiScanRecovery(lease);
+        } catch (...) {
+        }
+    } else if (outcome.logical.accepted) {
+        try {
+            ScheduleOwnedWifiScanWatchdog(request_id, lease);
+        } catch (...) {
+        }
+    }
+    return outcome;
+}
+
+BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan(
+        uint64_t request_id,
+        const WifiScanLeaseCoordinator::Lease& lease) noexcept {
+    BlufiWifiScanStartOutcome progress;
+    try {
+    ESP_LOGI(BLUFI_TAG, "Starting owned WiFi scan id=%" PRIu64, request_id);
+
+    auto commit_failure = [this, request_id, lease, &progress]() noexcept {
+        progress = CommitOwnedWifiScanStart(
+            request_id, lease, progress, false);
+        return progress;
+    };
 
     if (!EnsureWifiScanEventHandlerRegistered()) {
-        m_scan_in_progress = false;
-        return false;
+        return commit_failure();
     }
 
     auto& wifi_manager = WifiManager::GetInstance();
     if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
         ESP_LOGE(BLUFI_TAG, "Failed to initialize WiFi manager for scan");
-        m_scan_in_progress = false;
-        return false;
+        return commit_failure();
     }
 
     wifi_scan_config_t scan_config{};
@@ -2130,86 +2753,183 @@ bool Blufi::start_wifi_scan() {
     scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE;
     scan_config.scan_time.passive = WIFI_PASSIVE_SCAN_DEFAULT_TIME;
 
-    // Get current WiFi mode
+    // A failed mode read must not strand the phone with an empty list. The
+    // manager has initialized the driver above, but a concurrent radio reset can
+    // still make this read fail; treat that as a station-mode recovery case.
     wifi_mode_t current_mode = WIFI_MODE_NULL;
     esp_err_t err = esp_wifi_get_mode(&current_mode);
     if (err != ESP_OK) {
-        ESP_LOGE(BLUFI_TAG, "Failed to get WiFi mode: %s", esp_err_to_name(err));
-        m_scan_in_progress = false;
-        return false;
+        ESP_LOGW(BLUFI_TAG, "Failed to read WiFi mode before scan: %s",
+                 esp_err_to_name(err));
+        current_mode = WIFI_MODE_NULL;
     }
+    wifi_config_t restore_sta_config{};
+    wifi_config_t restore_ap_config{};
+    const bool restore_sta_config_valid =
+        (current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA) &&
+        esp_wifi_get_config(WIFI_IF_STA, &restore_sta_config) == ESP_OK;
+    const bool restore_ap_config_valid =
+        (current_mode == WIFI_MODE_AP || current_mode == WIFI_MODE_APSTA) &&
+        esp_wifi_get_config(WIFI_IF_AP, &restore_ap_config) == ESP_OK;
 
-    if (current_mode == WIFI_MODE_NULL) {
-        ESP_LOGI(BLUFI_TAG, "WiFi driver reinitialized for provisioning scan");
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        err = esp_wifi_start();
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after reinit: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        err = esp_wifi_scan_start(&scan_config, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-    } else if (current_mode == WIFI_MODE_AP) {
-        // If in AP mode, temporarily switch to APSTA to allow scanning
-        ESP_LOGI(BLUFI_TAG, "WiFi in AP mode");
-        err = esp_wifi_set_mode(WIFI_MODE_STA);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        // Need to restart WiFi for mode change to take effect
-        err = esp_wifi_start();
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after mode switch: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        // Start scan
-        err = esp_wifi_scan_start(&scan_config, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-    } else if (current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA) {
-        // Ensure WiFi driver is started (may have been stopped during config mode transition)
+    if (current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA) {
+        // The driver may remain initialized after StopRadio(). Starting an
+        // already-running driver is harmless and reported as WIFI_STATE.
         err = esp_wifi_start();
         if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi before scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
-        }
-        err = esp_wifi_scan_start(&scan_config, false);
-        if (err != ESP_OK) {
-            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s", esp_err_to_name(err));
-            m_scan_in_progress = false;
-            return false;
+            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi before scan: %s",
+                     esp_err_to_name(err));
+            return commit_failure();
         }
     } else {
-        ESP_LOGE(BLUFI_TAG, "Unexpected WiFi mode: %d", current_mode);
-        m_scan_in_progress = false;
-        return false;
+        // NULL/AP/unknown modes are not station-capable. Move to STA before the
+        // passive scan; config-mode list dispatch stops the idle radio later.
+        ESP_LOGI(BLUFI_TAG, "Switching WiFi to STA for scan (mode=%d)", current_mode);
+        err = esp_wifi_set_mode(WIFI_MODE_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(BLUFI_TAG, "Failed to set WiFi mode to STA: %s", esp_err_to_name(err));
+            return commit_failure();
+        }
+        err = esp_wifi_start();
+        if (err != ESP_OK && err != ESP_ERR_WIFI_STATE) {
+            ESP_LOGE(BLUFI_TAG, "Failed to start WiFi after mode switch: %s",
+                     esp_err_to_name(err));
+            return commit_failure();
+        }
     }
 
-    ESP_LOGI(BLUFI_TAG, "WiFi scan started");
-    return true;
+    {
+        std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+        wifi_scan_restore_mode_ =
+            current_mode == WIFI_MODE_AP || current_mode == WIFI_MODE_APSTA
+                ? WIFI_MODE_APSTA
+                : WIFI_MODE_STA;
+        wifi_scan_restore_sta_config_ = restore_sta_config;
+        wifi_scan_restore_ap_config_ = restore_ap_config;
+        wifi_scan_restore_sta_config_valid_ = restore_sta_config_valid;
+        wifi_scan_restore_ap_config_valid_ = restore_ap_config_valid;
+    }
+    if (!wifi_scan_controller_.IsClaimCurrent(
+            request_id,
+            setup_generation_.load(std::memory_order_acquire),
+            ble_session_state_.load(std::memory_order_acquire),
+            ble_connection_epoch_.load(std::memory_order_acquire))) {
+        return commit_failure();
+    }
+    progress.driver_attempted = true;
+    const esp_err_t scan_error = esp_wifi_scan_start(&scan_config, false);
+    progress.driver_accepted = scan_error == ESP_OK;
+    progress = CommitOwnedWifiScanStart(
+        request_id, lease, progress, false);
+    if (!progress.physical_committed || !progress.logical_committed) {
+        progress = CommitOwnedWifiScanStart(
+            request_id, lease, progress, false);
+    }
+    if (scan_error != ESP_OK) {
+        ESP_LOGE(BLUFI_TAG, "Failed to start WiFi scan: %s",
+                 esp_err_to_name(scan_error));
+    }
+    if (progress.logical.accepted) {
+        ESP_LOGI(BLUFI_TAG, "WiFi scan started");
+    }
+    return progress;
+    } catch (...) {
+        return CommitOwnedWifiScanStart(
+            request_id, lease, progress, false);
+    }
+}
+
+void Blufi::ScheduleOwnedWifiScanWatchdog(
+        uint64_t request_id, WifiScanLeaseCoordinator::Lease lease) {
+    const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
+    if (!wifi_scan_watchdog_timer_.Arm(exact, 5LL * 1000 * 1000)) {
+        HandleWifiScanWatchdog(exact);
+    }
+}
+
+void Blufi::HandleWifiScanWatchdog(
+        BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        bool current = false;
+        {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            current = wifi_scan_lease_.has_value() &&
+                wifi_scan_request_id_ == exact.request_id &&
+                wifi_scan_lease_->owner == exact.lease.owner &&
+                wifi_scan_lease_->lease_id == exact.lease.lease_id &&
+                wifi_scan_lease_->driver_incarnation ==
+                    exact.lease.driver_incarnation;
+        }
+        if (!current || !wifi_scan_controller_.CallbackOwed()) {
+            return;
+        }
+        auto& coordinator = WifiManager::GetInstance().ScanLeaseCoordinator();
+        if (coordinator.BeginDrain(exact.lease)) {
+            RequestOwnedWifiScanRecovery(exact.lease);
+        }
+    } catch (...) {
+        try {
+            auto& manager = WifiManager::GetInstance();
+            if (manager.ScanLeaseCoordinator().BeginDrain(exact.lease)) {
+                manager.RequestScanRecovery(exact.lease);
+            }
+        } catch (...) {
+        }
+    }
+}
+
+void Blufi::SchedulePendingWifiScan(
+        uint64_t request_id,
+        const BlufiWifiScanController::Request& request) {
+    Application::GetInstance().Schedule([this, request_id, request]() {
+        const uint32_t current_generation =
+            setup_generation_.load(std::memory_order_acquire);
+        const uint64_t current_session =
+            ble_session_state_.load(std::memory_order_acquire);
+        const uint64_t current_connection =
+            ble_connection_epoch_.load(std::memory_order_acquire);
+        if (request.setup_generation != current_generation ||
+            request.ble_session_state != current_session ||
+            request.ble_connection_epoch != current_connection) {
+            return;
+        }
+        ScheduleOwnedWifiScanStart(request_id, request);
+    });
+}
+
+void Blufi::ScheduleWifiScanFailure(
+        const BlufiWifiScanController::Request& request,
+        const char* reason) {
+    const std::string failure_reason = reason ? reason : "unknown";
+    Application::GetInstance().Schedule([this, request, failure_reason]() {
+        bool failure_owner_is_current = false;
+        {
+            std::lock_guard<std::mutex> session_lock(
+                provisioning_finalization_mutex_);
+            const uint32_t current_generation =
+                setup_generation_.load(std::memory_order_acquire);
+            const uint64_t current_session =
+                ble_session_state_.load(std::memory_order_acquire);
+            const uint64_t current_connection =
+                ble_connection_epoch_.load(std::memory_order_acquire);
+            failure_owner_is_current =
+                request.setup_generation == current_generation &&
+                request.ble_session_state == current_session &&
+                request.ble_connection_epoch == current_connection &&
+                m_ble_is_connected &&
+                DecodeBleSessionPhase(current_session) ==
+                    BleSessionPhase::kConnected;
+        }
+        if (!failure_owner_is_current) {
+            return;
+        }
+        ESP_LOGW(BLUFI_TAG, "WiFi scan fail reason=%s", failure_reason.c_str());
+        esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
+    });
 }
 
 void Blufi::_send_wifi_list(std::vector<wifi_ap_record_t> m_ap_records) {
     if (m_ap_records.empty()) {
-        ESP_LOGW(BLUFI_TAG, "No AP records available, sending WiFi scan fail");
-        esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
         return;
     }
 
@@ -2278,6 +2998,7 @@ void Blufi::_send_wifi_list(std::vector<wifi_ap_record_t> m_ap_records) {
     }
     LogBlufiHeapSnapshot("wifi_list_before_dispatch");
     esp_err_t err = esp_blufi_send_wifi_list(blufi_ap_count, blufi_ap_list.data());
+    LogBlufiHeapSnapshot("wifi_list_after_dispatch");
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to dispatch WiFi list: %s", esp_err_to_name(err));
     }
@@ -2292,10 +3013,12 @@ void Blufi::ScheduleWifiListSend(uint32_t expected_generation,
         [this, expected_generation, expected_ble_session_state,
          expected_ble_connection_epoch, expected_wifi_list_dispatch_epoch,
          ap_records = std::move(ap_records)]() mutable {
+            bool dispatch_current = false;
             RunIfSetupGenerationCurrent(
                 expected_generation,
-                [this, expected_ble_session_state, expected_ble_connection_epoch,
-                 expected_wifi_list_dispatch_epoch, &ap_records]() {
+                [this, expected_ble_session_state,
+                 expected_ble_connection_epoch,
+                 expected_wifi_list_dispatch_epoch, &dispatch_current]() {
                     const uint64_t current_ble_session_state =
                         ble_session_state_.load(std::memory_order_acquire);
                     const uint64_t current_ble_connection_epoch =
@@ -2312,8 +3035,11 @@ void Blufi::ScheduleWifiListSend(uint32_t expected_generation,
                         current_wifi_list_dispatch_epoch != expected_wifi_list_dispatch_epoch) {
                         return;
                     }
-                    _send_wifi_list(std::move(ap_records));
+                    dispatch_current = true;
                 });
+            if (dispatch_current) {
+                _send_wifi_list(std::move(ap_records));
+            }
             uint64_t owned_dispatch_epoch = expected_wifi_list_dispatch_epoch;
             m_wifi_list_dispatch_pending_epoch_.compare_exchange_strong(
                 owned_dispatch_epoch, 0,
@@ -2324,79 +3050,387 @@ void Blufi::ScheduleWifiListSend(uint32_t expected_generation,
 void Blufi::_wifi_scan_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
                                      void* event_data) {
     Blufi* self = static_cast<Blufi*>(arg);
-
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_SCAN_DONE) {
-        if (!self->m_scan_in_progress) {
-            ESP_LOGI(BLUFI_TAG, "Ignoring WiFi scan done event not owned by BluFi");
+    if (event_base != WIFI_EVENT || event_id != WIFI_EVENT_SCAN_DONE) {
+        return;
+    }
+    std::optional<WifiScanLeaseCoordinator::Lease> lease;
+    uint64_t request_id = 0;
+    try {
+        {
+            std::lock_guard<std::mutex> lock(self->wifi_scan_lease_mutex_);
+            lease = self->wifi_scan_lease_;
+            request_id = self->wifi_scan_request_id_;
+        }
+        if (!lease.has_value()) {
             return;
+        }
+        WifiScanLeaseCoordinator::CallbackDecision callback;
+        {
+            std::lock_guard<std::mutex> submission_lock(
+                self->wifi_scan_submission_mutex_);
+            callback = WifiManager::GetInstance().ScanLeaseCoordinator()
+                .ObserveScanDone(*lease);
+        }
+        if (callback.deferred_until_commit) {
+            return;
+        }
+        if (!callback.consume_now) {
+            ESP_LOGI(BLUFI_TAG,
+                     "Ignoring WiFi scan done event not owned by BluFi");
+            return;
+        }
+        self->ConsumeOwnedWifiScanCompletion(request_id);
+    } catch (...) {
+        try {
+            ESP_LOGE(BLUFI_TAG,
+                     "Unhandled WiFi scan completion failure; recovery required");
+            if (!lease.has_value()) {
+                return;
+            }
+            auto& coordinator =
+                WifiManager::GetInstance().ScanLeaseCoordinator();
+            if (coordinator.RetainFailedCompletion(*lease) &&
+                self->wifi_scan_controller_.RetainFailedCompletion(
+                    request_id)) {
+                self->RequestOwnedWifiScanRecovery(*lease);
+            }
+        } catch (...) {
+        }
+    }
+}
+
+bool Blufi::ConsumeOwnedWifiScanCompletion(uint64_t request_id) noexcept {
+        Blufi* self = this;
+        std::optional<WifiScanLeaseCoordinator::Lease> lease;
+        bool physical_released = false;
+        bool logical_prepared = false;
+        bool logical_committed = false;
+        bool logical_released = false;
+        BlufiWifiScanController::FinishDecision finished;
+        try {
+        {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            if (wifi_scan_request_id_ != request_id) {
+                return false;
+            }
+            lease = wifi_scan_lease_;
+        }
+        if (!lease.has_value()) {
+            return false;
+        }
+        const auto completion = wifi_scan_controller_.BeginCompletion(
+            self->setup_generation_.load(std::memory_order_acquire),
+            self->ble_session_state_.load(std::memory_order_acquire),
+            self->ble_connection_epoch_.load(std::memory_order_acquire));
+        if (!completion.owned_callback) {
+            ESP_LOGI(BLUFI_TAG, "Ignoring WiFi scan done event not owned by BluFi");
+            return false;
         }
 
         ESP_LOGI(BLUFI_TAG, "WiFi scan done");
 
         uint16_t ap_num = 0;
-        esp_wifi_scan_get_ap_num(&ap_num);
-
-        if (ap_num == 0) {
-            ESP_LOGW(BLUFI_TAG, "No APs found");
-            esp_wifi_clear_ap_list();
-            self->m_ap_records.clear();
-            self->m_ap_records_updated_us = 0;
+        bool cache_scan_results = false;
+        int64_t scan_results_updated_us = 0;
+        std::vector<wifi_ap_record_t> scanned_ap_records;
+        bool cleanup_proven = false;
+        if (completion.discard_results) {
+            cleanup_proven = esp_wifi_clear_ap_list() == ESP_OK;
         } else {
-            if (self->m_scan_should_save_ssid) {
-                ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);
-                self->m_ap_records.resize(ap_num);
-                esp_err_t err = esp_wifi_scan_get_ap_records(&ap_num, self->m_ap_records.data());
-                if (err != ESP_OK) {
-                    ESP_LOGE(BLUFI_TAG, "Failed to read WiFi scan records: %s", esp_err_to_name(err));
-                    esp_wifi_clear_ap_list();
-                    self->m_ap_records.clear();
-                    self->m_ap_records_updated_us = 0;
+            const esp_err_t count_error = esp_wifi_scan_get_ap_num(&ap_num);
+
+            if (count_error != ESP_OK || ap_num == 0) {
+                ESP_LOGW(BLUFI_TAG, "No APs found");
+                cleanup_proven = esp_wifi_clear_ap_list() == ESP_OK;
+                cache_scan_results = completion.save_results;
+            } else if (completion.save_results) {
+                using Collector = BlufiWifiScanResultCollector<
+                    wifi_ap_record_t, kMaxBlufiWifiScanCandidates>;
+                const auto collected = Collector::Collect(
+                    ap_num,
+                    [](uint16_t* count, wifi_ap_record_t* records) {
+                        return esp_wifi_scan_get_ap_records(count, records) ==
+                            ESP_OK;
+                    },
+                    []() { return esp_wifi_clear_ap_list() == ESP_OK; },
+                    [&](const wifi_ap_record_t* records, uint16_t count) {
+                        scanned_ap_records.assign(records, records + count);
+                    });
+                cleanup_proven = collected.cleanup_proven;
+                if (!cleanup_proven) {
+                    ESP_LOGE(BLUFI_TAG,
+                             "Failed to read or clear WiFi scan records");
+                } else if (collected.materialization_failed) {
+                    ESP_LOGE(BLUFI_TAG,
+                             "Insufficient memory to cache WiFi scan records");
                 } else {
-                    esp_wifi_clear_ap_list();
-                    self->m_ap_records.resize(ap_num);
-                    self->m_ap_records_updated_us = esp_timer_get_time();
+                    ap_num = collected.record_count;
+                    scan_results_updated_us = esp_timer_get_time();
 
                     ESP_LOGI(BLUFI_TAG, "Found %d APs", ap_num);
                 }
+                cache_scan_results = true;
             } else {
-                // A connect-owned scan is intentionally not cached by BluFi,
-                // but its driver-owned AP list still has to be released.
-                esp_wifi_clear_ap_list();
+                cleanup_proven = esp_wifi_clear_ap_list() == ESP_OK;
             }
         }
 
-        bool send_list_after_scan = false;
-        uint32_t expected_generation = 0;
-        uint64_t expected_ble_session_state = 0;
-        uint64_t expected_ble_connection_epoch = 0;
+        if (!cleanup_proven) {
+            ESP_LOGE(BLUFI_TAG, "WiFi scan AP-list cleanup failed; recovery required");
+            auto& coordinator = WifiManager::GetInstance().ScanLeaseCoordinator();
+            if (coordinator.RetainFailedCompletion(*lease) &&
+                wifi_scan_controller_.RetainFailedCompletion(
+                    completion.request_id)) {
+                RequestOwnedWifiScanRecovery(*lease);
+            }
+            return false;
+        }
+
         uint64_t expected_wifi_list_dispatch_epoch = 0;
+        bool send_owned_wifi_list = false;
+        bool send_owned_wifi_failure = false;
         std::vector<wifi_ap_record_t> owned_ap_records;
-        {
+        if (cache_scan_results || completion.send_list) {
             std::lock_guard<std::mutex> session_lock(
                 self->provisioning_finalization_mutex_);
-            send_list_after_scan = self->m_send_list_after_scan;
-            expected_generation = self->setup_generation_.load();
-            expected_ble_session_state =
-                self->ble_session_state_.load(std::memory_order_acquire);
-            expected_ble_connection_epoch =
-                self->ble_connection_epoch_.load(std::memory_order_acquire);
-            if (send_list_after_scan) {
+            const bool completion_owner_is_current =
+                completion.owner.setup_generation ==
+                    self->setup_generation_.load(std::memory_order_acquire) &&
+                completion.owner.ble_session_state ==
+                    self->ble_session_state_.load(std::memory_order_acquire) &&
+                completion.owner.ble_connection_epoch ==
+                    self->ble_connection_epoch_.load(std::memory_order_acquire);
+            if (cache_scan_results && completion_owner_is_current) {
+                self->m_ap_records.swap(scanned_ap_records);
+                self->m_ap_records_updated_us = scan_results_updated_us;
+                self->m_ap_records_owner_ = completion.owner;
+            }
+            if (completion.send_list && completion_owner_is_current) {
                 owned_ap_records.swap(self->m_ap_records);
                 self->m_ap_records_updated_us = 0;
-                expected_wifi_list_dispatch_epoch =
-                    self->m_wifi_list_dispatch_epoch_.fetch_add(
-                        1, std::memory_order_acq_rel) + 1;
-                self->m_wifi_list_dispatch_pending_epoch_.store(
-                    expected_wifi_list_dispatch_epoch, std::memory_order_release);
+                self->m_ap_records_owner_.reset();
+                if (owned_ap_records.empty()) {
+                    send_owned_wifi_failure = true;
+                } else {
+                    expected_wifi_list_dispatch_epoch =
+                        self->m_wifi_list_dispatch_epoch_.fetch_add(
+                            1, std::memory_order_acq_rel) + 1;
+                    self->m_wifi_list_dispatch_pending_epoch_.store(
+                        expected_wifi_list_dispatch_epoch, std::memory_order_release);
+                    send_owned_wifi_list = true;
+                }
             }
-            self->m_scan_in_progress = false;
-            self->m_send_list_after_scan = false;
         }
-        if (send_list_after_scan) {
-            self->ScheduleWifiListSend(expected_generation, expected_ble_session_state,
-                                       expected_ble_connection_epoch,
-                                       expected_wifi_list_dispatch_epoch,
-                                       std::move(owned_ap_records));
+
+        auto& coordinator =
+            WifiManager::GetInstance().ScanLeaseCoordinator();
+        bool retain_completion_for_recovery = false;
+        {
+            std::lock_guard<std::mutex> submission_lock(
+                wifi_scan_submission_mutex_);
+            logical_prepared =
+                self->wifi_scan_controller_.PrepareCompletion(
+                    completion.request_id);
+            if (!logical_prepared) {
+                const bool physical_retained =
+                    coordinator.RetainFailedCompletion(*lease);
+                const bool logical_retained = self->wifi_scan_controller_
+                    .RetainFailedCompletion(completion.request_id);
+                retain_completion_for_recovery =
+                    physical_retained && logical_retained;
+            } else {
+                logical_committed =
+                    self->wifi_scan_controller_.CommitPreparedCompletion(
+                        completion.request_id);
+            }
+            if (logical_prepared && !logical_committed) {
+                const bool physical_retained =
+                    coordinator.RetainFailedCompletion(*lease);
+                const bool logical_retained = self->wifi_scan_controller_
+                    .RetainFailedCompletion(completion.request_id);
+                retain_completion_for_recovery =
+                    physical_retained && logical_retained;
+            } else if (logical_committed &&
+                       !coordinator.FinishCompletion(*lease)) {
+                if (coordinator.OwnsExactLease(*lease)) {
+                    const bool physical_retained =
+                        coordinator.RetainFailedCompletion(*lease);
+                    const bool logical_retained = self->wifi_scan_controller_
+                        .RetainCommittedCompletionForRecovery(
+                            completion.request_id);
+                    retain_completion_for_recovery =
+                        physical_retained && logical_retained;
+                } else {
+                    physical_released = true;
+                    finished = self->wifi_scan_controller_
+                        .ReleaseCommittedCompletion(completion.request_id);
+                    logical_released = finished.completion_released;
+                }
+            } else if (logical_committed) {
+                physical_released = true;
+                finished = self->wifi_scan_controller_
+                    .ReleaseCommittedCompletion(completion.request_id);
+                logical_released = finished.completion_released;
+            }
+        }
+        if (retain_completion_for_recovery) {
+            RequestOwnedWifiScanRecovery(*lease);
+            return false;
+        }
+        if (!physical_released || !logical_released) {
+            return false;
+        }
+        bool released_exact_lease = false;
+        {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            if (wifi_scan_lease_.has_value() &&
+                wifi_scan_lease_->lease_id == lease->lease_id) {
+                released_exact_lease = true;
+                wifi_scan_lease_.reset();
+                wifi_scan_request_id_ = 0;
+                wifi_scan_restore_sta_config_ = {};
+                wifi_scan_restore_ap_config_ = {};
+                wifi_scan_restore_sta_config_valid_ = false;
+                wifi_scan_restore_ap_config_valid_ = false;
+            }
+        }
+        if (released_exact_lease) {
+            const BlufiWifiScanLeaseTimer::ExactTuple exact{
+                completion.request_id, *lease};
+            wifi_scan_watchdog_timer_.Disarm(exact);
+            wifi_scan_recovery_retry_timer_.Disarm(exact);
+        }
+        try {
+            if (send_owned_wifi_failure) {
+                self->ScheduleWifiScanFailure(
+                    completion.owner, "scan_completed_without_ap_records");
+            } else if (send_owned_wifi_list) {
+                self->ScheduleWifiListSend(
+                    completion.owner.setup_generation,
+                    completion.owner.ble_session_state,
+                    completion.owner.ble_connection_epoch,
+                    expected_wifi_list_dispatch_epoch,
+                    std::move(owned_ap_records));
+            }
+        } catch (...) {
+        }
+        if (finished.start_pending) {
+            try {
+                self->ScheduleOwnedWifiScanStart(finished.request_id,
+                                                 finished.pending);
+            } catch (...) {
+            }
+        }
+        return true;
+        } catch (...) {
+            if (physical_released) {
+                if (logical_committed && !logical_released) {
+                    try {
+                        finished = wifi_scan_controller_
+                            .ReleaseCommittedCompletion(request_id);
+                        logical_released = finished.completion_released;
+                        if (finished.start_pending) {
+                            ScheduleOwnedWifiScanStart(
+                                finished.request_id, finished.pending);
+                        }
+                    } catch (...) {
+                    }
+                }
+                try {
+                    std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+                    if (lease.has_value() && wifi_scan_lease_.has_value() &&
+                        wifi_scan_lease_->lease_id == lease->lease_id &&
+                        wifi_scan_lease_->driver_incarnation ==
+                            lease->driver_incarnation) {
+                        wifi_scan_lease_.reset();
+                        wifi_scan_request_id_ = 0;
+                    }
+                } catch (...) {
+                }
+                return true;
+            }
+            try {
+                if (lease.has_value()) {
+                    auto& coordinator =
+                        WifiManager::GetInstance().ScanLeaseCoordinator();
+                    const bool physical_retained =
+                        coordinator.RetainFailedCompletion(*lease);
+                    const bool logical_retained = logical_committed
+                        ? wifi_scan_controller_
+                            .RetainCommittedCompletionForRecovery(request_id)
+                        : wifi_scan_controller_.RetainFailedCompletion(
+                            request_id);
+                    if (physical_retained && logical_retained) {
+                        RequestOwnedWifiScanRecovery(*lease);
+                    }
+                }
+            } catch (...) {
+            }
+            return false;
+        }
+}
+
+void Blufi::RequestOwnedWifiScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease) {
+    uint64_t request_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+        if (!wifi_scan_lease_.has_value() ||
+            wifi_scan_lease_->owner != lease.owner ||
+            wifi_scan_lease_->lease_id != lease.lease_id ||
+            wifi_scan_lease_->driver_incarnation !=
+                lease.driver_incarnation) {
+            return;
+        }
+        request_id = wifi_scan_request_id_;
+    }
+    const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
+    if (WifiManager::GetInstance().RequestScanRecovery(lease)) {
+        wifi_scan_recovery_retry_timer_.Disarm(exact);
+        return;
+    }
+    ScheduleWifiScanRecoveryFallback(lease);
+}
+
+void Blufi::ScheduleWifiScanRecoveryFallback(
+        WifiScanLeaseCoordinator::Lease lease) {
+    uint64_t request_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+        if (!wifi_scan_lease_.has_value() ||
+            wifi_scan_lease_->lease_id != lease.lease_id ||
+            wifi_scan_lease_->driver_incarnation !=
+                lease.driver_incarnation) {
+            return;
+        }
+        request_id = wifi_scan_request_id_;
+    }
+    const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
+    if (!wifi_scan_recovery_retry_timer_.Arm(exact, 50LL * 1000)) {
+        HandleWifiScanRecoveryRetry(exact);
+    }
+}
+
+void Blufi::HandleWifiScanRecoveryRetry(
+        BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept {
+    try {
+        bool current = false;
+        {
+            std::lock_guard<std::mutex> lock(wifi_scan_lease_mutex_);
+            current = wifi_scan_lease_.has_value() &&
+                wifi_scan_request_id_ == exact.request_id &&
+                wifi_scan_lease_->owner == exact.lease.owner &&
+                wifi_scan_lease_->lease_id == exact.lease.lease_id &&
+                wifi_scan_lease_->driver_incarnation ==
+                    exact.lease.driver_incarnation;
+        }
+        if (current) {
+            WifiManager::GetInstance().RequestScanRecovery(exact.lease);
+        }
+    } catch (...) {
+        try {
+            WifiManager::GetInstance().RequestScanRecovery(exact.lease);
+        } catch (...) {
         }
     }
 }
@@ -2405,6 +3439,7 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
     switch (event) {
         case ESP_BLUFI_EVENT_INIT_FINISH:
             ESP_LOGI(BLUFI_TAG, "BLUFI init finish");
+            LogBlufiHeapSnapshot("blufi_init_finish");
             {
                 static const std::string device_name = GetBlufiDeviceName();
                 ESP_LOGI(BLUFI_TAG, "BLUFI advertising started");
@@ -2415,6 +3450,11 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             ESP_LOGI(BLUFI_TAG, "BLUFI deinit finish");
             break;
         case ESP_BLUFI_EVENT_BLE_CONNECT: {
+            uint32_t connected_generation = 0;
+            uint64_t accepting_state_snapshot = 0;
+            uint64_t connected_state_snapshot = 0;
+            uint64_t previous_connection_epoch = 0;
+            uint64_t connected_epoch = 0;
             {
                 std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
                 uint64_t expected_state = ble_session_state_.load(std::memory_order_acquire);
@@ -2422,20 +3462,29 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                     ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect while host is stopping");
                     break;
                 }
-                const uint32_t connection_generation =
+                connected_generation =
                     DecodeBleSessionGeneration(expected_state);
+                accepting_state_snapshot = expected_state;
                 const uint64_t connected_state = EncodeBleSessionState(
-                    connection_generation, BleSessionPhase::kConnected);
+                    connected_generation, BleSessionPhase::kConnected);
                 if (!ble_session_state_.compare_exchange_strong(
                         expected_state, connected_state,
                         std::memory_order_acq_rel, std::memory_order_acquire)) {
                     ESP_LOGW(BLUFI_TAG, "Ignoring BLE connect invalidated by host transition");
                     break;
                 }
-                ble_connection_epoch_.fetch_add(1, std::memory_order_acq_rel);
+                connected_state_snapshot = connected_state;
+                previous_connection_epoch =
+                    ble_connection_epoch_.fetch_add(1, std::memory_order_acq_rel);
+                connected_epoch = previous_connection_epoch + 1;
                 m_ble_is_connected = true;
             }
+            UpdateWifiScanSession(
+                connected_generation, accepting_state_snapshot,
+                previous_connection_epoch, connected_generation,
+                connected_state_snapshot, connected_epoch);
             ESP_LOGI(BLUFI_TAG, "BLUFI ble connect");
+            LogBlufiHeapSnapshot("ble_connect");
             // A successful client connect proves re-advertising still works, so
             // clear the re-advertise cap. This makes the cap count CONSECUTIVE
             // failed auto-readvertises (a flapping peer that never connects),
@@ -2455,6 +3504,8 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
         case ESP_BLUFI_EVENT_BLE_DISCONNECT: {
             bool owns_session = false;
             uint32_t disconnected_generation = 0;
+            uint64_t disconnected_state_snapshot = 0;
+            uint64_t disconnected_epoch = 0;
             {
                 std::lock_guard<std::mutex> session_lock(provisioning_finalization_mutex_);
                 uint64_t connected_state =
@@ -2466,11 +3517,23 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                     owns_session = ble_session_state_.compare_exchange_strong(
                         connected_state, disconnected_state,
                         std::memory_order_acq_rel, std::memory_order_acquire);
+                    if (owns_session) {
+                        disconnected_state_snapshot = disconnected_state;
+                    }
                 }
+                disconnected_epoch =
+                    ble_connection_epoch_.load(std::memory_order_acquire);
                 m_ble_is_connected = false;
-                m_send_list_after_scan = false;
+                std::vector<wifi_ap_record_t>().swap(m_ap_records);
+                m_ap_records_updated_us = 0;
+                m_ap_records_owner_.reset();
                 m_wifi_list_dispatch_epoch_.fetch_add(1, std::memory_order_acq_rel);
                 m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);
+            }
+            if (owns_session) {
+                InvalidateWifiScanSession(
+                    disconnected_generation, disconnected_state_snapshot,
+                    disconnected_epoch);
             }
             ESP_LOGI(BLUFI_TAG, "BLUFI ble disconnect");
             _security_deinit();
@@ -2498,6 +3561,10 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                             expected_disconnected, accepting_state,
                             std::memory_order_acq_rel, std::memory_order_acquire)) {
                         ++ble_readvertise_count_;
+                        UpdateWifiScanSession(
+                            disconnected_generation, expected_disconnected,
+                            disconnected_epoch, disconnected_generation,
+                            accepting_state, disconnected_epoch);
                         ESP_LOGI(BLUFI_TAG, "BLE re-advertise %d/%d after disconnect",
                                  ble_readvertise_count_, kMaxBleReadvertiseAttempts);
                         StartTbotBlufiAdvertising(GetBlufiDeviceName().c_str());
@@ -2601,30 +3668,62 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             if (!_require_secure_session_for_credentials()) {
                 break;
             }
+            if (param->sta_ssid.ssid_len == 0 ||
+                param->sta_ssid.ssid_len > kMaxWifiSsidBytes) {
+                ESP_LOGW(BLUFI_TAG, "Reject invalid STA SSID length");
+                staged_wifi_credentials_.Invalidate();
+                memset(m_sta_config.sta.ssid, 0,
+                       sizeof(m_sta_config.sta.ssid));
+                m_sta_config_ssid_len_ = 0;
+                memset(m_sta_config.sta.password, 0,
+                       sizeof(m_sta_config.sta.password));
+                m_sta_is_connecting.store(false);
+                SendStationConnectFailureReport();
+                break;
+            }
             // SSIDs are length-delimited and may legally occupy all 32 bytes.
-            size_t ssid_n = std::min<size_t>(param->sta_ssid.ssid_len,
-                                             sizeof(m_sta_config.sta.ssid));
+            const size_t ssid_n = param->sta_ssid.ssid_len;
             memset(m_sta_config.sta.ssid, 0, sizeof(m_sta_config.sta.ssid));
             memcpy(m_sta_config.sta.ssid, param->sta_ssid.ssid, ssid_n);
             m_sta_config_ssid_len_ = ssid_n;
+            const uint64_t candidate_epoch = staged_wifi_credentials_.UpdateSsid(
+                std::string(reinterpret_cast<const char*>(param->sta_ssid.ssid), ssid_n));
             m_sta_is_connecting.store(true);
             // Do NOT log the SSID value: the home network name is user PII and a
             // serial/log dump would leak it. Mirror the RECV_STA_PASSWD handler
             // below, which deliberately logs no credential value.
             ESP_LOGI(BLUFI_TAG, "Recv STA SSID (len=%u)", static_cast<unsigned>(ssid_n));
+            if (staged_wifi_credentials_.FallbackEpoch() == candidate_epoch) {
+                ScheduleStationConnectFallback(candidate_epoch);
+            }
             break;
         }
         case ESP_BLUFI_EVENT_RECV_STA_PASSWD: {
             if (!_require_secure_session_for_credentials()) {
                 break;
             }
-            // Bound the copy as above. Never log the password value.
-            size_t passwd_n = std::min<size_t>(param->sta_passwd.passwd_len,
-                                               sizeof(m_sta_config.sta.password) - 1);
-            memcpy(m_sta_config.sta.password, param->sta_passwd.passwd, passwd_n);
-            m_sta_config.sta.password[passwd_n] = '\0';
+            if (param->sta_passwd.passwd_len > kMaxWifiPasswordBytes) {
+                ESP_LOGW(BLUFI_TAG, "Reject invalid STA password length");
+                staged_wifi_credentials_.Invalidate();
+                memset(m_sta_config.sta.ssid, 0,
+                       sizeof(m_sta_config.sta.ssid));
+                m_sta_config_ssid_len_ = 0;
+                memset(m_sta_config.sta.password, 0,
+                       sizeof(m_sta_config.sta.password));
+                m_sta_is_connecting.store(false);
+                SendStationConnectFailureReport();
+                break;
+            }
+            // The staged helper is the sole password owner. Never retain a
+            // plaintext copy in the legacy wifi_config_t or log its value.
+            const size_t passwd_n = param->sta_passwd.passwd_len;
+            const uint64_t candidate_epoch = staged_wifi_credentials_.UpdatePassword(
+                std::string(reinterpret_cast<const char*>(param->sta_passwd.passwd),
+                            passwd_n));
             ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD");
-            ScheduleStationConnectFallback();
+            if (staged_wifi_credentials_.FallbackEpoch() == candidate_epoch) {
+                ScheduleStationConnectFallback(candidate_epoch);
+            }
             break;
         }
         case ESP_BLUFI_EVENT_GET_WIFI_LIST: {
@@ -2633,34 +3732,39 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 ESP_LOGI(BLUFI_TAG, "WiFi list dispatch already pending");
                 break;
             }
-            // Case 1: a scan is already in flight (init scan or refresh scan started by
-            // the previous _send_wifi_list()). Defer the response to its done handler
-            // instead of blocking the BluFi task.
-            if (m_scan_in_progress) {
-                m_scan_should_save_ssid = true;
-                m_send_list_after_scan = true;
-                break;
-            }
-            // Case 2: cache is populated and fresh. Respond immediately.
-            if (!m_ap_records.empty() && IsWifiScanCacheFresh()) {
-                auto ap_records = std::move(m_ap_records);
+            std::vector<wifi_ap_record_t> cached_ap_records;
+            {
+                std::lock_guard<std::mutex> session_lock(
+                    provisioning_finalization_mutex_);
+                const uint32_t current_generation =
+                    setup_generation_.load(std::memory_order_acquire);
+                const uint64_t current_session =
+                    ble_session_state_.load(std::memory_order_acquire);
+                const uint64_t current_connection =
+                    ble_connection_epoch_.load(std::memory_order_acquire);
+                const bool cache_owner_is_current =
+                    m_ap_records_owner_.has_value() &&
+                    m_ap_records_owner_->setup_generation == current_generation &&
+                    m_ap_records_owner_->ble_session_state == current_session &&
+                    m_ap_records_owner_->ble_connection_epoch == current_connection;
+                if (cache_owner_is_current && !m_ap_records.empty() &&
+                    IsWifiScanCacheFresh()) {
+                    cached_ap_records.swap(m_ap_records);
+                } else {
+                    m_ap_records.clear();
+                }
                 m_ap_records_updated_us = 0;
-                _send_wifi_list(std::move(ap_records));
+                m_ap_records_owner_.reset();
+            }
+            // Sending can stop the Wi-Fi radio and allocate BLE buffers, so it
+            // must stay outside the cache/session critical section.
+            if (!cached_ap_records.empty()) {
+                _send_wifi_list(std::move(cached_ap_records));
                 break;
             }
-            // Case 3: no fresh cache (e.g. driver was stopped during a
-            // config-mode transition, init scan never completed, or cache is
-            // stale). Trigger a real scan and dispatch from the scan-done
-            // handler. If the scan cannot start, return an error frame so the
-            // App exits its wait state instead of timing out.
-            m_ap_records.clear();
-            m_ap_records_updated_us = 0;
-            m_scan_should_save_ssid = true;
-            m_send_list_after_scan = true;
-            if (!start_wifi_scan()) {
-                m_send_list_after_scan = false;
-                esp_blufi_send_error_info(ESP_BLUFI_WIFI_SCAN_FAIL);
-            }
+            // No fresh cache: coalesce this logical request with any owned
+            // physical scan and dispatch only from its completion callback.
+            RequestWifiListScan(true, true);
             break;
         }
         case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA: {
@@ -2829,7 +3933,7 @@ void Blufi::_ble_setup_timeout_cb(void* arg) {
     });
 }
 
-void Blufi::StartBleSetupTimeout(int seconds) {
+bool Blufi::StartBleSetupTimeoutWithLifecycleOwned(int seconds) {
     const uint32_t generation = ble_timeout_generation_.fetch_add(1) + 1;
     std::lock_guard<std::mutex> lock(ble_setup_timer_mutex_);
     if (ble_setup_timer_ != nullptr) {
@@ -2851,16 +3955,22 @@ void Blufi::StartBleSetupTimeout(int seconds) {
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to create BLE setup timer: %s", esp_err_to_name(err));
         ble_setup_timer_ = nullptr;
-        return;
+        return false;
     }
     err = esp_timer_start_once(ble_setup_timer_, static_cast<uint64_t>(seconds) * 1000000ULL);
     if (err != ESP_OK) {
         ESP_LOGE(BLUFI_TAG, "Failed to start BLE setup timer: %s", esp_err_to_name(err));
         esp_timer_delete(ble_setup_timer_);
         ble_setup_timer_ = nullptr;
-        return;
+        return false;
     }
     ESP_LOGI(BLUFI_TAG, "BLE setup timer armed %ds", seconds);
+    return true;
+}
+
+void Blufi::StartBleSetupTimeout(int seconds) {
+    std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
+    StartBleSetupTimeoutWithLifecycleOwned(seconds);
 }
 
 void Blufi::CancelBleSetupTimeout() {

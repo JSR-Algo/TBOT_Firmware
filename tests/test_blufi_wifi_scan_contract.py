@@ -1,4 +1,5 @@
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,12 @@ def read(path: str) -> str:
 
 
 def function_body(text: str, signature: str) -> str:
+    signature = {
+        "bool Blufi::StartOwnedWifiScan":
+            "BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan",
+        "void Blufi::ConsumeOwnedWifiScanCompletion":
+            "bool Blufi::ConsumeOwnedWifiScanCompletion",
+    }.get(signature, signature)
     start = text.index(signature)
     brace = text.index("{", start)
     depth = 0
@@ -30,10 +37,1647 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def test_all_wifi_scan_start_calls_use_global_lease():
+    result = subprocess.run(
+        [
+            "rg", "-n", "--glob", "!build/**", "--glob", "!managed_components/**",
+            "--glob", "!docs/**", "--glob", "!tests/**", "--glob", "!scripts/**",
+            r"esp_wifi_scan_start\s*\(", ".",
+        ],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    callers = {line.split(":", 1)[0].removeprefix("./") for line in result.stdout.splitlines()}
+    assert callers == {
+        "components/esp-wifi-connect/wifi_station.cc",
+        "components/esp-wifi-connect/wifi_configuration_ap.cc",
+        "main/boards/common/blufi.cpp",
+        "main/boards/m5stack-cardputer-adv/wifi_config_ui.cc",
+    }
+
+    cardputer = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    scan = function_body(
+        cardputer, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
+    assert "Owner::kBlockingUi" in cardputer
+    assert "RegisterScanRecoveryOwner" in cardputer
+    assert "esp_event_handler_instance_register" in cardputer
+    assert cardputer.index("esp_event_handler_instance_register") < cardputer.index(
+        "esp_wifi_scan_start("
+    )
+    assert scan.index("TryAcquire(") < scan.index("esp_wifi_scan_start(")
+    assert scan.index("esp_wifi_scan_start(") < scan.index("CommitSubmission(")
+    assert "ObserveScanDone" in cardputer
+    assert "commit.consume_latched" in scan
+    assert "WaitForMatchingCompletion" in scan
+    assert scan.index("WaitForMatchingCompletion") < scan.index("CleanupScanList")
+    cleanup = function_body(cardputer, "bool CleanupScanList")
+    assert cleanup.index("esp_wifi_scan_get_ap_num") < cleanup.index(
+        "esp_wifi_scan_get_ap_records"
+    )
+    assert scan.index("CleanupScanList") < scan.rindex("FinishNormally")
+    assert "esp_wifi_clear_ap_list" in cleanup
+    assert "RequestScanRecovery" in cardputer
+    assert "BeginRecovery" in cardputer
+    assert "CompleteRecovery" in cardputer
+    assert "DrainDefaultEventLoop" not in cardputer
+    assert "password" not in scan.lower()
+
+
+def test_blocking_wifi_scan_owner_native_model():
+    subprocess.run(
+        [str(ROOT / "scripts/run_host_native_blocking_wifi_scan_lease_test.sh")],
+        cwd=ROOT,
+        check=True,
+    )
+
+
+def test_default_event_loop_barrier_has_one_bounded_public_api():
+    header = read(
+        "components/esp-wifi-connect/include/default_event_loop_barrier.h"
+    )
+
+    assert "bool DrainDefaultEventLoop(std::chrono::milliseconds timeout);" in header
+    assert "DefaultEventLoopScanDrainExecutor" not in header
+    assert "WifiScanLeaseCoordinator" not in header
+    assert "std::function" not in header
+    assert "template <" not in header
+    assert "bool barrier_drained" not in header
+
+
+def test_default_event_loop_barrier_registers_one_process_lifetime_handler():
+    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
+    body = function_body(source, "bool DrainDefaultEventLoop")
+
+    state = source[
+        source.index("class DefaultEventLoopBarrier") :
+        source.index("bool DrainDefaultEventLoop")
+    ]
+    assert "xSemaphoreCreateBinary" in state
+    assert "esp_event_handler_instance_register" in state
+    assert "esp_event_handler_instance_unregister" not in source
+    assert "static DefaultEventLoopBarrier* barrier = nullptr" in source
+    assert "static std::mutex initialization_mutex" in source
+    assert "std::lock_guard<std::mutex> initialization_lock" in source
+    assert "if (barrier == nullptr)" in source
+    assert "barrier = new (std::nothrow) DefaultEventLoopBarrier" in source
+    assert "xSemaphoreCreateBinary" not in body
+    assert "esp_event_handler_instance_register" not in body
+    assert "vSemaphoreDelete" not in body
+    assert state.count("vSemaphoreDelete") == 1
+    register_failure = state.index("register_result != ESP_OK")
+    assert register_failure < state.index("vSemaphoreDelete", register_failure)
+    assert "ESP_EVENT_DEFINE_BASE" in source
+    assert "ESP_EVENT_ANY_BASE" not in source
+    assert "ESP_EVENT_ANY_ID" not in source
+    assert "kMaximumBarrierWait{1000}" in source
+    assert "std::min(timeout, kMaximumBarrierWait)" in source
+    assert "portMAX_DELAY" not in source
+
+
+def test_default_event_loop_barrier_serializes_and_rejects_late_generations():
+    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
+    state = source[source.index("class DefaultEventLoopBarrier") :]
+
+    assert "std::lock_guard<std::mutex> lock(mutex_)" in state
+    assert state.count("std::lock_guard<std::mutex> handler_lock(handler_mutex_)") >= 2
+    assert "std::atomic<uint64_t> active_barrier_id_" in state
+    assert "posted_barrier_id == self->active_barrier_id_.load" in state
+    assert "active_barrier_id_.store(0" in state
+    assert "esp_event_post" in state
+    assert "xSemaphoreTake" in state
+
+
+def test_default_event_loop_barrier_has_no_scan_executor_or_driver_actions():
+    header = read(
+        "components/esp-wifi-connect/include/default_event_loop_barrier.h"
+    )
+    source = read("components/esp-wifi-connect/default_event_loop_barrier.cc")
+
+    combined = header + source
+    assert "DefaultEventLoopScanDrainExecutor" not in combined
+    assert "WifiScanLeaseCoordinator" not in combined
+    assert "DrainProof" not in combined
+    assert "esp_wifi_" not in combined
+
+
+def test_default_event_loop_barrier_is_built_by_wifi_component():
+    cmake = read("components/esp-wifi-connect/CMakeLists.txt")
+
+    assert cmake.count('"default_event_loop_barrier.cc"') == 2
+
+
+def test_default_event_loop_barrier_host_cleanup_model():
+    subprocess.run(
+        [str(ROOT / "scripts/run_host_native_default_event_loop_barrier_test.sh")],
+        cwd=ROOT,
+        check=True,
+    )
+
+
+def test_shared_scan_recovery_executor_is_the_only_proof_factory():
+    header = read(
+        "components/esp-wifi-connect/include/wifi_scan_recovery_executor.h"
+    )
+    source = read("components/esp-wifi-connect/wifi_scan_recovery_executor.cc")
+    coordinator = read(
+        "components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
+    )
+    cmake = read("components/esp-wifi-connect/CMakeLists.txt")
+
+    assert "class WifiScanRecoveryExecutor" in header
+    assert "WifiScanLeaseCoordinator::RecoveryProof Execute(" in header
+    assert "WifiScanRecoveryExecutor(const WifiScanRecoveryExecutor&) = delete" in header
+    assert "static std::mutex& ProcessMutex();" in header
+    assert "std::mutex mutex_;" not in header
+    assert "friend class WifiScanRecoveryExecutor;" in coordinator
+    assert coordinator.count("friend class WifiScanRecoveryExecutor;") == 2
+    assert "const WifiScanLeaseCoordinator* coordinator_identity_" in coordinator
+    assert source.count(
+        "recovery.recovery_id(), recovery.coordinator_identity_, true, true"
+    ) == 1
+    assert '"wifi_scan_recovery_executor.cc"' in cmake
+
+
+def test_shared_scan_recovery_executor_has_exact_fail_closed_choreography():
+    source = read("components/esp-wifi-connect/wifi_scan_recovery_executor.cc")
+    execute = function_body(
+        source, "WifiScanRecoveryExecutor::Execute"
+    )
+
+    operations = (
+        "esp_wifi_scan_stop()",
+        "esp_wifi_stop()",
+        "esp_wifi_deinit()",
+        "DrainDefaultEventLoop(std::chrono::milliseconds(1000))",
+        "esp_wifi_init(&cfg)",
+    )
+    positions = [execute.index(operation) for operation in operations]
+    assert positions == sorted(positions)
+    assert "cfg.nvs_enable = false;" in execute
+    assert "ESP_ERR_WIFI_NOT_INIT" in source
+    assert "ESP_ERR_WIFI_NOT_STARTED" in source
+    assert "ESP_ERR_WIFI_STATE" in source
+    assert "ProcessMutex()" in source
+    assert "esp_netif_init" not in source
+    assert "esp_event_loop_create_default" not in source
+    assert "nvs_flash" not in source
+
+
+def test_wifi_manager_exposes_process_lifetime_scan_coordinator_without_locking():
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    source = read("components/esp-wifi-connect/wifi_manager.cc")
+
+    assert '#include "wifi_scan_lease_coordinator.h"' in header
+    assert "WifiScanLeaseCoordinator& ScanLeaseCoordinator()" in header
+    accessor = function_body(header, "WifiScanLeaseCoordinator& ScanLeaseCoordinator()")
+    assert "return scan_lease_coordinator_;" in accessor
+    assert "mutex_" not in accessor
+    assert "WifiScanLeaseCoordinator scan_lease_coordinator_;" in header
+    assert "static WifiManager* instance = new WifiManager" in source
+    assert "std::make_unique<WifiStation>(scan_lease_coordinator_)" in source
+    assert "std::make_unique<WifiConfigurationAp>(scan_lease_coordinator_)" in source
+
+
+def test_station_scan_lease_uses_exact_callback_or_recovery_ownership():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    start = function_body(source, "bool WifiStation::StartOwnedScan")
+    handler = function_body(source, "void WifiStation::WifiEventHandler")
+    stop = function_body(source, "void WifiStation::Stop")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+
+    assert "std::mutex scan_mutex_;" in header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;" in header
+    assert "scan_in_progress_" not in header + source
+    assert "TryAcquire(WifiScanLeaseCoordinator::Owner::kStation)" in start
+    assert start.index("TryAcquire(") < start.index("esp_wifi_scan_start(")
+    assert start.index("esp_wifi_scan_start(") < start.index("CommitSubmission(")
+    assert "commit.consume_latched" in start
+    assert "CompleteOwnedScan(lease)" in start
+    assert handler.index("ObserveScanDone(lease)") < handler.index(
+        "CompleteOwnedScan(lease)"
+    )
+    assert completion.index("esp_wifi_scan_get_ap_num") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert completion.index("esp_wifi_clear_ap_list") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert stop.index("esp_timer_stop") < stop.index("BeginDrain(lease)")
+    assert stop.index("BeginDrain(lease)") < stop.index("esp_wifi_scan_stop")
+    assert "esp_event_handler_instance_unregister(WIFI_EVENT" not in stop
+    assert "scan_lease_.reset()" not in stop
+
+
+def test_config_ap_scan_lease_uses_one_owned_start_and_retained_handler():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    start_mode = function_body(source, "void WifiConfigurationAp::Start")
+    start_scan = function_body(source, "bool WifiConfigurationAp::StartOwnedScan")
+    handler = function_body(source, "void WifiConfigurationAp::WifiEventHandler")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
+    completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
+
+    assert "std::mutex scan_mutex_;" in header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;" in header
+    assert source.count("esp_wifi_scan_start(") == 1
+    assert "StartOwnedScan();" in start_mode
+    assert "StartOwnedScan();" in source[source.index(".callback =") : source.index(".arg = this")]
+    assert "TryAcquire(WifiScanLeaseCoordinator::Owner::kConfigAp)" in start_scan
+    assert start_scan.index("TryAcquire(") < start_scan.index("esp_wifi_scan_start(")
+    assert start_scan.index("esp_wifi_scan_start(") < start_scan.index(
+        "CommitSubmission("
+    )
+    assert "commit.consume_latched" in start_scan
+    assert handler.index("ObserveScanDone(lease)") < handler.index(
+        "CompleteOwnedScan(lease)"
+    )
+    assert completion.index("esp_wifi_scan_get_ap_num") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert completion.index("esp_wifi_clear_ap_list") < completion.index(
+        "FinishCompletion(lease)"
+    )
+    assert stop.index("esp_timer_stop") < stop.index("BeginDrain(lease)")
+    assert stop.index("BeginDrain(lease)") < stop.index("esp_wifi_scan_stop")
+    assert "esp_event_handler_instance_unregister(WIFI_EVENT" not in stop
+    assert "scan_lease_.reset()" not in stop
+
+
+def test_station_and_config_stop_never_cancel_a_foreign_scan():
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    config = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    station_stop = function_body(station, "void WifiStation::Stop")
+    config_stop = function_body(config, "bool WifiConfigurationAp::Stop")
+    config_connect = function_body(config, "bool WifiConfigurationAp::ConnectToWifi")
+
+    for body in (station_stop, config_stop, config_connect):
+        owned = body.index("if (scan_lease_.has_value())")
+        scan_stop = body.index("esp_wifi_scan_stop()")
+        assert owned < scan_stop
+        guarded = body[owned:scan_stop]
+        assert "const auto lease = *scan_lease_" in guarded
+        assert "BeginDrain(lease)" in guarded
+
+
+def test_restarted_station_and_config_retry_while_old_callback_debt_drains():
+    station = function_body(
+        read("components/esp-wifi-connect/wifi_station.cc"),
+        "bool WifiStation::StartOwnedScan",
+    )
+    config = function_body(
+        read("components/esp-wifi-connect/wifi_configuration_ap.cc"),
+        "bool WifiConfigurationAp::StartOwnedScan",
+    )
+
+    for body in (station, config):
+        assert "local_callback_debt = scan_lease_.has_value()" in body
+        assert body.index("local_callback_debt = scan_lease_.has_value()") < body.index(
+            "esp_timer_start_once("
+        )
+
+
+def test_station_submission_stop_and_completion_share_one_lifecycle_lock():
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    start = function_body(source, "bool WifiStation::StartOwnedScan")
+    stop = function_body(source, "void WifiStation::Stop")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in start
+    assert start.index("lifecycle_lock") < start.index("TryAcquire(")
+    assert start.index("TryAcquire(") < start.index("esp_wifi_scan_start(")
+    assert start.index("esp_wifi_scan_start(") < start.index("CommitSubmission(")
+    assert start.index("CommitSubmission(") < start.index("lifecycle_lock.unlock()")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in stop
+    assert stop.index("lifecycle_lock") < stop.index("scans_enabled_ = false")
+    assert stop.index("scans_enabled_ = false") < stop.index("BeginDrain(")
+    assert stop.index("BeginDrain(") < stop.index("esp_wifi_scan_stop(")
+    assert stop.index("esp_wifi_scan_stop(") < stop.index("esp_wifi_stop(")
+    assert stop.index("esp_wifi_stop(") < stop.index("lifecycle_lock.unlock()")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in completion
+    assert completion.index("lifecycle_lock") < completion.index("esp_wifi_scan_get_ap_num")
+    assert "HandleScanResultLocked(" in completion
+    assert completion.index("lifecycle_lock.unlock()") < completion.index(
+        "HandleScanResultLocked("
+    )
+
+
+def test_config_submission_connect_stop_and_publish_share_lifecycle_lock():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    start = function_body(source, "bool WifiConfigurationAp::StartOwnedScan")
+    connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
+    completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in start
+    assert start.index("lifecycle_lock") < start.index("TryAcquire(")
+    assert start.index("TryAcquire(") < start.index("esp_wifi_scan_start(")
+    assert start.index("CommitSubmission(") < start.index("lifecycle_lock.unlock()")
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in connect
+    assert connect.index("lifecycle_lock") < connect.index("BeginDrain(")
+    assert connect.index("BeginDrain(") < connect.index("esp_wifi_scan_stop(")
+    assert connect.index("esp_wifi_scan_stop(") < connect.index(
+        "lifecycle_lock.unlock()"
+    )
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in stop
+    assert stop.index("lifecycle_lock") < stop.index("scans_enabled_ = false")
+    assert stop.index("BeginDrain(") < stop.index("esp_wifi_scan_stop(")
+    assert stop.index("lifecycle_lock.unlock()") < stop.index(
+        "FinishConnectionAttemptBoundary(0, 0, true)"
+    )
+    assert "ap_records_.clear()" in stop
+
+    assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in completion
+    assert completion.index("lifecycle_lock") < completion.index("esp_wifi_scan_get_ap_num")
+    assert completion.index("ap_records_.swap(scanned_records)") < completion.index(
+        "lifecycle_lock.unlock()"
+    )
+
+
+def test_station_uses_session_operation_permits_for_all_emitting_handlers():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+    wifi_handler = function_body(source, "void WifiStation::WifiEventHandler")
+    ip_handler = function_body(source, "void WifiStation::IpEventHandler")
+    stop = function_body(source, "void WifiStation::Stop")
+
+    assert "std::condition_variable session_operations_drained_;" in header
+    assert "size_t in_flight_session_operations_ = 0;" in header
+    assert "bool TryBeginSessionOperationLocked(uint64_t session_id);" in header
+    assert "void FinishSessionOperation();" in header
+
+    assert "expected_session = lease_session_id_" in completion
+    assert "TryBeginSessionOperationLocked(expected_session)" in completion
+    assert completion.index("TryBeginSessionOperationLocked") < completion.index(
+        "lifecycle_lock.unlock()"
+    )
+    assert completion.index("lifecycle_lock.unlock()") < completion.index(
+        "StartConnectForSession("
+    )
+    assert completion.index("StartConnectForSession(") < completion.index(
+        "FinishSessionOperation()"
+    )
+
+    disconnected = wifi_handler[
+        wifi_handler.index("WIFI_EVENT_STA_DISCONNECTED") :
+    ]
+    assert "TryBeginSessionOperationLocked(session_id)" in disconnected
+    assert disconnected.index("TryBeginSessionOperationLocked") < disconnected.index(
+        "esp_wifi_connect()"
+    )
+    assert disconnected.index("FinishSessionOperation()") < disconnected.index(
+        "on_disconnected_("
+    )
+
+    assert "TryBeginSessionOperationLocked(session_id)" in ip_handler
+    assert ip_handler.index("TryBeginSessionOperationLocked") < ip_handler.index(
+        "FinishSessionOperation()"
+    )
+    assert ip_handler.index("FinishSessionOperation()") < ip_handler.index(
+        "on_connected_("
+    )
+    disable = stop.index("scans_enabled_ = false")
+    invalidate = stop.index("++scan_session_id_")
+    wait = stop.index("session_operations_drained_.wait(")
+    clear = stop.index("connect_queue_.clear()")
+    assert disable < invalidate < wait < clear
+
+
+def test_wifi_manager_never_waits_for_station_stop_under_manager_mutex():
+    source = read("components/esp-wifi-connect/wifi_manager.cc")
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+
+    assert "uint64_t lifecycle_generation_ = 0;" in header
+    assert "bool lifecycle_transition_in_progress_ = false;" in header
+    for signature in (
+        "void WifiManager::StopStation",
+        "void WifiManager::StartConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        body = function_body(source, signature)
+        stop = body.index("station->Stop()") if "station->Stop()" in body else body.index(
+            "station_to_stop->Stop()"
+        )
+        assert body.rfind("lock.unlock()", 0, stop) != -1
+        assert "transition_generation" in body
+
+
+def test_station_external_callbacks_use_reentrant_session_gate_after_permit_finish():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    stop = function_body(source, "void WifiStation::Stop")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+    wifi_handler = function_body(source, "void WifiStation::WifiEventHandler")
+    ip_handler = function_body(source, "void WifiStation::IpEventHandler")
+    dispatch = function_body(source, "void WifiStation::DispatchSessionCallback")
+
+    assert "std::recursive_mutex session_callback_mutex_;" in header
+    assert "void DispatchSessionCallback(" in header
+    assert stop.index("session_callback_mutex_") < stop.index("scan_mutex_")
+    assert dispatch.index("session_callback_mutex_") < dispatch.index("scan_mutex_")
+    assert "scans_enabled_ && expected_session == scan_session_id_" in dispatch
+
+    assert completion.index("FinishSessionOperation()") < completion.index(
+        "DispatchSessionCallback("
+    )
+    sta_start = wifi_handler[
+        wifi_handler.index("WIFI_EVENT_STA_START") :
+        wifi_handler.index("WIFI_EVENT_SCAN_DONE")
+    ]
+    assert sta_start.index("FinishSessionOperation()") < sta_start.index(
+        "DispatchSessionCallback("
+    )
+    disconnected = wifi_handler[wifi_handler.index("WIFI_EVENT_STA_DISCONNECTED") :]
+    assert disconnected.index("FinishSessionOperation()") < disconnected.index(
+        "DispatchSessionCallback("
+    )
+    assert ip_handler.index("FinishSessionOperation()") < ip_handler.index(
+        "DispatchSessionCallback("
+    )
+
+    for callback in ("on_scan_begin_", "on_connect_", "on_connected_", "on_disconnected_"):
+        assert f"DispatchSessionCallback" in source
+        uses = [m.start() for m in re.finditer(re.escape(callback + "("), source)]
+        assert uses
+        for use in uses:
+            prefix = source[max(0, use - 500) : use]
+            assert "DispatchSessionCallback(" in prefix
+
+
+def test_station_retry_is_post_permit_and_exact_session_scoped():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    completion = function_body(source, "void WifiStation::CompleteOwnedScan")
+    handler = function_body(source, "void WifiStation::WifiEventHandler")
+    retry = function_body(source, "void WifiStation::ScheduleScanRetry")
+
+    assert "void ScheduleScanRetry(uint64_t expected_session" in header
+    assert "expected_session == scan_session_id_" in retry
+    assert completion.index("FinishSessionOperation()") < completion.index(
+        "ScheduleScanRetry("
+    )
+    disconnected = handler[handler.index("WIFI_EVENT_STA_DISCONNECTED") :]
+    assert disconnected.index("FinishSessionOperation()") < disconnected.index(
+        "ScheduleScanRetry("
+    )
+
+    scan_result = function_body(source, "WifiStation::HandleScanResultLocked")
+    assert "ScheduleScanRetry(" not in scan_result
+    assert "scan_mutex_" not in scan_result
+
+
+def test_config_connect_waiter_is_exact_attempt_scoped_and_cancelled_by_stop():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
+    wifi_handler = function_body(source, "void WifiConfigurationAp::WifiEventHandler")
+    ip_handler = function_body(source, "void WifiConfigurationAp::IpEventHandler")
+
+    assert "WIFI_CANCEL_BIT" in source
+    assert "uint64_t connection_attempt_id_ = 0;" in header
+    assert "uint64_t active_connection_attempt_id_ = 0;" in header
+    assert "uint64_t active_connection_session_id_ = 0;" in header
+    assert "std::condition_variable connection_waiter_drained_;" in header
+    assert "WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | WIFI_CANCEL_BIT" in connect
+    assert "attempt_id == active_connection_attempt_id_" in connect
+    assert "attempt_session == active_connection_session_id_" in connect
+    assert "ScheduleScanRetry(attempt_session" in connect
+    assert "xEventGroupSetBits(event_group_, WIFI_CANCEL_BIT)" in stop
+    assert "connection_waiter_drained_.wait(" in stop
+    assert "FinishConnectionAttemptBoundary(" in connect
+    assert "if (!connection_boundary_ready_)" in connect
+    boundary = function_body(
+        source, "bool WifiConfigurationAp::FinishConnectionAttemptBoundary"
+    )
+    drains = [m.start() for m in re.finditer("DrainDefaultEventLoop\\(", boundary)]
+    assert len(drains) == 2
+    clear = boundary.index("xEventGroupClearBits(")
+    disconnect = boundary.index("esp_wifi_disconnect()")
+    wait = boundary.index("xEventGroupWaitBits(")
+    assert drains[0] < clear < disconnect < wait < drains[1]
+    assert "WIFI_ATTEMPT_BOUNDARY_BIT" in boundary
+    assert "active_connection_attempt_id_ = 0" in boundary
+    assert "attempt_id != active_connection_attempt_id_" in boundary
+    assert "attempt_session != active_connection_session_id_" in boundary
+    assert boundary.index("active_connection_attempt_id_ = 0") < boundary.index(
+        "esp_wifi_disconnect()"
+    )
+    assert "connection_boundary_ready_ = predrained" in boundary
+    for handler in (wifi_handler, ip_handler):
+        assert "active_connection_attempt_id_ != 0" in handler
+        assert "active_connection_session_id_ == self->scan_session_id_" in handler
+
+
+def test_config_stop_runs_closed_two_sided_connection_boundary():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
+    boundary = function_body(
+        source, "bool WifiConfigurationAp::FinishConnectionAttemptBoundary"
+    )
+
+    assert "FinishConnectionAttemptBoundary(" in stop
+    assert "FinishConnectionAttemptBoundary(0, 0, true)" in stop
+    assert "if (!boundary_closed)" in stop
+    assert "return false" in stop
+    assert "connection_boundary_ready_ = true" not in stop
+    assert "if (stop_wifi)" in boundary
+    assert boundary.index("esp_wifi_disconnect()") < boundary.index(
+        "esp_wifi_stop()"
+    )
+    post_drain = boundary.rindex("DrainDefaultEventLoop(")
+    assert boundary.index("esp_wifi_stop()") < post_drain
+    assert post_drain < boundary.index(
+        "connection_boundary_ready_ = predrained"
+    )
+    assert "WIFI_EVENT_STA_STOP" in function_body(
+        source, "void WifiConfigurationAp::WifiEventHandler"
+    )
+    waiter_drain = stop.index("connection_waiter_drained_.wait(")
+    clear_cancel = stop.index("xEventGroupClearBits(event_group_, WIFI_CANCEL_BIT)")
+    boundary_call = stop.index("FinishConnectionAttemptBoundary(0, 0, true)")
+    assert waiter_drain < clear_cancel < boundary_call
+
+    stop_wait = boundary[boundary.index("bool stop_terminal") :]
+    assert "WIFI_ATTEMPT_BOUNDARY_BIT | WIFI_CANCEL_BIT" not in stop_wait
+    assert "event_group_, WIFI_ATTEMPT_BOUNDARY_BIT," in stop_wait
+
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    start_station = function_body(manager, "bool WifiManager::TryStartStationTransition")
+    assert "if (!config_ap_to_stop->Stop())" in start_station
+    assert start_station.index("if (!config_ap_to_stop->Stop())") < start_station.index(
+        "StartStationTarget("
+    )
+    stop_config = function_body(manager, "void WifiManager::StopConfigAp")
+    assert "if (!config_ap->Stop())" in stop_config
+    assert "wifi_teardown_faulted_ = true" in stop_config
+    assert "config_mode_active_ = true" not in stop_config
+
+
+def test_failed_config_boundary_retains_resources_and_blocks_manager_transitions():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    stop = function_body(source, "bool WifiConfigurationAp::Stop")
+
+    assert "bool teardown_faulted_ = false;" in header
+    assert "std::atomic<bool> stopped_{false};" in header
+    assert "if (stopped_.load())" in stop
+    assert "if (!boundary_closed)" in stop
+    failure = stop[stop.index("if (!boundary_closed)") :]
+    for teardown in (
+        "esp_timer_delete(",
+        "esp_netif_destroy_default_wifi(",
+        "httpd_stop(",
+        "dns_server_->Stop()",
+    ):
+        assert failure.index("return false") < failure.index(teardown)
+    assert "teardown_faulted_ = true" in failure[: failure.index("return false")]
+    assert "bool wifi_teardown_faulted_ = false;" in manager_header
+
+    for signature in (
+        "void WifiManager::StartStation",
+        "void WifiManager::StartConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        body = function_body(
+            manager,
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature,
+        )
+        assert "wifi_teardown_faulted_" in body
+
+    destructor = function_body(source, "WifiConfigurationAp::~WifiConfigurationAp")
+    assert "Stop()" not in destructor
+    assert "instance_any_id_ != nullptr" in destructor
+    assert "std::abort()" in destructor
+
+    assert "~WifiManager() = delete;" in manager_header
+    assert "WifiManager::~WifiManager" not in manager
+    assert "station_.release()" not in manager
+    assert "config_ap_.release()" not in manager
+
+
+def test_process_lifetime_manager_graph_and_no_handler_scanner_destruction():
+    header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    destructor = function_body(source, "WifiConfigurationAp::~WifiConfigurationAp")
+    start = function_body(source, "void WifiConfigurationAp::Start")
+
+    assert "std::atomic<bool> started_{false};" in header
+    assert "started_.store(true)" in start
+    assert "instance_any_id_ != nullptr" in destructor
+    assert "instance_got_ip_ != nullptr" in destructor
+    assert "std::abort()" in destructor
+    assert "Stop()" not in destructor
+
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    station_destructor = function_body(station, "WifiStation::~WifiStation")
+    assert "static WifiManager* instance = new WifiManager" in manager
+    assert "~WifiManager() = delete;" in manager_header
+    assert "WifiManager::~WifiManager" not in manager
+    assert "instance_any_id_ != nullptr" in station_destructor
+    assert "instance_got_ip_ != nullptr" in station_destructor
+    assert "std::abort()" in station_destructor
+    assert "Stop()" not in station_destructor
+
+
+def test_config_cancelled_scan_completion_cannot_publish_during_credential_test():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    completion = function_body(source, "void WifiConfigurationAp::CompleteOwnedScan")
+
+    consume_guard = completion[
+        completion.index("const bool consume_results") : completion.index("uint16_t ap_num")
+    ]
+    publish_guard = completion[
+        completion.index("if (consume_results && scans_enabled_") : completion.index(
+            "ap_records_.swap(scanned_records)"
+        )
+    ]
+    assert "!is_connecting_" in consume_guard
+    assert "!is_connecting_" in publish_guard
+
+
+def test_config_submit_marks_busy_and_persistence_failures_as_json():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    submit = source[
+        source.index('httpd_uri_t form_submit = {'):
+        source.index('ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &form_submit));')
+    ]
+    response_type = submit.index('httpd_resp_set_type(req, "application/json")')
+    save = submit.index('this_->Save(ssid_str, password_str)')
+    save_failure = submit.index('Failed to save WiFi credentials')
+    assert response_type < save < save_failure
+
+
+def test_config_credentials_share_exact_32_63_limits_without_truncation():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
+    smartconfig = function_body(
+        source, "void WifiConfigurationAp::SmartConfigEventHandler"
+    )
+    submit = source[
+        source.index('httpd_uri_t form_submit = {'):
+        source.index('ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &form_submit));')
+    ]
+
+    assert "IsValidWifiCredentials(ssid, password)" in connect
+    assert "CopyWifiCredentialsToBuffers" in connect
+    assert "strlcpy" not in connect
+    assert "IsValidWifiCredentials(ssid_str, password_str)" in submit
+    assert smartconfig.count("strnlen(") == 2
+    assert "reinterpret_cast<const char*>(evt->ssid)" in smartconfig
+    assert "reinterpret_cast<const char*>(evt->password)" in smartconfig
+    assert "std::string ssid(" in smartconfig
+    assert "std::string password(" in smartconfig
+    assert "IsValidWifiCredentials(ssid, password)" in smartconfig
+
+
+def test_station_and_config_retain_completion_when_driver_ap_cleanup_is_unproven():
+    station_header = read("components/esp-wifi-connect/include/wifi_station.h")
+    station_source = read("components/esp-wifi-connect/wifi_station.cc")
+    config_header = read("components/esp-wifi-connect/include/wifi_configuration_ap.h")
+    config_source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+
+    assert "ClaimScanRecovery(" in station_header
+    assert "CompleteScanRecovery(" in station_header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;" in station_header
+    assert "ClaimScanRecovery(" in config_header
+    assert "CompleteScanRecovery(" in config_header
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_recovery_lease_;" in config_header
+    assert "scan_recovery_needed_" in station_header + station_source
+    assert "scan_recovery_needed_" in config_header + config_source
+
+    for source, signature in (
+        (station_source, "void WifiStation::CompleteOwnedScan"),
+        (config_source, "void WifiConfigurationAp::CompleteOwnedScan"),
+    ):
+        completion = function_body(source, signature)
+        assert "esp_wifi_scan_get_ap_num" in completion
+        assert "esp_wifi_scan_get_ap_records" in completion
+        assert "esp_wifi_clear_ap_list" in completion
+        assert "cleanup_proven" in completion
+        assert completion.index("if (!cleanup_proven)") < completion.index(
+            "FinishCompletion(lease)"
+        )
+        failure = completion[
+            completion.index("if (!cleanup_proven)") : completion.index(
+                "FinishCompletion(lease)"
+            )
+        ]
+        assert "RetainFailedCompletion(lease)" in failure
+        assert "RetainRecoveryDebtLocked(lease)" in failure
+        assert "scan_lease_.reset()" not in failure
+
+
+def test_station_and_config_publish_exact_recovery_debt_for_start_and_cancel():
+    for header_path, source_path, owner in (
+        (
+            "components/esp-wifi-connect/include/wifi_station.h",
+            "components/esp-wifi-connect/wifi_station.cc",
+            "WifiStation",
+        ),
+        (
+            "components/esp-wifi-connect/include/wifi_configuration_ap.h",
+            "components/esp-wifi-connect/wifi_configuration_ap.cc",
+            "WifiConfigurationAp",
+        ),
+    ):
+        header = read(header_path)
+        source = read(source_path)
+        start = function_body(source, f"bool {owner}::StartOwnedScan")
+        stop_signature = (
+            f"bool {owner}::Stop"
+            if owner == "WifiConfigurationAp"
+            else f"void {owner}::Stop"
+        )
+        stop = function_body(source, stop_signature)
+        claim = function_body(source, f"{owner}::ClaimScanRecovery")
+        complete = function_body(source, f"bool {owner}::CompleteScanRecovery")
+
+        assert "commit.drain_required" in start
+        assert "RetainRecoveryDebtLocked(lease)" in start
+        assert "RetainRecoveryDebtLocked(lease)" in stop
+        assert "scan_recovery_lease_" in claim
+        assert "WifiScanRecoveryGate::TryClaim" in claim
+        assert "WifiScanRecoveryGate::Complete" in complete
+        assert "ScanRecoveryClaim" in header
+
+
+def test_shared_scan_recovery_is_scheduled_by_process_lifetime_manager_worker():
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+
+    assert '#include "wifi_scan_recovery_executor.h"' in manager_header
+    assert "WifiScanRecoveryExecutor scan_recovery_executor_;" in manager_header
+    assert "TaskHandle_t scan_recovery_task_" in manager_header
+    assert "std::optional<ScanRecoveryWork> scan_recovery_claim_;" in manager_header
+    assert "bool WifiManager::ScheduleScanRecovery" in manager
+    assert "void WifiManager::ScanRecoveryTask" in manager
+    assert "void WifiManager::RunScanRecovery" in manager
+    assert "xTaskCreate" in function_body(manager, "bool WifiManager::Initialize")
+    assert "vTaskDelete" not in manager
+    schedule = function_body(manager, "bool WifiManager::ScheduleScanRecovery")
+    assert "xTaskNotifyGive" in schedule
+    assert "scan_recovery_executor_.Execute" not in schedule
+    worker = function_body(manager, "void WifiManager::ScanRecoveryTask")
+    assert "pdMS_TO_TICKS" in worker
+    assert "portMAX_DELAY" not in worker
+
+
+def test_scanners_notify_exact_debt_only_after_releasing_scan_lock():
+    for header_path, source_path, owner in (
+        (
+            "components/esp-wifi-connect/include/wifi_station.h",
+            "components/esp-wifi-connect/wifi_station.cc",
+            "WifiStation",
+        ),
+        (
+            "components/esp-wifi-connect/include/wifi_configuration_ap.h",
+            "components/esp-wifi-connect/wifi_configuration_ap.cc",
+            "WifiConfigurationAp",
+        ),
+    ):
+        header = read(header_path)
+        source = read(source_path)
+        assert "OnScanRecoveryNeeded" in header
+        assert "NotifyScanRecoveryNeeded" in header
+        notify = function_body(source, f"void {owner}::NotifyScanRecoveryNeeded")
+        assert "scan_recovery_needed_" in notify
+        assert "scan_mutex_" not in notify
+
+        start = function_body(source, f"bool {owner}::StartOwnedScan")
+        assert start.index("lifecycle_lock.unlock()") < start.index(
+            "NotifyScanRecoveryNeeded(lease)"
+        )
+
+
+def test_manager_recovery_retains_one_exact_claim_across_bounded_retries():
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+
+    assert "scan_recovery_claim_" in manager_header
+    assert "scan_recovery_active_" in manager_header
+    assert "scan_recovery_retry_pending_" in manager_header
+    assert run.count("ClaimScanRecovery(") == 2
+    assert "work = scan_recovery_claim_" in run
+    assert "vTaskDelay" in run
+    assert "CompleteScanRecovery" in run
+    assert "RetryScanAfterRecovery" in run
+    assert "wifi_teardown_faulted_ = false" not in run
+
+
+def test_manager_lifecycle_entry_points_are_blocked_during_scan_recovery():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    for signature in (
+        "void WifiManager::StartStation",
+        "void WifiManager::StopStation",
+        "void WifiManager::StartConfigAp",
+        "void WifiManager::StopConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        body = function_body(
+            manager,
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature,
+        )
+        assert "scan_recovery_active_" in body
+
+
+def test_mode_transitions_defer_target_start_until_exact_scan_recovery_finishes():
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+
+    assert "enum class PendingLifecycleTarget" in header
+    assert "pending_lifecycle_target_" in header
+    assert "pending_lifecycle_generation_" in header
+    assert "ResumePendingLifecycleTransition" in header
+
+    for signature, stopped_source, target_start in (
+        (
+            "void WifiManager::StartStation",
+            "config_ap_to_stop->Stop()",
+            "StartStationTarget(",
+        ),
+        (
+            "void WifiManager::StartConfigAp",
+            "station_to_stop->Stop()",
+            "StartConfigApTarget(",
+        ),
+    ):
+        body = function_body(
+            manager,
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature,
+        )
+        source_stop = body.index(stopped_source)
+        defer = body.index("DeferLifecycleTransitionForRecovery", source_stop)
+        target = body.index(target_start)
+        assert source_stop < defer < target
+        assert "return" in body[defer:target]
+
+    start_station = function_body(manager, "bool WifiManager::TryStartStationTransition")
+    assert start_station.index("config_ap_to_stop->Stop()") < start_station.index(
+        "config_mode_active_ = false"
+    )
+    start_config = function_body(manager, "void WifiManager::StartConfigAp")
+    assert start_config.index("station_to_stop->Stop()") < start_config.index(
+        "station_active_ = false"
+    )
+
+    complete = run.index("CompleteScanRecovery")
+    assert complete < run.index("ResumePendingLifecycleTransition", complete)
+
+
+def test_pending_transition_is_generation_bound_and_consumed_once():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    defer = function_body(
+        manager, "bool WifiManager::DeferLifecycleTransitionForRecovery"
+    )
+    resume = function_body(
+        manager, "void WifiManager::ResumePendingLifecycleTransition"
+    )
+
+    assert "lifecycle_generation_ != transition_generation" in defer
+    assert "pending_lifecycle_generation_ = transition_generation" in defer
+    assert "pending_lifecycle_target_ = target" in defer
+    assert "pending_lifecycle_target_ = PendingLifecycleTarget::kNone" in resume
+    assert "pending_lifecycle_generation_ = 0" in resume
+    assert "lifecycle_generation_ != pending_generation" in resume
+    assert resume.count("StartStationTarget(") == 1
+    assert resume.count("StartConfigApTarget(") == 1
+
+
+def test_callback_wins_before_claim_resumes_only_the_exact_pending_transition():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+    no_claim = run[
+        run.index("if (!work.has_value())", run.index("if (!work.has_value())") + 1) :
+        run.index("scan_recovery_claim_ = work")
+    ]
+
+    assert "bool resume_pending_transition = false" in run
+    assert "SameLease(*scan_recovery_debt_, *debt)" in no_claim
+    assert "scan_recovery_active_ = false" in no_claim
+    assert "resume_pending_transition = true" in no_claim
+    assert no_claim.index("scan_recovery_active_ = false") < no_claim.index(
+        "ResumePendingLifecycleTransition()"
+    )
+    assert "ResumePendingLifecycleTransition()" in no_claim
+    assert no_claim.index("}") < no_claim.index("ResumePendingLifecycleTransition()")
+
+
+def test_callback_wins_does_not_resume_when_exact_debt_still_exists_or_changed():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    run = function_body(manager, "void WifiManager::RunScanRecovery")
+    no_claim = run[
+        run.index("if (!work.has_value())", run.index("if (!work.has_value())") + 1) :
+        run.index("scan_recovery_claim_ = work")
+    ]
+
+    still_exists = no_claim[
+        no_claim.index("if (debt_still_exists)") :
+        no_claim.index("std::lock_guard<std::mutex> lock(mutex_)",
+                       no_claim.index("if (debt_still_exists)"))
+    ]
+    assert "ResumePendingLifecycleTransition" not in still_exists
+    exact_clear = no_claim[no_claim.index("SameLease(*scan_recovery_debt_, *debt)") :]
+    assert "resume_pending_transition = true" in exact_clear
+
+
+def test_manager_active_flags_stay_false_while_target_transition_is_pending():
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    defer = function_body(
+        manager, "bool WifiManager::DeferLifecycleTransitionForRecovery"
+    )
+    assert "station_active_ = false" in defer
+    assert "config_mode_active_ = false" in defer
+    assert "lifecycle_transition_in_progress_ = false" in defer
+    for signature in (
+        "void WifiManager::StartStation",
+        "void WifiManager::StopStation",
+        "void WifiManager::StartConfigAp",
+        "void WifiManager::StopConfigAp",
+        "bool WifiManager::StopRadio",
+    ):
+        inspected_signature = (
+            "bool WifiManager::TryStartStationTransition"
+            if signature == "void WifiManager::StartStation"
+            else signature
+        )
+        assert "pending_lifecycle_target_" in function_body(
+            manager, inspected_signature
+        )
+
+
+def test_recovery_restore_reapplies_start_time_wifi_runtime_settings():
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    config = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    station_restore = function_body(
+        station, "bool WifiStation::RestoreRadioAfterRecovery"
+    )
+    config_restore = function_body(
+        config, "bool WifiConfigurationAp::RestoreRadioAfterRecovery"
+    )
+
+    assert "radio_recovery_restorer_.RestoreStation" in station_restore
+    assert "power_save_type_ = ps_type" in function_body(
+        station, "void WifiStation::SetPowerSaveLevel"
+    )
+    assert "radio_recovery_restorer_.RestoreConfigAp" in config_restore
+
+
+def test_coordinator_recovery_cannot_claim_active_completion_reader():
+    coordinator = read(
+        "components/esp-wifi-connect/include/wifi_scan_lease_coordinator.h"
+    )
+    begin = function_body(
+        coordinator, "RecoveryDecision BeginRecovery"
+    )
+    retain = function_body(
+        coordinator, "bool RetainFailedCompletion"
+    )
+
+    assert "Phase::kCompleting" not in begin
+    assert "phase_ != Phase::kRunning" in begin
+    assert "phase_ != Phase::kDraining" in begin
+    assert "phase_ != Phase::kCompleting" in retain
+    assert "phase_ = Phase::kDraining" in retain
+
+
+def test_station_session_data_has_one_mutex_and_driver_calls_use_snapshots():
+    header = read("components/esp-wifi-connect/include/wifi_station.h")
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    stop = function_body(source, "void WifiStation::Stop")
+    connect = function_body(source, "std::string WifiStation::StartConnectForSession")
+
+    assert "mutable std::mutex session_data_mutex_;" in header
+    assert "session_operation_mutex_" not in header + source
+    assert "std::string GetSsid() const;" in header
+    assert "std::string GetIpAddress() const;" in header
+    for getter in ("std::string WifiStation::GetSsid", "std::string WifiStation::GetIpAddress"):
+        assert "session_data_mutex_" in function_body(source, getter)
+
+    assert "session_data_mutex_" in stop
+    assert "std::fill(password_.begin(), password_.end(), '\\0')" in stop
+    assert connect.index("session_data_mutex_") < connect.index("esp_wifi_set_config(")
+    data_scope = connect[connect.index("session_data_mutex_") : connect.index("esp_wifi_set_config(")]
+    assert data_scope.count("}") >= 1
+    assert "std::fill(password_.begin(), password_.end(), '\\0')" in connect
+
+
+def test_blufi_scan_state_is_owned_by_controller_not_cross_thread_booleans():
+    header = read("main/boards/common/blufi.h")
+
+    assert '#include "blufi_wifi_scan_controller.h"' in header
+    assert "BlufiWifiScanController wifi_scan_controller_;" in header
+    assert "m_scan_in_progress" not in header
+    assert "m_scan_should_save_ssid" not in header
+    assert "m_send_list_after_scan" not in header
+
+
+def test_blufi_scan_binds_logical_request_to_exact_global_lease():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    start = function_body(source, "void Blufi::ScheduleOwnedWifiScanStart")
+    start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
+    submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    commit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
+    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_lease_;" in header
+    assert "wifi_scan_retry_state_.Publish" in start
+    assert "RequestScanLeaseRetryPoll" in start
+    assert "TryAcquire(" in start_now
+    assert "WifiScanLeaseCoordinator::Owner::kBlufi" in start_now
+    assert start_now.index("TryAcquire(") < start_now.index("ClaimStart(")
+    assert start_now.index("SynchronizeDriverIncarnation(") < start_now.index("ClaimStart(")
+    assert "RetryOwnedWifiScanAfterLeaseBusy" in start_now
+    assert "ObserveScanDone(*lease)" in handler
+    assert "CommitSubmission(" in commit
+    assert "driver_accepted" in commit
+    assert "outcome.physical.consume_latched" in followup
+    assert "outcome.physical.callback_won_error" in followup
+
+
+def test_blufi_scan_commits_are_hidden_from_callback_until_logical_is_ready():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    submit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+    transaction = read("main/boards/common/blufi_wifi_scan_start_outcome.h")
+    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+
+    assert "std::mutex wifi_scan_submission_mutex_;" in header
+    submit_lock = submit.index("wifi_scan_submission_mutex_")
+    physical = submit.index("CommitSubmission(", submit_lock)
+    logical = submit.index("wifi_scan_controller_.CommitStart(", physical)
+    assert submit_lock < physical < logical
+    assert "wifi_scan_submission_mutex_" in handler
+    assert handler.index("wifi_scan_submission_mutex_") < handler.index(
+        "ObserveScanDone"
+    )
+    assert "AbandonUnsubmitted" in submit
+    assert "callback_won_error" in transaction
+
+
+def test_blufi_busy_retry_has_process_lifetime_timer_and_failure_fallback():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    retry = function_body(source, "void Blufi::RetryOwnedWifiScanAfterLeaseBusy")
+
+    assert "esp_timer_handle_t wifi_scan_retry_timer_" in header
+    assert "xTaskCreate" not in retry
+    assert "new (std::nothrow)" not in retry
+    constructor = function_body(source, "Blufi::Blufi()")
+    assert "esp_timer_create" in constructor
+    assert "esp_timer_create" not in retry
+    assert "esp_timer_start_once" in retry
+    assert "xTimerCreateStatic" in retry
+    assert "xTimerChangePeriod" in retry
+    assert "RequestScanLeaseRetryPoll" in retry
+    assert "Application::GetInstance().Schedule" not in retry
+    assert "UnclaimedRequestIfCurrent" in retry
+
+
+def test_blufi_retry_exception_cleanup_releases_exact_unsubmitted_claim():
+    source = read("main/boards/common/blufi.cpp")
+    start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
+    commit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+    transaction = read("main/boards/common/blufi_wifi_scan_start_outcome.h")
+
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> acquired_lease" in start_now
+    assert "AbandonUnsubmitted(lease)" in commit
+    assert "ReleaseStartClaimForRetry" in commit
+    assert "RepublishIfUnchanged(exact)" in start_now
+    assert "RunOwnedWifiScanFollowupNoexcept" in start_now
+    submit = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    scan_call = submit.index("esp_wifi_scan_start")
+    assert submit.index("progress.driver_attempted = true") < scan_call
+    assert scan_call < submit.index("progress.driver_accepted = scan_error == ESP_OK")
+    assert scan_call < submit.index("CommitOwnedWifiScanStart(", scan_call)
+    assert "outcome.driver_attempted" in transaction
+    assert "outcome.driver_accepted" in transaction
+    assert "outcome.physical_committed" in transaction
+    assert "outcome.logical_committed" in transaction
+    assert "outcome.PreserveDispositionAfterFailure()" in commit
+    outcome = read("main/boards/common/blufi_wifi_scan_start_outcome.h")
+    assert "if (abandoned)" in outcome
+    assert "LeaseDisposition::kReleased" in outcome
+    assert "rollback_intent_set" in outcome
+    assert "rollback_for_retry" in outcome
+
+
+def test_blufi_start_outcome_is_noexcept_and_all_commit_pairs_are_serialized():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    start_now = function_body(source, "void Blufi::TryStartOwnedWifiScanNow")
+    start = function_body(source, "BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan")
+    commit = function_body(source, "Blufi::CommitOwnedWifiScanStart")
+
+    assert "BlufiWifiScanStartOutcome StartOwnedWifiScan(" in header
+    assert "const WifiScanLeaseCoordinator::Lease& lease) noexcept" in header
+    assert "CommitOwnedWifiScanStart" in header
+    assert "std::lock_guard<std::mutex> submission_lock" in commit
+    physical_commit = commit.index("CommitSubmission(")
+    assert physical_commit < commit.index("CommitStart(", physical_commit)
+    assert "CommitSubmission(" not in start_now
+    assert "CommitStart(" not in start_now
+    assert "CommitOwnedWifiScanStart" in start
+
+
+def test_post_release_followups_are_contained_outside_ownership_rollback():
+    source = read("main/boards/common/blufi.cpp")
+    start = function_body(source, "BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan")
+
+    assert "RunOwnedWifiScanFollowupNoexcept" in source
+    assert "ScheduleWifiScanFailure" not in start
+    assert "SchedulePendingWifiScan" not in start
+    assert "ScheduleOwnedWifiScanWatchdog" not in start
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
+    assert "SchedulePendingWifiScan" not in followup
+    assert "ScheduleOwnedWifiScanStart" in followup
+
+
+def test_completion_commits_logical_before_physical_and_durable_pending_handoff():
+    source = read("main/boards/common/blufi.cpp")
+    completion = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    logical = completion.index("CommitPreparedCompletion(")
+    physical = completion.index(".FinishCompletion(*lease)")
+    release = completion.index("ReleaseCommittedCompletion(", physical)
+    assert logical < physical < release
+    assert "RetainCommittedCompletionForRecovery" in completion
+    assert "SchedulePendingWifiScan" not in completion
+    assert "ScheduleOwnedWifiScanStart" in completion
+
+
+def test_manager_poller_busy_retry_does_not_self_notify_hot_loop():
+    source = read("main/boards/common/blufi.cpp")
+    dispatch = function_body(source, "void Blufi::DispatchOwnedWifiScanRetry")
+    retry = function_body(source, "void Blufi::RetryOwnedWifiScanAfterLeaseBusy")
+
+    assert "EnqueueOwnedWifiScanRetry" in dispatch
+    assert "notify_manager" in retry
+
+
+def test_manager_poller_only_enqueues_exact_application_dispatch():
+    source = read("main/boards/common/blufi.cpp")
+    poll = function_body(source, "void Blufi::PollOwnedWifiScanRetry")
+    dispatch = function_body(source, "void Blufi::DispatchOwnedWifiScanRetry")
+    enqueue = function_body(source, "bool Blufi::EnqueueOwnedWifiScanRetry")
+
+    assert "TryStartOwnedWifiScanNow" not in poll + dispatch
+    assert "esp_wifi_scan_start" not in poll + dispatch
+    assert "Application::GetInstance().Schedule" in enqueue
+    assert "BeginDispatch" in enqueue
+    assert "CompleteDispatch" in enqueue
+    assert "TryStartOwnedWifiScanNow(exact" in enqueue
+    assert "catch (...)" in enqueue
+
+
+def test_blufi_watchdog_failures_enter_shared_recovery_immediately():
+    source = read("main/boards/common/blufi.cpp")
+    watchdog = function_body(source, "void Blufi::ScheduleOwnedWifiScanWatchdog")
+    watchdog_signal = function_body(source, "void Blufi::HandleWifiScanWatchdog")
+    recovery = function_body(source, "void Blufi::RequestOwnedWifiScanRecovery")
+
+    assert "wifi_scan_watchdog_timer_.Arm" in watchdog
+    assert "HandleWifiScanWatchdog(exact)" in watchdog
+    assert "BeginDrain(exact.lease)" in watchdog_signal
+    assert "RequestOwnedWifiScanRecovery(exact.lease)" in watchdog_signal
+    assert "Application::GetInstance().Schedule" not in watchdog_signal
+    assert "WifiManager::GetInstance().RequestScanRecovery(lease)" in recovery
+    assert "ScheduleWifiScanRecoveryFallback(lease)" in recovery
+
+
+def test_blufi_scan_timeout_and_recovery_retry_do_not_allocate_application_work():
+    source = read("main/boards/common/blufi.cpp")
+    watchdog = function_body(source, "void Blufi::HandleWifiScanWatchdog")
+    retry = function_body(source, "void Blufi::HandleWifiScanRecoveryRetry")
+    signal_watchdog = function_body(source, "void Blufi::SignalWifiScanWatchdog")
+    signal_retry = function_body(source, "void Blufi::SignalWifiScanRecoveryRetry")
+
+    for body in (watchdog, retry, signal_watchdog, signal_retry):
+        assert "Application::GetInstance().Schedule" not in body
+    assert "catch (...)" in signal_watchdog
+    assert "catch (...)" in signal_retry
+    assert "RequestScanRecovery" in retry
+
+
+def test_blufi_scan_recovery_uses_shared_manager_executor():
+    header = read("main/boards/common/blufi.h")
+    source = read("main/boards/common/blufi.cpp")
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager_source = read("components/esp-wifi-connect/wifi_manager.cc")
+
+    assert "RegisterScanRecoveryOwner" in manager_header
+    assert "RequestScanRecovery" in manager_header
+    assert "WifiScanLeaseCoordinator::Owner::kBlufi" in manager_source
+    assert "RegisterScanRecoveryOwner(" in source
+    assert "RequestScanRecovery(lease)" in source
+    assert "WifiScanRecoveryExecutor" not in header + source
+    assert "DrainDefaultEventLoop" not in header + source
+
+
+def test_cardputer_blocking_scan_uses_nonblocking_idf_callback_semantics():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    scan = function_body(source, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
+    assert "esp_wifi_scan_start(&scan_config, false)" in scan
+    assert "esp_wifi_scan_start(&scan_config, true)" not in scan
+    assert "BlockingWifiScanPolicy::CompletionWaitMs" in source
+    assert "!manager.IsInitialized() && !manager.Initialize()" in scan
+
+
+def test_cardputer_recovery_is_manager_owned_and_has_durable_exact_retry():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    assert "esp_wifi_get_mode" not in source
+    assert "esp_wifi_get_config" not in source
+    assert "esp_wifi_set_mode" not in source
+    assert "esp_wifi_set_config" not in source
+    assert "PrepareExternalScanRadio" in source + header
+    assert "FinishExternalScanRadio" in source + header
+    assert ".retry = [this]" in source
+
+
+def test_cardputer_ui_prepares_idle_radio_and_finishes_exact_transaction():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    manager = read("components/esp-wifi-connect/wifi_manager.cc")
+    scan = function_body(source, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
+    assert "PrepareExternalScanRadio(lease)" in scan
+    assert "FinishExternalScanRadio(lease)" in source
+    assert "esp_wifi_start" not in scan
+    assert "ExternalScanRecoveryRole::kIdle" in manager
+    assert "scan_mode = has_ap ? WIFI_MODE_APSTA : WIFI_MODE_STA" in manager
+    assert "esp_wifi_set_mode(scan_mode)" in manager
+    assert "esp_wifi_start()" in manager
+    assert "esp_wifi_stop()" in manager
+
+
+def test_cardputer_scan_done_status_gates_ap_result_consumption():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    handler = function_body(source, "static void HandleScanDone")
+    callback = function_body(source, "void OnScanDone")
+    assert "wifi_event_sta_scan_done_t" in handler
+    assert "event->status" in handler
+    assert "scan_status" in callback
+    assert "esp_wifi_clear_ap_list" in callback
+    status = read(
+        "main/boards/m5stack-cardputer-adv/"
+        "blocking_wifi_scan_completion_status.h")
+    assert "observed_->status == 0" in status
+    assert "callback_status_.Succeeded(lease)" in source
+
+
+def test_cardputer_board_has_real_ui_poll_timer_caller():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    assert "wifi_config_ui_->Poll()" in board
+    assert "esp_timer_start_periodic" in board
+    assert "Application::GetInstance().Schedule" in board
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    poll = function_body(source, "void WifiConfigUI::Poll")
+    assert "PeekRecoveryRetry" in poll
+    assert "StartScanning()" in poll
+    complete = function_body(source, "void WifiConfigUI::CompleteWifiScanWorker")
+    assert "ConsumeRecoveryRetry" in complete
+    scan = function_body(source, "WifiConfigUI::ScanWorkerResult WifiConfigUI::DoWifiScan")
+    assert "PublishBusyRetry(ui_generation)" in scan
+    start = function_body(source, "bool WifiConfigUI::StartScanning")
+    assert "scan_request_callback_" in start
+    assert "DoWifiScan()" not in start
+    assert "WifiScanWorkerTask" in board
+    assert "RunWifiScanWorker" in board
+    assert "CompleteWifiScanWorker" in board
+    assert "RetryInFlight" in board
+    assert "WifiConnectionWorkerTask" in board
+    assert "ProcessLifetimeWorkerHandle<TaskHandle_t>" in board
+    timer = function_body(board, "void InitializeWifiConfigUiPoller")
+    assert "NotifyWifiScanWorker()" in timer
+    assert "xTaskCreate" not in timer
+    ensure = function_body(board, "void EnsureWifiScanWorker")
+    assert "xTaskCreate" in ensure
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+    assert "PublishReconnect" in exit_mode
+    assert "wifi_credential_transaction_mutex_" in exit_mode
+    assert "HasActiveExternalScan" in board
+    connect = function_body(board, "void AttemptWifiConnection")
+    assert "PublishCredentials" in connect
+    assert "wifi_credential_transaction_mutex_" in connect
+    assert "AddSsid" not in connect
+    assert "vTaskDelay" not in connect
+    connection_worker = function_body(board, "static void WifiConnectionWorkerTask")
+    assert "AddSsid" not in connection_worker
+    assert "vTaskDelay" in connection_worker
+    assert "TryWifiConnect" in connection_worker
+    assert "StoreConnectionResult" in connection_worker
+    assert "OnConnectResult" not in connection_worker
+    assert "AttemptWifiConnection" not in timer
+    assert "TryWifiConnect" not in timer
+    assert "NotifyWifiConnectionWorker" in timer
+    assert "ScheduleWifiConnectionResult" in timer
+    on_result = function_body(source, "void WifiConfigUI::OnConnectResult")
+    assert "SaveWifiCredentials" not in on_result
+    assert "AddSsid" not in on_result
+    assert "BeginSsidTransaction" in connection_worker
+    assert "CommitSsidTransaction" in connection_worker
+    assert "RollbackSsidTransaction" in connection_worker
+    assert "StartStationWithCredentialsIfScanIdle" in connection_worker
+    exact_match = connection_worker.index(
+        "wifi_manager.GetSsid() == intent->ssid"
+    )
+    enable_scans = connection_worker.index("EnableStationAutomaticScans")
+    assert exact_match < enable_scans
+    finalization_idx = connection_worker.index("ClaimCredentialFinalization")
+    transaction_lock_idx = connection_worker.rfind(
+        "wifi_credential_transaction_mutex_", 0, finalization_idx
+    )
+    assert transaction_lock_idx >= 0
+    scanning_key = function_body(source, "void WifiConfigUI::HandleScanningKey")
+    assert "DismissPendingScanResult()" in scanning_key
+    assert "state_ == WifiConfigState::Scanning" in poll
+    key_handler = function_body(board, "void HandleKeyEvent")
+    assert key_handler.index("wifi_config_ui_mutex_") < key_handler.index(
+        "wifi_config_mode_")
+
+
+def test_cardputer_success_releases_ui_before_generation_bound_app_completion():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    app_header = read("main/application.h")
+    app = read("main/application.cc")
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+    completion = function_body(
+        app, "void Application::CompleteCardputerWifiProvisioning"
+    )
+
+    reset_idx = exit_mode.index("wifi_config_ui_.reset()")
+    schedule_idx = exit_mode.index("ScheduleWifiProvisioningCompletion")
+    assert reset_idx < schedule_idx
+    assert "ClaimSetupCompletion(exiting_generation)" in exit_mode
+    assert "CompleteCardputerWifiProvisioning(uint64_t ui_generation)" in app_header
+    assert "cardputer_wifi_completion_generation_" in app_header
+    assert "PromoteFromWifiConfigAfterProvisioning()" in completion
+    assert "HandleNetworkConnectedEvent()" in completion
+    promote_idx = completion.index("PromoteFromWifiConfigAfterProvisioning()")
+    consume_idx = completion.index("compare_exchange_weak")
+    assert promote_idx < consume_idx
+    connection_worker = function_body(
+        board, "static void WifiConnectionWorkerTask"
+    )
+    assert "intent->setup_completion_generation" in connection_worker
+    assert "ScheduleWifiProvisioningCompletion" in connection_worker
+    connected_idx = connection_worker.index("wifi_manager.IsConnected()")
+    reconnect_complete_idx = connection_worker.index("CompleteReconnect")
+    assert connected_idx < reconnect_complete_idx
+    scheduler = function_body(board, "void ScheduleWifiProvisioningCompletion")
+    assert "wifi_config_mode_" in scheduler
+    assert "wifi_config_ui_" in scheduler
+    assert "last_exited_wifi_config_generation_ != ui_generation" in scheduler
+    assert "Application::GetInstance().Schedule" in scheduler
+    completion_idx = scheduler.index("CompleteCardputerWifiProvisioning")
+    lock_idx = scheduler.index("wifi_config_ui_mutex_")
+    assert lock_idx < completion_idx
+    assert "Schedule(" not in completion
+
+
+def test_cardputer_exact_credentials_are_bounded_and_cancel_stops_exact_station():
+    station = read("components/esp-wifi-connect/wifi_station.cc")
+    exact = function_body(station, "bool WifiStation::ConnectExact")
+    assert "IsValidWifiCredentials(ssid, password)" in exact
+
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+    stop_idx = exit_mode.index("WifiManager::GetInstance().StopStation()")
+    reconnect_idx = exit_mode.index("PublishReconnect")
+    assert stop_idx < reconnect_idx
+
+
+def test_cardputer_preparation_failure_handles_callback_winner_fail_closed():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    recovery = function_body(
+        source, "bool RecoverPreparationFailure")
+    assert recovery.index("CommitSubmission(lease, false)") < recovery.index(
+        "RetainFailedCompletion")
+    assert "consume_latched" in recovery
+    assert "RetainForRecovery" in recovery
+    assert recovery.index("AbandonUnsubmitted(lease)") < recovery.index(
+        "CommitSubmission(lease, false)")
+
+def test_blufi_ap_cleanup_failure_retains_exact_recovery_debt():
+    source = read("main/boards/common/blufi.cpp")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert "cleanup_proven" in handler
+    assert "RetainFailedCompletion(*lease)" in handler
+    assert "wifi_scan_controller_.RetainFailedCompletion(" in handler
+    assert "completion.request_id" in handler
+    assert "RequestOwnedWifiScanRecovery(*lease)" in handler
+    cleanup = handler.index("cleanup_proven")
+    finish_physical = handler.index("FinishCompletion(*lease)")
+    assert cleanup < finish_physical
+
+
+def test_blufi_scan_completion_claims_owner_before_reading_driver_results():
+    source = read("main/boards/common/blufi.cpp")
+    event_handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert "ObserveScanDone(*lease)" in event_handler
+    assert handler.index("BeginCompletion(") < handler.index("esp_wifi_scan_get_ap_num")
+    assert handler.index("esp_wifi_clear_ap_list") < handler.index("FinishCompletion(")
+
+
+def test_blufi_scan_cache_is_published_and_consumed_under_finalization_mutex():
+    source = read("main/boards/common/blufi.cpp")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+    event_body = function_body(source, "void Blufi::_handle_event")
+    get_list = event_body[
+        event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
+        event_body.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")
+    ]
+
+    scan_cache_lock = scan_done.index("provisioning_finalization_mutex_")
+    scan_cache_publish = scan_done.index("self->m_ap_records.swap(")
+    assert scan_cache_lock < scan_cache_publish
+
+    get_cache_lock = get_list.index("provisioning_finalization_mutex_")
+    get_cache_read = get_list.index("IsWifiScanCacheFresh()")
+    get_cache_move = get_list.index("cached_ap_records.swap(m_ap_records)")
+    assert get_cache_lock < get_cache_read < get_cache_move
+
+
+def test_blufi_scan_cache_publish_revalidates_exact_session_under_mutex():
+    source = read("main/boards/common/blufi.cpp")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+    cache_section = scan_done[scan_done.index("provisioning_finalization_mutex_") :]
+
+    assert "completion.owner.setup_generation ==" in cache_section
+    assert "completion.owner.ble_session_state ==" in cache_section
+    assert "completion.owner.ble_connection_epoch ==" in cache_section
+    current = cache_section.index("completion_owner_is_current")
+    publish = cache_section.index("self->m_ap_records.swap(")
+    assert current < publish
+
+
+def test_blufi_scan_cache_records_exact_owner_when_published():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert "std::optional<BlufiWifiScanController::Request> m_ap_records_owner_;" in header
+    publish = scan_done.index("self->m_ap_records.swap(scanned_ap_records)")
+    owner = scan_done.index("self->m_ap_records_owner_ = completion.owner")
+    assert publish < owner
+
+
+def test_blufi_wifi_list_rejects_stale_cache_owner_and_accepts_exact_owner():
+    source = read("main/boards/common/blufi.cpp")
+    event_body = function_body(source, "void Blufi::_handle_event")
+    get_list = event_body[
+        event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
+        event_body.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")
+    ]
+
+    assert "m_ap_records_owner_.has_value()" in get_list
+    assert "m_ap_records_owner_->setup_generation == current_generation" in get_list
+    assert "m_ap_records_owner_->ble_session_state == current_session" in get_list
+    assert "m_ap_records_owner_->ble_connection_epoch == current_connection" in get_list
+    exact_owner = get_list.index("cache_owner_is_current")
+    freshness = get_list.index("IsWifiScanCacheFresh()")
+    consume = get_list.index("cached_ap_records.swap(m_ap_records)")
+    clear_owner = get_list.index("m_ap_records_owner_.reset()")
+    assert exact_owner < freshness < consume < clear_owner
+
+
+def test_blufi_scan_request_captures_generation_session_and_connection():
+    source = read("main/boards/common/blufi.cpp")
+    request = function_body(source, "void Blufi::RequestWifiListScan")
+
+    assert "setup_generation_.load" in request
+    assert "ble_session_state_.load" in request
+    assert "ble_connection_epoch_.load" in request
+    assert "wifi_scan_controller_.RequestScan" in request
+
+
+def test_blufi_scan_session_is_invalidated_on_disconnect_restart_and_deinit():
+    source = read("main/boards/common/blufi.cpp")
+    disconnect = function_body(source, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+    restart = function_body(source, "esp_err_t Blufi::RestartForSetup")
+    deinit = function_body(source, "esp_err_t Blufi::_deinit_impl")
+
+    assert "InvalidateWifiScanSession(" in disconnect
+    assert "InvalidateWifiScanSession(" in restart
+    assert "InvalidateWifiScanSession(" in deinit
+
+
+def test_blufi_does_not_unregister_scan_handler_while_callback_is_owed():
+    source = read("main/boards/common/blufi.cpp")
+    deinit = function_body(source, "esp_err_t Blufi::_deinit_impl")
+
+    assert "CanUnregisterHandler()" in deinit
+    assert deinit.index("CanUnregisterHandler()") < deinit.index(
+        "esp_event_handler_instance_unregister"
+    )
+
+
+def test_blufi_scan_invalidation_clears_deferred_list_work():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    invalidation = function_body(source, "void Blufi::InvalidateWifiScanSession")
+
+    assert "void InvalidateWifiScanSession(" in header
+    assert "wifi_scan_controller_.InvalidateSession" in invalidation
+    assert "m_wifi_list_dispatch_pending_epoch_.store(0" in invalidation
+
+
+def test_blufi_scan_lifecycle_refreshes_at_final_ble_session_tuples():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    init = function_body(source, "esp_err_t Blufi::_init_impl")
+    event = function_body(source, "void Blufi::_handle_event")
+    connect = event[
+        event.index("case ESP_BLUFI_EVENT_BLE_CONNECT:") :
+        event.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+    ]
+    disconnect = event[
+        event.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT:") :
+        event.index("case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:")
+    ]
+
+    assert "void UpdateWifiScanSession(" in header
+    assert init.index("BleSessionPhase::kAccepting") < init.index(
+        "UpdateWifiScanSession("
+    )
+    assert connect.index("ble_connection_epoch_.fetch_add(1") < connect.index(
+        "UpdateWifiScanSession("
+    )
+    assert disconnect.index("BleSessionPhase::kAccepting") < disconnect.index(
+        "UpdateWifiScanSession("
+    )
+
+
+def test_restart_invalidates_scan_after_releasing_finalization_mutex():
+    source = read("main/boards/common/blufi.cpp")
+    restart = function_body(source, "esp_err_t Blufi::RestartForSetup")
+    lock = restart.index(
+        "std::lock_guard<std::mutex> initial_state_lock(provisioning_finalization_mutex_);"
+    )
+    generation = restart.index("setup_generation_.fetch_add(1)", lock)
+    scope_end = restart.index("}\n    InvalidateWifiScanSession(", generation)
+    invalidation = restart.index("InvalidateWifiScanSession(", scope_end)
+
+    assert lock < generation < scope_end < invalidation
+
+
+def test_blufi_scan_failures_are_deferred_and_exactly_owner_bound():
+    source = read("main/boards/common/blufi.cpp")
+    header = read("main/boards/common/blufi.h")
+    start = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
+    failure = function_body(source, "void Blufi::ScheduleWifiScanFailure")
+
+    assert "void ScheduleWifiScanFailure(" in header
+    assert "Application::GetInstance().Schedule" in failure
+    assert "request.setup_generation == current_generation" in failure
+    assert "request.ble_session_state == current_session" in failure
+    assert "request.ble_connection_epoch == current_connection" in failure
+    stale_return = failure.index("if (!failure_owner_is_current)")
+    send_error = failure.index("esp_blufi_send_error_info")
+    assert stale_return < send_error
+    assert "ScheduleWifiScanFailure(outcome.logical.owner" in followup
+    assert "esp_blufi_send_error_info" not in start
+
+
+def test_empty_scan_completion_uses_owner_bound_failure_helper():
+    source = read("main/boards/common/blufi.cpp")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+    send_list = function_body(source, "void Blufi::_send_wifi_list")
+
+    assert "owned_ap_records.empty()" in scan_done
+    assert "ScheduleWifiScanFailure(" in scan_done
+    assert "completion.owner" in scan_done
+    assert "esp_blufi_send_error_info" not in send_list
+
+
 def test_blufi_wifi_scan_done_handler_is_registered_for_sta_mode_scans():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    body = function_body(source, "bool Blufi::start_wifi_scan")
+    body = function_body(source, "bool Blufi::StartOwnedWifiScan")
 
     assert "EnsureWifiScanEventHandlerRegistered()" in body
     assert body.index("EnsureWifiScanEventHandlerRegistered()") < body.index("esp_wifi_scan_start")
@@ -42,7 +1686,7 @@ def test_blufi_wifi_scan_done_handler_is_registered_for_sta_mode_scans():
 
 def test_blufi_wifi_scan_is_passive_to_preserve_internal_dma_heap():
     source = read("main/boards/common/blufi.cpp")
-    body = function_body(source, "bool Blufi::start_wifi_scan")
+    body = function_body(source, "bool Blufi::StartOwnedWifiScan")
 
     assert "wifi_scan_config_t scan_config" in body
     assert "scan_config.scan_type = WIFI_SCAN_TYPE_PASSIVE" in body
@@ -72,8 +1716,8 @@ def test_wifi_manager_stop_radio_releases_runtime_buffers_without_deinitializing
     body = function_body(source, "bool WifiManager::StopRadio")
 
     assert "bool StopRadio();" in header
-    assert "station_->Stop()" in body
-    assert "config_ap_->Stop()" in body
+    assert "station->Stop()" in body
+    assert "config_ap->Stop()" in body
     assert "esp_wifi_stop()" in body
     assert "esp_wifi_deinit()" not in body
     assert "station_.reset()" not in body
@@ -108,29 +1752,105 @@ def test_esp32s3_blufi_build_is_sized_for_one_peripheral_connection():
 
 def test_blufi_scan_reinitializes_wifi_after_list_dispatch_teardown():
     source = read("main/boards/common/blufi.cpp")
-    body = function_body(source, "bool Blufi::start_wifi_scan")
+    body = function_body(source, "bool Blufi::StartOwnedWifiScan")
 
     initialize = body.index("wifi_manager.Initialize()")
     get_mode = body.index("esp_wifi_get_mode")
-    null_mode = body.index("current_mode == WIFI_MODE_NULL")
+    station_capable = body.index(
+        "current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA"
+    )
 
-    assert initialize < get_mode < null_mode
+    assert initialize < get_mode < station_capable
+
+
+def test_blufi_scan_recovers_when_wifi_mode_read_fails():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::StartOwnedWifiScan")
+
+    get_mode = body.index("esp_wifi_get_mode(&current_mode)")
+    read_failure = body.index("if (err != ESP_OK)", get_mode)
+    set_fallback = body.index("current_mode = WIFI_MODE_NULL;", read_failure)
+    set_station = body.index("esp_wifi_set_mode(WIFI_MODE_STA)", set_fallback)
+
+    assert get_mode < read_failure < set_fallback < set_station
+    assert "Failed to read WiFi mode before scan" in body
+    assert "Failed to get WiFi mode" not in body
+
+
+def test_blufi_scan_uses_one_passive_start_after_mode_is_station_capable():
+    source = read("main/boards/common/blufi.cpp")
+    body = function_body(source, "bool Blufi::StartOwnedWifiScan")
+
+    assert "current_mode == WIFI_MODE_STA || current_mode == WIFI_MODE_APSTA" in body
+    assert "Unexpected WiFi mode" not in body
+    assert body.count("esp_wifi_scan_start(&scan_config, false)") == 1
+    assert body.index("esp_wifi_set_mode(WIFI_MODE_STA)") < body.index(
+        "esp_wifi_scan_start(&scan_config, false)"
+    )
+    assert body.count("err != ESP_OK && err != ESP_ERR_WIFI_STATE") == 2
+
+
+def test_blufi_wifi_scan_failures_log_start_and_empty_result_separately():
+    source = read("main/boards/common/blufi.cpp")
+    start = function_body(source, "bool Blufi::StartOwnedWifiScan")
+    followup = function_body(source, "Blufi::RunOwnedWifiScanFollowupNoexcept")
+    scan_done = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert '"scan_start_failed"' in followup
+    assert '"scan_completed_without_ap_records"' in scan_done
+
+
+def test_blufi_logs_heap_around_connection_and_wifi_list_dispatch():
+    source = read("main/boards/common/blufi.cpp")
+    send_list = function_body(source, "void Blufi::_send_wifi_list")
+    handler = function_body(source, "void Blufi::_handle_event")
+    init_event = handler[
+        handler.index("case ESP_BLUFI_EVENT_INIT_FINISH") :
+        handler.index("case ESP_BLUFI_EVENT_DEINIT_FINISH")
+    ]
+    connect_event = handler[
+        handler.index("case ESP_BLUFI_EVENT_BLE_CONNECT") :
+        handler.index("case ESP_BLUFI_EVENT_BLE_DISCONNECT")
+    ]
+
+    assert 'LogBlufiHeapSnapshot("blufi_init_finish")' in init_event
+    assert 'LogBlufiHeapSnapshot("ble_connect")' in connect_event
+    assert 'LogBlufiHeapSnapshot("wifi_list_before_dispatch")' in send_list
+    assert 'LogBlufiHeapSnapshot("wifi_list_after_dispatch")' in send_list
+    assert send_list.index("wifi_list_before_dispatch") < send_list.index(
+        "esp_err_t err = esp_blufi_send_wifi_list"
+    ) < send_list.index("wifi_list_after_dispatch")
 
 
 def test_blufi_wifi_scan_caps_application_owned_candidates():
     source = read("main/boards/common/blufi.cpp")
-    body = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    body = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
-    cap = "ap_num = std::min<uint16_t>(ap_num, kMaxBlufiWifiScanCandidates);"
     assert "kMaxBlufiWifiScanCandidates" in source
-    assert cap in body
-    assert body.index(cap) < body.index("m_ap_records.resize(ap_num)")
-    assert body.index(cap) < body.index("esp_wifi_scan_get_ap_records(&ap_num")
+    collector = "BlufiWifiScanResultCollector<"
+    assert collector in body
+    assert "wifi_ap_record_t, kMaxBlufiWifiScanCandidates" in body
+    assert "scanned_ap_records.resize(ap_num)" not in body
+    assert body.index(collector) < body.index("esp_wifi_scan_get_ap_records(")
+
+
+def test_blufi_wifi_scan_callback_contains_allocation_failure_and_recovery():
+    source = read("main/boards/common/blufi.cpp")
+    event_handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    completion = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
+
+    assert "try" in event_handler
+    assert "catch (...)" in event_handler
+    assert "RetainFailedCompletion(*lease)" in event_handler
+    assert "BlufiWifiScanResultCollector" in completion
+    assert "scanned_ap_records.assign" in completion
+    assert "materialization_failed" in completion
+    assert "scanned_ap_records.resize" not in completion
 
 
 def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_returns():
     source = read("main/boards/common/blufi.cpp")
-    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert "ScheduleWifiListSend" in handler
     assert "_send_wifi_list();" not in handler
@@ -139,12 +1859,21 @@ def test_blufi_wifi_list_dispatch_is_deferred_and_guarded_until_scan_callback_re
     assert "Application::GetInstance().Schedule" in helper
     assert "RunIfSetupGenerationCurrent" in helper
     assert "m_ble_is_connected" in helper
+    assert "dispatch_current = true" in helper
+    assert helper.index("dispatch_current = true") < helper.index(
+        "_send_wifi_list(std::move(ap_records))"
+    )
+    guarded = helper[
+        helper.index("RunIfSetupGenerationCurrent") :
+        helper.index("if (dispatch_current)")
+    ]
+    assert "_send_wifi_list" not in guarded
 
 
 def test_blufi_deferred_wifi_list_is_bound_to_exact_ble_connection():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
     helper = function_body(source, "void Blufi::ScheduleWifiListSend")
     connect = source[
         source.index("case ESP_BLUFI_EVENT_BLE_CONNECT") :
@@ -171,13 +1900,14 @@ def test_blufi_deferred_wifi_list_is_bound_to_exact_ble_connection():
     assert "provisioning_finalization_mutex_" in handler
     assert "provisioning_finalization_mutex_" in connect
     assert "provisioning_finalization_mutex_" in disconnect
-    assert "m_send_list_after_scan = false;" in disconnect
+    assert "m_wifi_list_dispatch_epoch_.fetch_add(1" in disconnect
+    assert "completion.owner.ble_connection_epoch" in handler
 
 
 def test_blufi_wifi_list_retry_waits_for_owned_deferred_dispatch():
     source = read("main/boards/common/blufi.cpp")
     header = read("main/boards/common/blufi.h")
-    handler = function_body(source, "void Blufi::_wifi_scan_event_handler")
+    handler = function_body(source, "void Blufi::ConsumeOwnedWifiScanCompletion")
     event_body = function_body(source, "void Blufi::_handle_event")
     get_list = event_body[
         event_body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") :
@@ -186,14 +1916,14 @@ def test_blufi_wifi_list_retry_waits_for_owned_deferred_dispatch():
 
     assert "m_wifi_list_dispatch_pending_epoch_" in header
     pending_check = get_list.index("m_wifi_list_dispatch_pending_epoch_")
-    assert pending_check < get_list.index("if (m_scan_in_progress)")
     assert pending_check < get_list.index("IsWifiScanCacheFresh()")
     assert pending_check < get_list.index("m_ap_records.clear();")
+    assert pending_check < get_list.index("RequestWifiListScan(true, true)")
 
     assert "std::vector<wifi_ap_record_t> owned_ap_records" in handler
     transfer = "owned_ap_records.swap(self->m_ap_records);"
     assert transfer in handler
-    assert handler.index(transfer) < handler.index("self->m_scan_in_progress = false;")
+    assert handler.index(transfer) < handler.index("FinishCompletion(")
     assert "std::move(owned_ap_records)" in handler
 
 
@@ -239,8 +1969,12 @@ def test_blufi_scan_done_handler_ignores_scan_events_it_did_not_start():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "void Blufi::_wifi_scan_event_handler")
 
-    assert "!self->m_scan_in_progress" in body
-    assert body.index("!self->m_scan_in_progress") < body.index("esp_wifi_scan_get_ap_num")
+    assert "!callback.consume_now" in body
+    assert "callback.deferred_until_commit" in body
+    assert "esp_wifi_scan_get_ap_num" not in body
+    assert body.index("!callback.consume_now") < body.index(
+        "ConsumeOwnedWifiScanCompletion"
+    )
     assert "Ignoring WiFi scan done event not owned by BluFi" in body
 
 def test_blufi_wifi_list_requests_refresh_stale_cached_scan_results():
@@ -253,18 +1987,18 @@ def test_blufi_wifi_list_requests_refresh_stale_cached_scan_results():
     assert "kWifiScanCacheMaxAgeUs" in header
     assert "IsWifiScanCacheFresh()" in header
     assert "IsWifiScanCacheFresh()" in source
-    assert "!m_ap_records.empty() && IsWifiScanCacheFresh()" in get_list
-    fresh_idx = get_list.index("!m_ap_records.empty() && IsWifiScanCacheFresh()")
+    assert "cache_owner_is_current && !m_ap_records.empty()" in get_list
+    assert "IsWifiScanCacheFresh()" in get_list
+    fresh_idx = get_list.index("cache_owner_is_current && !m_ap_records.empty()")
     assert "_send_wifi_list(" in get_list[fresh_idx:]
     assert "m_ap_records.clear();" in get_list
 
-def test_blufi_init_resets_wifi_scan_cache_capture_without_starting_eager_scan():
+def test_blufi_init_does_not_start_an_eager_wifi_scan():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "esp_err_t Blufi::_init_impl")
 
-    assert "m_scan_should_save_ssid = true;" in body
-    assert body.index("m_scan_should_save_ssid = true;") < body.index("_controller_init()")
-    assert "start_wifi_scan();" not in body
+    assert "RequestWifiListScan(" not in body
+    assert "StartOwnedWifiScan(" not in body
 
 def test_blufi_init_resets_ble_timeout_latch_for_fresh_setup_window():
     source = read("main/boards/common/blufi.cpp")
@@ -273,23 +2007,91 @@ def test_blufi_init_resets_ble_timeout_latch_for_fresh_setup_window():
     assert "ble_timed_out_ = false;" in body
     assert body.index("ble_timed_out_ = false;") < body.index("_controller_init()")
 
-def test_blufi_wifi_list_marks_inflight_scan_results_as_app_visible():
+def test_blufi_wifi_list_coalesces_inflight_scan_with_app_visible_request():
     source = read("main/boards/common/blufi.cpp")
     body = function_body(source, "void Blufi::_handle_event")
     get_list = body[body.index("case ESP_BLUFI_EVENT_GET_WIFI_LIST") : body.index("case ESP_BLUFI_EVENT_RECV_CUSTOM_DATA")]
-    inflight_branch = get_list[get_list.index("if (m_scan_in_progress)") : get_list.index("break;", get_list.index("if (m_scan_in_progress)"))]
 
-    assert "m_scan_should_save_ssid = true;" in inflight_branch
-    assert inflight_branch.index("m_scan_should_save_ssid = true;") < inflight_branch.index("m_send_list_after_scan = true;")
+    assert "RequestWifiListScan(true, true);" in get_list
+    request = function_body(source, "void Blufi::RequestWifiListScan")
+    assert "wifi_scan_controller_.RequestScan(request)" in request
 
 def test_wifi_station_does_not_consume_blufi_owned_scan_results():
     source = read("managed_components/78__esp-wifi-connect/wifi_station.cc")
     header = read("managed_components/78__esp-wifi-connect/include/wifi_station.h")
     handler = function_body(source, "void WifiStation::WifiEventHandler")
 
-    assert "scan_in_progress_" in header
+    assert "scan_in_progress_" not in header + source
+    assert "std::optional<WifiScanLeaseCoordinator::Lease> scan_lease_;" in header
     assert "bool StartOwnedScan();" in header
     assert "bool WifiStation::StartOwnedScan()" in source
-    assert "!this_->scan_in_progress_" in handler
-    assert handler.index("!this_->scan_in_progress_") < handler.index("HandleScanResult();")
+    assert "ObserveScanDone(lease)" in handler
+    assert handler.index("ObserveScanDone(lease)") < handler.index(
+        "CompleteOwnedScan(lease)"
+    )
     assert "Ignoring WiFi scan done event not owned by WifiStation" in handler
+
+
+def test_cardputer_uses_field_specific_wifi_credential_byte_limits():
+    source = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.cc")
+    header = read("main/boards/m5stack-cardputer-adv/wifi_config_ui.h")
+    password = function_body(source, "void WifiConfigUI::HandlePasswordInputKey")
+    manual = function_body(source, "void WifiConfigUI::HandleManualInputKey")
+
+    assert "MAX_INPUT_LENGTH" not in header
+    assert "kMaxWifiPasswordBytes" in password
+    assert "kMaxWifiSsidBytes" in manual
+    assert "AppendWifiFieldIfFits" in password
+    assert "AppendWifiFieldIfFits" in manual
+
+
+def test_cardputer_invalid_credentials_are_terminal_not_retried():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    invalid = worker.index("CardputerWifiStartAction::kRejectCredentials")
+    retry = worker.index("CardputerWifiStartAction::kRetry")
+    assert invalid > retry
+    invalid_path = worker[invalid:worker.index("bool connected", invalid)]
+    assert "ClaimCredentialFinalization" in invalid_path
+    assert "RollbackSsidTransaction" in invalid_path
+    assert "RetryInFlight" not in invalid_path
+
+
+def test_cardputer_transaction_ownership_is_released_on_all_terminal_paths():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    exit_mode = function_body(board, "void ExitWifiConfigMode")
+
+    assert "CommitSsidTransaction" in worker
+    assert worker.count("RollbackSsidTransaction") >= 2
+    cancel = exit_mode[exit_mode.index("CancelGeneration"):]
+    assert "RollbackSsidTransaction(*transaction)" in cancel
+
+
+def test_cardputer_station_start_runs_without_credential_transaction_lock():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    start = worker.index("StartStationWithCredentialsIfScanIdle")
+    preceding_lock = worker.rfind("wifi_credential_transaction_mutex_", 0, start)
+    preceding_scope_end = worker.rfind("}", 0, start)
+    assert preceding_scope_end > preceding_lock
+    after_start = worker[start:]
+    assert "CredentialTransaction" in after_start
+    assert after_start.index("CredentialTransaction") < after_start.index(
+        "CardputerWifiStartAction::kRetry"
+    )
+
+
+def test_cardputer_busy_transaction_is_terminal_without_retry_or_rollback():
+    board = read("main/boards/m5stack-cardputer-adv/m5stack_cardputer_adv.cc")
+    worker = function_body(board, "static void WifiConnectionWorkerTask")
+    begin = worker.index("BeginSsidTransaction")
+    busy = worker.index("transaction_id == 0", begin)
+    busy_path = worker[busy:worker.index("} else if", busy)]
+    assert "StoreConnectionResult" in busy_path
+    assert "*intent, false" in busy_path
+    assert "RetryInFlight" not in busy_path
+    assert "RollbackSsidTransaction" not in busy_path
+    schedule = worker.index("ScheduleWifiConnectionResult", busy)
+    transaction_scope_end = worker.index("if (credential_transaction_busy)", busy)
+    assert transaction_scope_end < schedule

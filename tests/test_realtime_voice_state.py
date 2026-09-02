@@ -1496,7 +1496,7 @@ def test_lesson_runtime_repair_pairing_ignored_before_claim_reset_wifi_clear_and
     assert body.index("lesson_runtime_active_.load()") < body.index("CloseAudioChannelByIntent();")
     assert body.index("lesson_runtime_active_.load()") < body.index("SystemReset::ReleaseCloudOwnership()")
     assert body.index("lesson_runtime_active_.load()") < body.index('claim_state.SetInt("confirmed", 0);')
-    assert body.index("lesson_runtime_active_.load()") < body.index("SsidManager::GetInstance().Clear();")
+    assert body.index("lesson_runtime_active_.load()") < body.index("SsidManager::GetInstance().ForceClearAndCancelTransaction()")
     assert body.index("lesson_runtime_active_.load()") < body.index("esp_restart();")
     guard = body[
         body.index("lesson_runtime_active_.load()") :
@@ -1523,7 +1523,7 @@ def test_lesson_runtime_defers_heartbeat_auth_failure_until_lesson_end():
     assert body.index("lesson_runtime_active_.load()") < body.index("CloseAudioChannelByIntent();")
     assert body.index("lesson_runtime_active_.load()") < body.index('backend_settings.SetString("device_secret", "");')
     assert body.index("lesson_runtime_active_.load()") < body.index('claim_state.SetInt("confirmed", 0);')
-    assert body.index("lesson_runtime_active_.load()") < body.index("SsidManager::GetInstance().Clear();")
+    assert body.index("lesson_runtime_active_.load()") < body.index("SsidManager::GetInstance().ForceClearAndCancelTransaction()")
     assert body.index("lesson_runtime_active_.load()") < body.index("esp_restart();")
     guard = body[
         body.index("lesson_runtime_active_.load()") :

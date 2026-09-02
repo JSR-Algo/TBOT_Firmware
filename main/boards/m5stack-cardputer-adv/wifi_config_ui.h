@@ -4,6 +4,7 @@
 #include "tca8418_keyboard.h"
 #include "display/lcd_display.h"
 #include <string>
+#include <cstdint>
 #include <vector>
 #include <functional>
 
@@ -37,6 +38,12 @@ enum class WifiConfigResult {
 class WifiConfigUI {
 public:
     using ConnectCallback = std::function<void(const std::string& ssid, const std::string& password)>;
+    using ScanRequestCallback = std::function<bool(uint64_t, uint64_t)>;
+    struct ScanWorkerResult {
+        bool scan_started = false;
+        bool failed = true;
+        std::vector<WifiScanResult> networks;
+    };
 
     WifiConfigUI(LcdDisplay* display);
     ~WifiConfigUI();
@@ -52,6 +59,9 @@ public:
 
     // Set callback for when connection should be attempted
     void SetConnectCallback(ConnectCallback callback) { connect_callback_ = callback; }
+    void SetScanRequestCallback(ScanRequestCallback callback) {
+        scan_request_callback_ = std::move(callback);
+    }
 
     // Notify connection result
     void OnConnectResult(bool success);
@@ -59,8 +69,12 @@ public:
     // Check if UI is active
     bool IsActive() const { return is_active_; }
 
-    // Update cursor blink state (call periodically from main loop)
-    void UpdateCursor();
+    // Called on the UI/Application task by the board's periodic poller.
+    void Poll();
+    uint64_t Generation() const { return ui_generation_; }
+    static ScanWorkerResult RunWifiScanWorker(uint64_t ui_generation);
+    void CompleteWifiScanWorker(uint64_t revision, ScanWorkerResult result);
+    void CancelPendingScan();
 
 private:
     LcdDisplay* display_;
@@ -83,6 +97,11 @@ private:
     std::string input_password_;
     std::string selected_ssid_;
     bool input_focus_on_password_;  // For manual input: true = password field, false = ssid field
+    bool scan_failed_ = false;
+    uint64_t ui_generation_ = 0;
+    uint64_t scan_revision_ = 0;
+    bool scan_request_pending_ = false;
+    ScanRequestCallback scan_request_callback_;
 
     // Cursor blinking
     bool cursor_visible_;
@@ -91,10 +110,8 @@ private:
 
     // Display constants
     static constexpr int MAX_VISIBLE_ITEMS = 4;
-    static constexpr int MAX_INPUT_LENGTH = 64;
-
     // State handlers
-    void StartScanning();
+    bool StartScanning();
     void ShowScanResults();
     void ShowPasswordInput();
     void ShowManualInput();
@@ -124,9 +141,9 @@ private:
     void DrawSavedWifiList();
     std::string GetSignalBars(int8_t rssi);
     void LoadSavedWifiList();
-    void SaveWifiCredentials(const std::string& ssid, const std::string& password);
     void DeleteSavedWifi(int index);
-    void DoWifiScan();
+    static ScanWorkerResult DoWifiScan(uint64_t ui_generation);
+    void DismissPendingScanResult();
     void AttemptConnection();
 };
 

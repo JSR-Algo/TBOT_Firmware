@@ -239,6 +239,19 @@ void test_receive_loop_decoded_payload_edges() {
         require(SsidManager::GetInstance().saved.empty(), "missing-newline payload saves no credentials");
     }
 
+    SsidManager::GetInstance().next_add_result = SsidMutationResult::kBusy;
+    app.audio_service.next_read_ok = true;
+    app.audio_service.next_audio = {1, 2, 3, 4, 5, 6, 7, 8};
+    HostDelayState() = HostDelayControl{0, 1};
+    try {
+        ReceiveWifiCredentialsFromAudio(&app, &wifi, &display, 1);
+        require(false, "busy credential save should continue to delay abort");
+    } catch (const HostAbortDelay &) {
+        require(!wifi.stop_config_ap_called, "busy credential save does not stop config AP");
+        require(SsidManager::GetInstance().saved.empty(), "busy credential save persists nothing");
+    }
+
+    frames.push_back(default_framed_probabilities("Home\nsecret"));
     app.audio_service.next_read_ok = true;
     app.audio_service.next_audio = {1, 2, 3, 4, 5, 6, 7, 8};
     HostDelayState() = HostDelayControl{0, -1};

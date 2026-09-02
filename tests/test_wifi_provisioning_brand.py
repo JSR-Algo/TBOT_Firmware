@@ -56,8 +56,8 @@ def test_blufi_compact_advertising_waits_for_adv_and_scan_response_payloads():
     assert "ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT" in handler
     assert "ESP_GAP_BLE_SCAN_RSP_DATA_RAW_SET_COMPLETE_EVT" in handler
     assert "ESP_GAP_BLE_ADV_START_COMPLETE_EVT" in handler
-    assert "MaybeStartTbotBlufiAdvertising" in handler
-    assert "HandleTbotBlufiAdvertisingStartComplete" in handler
+    assert "CompleteCompactConfigAndSubmit" in handler
+    assert "CompleteStartAndMaybeFallback" in handler
 
     configure = function_body(blufi, "static void StartTbotBlufiAdvertising")
     assert "esp_ble_gap_config_adv_data_raw" in configure
@@ -79,20 +79,115 @@ def test_blufi_compact_advertising_waits_for_adv_and_scan_response_payloads():
 def test_blufi_compact_advertising_ignores_callbacks_from_prior_lifecycle():
     blufi = read("main/boards/common/blufi.cpp")
 
-    assert "tbot_adv_lifecycle_epoch" in blufi
-    assert "tbot_adv_data_callback_epochs" in blufi
-    assert "tbot_scan_rsp_callback_epochs" in blufi
-    assert "tbot_adv_start_callback_epochs" in blufi
+    assert "TbotBlufiAdvertisingLedger" in blufi
+    assert "BeginCompactAndSubmit" in blufi
+    assert "CompleteCompactConfigAndSubmit" in blufi
+    assert "CompleteStartAndMaybeFallback" in blufi
 
     handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
-    assert "PopTbotAdvertisingCallbackEpoch" in handler
-    assert "callback_epoch" in handler
+    assert "CompleteDefaultConfigAndSubmit" in handler
+    assert "CompleteCompactConfigAndSubmit" in handler
+    assert "CompleteStartAndMaybeFallback" in handler
 
-    maybe_start = function_body(blufi, "void MaybeStartTbotBlufiAdvertising")
-    assert "callback_epoch != tbot_adv_active_epoch" in maybe_start
 
-    start_complete = function_body(blufi, "void HandleTbotBlufiAdvertisingStartComplete")
-    assert "callback_epoch != tbot_adv_active_epoch" in start_complete
+def test_blufi_default_fallback_owns_config_and_start_callback_epochs():
+    blufi = read("main/boards/common/blufi.cpp")
+    ledger = read("main/boards/common/blufi_advertising_ledger.h")
+
+    assert '#include "blufi_advertising_ledger.h"' in blufi
+    assert "TbotBlufiAdvertisingLedger tbot_adv_ledger" in blufi
+
+    claim_and_submit = function_body(
+        ledger, "std::optional<Owner> ClaimDefaultFallbackAndSubmit"
+    )
+    claim = claim_and_submit.index("ClaimDefaultFallback()")
+    start_default = claim_and_submit.index("submit_default();")
+    assert claim < start_default
+    assert "std::lock_guard" not in claim_and_submit[claim:start_default]
+
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+    assert "if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT)" in handler
+    assert "if (param == nullptr)" in handler
+    structured_complete = handler.index("ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT")
+    transfer_epoch = handler.index("CompleteDefaultConfigAndSubmit", structured_complete)
+    start_default = handler.index(
+        "esp_ble_gap_start_advertising(&tbot_adv_params)", structured_complete
+    )
+    assert transfer_epoch < start_default
+    assert "kCompactStart" in ledger
+    assert "kDefaultStart" in ledger
+
+
+def test_blufi_advertising_ledger_resets_only_after_successful_host_deinit():
+    blufi = read("main/boards/common/blufi.cpp")
+    invalidate = function_body(blufi, "void InvalidateTbotBlufiAdvertising")
+    host_deinit = function_body(blufi, "esp_err_t Blufi::_host_deinit")
+
+    assert "ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit" not in invalidate
+    reset = host_deinit.index("ResetTbotBlufiAdvertisingAfterSuccessfulHostDeinit")
+    deinit = host_deinit.index("esp_bluedroid_deinit()")
+    success = host_deinit.index("host_initialized_ = false;")
+    assert deinit < success < reset
+    init = function_body(blufi, "esp_err_t Blufi::_init_impl")
+    gap_register = function_body(blufi, "esp_err_t Blufi::_gap_register_callback")
+    assert "ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit" not in init
+    register = gap_register.index("esp_ble_gap_register_callback")
+    activate = gap_register.index("ActivateTbotBlufiAdvertisingAfterSuccessfulHostInit")
+    profile_init = gap_register.index("esp_blufi_profile_init()")
+    assert register < activate < profile_init
+    activation_failure = gap_register[activate:profile_init]
+    assert "InvalidateTbotBlufiAdvertising()" in activation_failure
+
+
+def test_blufi_gap_handler_gates_advertising_but_delegates_unrelated_events():
+    blufi = read("main/boards/common/blufi.cpp")
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+
+    structured = handler.index("ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT")
+    owned_start = handler.index("CompleteDefaultConfigAndSubmit", structured)
+    raw = handler.index("ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT")
+    start = handler.index("ESP_GAP_BLE_ADV_START_COMPLETE_EVT")
+    unrelated = handler.index("esp_blufi_gap_event_handler(event, param)", start)
+    assert structured < owned_start < raw < start < unrelated
+    assert "default:" in handler[:unrelated]
+    assert "esp_blufi_gap_event_handler(event, param)" not in handler[structured:raw]
+
+
+def test_blufi_default_start_uses_idf_equivalent_params_with_exact_cancellation():
+    blufi = read("main/boards/common/blufi.cpp")
+    ledger = read("main/boards/common/blufi_advertising_ledger.h")
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+
+    assert "CompleteDefaultConfigAndSubmit" in handler
+    assert "param->adv_data_cmpl.status == ESP_BT_STATUS_SUCCESS" in handler
+    assert "esp_ble_gap_start_advertising(&tbot_adv_params)" in handler
+    assert "esp_blufi_gap_event_handler(event, param)" not in handler[
+        handler.index("ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT"):
+        handler.index("ESP_GAP_BLE_ADV_DATA_RAW_SET_COMPLETE_EVT")
+    ]
+    assert "Cancel(result.start_owner)" in ledger
+
+    params = blufi[blufi.index("esp_ble_adv_params_t tbot_adv_params"):]
+    assert ".adv_int_min = 0x100" in params
+    assert ".adv_int_max = 0x100" in params
+    assert ".adv_type = ADV_TYPE_IND" in params
+    assert ".own_addr_type = BLE_ADDR_TYPE_PUBLIC" in params
+    assert ".channel_map = ADV_CHNL_ALL" in params
+    assert ".adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY" in params
+
+
+def test_blufi_default_start_async_failure_is_terminal_and_visible():
+    blufi = read("main/boards/common/blufi.cpp")
+    ledger = read("main/boards/common/blufi_advertising_ledger.h")
+    handler = function_body(blufi, "static void TbotBlufiGapEventHandler")
+
+    assert "bool default_failed = false" in ledger
+    assert "result.default_failed" in handler
+    assert '"BluFi default advertising start failed"' in handler
+    start_case = handler[handler.index("ESP_GAP_BLE_ADV_START_COMPLETE_EVT"):]
+    fallback = start_case.index("result.fallback_started")
+    terminal = start_case.index("result.default_failed")
+    assert fallback < terminal
 
 
 def test_blufi_never_logs_wifi_password_values():
@@ -268,7 +363,9 @@ def test_runtime_state_machine_can_interrupt_backend_connect_for_wifi_config():
 def test_start_network_preserves_boot_reprovisioning_during_startup():
     wifi_board = read("main/boards/common/wifi_board.cc")
     start = wifi_board.index("void WifiBoard::StartNetwork()")
-    start_body = wifi_board[start : wifi_board.index("void WifiBoard::TryWifiConnect()", start)]
+    start_body = wifi_board[start : wifi_board.index(
+        "WifiStationStartResult WifiBoard::TryWifiConnect()", start
+    )]
 
     assert "StartNetwork skipped auto-connect because config mode is already active" in start_body
     assert "if (in_config_mode_)" in start_body

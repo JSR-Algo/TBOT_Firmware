@@ -26,6 +26,8 @@ def _start_wifi_config_body(wifi_board: str) -> str:
     return wifi_board[start:end]
 
 def _function_body(text: str, signature: str) -> str:
+    if signature == "void Blufi::ConsumeOwnedWifiScanCompletion":
+        signature = "bool Blufi::ConsumeOwnedWifiScanCompletion"
     start = text.index(signature)
     brace = text.index("{", start)
     depth = 0
@@ -161,7 +163,7 @@ def test_fw3c_wifi_list_releases_scan_heap_before_blufi_dispatch():
 
 def test_fw3c_scan_driver_records_are_released_on_all_exit_paths():
     blufi = read("main/boards/common/blufi.cpp")
-    scan_body = _function_body(blufi, "void Blufi::_wifi_scan_event_handler")
+    scan_body = _function_body(blufi, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert scan_body.count("esp_wifi_clear_ap_list()") >= 2
 
@@ -181,6 +183,40 @@ def test_fw3d_wifi_list_send_path_does_not_start_overlapping_refresh_scan():
     assert "start_wifi_scan()" not in after_send
 
 
+def test_fw3d_scan_invalidation_follows_lifecycle_identity_changes():
+    blufi = read("main/boards/common/blufi.cpp")
+    disconnect = _function_body(blufi, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    deinit = _function_body(blufi, "esp_err_t Blufi::_deinit_impl")
+
+    assert disconnect.index("ble_session_state_.compare_exchange_strong") < disconnect.index(
+        "InvalidateWifiScanSession("
+    )
+    assert restart.index("setup_generation_.fetch_add(1)") < restart.index(
+        "InvalidateWifiScanSession("
+    )
+    assert deinit.index("ble_session_state_.exchange") < deinit.index(
+        "InvalidateWifiScanSession("
+    )
+
+
+def test_fw3d_scan_controller_lock_never_nests_finalization_lock():
+    blufi = read("main/boards/common/blufi.cpp")
+    restart = _function_body(blufi, "esp_err_t Blufi::RestartForSetup")
+    connect = _function_body(blufi, "case ESP_BLUFI_EVENT_BLE_CONNECT:")
+    disconnect = _function_body(blufi, "case ESP_BLUFI_EVENT_BLE_DISCONNECT:")
+
+    assert restart.index("CancelBleSetupTimeout();\n    }") < restart.index(
+        "InvalidateWifiScanSession("
+    )
+    assert connect.index("m_ble_is_connected = true;\n            }") < connect.index(
+        "UpdateWifiScanSession("
+    )
+    assert disconnect.index(
+        "m_wifi_list_dispatch_pending_epoch_.store(0, std::memory_order_release);\n            }"
+    ) < disconnect.index("InvalidateWifiScanSession(")
+
+
 # ---------------------------------------------------------------------------
 # FW3e: blufi.cpp — scan completion must not log every AP while a phone is
 #       waiting for BluFi notifications. In dense RF environments this floods
@@ -188,7 +224,7 @@ def test_fw3d_wifi_list_send_path_does_not_start_overlapping_refresh_scan():
 # ---------------------------------------------------------------------------
 def test_fw3e_wifi_scan_done_does_not_log_every_ap_before_blufi_send():
     blufi = read("main/boards/common/blufi.cpp")
-    scan_body = _function_body(blufi, "void Blufi::_wifi_scan_event_handler")
+    scan_body = _function_body(blufi, "void Blufi::ConsumeOwnedWifiScanCompletion")
 
     assert "Found %d APs" in scan_body
     assert "SSID: %s" not in scan_body
@@ -209,8 +245,9 @@ def test_fw3f_password_frame_schedules_duplicate_safe_connect_fallback():
     passwd_body = blufi[passwd_idx:list_idx]
     fallback_body = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
 
-    assert "ScheduleStationConnectFallback();" in passwd_body
-    assert 'StartStationConnectFromCredentials("password_fallback")' in fallback_body
+    assert "ScheduleStationConnectFallback(candidate_epoch);" in passwd_body
+    assert '"password_fallback", candidate_epoch' in fallback_body
+    assert "uint64_t candidate_epoch" in fallback_body
     assert "m_wifi_connect_task_started" in fallback_body
     assert "vTaskDelay" in fallback_body
 
@@ -227,7 +264,7 @@ def test_fw3f_connect_fallback_task_deletes_itself_on_all_exits():
     assert "vTaskDelete(nullptr);" in early_exit
     assert early_exit.index("vTaskDelete(nullptr);") < early_exit.index("return;")
     assert fallback_body.rfind("vTaskDelete(nullptr);") > fallback_body.index(
-        'StartStationConnectFromCredentials("password_fallback")'
+        '"password_fallback", candidate_epoch'
     )
 
 
@@ -257,7 +294,7 @@ def test_fw4_ble_teardown_precedes_station_association():
     helper = _station_connect_helper_body()
 
     release_idx = helper.index("ReleaseBleForStationAssociation")
-    station_idx = helper.index("wifi.StartStation()")
+    station_idx = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert release_idx < station_idx
     assert "ESP_BLUFI_STA_CONN_SUCCESS" not in helper
 
@@ -551,15 +588,14 @@ def test_fw13_recv_sta_ssid_passwd_copy_is_length_bounded():
         "password copy writes NUL at an unbounded index — overflows when len == sizeof"
     )
 
-    # Both copies must clamp the length against the buffer size.
-    for label, segment, buf in (
-        ("ssid", ssid_body, "m_sta_config.sta.ssid"),
-        ("passwd", passwd_body, "m_sta_config.sta.password"),
-    ):
-        assert "std::min" in segment, f"{label} copy is not bounded with std::min"
-        assert f"sizeof({buf})" in segment, (
-            f"{label} copy does not clamp against sizeof({buf})"
-        )
+    # SSID retains its legacy status copy, while password is staged only in the
+    # mutex-owned authority and never retained in the unused legacy buffer.
+    assert "sizeof(m_sta_config.sta.ssid)" in ssid_body
+    assert ssid_body.index("Reject invalid STA") < ssid_body.index("memcpy(")
+    assert "param->sta_passwd.passwd_len > kMaxWifiPasswordBytes" in passwd_body
+    assert "memcpy(m_sta_config.sta.password" not in passwd_body
+    assert "m_sta_config.sta.password[passwd_n]" not in passwd_body
+    assert "staged_wifi_credentials_.UpdatePassword" in passwd_body
 
     # Defense-in-depth: the password handler still must not log the value.
     assert 'ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD");' in passwd_body
@@ -662,7 +698,7 @@ def test_wifi_credentials_release_ble_before_station_association():
     helper = _station_connect_helper_body()
 
     release = helper.index("ReleaseBleForStationAssociation")
-    station = helper.index("wifi.StartStation()")
+    station = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert release < station
 
 
@@ -681,7 +717,7 @@ def test_ble_restore_is_scoped_to_the_originating_setup_generation():
 
     assert "expected_generation != setup_generation_.load()" in restore
     assert "InitWithLifecycleOwned()" in restore
-    assert "StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC)" in restore
+    assert "StartBleSetupTimeoutWithLifecycleOwned(CONFIG_BLE_SETUP_TIMEOUT_SEC)" in restore
 
 
 # ---------------------------------------------------------------------------
@@ -870,7 +906,7 @@ def test_fw20_ble_active_defer_skips_reschedule_during_wifi_connect():
 def test_fw21_ble_release_precedes_station_and_claim_continuation():
     req = _station_connect_helper_body()
     release_idx = req.index("ReleaseBleForStationAssociation")
-    station_idx = req.index("wifi.StartStation()")
+    station_idx = req.index("wifi.StartStationWithCredentialsIfScanIdle")
     success_idx = req.index("if (credentials_committed)")
     sched_idx = req.index("Application::GetInstance().Schedule(", success_idx)
     sched_body = req[sched_idx:]
@@ -898,7 +934,7 @@ def test_fw21_ble_release_precedes_station_and_claim_continuation():
 def test_fw21b_station_association_has_no_ble_delivery_grace_or_report():
     req = _station_connect_helper_body()
     release_idx = req.index("ReleaseBleForStationAssociation")
-    station_idx = req.index("wifi.StartStation()")
+    station_idx = req.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert release_idx < station_idx
     assert "kBlufiSuccessReportDeliveryGraceMs" not in req
     assert "esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS" not in req
@@ -918,7 +954,7 @@ def test_fw21c_ble_release_and_station_worker_are_generation_fenced():
     generation_check_idx = req.index(
         "if (generation != self->setup_generation_.load())", release_idx
     )
-    station_idx = req.index("wifi.StartStation()", generation_check_idx)
+    station_idx = req.index("wifi.StartStationWithCredentialsIfScanIdle", generation_check_idx)
     assert release_idx < generation_check_idx < station_idx
 
     header = read("main/boards/common/blufi.h")
@@ -1021,7 +1057,7 @@ def test_fw21e_restart_and_completion_share_finalization_mutex_without_lock_leak
     generation_advance = restart.index("setup_generation_.fetch_add(1)")
     transaction_take = restart.index("ssid_transaction_id_.exchange(0)")
     rollback = restart.index("RollbackSsidTransaction(stale_ssid_transaction)")
-    initial_scope_end = restart.index("}\n\n    if (GetBleState()", rollback)
+    initial_scope_end = restart.index("}\n    InvalidateWifiScanSession(", rollback)
     deinit = restart.index(
         "esp_err_t teardown_error = DeinitWithLifecycleOwned();", initial_scope_end
     )
@@ -1136,6 +1172,9 @@ def test_fw21e_compound_lifecycle_transactions_use_owned_primitives_without_recu
     teardown = _function_body(
         blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownImpl"
     )
+    teardown_owned = _function_body(
+        blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownWithLifecycleOwned"
+    )
     restore = _function_body(blufi, "void Blufi::RestoreBleAfterStationFailure")
 
     for body in (restart, release, teardown, restore):
@@ -1146,12 +1185,13 @@ def test_fw21e_compound_lifecycle_transactions_use_owned_primitives_without_recu
     assert "DeinitWithLifecycleOwned()" in restart
     assert "InitWithLifecycleOwned()" in restart
     assert "DeinitWithLifecycleOwned()" in release
-    assert "DeinitWithLifecycleOwned()" in teardown
+    assert "CompleteSuccessfulProvisioningTeardownWithLifecycleOwned" in teardown
+    assert "DeinitWithLifecycleOwned()" in teardown_owned
 
     lifecycle = restore.index("ble_lifecycle_mutex_")
     finalization = restore.index("provisioning_finalization_mutex_", lifecycle)
     finalization_scope_end = restore.index(
-        "}\n\n        WifiManager::GetInstance().StopStation();", finalization
+        "}\n        InvalidateWifiScanSession(", finalization
     )
     stop_station = restore.index("WifiManager::GetInstance().StopStation()")
     init = restore.index("InitWithLifecycleOwned()", finalization_scope_end)
@@ -1193,14 +1233,19 @@ def test_fw21e_successful_teardown_validates_generation_without_locking_callback
     generation_check = teardown.index(
         "expected_generation.value() != setup_generation_.load()", generation_lock
     )
-    generation_scope_end = teardown.index("}\n\n    constexpr", generation_check)
-    claim = teardown.index("provisioning_session_.Claim", generation_scope_end)
-    deinit = teardown.index(
-        "const esp_err_t deinit_error = DeinitWithLifecycleOwned();", claim
+    generation_scope_end = teardown.index("}\n\n    return", generation_check)
+    owned_call = teardown.index(
+        "CompleteSuccessfulProvisioningTeardownWithLifecycleOwned", generation_scope_end
     )
+    owned = _function_body(
+        blufi, "bool Blufi::CompleteSuccessfulProvisioningTeardownWithLifecycleOwned"
+    )
+    claim = owned.index("provisioning_session_.Claim")
+    deinit = owned.index("const esp_err_t deinit_error = DeinitWithLifecycleOwned();", claim)
 
-    assert lifecycle_lock < generation_lock < generation_check < generation_scope_end < claim < deinit
-    assert "provisioning_finalization_mutex_" not in teardown[generation_scope_end:deinit]
+    assert lifecycle_lock < generation_lock < generation_check < generation_scope_end < owned_call
+    assert claim < deinit
+    assert "provisioning_finalization_mutex_" not in owned[:deinit]
 
 
 def test_fw21e_teardown_callers_do_not_invoke_deinit_under_generation_action_lock():
@@ -1329,16 +1374,15 @@ def test_fw21g_claim_refresh_dispatch_is_generation_bound_without_tls_under_lock
     run_idx = schedule.index("RunIfSetupGenerationCurrent(")
     assert "expected_setup_generation" in schedule[run_idx:run_idx + 180]
     promote_idx = schedule.index("PromoteFromWifiConfigAfterProvisioning();", run_idx)
-    dispatch_idx = schedule.index(
-        "DispatchPendingTbotClaimRefreshForSetupGeneration(", promote_idx
-    )
-    assert "expected_setup_generation" in schedule[dispatch_idx:dispatch_idx + 150]
-    assert run_idx < promote_idx < dispatch_idx
-    guarded_dispatch = schedule[run_idx:dispatch_idx]
+    effects_idx = schedule.index("deferred_effects.dispatch_refresh = true", promote_idx)
+    execute_idx = schedule.index("ExecuteClaimDeferredEffects", effects_idx)
+    assert "expected_setup_generation" in schedule[execute_idx:execute_idx + 150]
+    assert run_idx < promote_idx < effects_idx < execute_idx
+    guarded_dispatch = schedule[run_idx:execute_idx]
     assert "FetchBackendApiUrlFromBootstrap" not in guarded_dispatch
     assert "ConfirmPendingTbotClaim" not in guarded_dispatch
     assert "RefreshPendingTbotClaim" not in schedule
-    assert "Schedule([this]()" not in schedule[promote_idx:dispatch_idx]
+    assert "Schedule([this]()" not in schedule[promote_idx:execute_idx]
 
     success_start = blufi.index("if (credentials_committed)")
     success_end = blufi.index("Failed to connect to WiFi via esp-wifi-connect", success_start)
@@ -1367,7 +1411,9 @@ def test_fw21h_generation_flows_through_claim_network_contexts_and_result_apply(
 
     assert "DispatchPendingTbotClaimRefreshForSetupGeneration" in header
     assert "DispatchPendingTbotClaimFetch" in prepare
-    assert "DispatchPendingTbotClaimConfirmation" in prepare
+    assert "effects.dispatch_confirmation = true" in prepare
+    assert "ClaimBleLifecycleIntent::kStopAdvertising" in prepare
+    assert "ExecuteClaimDeferredEffects" in prepare
     for blocking in (
         "FetchBackendApiUrlFromBootstrap",
         "FetchPendingTbotClaimFromDeviceConfig",
@@ -1414,36 +1460,244 @@ def test_fw21h_generation_bound_claim_confirm_defers_ble_teardown_until_after_ga
 
     gate = task.index("Blufi::GetInstance().RunIfSetupGenerationCurrent(")
     gate_end = task.index("});", gate)
-    teardown = task.index("CompleteSuccessfulProvisioningTeardown", gate_end)
+    teardown = task.index("ExecuteClaimDeferredEffects", gate_end)
 
-    assert "apply_result(true)" in task[gate:gate_end]
+    assert "apply_result(true, &deferred_effects)" in task[gate:gate_end]
     assert "CompleteSuccessfulProvisioningTeardown" not in task[gate:gate_end]
     assert "StopBleAdvertising" not in task[gate:gate_end]
     assert gate < gate_end < teardown
-    assert '"claim_confirmed", provisioning_token' in task[teardown:teardown + 180]
+    assert "provisioning_token" in task[teardown:teardown + 180]
     post_gate = task[gate_end:]
-    assert re.search(
-        r"#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING\s+"
-        r"if \(applied && should_teardown\) \{\s+"
-        r"Blufi::GetInstance\(\)\.CompleteSuccessfulProvisioningTeardownForGeneration\(",
-        post_gate,
-    )
-    generation_teardown = post_gate.index(
-        "CompleteSuccessfulProvisioningTeardownForGeneration("
-    )
+    generation_teardown = post_gate.index("ExecuteClaimDeferredEffects(")
     assert "expected_setup_generation" in post_gate[
         generation_teardown:generation_teardown + 180
     ]
-    assert re.search(
-        r"#else\s+if \(applied && should_teardown\) \{\s+"
-        r"self->StopBleAdvertising\(\);",
-        post_gate,
-    )
+    effects = _function_body(application, "void Application::ExecuteClaimDeferredEffects")
+    assert "CompleteSuccessfulProvisioningTeardownForGeneration" in effects
+    assert "StopBleAdvertisingForSetupGeneration" in effects
 
     confirmed = result_handler[result_handler.index("CancelClaimExpiryTimer();") :]
     defer_guard = confirmed.index("if (!defer_successful_teardown)")
     owned_teardown = confirmed.index("CompleteSuccessfulProvisioningTeardown(", defer_guard)
     assert defer_guard < owned_teardown
+
+
+def test_fw21h_generation_gates_commit_state_and_defer_all_lifecycle_effects():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    fetch_task = _function_body(app, "void Application::ClaimFetchTask")
+    confirm_task = _function_body(app, "void Application::ClaimConfirmationTask")
+    refresh = _function_body(app, "void Application::SchedulePendingTbotClaimRefresh")
+
+    assert "enum class ClaimBleLifecycleIntent" in header
+    assert "struct ClaimDeferredEffects" in header
+    assert "ExecuteClaimDeferredEffects" in header
+
+    fetch_apply = _function_body(app, "void Application::ApplyPendingTbotClaimFetchResult")
+    confirm_apply = _function_body(
+        app, "bool Application::ApplyPendingTbotClaimConfirmationResult"
+    )
+    assert "deferred_effects != nullptr" in fetch_apply
+    assert "deferred_effects->ble_intent = intent" in fetch_apply
+    assert "deferred_effects->dispatch_confirmation = true" in fetch_apply
+    assert "deferred_effects != nullptr" in confirm_apply
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in confirm_apply
+    complete_teardown = confirm_apply.index(
+        "ClaimBleLifecycleIntent::kCompleteSuccessfulTeardown"
+    )
+    assert "ClaimBleLifecycleIntent::kStopAdvertising" in confirm_apply[
+        complete_teardown:
+    ]
+
+    for body in (fetch_task, confirm_task):
+        gate = body.index("RunIfSetupGenerationCurrent(")
+        execute = body.index("ExecuteClaimDeferredEffects", gate)
+        locked = body[gate:execute]
+        for forbidden in (
+            "EnsureBleAdvertisingForStandby",
+            "StopBleAdvertising",
+            "CompleteSuccessfulProvisioningTeardown",
+            "DispatchPendingTbotClaimRefreshForSetupGeneration",
+            ".init()",
+            ".deinit()",
+        ):
+            assert forbidden not in locked
+        assert "applied" in body[gate:execute]
+        assert "expected_setup_generation" in body[execute:execute + 220]
+
+    refresh_gate = refresh.index("RunIfSetupGenerationCurrent(")
+    refresh_end = refresh.index("ExecuteClaimDeferredEffects", refresh_gate)
+    assert "DispatchPendingTbotClaimRefreshForSetupGeneration" not in refresh[
+        refresh_gate:refresh_end
+    ]
+    assert "applied" in refresh[refresh_gate:refresh_end]
+    assert "expected_setup_generation" in refresh[refresh_end:refresh_end + 180]
+    execute_effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    dispatch = execute_effects.index("DispatchPendingTbotClaimRefreshForSetupGeneration")
+    assert "expected_setup_generation" in execute_effects[dispatch:dispatch + 180]
+
+
+def test_fw21h_generation_aware_lifecycle_apis_preserve_global_lock_order():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    for signature, name, primitive in (
+        ("bool Blufi::EnsureAdvertisingForSetupGeneration", "EnsureAdvertisingForSetupGeneration", "InitWithLifecycleOwned()"),
+        ("esp_err_t Blufi::DeinitForSetupGeneration", "DeinitForSetupGeneration", "DeinitWithLifecycleOwned()"),
+    ):
+        assert name in header
+        body = _function_body(blufi, signature)
+        lifecycle = body.index("ble_lifecycle_mutex_")
+        finalization = body.index("provisioning_finalization_mutex_", lifecycle)
+        generation = body.index("expected_generation != setup_generation_.load()", finalization)
+        scope_end = body.index("}\n", generation)
+        primitive_call = body.index(primitive, scope_end)
+        assert lifecycle < finalization < generation < scope_end < primitive_call
+
+
+def test_fw21h_deferred_dispatch_launch_is_reserved_against_setup_restart():
+    app = read("main/application.cc")
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    refresh = _function_body(
+        app, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+
+    assert "RunWithSetupGenerationCurrent" in header
+    reservation = _function_body(blufi, "bool Blufi::RunWithSetupGenerationCurrent")
+    lifecycle = reservation.index("ble_lifecycle_mutex_")
+    finalization = reservation.index("provisioning_finalization_mutex_", lifecycle)
+    generation = reservation.index(
+        "expected_generation != setup_generation_.load()", finalization
+    )
+    scope_end = reservation.index("}\n", generation)
+    action = reservation.index("action()", generation)
+    assert lifecycle < finalization < generation < scope_end < action
+
+    assert "commit_dispatch" in effects
+    assert "RunClaimDispatchForSetupGeneration" in effects
+    assert "DispatchPendingTbotClaimConfirmation" in effects[
+        effects.index("commit_dispatch"):
+    ]
+    assert "StopBleAdvertising();" not in refresh
+    assert "ClaimBleLifecycleIntent::kStopAdvertising" in refresh
+    assert "ExecuteClaimDeferredEffects" in refresh
+    assert "RunClaimDispatchForSetupGeneration" in refresh
+
+
+def test_fw21h_claim_dispatch_docs_cover_post_gate_restart_suppression():
+    header = read("main/application.h")
+    assert "post-gate BOOT restart" in header
+    assert "confirmation or refresh worker" in header
+
+
+def test_fw21h_generation_dispatch_reservation_keeps_non_blufi_builds_compilable():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    helper = _function_body(app, "bool Application::RunClaimDispatchForSetupGeneration")
+    assert "RunClaimDispatchForSetupGeneration" in header
+    assert "#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING" in helper
+    guarded, fallback = helper.split("#else", 1)
+    assert "Blufi::GetInstance().RunWithSetupGenerationCurrent" in guarded
+    assert "Blufi::" not in fallback
+    assert "action();" in fallback
+
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    refresh = _function_body(
+        app, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+    assert "RunClaimDispatchForSetupGeneration" in effects
+    assert "RunClaimDispatchForSetupGeneration" in refresh
+
+
+def test_fw21h_confirmation_dispatch_failure_fallback_is_committed_inside_reservation():
+    app = read("main/application.cc")
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    commit = effects[effects.index("auto commit_dispatch") : effects.index("};")]
+    assert "DispatchPendingTbotClaimConfirmation" in commit
+    assert "StartClaimPoll();" in commit
+    assert "confirmation_dispatch_failed" not in effects
+
+
+def test_fw21h_fetch_dispatch_failure_fallback_is_generation_reserved():
+    app = read("main/application.cc")
+    header = read("main/application.h")
+    refresh = _function_body(
+        app, "void Application::DispatchPendingTbotClaimRefreshForSetupGeneration"
+    )
+    effects = _function_body(app, "void Application::ExecuteClaimDeferredEffects")
+    assert "restore_standby_after_dispatch_failure" in header
+    failed = refresh[refresh.index("if (!dispatched)") :]
+    assert "restore_standby_after_dispatch_failure = true" in failed
+    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby" not in failed
+    assert "RenderClaimSubstate" not in failed
+    assert "StartClaimPoll" not in failed
+
+    commit = effects[effects.index("auto commit_dispatch") : effects.index("};")]
+    assert "restore_standby_after_dispatch_failure" in commit
+    assert "claim_substate_ = TbotClaimSubstate::AvailableStandby" in commit
+    assert "RenderClaimSubstate" in commit
+    assert "StartClaimPoll" in commit
+
+
+def test_fw21h_generation_aware_ensure_checks_ble_state_only_inside_owned_transaction():
+    app = read("main/application.cc")
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    ensure = _function_body(app, "bool Application::EnsureBleAdvertisingForStandbyImpl")
+    generation_branch = ensure[
+        ensure.index("if (expected_generation.has_value())") : ensure.index(
+            "if (blufi.GetBleState()", ensure.index("if (expected_generation.has_value())")
+        )
+    ]
+    assert "EnsureAdvertisingForSetupGeneration" in header
+    assert "EnsureAdvertisingForSetupGeneration" in generation_branch
+    assert "GetBleState" not in generation_branch
+
+    transaction = _function_body(blufi, "bool Blufi::EnsureAdvertisingForSetupGeneration")
+    lifecycle = transaction.index("ble_lifecycle_mutex_")
+    finalization = transaction.index("provisioning_finalization_mutex_", lifecycle)
+    generation = transaction.index(
+        "expected_generation != setup_generation_.load()", finalization
+    )
+    scope_end = transaction.index("}\n", generation)
+    state = transaction.index("GetBleState()", scope_end)
+    init = transaction.index("InitWithLifecycleOwned()", state)
+    timer = transaction.index("StartBleSetupTimeoutWithLifecycleOwned", init)
+    assert lifecycle < finalization < generation < scope_end < state < init < timer
+
+
+def test_fw21h_generation_lifecycle_callbacks_document_no_reentry_contract():
+    header = read("main/boards/common/blufi.h")
+    ensure_contract = header[
+        header.index("// prepare/on_current run while lifecycle ownership is held.") :
+        header.index("bool EnsureAdvertisingForSetupGeneration")
+    ]
+    assert "re-enter a public Blufi lifecycle API" in ensure_contract
+    assert "perform network I/O" in ensure_contract
+    assert "require a BluFi callback" in ensure_contract
+
+    for api in (
+        "esp_err_t DeinitForSetupGeneration",
+        "bool CompleteSuccessfulProvisioningTeardownForGeneration",
+    ):
+        declaration = header.index(api)
+        contract = header.rfind("// on_current follows", 0, declaration)
+        assert contract != -1
+        assert "lifecycle-owned callback contract" in header[contract:declaration]
+
+    dispatch = header[
+        header.index("Run a bounded dispatch action") :
+        header.index("bool RunWithSetupGenerationCurrent")
+    ]
+    assert "perform network I/O" in dispatch
+    assert "re-enter a public BluFi lifecycle API" in dispatch
+
+    finalization_only = header[
+        header.index("Run a short non-network action") :
+        header.index("bool RunIfSetupGenerationCurrent")
+    ]
+    assert "lifecycle-owned callback contract" not in finalization_only
 
 
 # ---------------------------------------------------------------------------
@@ -2097,7 +2351,7 @@ def test_fw33_boot_reentry_starts_a_new_generation_and_clean_ble_session():
 
 def test_fw34_stale_timeout_and_wifi_workers_cannot_mutate_new_boot_generation():
     blufi = read("main/boards/common/blufi.cpp")
-    arm = _function_body(blufi, "void Blufi::StartBleSetupTimeout")
+    arm = _function_body(blufi, "bool Blufi::StartBleSetupTimeoutWithLifecycleOwned")
     timeout = _function_body(blufi, "void Blufi::_ble_setup_timeout_cb")
     connect = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
 
@@ -2141,7 +2395,7 @@ def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_
     settle_delay = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
     spawn = helper.index("xTaskCreate(", capture)
     release = helper.index("ReleaseBleForStationAssociation", spawn)
-    start_station = helper.index("wifi.StartStation();", release)
+    start_station = helper.index("wifi.StartStationWithCredentialsIfScanIdle", release)
     assert capture < settle_delay < spawn < release < start_station
     post_delay = helper[settle_delay:spawn]
     assert "generation != setup_generation_.load()" in post_delay
@@ -2179,7 +2433,7 @@ def test_fw38_password_fallback_is_generation_scoped_and_spawn_failure_is_recove
     failure = fallback[fallback.index("if (created != pdPASS)") :]
     assert "Application::GetInstance().Schedule" in failure
     assert "generation != setup_generation_.load()" in failure
-    assert 'StartStationConnectFromCredentials("password_fallback_task_create_failed")' in failure
+    assert '"password_fallback_task_create_failed", candidate_epoch' in failure
 
 
 def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_factory_reset():
@@ -2195,8 +2449,43 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     assert "ssid_transaction_id_.exchange(0)" in restart
     assert "RollbackSsidTransaction(stale_ssid_transaction)" in restart
 
+    begin_failure = helper[
+        helper.index("if (ssid_transaction == 0)"):
+        helper.index("ssid_transaction_id_.store(ssid_transaction)")
+    ]
+    assert "RollbackSsidTransaction" not in begin_failure
+    assert "CommitSsidTransaction" not in begin_failure
+    assert "m_wifi_connect_task_started.store(false)" in begin_failure
+    assert "m_sta_is_connecting.store(false)" in begin_failure
+    assert "ssid_transaction_id_.store(0)" in begin_failure
+    assert "m_sta_connected = false" in begin_failure
+    assert "m_sta_got_ip = false" in begin_failure
+    assert begin_failure.count("SendStationConnectFailureReport()") == 1
+    assert begin_failure.index("m_wifi_connect_task_started.store(false)") < begin_failure.index(
+        "SendStationConnectFailureReport()"
+    )
+    assert "RollbackSsidTransaction" not in begin_failure
+    assert "CommitSsidTransaction" not in begin_failure
+    assert "ReleaseBleForStationAssociation" not in begin_failure
+    assert "provisioning_finalization_mutex_" not in begin_failure
+    assert "ssid.c_str()" not in begin_failure
+    assert "password.c_str()" not in begin_failure
+
+    exact_start = helper.index("StartStationWithCredentialsIfScanIdle")
+    assert "wifi.StartStation();" not in helper
+    assert helper.index("ReleaseBleForStationAssociation") < exact_start
+    exact_slice = helper[exact_start:helper.index("constexpr int kConnectTimeoutMs", exact_start)]
+    assert "candidate_password" in exact_slice
+    assert "kStartedNow" in exact_slice
+    assert "exact_station_started" in exact_slice
+    assert "RollbackSsidTransaction" not in exact_slice
+    success = helper[helper.index("if (credentials_committed)"):]
+    assert success.index("EnableStationAutomaticScans") < success.index(
+        "m_sta_connected = true"
+    )
+
     stage_idx = helper.index("BeginSsidTransaction(ssid, password)")
-    station_idx = helper.index("wifi.StartStation()")
+    station_idx = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     commit_idx = helper.index("CommitSsidTransaction(ssid_transaction)")
     success_idx = helper.index("if (credentials_committed)")
     failure_branch_idx = helper.index("} else {", success_idx)
@@ -2256,7 +2545,7 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     assert "if (!SaveToNvs())" in commit
     assert "RestoreActiveTransaction();" in commit
     persistence_guard = helper[
-        helper.index("if (wifi.IsConnected())") : helper.index(
+        helper.index("if (exact_station_started && wifi.IsConnected())") : helper.index(
             "if (credentials_committed)"
         )
     ]
@@ -2280,7 +2569,7 @@ def test_fw40_only_exact_candidate_wifi_can_commit_and_report_success():
     context_idx = helper.index("WifiConnectTaskContext")
     capture_idx = helper.index("memcpy(ctx->candidate_ssid.data()")
     delay_idx = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
-    station_idx = helper.index("wifi.StartStation()")
+    station_idx = helper.index("wifi.StartStationWithCredentialsIfScanIdle")
     assert context_idx < capture_idx < delay_idx < station_idx
 
     commit_guard = helper[
@@ -2322,6 +2611,25 @@ def test_fw41_early_connect_setup_failures_report_deterministic_sta_fail():
     blufi = read("main/boards/common/blufi.cpp")
     report = _function_body(blufi, "void Blufi::SendStationConnectFailureReport")
     assert "ESP_BLUFI_STA_CONN_FAIL" in report
+
+
+def test_fw41b_exact_start_rejection_uses_the_single_terminal_failure_lane():
+    helper = _station_connect_helper_body()
+    exact_start = helper.index("StartStationWithCredentialsIfScanIdle")
+    timeout = helper.index("constexpr int kConnectTimeoutMs", exact_start)
+    exact_start_lane = helper[exact_start:timeout]
+
+    assert "exact_station_started" in exact_start_lane
+    assert "RollbackSsidTransaction" not in exact_start_lane
+    assert "RestoreBleAfterStationFailure" not in exact_start_lane
+    assert "vTaskDelete(nullptr)" not in exact_start_lane
+
+    terminal_start = helper.index(
+        "} else {", helper.index("if (credentials_committed)")
+    )
+    terminal = helper[terminal_start:helper.index("vTaskDelete(nullptr);", terminal_start)]
+    assert terminal.count("ProvisioningStatusReporter::Report(") == 1
+    assert terminal.count("RestoreBleAfterStationFailure(generation)") == 1
 
 
 def test_fw42_wifi_connect_single_flight_is_atomic_and_teardown_errors_are_preserved():
@@ -2366,13 +2674,13 @@ def test_fw43_ssid_transactions_compensate_persist_failure_and_lock_all_list_acc
     get_list = _function_body(source, "std::vector<SsidItem> SsidManager::GetSsidList() const")
     assert "std::lock_guard<std::mutex>" in get_list
     for signature in (
-        "void SsidManager::Clear",
-        "void SsidManager::AddSsid",
+        "SsidMutationResult SsidManager::Clear",
+        "SsidMutationResult SsidManager::AddSsid",
         "uint32_t SsidManager::BeginSsidTransaction",
         "bool SsidManager::CommitSsidTransaction",
         "bool SsidManager::RollbackSsidTransaction",
-        "void SsidManager::RemoveSsid",
-        "void SsidManager::SetDefaultSsid",
+        "SsidMutationResult SsidManager::RemoveSsid",
+        "SsidMutationResult SsidManager::SetDefaultSsid",
     ):
         assert "std::lock_guard<std::mutex>" in _function_body(source, signature)
 
@@ -2393,9 +2701,26 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
     assert "m_sta_config_ssid_len_ = ssid_n" in ssid_event
     assert "m_sta_config.sta.ssid[ssid_n] = '\\0'" not in ssid_event
     assert "memset(m_sta_config.sta.ssid, 0" in ssid_event
+    assert "param->sta_ssid.ssid_len > kMaxWifiSsidBytes" in ssid_event
 
-    assert "m_sta_config_ssid_len_" in helper
-    assert "reinterpret_cast<const char*>(m_sta_config.sta.ssid)," in helper
+    password_event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_PASSWD:")
+    assert "param->sta_passwd.passwd_len > kMaxWifiPasswordBytes" in password_event
+    rejection = password_event[
+        password_event.index("param->sta_passwd.passwd_len >"):
+        password_event.index("size_t passwd_n")
+    ]
+    assert "ScheduleStationConnectFallback" not in rejection
+    assert "memset(m_sta_config.sta.password" in rejection
+    assert "m_sta_is_connecting.store(false)" in rejection
+    assert "SendStationConnectFailureReport()" in rejection
+    assert "break;" in rejection
+
+    assert "staged_wifi_credentials_.UpdateSsid" in ssid_event
+    assert "staged_wifi_credentials_.UpdatePassword" in password_event
+    assert "std::string ssid = candidate->ssid" in helper
+    assert "std::string password = candidate->password" in helper
+    assert "candidate.reset()" in helper
+    assert "m_sta_config" not in helper
     assert "SecureClearLocalString(ssid);" in helper
     assert "SecureClearLocalString(password);" in helper
     begin_idx = helper.index("BeginSsidTransaction(ssid, password)")
@@ -2405,9 +2730,85 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
 
     station = read("components/esp-wifi-connect/wifi_station.cc")
     start_connect = _function_body(station, "void WifiStation::StartConnect")
+    start_connect += _function_body(
+        station, "std::string WifiStation::StartConnectForSession"
+    )
     assert "strcpy((char *)wifi_config.sta.ssid" not in start_connect
-    assert "memcpy(wifi_config.sta.ssid" in start_connect
     assert "sizeof(wifi_config.sta.ssid)" in start_connect
+    assert "CopyWifiCredentialsToBuffers" in start_connect
+    assert "strcpy((char *)wifi_config.sta.password" not in start_connect
+
+
+def test_fw44b_rejected_blufi_field_invalidates_the_whole_candidate():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    ssid_event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_SSID:")
+    password_event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_PASSWD:")
+    connect_event = _function_body(blufi, "case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:")
+    helper = _station_connect_helper_body()
+    fallback = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
+
+    assert "BlufiStagedWifiCredentials staged_wifi_credentials_" in header
+    for event in (ssid_event, password_event):
+        rejection_start = event.index("Reject invalid STA")
+        rejection = event[rejection_start:event.index("break;", rejection_start)]
+        assert "staged_wifi_credentials_.Invalidate()" in rejection
+        assert "memset(m_sta_config.sta.ssid" in rejection
+        assert "m_sta_config_ssid_len_ = 0" in rejection
+        assert "memset(m_sta_config.sta.password" in rejection
+        assert rejection.count("SendStationConnectFailureReport()") == 1
+
+    assert "staged_wifi_credentials_.UpdatePassword" in password_event
+    password_fallback = password_event[password_event.index("const uint64_t candidate_epoch"):]
+    assert "staged_wifi_credentials_.FallbackEpoch() == candidate_epoch" in password_fallback
+    assert "ScheduleStationConnectFallback" in password_fallback
+
+    assert "m_sta_config" not in connect_event
+    assert "SendStationConnectFailureReport" not in connect_event
+    assert "staged_wifi_credentials_.Claim(*expected_candidate_epoch)" in helper
+    assert "staged_wifi_credentials_.ClaimCurrent()" in helper
+    assert helper.index("staged_wifi_credentials_.Claim") < helper.index(
+        "BeginSsidTransaction"
+    )
+    assert "m_sta_config" not in helper
+    assert "uint64_t candidate_epoch" in fallback
+    assert '"password_fallback", candidate_epoch' in fallback
+
+
+def test_fw44c_staged_wifi_snapshot_securely_clears_owned_credentials():
+    staged = read("main/boards/common/blufi_staged_wifi_credentials.h")
+    helper = _station_connect_helper_body()
+
+    assert "~Snapshot()" in staged
+    assert "Snapshot(const Snapshot&) = delete" in staged
+    assert "ssid(other.ssid)" in staged
+    assert "password(other.password)" in staged
+    assert "~BlufiStagedWifiCredentials()" in staged
+    assert "SecureClear(ssid_);" in staged
+    assert "SecureClear(password_);" in staged
+    assert "StagedByteCountForTesting()" in staged
+
+    password_event = _function_body(
+        read("main/boards/common/blufi.cpp"),
+        "case ESP_BLUFI_EVENT_RECV_STA_PASSWD:",
+    )
+    assert "memcpy(m_sta_config.sta.password" not in password_event
+    assert "m_sta_config.sta.password[passwd_n]" not in password_event
+
+    worker_copy = helper.index("static_cast<size_t>(m_sta_ssid_len), password}")
+    local_clear = helper.index("SecureClearLocalString(password);", worker_copy)
+    settle_delay = helper.index("vTaskDelay(pdMS_TO_TICKS(500));", local_clear)
+    assert worker_copy < local_clear < settle_delay
+
+    task_copy = helper.index("task_ctx->candidate_password;")
+    task_source_clear = helper.index(
+        "SecureClearLocalString(task_ctx->candidate_password);", task_copy
+    )
+    task_delete = helper.index("delete task_ctx;", task_source_clear)
+    assert task_copy < task_source_clear < task_delete
+
+    task_create_failure = helper[helper.index("if (created != pdPASS)"):]
+    assert "SecureClearLocalString(ctx->candidate_password);" in task_create_failure
 
 
 def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():

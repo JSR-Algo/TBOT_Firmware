@@ -14,9 +14,15 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "mbedtls/aes.h"
 #include "mbedtls/dhm.h"
 #include "wifi_manager.h"
+#include "blufi_wifi_scan_lease_timer.h"
+#include "blufi_wifi_scan_retry_state.h"
+#include "blufi_wifi_scan_start_outcome.h"
+#include "blufi_wifi_scan_controller.h"
+#include "blufi_staged_wifi_credentials.h"
 #include "blufi_transition_gate.h"
 #include "audio/provisioning_session_binding.h"
 
@@ -40,26 +46,30 @@ public:
     static Blufi &GetInstance();
 
     /**
-     * @brief Start WiFi scan for Blufi provisioning
-     * This method intelligently handles WiFi scanning based on current WiFi state:
-     * - If WiFi config mode is active, it uses the existing scan results from WifiConfigurationAp
-     * - Otherwise, it performs a dedicated scan without interfering with normal WiFi operations
-     * @return true if a scan was started (or was already in progress); false on failure.
-     */
-    bool start_wifi_scan();
-
-    /**
      * @brief Initializes the Bluetooth controller, host, and Blufi profile.
      * This is the main entry point to start the Blufi process.
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t init();
+    // prepare/on_current run while lifecycle ownership is held. They must not
+    // re-enter a public Blufi lifecycle API, perform network I/O, or wait for
+    // work that can require a BluFi callback.
+    bool EnsureAdvertisingForSetupGeneration(
+        uint32_t expected_generation, int timeout_seconds,
+        ProvisioningToken* provisioning_token,
+        const std::function<esp_err_t()>& prepare,
+        const std::function<void()>& on_current = {});
 
     /**
      * @brief Deinitializes Blufi and the Bluetooth stack.
      * @return ESP_OK on success, otherwise an error code.
      */
     esp_err_t deinit();
+    // on_current follows the lifecycle-owned callback contract documented on
+    // EnsureAdvertisingForSetupGeneration().
+    esp_err_t DeinitForSetupGeneration(
+        uint32_t expected_generation,
+        const std::function<void()>& on_current = {});
 
     /** Start a fresh provisioning generation for an explicit BOOT re-entry. */
     esp_err_t RestartForSetup();
@@ -67,6 +77,13 @@ public:
     /** Run a short non-network action while setup generation ownership is stable. */
     bool RunIfSetupGenerationCurrent(uint32_t expected_generation,
                                      const std::function<void()>& action);
+    /**
+     * Run a bounded dispatch action while BOOT restart is excluded.
+     * Lock order is lifecycle -> short finalization validation; action must not
+     * perform network I/O or re-enter a public BluFi lifecycle API.
+     */
+    bool RunWithSetupGenerationCurrent(uint32_t expected_generation,
+                                       const std::function<void()>& action);
 
     bool BindProvisioningSession(ProvisioningToken token);
     ProvisioningReservation TryReserveProvisioningSession();
@@ -76,9 +93,12 @@ public:
     bool AbortProvisioningSetup(ProvisioningToken token);
     bool CompleteSuccessfulProvisioningTeardown(const char* reason,
                                                 ProvisioningToken provisioning_token);
+    // on_current follows the lifecycle-owned callback contract documented on
+    // EnsureAdvertisingForSetupGeneration().
     bool CompleteSuccessfulProvisioningTeardownForGeneration(
         const char* reason, ProvisioningToken provisioning_token,
-        uint32_t expected_generation);
+        uint32_t expected_generation,
+        const std::function<void()>& on_current = {});
     bool WasProvisioningSuccessfullyCompleted(ProvisioningToken provisioning_token) const;
 
     /**
@@ -154,6 +174,7 @@ private:
     // Call only while ble_lifecycle_mutex_ is owned by the current task.
     esp_err_t InitWithLifecycleOwned();
     esp_err_t DeinitWithLifecycleOwned();
+    bool StartBleSetupTimeoutWithLifecycleOwned(int seconds);
     esp_err_t _init_impl();
     esp_err_t _deinit_impl();
 
@@ -191,24 +212,81 @@ private:
 
     // WiFi scan methods
     bool EnsureWifiScanEventHandlerRegistered();
+    void InvalidateWifiScanSession(uint32_t generation, uint64_t session,
+                                   uint64_t connection_epoch);
+    void UpdateWifiScanSession(uint32_t expected_generation,
+                               uint64_t expected_session,
+                               uint64_t expected_connection_epoch,
+                               uint32_t generation, uint64_t session,
+                               uint64_t connection_epoch);
     bool IsWifiScanCacheFresh() const;
+    void RequestWifiListScan(bool save_results, bool send_list);
+    void ScheduleOwnedWifiScanStart(
+        uint64_t request_id,
+        BlufiWifiScanController::Request request);
+    void RetryOwnedWifiScanAfterLeaseBusy(
+        BlufiWifiScanRetryState::ExactRequest exact,
+        BlufiWifiScanController::Request request, bool notify_manager);
+    static void PollOwnedWifiScanRetry(void* context) noexcept;
+    bool EnqueueOwnedWifiScanRetry() noexcept;
+    void DispatchOwnedWifiScanRetry() noexcept;
+    void TryStartOwnedWifiScanNow(
+        BlufiWifiScanRetryState::ExactRequest exact,
+        bool notify_manager = true) noexcept;
+    BlufiWifiScanStartOutcome StartOwnedWifiScan(
+        uint64_t request_id,
+        const WifiScanLeaseCoordinator::Lease& lease) noexcept;
+    BlufiWifiScanStartOutcome CommitOwnedWifiScanStart(
+        uint64_t request_id, const WifiScanLeaseCoordinator::Lease& lease,
+        BlufiWifiScanStartOutcome outcome,
+        bool retry_on_abandon) noexcept;
+    BlufiWifiScanStartOutcome RunOwnedWifiScanFollowupNoexcept(
+        uint64_t request_id, const WifiScanLeaseCoordinator::Lease& lease,
+        const BlufiWifiScanStartOutcome& outcome) noexcept;
+    bool ConsumeOwnedWifiScanCompletion(uint64_t request_id) noexcept;
+    void ScheduleOwnedWifiScanWatchdog(
+        uint64_t request_id,
+        WifiScanLeaseCoordinator::Lease lease);
+    void RequestOwnedWifiScanRecovery(
+        const WifiScanLeaseCoordinator::Lease& lease);
+    void ScheduleWifiScanRecoveryFallback(
+        WifiScanLeaseCoordinator::Lease lease);
+    static BlufiWifiScanLeaseTimer::Ops WifiScanLeaseTimerOps();
+    static void SignalWifiScanWatchdog(
+        void* context, BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept;
+    static void SignalWifiScanRecoveryRetry(
+        void* context, BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept;
+    void HandleWifiScanWatchdog(
+        BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept;
+    void HandleWifiScanRecoveryRetry(
+        BlufiWifiScanLeaseTimer::ExactTuple exact) noexcept;
+    void SchedulePendingWifiScan(
+        uint64_t request_id,
+        const BlufiWifiScanController::Request& request);
+    void ScheduleWifiScanFailure(
+        const BlufiWifiScanController::Request& request,
+        const char* reason);
     void ScheduleClaimRefreshAfterTokenHandoff();
     void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);
     bool CompleteSuccessfulProvisioningTeardownImpl(
         const char* reason, ProvisioningToken provisioning_token,
-        std::optional<uint32_t> expected_generation);
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current = {});
+    bool CompleteSuccessfulProvisioningTeardownWithLifecycleOwned(
+        const char* reason, ProvisioningToken provisioning_token,
+        const std::function<void()>& on_current = {});
     bool ReleaseBleForStationAssociation(uint32_t expected_generation);
     void RestoreBleAfterStationFailure(uint32_t expected_generation);
-    void StartStationConnectFromCredentials(const char* reason);
+    void StartStationConnectFromCredentials(
+        const char* reason, std::optional<uint64_t> expected_candidate_epoch = std::nullopt);
     void SendStationConnectFailureReport();
-    void ScheduleStationConnectFallback();
+    void ScheduleStationConnectFallback(uint64_t candidate_epoch);
     void _send_wifi_list(std::vector<wifi_ap_record_t> ap_records);
     void ScheduleWifiListSend(uint32_t expected_generation,
                               uint64_t expected_ble_session_state,
                               uint64_t expected_ble_connection_epoch,
                               uint64_t expected_wifi_list_dispatch_epoch,
                               std::vector<wifi_ap_record_t> ap_records);
-    void _start_dedicated_wifi_scan();
     static void _wifi_scan_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id,
                                          void *event_data);
 
@@ -273,6 +351,7 @@ private:
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;
     size_t m_sta_config_ssid_len_ = 0;
+    BlufiStagedWifiCredentials staged_wifi_credentials_;
     std::atomic<bool> m_sta_is_connecting{false};
     std::atomic<bool> m_wifi_connect_task_started{false};
     std::atomic<uint32_t> setup_generation_{0};
@@ -304,18 +383,32 @@ private:
     // WiFi scan related
     std::vector<wifi_ap_record_t> m_ap_records;
     int64_t m_ap_records_updated_us = 0;
+    // Protected by provisioning_finalization_mutex_ together with the records
+    // and timestamp so cached APs cannot cross a BLE/setup ownership boundary.
+    std::optional<BlufiWifiScanController::Request> m_ap_records_owner_;
     static constexpr int64_t kWifiScanCacheMaxAgeUs = 10LL * 1000 * 1000;
-    bool m_scan_in_progress = false;
+    BlufiWifiScanController wifi_scan_controller_;
+    std::mutex wifi_scan_lease_mutex_;
+    std::mutex wifi_scan_submission_mutex_;
+    std::optional<WifiScanLeaseCoordinator::Lease> wifi_scan_lease_;
+    uint64_t wifi_scan_request_id_ = 0;
+    std::optional<BlufiWifiScanController::RecoveryTicket>
+        wifi_scan_recovery_ticket_;
+    std::optional<BlufiWifiScanController::FinishDecision>
+        wifi_scan_recovery_finish_;
+    wifi_mode_t wifi_scan_restore_mode_ = WIFI_MODE_STA;
+    wifi_config_t wifi_scan_restore_sta_config_{};
+    wifi_config_t wifi_scan_restore_ap_config_{};
+    bool wifi_scan_restore_sta_config_valid_ = false;
+    bool wifi_scan_restore_ap_config_valid_ = false;
+    BlufiWifiScanRetryState wifi_scan_retry_state_;
+    std::mutex wifi_scan_retry_timer_mutex_;
+    esp_timer_handle_t wifi_scan_retry_timer_ = nullptr;
+    StaticTimer_t wifi_scan_retry_fallback_storage_{};
+    TimerHandle_t wifi_scan_retry_fallback_timer_ = nullptr;
+    BlufiWifiScanLeaseTimer wifi_scan_watchdog_timer_;
+    BlufiWifiScanLeaseTimer wifi_scan_recovery_retry_timer_;
     esp_event_handler_instance_t scan_event_instance_ = nullptr;
-    // When true, scan results are stored in m_ap_records on scan completion.
-    // Cleared during connect-to-AP so that the connect-time scan does not
-    // overwrite the cache with results gathered for connection purposes.
-    bool m_scan_should_save_ssid = true;
-    // When true, the next scan-done event responds to a pending GET_WIFI_LIST
-    // request from the App. Set by the GET_WIFI_LIST handler when no cache is
-    // available or a scan is already in flight; cleared by the scan-done
-    // handler after dispatching the response.
-    bool m_send_list_after_scan = false;
     std::atomic<uint64_t> m_wifi_list_dispatch_epoch_{0};
     // Zero means no queued response; otherwise this is the owning dispatch token.
     std::atomic<uint64_t> m_wifi_list_dispatch_pending_epoch_{0};

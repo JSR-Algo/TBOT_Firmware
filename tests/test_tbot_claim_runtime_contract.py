@@ -233,7 +233,7 @@ def test_successful_no_claim_fetch_keeps_token_and_retries_delayed_claim_visibil
     # The active-claim result path still tears BLE down once immediately before
     # confirmation.
     active_claim = apply_body[apply_body.index("// Fetch succeeded with an active claim") :]
-    assert active_claim.index("StopBleAdvertising();") < active_claim.index(
+    assert active_claim.index("ClaimBleLifecycleIntent::kStopAdvertising") < active_claim.index(
         "ConfirmPendingTbotClaim"
     )
 
@@ -254,7 +254,8 @@ def test_application_exposes_scheduled_pending_claim_refresh_for_late_ble_token(
     assert "Schedule([this, expected_setup_generation]()" in schedule_body
     run_idx = schedule_body.index("RunIfSetupGenerationCurrent(")
     assert "expected_setup_generation" in schedule_body[run_idx:run_idx + 180]
-    assert "DispatchPendingTbotClaimRefreshForSetupGeneration" in schedule_body
+    assert "deferred_effects.dispatch_refresh = true" in schedule_body
+    assert "ExecuteClaimDeferredEffects" in schedule_body
     assert "RefreshPendingTbotClaim();" not in schedule_body
 
 
@@ -299,23 +300,24 @@ def test_unclaimed_no_token_standby_waits_on_ble_without_periodic_reinit_cycle()
     no_token_start = no_claim_branch.index("if (token.empty())")
     no_token_branch = no_claim_branch[no_token_start:no_claim_branch.index("return;", no_token_start) + len("return;")]
 
-    assert "EnsureBleAdvertisingForStandby();" in no_claim_branch[:no_token_start]
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in no_claim_branch[:no_token_start]
     assert "StopClaimPoll();" in no_token_branch
     assert "StartClaimPoll();" not in no_token_branch
 
 def test_claimed_devices_leave_claim_fsm_before_standby_ble_advertising():
     source = read("main/application.cc")
     refresh_body = function_body(source, "void Application::RefreshPendingTbotClaim")
-    ensure_body = function_body(source, "void Application::EnsureBleAdvertisingForStandby")
-    stop_ble_body = function_body(source, "void Application::StopBleAdvertising")
+    ensure_body = function_body(source, "bool Application::EnsureBleAdvertisingForStandbyImpl")
+    stop_ble_body = function_body(source, "bool Application::StopBleAdvertisingImpl")
 
     assert "IsDeviceClaimed()" in refresh_body
     assert "StopClaimPoll();" in refresh_body
     assert "StopBleAdvertising();" in refresh_body
     assert "return;" in refresh_body[refresh_body.index("if (IsDeviceClaimed())") :]
     assert "IsDeviceClaimed()" in ensure_body
-    assert "StopBleAdvertising();" in ensure_body
-    assert "blufi.deinit();" in stop_ble_body
+    assert "StopBleAdvertisingForSetupGeneration" in ensure_body
+    assert "StopBleAdvertisingImpl(std::nullopt)" in ensure_body
+    assert "blufi.deinit() == ESP_OK" in stop_ble_body
 
     claimed_idx = refresh_body.index("if (IsDeviceClaimed())")
     standby_idx = refresh_body.index("Blufi::GetInstance().GetBleState()")
@@ -326,7 +328,9 @@ def test_claimed_devices_leave_claim_fsm_before_standby_ble_advertising():
     assert "StopBleAdvertising();" in claimed_branch
     assert "EnsureBleAdvertisingForStandby();" not in claimed_branch
     assert "if (IsDeviceClaimed())" in ensure_body
-    assert "StopBleAdvertising();" in ensure_body[:ensure_body.index("if (blufi.GetBleState()")]
+    claimed_ensure = ensure_body[:ensure_body.index("if (blufi.GetBleState()")]
+    assert "StopBleAdvertisingForSetupGeneration" in claimed_ensure
+    assert "StopBleAdvertisingImpl(std::nullopt)" in claimed_ensure
     assert "CancelBleSetupTimeout();" in stop_ble_body
     assert "StartBleSetupTimeout(CONFIG_BLE_SETUP_TIMEOUT_SEC);" in ensure_body
 
@@ -438,12 +442,16 @@ def test_blufi_wifi_success_tears_down_ble_before_claim_refresh():
     branch_start = source.index("if (credentials_committed)")
     helper_start = source.index("void Blufi::StartStationConnectFromCredentials")
     release_idx = source.index("ReleaseBleForStationAssociation", helper_start)
-    station_idx = source.index("wifi.StartStation()", release_idx)
+    station_idx = source.index("wifi.StartStationWithCredentialsIfScanIdle(", release_idx)
     connected_log_idx = source.index('"connected to WiFi"', station_idx)
     failure_log_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", connected_log_idx)
     success_body = source[branch_start:failure_log_idx]
 
     assert "ReleaseBleForStationAssociation" in source[helper_start:station_idx]
+    exact_start = source[station_idx:branch_start]
+    assert "candidate_ssid_string" in exact_start
+    assert "candidate_password" in exact_start
+    assert "WifiManager::StationStartResult::kStartedNow" in exact_start
     assert "CompleteSuccessfulProvisioningTeardown" in success_body
     assert '"wifi_credentials_connected"' in success_body
     assert "const bool code_based_provisioning" in success_body
@@ -505,7 +513,7 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
     success_start = source.index("if (credentials_committed)")
     helper_start = source.index("void Blufi::StartStationConnectFromCredentials")
     release_idx = source.index("ReleaseBleForStationAssociation", helper_start)
-    station_idx = source.index("wifi.StartStation()", release_idx)
+    station_idx = source.index("wifi.StartStationWithCredentialsIfScanIdle(", release_idx)
     failure_idx = source.index("Failed to connect to WiFi via esp-wifi-connect", station_idx)
     success_body = source[success_start:failure_idx]
     helper_body = function_body(source, "void Blufi::TryReportProvisioningAuthenticated")
@@ -514,6 +522,7 @@ def test_blufi_reports_device_authenticated_only_after_ble_teardown():
     assert "void TryReportProvisioningAuthenticated(const char* reason, uint32_t expected_generation);" in header
     assert '"wifi_success_after_ble_teardown", generation' in success_body
     assert release_idx < station_idx
+    assert station_idx < success_start
     assert success_body.index("CompleteSuccessfulProvisioningTeardown") < success_body.index(
         '"wifi_success_after_ble_teardown", generation'
     )
@@ -541,7 +550,7 @@ def test_pending_claim_without_bootstrap_token_keeps_ble_open_and_does_not_confi
     assert "if (token.empty())" in pending_body
     branch_start = pending_body.index("if (token.empty())")
     empty_token_branch = pending_body[branch_start:pending_body.index("StopClaimPoll();", branch_start)]
-    assert "EnsureBleAdvertisingForStandby();" in empty_token_branch
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in empty_token_branch
     assert "StartClaimPoll();" in empty_token_branch
     assert "return;" in empty_token_branch
     assert "StopBleAdvertising();" not in empty_token_branch
@@ -861,9 +870,9 @@ def test_auth_rejected_device_config_clears_stale_bootstrap_token_without_server
     assert "claim_substate_ = TbotClaimSubstate::AvailableStandby;" in auth_branch
     nvs_clear = auth_branch.index('websocket_settings.SetString("bootstrap_token", "");')
     ram_clear = auth_branch.index("Blufi::GetInstance().ClearProvisioningSecrets();")
-    reopen_ble = auth_branch.index("EnsureBleAdvertisingForStandby();")
+    reopen_ble = auth_branch.index("ClaimBleLifecycleIntent::kEnsureAdvertising")
     assert nvs_clear < ram_clear < reopen_ble
-    assert "EnsureBleAdvertisingForStandby();" in auth_branch
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in auth_branch
     assert "StopClaimPoll();" in auth_branch
     assert "StartClaimPoll();" not in auth_branch
     assert "return;" in auth_branch

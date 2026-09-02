@@ -17,6 +17,7 @@
 #include <memory>
 #include <atomic>
 #include <cstdint>
+#include <optional>
 
 #include "protocol.h"
 #include "ota.h"
@@ -192,6 +193,7 @@ public:
      */
     void ResetProtocol();
     void SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation);
+    void CompleteCardputerWifiProvisioning(uint64_t ui_generation);
     void PromoteCourseModeFromWifiConfigAfterProvisioning();
     void EnsureBleAdvertisingForUnclaimedSavedWifi();
     // True once the device has been claimed by PersistTbotClaimConfirmationResponse.
@@ -238,6 +240,7 @@ private:
     std::deque<std::function<void()>> main_tasks_;
     std::unique_ptr<Protocol> protocol_;
     std::atomic<uint64_t> protocol_generation_{0};
+    std::atomic<uint64_t> cardputer_wifi_completion_generation_{0};
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
     DeviceStateMachine state_machine_;
@@ -443,6 +446,29 @@ private:
     // point only; the stale-event guards on HandleNetworkConnectedEvent/
     // RefreshPendingTbotClaim are left untouched.
     void PromoteFromWifiConfigAfterProvisioning();
+    enum class ClaimBleLifecycleIntent {
+        kNone,
+        kEnsureAdvertising,
+        kStopAdvertising,
+        kCompleteSuccessfulTeardown,
+    };
+    struct ClaimDeferredEffects {
+        ClaimBleLifecycleIntent ble_intent = ClaimBleLifecycleIntent::kNone;
+        bool dispatch_confirmation = false;
+        bool dispatch_refresh = false;
+        bool restore_standby_after_dispatch_failure = false;
+    };
+    // Claim fetch and provisioning-promotion results first commit their state under
+    // RunIfSetupGenerationCurrent. A post-gate BOOT restart must still suppress the
+    // stale confirmation or refresh worker, so ExecuteClaimDeferredEffects reserves
+    // the lifecycle, briefly validates finalization, and commits bounded dispatch
+    // plus any dispatch-failure poll/standby fallback before unlock. Worker result
+    // application retains its own generation gate.
+    void ExecuteClaimDeferredEffects(
+        const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
+        WakeWordLifecycleController::ProvisioningToken provisioning_token = {});
+    bool RunClaimDispatchForSetupGeneration(
+        uint32_t expected_setup_generation, const std::function<void()>& action);
     bool ConfirmPendingTbotClaim(bool trust_backend_expiry = false);
     bool DispatchPendingTbotClaimConfirmation(uint32_t expected_setup_generation,
                                               bool enforce_setup_generation);
@@ -450,7 +476,8 @@ private:
     bool ApplyPendingTbotClaimConfirmationResult(
         ClaimConfirmationResult result,
         WakeWordLifecycleController::ProvisioningToken provisioning_token,
-        bool defer_successful_teardown = false);
+        bool defer_successful_teardown = false,
+        ClaimDeferredEffects* deferred_effects = nullptr);
     // "Hi ESP needs many tries" fix: the blocking ~3s /device/config HTTP/TLS
     // fetch is split out of RefreshPendingTbotClaim() so it can run on a
     // dedicated low-priority worker instead of the priority-10 Application task
@@ -469,7 +496,8 @@ private:
                                           const PendingTbotClaim& pending_claim,
                                           bool fetched, int device_config_status,
                                           bool defer_confirmation = false,
-                                          uint32_t expected_setup_generation = 0);
+                                          uint32_t expected_setup_generation = 0,
+                                          ClaimDeferredEffects* deferred_effects = nullptr);
 
     // Deferred cloud-ownership release for the BOOT re-pair flow.
     // EnterRepairPairingMode() sets backend.release_pending and KEEPS the device
@@ -501,7 +529,17 @@ private:
     // Wi-Fi-config path to reopen BluFi so BLE does not contend with AFE audio.
     // No-ops in non-BluFi builds.
     void EnsureBleAdvertisingForStandby();
+    bool EnsureBleAdvertisingForStandbyForSetupGeneration(
+        uint32_t expected_generation, const std::function<void()>& on_current = {});
+    bool EnsureBleAdvertisingForStandbyImpl(
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current = {});
     void StopBleAdvertising();
+    bool StopBleAdvertisingForSetupGeneration(
+        uint32_t expected_generation, const std::function<void()>& on_current = {});
+    bool StopBleAdvertisingImpl(
+        std::optional<uint32_t> expected_generation,
+        const std::function<void()>& on_current = {});
 
     // --- Heartbeat (C5) ---
     bool ShouldKeepManagementHeartbeat() const;

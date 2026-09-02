@@ -137,4 +137,6 @@ def test_bootstrap_token_claim_preempts_passive_websocket_and_keeps_retrying():
     direct_failed = direct[direct.index("if (!dispatched)") :]
     assert "if (!token.empty() && passive_ws_intent_.load())" in direct
     assert "CloseAudioChannelByIntent();" in direct
-    assert "StartClaimPoll();" in direct_failed
+    assert "restore_standby_after_dispatch_failure = true" in direct_failed
+    effects = function_body(source, "void Application::ExecuteClaimDeferredEffects")
+    assert "StartClaimPoll();" in effects

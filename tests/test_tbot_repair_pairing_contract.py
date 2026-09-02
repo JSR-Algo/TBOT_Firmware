@@ -60,7 +60,7 @@ def test_enter_repair_pairing_is_thread_safe_and_unclaims_locally():
     # Forget Wi-Fi + reboot so the next boot re-opens Wi-Fi provisioning and the parent
     # can pick a NEW network. (Re-advertising on the old, still-connected network makes
     # the app skip the Wi-Fi step, so a different network could never be set.)
-    assert "SsidManager::GetInstance().Clear();" in body
+    assert "SsidManager::GetInstance().ForceClearAndCancelTransaction()" in body
     assert "esp_restart();" in body
 
 
@@ -72,7 +72,7 @@ def test_enter_repair_pairing_releases_cloud_before_forgetting_wifi():
     # backend, and a deferred/async release races the parent re-pairing on the new phone
     # and loses (the phone's claim hits the backend first -> DEVICE_ALREADY_OWNED).
     assert "SystemReset::ReleaseCloudOwnership()" in body
-    assert body.index("SystemReset::ReleaseCloudOwnership()") < body.index("SsidManager::GetInstance().Clear();")
+    assert body.index("SystemReset::ReleaseCloudOwnership()") < body.index("SsidManager::GetInstance().ForceClearAndCancelTransaction()")
 
     # On success: drop the now-orphaned secret + stop deferring.
     assert 'backend_settings.SetString("device_secret", "");' in body

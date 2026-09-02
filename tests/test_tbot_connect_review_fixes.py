@@ -186,7 +186,7 @@ def test_heartbeat_auth_failure_clears_stale_claim_credentials_and_reboots_into_
     assert 'backend_settings.SetString("device_id", "");' in recovery_body
     assert 'websocket_settings.SetString("token", "");' in recovery_body
     assert 'websocket_settings.SetString("url", "");' in recovery_body
-    assert "SsidManager::GetInstance().Clear();" in recovery_body
+    assert "SsidManager::GetInstance().ForceClearAndCancelTransaction()" in recovery_body
     assert "esp_restart();" in recovery_body
 
 # ---------------------------------------------------------------------------
