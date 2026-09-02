@@ -588,16 +588,14 @@ def test_fw13_recv_sta_ssid_passwd_copy_is_length_bounded():
         "password copy writes NUL at an unbounded index — overflows when len == sizeof"
     )
 
-    # Both handlers reject oversize fields before their exact-length copies.
-    for label, segment, buf in (
-        ("ssid", ssid_body, "m_sta_config.sta.ssid"),
-        ("passwd", passwd_body, "m_sta_config.sta.password"),
-    ):
-        assert f"sizeof({buf})" in segment, (
-            f"{label} copy does not validate against sizeof({buf})"
-        )
-        assert "Reject invalid STA" in segment
-        assert segment.index("Reject invalid STA") < segment.index("memcpy(")
+    # SSID retains its legacy status copy, while password is staged only in the
+    # mutex-owned authority and never retained in the unused legacy buffer.
+    assert "sizeof(m_sta_config.sta.ssid)" in ssid_body
+    assert ssid_body.index("Reject invalid STA") < ssid_body.index("memcpy(")
+    assert "param->sta_passwd.passwd_len > kMaxWifiPasswordBytes" in passwd_body
+    assert "memcpy(m_sta_config.sta.password" not in passwd_body
+    assert "m_sta_config.sta.password[passwd_n]" not in passwd_body
+    assert "staged_wifi_credentials_.UpdatePassword" in passwd_body
 
     # Defense-in-depth: the password handler still must not log the value.
     assert 'ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD");' in passwd_body
@@ -2788,6 +2786,14 @@ def test_fw44c_staged_wifi_snapshot_securely_clears_owned_credentials():
     assert "~BlufiStagedWifiCredentials()" in staged
     assert "SecureClear(ssid_);" in staged
     assert "SecureClear(password_);" in staged
+    assert "StagedByteCountForTesting()" in staged
+
+    password_event = _function_body(
+        read("main/boards/common/blufi.cpp"),
+        "case ESP_BLUFI_EVENT_RECV_STA_PASSWD:",
+    )
+    assert "memcpy(m_sta_config.sta.password" not in password_event
+    assert "m_sta_config.sta.password[passwd_n]" not in password_event
 
     worker_copy = helper.index("static_cast<size_t>(m_sta_ssid_len), password}")
     local_clear = helper.index("SecureClearLocalString(password);", worker_copy)

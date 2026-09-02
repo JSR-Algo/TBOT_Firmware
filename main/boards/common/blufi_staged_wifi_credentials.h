@@ -102,14 +102,18 @@ public:
         return CompleteLocked() ? epoch_ : 0;
     }
 
+    size_t StagedByteCountForTesting() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ssid_.size() + password_.size();
+    }
+
     std::optional<Snapshot> Claim(uint64_t expected_epoch) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (expected_epoch == 0 || expected_epoch != epoch_ || claimed_ ||
             !CompleteLocked()) {
             return std::nullopt;
         }
-        claimed_ = true;
-        return Snapshot{epoch_, ssid_, password_};
+        return ClaimLocked();
     }
 
     std::optional<Snapshot> ClaimCurrent() {
@@ -117,11 +121,20 @@ public:
         if (claimed_ || !CompleteLocked()) {
             return std::nullopt;
         }
-        claimed_ = true;
-        return Snapshot{epoch_, ssid_, password_};
+        return ClaimLocked();
     }
 
 private:
+    std::optional<Snapshot> ClaimLocked() {
+        Snapshot snapshot{epoch_, ssid_, password_};
+        claimed_ = true;
+        SecureClear(ssid_);
+        SecureClear(password_);
+        ssid_received_ = false;
+        password_received_ = false;
+        return snapshot;
+    }
+
     static void SecureClear(std::string& value) {
         if (!value.empty()) {
             volatile char* bytes = &value[0];

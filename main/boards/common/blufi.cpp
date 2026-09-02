@@ -3714,12 +3714,9 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                 SendStationConnectFailureReport();
                 break;
             }
-            // Bound the copy as above. Never log the password value.
+            // The staged helper is the sole password owner. Never retain a
+            // plaintext copy in the legacy wifi_config_t or log its value.
             const size_t passwd_n = param->sta_passwd.passwd_len;
-            memset(m_sta_config.sta.password, 0,
-                   sizeof(m_sta_config.sta.password));
-            memcpy(m_sta_config.sta.password, param->sta_passwd.passwd, passwd_n);
-            m_sta_config.sta.password[passwd_n] = '\0';
             const uint64_t candidate_epoch = staged_wifi_credentials_.UpdatePassword(
                 std::string(reinterpret_cast<const char*>(param->sta_passwd.passwd),
                             passwd_n));

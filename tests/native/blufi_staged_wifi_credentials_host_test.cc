@@ -22,11 +22,19 @@ int main() {
     assert(claimed_b.has_value());
     assert(claimed_b->ssid == "ssid-b");
     assert(claimed_b->password == "password-b");
+    assert(staged.StagedByteCountForTesting() == 0);
+    assert(staged.FallbackEpoch() == 0);
     assert(!staged.Claim(candidate_b).has_value());
 
-    const auto duplicate = staged.UpdateSsid("ssid-b");
-    assert(duplicate == candidate_b);
-    assert(!staged.Claim(duplicate).has_value());
+    const auto replacement_password = staged.UpdatePassword("password-c");
+    assert(replacement_password != candidate_b);
+    assert(!staged.Claim(replacement_password).has_value());
+    const auto replacement_epoch = staged.UpdateSsid("ssid-c");
+    const auto replacement = staged.Claim(replacement_epoch);
+    assert(replacement.has_value());
+    assert(replacement->ssid == "ssid-c");
+    assert(replacement->password == "password-c");
+    assert(staged.StagedByteCountForTesting() == 0);
 
     BlufiStagedWifiCredentials password_first;
     const auto password_only = password_first.UpdatePassword("password-first");
@@ -37,6 +45,7 @@ int main() {
     assert(password_first_claim.has_value());
     assert(password_first_claim->ssid == "ssid-second");
     assert(password_first_claim->password == "password-first");
+    assert(password_first.StagedByteCountForTesting() == 0);
 
     staged.Invalidate();
     assert(!staged.ClaimCurrent().has_value());

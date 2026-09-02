@@ -921,13 +921,13 @@ def test_sec29_sta_credentials_are_rejected_before_copy_without_secure_session()
     assert "esp_blufi_send_error_info(" in _credential_guard_body()
     for case_name, destination in (
         ("ESP_BLUFI_EVENT_RECV_STA_SSID", "m_sta_config.sta.ssid"),
-        ("ESP_BLUFI_EVENT_RECV_STA_PASSWD", "m_sta_config.sta.password"),
+        ("ESP_BLUFI_EVENT_RECV_STA_PASSWD", "staged_wifi_credentials_.UpdatePassword"),
     ):
         case_body = _event_case_body(case_name)
         guard_idx = case_body.index("_require_secure_session_for_credentials()")
-        memcpy_idx = case_body.index(f"memcpy({destination}")
-        assert guard_idx < memcpy_idx, f"{case_name} must check secure session before memcpy"
-        assert "break;" in case_body[guard_idx:memcpy_idx]
+        write_idx = case_body.index(destination)
+        assert guard_idx < write_idx, f"{case_name} must check secure session before staging"
+        assert "break;" in case_body[guard_idx:write_idx]
 
 # ---------------------------------------------------------------------------
 # SEC31: BluFi CUSTOM_DATA carries bootstrap_token / provisioning_code /
