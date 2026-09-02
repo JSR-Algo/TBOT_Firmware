@@ -721,6 +721,29 @@ def test_config_submit_marks_busy_and_persistence_failures_as_json():
     assert response_type < save < save_failure
 
 
+def test_config_credentials_share_exact_32_63_limits_without_truncation():
+    source = read("components/esp-wifi-connect/wifi_configuration_ap.cc")
+    connect = function_body(source, "bool WifiConfigurationAp::ConnectToWifi")
+    smartconfig = function_body(
+        source, "void WifiConfigurationAp::SmartConfigEventHandler"
+    )
+    submit = source[
+        source.index('httpd_uri_t form_submit = {'):
+        source.index('ESP_ERROR_CHECK(httpd_register_uri_handler(server_, &form_submit));')
+    ]
+
+    assert "IsValidWifiCredentials(ssid, password)" in connect
+    assert "CopyWifiCredentialsToBuffers" in connect
+    assert "strlcpy" not in connect
+    assert "IsValidWifiCredentials(ssid_str, password_str)" in submit
+    assert smartconfig.count("strnlen(") == 2
+    assert "reinterpret_cast<const char*>(evt->ssid)" in smartconfig
+    assert "reinterpret_cast<const char*>(evt->password)" in smartconfig
+    assert "std::string ssid(" in smartconfig
+    assert "std::string password(" in smartconfig
+    assert "IsValidWifiCredentials(ssid, password)" in smartconfig
+
+
 def test_station_and_config_retain_completion_when_driver_ap_cleanup_is_unproven():
     station_header = read("components/esp-wifi-connect/include/wifi_station.h")
     station_source = read("components/esp-wifi-connect/wifi_station.cc")

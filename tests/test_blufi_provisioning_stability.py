@@ -587,15 +587,16 @@ def test_fw13_recv_sta_ssid_passwd_copy_is_length_bounded():
         "password copy writes NUL at an unbounded index — overflows when len == sizeof"
     )
 
-    # Both copies must clamp the length against the buffer size.
+    # Both handlers reject oversize fields before their exact-length copies.
     for label, segment, buf in (
         ("ssid", ssid_body, "m_sta_config.sta.ssid"),
         ("passwd", passwd_body, "m_sta_config.sta.password"),
     ):
-        assert "std::min" in segment, f"{label} copy is not bounded with std::min"
         assert f"sizeof({buf})" in segment, (
-            f"{label} copy does not clamp against sizeof({buf})"
+            f"{label} copy does not validate against sizeof({buf})"
         )
+        assert "Reject invalid STA" in segment
+        assert segment.index("Reject invalid STA") < segment.index("memcpy(")
 
     # Defense-in-depth: the password handler still must not log the value.
     assert 'ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD");' in passwd_body
@@ -2701,6 +2702,19 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
     assert "m_sta_config_ssid_len_ = ssid_n" in ssid_event
     assert "m_sta_config.sta.ssid[ssid_n] = '\\0'" not in ssid_event
     assert "memset(m_sta_config.sta.ssid, 0" in ssid_event
+    assert "param->sta_ssid.ssid_len > kMaxWifiSsidBytes" in ssid_event
+
+    password_event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_PASSWD:")
+    assert "param->sta_passwd.passwd_len > kMaxWifiPasswordBytes" in password_event
+    rejection = password_event[
+        password_event.index("param->sta_passwd.passwd_len >"):
+        password_event.index("size_t passwd_n")
+    ]
+    assert "ScheduleStationConnectFallback" not in rejection
+    assert "memset(m_sta_config.sta.password" in rejection
+    assert "m_sta_is_connecting.store(false)" in rejection
+    assert "SendStationConnectFailureReport()" in rejection
+    assert "break;" in rejection
 
     assert "m_sta_config_ssid_len_" in helper
     assert "reinterpret_cast<const char*>(m_sta_config.sta.ssid)," in helper
@@ -2717,8 +2731,9 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
         station, "std::string WifiStation::StartConnectForSession"
     )
     assert "strcpy((char *)wifi_config.sta.ssid" not in start_connect
-    assert "memcpy(wifi_config.sta.ssid" in start_connect
     assert "sizeof(wifi_config.sta.ssid)" in start_connect
+    assert "CopyWifiCredentialsToBuffers" in start_connect
+    assert "strcpy((char *)wifi_config.sta.password" not in start_connect
 
 
 def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():

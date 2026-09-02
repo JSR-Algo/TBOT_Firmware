@@ -175,6 +175,23 @@ int main() {
     assert(after_success != 0);
     assert(manager.RollbackSsidTransaction(after_success));
 
+    const std::string max_ssid(32, 's');
+    const std::string max_password(63, 'p');
+    assert(manager.AddSsid(max_ssid, max_password) ==
+           SsidMutationResult::kApplied);
+    const auto after_max_credentials = manager.GetSsidList();
+    assert(after_max_credentials.front().ssid == max_ssid);
+    assert(after_max_credentials.front().password == max_password);
+    const auto durable_after_max_credentials = durable_nvs;
+    assert(manager.AddSsid(std::string(33, 's'), "password") ==
+           SsidMutationResult::kInvalid);
+    assert(manager.AddSsid("ssid", std::string(64, 'p')) ==
+           SsidMutationResult::kInvalid);
+    assert(manager.BeginSsidTransaction(std::string(33, 's'), "password") == 0);
+    assert(manager.BeginSsidTransaction("ssid", std::string(64, 'p')) == 0);
+    AssertSameList(manager.GetSsidList(), after_max_credentials);
+    assert(durable_nvs == durable_after_max_credentials);
+
     const auto before_failed_add = manager.GetSsidList();
     const auto durable_before_failed_add = durable_nvs;
     fail_next_commit = true;
@@ -236,9 +253,12 @@ int main() {
     assert(concurrent_remove == SsidMutationResult::kBusy);
     assert(manager.CommitSsidTransaction(mutation_owner));
     const auto committed_existing = manager.GetSsidList();
-    assert(committed_existing[5].ssid == "saved-4");
-    assert(committed_existing[5].password ==
-           "concurrent-provisional-password");
+    const auto committed_match = std::find_if(
+        committed_existing.begin(), committed_existing.end(),
+        [](const SsidItem& item) { return item.ssid == "saved-4"; });
+    assert(committed_match != committed_existing.end());
+    assert(committed_match != committed_existing.begin());
+    assert(committed_match->password == "concurrent-provisional-password");
 
     const auto before_failed_force_clear = manager.GetSsidList();
     const auto durable_before_failed_force_clear = durable_nvs;

@@ -707,6 +707,25 @@ void CredentialFieldLimitsAreByteExact() {
                                   std::string(63, 'p')));
     assert(!IsValidWifiCredentials(std::string(33, 's'), "password"));
     assert(!IsValidWifiCredentials("ssid", std::string(64, 'p')));
+    uint8_t ssid_buffer[32] = {};
+    uint8_t password_buffer[64] = {};
+    assert(CopyWifiCredentialsToBuffers(
+        std::string(32, 's'), std::string(63, 'p'),
+        ssid_buffer, sizeof(ssid_buffer),
+        password_buffer, sizeof(password_buffer)));
+    assert(std::all_of(std::begin(ssid_buffer), std::end(ssid_buffer),
+                       [](uint8_t value) { return value == 's'; }));
+    assert(std::all_of(std::begin(password_buffer), std::end(password_buffer) - 1,
+                       [](uint8_t value) { return value == 'p'; }));
+    assert(password_buffer[63] == 0);
+    assert(!CopyWifiCredentialsToBuffers(
+        std::string(33, 's'), "password",
+        ssid_buffer, sizeof(ssid_buffer),
+        password_buffer, sizeof(password_buffer)));
+    assert(!CopyWifiCredentialsToBuffers(
+        "ssid", std::string(64, 'p'),
+        ssid_buffer, sizeof(ssid_buffer),
+        password_buffer, sizeof(password_buffer)));
 
     std::string ssid(31, 's');
     assert(!AppendWifiFieldIfFits(ssid, "\xC3\xA9", kMaxWifiSsidBytes));

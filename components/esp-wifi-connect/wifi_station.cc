@@ -472,6 +472,15 @@ WifiApRecord WifiStation::PrepareNextConnectLocked() {
 
 std::string WifiStation::StartConnectForSession(WifiApRecord ap_record,
                                                 bool use_remembered_bssid) {
+    wifi_config_t wifi_config = {};
+    if (!CopyWifiCredentialsToBuffers(
+            ap_record.ssid, ap_record.password,
+            wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid),
+            wifi_config.sta.password, sizeof(wifi_config.sta.password))) {
+        ESP_LOGE(TAG, "Invalid queued WiFi credentials");
+        std::fill(ap_record.password.begin(), ap_record.password.end(), '\0');
+        return {};
+    }
     const std::string connecting_ssid = ap_record.ssid;
     {
         std::lock_guard<std::mutex> data_lock(session_data_mutex_);
@@ -481,12 +490,6 @@ std::string WifiStation::StartConnectForSession(WifiApRecord ap_record,
         reconnect_count_ = 0;
     }
 
-    wifi_config_t wifi_config;
-    bzero(&wifi_config, sizeof(wifi_config));
-    const size_t ssid_len =
-        std::min(ap_record.ssid.size(), sizeof(wifi_config.sta.ssid));
-    memcpy(wifi_config.sta.ssid, ap_record.ssid.data(), ssid_len);
-    strcpy((char *)wifi_config.sta.password, ap_record.password.c_str());
     if (use_remembered_bssid && remember_bssid_) {
         wifi_config.sta.channel = ap_record.channel;
         memcpy(wifi_config.sta.bssid, ap_record.bssid, 6);

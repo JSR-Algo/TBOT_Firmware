@@ -1,6 +1,7 @@
 #include "blufi.h"
 #include "blufi_wifi_scan_result_collector.h"
 #include "blufi_advertising_ledger.h"
+#include "wifi_credential_limits.h"
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -3656,9 +3657,18 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             if (!_require_secure_session_for_credentials()) {
                 break;
             }
+            if (param->sta_ssid.ssid_len == 0 ||
+                param->sta_ssid.ssid_len > kMaxWifiSsidBytes) {
+                ESP_LOGW(BLUFI_TAG, "Reject invalid STA SSID length");
+                memset(m_sta_config.sta.ssid, 0,
+                       sizeof(m_sta_config.sta.ssid));
+                m_sta_config_ssid_len_ = 0;
+                m_sta_is_connecting.store(false);
+                SendStationConnectFailureReport();
+                break;
+            }
             // SSIDs are length-delimited and may legally occupy all 32 bytes.
-            size_t ssid_n = std::min<size_t>(param->sta_ssid.ssid_len,
-                                             sizeof(m_sta_config.sta.ssid));
+            const size_t ssid_n = param->sta_ssid.ssid_len;
             memset(m_sta_config.sta.ssid, 0, sizeof(m_sta_config.sta.ssid));
             memcpy(m_sta_config.sta.ssid, param->sta_ssid.ssid, ssid_n);
             m_sta_config_ssid_len_ = ssid_n;
@@ -3673,9 +3683,18 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             if (!_require_secure_session_for_credentials()) {
                 break;
             }
+            if (param->sta_passwd.passwd_len > kMaxWifiPasswordBytes) {
+                ESP_LOGW(BLUFI_TAG, "Reject invalid STA password length");
+                memset(m_sta_config.sta.password, 0,
+                       sizeof(m_sta_config.sta.password));
+                m_sta_is_connecting.store(false);
+                SendStationConnectFailureReport();
+                break;
+            }
             // Bound the copy as above. Never log the password value.
-            size_t passwd_n = std::min<size_t>(param->sta_passwd.passwd_len,
-                                               sizeof(m_sta_config.sta.password) - 1);
+            const size_t passwd_n = param->sta_passwd.passwd_len;
+            memset(m_sta_config.sta.password, 0,
+                   sizeof(m_sta_config.sta.password));
             memcpy(m_sta_config.sta.password, param->sta_passwd.passwd, passwd_n);
             m_sta_config.sta.password[passwd_n] = '\0';
             ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD");

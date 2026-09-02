@@ -1,4 +1,5 @@
 #include "ssid_manager.h"
+#include "wifi_credential_limits.h"
 
 #include <algorithm>
 #include <esp_log.h>
@@ -86,11 +87,14 @@ void SsidManager::LoadFromNvs() {
         if (nvs_get_str(nvs_handle, password_key.c_str(), password, &length) != ESP_OK) {
             continue;
         }
-        if (ssid[0] == '\0') {
-            ESP_LOGW(TAG, "Ignore empty SSID in NVS key %s", ssid_key.c_str());
+        const std::string loaded_ssid(ssid);
+        const std::string loaded_password(password);
+        if (!IsValidWifiCredentials(loaded_ssid, loaded_password)) {
+            ESP_LOGW(TAG, "Ignore invalid credentials in NVS key %s",
+                     ssid_key.c_str());
             continue;
         }
-        ssid_list_.push_back({ssid, password});
+        ssid_list_.push_back({loaded_ssid, loaded_password});
     }
     nvs_close(nvs_handle);
 }
@@ -170,8 +174,8 @@ SsidMutationResult SsidManager::AddSsid(const std::string& ssid,
     if (active_transaction_id_ != 0) {
         return SsidMutationResult::kBusy;
     }
-    if (ssid.empty()) {
-        ESP_LOGW(TAG, "Ignore empty SSID");
+    if (!IsValidWifiCredentials(ssid, password)) {
+        ESP_LOGW(TAG, "Ignore invalid WiFi credentials");
         return SsidMutationResult::kInvalid;
     }
     auto previous_list = ssid_list_;
@@ -181,8 +185,8 @@ SsidMutationResult SsidManager::AddSsid(const std::string& ssid,
 
 uint32_t SsidManager::BeginSsidTransaction(const std::string& ssid,
                                            const std::string& password) {
-    if (ssid.empty()) {
-        ESP_LOGW(TAG, "Ignore empty SSID transaction");
+    if (!IsValidWifiCredentials(ssid, password)) {
+        ESP_LOGW(TAG, "Ignore invalid WiFi credential transaction");
         return 0;
     }
 

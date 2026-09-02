@@ -39,7 +39,7 @@ def test_ssid_manager_ignores_empty_persisted_ssids():
         "bool SsidManager::SaveToNvs()",
     )
 
-    empty_guard = body.index("ssid[0] == '\\0'")
+    empty_guard = body.index("IsValidWifiCredentials(loaded_ssid, loaded_password)")
     push_idx = body.index("ssid_list_.push_back")
 
     assert empty_guard < push_idx, (
@@ -58,7 +58,7 @@ def test_ssid_manager_rejects_empty_ssids_before_persisting():
         "uint32_t SsidManager::BeginSsidTransaction",
     )
 
-    empty_guard = body.index("ssid.empty()")
+    empty_guard = body.index("IsValidWifiCredentials(ssid, password)")
     save_idx = body.index("PersistMutationOrRestore")
 
     assert empty_guard < save_idx

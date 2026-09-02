@@ -1,4 +1,5 @@
 #include "wifi_configuration_ap.h"
+#include "wifi_credential_limits.h"
 #include "default_event_loop_barrier.h"
 #include <chrono>
 #include <cstring>
@@ -555,9 +556,16 @@ void WifiConfigurationAp::StartWebServer()
             }
 
             std::string ssid_str = ssid_item->valuestring;
-            std::string password_str = "";
-            if (cJSON_IsString(password_item) && (password_item->valuestring != NULL) && (strlen(password_item->valuestring) < 65)) {
+            std::string password_str;
+            if (cJSON_IsString(password_item) && password_item->valuestring != NULL) {
                 password_str = password_item->valuestring;
+            }
+            if (!IsValidWifiCredentials(ssid_str, password_str)) {
+                cJSON_Delete(json);
+                httpd_resp_send(req,
+                                "{\"success\":false,\"error\":\"Invalid WiFi credentials\"}",
+                                HTTPD_RESP_USE_STRLEN);
+                return ESP_OK;
             }
 
             // 获取当前对象
@@ -836,18 +844,15 @@ void WifiConfigurationAp::StartWebServer()
 
 bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::string &password)
 {
-    if (ssid.empty()) {
-        ESP_LOGE(TAG, "SSID cannot be empty");
+    if (!IsValidWifiCredentials(ssid, password)) {
+        ESP_LOGE(TAG, "Invalid WiFi credentials");
         return false;
     }
-
-    if (ssid.length() > 32) {  // WiFi SSID 最大长度
-        ESP_LOGE(TAG, "SSID too long");
-        return false;
-    }
-
-    if (password.length() > 64) {
-        ESP_LOGE(TAG, "Password too long");
+    wifi_config_t wifi_config = {};
+    if (!CopyWifiCredentialsToBuffers(
+            ssid, password,
+            wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid),
+            wifi_config.sta.password, sizeof(wifi_config.sta.password))) {
         return false;
     }
 
@@ -882,10 +887,6 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     xEventGroupClearBits(
         event_group_, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT | WIFI_CANCEL_BIT);
 
-    wifi_config_t wifi_config;
-    bzero(&wifi_config, sizeof(wifi_config));
-    strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), 32);
-    strlcpy((char *)wifi_config.sta.password, password.c_str(), 64);
     wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi_config.sta.failure_retry_cnt = 1;
 
@@ -1133,12 +1134,21 @@ void WifiConfigurationAp::SmartConfigEventHandler(void *arg, esp_event_base_t ev
             ESP_LOGI(TAG, "Got SmartConfig credentials");
             smartconfig_event_got_ssid_pswd_t *evt = (smartconfig_event_got_ssid_pswd_t *)event_data;
 
-            char ssid[32], password[64];
-            memcpy(ssid, evt->ssid, sizeof(evt->ssid));
-            memcpy(password, evt->password, sizeof(evt->password));
+            const size_t ssid_length = strnlen(
+                reinterpret_cast<const char*>(evt->ssid), sizeof(evt->ssid));
+            const size_t password_length = strnlen(
+                reinterpret_cast<const char*>(evt->password), sizeof(evt->password));
+            const std::string ssid(
+                reinterpret_cast<const char*>(evt->ssid), ssid_length);
+            const std::string password(
+                reinterpret_cast<const char*>(evt->password), password_length);
             ESP_LOGI(TAG, "SmartConfig credentials received (ssid_len=%u password_len=%u)",
-                     static_cast<unsigned>(strnlen(ssid, sizeof(ssid))),
-                     static_cast<unsigned>(strnlen(password, sizeof(password))));
+                     static_cast<unsigned>(ssid_length),
+                     static_cast<unsigned>(password_length));
+            if (!IsValidWifiCredentials(ssid, password)) {
+                ESP_LOGW(TAG, "SmartConfig credentials were invalid");
+                break;
+            }
             // 尝试连接WiFi会失败，故不连接
             if (self->Save(ssid, password) != SsidMutationResult::kApplied) {
                 ESP_LOGW(TAG, "SmartConfig credentials were not saved");
