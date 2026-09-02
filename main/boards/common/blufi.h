@@ -349,6 +349,9 @@ private:
     uint8_t m_sta_ssid[32]{};
     int m_sta_ssid_len;
     size_t m_sta_config_ssid_len_ = 0;
+    std::atomic<bool> m_sta_credentials_rejected_{false};
+    std::atomic<bool> m_sta_ssid_received_{false};
+    std::atomic<bool> m_sta_password_received_{false};
     std::atomic<bool> m_sta_is_connecting{false};
     std::atomic<bool> m_wifi_connect_task_started{false};
     std::atomic<uint32_t> setup_generation_{0};

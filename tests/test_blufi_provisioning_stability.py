@@ -2736,6 +2736,50 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
     assert "strcpy((char *)wifi_config.sta.password" not in start_connect
 
 
+def test_fw44b_rejected_blufi_field_invalidates_the_whole_candidate():
+    header = read("main/boards/common/blufi.h")
+    blufi = read("main/boards/common/blufi.cpp")
+    ssid_event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_SSID:")
+    password_event = _function_body(blufi, "case ESP_BLUFI_EVENT_RECV_STA_PASSWD:")
+    connect_event = _function_body(blufi, "case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:")
+    helper = _station_connect_helper_body()
+    fallback = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
+
+    assert "std::atomic<bool> m_sta_credentials_rejected_" in header
+    assert "std::atomic<bool> m_sta_ssid_received_" in header
+    assert "std::atomic<bool> m_sta_password_received_" in header
+    for event in (ssid_event, password_event):
+        rejection_start = event.index("Reject invalid STA")
+        rejection = event[rejection_start:event.index("break;", rejection_start)]
+        assert "m_sta_credentials_rejected_.store(true" in rejection
+        assert "memset(m_sta_config.sta.ssid" in rejection
+        assert "m_sta_config_ssid_len_ = 0" in rejection
+        assert "memset(m_sta_config.sta.password" in rejection
+        assert "m_sta_ssid_received_.store(false" in rejection
+        assert "m_sta_password_received_.store(false" in rejection
+        assert rejection.count("SendStationConnectFailureReport()") == 1
+
+    assert "m_sta_password_received_.store(true" in password_event
+    password_fallback = password_event[
+        password_event.index("m_sta_password_received_.store(true"):
+    ]
+    assert "m_sta_ssid_received_.load" in password_fallback
+    assert "ScheduleStationConnectFallback" in password_fallback
+
+    assert "m_sta_credentials_rejected_.load" in connect_event
+    assert connect_event.index("m_sta_credentials_rejected_.load") < connect_event.index(
+        "StartStationConnectFromCredentials"
+    )
+    assert "SendStationConnectFailureReport" not in connect_event
+    assert "m_sta_credentials_rejected_.load" in helper
+    assert "m_sta_ssid_received_.load" in helper
+    assert "m_sta_password_received_.load" in helper
+    assert helper.index("m_sta_credentials_rejected_.load") < helper.index(
+        "BeginSsidTransaction"
+    )
+    assert "m_sta_credentials_rejected_.load" in fallback
+
+
 def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():
     header = read("main/boards/common/blufi.h")
     blufi = read("main/boards/common/blufi.cpp")
