@@ -245,8 +245,9 @@ def test_fw3f_password_frame_schedules_duplicate_safe_connect_fallback():
     passwd_body = blufi[passwd_idx:list_idx]
     fallback_body = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
 
-    assert "ScheduleStationConnectFallback();" in passwd_body
-    assert 'StartStationConnectFromCredentials("password_fallback")' in fallback_body
+    assert "ScheduleStationConnectFallback(candidate_epoch);" in passwd_body
+    assert '"password_fallback", candidate_epoch' in fallback_body
+    assert "uint64_t candidate_epoch" in fallback_body
     assert "m_wifi_connect_task_started" in fallback_body
     assert "vTaskDelay" in fallback_body
 
@@ -263,7 +264,7 @@ def test_fw3f_connect_fallback_task_deletes_itself_on_all_exits():
     assert "vTaskDelete(nullptr);" in early_exit
     assert early_exit.index("vTaskDelete(nullptr);") < early_exit.index("return;")
     assert fallback_body.rfind("vTaskDelete(nullptr);") > fallback_body.index(
-        'StartStationConnectFromCredentials("password_fallback")'
+        '"password_fallback", candidate_epoch'
     )
 
 
@@ -2434,7 +2435,7 @@ def test_fw38_password_fallback_is_generation_scoped_and_spawn_failure_is_recove
     failure = fallback[fallback.index("if (created != pdPASS)") :]
     assert "Application::GetInstance().Schedule" in failure
     assert "generation != setup_generation_.load()" in failure
-    assert 'StartStationConnectFromCredentials("password_fallback_task_create_failed")' in failure
+    assert '"password_fallback_task_create_failed", candidate_epoch' in failure
 
 
 def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_factory_reset():
@@ -2716,8 +2717,12 @@ def test_fw44_full_32_byte_ssid_uses_explicit_length_and_clears_local_credential
     assert "SendStationConnectFailureReport()" in rejection
     assert "break;" in rejection
 
-    assert "m_sta_config_ssid_len_" in helper
-    assert "reinterpret_cast<const char*>(m_sta_config.sta.ssid)," in helper
+    assert "staged_wifi_credentials_.UpdateSsid" in ssid_event
+    assert "staged_wifi_credentials_.UpdatePassword" in password_event
+    assert "std::string ssid = candidate->ssid" in helper
+    assert "std::string password = candidate->password" in helper
+    assert "candidate.reset()" in helper
+    assert "m_sta_config" not in helper
     assert "SecureClearLocalString(ssid);" in helper
     assert "SecureClearLocalString(password);" in helper
     begin_idx = helper.index("BeginSsidTransaction(ssid, password)")
@@ -2745,39 +2750,59 @@ def test_fw44b_rejected_blufi_field_invalidates_the_whole_candidate():
     helper = _station_connect_helper_body()
     fallback = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
 
-    assert "std::atomic<bool> m_sta_credentials_rejected_" in header
-    assert "std::atomic<bool> m_sta_ssid_received_" in header
-    assert "std::atomic<bool> m_sta_password_received_" in header
+    assert "BlufiStagedWifiCredentials staged_wifi_credentials_" in header
     for event in (ssid_event, password_event):
         rejection_start = event.index("Reject invalid STA")
         rejection = event[rejection_start:event.index("break;", rejection_start)]
-        assert "m_sta_credentials_rejected_.store(true" in rejection
+        assert "staged_wifi_credentials_.Invalidate()" in rejection
         assert "memset(m_sta_config.sta.ssid" in rejection
         assert "m_sta_config_ssid_len_ = 0" in rejection
         assert "memset(m_sta_config.sta.password" in rejection
-        assert "m_sta_ssid_received_.store(false" in rejection
-        assert "m_sta_password_received_.store(false" in rejection
         assert rejection.count("SendStationConnectFailureReport()") == 1
 
-    assert "m_sta_password_received_.store(true" in password_event
-    password_fallback = password_event[
-        password_event.index("m_sta_password_received_.store(true"):
-    ]
-    assert "m_sta_ssid_received_.load" in password_fallback
+    assert "staged_wifi_credentials_.UpdatePassword" in password_event
+    password_fallback = password_event[password_event.index("const uint64_t candidate_epoch"):]
+    assert "staged_wifi_credentials_.FallbackEpoch() == candidate_epoch" in password_fallback
     assert "ScheduleStationConnectFallback" in password_fallback
 
-    assert "m_sta_credentials_rejected_.load" in connect_event
-    assert connect_event.index("m_sta_credentials_rejected_.load") < connect_event.index(
-        "StartStationConnectFromCredentials"
-    )
+    assert "m_sta_config" not in connect_event
     assert "SendStationConnectFailureReport" not in connect_event
-    assert "m_sta_credentials_rejected_.load" in helper
-    assert "m_sta_ssid_received_.load" in helper
-    assert "m_sta_password_received_.load" in helper
-    assert helper.index("m_sta_credentials_rejected_.load") < helper.index(
+    assert "staged_wifi_credentials_.Claim(*expected_candidate_epoch)" in helper
+    assert "staged_wifi_credentials_.ClaimCurrent()" in helper
+    assert helper.index("staged_wifi_credentials_.Claim") < helper.index(
         "BeginSsidTransaction"
     )
-    assert "m_sta_credentials_rejected_.load" in fallback
+    assert "m_sta_config" not in helper
+    assert "uint64_t candidate_epoch" in fallback
+    assert '"password_fallback", candidate_epoch' in fallback
+
+
+def test_fw44c_staged_wifi_snapshot_securely_clears_owned_credentials():
+    staged = read("main/boards/common/blufi_staged_wifi_credentials.h")
+    helper = _station_connect_helper_body()
+
+    assert "~Snapshot()" in staged
+    assert "Snapshot(const Snapshot&) = delete" in staged
+    assert "ssid(other.ssid)" in staged
+    assert "password(other.password)" in staged
+    assert "~BlufiStagedWifiCredentials()" in staged
+    assert "SecureClear(ssid_);" in staged
+    assert "SecureClear(password_);" in staged
+
+    worker_copy = helper.index("static_cast<size_t>(m_sta_ssid_len), password}")
+    local_clear = helper.index("SecureClearLocalString(password);", worker_copy)
+    settle_delay = helper.index("vTaskDelay(pdMS_TO_TICKS(500));", local_clear)
+    assert worker_copy < local_clear < settle_delay
+
+    task_copy = helper.index("task_ctx->candidate_password;")
+    task_source_clear = helper.index(
+        "SecureClearLocalString(task_ctx->candidate_password);", task_copy
+    )
+    task_delete = helper.index("delete task_ctx;", task_source_clear)
+    assert task_copy < task_source_clear < task_delete
+
+    task_create_failure = helper[helper.index("if (created != pdPASS)"):]
+    assert "SecureClearLocalString(ctx->candidate_password);" in task_create_failure
 
 
 def test_fw45_teardown_failure_poison_blocks_all_blind_reinit_attempts():

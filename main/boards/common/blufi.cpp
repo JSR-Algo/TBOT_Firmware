@@ -1020,9 +1020,7 @@ esp_err_t Blufi::RestartForSetup() {
         m_ap_records_owner_.reset();
         memset(&m_sta_config, 0, sizeof(m_sta_config));
         m_sta_config_ssid_len_ = 0;
-        m_sta_credentials_rejected_.store(false, std::memory_order_release);
-        m_sta_ssid_received_.store(false, std::memory_order_release);
-        m_sta_password_received_.store(false, std::memory_order_release);
+        staged_wifi_credentials_.Invalidate();
         memset(m_sta_bssid, 0, sizeof(m_sta_bssid));
         memset(m_sta_ssid, 0, sizeof(m_sta_ssid));
         m_sta_ssid_len = 0;
@@ -1967,19 +1965,22 @@ void Blufi::TryReportProvisioningAuthenticated(const char* reason,
 #endif
 }
 
-void Blufi::StartStationConnectFromCredentials(const char* reason) {
-    if (m_sta_credentials_rejected_.load(std::memory_order_acquire) ||
-        !m_sta_ssid_received_.load(std::memory_order_acquire) ||
-        !m_sta_password_received_.load(std::memory_order_acquire) ||
-        m_sta_config_ssid_len_ == 0) {
-        ESP_LOGW(BLUFI_TAG, "Ignoring rejected or incomplete WiFi candidate: %s",
-                 reason ? reason : "unknown");
-        return;
-    }
+void Blufi::StartStationConnectFromCredentials(
+        const char* reason, std::optional<uint64_t> expected_candidate_epoch) {
     bool expected_not_started = false;
     if (!m_wifi_connect_task_started.compare_exchange_strong(expected_not_started, true)) {
         ESP_LOGI(BLUFI_TAG, "WiFi connect already started; ignoring duplicate trigger: %s",
                  reason ? reason : "unknown");
+        return;
+    }
+
+    auto candidate = expected_candidate_epoch.has_value()
+        ? staged_wifi_credentials_.Claim(*expected_candidate_epoch)
+        : staged_wifi_credentials_.ClaimCurrent();
+    if (!candidate.has_value()) {
+        ESP_LOGW(BLUFI_TAG, "Ignoring stale, claimed, or incomplete WiFi candidate: %s",
+                 reason ? reason : "unknown");
+        m_wifi_connect_task_started.store(false);
         return;
     }
 
@@ -1989,17 +1990,9 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     const uint32_t generation = setup_generation_.load();
     const auto provisioning_token = CaptureProvisioningSession();
 
-    std::string ssid(reinterpret_cast<const char*>(m_sta_config.sta.ssid),
-                     m_sta_config_ssid_len_);
-    std::string password(reinterpret_cast<const char*>(m_sta_config.sta.password));
-    if (ssid.empty()) {
-        ESP_LOGW(BLUFI_TAG, "Ignoring WiFi connect trigger with empty SSID: %s",
-                 reason ? reason : "unknown");
-        SecureClearLocalString(password);
-        m_wifi_connect_task_started.store(false);
-        m_sta_is_connecting.store(false);
-        return;
-    }
+    std::string ssid = candidate->ssid;
+    std::string password = candidate->password;
+    candidate.reset();
     ESP_LOGI(BLUFI_TAG, "Starting WiFi connect from BluFi credentials: %s",
              reason ? reason : "unknown");
     m_sta_ssid_len = static_cast<int>(std::min(ssid.size(), sizeof(m_sta_ssid)));
@@ -2061,7 +2054,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
     };
     auto* ctx = new (std::nothrow) WifiConnectTaskContext{
         this, generation, ssid_transaction, provisioning_token, {},
-        static_cast<size_t>(m_sta_ssid_len), std::move(password)};
+        static_cast<size_t>(m_sta_ssid_len), password};
     if (ctx == nullptr) {
         SecureClearLocalString(password);
         ESP_LOGE(BLUFI_TAG, "Failed to allocate BluFi WiFi completion context");
@@ -2074,6 +2067,7 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
         SendStationConnectFailureReport();
         return;
     }
+    SecureClearLocalString(password);
     memcpy(ctx->candidate_ssid.data(), m_sta_ssid, ctx->candidate_ssid_len);
 
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -2097,8 +2091,8 @@ void Blufi::StartStationConnectFromCredentials(const char* reason) {
             const auto provisioning_token = task_ctx->provisioning_token;
             const auto candidate_ssid = task_ctx->candidate_ssid;
             const size_t candidate_ssid_len = task_ctx->candidate_ssid_len;
-            std::string candidate_password =
-                std::move(task_ctx->candidate_password);
+            std::string candidate_password = task_ctx->candidate_password;
+            SecureClearLocalString(task_ctx->candidate_password);
             delete task_ctx;
             auto& wifi = WifiManager::GetInstance();
 
@@ -2375,20 +2369,23 @@ void Blufi::SendStationConnectFailureReport() {
                                     _get_softap_conn_num(), &info);
 }
 
-void Blufi::ScheduleStationConnectFallback() {
+void Blufi::ScheduleStationConnectFallback(uint64_t candidate_epoch) {
     const uint32_t generation = setup_generation_.load();
     struct StationConnectFallbackContext {
         Blufi* self;
         uint32_t generation;
+        uint64_t candidate_epoch;
     };
-    auto* ctx = new (std::nothrow) StationConnectFallbackContext{this, generation};
+    auto* ctx = new (std::nothrow) StationConnectFallbackContext{
+        this, generation, candidate_epoch};
     if (ctx == nullptr) {
         ESP_LOGE(BLUFI_TAG, "Failed to allocate password fallback context");
-        Application::GetInstance().Schedule([this, generation]() {
+        Application::GetInstance().Schedule([this, generation, candidate_epoch]() {
             if (generation != setup_generation_.load()) {
                 return;
             }
-            StartStationConnectFromCredentials("password_fallback_task_create_failed");
+            StartStationConnectFromCredentials(
+                "password_fallback_task_create_failed", candidate_epoch);
         });
         return;
     }
@@ -2398,6 +2395,7 @@ void Blufi::ScheduleStationConnectFallback() {
             auto* task_ctx = static_cast<StationConnectFallbackContext*>(ctx);
             auto* self = task_ctx->self;
             const uint32_t generation = task_ctx->generation;
+            const uint64_t candidate_epoch = task_ctx->candidate_epoch;
             delete task_ctx;
             vTaskDelay(pdMS_TO_TICKS(500));
             if (generation != self->setup_generation_.load()) {
@@ -2405,28 +2403,27 @@ void Blufi::ScheduleStationConnectFallback() {
                 vTaskDelete(nullptr);
                 return;
             }
-            if (!self->m_sta_is_connecting.load() || self->m_wifi_connect_task_started.load() ||
-                self->m_sta_config_ssid_len_ == 0 ||
-                !self->m_sta_ssid_received_.load(std::memory_order_acquire) ||
-                !self->m_sta_password_received_.load(std::memory_order_acquire) ||
-                self->m_sta_credentials_rejected_.load(std::memory_order_acquire)) {
+            if (!self->m_sta_is_connecting.load() ||
+                self->m_wifi_connect_task_started.load()) {
                 vTaskDelete(nullptr);
                 return;
             }
             ESP_LOGW(BLUFI_TAG,
                      "CONNECT_TO_AP not observed after password; starting WiFi fallback");
-            self->StartStationConnectFromCredentials("password_fallback");
+            self->StartStationConnectFromCredentials(
+                "password_fallback", candidate_epoch);
             vTaskDelete(nullptr);
         },
         "blufi_conn_fb", 3072, ctx, 5, nullptr);
     if (created != pdPASS) {
         delete ctx;
         ESP_LOGE(BLUFI_TAG, "Failed to create password fallback task");
-        Application::GetInstance().Schedule([this, generation]() {
+        Application::GetInstance().Schedule([this, generation, candidate_epoch]() {
             if (generation != setup_generation_.load()) {
                 return;
             }
-            StartStationConnectFromCredentials("password_fallback_task_create_failed");
+            StartStationConnectFromCredentials(
+                "password_fallback_task_create_failed", candidate_epoch);
         });
     }
 }
@@ -3616,13 +3613,6 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
         }
         case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP: {
             ESP_LOGI(BLUFI_TAG, "BLUFI request wifi connect to AP via esp-wifi-connect");
-            if (m_sta_credentials_rejected_.load(std::memory_order_acquire) ||
-                !m_sta_ssid_received_.load(std::memory_order_acquire) ||
-                !m_sta_password_received_.load(std::memory_order_acquire) ||
-                m_sta_config_ssid_len_ == 0) {
-                ESP_LOGW(BLUFI_TAG, "Ignoring rejected or incomplete WiFi candidate");
-                break;
-            }
             StartStationConnectFromCredentials("blufi_connect_request");
             break;
         }
@@ -3681,38 +3671,30 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             if (param->sta_ssid.ssid_len == 0 ||
                 param->sta_ssid.ssid_len > kMaxWifiSsidBytes) {
                 ESP_LOGW(BLUFI_TAG, "Reject invalid STA SSID length");
-                m_sta_credentials_rejected_.store(true, std::memory_order_release);
+                staged_wifi_credentials_.Invalidate();
                 memset(m_sta_config.sta.ssid, 0,
                        sizeof(m_sta_config.sta.ssid));
                 m_sta_config_ssid_len_ = 0;
                 memset(m_sta_config.sta.password, 0,
                        sizeof(m_sta_config.sta.password));
-                m_sta_ssid_received_.store(false, std::memory_order_release);
-                m_sta_password_received_.store(false, std::memory_order_release);
                 m_sta_is_connecting.store(false);
                 SendStationConnectFailureReport();
                 break;
             }
             // SSIDs are length-delimited and may legally occupy all 32 bytes.
             const size_t ssid_n = param->sta_ssid.ssid_len;
-            const bool replacing_ssid =
-                m_sta_ssid_received_.exchange(true, std::memory_order_acq_rel);
             memset(m_sta_config.sta.ssid, 0, sizeof(m_sta_config.sta.ssid));
-            if (replacing_ssid) {
-                memset(m_sta_config.sta.password, 0,
-                       sizeof(m_sta_config.sta.password));
-                m_sta_password_received_.store(false, std::memory_order_release);
-            }
             memcpy(m_sta_config.sta.ssid, param->sta_ssid.ssid, ssid_n);
             m_sta_config_ssid_len_ = ssid_n;
-            m_sta_credentials_rejected_.store(false, std::memory_order_release);
+            const uint64_t candidate_epoch = staged_wifi_credentials_.UpdateSsid(
+                std::string(reinterpret_cast<const char*>(param->sta_ssid.ssid), ssid_n));
             m_sta_is_connecting.store(true);
             // Do NOT log the SSID value: the home network name is user PII and a
             // serial/log dump would leak it. Mirror the RECV_STA_PASSWD handler
             // below, which deliberately logs no credential value.
             ESP_LOGI(BLUFI_TAG, "Recv STA SSID (len=%u)", static_cast<unsigned>(ssid_n));
-            if (m_sta_password_received_.load(std::memory_order_acquire)) {
-                ScheduleStationConnectFallback();
+            if (staged_wifi_credentials_.FallbackEpoch() == candidate_epoch) {
+                ScheduleStationConnectFallback(candidate_epoch);
             }
             break;
         }
@@ -3722,22 +3704,14 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             }
             if (param->sta_passwd.passwd_len > kMaxWifiPasswordBytes) {
                 ESP_LOGW(BLUFI_TAG, "Reject invalid STA password length");
-                m_sta_credentials_rejected_.store(true, std::memory_order_release);
+                staged_wifi_credentials_.Invalidate();
                 memset(m_sta_config.sta.ssid, 0,
                        sizeof(m_sta_config.sta.ssid));
                 m_sta_config_ssid_len_ = 0;
                 memset(m_sta_config.sta.password, 0,
                        sizeof(m_sta_config.sta.password));
-                m_sta_ssid_received_.store(false, std::memory_order_release);
-                m_sta_password_received_.store(false, std::memory_order_release);
                 m_sta_is_connecting.store(false);
                 SendStationConnectFailureReport();
-                break;
-            }
-            if (m_sta_credentials_rejected_.load(std::memory_order_acquire)) {
-                memset(m_sta_config.sta.password, 0,
-                       sizeof(m_sta_config.sta.password));
-                m_sta_password_received_.store(false, std::memory_order_release);
                 break;
             }
             // Bound the copy as above. Never log the password value.
@@ -3746,10 +3720,12 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
                    sizeof(m_sta_config.sta.password));
             memcpy(m_sta_config.sta.password, param->sta_passwd.passwd, passwd_n);
             m_sta_config.sta.password[passwd_n] = '\0';
-            m_sta_password_received_.store(true, std::memory_order_release);
+            const uint64_t candidate_epoch = staged_wifi_credentials_.UpdatePassword(
+                std::string(reinterpret_cast<const char*>(param->sta_passwd.passwd),
+                            passwd_n));
             ESP_LOGI(BLUFI_TAG, "Recv STA PASSWORD");
-            if (m_sta_ssid_received_.load(std::memory_order_acquire)) {
-                ScheduleStationConnectFallback();
+            if (staged_wifi_credentials_.FallbackEpoch() == candidate_epoch) {
+                ScheduleStationConnectFallback(candidate_epoch);
             }
             break;
         }
