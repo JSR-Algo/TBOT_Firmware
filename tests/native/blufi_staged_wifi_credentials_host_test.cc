@@ -8,6 +8,41 @@ int main() {
     static_assert(!std::is_copy_constructible_v<BlufiStagedWifiCredentials::Snapshot>);
     static_assert(std::is_move_constructible_v<BlufiStagedWifiCredentials::Snapshot>);
 
+    {
+        BlufiStagedWifiCredentials same_ssid_rotation;
+        same_ssid_rotation.UpdateSsid("ssid-a");
+        const auto old_epoch = same_ssid_rotation.UpdatePassword("password-1");
+        const auto new_ssid_epoch = same_ssid_rotation.UpdateSsid("ssid-a");
+        assert(new_ssid_epoch != old_epoch);
+        assert(!same_ssid_rotation.Claim(old_epoch).has_value());
+        assert(same_ssid_rotation.FallbackEpoch() == 0);
+        const auto new_epoch = same_ssid_rotation.UpdatePassword("password-2");
+        assert(!same_ssid_rotation.Claim(old_epoch).has_value());
+        const auto candidate = same_ssid_rotation.Claim(new_epoch);
+        assert(candidate.has_value());
+        assert(candidate->ssid == "ssid-a");
+        assert(candidate->password == "password-2");
+        assert(!same_ssid_rotation.Claim(new_epoch).has_value());
+    }
+
+    {
+        BlufiStagedWifiCredentials same_password_rotation;
+        same_password_rotation.UpdatePassword("password-a");
+        const auto old_epoch = same_password_rotation.UpdateSsid("ssid-1");
+        const auto new_password_epoch = same_password_rotation.UpdatePassword("password-a");
+        assert(new_password_epoch != old_epoch);
+        assert(!same_password_rotation.Claim(old_epoch).has_value());
+        assert(same_password_rotation.FallbackEpoch() == 0);
+        const auto new_epoch = same_password_rotation.UpdateSsid("ssid-2");
+        assert(!same_password_rotation.Claim(old_epoch).has_value());
+        const auto candidate = same_password_rotation.ClaimCurrent();
+        assert(candidate.has_value());
+        assert(candidate->epoch == new_epoch);
+        assert(candidate->ssid == "ssid-2");
+        assert(candidate->password == "password-a");
+        assert(!same_password_rotation.ClaimCurrent().has_value());
+    }
+
     BlufiStagedWifiCredentials staged;
     const auto ssid_a = staged.UpdateSsid("ssid-a");
     assert(!staged.Claim(ssid_a).has_value());

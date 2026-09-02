@@ -57,12 +57,11 @@ public:
 
     uint64_t UpdateSsid(const std::string& ssid) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (ssid_received_ && ssid_ == ssid) {
-            return epoch_;
-        }
-        if (ssid_received_ && password_received_) {
+        if (CompleteLocked()) {
             SecureClear(password_);
             password_received_ = false;
+        } else if (ssid_received_ && ssid_ == ssid) {
+            return epoch_;
         }
         SecureClear(ssid_);
         ssid_ = ssid;
@@ -73,12 +72,11 @@ public:
 
     uint64_t UpdatePassword(const std::string& password) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (password_received_ && password_ == password) {
-            return epoch_;
-        }
-        if (ssid_received_ && password_received_) {
+        if (CompleteLocked()) {
             SecureClear(ssid_);
             ssid_received_ = false;
+        } else if (password_received_ && password_ == password) {
+            return epoch_;
         }
         SecureClear(password_);
         password_ = password;
