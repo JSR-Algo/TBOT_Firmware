@@ -830,17 +830,22 @@ def test_paused_no_token_fetch_restores_ble_and_retries_when_dispatch_is_not_acc
 
 
 def test_audio_service_start_is_idempotent_while_workers_are_running():
+    header = read("main/audio/audio_service.h")
     source = read("main/audio/audio_service.cc")
-    start_body = function_body(source, "void AudioService::Start")
+    start_workers = function_body(source, "bool AudioService::StartWorkers")
 
-    guard = start_body.index("service_stopped_.compare_exchange_strong(")
-    timer_start = start_body.index("esp_timer_start_periodic")
-    first_task = start_body.index("xTaskCreate", timer_start)
-
-    assert guard < timer_start < first_task
-    guard_body = start_body[guard:timer_start]
-    assert "return;" in guard_body
-    assert "std::memory_order_acq_rel" in start_body
+    assert "std::atomic<bool> start_in_progress_{false};" in header
+    assert "std::atomic<bool> service_running_{false};" in header
+    claim = start_workers.index("start_in_progress_.compare_exchange_strong(")
+    running = start_workers.index("if (IsRunning())", claim)
+    first_creation = start_workers.index(
+        "AudioWorkerStartTransaction::StartOnce", running
+    )
+    assert claim < running < first_creation
+    duplicate = start_workers[running:first_creation]
+    assert "start_in_progress_.store(false" in duplicate
+    assert "return true;" in duplicate
+    assert "std::memory_order_acq_rel" in start_workers
 
 def test_auth_rejected_device_config_clears_stale_bootstrap_token_without_server_unavailable_copy():
     source = read("main/application.cc")

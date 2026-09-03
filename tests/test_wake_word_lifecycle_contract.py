@@ -86,10 +86,11 @@ def test_wifi_provisioning_restarts_only_workers_owned_by_current_token():
 
     lifecycle = end.index("wake_word_lifecycle_.EndProvisioningAndRearm(token)")
     consume = end.index("provisioning_audio_workers_.Consume(token.generation)")
-    restart = end.index("Start();")
-    assert lifecycle < consume < restart
+    retry = end.index("AudioWorkerStartTransaction::Rearm")
+    assert lifecycle < consume < retry
     assert "if (!completion.accepted)" in end
-    assert "if (completion.restart_required)" in end
+    assert "if (!completion.restart_required)" in end
+    assert "return StartWorkers(attempt);" in end
 
 
 def test_concrete_wake_words_shutdown_safely_and_preserve_borrowed_models():
