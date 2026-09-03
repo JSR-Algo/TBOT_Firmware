@@ -34,16 +34,24 @@ def test_audio_start_returns_checked_complete_worker_result():
     assert "return StartWorkers(1);" in start
     assert "AudioWorkerStartTransaction::StartOnce" in checked
     assert "HasCompleteWorkerSet()" in checked
-    assert checked.index("HasCompleteWorkerSet()") < checked.index(
-        "esp_timer_start_periodic"
+    complete = checked.index("const bool complete = HasCompleteWorkerSet();")
+    incomplete = checked.index("if (!complete)", complete)
+    timer = checked.index("if (esp_timer_start_periodic(", incomplete)
+    timer_result = checked.index("!= ESP_OK", timer)
+    publish = checked.index(
+        "service_running_.store(true, std::memory_order_release)", timer_result
     )
-    assert checked.index("esp_timer_start_periodic") < checked.index(
-        "service_running_.store(true, std::memory_order_release)"
-    )
-    assert "service_running_.store(true, std::memory_order_release)" in checked
-    assert checked.index("HasCompleteWorkerSet()") < checked.index(
-        "service_running_.store(true, std::memory_order_release)"
-    )
+    assert complete < incomplete < timer < timer_result < publish
+
+    incomplete_branch = function_body(checked, "if (!complete)")
+    assert "const bool result = RollbackWorkerStart();" in incomplete_branch
+    assert "return result;" in incomplete_branch
+
+    timer_failure = function_body(checked, "if (esp_timer_start_periodic(")
+    assert "!= ESP_OK" in timer_failure
+    assert "const bool result = RollbackWorkerStart();" in timer_failure
+    assert "return result;" in timer_failure
+    assert checked.index("RollbackWorkerStart();", timer) < publish
 
 
 def test_each_audio_worker_creation_is_checked_and_opus_remains_internal():
@@ -90,12 +98,20 @@ def test_provisioning_rearm_consumes_once_then_retries_once_after_reclaim():
 
     lifecycle = rearm.index("wake_word_lifecycle_.EndProvisioningAndRearm(token)")
     consume = rearm.index("provisioning_audio_workers_.Consume(token.generation)")
+    rejected = rearm.index("if (!completion.accepted)", consume)
+    stopped = rearm.index("if (!completion.restart_required)", rejected)
     retry = rearm.index("AudioWorkerStartTransaction::Rearm")
-    assert lifecycle < consume < retry
+    assert lifecycle < consume < rejected < stopped < retry
+    rejected_branch = function_body(rearm, "if (!completion.accepted)")
+    stopped_branch = function_body(rearm, "if (!completion.restart_required)")
+    assert "return false;" in rejected_branch
+    assert "return true;" in stopped_branch
+    for guard in (rejected_branch, stopped_branch):
+        assert "AudioWorkerStartTransaction::Rearm" not in guard
+        assert "vTaskDelay" not in guard
+        assert "StartWorkers" not in guard
     assert "vTaskDelay(pdMS_TO_TICKS(delay_ms))" in rearm
     assert "return StartWorkers(attempt);" in rearm
-    assert "if (!completion.restart_required)" in rearm
-    assert "return true;" in rearm
     assert "return rearmed;" in rearm
 
 

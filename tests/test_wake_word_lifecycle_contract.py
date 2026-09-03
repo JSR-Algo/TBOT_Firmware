@@ -86,10 +86,18 @@ def test_wifi_provisioning_restarts_only_workers_owned_by_current_token():
 
     lifecycle = end.index("wake_word_lifecycle_.EndProvisioningAndRearm(token)")
     consume = end.index("provisioning_audio_workers_.Consume(token.generation)")
+    rejected = end.index("if (!completion.accepted)", consume)
+    stopped = end.index("if (!completion.restart_required)", rejected)
     retry = end.index("AudioWorkerStartTransaction::Rearm")
-    assert lifecycle < consume < retry
-    assert "if (!completion.accepted)" in end
-    assert "if (!completion.restart_required)" in end
+    assert lifecycle < consume < rejected < stopped < retry
+    rejected_branch = function_body(end, "if (!completion.accepted)")
+    stopped_branch = function_body(end, "if (!completion.restart_required)")
+    assert "return false;" in rejected_branch
+    assert "return true;" in stopped_branch
+    for guard in (rejected_branch, stopped_branch):
+        assert "AudioWorkerStartTransaction::Rearm" not in guard
+        assert "vTaskDelay" not in guard
+        assert "StartWorkers" not in guard
     assert "return StartWorkers(attempt);" in end
 
 

@@ -836,8 +836,16 @@ def test_audio_service_start_is_idempotent_while_workers_are_running():
 
     assert "std::atomic<bool> start_in_progress_{false};" in header
     assert "std::atomic<bool> service_running_{false};" in header
-    claim = start_workers.index("start_in_progress_.compare_exchange_strong(")
+    claim = start_workers.index(
+        "if (!start_in_progress_.compare_exchange_strong("
+    )
+    claim_failure = function_body(
+        start_workers, "if (!start_in_progress_.compare_exchange_strong("
+    )
+    assert "start_in_progress_.compare_exchange_strong(" in claim_failure
+    assert "return false;" in claim_failure
     running = start_workers.index("if (IsRunning())", claim)
+    assert start_workers.index("return false;", claim) < running
     first_creation = start_workers.index(
         "AudioWorkerStartTransaction::StartOnce", running
     )
