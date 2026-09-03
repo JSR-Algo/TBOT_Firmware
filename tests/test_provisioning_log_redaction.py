@@ -104,3 +104,21 @@ def test_all_board_and_status_paths_redact_ssids_and_routing_urls():
     assert '"Saved settings: ota_url=%s' not in config_ap
     assert 'code=%d, url=%s' not in application
     assert 'code=%d, url=%s"' not in application
+
+
+def test_provisioning_failure_extracts_only_a_safe_top_level_error_code():
+    header = read("main/provisioning/provisioning_status_reporter.h")
+    source = read("main/provisioning/provisioning_status_reporter.cc")
+
+    assert "ExtractProvisioningErrorCode" in header
+    assert "cJSON_Parse" in source
+    assert 'cJSON_GetObjectItem(root, "code")' in source
+    assert "cJSON_IsString(code)" in source
+    assert "kMaxProvisioningErrorCodeLength" in source
+    assert "std::isalnum" in source
+    assert "ch != '_' && ch != '-'" in source
+    assert "unknown" in source
+    assert "error_code=%s" in source
+    # The response body may reflect credentials; only the bounded code is logged.
+    assert 'resp_body.c_str()' not in source
+    assert 'body=%s' not in source

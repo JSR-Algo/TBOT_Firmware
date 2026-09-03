@@ -2,6 +2,9 @@
 
 #include <string>
 
+// Returns a bounded, log-safe top-level backend error code or "unknown".
+std::string ExtractProvisioningErrorCode(const std::string& response_body);
+
 /**
  * Reports provisioning status to the backend after Wi-Fi join.
  *

@@ -1,5 +1,6 @@
 #include "provisioning_status_reporter.h"
 
+#include <cctype>
 #include <cJSON.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -11,10 +12,37 @@
 #include "settings.h"
 
 static const char* TAG = "ProvisioningReporter";
+static constexpr size_t kMaxProvisioningErrorCodeLength = 64;
 
 // Retry delays in milliseconds: 2 s, 4 s, 8 s
 static const int kRetryDelaysMs[] = {2000, 4000, 8000};
 static constexpr int kMaxAttempts = 3;
+
+std::string ExtractProvisioningErrorCode(const std::string& response_body) {
+    cJSON* root = cJSON_Parse(response_body.c_str());
+    if (root == nullptr) {
+        return "unknown";
+    }
+
+    cJSON* code = cJSON_GetObjectItem(root, "code");
+    if (!cJSON_IsString(code) || code->valuestring == nullptr) {
+        cJSON_Delete(root);
+        return "unknown";
+    }
+
+    const std::string value(code->valuestring);
+    cJSON_Delete(root);
+    if (value.empty() || value.size() > kMaxProvisioningErrorCodeLength) {
+        return "unknown";
+    }
+
+    for (unsigned char ch : value) {
+        if (!std::isalnum(ch) && ch != '_' && ch != '-') {
+            return "unknown";
+        }
+    }
+    return value;
+}
 
 bool ProvisioningStatusReporter::Report(Status status,
                                         const std::string& token,
@@ -133,8 +161,10 @@ bool ProvisioningStatusReporter::Report(Status status,
         // Redact the response body to a length only: a misbehaving backend could
         // reflect the submitted request body (which carries the provisioning
         // code) in an error response, so never log it verbatim.
-        ESP_LOGW(TAG, "Provisioning status report failed (HTTP %d) resp_len=%u, will retry",
-                 status_code, static_cast<unsigned>(resp_body.size()));
+        const std::string error_code = ExtractProvisioningErrorCode(resp_body);
+        ESP_LOGW(TAG,
+                 "Provisioning status report failed (HTTP %d) error_code=%s resp_len=%u, will retry",
+                 status_code, error_code.c_str(), static_cast<unsigned>(resp_body.size()));
     }
 
     ESP_LOGE(TAG, "All %d provisioning report attempts failed", kMaxAttempts);
