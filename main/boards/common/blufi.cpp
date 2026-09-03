@@ -81,6 +81,7 @@ static const char* BLUFI_TAG = "BLUFI_CLASS";
 static constexpr int kClaimRefreshAfterTokenHandoffDelayMs = 2500;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
 static constexpr uint16_t kMaxBlufiWifiScanCandidates = 8;
+static constexpr int64_t kWifiScanWatchdogTimeoutUs = 8LL * 1000 * 1000;
 
 enum class BleSessionPhase : uint64_t {
     kStopping = 0,
@@ -2842,7 +2843,7 @@ BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan(
 void Blufi::ScheduleOwnedWifiScanWatchdog(
         uint64_t request_id, WifiScanLeaseCoordinator::Lease lease) {
     const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
-    if (!wifi_scan_watchdog_timer_.Arm(exact, 5LL * 1000 * 1000)) {
+    if (!wifi_scan_watchdog_timer_.Arm(exact, kWifiScanWatchdogTimeoutUs)) {
         HandleWifiScanWatchdog(exact);
     }
 }
