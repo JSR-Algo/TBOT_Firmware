@@ -54,6 +54,44 @@ def test_begin_failure_after_quiescence_stays_fail_closed_without_rearm():
     assert "RollbackWifiConfigEntry(preparation)" in begin_failure
 
 
+def test_wifi_provisioning_drains_resident_audio_workers_before_blufi_init():
+    audio_h = read("main/audio/audio_service.h")
+    audio_cc = read("main/audio/audio_service.cc")
+    wifi = read("main/boards/common/wifi_board.cc")
+
+    begin = audio_cc[
+        audio_cc.index("AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning"):
+        audio_cc.index("bool AudioService::EndWifiProvisioningAndRearm")
+    ]
+    assert "const bool restart_audio = IsRunning();" in begin
+    assert begin.index("provisioning_audio_workers_.Bind") < begin.index("Stop();")
+    assert begin.index("Stop();") < begin.index("WaitForServiceWorkersStopped")
+    assert "if (!WaitForServiceWorkersStopped(kProvisioningWorkerStopTimeoutMs))" in begin
+    assert "return {{}, false};" in begin
+
+    assert "std::atomic<bool> service_stopped_{true};" in audio_h
+    assert "bool WaitForServiceWorkersStopped(uint32_t timeout_ms);" in audio_h
+
+    entry = wifi[
+        wifi.index("void WifiBoard::StartWifiConfigMode("):
+        wifi.index("void WifiBoard::EnterWifiConfigMode()")
+    ]
+    assert entry.index("BeginWifiProvisioning()") < entry.index("blufi.RestartForSetup()")
+
+
+def test_wifi_provisioning_restarts_only_workers_owned_by_current_token():
+    source = read("main/audio/audio_service.cc")
+    end = source[source.index("bool AudioService::EndWifiProvisioningAndRearm"):]
+    end = end[:end.index("void AudioService::EnableVoiceProcessing")]
+
+    lifecycle = end.index("wake_word_lifecycle_.EndProvisioningAndRearm(token)")
+    consume = end.index("provisioning_audio_workers_.Consume(token.generation)")
+    restart = end.index("Start();")
+    assert lifecycle < consume < restart
+    assert "if (!completion.accepted)" in end
+    assert "if (completion.restart_required)" in end
+
+
 def test_concrete_wake_words_shutdown_safely_and_preserve_borrowed_models():
     for stem in ("afe_wake_word", "custom_wake_word", "esp_wake_word"):
         header = read(f"main/audio/wake_words/{stem}.h")
