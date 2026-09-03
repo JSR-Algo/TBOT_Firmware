@@ -844,7 +844,19 @@ AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning() 
 }
 
 bool AudioService::EndWifiProvisioningAndRearm(WifiProvisioningToken token) {
-    return wake_word_lifecycle_.EndProvisioningAndRearm(token);
+    if (!wake_word_lifecycle_.EndProvisioningAndRearm(token)) {
+        return false;
+    }
+    const auto completion =
+        provisioning_audio_workers_.Consume(token.generation);
+    if (!completion.accepted) {
+        ESP_LOGE(TAG, "Audio provisioning worker completion token was not owned");
+        return false;
+    }
+    if (completion.restart_required) {
+        Start();
+    }
+    return true;
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {
