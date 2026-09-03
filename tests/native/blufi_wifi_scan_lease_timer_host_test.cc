@@ -186,6 +186,24 @@ void CallbackPausedAfterDeadlineCannotClaimConcurrentRearm() {
     assert(sink.signal.request_id == 2);
 }
 
+void PassiveScanCompletionBeforeWatchdogPreventsRecoverySignal() {
+    FakeDriver driver;
+    Sink sink;
+    Timer timer({&driver, Create, Stop, StartOnce, NowUs, BeforeClaim},
+                &sink, Signal);
+    const auto exact = Tuple(7, 70, 4);
+
+    assert(timer.Arm(exact, 8'000'000));
+    driver.now_us.store(5'000'000);
+    assert(timer.CurrentExactTuple().has_value());
+    assert(sink.signal_count == 0);
+
+    assert(timer.Disarm(exact));
+    driver.now_us.store(8'000'000);
+    driver.callback(driver.callback_arg);
+    assert(sink.signal_count == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -194,4 +212,5 @@ int main() {
     ExactDisarmCannotCancelReplacementTuple();
     StaleCallbackCannotConsumeNewGenerationBeforeItsDeadline();
     CallbackPausedAfterDeadlineCannotClaimConcurrentRearm();
+    PassiveScanCompletionBeforeWatchdogPreventsRecoverySignal();
 }
