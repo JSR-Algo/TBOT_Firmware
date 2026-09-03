@@ -193,13 +193,13 @@ void PassiveScanCompletionBeforeWatchdogPreventsRecoverySignal() {
                 &sink, Signal);
     const auto exact = Tuple(7, 70, 4);
 
-    assert(timer.Arm(exact, 8'000'000));
-    driver.now_us.store(5'000'000);
+    assert(timer.Arm(exact, 20'000'000));
+    driver.now_us.store(12'000'000);
     assert(timer.CurrentExactTuple().has_value());
     assert(sink.signal_count == 0);
 
     assert(timer.Disarm(exact));
-    driver.now_us.store(8'000'000);
+    driver.now_us.store(20'000'000);
     driver.callback(driver.callback_arg);
     assert(sink.signal_count == 0);
 }

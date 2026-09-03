@@ -28,9 +28,12 @@ valid completion callback is correctly rejected by the ownership coordinator.
 
 ### 1. Add a watchdog margin (selected)
 
-Arm the BluFi scan watchdog at 8 seconds instead of 5 seconds. This leaves a
-3-second scheduling margin after the observed 5-second passive scan completion
-while retaining bounded recovery for a stalled scan.
+Arm the BluFi scan watchdog at 20 seconds instead of 5 seconds. Physical testing
+showed that an 8-second watchdog still aborted every scan at its exact deadline.
+A temporary 30-second diagnostic build completed the same passive scan and made
+the list visible on Android in approximately 14 seconds including UI polling.
+Twenty seconds leaves margin for BLE/Wi-Fi coexistence while retaining bounded
+recovery for a stalled scan.
 
 This is the smallest change and does not alter ownership semantics or scan
 results.
@@ -48,24 +51,24 @@ This weakens the safety property the ownership layer is designed to enforce.
 
 ## Design
 
-Introduce a named BluFi scan watchdog duration of 8 seconds and use it when
+Introduce a named BluFi scan watchdog duration of 20 seconds and use it when
 arming `wifi_scan_watchdog_timer_`. Keep the current exact tuple of request ID,
 lease ID, driver incarnation, setup generation, BLE session state, and BLE
 connection epoch unchanged.
 
 The watchdog continues to request recovery only when the exact tuple is still
-current and the logical controller still owes a callback. A normal passive scan
-completion at approximately 5 seconds is consumed before the watchdog fires,
-which disarms the watchdog through the existing completion path.
+current and the logical controller still owes a callback. A normal passive scan,
+including the measured coexistence-delayed case, is consumed before the watchdog
+fires, which disarms the watchdog through the existing completion path.
 
 ## Test Strategy
 
 Use test-driven development:
 
-1. Add a source/contract regression test requiring a watchdog duration greater
-   than the observed 5-second passive scan boundary.
-2. Add or extend the native timer/controller test to show that a completion at
-   the passive-scan boundary wins normally and prevents later recovery.
+1. Add a source/contract regression test requiring the measured 20-second
+   watchdog duration, greater than the nominal 5-second passive scan boundary.
+2. Add or extend the native timer/controller test to show that a delayed normal
+   completion at 12 seconds wins and prevents later recovery at 20 seconds.
 3. Run the focused BluFi Wi-Fi scan contract and native suites.
 4. Run the full firmware test suite and the LCDWiki ESP32-S3 production build.
 5. Flash the robot and verify physically that Android receives a Wi-Fi list.
@@ -77,7 +80,7 @@ Use test-driven development:
 - No repeated `Ignoring WiFi scan done event not owned by BluFi` loop during a
   normal scan.
 - Android receives and displays the robot's Wi-Fi list.
-- A genuinely stalled scan still enters recovery after the 8-second watchdog.
+- A genuinely stalled scan still enters recovery after the 20-second watchdog.
 - Existing scan ownership, recovery, lifecycle, and provisioning tests pass.
 - Physical provisioning continues without `Memory Full`, heap allocation
   failures, or manual BOOT entry.

@@ -1275,7 +1275,9 @@ def test_blufi_scan_watchdog_has_margin_after_passive_scan_boundary():
         source,
     )
     assert match is not None
-    assert int(match.group(1)) > 5
+    timeout_seconds = int(match.group(1))
+    assert timeout_seconds == 20
+    assert timeout_seconds > 5
     assert (
         "wifi_scan_watchdog_timer_.Arm(exact, kWifiScanWatchdogTimeoutUs)"
         in watchdog

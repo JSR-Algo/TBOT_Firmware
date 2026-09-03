@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Prevent the BluFi passive Wi-Fi scan watchdog from racing the normal five-second ESP-IDF scan completion while retaining bounded recovery for a genuinely stalled scan.
+**Goal:** Prevent the BluFi passive Wi-Fi scan watchdog from racing an ESP-IDF passive scan delayed by BLE/Wi-Fi coexistence while retaining bounded recovery for a genuinely stalled scan.
 
-**Architecture:** Keep the existing scan lease, exact-tuple, generation, BLE epoch, and recovery state machines unchanged. Introduce one named eight-second watchdog duration in `blufi.cpp`, enforce that timing through a source contract, and extend the host-native timer test to prove that normal completion at five seconds disarms the pending watchdog before its later callback can request recovery.
+**Architecture:** Keep the existing scan lease, exact-tuple, generation, BLE epoch, and recovery state machines unchanged. Introduce one named twenty-second watchdog duration in `blufi.cpp`, enforce that timing through a source contract, and extend the host-native timer test to prove that a coexistence-delayed completion disarms the pending watchdog before its later callback can request recovery.
 
 **Tech Stack:** C++17, ESP-IDF 5.5, `esp_timer`, Python 3/pytest source contracts, host-native Clang tests, ESP32-S3 USB Serial/JTAG.
 
@@ -12,9 +12,9 @@
 
 ## File Map
 
-- Modify `tests/test_blufi_wifi_scan_contract.py`: lock the named timeout, require an eight-second value greater than the observed five-second passive-scan boundary, and forbid the old literal at the timer arm site.
-- Modify `tests/native/blufi_wifi_scan_lease_timer_host_test.cc`: model a five-second normal completion followed by a stale eight-second timer callback and prove no recovery signal escapes.
-- Modify `main/boards/common/blufi.cpp`: define and use the named eight-second watchdog constant without changing ownership or recovery logic.
+- Modify `tests/test_blufi_wifi_scan_contract.py`: lock the named timeout to twenty seconds, require a value greater than the nominal five-second passive-scan boundary, and forbid the old literal at the timer arm site.
+- Modify `tests/native/blufi_wifi_scan_lease_timer_host_test.cc`: model a twelve-second normal completion followed by a stale twenty-second timer callback and prove no recovery signal escapes.
+- Modify `main/boards/common/blufi.cpp`: define and use the named twenty-second watchdog constant without changing ownership or recovery logic.
 - Create `docs/qa/ad-hoc/2026-09-03-blufi-scan-watchdog-margin.md`: record credential-free automated, build, flash, and physical E2E evidence.
 
 ### Task 1: Add the RED watchdog timing contracts
@@ -37,7 +37,9 @@ def test_blufi_scan_watchdog_has_margin_after_passive_scan_boundary():
         source,
     )
     assert match is not None
-    assert int(match.group(1)) > 5
+    timeout_seconds = int(match.group(1))
+    assert timeout_seconds == 20
+    assert timeout_seconds > 5
     assert "wifi_scan_watchdog_timer_.Arm(exact, kWifiScanWatchdogTimeoutUs)" in watchdog
     assert "5LL * 1000 * 1000" not in watchdog
 ```
@@ -56,13 +58,13 @@ void PassiveScanCompletionBeforeWatchdogPreventsRecoverySignal() {
                 &sink, Signal);
     const auto exact = Tuple(7, 70, 4);
 
-    assert(timer.Arm(exact, 8'000'000));
-    driver.now_us.store(5'000'000);
+    assert(timer.Arm(exact, 20'000'000));
+    driver.now_us.store(12'000'000);
     assert(timer.CurrentExactTuple().has_value());
     assert(sink.signal_count == 0);
 
     assert(timer.Disarm(exact));
-    driver.now_us.store(8'000'000);
+    driver.now_us.store(20'000'000);
     driver.callback(driver.callback_arg);
     assert(sink.signal_count == 0);
 }
@@ -104,7 +106,7 @@ git commit -m "test(blufi): reproduce scan watchdog boundary race"
 Add:
 
 ```cpp
-static constexpr int64_t kWifiScanWatchdogTimeoutUs = 8LL * 1000 * 1000;
+static constexpr int64_t kWifiScanWatchdogTimeoutUs = 20LL * 1000 * 1000;
 ```
 
 Place it after `kMaxBlufiWifiScanCandidates` so the scan timeout remains visible with the other file-local BluFi scan configuration.
