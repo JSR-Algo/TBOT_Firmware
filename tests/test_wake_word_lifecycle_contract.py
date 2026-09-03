@@ -8,6 +8,20 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:index + 1]
+    raise AssertionError(f"unterminated function {signature}")
+
+
 def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_lease():
     header = read("main/audio/audio_service.h")
     source = read("main/audio/audio_service.cc")
