@@ -2325,8 +2325,8 @@ def test_fw31_unclaimed_boot_defers_audio_workers_until_claim_confirmation():
     finish = _function_body(
         application, "bool Application::FinishClaimActivationAfterLocalAssetsReady"
     )
-    assert "audio_service_.Start();" in finish
-    assert finish.index("audio_service_.Start();") < finish.index(
+    assert "if (!audio_service_.Start())" in finish
+    assert finish.index("if (!audio_service_.Start())") < finish.index(
         "audio_service_.EnableWakeWordDetection(true)"
     )
 

@@ -967,15 +967,17 @@ def test_same_session_claim_applies_local_assets_before_starting_audio_or_wake()
     assert "bool EnsureLocalAssetsAppliedForClaim();" in header
     assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
     ready_idx = finish_body.index("if (!EnsureLocalAssetsAppliedForClaim())")
+    start_idx = finish_body.index("if (!audio_service_.Start())")
     idle_idx = finish_body.index("SetDeviceState(kDeviceStateIdle);")
-    start_idx = finish_body.index("audio_service_.Start();")
     wake_idx = finish_body.index("audio_service_.EnableWakeWordDetection(true);")
 
-    assert ready_idx < idle_idx < start_idx < wake_idx
+    assert ready_idx < start_idx < idle_idx < wake_idx
 
-    gated_body = finish_body[idle_idx:finish_body.index("StartHeartbeat();", idle_idx)]
+    start_failure = function_body(finish_body, "if (!audio_service_.Start())")
+    assert "return false;" in start_failure
+    gated_body = finish_body[start_idx:finish_body.index("StartHeartbeat();", start_idx)]
     assert "SetDeviceState(kDeviceStateIdle);" in gated_body
-    assert "audio_service_.Start();" in gated_body
+    assert "if (!audio_service_.Start())" in gated_body
     assert "audio_service_.EnableWakeWordDetection(true);" in gated_body
 
 def test_same_session_claim_asset_failure_is_recoverable_and_does_not_show_success():
@@ -1053,12 +1055,12 @@ def test_claim_local_asset_failure_does_not_reload_or_start_claimed_passive_unti
     assets_idx = finish_body.index("if (!EnsureLocalAssetsAppliedForClaim())")
     failure_return_idx = finish_body.index("return false;", assets_idx)
     reload_idx = finish_body.index("ReloadProtocolAfterClaimCredentials();", failure_return_idx)
-    idle_idx = finish_body.index("SetDeviceState(kDeviceStateIdle);", reload_idx)
-    audio_idx = finish_body.index("audio_service_.Start();", idle_idx)
-    wake_idx = finish_body.index("audio_service_.EnableWakeWordDetection(true);", audio_idx)
+    audio_idx = finish_body.index("if (!audio_service_.Start())", reload_idx)
+    idle_idx = finish_body.index("SetDeviceState(kDeviceStateIdle);", audio_idx)
+    wake_idx = finish_body.index("audio_service_.EnableWakeWordDetection(true);", idle_idx)
     success_idx = finish_body.index("Lang::Strings::CONNECTED", wake_idx)
 
-    assert assets_idx < failure_return_idx < reload_idx < idle_idx < audio_idx < wake_idx < success_idx
+    assert assets_idx < failure_return_idx < reload_idx < audio_idx < idle_idx < wake_idx < success_idx
     assert "FinishClaimActivationAfterLocalAssetsReady()" in retry_tick
     assert "ReloadProtocolAfterClaimCredentials();" not in retry_tick
     assert "if (IsDeviceClaimed())" in initialize
