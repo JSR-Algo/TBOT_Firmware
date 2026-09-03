@@ -21,6 +21,7 @@ run_variant asan_ubsan -O1 -g -fsanitize=address,undefined \
   -fno-omit-frame-pointer
 if printf '%s\n' 'int main() { return 0; }' | "${compiler}" -x c++ \
     -std=c++17 -pthread -fsanitize=thread - -o "${build_dir}/tsan_probe" \
-    >/dev/null 2>&1; then
+    >/dev/null 2>&1 && \
+    "${build_dir}/tsan_probe" >/dev/null 2>&1; then
   run_variant tsan -O1 -g -fsanitize=thread -fno-omit-frame-pointer
 fi
