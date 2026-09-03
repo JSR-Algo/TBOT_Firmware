@@ -3596,14 +3596,16 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             }
             switch (param->wifi_mode.op_mode) {
                 case WIFI_MODE_STA:
-                    wifi_manager.StartStation();
+                    ESP_LOGI(BLUFI_TAG,
+                             "Deferring station start until BluFi credentials are ready");
                     break;
                 case WIFI_MODE_AP:
                     wifi_manager.StartConfigAp();
                     break;
                 case WIFI_MODE_APSTA:
-                    ESP_LOGW(BLUFI_TAG, "APSTA mode not supported, starting station only");
-                    wifi_manager.StartStation();
+                    ESP_LOGW(BLUFI_TAG,
+                             "APSTA mode not supported; deferring station start until "
+                             "BluFi credentials are ready");
                     break;
                 default:
                     wifi_manager.StopStation();
