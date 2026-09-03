@@ -24,6 +24,8 @@
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
 #include "wake_word_lifecycle_controller.h"
+#include "audio_worker_start_transaction.h"
+#include "provisioning_audio_worker_state.h"
 #include "protocol.h"
 #include "ogg_demuxer.h"
 
@@ -127,19 +129,24 @@ struct AudioTaskStackHighWaterMarks {
 
 class AudioService {
 public:
+    using AudioWorker = AudioWorkerStartTransaction::Worker;
+
     // The measured 20 KiB task left only 428 bytes free after live encoding.
     // That is ~19.6 KiB peak; 28 KiB keeps about 8 KiB headroom.
     static constexpr uint32_t kOpusCodecTaskStackBytes = 28 * 1024;
+    static constexpr uint32_t kProvisioningWorkerStopTimeoutMs = 5000;
 
     AudioService();
     ~AudioService();
 
     void Initialize(AudioCodec* codec);
-    void Start();
+    bool Start();
     void Stop();
     std::string GetLastWakeWord();
     bool IsVoiceDetected() const { return voice_detected_; }
-    bool IsRunning() const { return !service_stopped_; }
+    bool IsRunning() const {
+        return service_running_.load(std::memory_order_acquire);
+    }
     bool IsIdle();
     bool WaitForPlaybackQueueEmpty(uint32_t timeout_ms = 0);
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
@@ -240,7 +247,10 @@ private:
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
     std::atomic<bool> voice_detected_{false};
-    bool service_stopped_ = true;
+    std::atomic<bool> service_stopped_{true};
+    std::atomic<bool> service_running_{false};
+    std::atomic<bool> start_in_progress_{false};
+    ProvisioningAudioWorkerState provisioning_audio_workers_;
     bool audio_input_need_warmup_ = false;
 
     // Active response generation for barge-in gen-gating. Written via
@@ -259,6 +269,13 @@ private:
     void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();
+    bool StartWorkers(uint32_t attempt);
+    bool CreateAudioWorker(AudioWorker worker);
+    bool RollbackWorkerStart();
+    bool HasCompleteWorkerSet();
+    void LogWorkerCreateFailure(const char* worker_name,
+                                BaseType_t created);
+    bool WaitForServiceWorkersStopped(uint32_t timeout_ms);
 };
 
 #endif

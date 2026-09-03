@@ -8,6 +8,20 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def function_body(text: str, signature: str) -> str:
+    start = text.index(signature)
+    brace = text.index("{", start)
+    depth = 0
+    for index in range(brace, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[brace:index + 1]
+    raise AssertionError(f"unterminated function {signature}")
+
+
 def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_lease():
     header = read("main/audio/audio_service.h")
     source = read("main/audio/audio_service.cc")
@@ -52,6 +66,53 @@ def test_begin_failure_after_quiescence_stays_fail_closed_without_rearm():
     begin_failure = start[start.index("if (!begin_result)"):start.index("const auto provisioning_token")]
     assert "if (begin_result.rollback_complete)" in begin_failure
     assert "RollbackWifiConfigEntry(preparation)" in begin_failure
+
+
+def test_wifi_provisioning_drains_resident_audio_workers_before_blufi_init():
+    audio_h = read("main/audio/audio_service.h")
+    audio_cc = read("main/audio/audio_service.cc")
+    wifi = read("main/boards/common/wifi_board.cc")
+
+    begin = audio_cc[
+        audio_cc.index("AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning"):
+        audio_cc.index("bool AudioService::EndWifiProvisioningAndRearm")
+    ]
+    assert "const bool restart_audio = IsRunning();" in begin
+    assert begin.index("provisioning_audio_workers_.Bind") < begin.index("Stop();")
+    assert begin.index("Stop();") < begin.index("WaitForServiceWorkersStopped")
+    assert "if (!WaitForServiceWorkersStopped(kProvisioningWorkerStopTimeoutMs))" in begin
+    assert "return {{}, false};" in begin
+
+    assert "std::atomic<bool> service_stopped_{true};" in audio_h
+    assert "bool WaitForServiceWorkersStopped(uint32_t timeout_ms);" in audio_h
+
+    entry = wifi[
+        wifi.index("void WifiBoard::StartWifiConfigMode("):
+        wifi.index("void WifiBoard::EnterWifiConfigMode()")
+    ]
+    assert entry.index("BeginWifiProvisioning()") < entry.index("blufi.RestartForSetup()")
+
+
+def test_wifi_provisioning_restarts_only_workers_owned_by_current_token():
+    source = read("main/audio/audio_service.cc")
+    end = source[source.index("bool AudioService::EndWifiProvisioningAndRearm"):]
+    end = end[:end.index("void AudioService::EnableVoiceProcessing")]
+
+    lifecycle = end.index("wake_word_lifecycle_.EndProvisioningAndRearm(token)")
+    consume = end.index("provisioning_audio_workers_.Consume(token.generation)")
+    rejected = end.index("if (!completion.accepted)", consume)
+    stopped = end.index("if (!completion.restart_required)", rejected)
+    retry = end.index("AudioWorkerStartTransaction::Rearm")
+    assert lifecycle < consume < rejected < stopped < retry
+    rejected_branch = function_body(end, "if (!completion.accepted)")
+    stopped_branch = function_body(end, "if (!completion.restart_required)")
+    assert "return false;" in rejected_branch
+    assert "return true;" in stopped_branch
+    for guard in (rejected_branch, stopped_branch):
+        assert "AudioWorkerStartTransaction::Rearm" not in guard
+        assert "vTaskDelay" not in guard
+        assert "StartWorkers" not in guard
+    assert "return StartWorkers(attempt);" in end
 
 
 def test_concrete_wake_words_shutdown_safely_and_preserve_borrowed_models():

@@ -1266,6 +1266,25 @@ def test_blufi_watchdog_failures_enter_shared_recovery_immediately():
     assert "ScheduleWifiScanRecoveryFallback(lease)" in recovery
 
 
+def test_blufi_scan_watchdog_has_margin_after_passive_scan_boundary():
+    source = read("main/boards/common/blufi.cpp")
+    watchdog = function_body(source, "void Blufi::ScheduleOwnedWifiScanWatchdog")
+
+    match = re.search(
+        r"kWifiScanWatchdogTimeoutUs\s*=\s*(\d+)LL\s*\*\s*1000\s*\*\s*1000",
+        source,
+    )
+    assert match is not None
+    timeout_seconds = int(match.group(1))
+    assert timeout_seconds == 20
+    assert timeout_seconds > 5
+    assert (
+        "wifi_scan_watchdog_timer_.Arm(exact, kWifiScanWatchdogTimeoutUs)"
+        in watchdog
+    )
+    assert "5LL * 1000 * 1000" not in watchdog
+
+
 def test_blufi_scan_timeout_and_recovery_retry_do_not_allocate_application_work():
     source = read("main/boards/common/blufi.cpp")
     watchdog = function_body(source, "void Blufi::HandleWifiScanWatchdog")

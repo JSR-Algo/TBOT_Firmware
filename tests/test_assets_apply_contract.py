@@ -93,11 +93,14 @@ def test_claim_audio_gate_depends_on_truthful_local_srmodels_apply_result():
     )
 
     ready_idx = finish.index("if (!EnsureLocalAssetsAppliedForClaim())")
-    gate_idx = finish.index("SetDeviceState(kDeviceStateIdle);", ready_idx)
+    gate_idx = finish.index("if (!audio_service_.Start())", ready_idx)
+    idle_idx = finish.index("SetDeviceState(kDeviceStateIdle);", gate_idx)
     heartbeat_idx = finish.index("StartHeartbeat();", gate_idx)
     gated_branch = finish[gate_idx:heartbeat_idx]
 
-    assert "audio_service_.Start();" in gated_branch
+    assert gate_idx < idle_idx < heartbeat_idx
+    assert "if (!audio_service_.Start())" in gated_branch
+    assert "return false;" in function_body(finish, "if (!audio_service_.Start())")
     assert "audio_service_.EnableWakeWordDetection(true);" in gated_branch
-    assert "audio_service_.Start();" not in finish[ready_idx:gate_idx]
+    assert "audio_service_.Start()" not in finish[ready_idx:gate_idx]
     assert "audio_service_.EnableWakeWordDetection(true);" not in finish[ready_idx:gate_idx]

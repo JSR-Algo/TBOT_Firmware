@@ -1,4 +1,5 @@
 #include "audio_service.h"
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <cstring>
 
@@ -134,72 +135,213 @@ void AudioService::Initialize(AudioCodec* codec) {
     esp_timer_create(&audio_power_timer_args, &audio_power_timer_);
 }
 
-void AudioService::Start() {
-    if (!service_stopped_) {
-        ESP_LOGW(TAG, "Audio service already running; ignoring duplicate start");
-        return;
-    }
-    service_stopped_ = false;
-    xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+bool AudioService::Start() {
+    return StartWorkers(1);
+}
 
-    esp_timer_start_periodic(audio_power_timer_, 1000000);
+void AudioService::LogWorkerCreateFailure(const char* worker_name,
+                                          BaseType_t created) {
+    ESP_LOGE(TAG,
+             "Audio worker create failed worker=%s result=%ld "
+             "internal_free=%u internal_largest=%u",
+             worker_name,
+             static_cast<long>(created),
+             static_cast<unsigned>(
+                 heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+             static_cast<unsigned>(
+                 heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)));
+}
 
+bool AudioService::HasCompleteWorkerSet() {
+    std::lock_guard<std::mutex> lock(task_handle_mutex_);
+    return opus_codec_task_handle_ != nullptr &&
+           audio_input_task_handle_ != nullptr &&
+           audio_output_task_handle_ != nullptr;
+}
+
+bool AudioService::CreateAudioWorker(AudioWorker worker) {
+    switch (worker) {
+        case AudioWorker::kOpusCodec: {
+            BaseType_t created;
+            TaskHandle_t task_handle;
+            {
+                std::lock_guard<std::mutex> lock(task_handle_mutex_);
+                created = xTaskCreate([](void* arg) {
+                    AudioService* audio_service =
+                        static_cast<AudioService*>(arg);
+                    audio_service->OpusCodecTask();
+                    {
+                        std::lock_guard<std::mutex> handle_lock(
+                            audio_service->task_handle_mutex_);
+                        audio_service->opus_codec_task_handle_ = nullptr;
+                    }
+                    vTaskDelete(NULL);
+                }, "opus_codec", kOpusCodecTaskStackBytes, this, 2,
+                &opus_codec_task_handle_);
+                task_handle = opus_codec_task_handle_;
+                if (created == pdPASS && task_handle != nullptr) {
+                    return true;
+                }
+            }
+            LogWorkerCreateFailure("opus_codec", created);
+            return false;
+        }
+        case AudioWorker::kAudioInput: {
+            BaseType_t created;
+            TaskHandle_t task_handle;
+            {
+                std::lock_guard<std::mutex> lock(task_handle_mutex_);
 #if CONFIG_USE_AUDIO_PROCESSOR
-    /* Start the audio input task */
-    xTaskCreatePinnedToCore([](void* arg) {
-        AudioService* audio_service = (AudioService*)arg;
-        audio_service->AudioInputTask();
-        {
-            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
-            audio_service->audio_input_task_handle_ = nullptr;
-        }
-        vTaskDelete(NULL);
-    }, "audio_input", 2048 * 5, this, 8, &audio_input_task_handle_, 0);
-
-    /* Start the audio output task */
-    xTaskCreate([](void* arg) {
-        AudioService* audio_service = (AudioService*)arg;
-        audio_service->AudioOutputTask();
-        {
-            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
-            audio_service->audio_output_task_handle_ = nullptr;
-        }
-        vTaskDelete(NULL);
-    }, "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);
+                created = xTaskCreatePinnedToCore([](void* arg) {
+                    AudioService* audio_service =
+                        static_cast<AudioService*>(arg);
+                    audio_service->AudioInputTask();
+                    {
+                        std::lock_guard<std::mutex> handle_lock(
+                            audio_service->task_handle_mutex_);
+                        audio_service->audio_input_task_handle_ = nullptr;
+                    }
+                    vTaskDelete(NULL);
+                }, "audio_input", 2048 * 5, this, 8,
+                &audio_input_task_handle_, 0);
 #else
-    /* Start the audio input task */
-    xTaskCreate([](void* arg) {
-        AudioService* audio_service = (AudioService*)arg;
-        audio_service->AudioInputTask();
-        {
-            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
-            audio_service->audio_input_task_handle_ = nullptr;
-        }
-        vTaskDelete(NULL);
-    }, "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_);
-
-    /* Start the audio output task */
-    xTaskCreate([](void* arg) {
-        AudioService* audio_service = (AudioService*)arg;
-        audio_service->AudioOutputTask();
-        {
-            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
-            audio_service->audio_output_task_handle_ = nullptr;
-        }
-        vTaskDelete(NULL);
-    }, "audio_output", 2048, this, 4, &audio_output_task_handle_);
+                created = xTaskCreate([](void* arg) {
+                    AudioService* audio_service =
+                        static_cast<AudioService*>(arg);
+                    audio_service->AudioInputTask();
+                    {
+                        std::lock_guard<std::mutex> handle_lock(
+                            audio_service->task_handle_mutex_);
+                        audio_service->audio_input_task_handle_ = nullptr;
+                    }
+                    vTaskDelete(NULL);
+                }, "audio_input", 2048 * 2, this, 8,
+                &audio_input_task_handle_);
 #endif
-
-    /* Start the opus codec task */
-    xTaskCreate([](void* arg) {
-        AudioService* audio_service = (AudioService*)arg;
-        audio_service->OpusCodecTask();
-        {
-            std::lock_guard<std::mutex> lock(audio_service->task_handle_mutex_);
-            audio_service->opus_codec_task_handle_ = nullptr;
+                task_handle = audio_input_task_handle_;
+                if (created == pdPASS && task_handle != nullptr) {
+                    return true;
+                }
+            }
+            LogWorkerCreateFailure("audio_input", created);
+            return false;
         }
-        vTaskDelete(NULL);
-    }, "opus_codec", kOpusCodecTaskStackBytes, this, 2, &opus_codec_task_handle_);
+        case AudioWorker::kAudioOutput: {
+            BaseType_t created;
+            TaskHandle_t task_handle;
+            {
+                std::lock_guard<std::mutex> lock(task_handle_mutex_);
+#if CONFIG_USE_AUDIO_PROCESSOR
+                created = xTaskCreate([](void* arg) {
+                    AudioService* audio_service =
+                        static_cast<AudioService*>(arg);
+                    audio_service->AudioOutputTask();
+                    {
+                        std::lock_guard<std::mutex> handle_lock(
+                            audio_service->task_handle_mutex_);
+                        audio_service->audio_output_task_handle_ = nullptr;
+                    }
+                    vTaskDelete(NULL);
+                }, "audio_output", 2048 * 2, this, 4,
+                &audio_output_task_handle_);
+#else
+                created = xTaskCreate([](void* arg) {
+                    AudioService* audio_service =
+                        static_cast<AudioService*>(arg);
+                    audio_service->AudioOutputTask();
+                    {
+                        std::lock_guard<std::mutex> handle_lock(
+                            audio_service->task_handle_mutex_);
+                        audio_service->audio_output_task_handle_ = nullptr;
+                    }
+                    vTaskDelete(NULL);
+                }, "audio_output", 2048, this, 4,
+                &audio_output_task_handle_);
+#endif
+                task_handle = audio_output_task_handle_;
+                if (created == pdPASS && task_handle != nullptr) {
+                    return true;
+                }
+            }
+            LogWorkerCreateFailure("audio_output", created);
+            return false;
+        }
+    }
+    return false;
+}
+
+bool AudioService::RollbackWorkerStart() {
+    Stop();
+    if (!WaitForServiceWorkersStopped(kProvisioningWorkerStopTimeoutMs)) {
+        ESP_LOGE(TAG, "Audio worker startup rollback timed out");
+    }
+    service_stopped_.store(true, std::memory_order_release);
+    service_running_.store(false, std::memory_order_release);
+    return false;
+}
+
+bool AudioService::StartWorkers(uint32_t attempt) {
+    bool expected = false;
+    if (!start_in_progress_.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel)) {
+        ESP_LOGW(TAG,
+                 "Audio service start_in_progress_.compare_exchange_strong() "
+                 "rejected overlapping start");
+        return false;
+    }
+    if (IsRunning()) {
+        start_in_progress_.store(false, std::memory_order_release);
+        ESP_LOGW(TAG, "Audio service already running; ignoring duplicate start");
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(task_handle_mutex_);
+        if (opus_codec_task_handle_ != nullptr ||
+            audio_input_task_handle_ != nullptr ||
+            audio_output_task_handle_ != nullptr) {
+            start_in_progress_.store(false, std::memory_order_release);
+            ESP_LOGE(TAG, "Audio worker start blocked by residual worker handles");
+            return false;
+        }
+    }
+
+    ESP_LOGI(TAG, "Audio worker start attempt=%lu",
+             static_cast<unsigned long>(attempt));
+    service_running_.store(false, std::memory_order_release);
+    service_stopped_.store(false, std::memory_order_release);
+    xEventGroupClearBits(
+        event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
+        AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING);
+
+    const bool created = AudioWorkerStartTransaction::StartOnce(
+        [this](AudioWorker worker) { return CreateAudioWorker(worker); },
+        [this]() { RollbackWorkerStart(); });
+    if (!created) {
+        start_in_progress_.store(false, std::memory_order_release);
+        return false;
+    }
+
+    const bool complete = HasCompleteWorkerSet();
+    ESP_LOGI(TAG,
+             "Audio worker start attempt=%lu complete_workers=%d",
+             static_cast<unsigned long>(attempt),
+             static_cast<int>(complete));
+    if (!complete) {
+        const bool result = RollbackWorkerStart();
+        start_in_progress_.store(false, std::memory_order_release);
+        return result;
+    }
+
+    if (esp_timer_start_periodic(
+            audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000) != ESP_OK) {
+        ESP_LOGE(TAG, "Audio power timer start failed: result != ESP_OK");
+        const bool result = RollbackWorkerStart();
+        start_in_progress_.store(false, std::memory_order_release);
+        return result;
+    }
+    service_running_.store(true, std::memory_order_release);
+    start_in_progress_.store(false, std::memory_order_release);
+    return true;
 }
 
 AudioTaskStackHighWaterMarks AudioService::GetTaskStackHighWaterMarks() {
@@ -229,7 +371,8 @@ WakeWordProgress AudioService::GetWakeWordProgress() {
 
 void AudioService::Stop() {
     esp_timer_stop(audio_power_timer_);
-    service_stopped_ = true;
+    service_running_.store(false, std::memory_order_release);
+    service_stopped_.store(true, std::memory_order_release);
     xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
         AS_EVENT_WAKE_WORD_RUNNING |
         AS_EVENT_AUDIO_PROCESSOR_RUNNING);
@@ -240,6 +383,30 @@ void AudioService::Stop() {
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
+}
+
+bool AudioService::WaitForServiceWorkersStopped(uint32_t timeout_ms) {
+    const TickType_t start = xTaskGetTickCount();
+    const TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+    while (true) {
+        bool stopped = false;
+        {
+            std::lock_guard<std::mutex> lock(task_handle_mutex_);
+            stopped = audio_input_task_handle_ == nullptr &&
+                      audio_output_task_handle_ == nullptr &&
+                      opus_codec_task_handle_ == nullptr;
+        }
+        if (stopped) {
+            // Each worker clears its handle immediately before self-delete.
+            // Let the idle task reclaim the just-deleted stack before BLE.
+            vTaskDelay(pdMS_TO_TICKS(10));
+            return true;
+        }
+        if (xTaskGetTickCount() - start >= timeout) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples) {
@@ -784,6 +951,20 @@ AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning() 
             wake_word_->Shutdown(0);
         }
     });
+    const bool restart_audio = IsRunning();
+    if (!provisioning_audio_workers_.Bind(
+            provisioning_token.generation, restart_audio)) {
+        ESP_LOGE(TAG, "Audio provisioning worker ownership is already active");
+        return {{}, false};
+    }
+    if (restart_audio) {
+        Stop();
+        if (!WaitForServiceWorkersStopped(kProvisioningWorkerStopTimeoutMs)) {
+            ESP_LOGE(TAG, "Audio worker shutdown timed out; provisioning remains fail-closed");
+            return {{}, false};
+        }
+        ESP_LOGI(TAG, "Audio worker stacks released for WiFi config");
+    }
     wake_word_feed_target_.store(nullptr, std::memory_order_release);
     xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
 
@@ -805,7 +986,29 @@ AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning() 
 }
 
 bool AudioService::EndWifiProvisioningAndRearm(WifiProvisioningToken token) {
-    return wake_word_lifecycle_.EndProvisioningAndRearm(token);
+    if (!wake_word_lifecycle_.EndProvisioningAndRearm(token)) {
+        return false;
+    }
+    const auto completion =
+        provisioning_audio_workers_.Consume(token.generation);
+    if (!completion.accepted) {
+        ESP_LOGE(TAG, "Audio provisioning worker completion token was not owned");
+        return false;
+    }
+    if (!completion.restart_required) {
+        return true;
+    }
+
+    const bool rearmed = AudioWorkerStartTransaction::Rearm(
+        [](uint32_t delay_ms) {
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        },
+        [this](uint32_t attempt) {
+            return StartWorkers(attempt);
+        });
+    ESP_LOGI(TAG, "Audio provisioning rearm complete_workers=%d",
+             static_cast<int>(rearmed));
+    return rearmed;
 }
 
 void AudioService::EnableVoiceProcessing(bool enable) {

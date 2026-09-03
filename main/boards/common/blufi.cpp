@@ -81,6 +81,7 @@ static const char* BLUFI_TAG = "BLUFI_CLASS";
 static constexpr int kClaimRefreshAfterTokenHandoffDelayMs = 2500;
 static constexpr size_t kMaxBlufiWifiListApRecords = 4;
 static constexpr uint16_t kMaxBlufiWifiScanCandidates = 8;
+static constexpr int64_t kWifiScanWatchdogTimeoutUs = 20LL * 1000 * 1000;
 
 enum class BleSessionPhase : uint64_t {
     kStopping = 0,
@@ -2842,7 +2843,7 @@ BlufiWifiScanStartOutcome Blufi::StartOwnedWifiScan(
 void Blufi::ScheduleOwnedWifiScanWatchdog(
         uint64_t request_id, WifiScanLeaseCoordinator::Lease lease) {
     const BlufiWifiScanLeaseTimer::ExactTuple exact{request_id, lease};
-    if (!wifi_scan_watchdog_timer_.Arm(exact, 5LL * 1000 * 1000)) {
+    if (!wifi_scan_watchdog_timer_.Arm(exact, kWifiScanWatchdogTimeoutUs)) {
         HandleWifiScanWatchdog(exact);
     }
 }
@@ -3595,14 +3596,16 @@ void Blufi::_handle_event(esp_blufi_cb_event_t event, esp_blufi_cb_param_t* para
             }
             switch (param->wifi_mode.op_mode) {
                 case WIFI_MODE_STA:
-                    wifi_manager.StartStation();
+                    ESP_LOGI(BLUFI_TAG,
+                             "Deferring station start until BluFi credentials are ready");
                     break;
                 case WIFI_MODE_AP:
                     wifi_manager.StartConfigAp();
                     break;
                 case WIFI_MODE_APSTA:
-                    ESP_LOGW(BLUFI_TAG, "APSTA mode not supported, starting station only");
-                    wifi_manager.StartStation();
+                    ESP_LOGW(BLUFI_TAG,
+                             "APSTA mode not supported; deferring station start until "
+                             "BluFi credentials are ready");
                     break;
                 default:
                     wifi_manager.StopStation();

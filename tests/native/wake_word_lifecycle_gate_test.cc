@@ -1,5 +1,6 @@
 #include "audio/wake_word_lifecycle_controller.h"
 #include "audio/provisioning_session_binding.h"
+#include "audio/provisioning_audio_worker_state.h"
 #include "device_state_machine.h"
 #include "wifi_config_entry_policy.h"
 
@@ -327,6 +328,30 @@ int main() {
         Require(controller.EndProvisioningAndRearm(token), "repeated transition rearms once");
     }
     Require(controller.CapturePrewarmToken().valid(), "repeated transitions remain rearmable");
+
+    ProvisioningAudioWorkerState audio_workers;
+    Require(audio_workers.Bind(41, true),
+            "running audio binds restart ownership to the provisioning generation");
+    Require(!audio_workers.Bind(42, true),
+            "a second generation cannot replace active restart ownership");
+
+    const auto stale_audio = audio_workers.Consume(40);
+    Require(!stale_audio.accepted && !stale_audio.restart_required,
+            "stale completion cannot restart audio");
+
+    const auto current_audio = audio_workers.Consume(41);
+    Require(current_audio.accepted && current_audio.restart_required,
+            "current completion restarts audio once");
+
+    const auto duplicate_audio = audio_workers.Consume(41);
+    Require(!duplicate_audio.accepted && !duplicate_audio.restart_required,
+            "duplicate completion cannot restart audio twice");
+
+    Require(audio_workers.Bind(43, false),
+            "previously stopped audio still binds the generation");
+    const auto stopped_audio = audio_workers.Consume(43);
+    Require(stopped_audio.accepted && !stopped_audio.restart_required,
+            "previously stopped audio remains stopped after provisioning");
 
     std::cout << "wake word lifecycle controller test OK\n";
     return 0;

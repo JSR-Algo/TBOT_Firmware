@@ -688,10 +688,52 @@ def _req_connect_body() -> str:
     end = blufi.index("case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:", start)
     return blufi[start:end]
 
+
+def _wifi_opmode_body() -> str:
+    """The scoped block for ESP_BLUFI_EVENT_SET_WIFI_OPMODE."""
+    blufi = read("main/boards/common/blufi.cpp")
+    return _function_body(blufi, "case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:")
+
+
 def _station_connect_helper_body() -> str:
     """The shared BluFi station-connect helper used by CONNECT_TO_AP and fallback."""
     blufi = read("main/boards/common/blufi.cpp")
     return _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+
+
+def test_blufi_opmode_defers_sta_start_to_exact_credential_owner():
+    opmode = _wifi_opmode_body()
+    connect = _req_connect_body()
+    password = _function_body(
+        read("main/boards/common/blufi.cpp"),
+        "case ESP_BLUFI_EVENT_RECV_STA_PASSWD:",
+    )
+
+    assert "WifiManager::GetInstance()" in opmode
+    assert "wifi_manager.Initialize()" in opmode
+
+    sta = opmode[
+        opmode.index("case WIFI_MODE_STA:") :
+        opmode.index("case WIFI_MODE_AP:")
+    ]
+    ap = opmode[
+        opmode.index("case WIFI_MODE_AP:") :
+        opmode.index("case WIFI_MODE_APSTA:")
+    ]
+    apsta = opmode[
+        opmode.index("case WIFI_MODE_APSTA:") :
+        opmode.index("default:")
+    ]
+    fallback = opmode[opmode.index("default:") :]
+
+    assert "StartStation()" not in sta
+    assert "StartStation()" not in apsta
+    assert "StartConfigAp()" in ap
+    assert "StopStation()" in fallback
+    assert "StopConfigAp()" in fallback
+
+    assert 'StartStationConnectFromCredentials("blufi_connect_request")' in connect
+    assert "ScheduleStationConnectFallback" in password
 
 
 def test_wifi_credentials_release_ble_before_station_association():
@@ -2283,8 +2325,8 @@ def test_fw31_unclaimed_boot_defers_audio_workers_until_claim_confirmation():
     finish = _function_body(
         application, "bool Application::FinishClaimActivationAfterLocalAssetsReady"
     )
-    assert "audio_service_.Start();" in finish
-    assert finish.index("audio_service_.Start();") < finish.index(
+    assert "if (!audio_service_.Start())" in finish
+    assert finish.index("if (!audio_service_.Start())") < finish.index(
         "audio_service_.EnableWakeWordDetection(true)"
     )
 

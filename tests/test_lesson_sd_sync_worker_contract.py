@@ -166,7 +166,7 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
         app_source, "bool Application::FinishClaimActivationAfterLocalAssetsReady"
     )
     claim_rearm = claim_finish[
-        claim_finish.index("audio_service_.Start();") :
+        claim_finish.index("if (!audio_service_.Start())") :
         claim_finish.index("StartHeartbeat();")
     ]
     assert "lesson_asset_sync_quiet_.load()" in claim_rearm

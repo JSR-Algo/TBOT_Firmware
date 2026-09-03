@@ -154,6 +154,9 @@ def test_opus_worker_stack_uses_the_measured_named_budget():
     assert "about 8 KiB headroom" in header
     assert "kOpusCodecTaskStackBytes = 28 * 1024" in header
     assert '"opus_codec", kOpusCodecTaskStackBytes, this' in source
+    assert "xTaskCreateWithCaps" not in function_body(
+        source, "bool AudioService::CreateAudioWorker"
+    )
     assert "kOpusCodecTaskStackBytes / sizeof(StackType_t)" not in source
     assert "kOpusCodecTaskStackBytes / sizeof(StackType_t::value_type)" not in source
     assert "2048 * 12" not in source

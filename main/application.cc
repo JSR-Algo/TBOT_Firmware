@@ -675,7 +675,10 @@ void Application::Initialize() {
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
     if (IsDeviceClaimed()) {
-        audio_service_.Start();
+        if (!audio_service_.Start()) {
+            ESP_LOGE(TAG, "Claimed boot audio startup failed; initialization remains stopped");
+            return;
+        }
     } else {
         // Provisioning and claim workers require contiguous internal SRAM.
         // Unclaimed robots do not use wake-word, voice, or lesson audio, so do
@@ -2113,8 +2116,11 @@ bool Application::FinishClaimActivationAfterLocalAssetsReady() {
     // TBOT claim complete -> refresh the protocol with claimed credentials, then
     // return to explicit wake standby. InitializeProtocol opens only the passive
     // lesson/nudge WebSocket for claimed idle devices.
+    if (!audio_service_.Start()) {
+        ESP_LOGE(TAG, "Claim activation audio startup failed; retry remains pending");
+        return false;
+    }
     SetDeviceState(kDeviceStateIdle);
-    audio_service_.Start();
     if (!lesson_asset_sync_quiet_.load()) {
         audio_service_.EnableWakeWordDetection(true);
     }
@@ -6216,7 +6222,9 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     if (!upgrade_success) {
         // Upgrade failed, restart audio service and continue running
         ESP_LOGE(TAG, "Firmware upgrade failed, restarting audio service and continuing operation...");
-        audio_service_.Start(); // Restart audio service
+        if (!audio_service_.Start()) {
+            ESP_LOGE(TAG, "Firmware upgrade rollback could not restart audio service");
+        }
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
         Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
