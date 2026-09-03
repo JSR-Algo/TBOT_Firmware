@@ -32,10 +32,12 @@ jobs:
       - name: Run native lifecycle and lesson heap tests
         run: |
           scripts/run_host_native_wake_word_lifecycle_test.sh
+          scripts/run_host_native_audio_worker_start_transaction_test.sh
           scripts/run_host_native_blufi_transition_gate_test.sh
           scripts/run_host_native_lesson_heap_probe_test.sh
           python3 -m pytest \
             tests/test_wake_word_lifecycle_contract.py \
+            tests/test_audio_rearm_transaction_contract.py \
             tests/test_wake_word_live_uplink_contract.py \
             tests/test_provisioning_success_teardown_contract.py \
             tests/test_blufi_deinit_transaction.py \
