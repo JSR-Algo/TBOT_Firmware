@@ -833,14 +833,14 @@ def test_audio_service_start_is_idempotent_while_workers_are_running():
     source = read("main/audio/audio_service.cc")
     start_body = function_body(source, "void AudioService::Start")
 
-    guard = start_body.index("if (!service_stopped_)")
-    mark_running = start_body.index("service_stopped_ = false;")
+    guard = start_body.index("service_stopped_.compare_exchange_strong(")
     timer_start = start_body.index("esp_timer_start_periodic")
     first_task = start_body.index("xTaskCreate", timer_start)
 
-    assert guard < mark_running < timer_start < first_task
-    guard_body = start_body[guard:mark_running]
+    assert guard < timer_start < first_task
+    guard_body = start_body[guard:timer_start]
     assert "return;" in guard_body
+    assert "std::memory_order_acq_rel" in start_body
 
 def test_auth_rejected_device_config_clears_stale_bootstrap_token_without_server_unavailable_copy():
     source = read("main/application.cc")

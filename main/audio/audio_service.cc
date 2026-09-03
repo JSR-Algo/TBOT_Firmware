@@ -135,11 +135,12 @@ void AudioService::Initialize(AudioCodec* codec) {
 }
 
 void AudioService::Start() {
-    if (!service_stopped_) {
+    bool expected = true;
+    if (!service_stopped_.compare_exchange_strong(
+            expected, false, std::memory_order_acq_rel)) {
         ESP_LOGW(TAG, "Audio service already running; ignoring duplicate start");
         return;
     }
-    service_stopped_ = false;
     xEventGroupClearBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING | AS_EVENT_WAKE_WORD_RUNNING | AS_EVENT_AUDIO_PROCESSOR_RUNNING);
 
     esp_timer_start_periodic(audio_power_timer_, 1000000);
@@ -229,7 +230,7 @@ WakeWordProgress AudioService::GetWakeWordProgress() {
 
 void AudioService::Stop() {
     esp_timer_stop(audio_power_timer_);
-    service_stopped_ = true;
+    service_stopped_.store(true, std::memory_order_release);
     xEventGroupSetBits(event_group_, AS_EVENT_AUDIO_TESTING_RUNNING |
         AS_EVENT_WAKE_WORD_RUNNING |
         AS_EVENT_AUDIO_PROCESSOR_RUNNING);
@@ -240,6 +241,30 @@ void AudioService::Stop() {
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
     audio_queue_cv_.notify_all();
+}
+
+bool AudioService::WaitForServiceWorkersStopped(uint32_t timeout_ms) {
+    const TickType_t start = xTaskGetTickCount();
+    const TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+    while (true) {
+        bool stopped = false;
+        {
+            std::lock_guard<std::mutex> lock(task_handle_mutex_);
+            stopped = audio_input_task_handle_ == nullptr &&
+                      audio_output_task_handle_ == nullptr &&
+                      opus_codec_task_handle_ == nullptr;
+        }
+        if (stopped) {
+            // Each worker clears its handle immediately before self-delete.
+            // Let the idle task reclaim the just-deleted stack before BLE.
+            vTaskDelay(pdMS_TO_TICKS(10));
+            return true;
+        }
+        if (xTaskGetTickCount() - start >= timeout) {
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
 
 bool AudioService::ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples) {
@@ -784,6 +809,20 @@ AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning() 
             wake_word_->Shutdown(0);
         }
     });
+    const bool restart_audio = IsRunning();
+    if (!provisioning_audio_workers_.Bind(
+            provisioning_token.generation, restart_audio)) {
+        ESP_LOGE(TAG, "Audio provisioning worker ownership is already active");
+        return {{}, false};
+    }
+    if (restart_audio) {
+        Stop();
+        if (!WaitForServiceWorkersStopped(kProvisioningWorkerStopTimeoutMs)) {
+            ESP_LOGE(TAG, "Audio worker shutdown timed out; provisioning remains fail-closed");
+            return {{}, false};
+        }
+        ESP_LOGI(TAG, "Audio worker stacks released for WiFi config");
+    }
     wake_word_feed_target_.store(nullptr, std::memory_order_release);
     xEventGroupClearBits(event_group_, AS_EVENT_WAKE_WORD_RUNNING);
 
