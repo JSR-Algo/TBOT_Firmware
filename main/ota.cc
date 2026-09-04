@@ -24,6 +24,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cctype>
+#include <string_view>
+#include <utility>
 #include <vector>
 #include <algorithm>
 
@@ -53,6 +55,22 @@ private:
 
 bool IsEphemeralEndpoint(const std::string& url) {
     return url.find(".trycloudflare.com/") != std::string::npos;
+}
+
+bool IsValidEvidenceJourneyId(std::string_view value) {
+    if (value.empty() || value.size() > 64) {
+        return false;
+    }
+    for (const char byte : value) {
+        const bool allowed =
+            (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+            (byte >= '0' && byte <= '9') || byte == '.' || byte == '_' ||
+            byte == ':' || byte == '-';
+        if (!allowed) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::string ExtractUrlHost(const std::string& url) {
@@ -208,8 +226,15 @@ std::string Ota::GetCheckVersionUrl() {
 #endif
 }
 
+std::string Ota::TakeTransientEvidenceJourneyId() {
+    std::string evidence_journey_id = std::move(transient_evidence_journey_id_);
+    transient_evidence_journey_id_.clear();
+    return evidence_journey_id;
+}
+
 bool Ota::ParseCourseModeResponse(const cJSON* root) {
     transient_websocket_token_.clear();
+    transient_evidence_journey_id_.clear();
     has_websocket_config_ = false;
     has_mqtt_config_ = false;
     has_new_version_ = false;
@@ -238,17 +263,36 @@ bool Ota::ParseCourseModeResponse(const cJSON* root) {
     if (!cJSON_IsObject(websocket)) return false;
     const cJSON* url = cJSON_GetObjectItem(websocket, "url");
     const cJSON* token = cJSON_GetObjectItem(websocket, "token");
+    const cJSON* evidence_journey_id =
+        cJSON_GetObjectItem(websocket, "evidence_journey_id");
     if (!cJSON_IsString(url) || !cJSON_IsString(token)) return false;
+    size_t url_field_count = 0;
+    size_t token_field_count = 0;
+    size_t evidence_journey_id_field_count = 0;
     size_t websocket_field_count = 0;
     cJSON_ArrayForEach(item, websocket) {
-        if (item->string == nullptr ||
-            (std::strcmp(item->string, "url") != 0 && std::strcmp(item->string, "token") != 0) ||
-            std::strcmp(item->string, "factory_test_claimed") == 0) {
+        if (item->string == nullptr) {
+            return false;
+        }
+        if (std::strcmp(item->string, "url") == 0) {
+            ++url_field_count;
+        } else if (std::strcmp(item->string, "token") == 0) {
+            ++token_field_count;
+        } else if (std::strcmp(item->string, "evidence_journey_id") == 0) {
+            ++evidence_journey_id_field_count;
+        } else {
             return false;
         }
         ++websocket_field_count;
     }
-    if (websocket_field_count != 2) return false;
+    if ((websocket_field_count != 2 && websocket_field_count != 3) ||
+        url_field_count != 1 || token_field_count != 1 ||
+        evidence_journey_id_field_count > 1) {
+        return false;
+    }
+    const bool has_valid_evidence_journey_id =
+        cJSON_IsString(evidence_journey_id) &&
+        IsValidEvidenceJourneyId(evidence_journey_id->valuestring);
     const std::string_view websocket_url(url->valuestring);
     const std::string_view websocket_token(token->valuestring);
     if (!IsValidCourseModeWebsocketUrl(websocket_url) ||
@@ -261,6 +305,9 @@ bool Ota::ParseCourseModeResponse(const cJSON* root) {
     }
     transient_websocket_url_.assign(websocket_url);
     transient_websocket_token_.assign(websocket_token);
+    if (has_valid_evidence_journey_id) {
+        transient_evidence_journey_id_.assign(evidence_journey_id->valuestring);
+    }
     has_websocket_config_ = true;
     return true;
 }
@@ -289,6 +336,7 @@ std::unique_ptr<Http> Ota::SetupHttp(int timeout_ms) {
  * Specification: https://ccnphfhqs21z.feishu.cn/wiki/FjW6wZmisimNBBkov6OcmfvknVd
  */
 esp_err_t Ota::CheckVersion() {
+    transient_evidence_journey_id_.clear();
 #if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     auto& board = Board::GetInstance();
     const auto app_desc = esp_app_get_description();
@@ -436,12 +484,23 @@ esp_err_t Ota::CheckVersion() {
 
     has_websocket_config_ = false;
     cJSON *websocket = cJSON_GetObjectItem(root, "websocket");
+    transient_evidence_journey_id_.clear();
     bool factory_test_claimed_seen = false;
     int factory_test_claimed_value = 0;
     if (cJSON_IsObject(websocket)) {
         Settings settings("websocket", true);
         cJSON *item = NULL;
         cJSON_ArrayForEach(item, websocket) {
+            if (item->string != nullptr &&
+                std::strcmp(item->string, "evidence_journey_id") == 0) {
+                if (cJSON_IsString(item) &&
+                    IsValidEvidenceJourneyId(item->valuestring)) {
+                    transient_evidence_journey_id_.assign(item->valuestring);
+                } else {
+                    transient_evidence_journey_id_.clear();
+                }
+                continue;
+            }
             if (cJSON_IsString(item)) {
                 if (std::strcmp(item->string, "token") == 0) {
                     ESP_LOGI(TAG, "Received websocket token: empty=%d",

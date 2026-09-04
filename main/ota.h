@@ -35,6 +35,7 @@ public:
     const std::string& GetActivationCode() const { return activation_code_; }
     const std::string& GetTransientWebsocketUrl() const { return transient_websocket_url_; }
     const std::string& GetTransientWebsocketToken() const { return transient_websocket_token_; }
+    std::string TakeTransientEvidenceJourneyId();
     std::string GetCheckVersionUrl();
 
 private:
@@ -54,6 +55,7 @@ private:
     std::string serial_number_;
     std::string transient_websocket_url_;
     std::string transient_websocket_token_;
+    std::string transient_evidence_journey_id_;
     int activation_timeout_ms_ = 30000;
 
     std::function<void(int progress, size_t speed)> upgrade_callback_;
