@@ -37,6 +37,15 @@ def test_cloud_unpair_command_reuses_the_proven_repair_pairing_flow():
     assert branch.index("EnterRepairPairingMode();") < branch.index("Unknown system command")
 
 
+def test_cloud_unpair_acknowledges_request_before_repair_flow():
+    body = system_command_body()
+    branch = body[body.index('strcmp(command->valuestring, "unpair") == 0') :]
+
+    assert "request_id" in branch
+    assert '"system_ack"' in branch
+    assert branch.index('"system_ack"') < branch.index("EnterRepairPairingMode();")
+
+
 def test_cloud_unpair_is_rejected_during_an_active_lesson():
     body = system_command_body()
     branch = body[body.index('strcmp(command->valuestring, "unpair") == 0') :]

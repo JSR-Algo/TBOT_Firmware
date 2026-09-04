@@ -161,6 +161,10 @@ static constexpr uint64_t kClaimPollIntervalUs =
 // cannot keep waking the network stack every 10s and jittering live audio.
 static constexpr uint64_t kClaimPollIntervalIdleUs = 60ULL * 1000000ULL;  // 60s while online
 static constexpr int64_t kClaimPollWindowMs = 5LL * 60LL * 1000LL;        // 5 min cap
+// The phone creates the backend claim before handing credentials/token to the
+// robot. Allow one slow visibility retry, then recover discovery while enough
+// internal heap remains to initialize Bluedroid.
+static constexpr int64_t kClaimVisibilityRetryWindowMs = 20LL * 1000LL;
 
 // TBOT heartbeat (C5): POST /v1/device/heartbeat every 20s while claimed/online.
 static constexpr uint64_t kHeartbeatIntervalUs = 20ULL * 1000000ULL;  // 20s
@@ -1503,13 +1507,6 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
         SecureClearString(pending_tbot_claim_token_);
         pending_tbot_claim_token_ = token;
 
-        // Unclaimed + claimable standby is exactly the state the mobile app
-        // discovers over BLE: start (or keep) advertising "TBOT-<MAC>" so the
-        // app's BLE scan can find this robot and begin the cloud claim. This
-        // call is idempotent (guards against double-init) and re-arms the BLE
-        // hard-timeout each poll so advertising persists while we stay unclaimed.
-        request_ble(ClaimBleLifecycleIntent::kEnsureAdvertising);
-
         // L2: distinguish a failed fetch (backend unreachable) from a successful
         // fetch that simply reports no claim. On repeated fetch failure the copy
         // becomes "Server unavailable. Retrying..." instead of the misleading
@@ -1543,11 +1540,36 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
         // Once the liveness fetch completes without claim auth, BLE custom-data
         // becomes the wake-up signal for the next claim refresh.
         if (token.empty()) {
+            // No phone handoff is pending, so the app still needs a stable BLE
+            // advertisement to discover the robot and deliver a fresh token.
+            request_ble(ClaimBleLifecycleIntent::kEnsureAdvertising);
             // The no-token fetch refreshed setup liveness. Keep one stable BLE
             // advertising session now; the custom-data token callback schedules
             // the next refresh directly. Repeated Bluedroid deinit/init cycles
             // can assert in vQueueDelete on the ESP32-S3.
             StopClaimPoll();
+            return;
+        }
+        // A token-backed retry follows a completed phone handoff. BLE was
+        // stopped before the TLS fetch and must remain off while backend claim
+        // visibility catches up; reinitializing Bluedroid on every poll leaks
+        // internal heap on ESP32-S3. A 401/403 above reopens BLE for a new token.
+        const int64_t now_ms = esp_timer_get_time() / 1000;
+        if (now_ms - claim_poll_started_ms_ >= kClaimVisibilityRetryWindowMs) {
+            ESP_LOGW(TAG, "Claim visibility retry window elapsed; clearing stale token and restoring BLE standby");
+            Settings websocket_settings("websocket", true);
+            websocket_settings.SetString("bootstrap_token", "");
+            websocket_settings.SetInt("claim_ambiguous", 0);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+            Blufi::GetInstance().ClearProvisioningSecrets();
+#endif
+            websocket_settings.EraseKey("claim_device_id");
+            SecureClearString(pending_tbot_claim_token_);
+            pending_tbot_claim_ = PendingTbotClaim{};
+            claim_substate_ = TbotClaimSubstate::AvailableStandby;
+            RenderClaimSubstate(claim_substate_);
+            StopClaimPoll();
+            request_ble(ClaimBleLifecycleIntent::kEnsureAdvertising);
             return;
         }
         if (claim_fetch_failures_ >= 4 && IsDeviceClaimed()) {
@@ -4005,6 +4027,24 @@ void Application::InitializeProtocol() {
                     if (lesson_runtime_active_.load()) {
                         ESP_LOGI(TAG, "System unpair ignored during lesson");
                         return;
+                    }
+                    const auto* request_id = cJSON_GetObjectItem(root, "request_id");
+                    if (cJSON_IsString(request_id) && request_id->valuestring != nullptr &&
+                        request_id->valuestring[0] != '\0' && std::strlen(request_id->valuestring) <= 64) {
+                        cJSON* ack = cJSON_CreateObject();
+                        if (ack != nullptr) {
+                            cJSON_AddStringToObject(ack, "type", "system_ack");
+                            cJSON_AddStringToObject(ack, "command", "unpair");
+                            cJSON_AddStringToObject(ack, "request_id", request_id->valuestring);
+                            char* encoded = cJSON_PrintUnformatted(ack);
+                            const bool sent = encoded != nullptr && protocol_ != nullptr &&
+                                              protocol_->SendLessonFrame(encoded);
+                            if (!sent) {
+                                ESP_LOGW(TAG, "System unpair acknowledgement could not be sent");
+                            }
+                            if (encoded != nullptr) cJSON_free(encoded);
+                            cJSON_Delete(ack);
+                        }
                     }
                     EnterRepairPairingMode();
                 } else if (strcmp(command->valuestring, "wifi_setup") == 0) {
