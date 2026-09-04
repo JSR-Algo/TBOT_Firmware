@@ -193,7 +193,8 @@ def test_unclaimed_protocol_selection_can_use_persisted_or_compile_time_websocke
     assert 'Settings websocket_settings("websocket", false);' in selection
     assert 'websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL)' in selection
     assert "has_configured_websocket_url" in selection
-    assert "ota_->HasWebsocketConfig() || has_configured_websocket_url" in selection
+    assert "has_available_websocket_url" in selection
+    assert "ota_->HasWebsocketConfig() || has_available_websocket_url" in selection
     assert "std::make_unique<WebsocketProtocol>()" in selection
     assert "SetUnclaimedPublicLessonOnly(!IsDeviceClaimed())" in selection
     assert selection.index("has_configured_websocket_url") < selection.index(

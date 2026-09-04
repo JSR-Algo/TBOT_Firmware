@@ -356,7 +356,7 @@ def test_station_submission_stop_and_completion_share_one_lifecycle_lock():
     assert stop.index("scans_enabled_ = false") < stop.index("BeginDrain(")
     assert stop.index("BeginDrain(") < stop.index("esp_wifi_scan_stop(")
     assert stop.index("esp_wifi_scan_stop(") < stop.index("esp_wifi_stop(")
-    assert stop.index("esp_wifi_stop(") < stop.index("lifecycle_lock.unlock()")
+    assert stop.index("lifecycle_lock.unlock()") < stop.index("esp_wifi_stop(")
 
     assert "std::unique_lock<std::mutex> lifecycle_lock(scan_mutex_)" in completion
     assert completion.index("lifecycle_lock") < completion.index("esp_wifi_scan_get_ap_num")

@@ -2576,6 +2576,14 @@ bool Application::IsDeviceClaimed() const {
     // successful confirm, so after a reboot/marker loss they are enough to keep
     // the robot on the claimed online path. We must NOT key off websocket
     // "token": OTA CheckVersion can write that realtime-WS token on every boot.
+    Settings backend_settings("backend", false);
+    if (backend_settings.GetInt("release_pending", 0) != 0) {
+        // Credentials are retained only so the deferred ownership release can
+        // authenticate. They must not start claimed runtime/audio while the
+        // robot is rebooting into Wi-Fi provisioning.
+        return false;
+    }
+
     Settings claim_state("tbot_claim", false);
     const bool claim_confirmed = claim_state.GetInt("confirmed", 0) != 0;
 
@@ -2586,7 +2594,6 @@ bool Application::IsDeviceClaimed() const {
         return true;
     }
 
-    Settings backend_settings("backend", false);
     const std::string device_id = backend_settings.GetString("device_id");
     const std::string device_secret = backend_settings.GetString("device_secret");
     if (claim_confirmed && (device_id.empty() || device_secret.empty())) {
@@ -2974,7 +2981,7 @@ void Application::EnterRepairPairingMode() {
                                !backend_settings.GetString("device_id").empty() &&
                                !backend_settings.GetString("api_url").empty();
         }
-        bool released = false;
+        bool released = !had_cloud_secret;
         if (had_cloud_secret) {
             released = SystemReset::ReleaseCloudOwnership();
             ESP_LOGW(TAG, "BOOT re-pair cloud ownership release: %s",
@@ -2989,8 +2996,10 @@ void Application::EnterRepairPairingMode() {
         {
             Settings backend_settings("backend", true);
             if (released) {
-                // Backend row is freed; the now-orphaned secret would only 401 a
-                // retry, so drop it and stop deferring.
+                // Backend row is freed (or already absent). Drop the complete
+                // identity before reboot so startup cannot briefly run claimed
+                // audio/runtime and fragment the heap before provisioning.
+                backend_settings.SetString("device_id", "");
                 backend_settings.SetString("device_secret", "");
                 backend_settings.SetInt("release_pending", 0);
             } else if (had_cloud_secret) {
@@ -3001,10 +3010,12 @@ void Application::EnterRepairPairingMode() {
         {
             Settings claim_state("tbot_claim", true);
             claim_state.SetInt("confirmed", 0);
+            claim_state.SetInt("factory_test", 0);
         }
         {
             Settings websocket_settings("websocket", true);
             websocket_settings.SetString("bootstrap_token", "");
+            websocket_settings.SetString("token", "");
             websocket_settings.SetInt("claim_ambiguous", 0);
             websocket_settings.SetString("url", "");
             websocket_settings.EraseKey("claim_device_id");
@@ -3142,6 +3153,7 @@ void Application::CloudReleaseTask(void* arg) {
         }
         Settings backend_settings("backend", true);
         backend_settings.SetInt("release_pending", 0);
+        backend_settings.SetString("device_id", "");
         backend_settings.SetString("device_secret", "");
         std::fill(device_secret.begin(), device_secret.end(), '\0');
         ESP_LOGI(TAG, "Deferred cloud ownership released; robot is free for a new parent to claim");
@@ -3533,10 +3545,14 @@ void Application::InitializeProtocol() {
 #if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     Settings websocket_settings("websocket", false);
     const bool has_configured_websocket_url =
+        !websocket_settings.GetString("url", "").empty();
+    const bool prefer_claimed_websocket =
+        IsDeviceClaimed() && has_configured_websocket_url;
+    const bool has_available_websocket_url =
         !websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL).empty();
-    if (ota_->HasMqttConfig()) {
+    if (ota_->HasMqttConfig() && !prefer_claimed_websocket) {
         protocol_ = std::make_unique<MqttProtocol>();
-    } else if (ota_->HasWebsocketConfig() || has_configured_websocket_url) {
+    } else if (ota_->HasWebsocketConfig() || has_available_websocket_url) {
         auto websocket_protocol = std::make_unique<WebsocketProtocol>();
         websocket_protocol->SetUnclaimedPublicLessonOnly(!IsDeviceClaimed());
         protocol_ = std::move(websocket_protocol);

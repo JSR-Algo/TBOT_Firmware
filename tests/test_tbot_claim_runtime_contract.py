@@ -221,14 +221,15 @@ def test_successful_no_claim_fetch_keeps_token_and_retries_delayed_claim_visibil
     # The app and backend can expose the new claim a few seconds after the BLE
     # handoff. A first HTTP 200 with claim_present=0 is therefore not proof that
     # the bootstrap token is abandoned. Preserve it and use the bounded poll;
-    # only an explicit 401/403 may clear a rejected token.
+    # an explicit 401/403 or an exhausted visibility window may clear it.
     assert "if (fetched && !pending_claim.active && !token.empty())" not in apply_body
     no_claim_start = apply_body.index("if (!fetched || !pending_claim.active)")
     active_claim_start = apply_body.index("// Fetch succeeded with an active claim")
     no_claim_branch = apply_body[no_claim_start:active_claim_start]
-    assert "pending_tbot_claim_token_ = token;" in no_claim_branch
+    no_claim_retry_body = no_claim_branch[:no_claim_branch.index("const int64_t now_ms")]
+    assert "pending_tbot_claim_token_ = token;" in no_claim_retry_body
     assert "StartClaimPoll();" in no_claim_branch
-    assert 'websocket_settings.SetString("bootstrap_token", "");' not in no_claim_branch
+    assert 'websocket_settings.SetString("bootstrap_token", "");' not in no_claim_retry_body
 
     # The active-claim result path still tears BLE down once immediately before
     # confirmation.
@@ -236,6 +237,46 @@ def test_successful_no_claim_fetch_keeps_token_and_retries_delayed_claim_visibil
     assert active_claim.index("ClaimBleLifecycleIntent::kStopAdvertising") < active_claim.index(
         "ConfirmPendingTbotClaim"
     )
+
+def test_token_backed_no_claim_retry_does_not_reinitialize_ble_each_poll():
+    source = read("main/application.cc")
+    apply_body = function_body(source, "void Application::ApplyPendingTbotClaimFetchResult")
+    no_claim_start = apply_body.index("if (!fetched || !pending_claim.active)")
+    active_claim_start = apply_body.index("// Fetch succeeded with an active claim")
+    no_claim_branch = apply_body[no_claim_start:active_claim_start]
+    no_token_start = no_claim_branch.index("if (token.empty())")
+    before_token_split = no_claim_branch[:no_token_start]
+    no_token_branch = no_claim_branch[
+        no_token_start:no_claim_branch.index("return;", no_token_start) + len("return;")
+    ]
+    token_branch = no_claim_branch[no_claim_branch.index("return;", no_token_start) + len("return;") :]
+
+    # Once the phone has delivered a bootstrap token, BLE has already served
+    # its handoff purpose. Keep it off while backend claim visibility catches
+    # up; repeated deinit/init cycles exhaust ESP32-S3 internal heap.
+    assert "EnsureBleAdvertisingForStandby" not in before_token_split
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in no_token_branch
+    assert "StartClaimPoll();" in token_branch
+    assert "EnsureBleAdvertisingForStandby" not in token_branch
+
+def test_token_backed_no_claim_retry_expires_into_stable_ble_standby():
+    source = read("main/application.cc")
+    apply_body = function_body(source, "void Application::ApplyPendingTbotClaimFetchResult")
+    no_claim_start = apply_body.index("if (!fetched || !pending_claim.active)")
+    active_claim_start = apply_body.index("// Fetch succeeded with an active claim")
+    no_claim_branch = apply_body[no_claim_start:active_claim_start]
+    token_branch = no_claim_branch[no_claim_branch.index("return;", no_claim_branch.index("if (token.empty())")) + len("return;") :]
+
+    assert "kClaimVisibilityRetryWindowMs" in source
+    assert "kClaimVisibilityRetryWindowMs = 20LL * 1000LL" in source
+    assert "claim_poll_started_ms_" in token_branch
+    assert 'websocket_settings.SetString("bootstrap_token", "");' in token_branch
+    assert "ClearProvisioningSecrets();" in token_branch
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in token_branch
+    assert token_branch.index("StopClaimPoll();") < token_branch.index(
+        "ClaimBleLifecycleIntent::kEnsureAdvertising"
+    )
+
 
 def test_blufi_waits_for_full_wifi_board_connect_timeout_before_reporting_failure():
     source = read("main/boards/common/blufi.cpp")
@@ -300,7 +341,7 @@ def test_unclaimed_no_token_standby_waits_on_ble_without_periodic_reinit_cycle()
     no_token_start = no_claim_branch.index("if (token.empty())")
     no_token_branch = no_claim_branch[no_token_start:no_claim_branch.index("return;", no_token_start) + len("return;")]
 
-    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in no_claim_branch[:no_token_start]
+    assert "ClaimBleLifecycleIntent::kEnsureAdvertising" in no_token_branch
     assert "StopClaimPoll();" in no_token_branch
     assert "StartClaimPoll();" not in no_token_branch
 
@@ -367,6 +408,19 @@ def test_factory_test_claimed_nvs_key_fits_esp_idf_limit():
     assert 'std::strcmp(item->string, "factory_test_claimed") == 0' in websocket_section
     assert 'claim_state.SetInt("factory_test",' in websocket_section
     assert len("factory_test") <= 15
+
+
+def test_pending_cloud_release_cannot_start_claimed_runtime_or_audio():
+    source = read("main/application.cc")
+    claimed_body = function_body(source, "bool Application::IsDeviceClaimed")
+
+    assert 'backend_settings.GetInt("release_pending", 0)' in claimed_body
+    pending_check = claimed_body.index('backend_settings.GetInt("release_pending", 0)')
+    credential_return = claimed_body.index(
+        "return !device_id.empty() && !device_secret.empty();"
+    )
+    assert pending_check < credential_return
+    assert "return false;" in claimed_body[pending_check:credential_return]
 
 
 def test_saved_wifi_recovery_public_entry_keeps_claim_gate_inside_application():
@@ -898,11 +952,14 @@ def test_retryable_device_config_fetch_failure_retains_blufi_ram_secrets():
     retry_start = apply_body.index("if (!fetched || !pending_claim.active)")
     active_claim_start = apply_body.index("// Fetch succeeded with an active claim", retry_start)
     retry_body = apply_body[retry_start:active_claim_start]
+    failure_counter_body = retry_body[
+        retry_body.index("if (!fetched)"):retry_body.index("static constexpr int kClaimFetchFailureCopyThreshold")
+    ]
 
     assert "claim_fetch_failures_" in retry_body
     assert "StartClaimPoll();" in retry_body
-    assert "ClearProvisioningSecrets" not in retry_body
-    assert 'EraseKey("claim_device_id")' not in retry_body
+    assert "ClearProvisioningSecrets" not in failure_counter_body
+    assert 'EraseKey("claim_device_id")' not in failure_counter_body
 
 
 def test_claim_token_copies_are_zeroized_across_fetch_worker_handoffs():
@@ -1086,6 +1143,38 @@ def test_same_session_claim_asset_apply_is_local_only_and_does_not_download():
         "EnableWakeWordDetection",
     ):
         assert forbidden not in helper
+
+
+def test_claimed_robot_prefers_provisioned_websocket_over_stale_ota_mqtt():
+    source = read("main/application.cc")
+    initialize = function_body(source, "void Application::InitializeProtocol")
+
+    claimed_websocket = initialize.index("const bool prefer_claimed_websocket =")
+    mqtt_fallback = initialize.index("ota_->HasMqttConfig()")
+    websocket_build = initialize.index("std::make_unique<WebsocketProtocol>()")
+
+    # Provisioning persists the management ws_url while the OTA object can still
+    # carry a legacy MQTT section. Remote-unpair requires the claimed robot to
+    # select the provisioned WebSocket before considering that stale fallback.
+    assert claimed_websocket < mqtt_fallback < websocket_build
+    preference = initialize[claimed_websocket:mqtt_fallback]
+    assert "IsDeviceClaimed()" in preference
+    assert "has_configured_websocket_url" in preference
+    mqtt_branch = initialize[mqtt_fallback:websocket_build]
+    assert "!prefer_claimed_websocket" in mqtt_branch
+
+
+def test_mqtt_is_not_displaced_by_compile_time_websocket_fallback():
+    source = read("main/application.cc")
+    initialize = function_body(source, "void Application::InitializeProtocol")
+
+    # Only an explicitly persisted management URL proves provisioning/config
+    # fetch selected WebSocket. CONFIG_WEBSOCKET_URL remains a construction
+    # fallback and must not override a valid OTA MQTT section by itself.
+    assert 'websocket_settings.GetString("url", "")' in initialize
+    preference_end = initialize.index("const bool prefer_claimed_websocket")
+    preference_setup = initialize[:preference_end]
+    assert 'GetString("url", CONFIG_WEBSOCKET_URL)' not in preference_setup
 
 def test_app_startup_registers_allocation_failure_diagnostics_without_allocating_in_hook():
     source = read("main/main.cc")

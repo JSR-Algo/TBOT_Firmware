@@ -84,12 +84,20 @@ void WifiStation::Stop() {
     });
 
     std::optional<WifiScanLeaseCoordinator::Lease> recovery_debt;
+    const bool had_scan_lease = scan_lease_.has_value();
     if (scan_lease_.has_value()) {
         const auto lease = *scan_lease_;
         if (scan_lease_coordinator_.BeginDrain(lease)) {
             RetainRecoveryDebtLocked(lease);
             recovery_debt = lease;
         }
+    }
+
+    // Driver stop/disconnect can synchronously dispatch Wi-Fi callbacks. They
+    // validate the now-invalid session under scan_mutex_, so release it before
+    // entering the driver or teardown deadlocks waiting on its own callback.
+    lifecycle_lock.unlock();
+    if (had_scan_lease) {
         esp_wifi_scan_stop();
     }
 
@@ -120,7 +128,6 @@ void WifiStation::Stop() {
         active_station_config_ = {};
         active_station_config_valid_ = false;
     }
-    lifecycle_lock.unlock();
     if (timer_to_delete != nullptr) {
         esp_timer_delete(timer_to_delete);
     }

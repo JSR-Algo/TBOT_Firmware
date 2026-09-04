@@ -4,10 +4,11 @@ Holding BOOT must let a (possibly different) parent phone re-connect/re-claim th
 robot instead of it staying "stuck" to the phone/account it was already paired
 with. These source-scrape checks lock the design decided with the user:
 
-  * Re-pair runs LOCALLY and offline-safe at press time -- it must NOT block on
-    the cloud, because the robot may have no Wi-Fi. So EnterRepairPairingMode()
-    drops the local claimed flag + WS/claim tokens and re-advertises for pairing,
-    while KEEPING the backend credentials.
+  * Re-pair clears all local claimed/runtime identity after cloud release succeeds
+    (including an already-released HTTP 401), before rebooting into provisioning.
+  * A genuinely offline release keeps only the backend credentials needed for the
+    deferred retry, while release_pending prevents them from starting claimed
+    runtime/audio during the next provisioning boot.
   * Releasing backend ownership (so the `devices` row stops returning
     DEVICE_ALREADY_OWNED) is DEFERRED via backend.release_pending and fired off
     the priority-10 Application task once the robot is online again.
@@ -74,16 +75,29 @@ def test_enter_repair_pairing_releases_cloud_before_forgetting_wifi():
     assert "SystemReset::ReleaseCloudOwnership()" in body
     assert body.index("SystemReset::ReleaseCloudOwnership()") < body.index("SsidManager::GetInstance().ForceClearAndCancelTransaction()")
 
-    # On success: drop the now-orphaned secret + stop deferring.
+    # On success/already-released: drop the complete backend identity + stop
+    # deferring. Leaving device_id behind makes the next boot enter stale-claim
+    # recovery only after large audio workers have fragmented internal heap.
+    assert 'backend_settings.SetString("device_id", "");' in body
     assert 'backend_settings.SetString("device_secret", "");' in body
     assert 'backend_settings.SetInt("release_pending", 0);' in body
     # On failure (offline): keep credentials + defer a retry for when we're online.
     assert 'backend_settings.SetInt("release_pending", 1);' in body
 
-    # MUST keep the URL + device id the (synchronous or deferred) release needs to
-    # authenticate against the backend.
-    assert 'SetString("device_id", "");' not in body
+    # Keep the API URL; the offline branch keeps id + secret for deferred release.
     assert 'SetString("api_url", "");' not in body
+
+
+def test_enter_repair_pairing_clears_every_claim_runtime_marker_on_completed_release():
+    body = function_body(app_source(), "void Application::EnterRepairPairingMode")
+
+    assert 'claim_state.SetInt("confirmed", 0);' in body
+    assert 'claim_state.SetInt("factory_test", 0);' in body
+    assert 'websocket_settings.SetString("bootstrap_token", "");' in body
+    assert 'websocket_settings.SetString("token", "");' in body
+    assert 'websocket_settings.SetString("url", "");' in body
+    assert 'websocket_settings.SetInt("claim_ambiguous", 0);' in body
+    assert 'websocket_settings.EraseKey("claim_device_id");' in body
 
 
 def test_refresh_pending_claim_fires_deferred_release():
@@ -140,6 +154,7 @@ def test_cloud_release_worker_clears_state_only_on_success():
     # On success: stop deferring + drop the now-released secret so the next claim
     # mints a fresh one. A failed release leaves release_pending set to retry.
     assert 'backend_settings.SetInt("release_pending", 0);' in body
+    assert 'backend_settings.SetString("device_id", "");' in body
     assert 'backend_settings.SetString("device_secret", "");' in body
     assert "self->RefreshPendingTbotClaim();" in body
     assert "vTaskDelete(nullptr);" in body
