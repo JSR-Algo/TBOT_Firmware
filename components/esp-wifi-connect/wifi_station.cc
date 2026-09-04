@@ -67,7 +67,7 @@ SsidMutationResult WifiStation::AddAuth(const std::string &&ssid,
 void WifiStation::Stop() {
     ESP_LOGI(TAG, "Stopping WiFi station");
 
-    std::lock_guard<std::recursive_mutex> callback_lock(
+    std::unique_lock<std::recursive_mutex> callback_lock(
         session_callback_mutex_);
     if (timer_handle_ != nullptr) {
         esp_timer_stop(timer_handle_);
@@ -76,6 +76,7 @@ void WifiStation::Stop() {
     scans_enabled_ = false;
     automatic_scans_enabled_ = false;
     ++scan_session_id_;
+    callback_lock.unlock();
     esp_timer_handle_t timer_to_delete = timer_handle_;
     timer_handle_ = nullptr;
     session_operations_drained_.wait(lifecycle_lock, [this]() {

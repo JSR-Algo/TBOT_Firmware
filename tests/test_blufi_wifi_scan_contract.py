@@ -511,6 +511,14 @@ def test_station_external_callbacks_use_reentrant_session_gate_after_permit_fini
             assert "DispatchSessionCallback(" in prefix
 
 
+def test_station_stop_releases_callback_lock_before_waiting_for_session_drain():
+    source = read("components/esp-wifi-connect/wifi_station.cc")
+    stop = function_body(source, "void WifiStation::Stop")
+    wait = stop.index("session_operations_drained_.wait(")
+    release = stop.index("callback_lock.unlock()")
+    assert release < wait
+
+
 def test_station_retry_is_post_permit_and_exact_session_scoped():
     header = read("components/esp-wifi-connect/include/wifi_station.h")
     source = read("components/esp-wifi-connect/wifi_station.cc")
