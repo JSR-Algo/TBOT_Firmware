@@ -2450,6 +2450,18 @@ def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_
     assert "delete ctx;" in helper
 
 
+def test_fw37a_wifi_station_handoff_never_blocks_the_blufi_event_callback():
+    blufi = read("main/boards/common/blufi.cpp")
+    helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+
+    spawn = helper.index("xTaskCreate(")
+    # StartStationWithCredentialsIfScanIdle owns the active-station teardown in
+    # its worker context. Stopping synchronously here can wait forever on an
+    # in-flight Wi-Fi callback and strand the phone at the first progress step.
+    assert "wifi_manager.StopStation();" not in helper[:spawn]
+    assert helper.index("wifi.StartStationWithCredentialsIfScanIdle", spawn) > spawn
+
+
 def test_fw37b_stale_ble_release_failure_cannot_clear_new_wifi_attempt_flags():
     blufi = read("main/boards/common/blufi.cpp")
     helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")

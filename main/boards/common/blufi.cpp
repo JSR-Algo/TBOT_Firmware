@@ -2029,7 +2029,6 @@ void Blufi::StartStationConnectFromCredentials(
         if (wifi_manager.IsConfigMode()) {
             wifi_manager.StopConfigAp();
         }
-        wifi_manager.StopStation();
     }
 
     if (!wifi_manager.IsInitialized() && !wifi_manager.Initialize()) {
@@ -2064,7 +2063,6 @@ void Blufi::StartStationConnectFromCredentials(
         ssid_manager.RollbackSsidTransaction(ssid_transaction);
         uint32_t expected_transaction = ssid_transaction;
         ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
-        wifi_manager.StopStation();
         SendStationConnectFailureReport();
         return;
     }
@@ -2349,7 +2347,6 @@ void Blufi::StartStationConnectFromCredentials(
         ssid_manager.RollbackSsidTransaction(ssid_transaction);
         uint32_t expected_transaction = ssid_transaction;
         ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
-        wifi_manager.StopStation();
 
         wifi_mode_t mode = GetWifiModeWithFallback(wifi_manager);
         esp_blufi_extra_info_t info = {};

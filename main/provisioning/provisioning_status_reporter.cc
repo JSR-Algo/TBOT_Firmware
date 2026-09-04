@@ -19,7 +19,7 @@ static const int kRetryDelaysMs[] = {2000, 4000, 8000};
 static constexpr int kMaxAttempts = 3;
 
 std::string ExtractProvisioningErrorCode(const std::string& response_body) {
-    cJSON* root = cJSON_Parse(response_body.c_str());
+    cJSON* root = cJSON_Parse(response_body.data());
     if (root == nullptr) {
         return "unknown";
     }
