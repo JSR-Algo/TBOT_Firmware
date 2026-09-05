@@ -130,6 +130,9 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         ESP_LOGE(TAG, "Failed to allocate AFE configuration");
         return false;
     }
+    // This product only exposes the primary "Hi ESP" wake phrase. Loading the
+    // unused secondary model consumes the internal RAM Wi-Fi needs for DMA/TLS.
+    afe_config->wakenet_model_name_2 = nullptr;
     char* configured_wakenet_models[] = {
         afe_config->wakenet_model_name,
         afe_config->wakenet_model_name_2,
@@ -200,7 +203,7 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
             this_->audio_detection_task_handle_.store(nullptr, std::memory_order_release);
         }
         xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT);
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(nullptr);
     }, "audio_detection", 4096, this, tskIDLE_PRIORITY + 1, nullptr,
        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (detection_created != pdPASS) {

@@ -129,6 +129,17 @@ def test_failed_afe_detection_task_creation_releases_partial_pipeline_before_ret
     assert failure.index("afe_iface_->destroy(afe_data_);") < failure.index("return false;")
 
 
+def test_psram_afe_detection_stack_uses_matching_delete_api():
+    source = read("main/audio/wake_words/afe_wake_word.cc")
+    initialize = function_body(source, "bool AfeWakeWord::Initialize")
+    task_start = initialize.index("xTaskCreateWithCaps")
+    task_end = initialize.index('}, "audio_detection"', task_start)
+    task = initialize[task_start:task_end]
+
+    assert "vTaskDeleteWithCaps(nullptr);" in task
+    assert "vTaskDelete(NULL);" not in task
+
+
 def test_ci_runs_audio_rearm_transaction_gates():
     workflow = read(".github/workflows/build.yml")
     assert "scripts/run_host_native_audio_worker_start_transaction_test.sh" in workflow

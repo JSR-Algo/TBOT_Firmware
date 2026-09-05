@@ -83,6 +83,23 @@ def test_management_heartbeat_reuses_the_persistent_network_worker_stack():
     assert "2, sizeof(NetworkWorkItem)" in " ".join(source.split())
 
 
+def test_wake_word_pipeline_disables_the_unused_secondary_model_before_creation():
+    source = read("main/audio/wake_words/afe_wake_word.cc")
+    initialize = function_body(
+        source,
+        "bool AfeWakeWord::Initialize",
+        "void AfeWakeWord::OnWakeWordDetected",
+    )
+
+    disable_secondary = initialize.index(
+        "afe_config->wakenet_model_name_2 = nullptr;"
+    )
+    configured_models = initialize.index("configured_wakenet_models")
+    create_pipeline = initialize.index("create_from_config")
+
+    assert disable_secondary < configured_models < create_pipeline
+
+
 def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
     application = read("main/application.cc")
     websocket = read("main/protocols/websocket_protocol.cc")

@@ -159,7 +159,7 @@ bool EspTcp::Connect(const std::string& host, int port) {
         tcp->receive_task_handle_.store(nullptr);
         tcp->shutdown_state_.TaskExited();
         xEventGroupSetBits(event_group, ESP_TCP_EVENT_RECEIVE_TASK_EXIT);
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(nullptr);
     }, "tcp_receive", 4096, this, 1, &receive_task,
        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
