@@ -3246,11 +3246,16 @@ def test_afe_background_tasks_keep_fetch_below_feed_but_above_idle():
     processor = read("main/audio/processors/afe_audio_processor.cc")
     audio_service = read("main/audio/audio_service.cc")
 
-    wake_task = wake_word[wake_word.index('"audio_detection"') - 180:wake_word.index('"audio_detection"') + 120]
+    wake_task = wake_word[
+        wake_word.index("const BaseType_t detection_created") :
+        wake_word.index("if (detection_created != pdPASS)")
+    ]
     processor_task = processor[processor.index('"audio_communication"') - 180:processor.index('"audio_communication"') + 120]
     input_task = audio_service[audio_service.index('"audio_input"') - 180:audio_service.index('"audio_input"') + 120]
 
+    assert "xTaskCreateWithCaps" in wake_task
     assert '"audio_detection", 4096, this, tskIDLE_PRIORITY + 1' in wake_task
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in wake_task
     assert '"audio_detection", 4096, this, tskIDLE_PRIORITY,' not in wake_task
     assert '"audio_input", 2048 * 5, this, 8' in input_task
     assert '"audio_communication", 4096, this, tskIDLE_PRIORITY + 9' in processor_task

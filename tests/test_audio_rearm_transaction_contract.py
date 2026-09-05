@@ -115,6 +115,20 @@ def test_provisioning_rearm_consumes_once_then_retries_once_after_reclaim():
     assert "return rearmed;" in rearm
 
 
+def test_failed_afe_detection_task_creation_releases_partial_pipeline_before_retry():
+    source = read("main/audio/wake_words/afe_wake_word.cc")
+    initialize = function_body(source, "bool AfeWakeWord::Initialize")
+    failure = function_body(initialize, "if (detection_created != pdPASS)")
+
+    assert "if (afe_config == nullptr)" in initialize
+    assert "if (afe_iface_ == nullptr)" in initialize
+    assert "afe_config_free(afe_config);" in initialize
+    assert "if (afe_data_ == nullptr)" in initialize
+    assert "afe_iface_->destroy(afe_data_);" in failure
+    assert "afe_data_ = nullptr;" in failure
+    assert failure.index("afe_iface_->destroy(afe_data_);") < failure.index("return false;")
+
+
 def test_ci_runs_audio_rearm_transaction_gates():
     workflow = read(".github/workflows/build.yml")
     assert "scripts/run_host_native_audio_worker_start_transaction_test.sh" in workflow
