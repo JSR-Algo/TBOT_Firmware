@@ -1032,8 +1032,7 @@ def test_fw21d_transaction_resolution_and_shared_mutation_are_generation_fenced(
     )
     commit_idx = worker.index("CommitSsidTransaction(ssid_transaction)", pre_commit_fence)
     assert commit_marker < pre_commit_fence < commit_idx
-    assert "vTaskDelete(nullptr);" in worker[pre_commit_fence:commit_idx]
-    assert "return;" in worker[pre_commit_fence:commit_idx]
+    assert "continue;" in worker[pre_commit_fence:commit_idx]
 
     rollback_marker = worker.index(
         "Revalidate setup ownership immediately before transaction rollback",
@@ -1061,8 +1060,7 @@ def test_fw21d_transaction_resolution_and_shared_mutation_are_generation_fenced(
     assert rollback_region.count("RollbackSsidTransaction(ssid_transaction)") >= 2
     assert "ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0)" in rollback_region
     assert rollback_after_commit < shared_marker < post_resolve_fence < first_shared_mutation
-    assert "vTaskDelete(nullptr);" in worker[post_resolve_fence:first_shared_mutation]
-    assert "return;" in worker[post_resolve_fence:first_shared_mutation]
+    assert "continue;" in worker[post_resolve_fence:first_shared_mutation]
 
     ownership = worker[pre_commit_fence:first_shared_mutation]
     assert ownership.count("uint32_t expected_transaction = ssid_transaction;") >= 2
@@ -2173,8 +2171,8 @@ def test_fw28_wifi_connect_fail_lane_resets_flags_and_reports_fail():
     assert "self->m_sta_connected = false;" in fail
     assert "self->m_sta_got_ip = false;" in fail
 
-    # The FAIL conn-report is sent (phone -> WIFI_CONNECT_FAILED).
-    assert "esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL" in fail
+    # BLE is restored so the phone can retry without a BOOT-button recovery.
+    assert "RestoreBleAfterStationFailure(generation)" in fail
 
     # The fail lane must NOT tear BLE down (same-session retry) — re-asserted in
     # this scope so the invariant is anchored to the FAIL branch specifically.
@@ -2368,12 +2366,25 @@ def test_fw32_wifi_completion_worker_creation_failure_cannot_silently_hang():
     blufi = read("main/boards/common/blufi.cpp")
     helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
 
-    assert "BaseType_t created = xTaskCreate(" in helper
-    assert "if (created != pdPASS)" in helper
-    failure = helper[helper.index("if (created != pdPASS)") :]
+    assert "xTaskCreateStatic(" in helper
+    assert "blufi_wifi_connect_task_stack" in helper
+    assert "blufi_wifi_connect_task_buffer" in helper
+    assert "DRAM_ATTR static StackType_t" in blufi
+    assert "DRAM_ATTR static StaticTask_t" in blufi
+    worker = helper[helper.index("xTaskCreateStatic(") :]
+    assert "xQueueReceive(blufi_wifi_connect_queue" in worker
+    assert "for (;;)" in worker
+    assert "vTaskDelete(nullptr);" not in worker
+    assert "vTaskDeleteWithCaps(nullptr);" not in worker
+    assert "if (blufi_wifi_connect_task == nullptr)" in helper
+    assert "if (xQueueSend(blufi_wifi_connect_queue" in helper
+    failure = helper[
+        helper.index("auto reject_worker_start") :
+        helper.index("if (blufi_wifi_connect_queue == nullptr)")
+    ]
     assert "m_wifi_connect_task_started.store(false);" in failure
     assert "m_sta_is_connecting.store(false);" in failure
-    assert "Failed to create BluFi WiFi completion task" in failure
+    assert "Failed to dispatch BluFi WiFi completion work" in failure
 
 
 def test_fw33_boot_reentry_starts_a_new_generation_and_clean_ble_session():
@@ -2435,10 +2446,15 @@ def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_
 
     capture = helper.index("const uint32_t generation = setup_generation_.load();")
     settle_delay = helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
-    spawn = helper.index("xTaskCreate(", capture)
+    spawn = helper.index("xTaskCreateStatic(", capture)
     release = helper.index("ReleaseBleForStationAssociation", spawn)
     start_station = helper.index("wifi.StartStationWithCredentialsIfScanIdle", release)
     assert capture < settle_delay < spawn < release < start_station
+    wait_loop = helper[
+        helper.index("while (waited_ms < kConnectTimeoutMs", start_station):
+        helper.index("std::unique_lock<std::mutex> finalization_lock", start_station)
+    ]
+    assert "generation == self->setup_generation_.load()" in wait_loop
     post_delay = helper[settle_delay:spawn]
     assert "generation != setup_generation_.load()" in post_delay
     assert "generation != self->setup_generation_.load()" in helper
@@ -2454,7 +2470,7 @@ def test_fw37a_wifi_station_handoff_never_blocks_the_blufi_event_callback():
     blufi = read("main/boards/common/blufi.cpp")
     helper = _function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
 
-    spawn = helper.index("xTaskCreate(")
+    spawn = helper.index("xTaskCreateStatic(")
     # StartStationWithCredentialsIfScanIdle owns the active-station teardown in
     # its worker context. Stopping synchronously here can wait forever on an
     # in-flight Wi-Fi callback and strand the phone at the first progress step.
@@ -2564,7 +2580,7 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
 
     # A completion worker from an invalidated setup generation carries its own
     # opaque transaction id; it cannot commit or rollback a newer candidate.
-    assert "uint32_t ssid_transaction;" in helper
+    assert "uint32_t ssid_transaction;" in blufi
     assert "task_ctx->ssid_transaction" in helper
     assert "std::atomic<uint32_t> ssid_transaction_id_" in read(
         "main/boards/common/blufi.h"
@@ -2614,7 +2630,7 @@ def test_fw40_only_exact_candidate_wifi_can_commit_and_report_success():
 
     assert "connected_to_candidate" in helper
     assert "wifi.GetSsid()" in helper
-    assert "std::array<uint8_t" in helper
+    assert "std::array<uint8_t" in read("main/boards/common/blufi.cpp")
     assert "candidate_ssid" in helper
     assert "candidate_ssid_len" in helper
     assert "task_ctx->candidate_ssid" in helper
@@ -2652,7 +2668,7 @@ def test_fw41_early_connect_setup_failures_report_deterministic_sta_fail():
         helper.index("vTaskDelay(pdMS_TO_TICKS(500));")
     ]
     allocation_failure = helper[
-        helper.index("if (ctx == nullptr)") : helper.index("BaseType_t created = xTaskCreate(")
+        helper.index("if (ctx == nullptr)") : helper.index("blufi_wifi_connect_task = xTaskCreateStatic(")
     ]
 
     for failure in (init_failure, allocation_failure):
@@ -2681,7 +2697,9 @@ def test_fw41b_exact_start_rejection_uses_the_single_terminal_failure_lane():
     terminal_start = helper.index(
         "} else {", helper.index("if (credentials_committed)")
     )
-    terminal = helper[terminal_start:helper.index("vTaskDelete(nullptr);", terminal_start)]
+    restore_call = "self->RestoreBleAfterStationFailure(generation);"
+    terminal_end = helper.index(restore_call, terminal_start) + len(restore_call)
+    terminal = helper[terminal_start:terminal_end]
     assert terminal.count("ProvisioningStatusReporter::Report(") == 1
     assert terminal.count("RestoreBleAfterStationFailure(generation)") == 1
 
@@ -2861,7 +2879,10 @@ def test_fw44c_staged_wifi_snapshot_securely_clears_owned_credentials():
     task_delete = helper.index("delete task_ctx;", task_source_clear)
     assert task_copy < task_source_clear < task_delete
 
-    task_create_failure = helper[helper.index("if (created != pdPASS)"):]
+    task_create_failure = helper[
+        helper.index("auto reject_worker_start"):
+        helper.index("if (blufi_wifi_connect_queue == nullptr)")
+    ]
     assert "SecureClearLocalString(ctx->candidate_password);" in task_create_failure
 
 

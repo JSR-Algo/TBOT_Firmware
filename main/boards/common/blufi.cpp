@@ -26,6 +26,7 @@
 #include "esp_mac.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "wifi_manager.h"
 
@@ -112,8 +113,23 @@ struct DelayedClaimRefreshContext {
 
 struct WifiConnectTaskContext {
     Blufi* self;
+    uint32_t generation;
+    uint32_t ssid_transaction;
     Blufi::ProvisioningToken provisioning_token;
+    std::array<uint8_t, 32> candidate_ssid;
+    size_t candidate_ssid_len;
+    std::string candidate_password;
 };
+
+static constexpr uint32_t kBlufiWifiConnectTaskStackDepth = 4096;
+DRAM_ATTR static StaticTask_t blufi_wifi_connect_task_buffer;
+DRAM_ATTR static StackType_t
+    blufi_wifi_connect_task_stack[kBlufiWifiConnectTaskStackDepth];
+DRAM_ATTR static StaticQueue_t blufi_wifi_connect_queue_buffer;
+DRAM_ATTR static uint8_t
+    blufi_wifi_connect_queue_storage[sizeof(WifiConnectTaskContext*)];
+static QueueHandle_t blufi_wifi_connect_queue = nullptr;
+static TaskHandle_t blufi_wifi_connect_task = nullptr;
 
 static void CaptureFirstError(esp_err_t& first_error, esp_err_t error) {
     if (first_error == ESP_OK && error != ESP_OK) {
@@ -2043,15 +2059,6 @@ void Blufi::StartStationConnectFromCredentials(
         return;
     }
 
-    struct WifiConnectTaskContext {
-        Blufi* self;
-        uint32_t generation;
-        uint32_t ssid_transaction;
-        ProvisioningToken provisioning_token;
-        std::array<uint8_t, 32> candidate_ssid;
-        size_t candidate_ssid_len;
-        std::string candidate_password;
-    };
     auto* ctx = new (std::nothrow) WifiConnectTaskContext{
         this, generation, ssid_transaction, provisioning_token, {},
         static_cast<size_t>(m_sta_ssid_len), password};
@@ -2081,9 +2088,45 @@ void Blufi::StartStationConnectFromCredentials(
         return;
     }
 
-    BaseType_t created = xTaskCreate(
-        [](void* ctx) {
-            auto* task_ctx = static_cast<WifiConnectTaskContext*>(ctx);
+    auto reject_worker_start = [&]() {
+        SecureClearLocalString(ctx->candidate_password);
+        delete ctx;
+        ESP_LOGE(BLUFI_TAG, "Failed to dispatch BluFi WiFi completion work");
+        m_wifi_connect_task_started.store(false);
+        m_sta_is_connecting.store(false);
+        ssid_manager.RollbackSsidTransaction(ssid_transaction);
+        uint32_t expected_transaction = ssid_transaction;
+        ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
+
+        wifi_mode_t mode = GetWifiModeWithFallback(wifi_manager);
+        esp_blufi_extra_info_t info = {};
+        info.sta_ssid = m_sta_ssid;
+        info.sta_ssid_len = m_sta_ssid_len;
+        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
+                                        _get_softap_conn_num(), &info);
+    };
+
+    if (blufi_wifi_connect_queue == nullptr) {
+        blufi_wifi_connect_queue = xQueueCreateStatic(
+            1, sizeof(WifiConnectTaskContext*),
+            blufi_wifi_connect_queue_storage,
+            &blufi_wifi_connect_queue_buffer);
+    }
+    if (blufi_wifi_connect_queue == nullptr) {
+        reject_worker_start();
+        return;
+    }
+
+    if (blufi_wifi_connect_task == nullptr) {
+        blufi_wifi_connect_task = xTaskCreateStatic(
+            [](void*) {
+                for (;;) {
+                    WifiConnectTaskContext* task_ctx = nullptr;
+                    if (xQueueReceive(blufi_wifi_connect_queue, &task_ctx,
+                                      portMAX_DELAY) != pdTRUE ||
+                        task_ctx == nullptr) {
+                        continue;
+                    }
             auto* self = task_ctx->self;
             const uint32_t generation = task_ctx->generation;
             const uint32_t ssid_transaction = task_ctx->ssid_transaction;
@@ -2106,8 +2149,7 @@ void Blufi::StartStationConnectFromCredentials(
                     self->m_sta_is_connecting.store(false);
                     self->RestoreBleAfterStationFailure(generation);
                 }
-                vTaskDelete(nullptr);
-                return;
+                continue;
             }
 
             if (generation != self->setup_generation_.load()) {
@@ -2115,8 +2157,7 @@ void Blufi::StartStationConnectFromCredentials(
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
                 uint32_t expected_transaction = ssid_transaction;
                 self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
-                vTaskDelete(nullptr);
-                return;
+                continue;
             }
 
             const std::string candidate_ssid_string(
@@ -2137,7 +2178,8 @@ void Blufi::StartStationConnectFromCredentials(
             int waited_ms = 0;
 
             while (waited_ms < kConnectTimeoutMs && !wifi.IsConnected() &&
-                   exact_station_started) {
+                   exact_station_started &&
+                   generation == self->setup_generation_.load()) {
                 vTaskDelay(kDelayTick);
                 waited_ms += 200;
             }
@@ -2154,8 +2196,7 @@ void Blufi::StartStationConnectFromCredentials(
                 uint32_t expected_transaction = ssid_transaction;
                 self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
                 finalization_lock.unlock();
-                vTaskDelete(nullptr);
-                return;
+                continue;
             }
 
             bool connected_to_candidate = false;
@@ -2181,8 +2222,7 @@ void Blufi::StartStationConnectFromCredentials(
                     uint32_t expected_transaction = ssid_transaction;
                     self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
                     finalization_lock.unlock();
-                    vTaskDelete(nullptr);
-                    return;
+                    continue;
                 }
                 credentials_committed =
                     SsidManager::GetInstance().CommitSsidTransaction(ssid_transaction);
@@ -2197,8 +2237,7 @@ void Blufi::StartStationConnectFromCredentials(
                     uint32_t expected_transaction = ssid_transaction;
                     self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
                     finalization_lock.unlock();
-                    vTaskDelete(nullptr);
-                    return;
+                    continue;
                 }
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
             }
@@ -2211,8 +2250,7 @@ void Blufi::StartStationConnectFromCredentials(
                 ESP_LOGI(BLUFI_TAG,
                          "Ignoring stale BluFi WiFi completion after credential resolution");
                 finalization_lock.unlock();
-                vTaskDelete(nullptr);
-                return;
+                continue;
             }
 
             if (credentials_committed) {
@@ -2335,25 +2373,17 @@ void Blufi::StartStationConnectFromCredentials(
 #endif
                 self->RestoreBleAfterStationFailure(generation);
             }
-            vTaskDelete(nullptr);
-        },
-        "blufi_wifi_conn", 4096, ctx, 5, nullptr);
-    if (created != pdPASS) {
-        SecureClearLocalString(ctx->candidate_password);
-        delete ctx;
-        ESP_LOGE(BLUFI_TAG, "Failed to create BluFi WiFi completion task");
-        m_wifi_connect_task_started.store(false);
-        m_sta_is_connecting.store(false);
-        ssid_manager.RollbackSsidTransaction(ssid_transaction);
-        uint32_t expected_transaction = ssid_transaction;
-        ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
-
-        wifi_mode_t mode = GetWifiModeWithFallback(wifi_manager);
-        esp_blufi_extra_info_t info = {};
-        info.sta_ssid = m_sta_ssid;
-        info.sta_ssid_len = m_sta_ssid_len;
-        esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
-                                        _get_softap_conn_num(), &info);
+                }
+            },
+            "blufi_wifi_conn", kBlufiWifiConnectTaskStackDepth, nullptr, 5,
+            blufi_wifi_connect_task_stack, &blufi_wifi_connect_task_buffer);
+    }
+    if (blufi_wifi_connect_task == nullptr) {
+        reject_worker_start();
+        return;
+    }
+    if (xQueueSend(blufi_wifi_connect_queue, &ctx, 0) != pdTRUE) {
+        reject_worker_start();
     }
 }
 
