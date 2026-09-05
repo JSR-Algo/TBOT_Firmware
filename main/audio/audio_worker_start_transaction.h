@@ -33,8 +33,11 @@ public:
     }
 
     template <typename Delay, typename StartAttempt>
-    static bool Rearm(Delay&& delay, StartAttempt&& start_attempt) {
-        delay(kIdleReclaimDelayMs);
+    static bool Rearm(Delay&& delay, StartAttempt&& start_attempt,
+                      bool delay_before_first_attempt = true) {
+        if (delay_before_first_attempt) {
+            delay(kIdleReclaimDelayMs);
+        }
         for (uint32_t attempt = 1; attempt <= kMaxRearmAttempts; ++attempt) {
             if (start_attempt(attempt)) {
                 return true;

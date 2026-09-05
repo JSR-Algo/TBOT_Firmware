@@ -134,6 +134,7 @@ public:
     // The measured 20 KiB task left only 428 bytes free after live encoding.
     // That is ~19.6 KiB peak; 28 KiB keeps about 8 KiB headroom.
     static constexpr uint32_t kOpusCodecTaskStackBytes = 28 * 1024;
+    static constexpr uint32_t kPostProvisioningNetworkHeadroomBytes = 12 * 1024;
     static constexpr uint32_t kProvisioningWorkerStopTimeoutMs = 5000;
 
     AudioService();
@@ -176,6 +177,8 @@ public:
     void EnableAudioTesting(bool enable);
     void EnableDeviceAec(bool enable);
     WifiProvisioningBeginResult BeginWifiProvisioning();
+    bool ReserveWifiPostAssociationNetworkHeadroom(WifiProvisioningToken token);
+    bool ReleaseWifiPostAssociationNetworkHeadroom(WifiProvisioningToken token);
     bool EndWifiProvisioningAndRearm(WifiProvisioningToken token);
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
@@ -251,6 +254,9 @@ private:
     std::atomic<bool> service_running_{false};
     std::atomic<bool> start_in_progress_{false};
     ProvisioningAudioWorkerState provisioning_audio_workers_;
+    std::mutex wifi_station_network_headroom_mutex_;
+    uint64_t wifi_station_network_headroom_generation_ = 0;
+    void* wifi_station_network_headroom_reservation_ = nullptr;
     bool audio_input_need_warmup_ = false;
 
     // Active response generation for barge-in gen-gating. Written via

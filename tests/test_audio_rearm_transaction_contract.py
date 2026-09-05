@@ -54,18 +54,19 @@ def test_audio_start_returns_checked_complete_worker_result():
     assert checked.index("RollbackWorkerStart();", timer) < publish
 
 
-def test_each_audio_worker_creation_is_checked_and_opus_remains_internal():
+def test_each_audio_worker_creation_is_checked_and_opus_uses_psram_stack():
     source = read("main/audio/audio_service.cc")
     create = function_body(source, "bool AudioService::CreateAudioWorker")
+    opus_start = create.index("case AudioWorker::kOpusCodec")
+    opus_end = create.index("case AudioWorker::kAudioInput", opus_start)
+    opus = create[opus_start:opus_end]
 
     assert create.count("created == pdPASS && task_handle != nullptr") == 3
-    assert create.index("case AudioWorker::kOpusCodec") < create.index(
-        "case AudioWorker::kAudioInput"
-    )
-    assert '"opus_codec", kOpusCodecTaskStackBytes, this' in create
-    assert "xTaskCreateWithCaps" not in create
-    assert "MALLOC_CAP_SPIRAM" not in create
-    assert "kOpusCodecTaskStackBytes / sizeof" not in create
+    assert "xTaskCreateWithCaps" in opus
+    assert '"opus_codec", kOpusCodecTaskStackBytes, this' in opus
+    assert "MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT" in opus
+    assert "vTaskDeleteWithCaps(NULL);" in opus
+    assert "vTaskDelete(NULL);" not in opus
 
 
 def test_creation_failure_logs_safe_internal_heap_diagnostics():
@@ -78,6 +79,52 @@ def test_creation_failure_logs_safe_internal_heap_diagnostics():
     assert "heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)" in failure
     for forbidden in ("ssid", "password", "credential", "audio payload"):
         assert forbidden not in failure.lower()
+
+
+def test_provisioning_keeps_internal_heap_free_for_ble_then_reserves_network_headroom():
+    header = read("main/audio/audio_service.h")
+    source = read("main/audio/audio_service.cc")
+    blufi = read("main/boards/common/blufi.cpp")
+
+    assert "ReserveWifiStationAssociationStack" not in header
+    assert "ReleaseWifiStationAssociationStack" not in header
+    assert "wifi_station_stack_reservation_" not in header
+    assert "bool ReserveWifiPostAssociationNetworkHeadroom(WifiProvisioningToken token);" in header
+    assert "kPostProvisioningNetworkHeadroomBytes" in header
+    assert "wifi_station_network_headroom_reservation_" in header
+    assert "ReserveWifiStationAssociationStack" not in source
+    assert "ReleaseWifiStationAssociationStack" not in source
+
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    start_config = function_body(wifi_board, "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode")
+    begin = start_config.index("BeginWifiProvisioning")
+    restart_ble = start_config.index("RestartForSetup", begin)
+    assert begin < restart_ble
+    assert "ReserveWifiStationAssociationStack" not in start_config
+
+    connect = function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
+    release_ble = connect.index("ReleaseBleForStationAssociation(generation)")
+    reserve_network = connect.index("ReserveWifiPostAssociationNetworkHeadroom", release_ble)
+    start_station = connect.index("wifi.StartStationWithCredentialsIfScanIdle", reserve_network)
+    assert release_ble < reserve_network < start_station
+
+
+def test_network_headroom_is_released_at_rearm_or_before_ble_restore():
+    source = read("main/audio/audio_service.cc")
+    blufi = read("main/boards/common/blufi.cpp")
+
+    rearm = function_body(source, "bool AudioService::EndWifiProvisioningAndRearm")
+    start = rearm.index("AudioWorkerStartTransaction::Rearm")
+    release_network = rearm.index("ReleaseWifiPostAssociationNetworkHeadroom(token)", start)
+    assert start < release_network
+    assert "reserved_stack_released" not in rearm
+
+    restore = function_body(blufi, "void Blufi::RestoreBleAfterStationFailure")
+    release_network = restore.index(
+        "ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token)"
+    )
+    init = restore.index("InitWithLifecycleOwned()", release_network)
+    assert release_network < init
 
 
 def test_failed_start_stops_waits_and_leaves_service_stopped():

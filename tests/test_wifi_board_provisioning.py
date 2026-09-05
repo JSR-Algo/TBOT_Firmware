@@ -41,7 +41,7 @@ def _start_wifi_config_body(wifi_board: str) -> str:
     """Body of WifiBoard::StartWifiConfigMode() up to EnterWifiConfigMode()."""
     return _func_body(
         wifi_board,
-        "void WifiBoard::StartWifiConfigMode(",
+        "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(",
         "void WifiBoard::EnterWifiConfigMode()",
     )
 
@@ -99,10 +99,10 @@ def test_wb1_start_config_mode_setup_step_ordering():
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
 
     assert reserve_idx < release_idx < commit_idx < restart_idx
-    assert restart_idx < state_idx < stop_idx < config_idx < timer_idx, (
+    assert restart_idx < state_idx < config_idx < stop_idx < timer_idx, (
         "StartWifiConfigMode() BLE setup steps must run in order: "
         "reservation -> wake-word release -> binding -> restart success -> "
-        "checked state publication -> station/config mutation -> StartBleSetupTimeout()"
+        "checked state publication -> config/station mutation -> StartBleSetupTimeout()"
     )
     assert "if (blufi_restart_error != ESP_OK)" in body
     restart_failure = body[body.index("if (blufi_restart_error != ESP_OK)"):stop_idx]
@@ -177,7 +177,7 @@ def test_wb4_ap_state_string_active_requires_both_flags_else_off():
     body = _func_body(
         wifi_board,
         "const char* WifiBoard::GetApStateString()",
-        "void WifiBoard::StartWifiConfigMode(",
+        "void WifiBoard::RequestWifiConfigMode(",
     )
 
     # "active" is gated on BOTH the board flag AND the manager's IsConfigMode().
@@ -218,7 +218,7 @@ def test_wb5_station_connect_timeout_is_60_seconds():
         "void WifiBoard::OnWifiConnectTimeout(",
         "// ---",
     )
-    assert "RequestWifiConfigMode();" in timeout_body
+    assert "RequestWifiConfigMode(false, true);" in timeout_body
     assert "StopStation" not in timeout_body
 
 
@@ -232,7 +232,7 @@ def test_wifi_connect_timeout_ignores_active_lesson_before_station_or_setup_side
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in timeout_body
     guard_idx = timeout_body.index("Application::GetInstance().IsLessonRuntimeActive()")
-    setup_idx = timeout_body.index("RequestWifiConfigMode();")
+    setup_idx = timeout_body.index("RequestWifiConfigMode(false, true);")
     assert guard_idx < setup_idx
     guard = timeout_body[guard_idx:setup_idx]
     assert "return;" in guard
@@ -246,14 +246,8 @@ def test_wifi_config_entry_uses_main_task_request_without_delayed_worker_side_ef
         "void WifiBoard::EnterWifiConfigMode()",
         "bool WifiBoard::IsInWifiConfigMode()",
     )
-    assert "app.IsLessonRuntimeActive()" in enter_body
-    guard_idx = enter_body.index("app.IsLessonRuntimeActive()")
-    setup_idx = enter_body.index("RequestWifiConfigMode(true)")
-    assert guard_idx < setup_idx
-    guard = enter_body[guard_idx:setup_idx]
-    assert "return;" in guard
-    assert "StopStation" not in guard
-    assert "RequestWifiConfigMode" not in guard
+    assert "RequestWifiConfigMode(true)" in enter_body
+    assert "IsLessonRuntimeActive" not in enter_body
     assert "xTaskCreate" not in enter_body
     assert "StopStation" not in enter_body
     assert "esp_timer_stop" not in enter_body
@@ -292,10 +286,16 @@ def test_wifi_config_entry_is_one_idempotent_main_task_transaction():
     request_body = _func_body(
         wifi_board,
         "void WifiBoard::RequestWifiConfigMode(",
-        "void WifiBoard::StartWifiConfigMode(",
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
     )
-    assert "compare_exchange_strong" in request_body
-    assert "wifi_config_entry_pending_.store(false)" in request_body
+    assert "wifi_config_entry_intent_.fetch_or" in request_body
+    drain = _func_body(
+        wifi_board,
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+        "void WifiBoard::ArmWifiConfigIntentRetry(",
+    )
+    assert "compare_exchange_strong" in drain
+    assert "wifi_config_entry_pending_.store(false)" in drain
 
 
 def test_application_prepares_realtime_before_blufi_and_checks_publication():
@@ -378,7 +378,7 @@ def test_start_wifi_config_mode_ignores_active_lesson_before_setup_side_effects(
     state_idx = body.index("PublishWifiConfigEntry(preparation)")
     assert guard_idx < preflight_idx < state_idx < config_flag_idx
     guard = body[guard_idx:preflight_idx]
-    assert "return;" in guard
+    assert "return WifiConfigEntryResult::kRetry;" in guard
     assert "in_config_mode_" not in guard
     assert "SetDeviceState" not in guard
     assert "StartConfigAp" not in guard
@@ -674,3 +674,208 @@ def test_wb13_config_mode_exit_reattempts_connect_after_cancel():
         "config-mode exit must cancel the AP hard-timeout before re-attempting "
         "the connection through the single TryWifiConnect() entry"
     )
+
+
+# ---------------------------------------------------------------------------
+# WB14: A claimed robot that loses Wi-Fi at runtime must eventually recover to
+#       BLE setup without a BOOT press. Arm the existing station timeout once;
+#       repeated disconnect events must not slide the deadline indefinitely.
+#       Active lessons and an already-open config session keep ownership.
+# ---------------------------------------------------------------------------
+def test_wb14_runtime_disconnect_arms_non_sliding_recovery_timeout():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    fn = _func_body(
+        wifi_board,
+        "void WifiBoard::OnNetworkEvent(",
+        "void WifiBoard::SetNetworkEventCallback(",
+    )
+    case_idx = fn.index("case NetworkEvent::Disconnected:")
+    case_end = fn.index("case NetworkEvent::WifiConfigModeEnter:", case_idx)
+    body = fn[case_idx:case_end]
+
+    assert "!in_config_mode_" in body
+    active_guard = "!esp_timer_is_active(connect_timer_)"
+    assert active_guard in body
+    arm = "esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)"
+    assert arm in body
+    assert body.index(active_guard) < body.index(arm), (
+        "runtime disconnect must only arm an inactive timer so repeated events "
+        "cannot restart the 60-second recovery window"
+    )
+
+
+def test_wb15_runtime_reconnect_cancels_pending_recovery_timeout():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _connected_event_body(wifi_board)
+
+    assert "esp_timer_stop(connect_timer_);" in body
+
+
+def test_wb16_runtime_recovery_rearms_while_lesson_owns_the_robot():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _func_body(
+        wifi_board,
+        "void WifiBoard::OnWifiConnectTimeout(",
+        "// ---",
+    )
+
+    lesson_idx = body.index("IsLessonRuntimeActive()")
+    rearm_idx = body.index(
+        "esp_timer_start_once(board->connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)",
+        lesson_idx,
+    )
+    return_idx = body.index("return;", lesson_idx)
+    request_idx = body.index("board->RequestWifiConfigMode(false, true);")
+    assert lesson_idx < rearm_idx < return_idx < request_idx
+    assert "board->in_config_mode_" in body[:request_idx]
+
+
+def test_wb17_config_entry_marks_mode_before_synchronous_station_stop():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _start_wifi_config_body(wifi_board)
+
+    mark_idx = body.index("in_config_mode_ = true;")
+    stop_idx = body.index("WifiManager::GetInstance().StopStation();")
+    assert mark_idx < stop_idx, (
+        "StopStation emits Disconnected synchronously, so config ownership must "
+        "be visible before the event can try to arm runtime recovery"
+    )
+
+
+def test_wb18_automatic_timeout_request_rechecks_connection_on_main_task():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    timeout_body = _func_body(
+        wifi_board,
+        "void WifiBoard::OnWifiConnectTimeout(",
+        "// ---",
+    )
+    request_body = _func_body(
+        wifi_board,
+        "void WifiBoard::RequestWifiConfigMode(",
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+    )
+    start_body = _start_wifi_config_body(wifi_board)
+
+    assert "board->RequestWifiConfigMode(false, true);" in timeout_body
+    assert "require_disconnected" in request_body
+    assert "WifiManager::GetInstance().IsConnected()" in start_body
+    assert start_body.index("IsConnected()") < start_body.index("PrepareWifiConfigEntry(")
+
+
+def test_wb19_explicit_setup_upgrades_a_pending_conditional_recovery():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    wifi_header = read("main/boards/common/wifi_board.h")
+    body = _func_body(
+        wifi_board,
+        "void WifiBoard::RequestWifiConfigMode(",
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+    )
+    drain = _func_body(
+        wifi_board,
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+        "void WifiBoard::ArmWifiConfigIntentRetry(",
+    )
+
+    assert "wifi_config_entry_intent_" in wifi_header
+    assert "kWifiConfigIntentConditional" in body
+    assert "kWifiConfigIntentExplicit" in body
+    assert "wifi_config_entry_intent_.fetch_or" in body
+    explicit = drain.index("kWifiConfigIntentExplicit")
+    conditional = drain.index("conditional_entry", explicit)
+    assert explicit < conditional
+
+
+def test_wb20_config_mode_state_is_atomic_across_timer_wifi_and_app_tasks():
+    wifi_header = read("main/boards/common/wifi_board.h")
+
+    assert "std::atomic<bool> in_config_mode_{false};" in wifi_header, (
+        "in_config_mode_ is read by ESP_TIMER_TASK and written by Wi-Fi/application "
+        "tasks, so a plain bool creates a C++ data race and can lose recovery"
+    )
+
+
+def test_wb21_config_entry_rearms_recovery_if_lesson_starts_after_timer_dispatch():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _start_wifi_config_body(wifi_board)
+
+    lesson_idx = body.index("IsLessonRuntimeActive()")
+    rearm_idx = body.index("ArmWifiConfigIntentRetry();", lesson_idx)
+    return_idx = body.index("return WifiConfigEntryResult::kRetry;", lesson_idx)
+    assert lesson_idx < rearm_idx < return_idx, (
+        "a lesson can start after the timer callback queues config entry; the "
+        "application-task guard must rearm recovery instead of losing it"
+    )
+
+
+def test_wb22_lesson_deferral_preserves_explicit_setup_intent():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    wifi_header = read("main/boards/common/wifi_board.h")
+    request_body = _func_body(
+        wifi_board,
+        "void WifiBoard::RequestWifiConfigMode(",
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+    )
+    start_body = _start_wifi_config_body(wifi_board)
+
+    assert "WifiConfigEntryResult StartWifiConfigMode" in wifi_header
+    assert "wifi_config_entry_intent_.fetch_or" in request_body
+    lesson_idx = start_body.index("IsLessonRuntimeActive()")
+    return_idx = start_body.index("return WifiConfigEntryResult::kRetry;", lesson_idx)
+    assert "wifi_config_entry_intent_" not in start_body[lesson_idx:return_idx]
+    app = read("main/application.cc")
+    lesson_end = _func_body(
+        app,
+        "void Application::SetLessonRuntimeActive(",
+        "void Application::BeginLessonTerminalAudioQuiet(",
+    )
+    assert "ResumePendingWifiConfigMode" in lesson_end
+
+
+def test_wb23_config_entry_uses_one_level_triggered_intent_word():
+    header = read("main/boards/common/wifi_board.h")
+    source = read("main/boards/common/wifi_board.cc")
+
+    assert "wifi_config_entry_intent_" in header
+    assert "wifi_config_entry_force_" not in header
+    assert "wifi_config_entry_show_notification_" not in header
+    request = _func_body(
+        source,
+        "void WifiBoard::RequestWifiConfigMode(",
+        "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(",
+    )
+    assert "fetch_or" in request
+    assert "wifi_config_entry_intent_.store(0)" not in request
+
+
+def test_wb24_conditional_recovery_rechecks_connection_at_commit_boundary():
+    source = read("main/boards/common/wifi_board.cc")
+    start = _start_wifi_config_body(source)
+
+    publish = start.index("app.PublishWifiConfigEntry(preparation)")
+    stop = start.index("WifiManager::GetInstance().StopStation()", publish)
+    commit_guard = start.index("WifiManager::GetInstance().IsConnected()", publish)
+    assert publish < commit_guard < stop
+    rollback = start[commit_guard:stop]
+    assert "AbortProvisioningSetup" in rollback
+    assert "RollbackWifiConfigEntry" in rollback
+    assert "kCancelled" in rollback
+
+
+def test_wb25_failed_or_lesson_deferred_entry_keeps_intent_for_retry():
+    header = read("main/boards/common/wifi_board.h")
+    source = read("main/boards/common/wifi_board.cc")
+    request = _func_body(
+        source,
+        "void WifiBoard::RequestWifiConfigMode(",
+        "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(",
+    )
+    start = _start_wifi_config_body(source)
+
+    assert "enum class WifiConfigEntryResult" in header
+    assert "kStarted" in header and "kCancelled" in header and "kRetry" in header
+    assert "if (result == WifiConfigEntryResult::kStarted)" in request
+    assert "wifi_config_entry_intent_.fetch_and" in request
+    assert "ScheduleWifiConfigIntentDrain" in request
+    assert "return WifiConfigEntryResult::kRetry;" in start
+    lesson = start[start.index("IsLessonRuntimeActive()"):]
+    assert "return WifiConfigEntryResult::kRetry;" in lesson

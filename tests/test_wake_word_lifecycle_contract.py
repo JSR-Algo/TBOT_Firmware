@@ -61,8 +61,9 @@ def test_begin_failure_after_quiescence_stays_fail_closed_without_rearm():
         assert "return {{}, false};" in failure
         assert "EndProvisioningAndRearm" not in failure
 
-    start = wifi[wifi.index("void WifiBoard::StartWifiConfigMode("):]
-    start = start[:wifi.index("void WifiBoard::EnterWifiConfigMode()") - wifi.index("void WifiBoard::StartWifiConfigMode(")]
+    signature = "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode("
+    start = wifi[wifi.index(signature):]
+    start = start[:wifi.index("void WifiBoard::EnterWifiConfigMode()") - wifi.index(signature)]
     begin_failure = start[start.index("if (!begin_result)"):start.index("const auto provisioning_token")]
     assert "if (begin_result.rollback_complete)" in begin_failure
     assert "RollbackWifiConfigEntry(preparation)" in begin_failure
@@ -87,7 +88,7 @@ def test_wifi_provisioning_drains_resident_audio_workers_before_blufi_init():
     assert "bool WaitForServiceWorkersStopped(uint32_t timeout_ms);" in audio_h
 
     entry = wifi[
-        wifi.index("void WifiBoard::StartWifiConfigMode("):
+        wifi.index("WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode("):
         wifi.index("void WifiBoard::EnterWifiConfigMode()")
     ]
     assert entry.index("BeginWifiProvisioning()") < entry.index("blufi.RestartForSetup()")
@@ -186,7 +187,7 @@ def test_afe_discards_fetch_from_superseded_run_generation():
 
 def test_wifi_provisioning_rearms_only_after_ble_deinit():
     source = read("main/boards/common/wifi_board.cc")
-    start = source.index("void WifiBoard::StartWifiConfigMode(")
+    start = source.index("WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(")
     start_body = source[start:source.index("void WifiBoard::EnterWifiConfigMode()", start)]
     assert start_body.index("BeginWifiProvisioning()") < start_body.index("blufi.RestartForSetup();")
 

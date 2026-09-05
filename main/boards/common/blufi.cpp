@@ -1219,7 +1219,10 @@ bool Blufi::ReleaseBleForStationAssociation(uint32_t expected_generation) {
     return expected_generation == setup_generation_.load() && IsBleStackFullyOff();
 }
 
-void Blufi::RestoreBleAfterStationFailure(uint32_t expected_generation) {
+void Blufi::RestoreBleAfterStationFailure(
+        uint32_t expected_generation, ProvisioningToken provisioning_token) {
+    Application::GetInstance().GetAudioService()
+        .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
     Application::GetInstance().Schedule([this, expected_generation]() {
         std::lock_guard<std::mutex> lifecycle_lock(ble_lifecycle_mutex_);
         uint32_t restore_generation = 0;
@@ -2147,7 +2150,7 @@ void Blufi::StartStationConnectFromCredentials(
                 if (generation == self->setup_generation_.load()) {
                     self->m_wifi_connect_task_started.store(false);
                     self->m_sta_is_connecting.store(false);
-                    self->RestoreBleAfterStationFailure(generation);
+                    self->RestoreBleAfterStationFailure(generation, provisioning_token);
                 }
                 continue;
             }
@@ -2157,6 +2160,22 @@ void Blufi::StartStationConnectFromCredentials(
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
                 uint32_t expected_transaction = ssid_transaction;
                 self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
+                Application::GetInstance().GetAudioService()
+                    .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
+                continue;
+            }
+
+            if (!Application::GetInstance().GetAudioService()
+                    .ReserveWifiPostAssociationNetworkHeadroom(provisioning_token)) {
+                SecureClearLocalString(candidate_password);
+                ESP_LOGE(BLUFI_TAG,
+                         "Unable to reserve network headroom before WiFi association");
+                SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
+                uint32_t expected_transaction = ssid_transaction;
+                self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
+                self->m_wifi_connect_task_started.store(false);
+                self->m_sta_is_connecting.store(false);
+                self->RestoreBleAfterStationFailure(generation, provisioning_token);
                 continue;
             }
 
@@ -2196,6 +2215,8 @@ void Blufi::StartStationConnectFromCredentials(
                 uint32_t expected_transaction = ssid_transaction;
                 self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
                 finalization_lock.unlock();
+                Application::GetInstance().GetAudioService()
+                    .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                 continue;
             }
 
@@ -2222,6 +2243,8 @@ void Blufi::StartStationConnectFromCredentials(
                     uint32_t expected_transaction = ssid_transaction;
                     self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
                     finalization_lock.unlock();
+                    Application::GetInstance().GetAudioService()
+                        .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                     continue;
                 }
                 credentials_committed =
@@ -2237,6 +2260,8 @@ void Blufi::StartStationConnectFromCredentials(
                     uint32_t expected_transaction = ssid_transaction;
                     self->ssid_transaction_id_.compare_exchange_strong(expected_transaction, 0);
                     finalization_lock.unlock();
+                    Application::GetInstance().GetAudioService()
+                        .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                     continue;
                 }
                 SsidManager::GetInstance().RollbackSsidTransaction(ssid_transaction);
@@ -2250,6 +2275,8 @@ void Blufi::StartStationConnectFromCredentials(
                 ESP_LOGI(BLUFI_TAG,
                          "Ignoring stale BluFi WiFi completion after credential resolution");
                 finalization_lock.unlock();
+                Application::GetInstance().GetAudioService()
+                    .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                 continue;
             }
 
@@ -2286,6 +2313,8 @@ void Blufi::StartStationConnectFromCredentials(
                         ESP_LOGI(BLUFI_TAG,
                                  "Ignoring stale BluFi WiFi completion continuation");
                         continuation_lock.unlock();
+                        Application::GetInstance().GetAudioService()
+                            .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                         return;
                     }
                     const bool code_based_provisioning =
@@ -2299,6 +2328,8 @@ void Blufi::StartStationConnectFromCredentials(
                         teardown_completed ||
                         self->WasProvisioningSuccessfullyCompleted(provisioning_token);
                     if (!completion_recorded) {
+                        Application::GetInstance().GetAudioService()
+                            .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                         return;
                     }
                     self->provisioning_session_.AcknowledgeSuccessfullyCompleted(
@@ -2315,6 +2346,9 @@ void Blufi::StartStationConnectFromCredentials(
                     std::unique_lock<std::mutex> continuation_lock(
                         self->provisioning_finalization_mutex_);
                     if (generation != self->setup_generation_.load()) {
+                        continuation_lock.unlock();
+                        Application::GetInstance().GetAudioService()
+                            .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                         return;
                     }
                     continuation_lock.unlock();
@@ -2326,6 +2360,8 @@ void Blufi::StartStationConnectFromCredentials(
                         teardown_completed ||
                         self->WasProvisioningSuccessfullyCompleted(provisioning_token);
                     if (!completion_recorded) {
+                        Application::GetInstance().GetAudioService()
+                            .ReleaseWifiPostAssociationNetworkHeadroom(provisioning_token);
                         return;
                     }
                     self->provisioning_session_.AcknowledgeSuccessfullyCompleted(
@@ -2371,7 +2407,7 @@ void Blufi::StartStationConnectFromCredentials(
                 SecureClearLocalString(failure_token);
                 SecureClearLocalString(failure_code);
 #endif
-                self->RestoreBleAfterStationFailure(generation);
+                self->RestoreBleAfterStationFailure(generation, provisioning_token);
             }
                 }
             },

@@ -47,6 +47,12 @@ AudioService::AudioService() {
 }
 
 AudioService::~AudioService() {
+    {
+        std::lock_guard<std::mutex> lock(wifi_station_network_headroom_mutex_);
+        heap_caps_free(wifi_station_network_headroom_reservation_);
+        wifi_station_network_headroom_reservation_ = nullptr;
+        wifi_station_network_headroom_generation_ = 0;
+    }
     if (event_group_ != nullptr) {
         vEventGroupDelete(event_group_);
     }
@@ -166,7 +172,7 @@ bool AudioService::CreateAudioWorker(AudioWorker worker) {
             TaskHandle_t task_handle;
             {
                 std::lock_guard<std::mutex> lock(task_handle_mutex_);
-                created = xTaskCreate([](void* arg) {
+                created = xTaskCreateWithCaps([](void* arg) {
                     AudioService* audio_service =
                         static_cast<AudioService*>(arg);
                     audio_service->OpusCodecTask();
@@ -175,9 +181,10 @@ bool AudioService::CreateAudioWorker(AudioWorker worker) {
                             audio_service->task_handle_mutex_);
                         audio_service->opus_codec_task_handle_ = nullptr;
                     }
-                    vTaskDelete(NULL);
+                    vTaskDeleteWithCaps(NULL);
                 }, "opus_codec", kOpusCodecTaskStackBytes, this, 2,
-                &opus_codec_task_handle_);
+                &opus_codec_task_handle_,
+                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
                 task_handle = opus_codec_task_handle_;
                 if (created == pdPASS && task_handle != nullptr) {
                     return true;
@@ -985,6 +992,51 @@ AudioService::WifiProvisioningBeginResult AudioService::BeginWifiProvisioning() 
     return {provisioning_token, false};
 }
 
+bool AudioService::ReserveWifiPostAssociationNetworkHeadroom(
+        WifiProvisioningToken token) {
+    if (!token.valid()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(wifi_station_network_headroom_mutex_);
+    if (wifi_station_network_headroom_reservation_ != nullptr) {
+        return wifi_station_network_headroom_generation_ == token.generation;
+    }
+    wifi_station_network_headroom_reservation_ = heap_caps_malloc(
+        kPostProvisioningNetworkHeadroomBytes,
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (wifi_station_network_headroom_reservation_ == nullptr) {
+        ESP_LOGE(TAG,
+                 "Unable to reserve post-provisioning network headroom: "
+                 "dma_free=%u dma_largest=%u",
+                 static_cast<unsigned>(
+                     heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)),
+                 static_cast<unsigned>(heap_caps_get_largest_free_block(
+                     MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)));
+        return false;
+    }
+    wifi_station_network_headroom_generation_ = token.generation;
+    ESP_LOGI(TAG, "Reserved network headroom after BLE teardown");
+    return true;
+}
+
+bool AudioService::ReleaseWifiPostAssociationNetworkHeadroom(
+        WifiProvisioningToken token) {
+    void* reservation = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(
+            wifi_station_network_headroom_mutex_);
+        if (wifi_station_network_headroom_reservation_ == nullptr ||
+            wifi_station_network_headroom_generation_ != token.generation) {
+            return false;
+        }
+        reservation = wifi_station_network_headroom_reservation_;
+        wifi_station_network_headroom_reservation_ = nullptr;
+        wifi_station_network_headroom_generation_ = 0;
+    }
+    heap_caps_free(reservation);
+    return true;
+}
+
 bool AudioService::EndWifiProvisioningAndRearm(WifiProvisioningToken token) {
     if (!wake_word_lifecycle_.EndProvisioningAndRearm(token)) {
         return false;
@@ -996,6 +1048,7 @@ bool AudioService::EndWifiProvisioningAndRearm(WifiProvisioningToken token) {
         return false;
     }
     if (!completion.restart_required) {
+        ReleaseWifiPostAssociationNetworkHeadroom(token);
         return true;
     }
 
@@ -1005,7 +1058,8 @@ bool AudioService::EndWifiProvisioningAndRearm(WifiProvisioningToken token) {
         },
         [this](uint32_t attempt) {
             return StartWorkers(attempt);
-        });
+        }, false);
+    ReleaseWifiPostAssociationNetworkHeadroom(token);
     ESP_LOGI(TAG, "Audio provisioning rearm complete_workers=%d",
              static_cast<int>(rearmed));
     return rearmed;

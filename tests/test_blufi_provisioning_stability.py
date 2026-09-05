@@ -21,7 +21,7 @@ def read(path: str) -> str:
 
 def _start_wifi_config_body(wifi_board: str) -> str:
     """The body of WifiBoard::StartWifiConfigMode() up to the next function."""
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
+    start = wifi_board.index("WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(")
     end = wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)
     return wifi_board[start:end]
 
@@ -461,7 +461,7 @@ def test_fw10_wifi_connect_fail_lane_never_clears_claim_secrets():
 
     # BLE is already off for station association. Failure returns to a fresh BLE
     # setup generation automatically, without consuming the claim secrets.
-    assert "RestoreBleAfterStationFailure(generation)" in region
+    assert "RestoreBleAfterStationFailure(generation, provisioning_token)" in region
     assert "xTaskCreate(" not in region
 
 
@@ -2172,7 +2172,7 @@ def test_fw28_wifi_connect_fail_lane_resets_flags_and_reports_fail():
     assert "self->m_sta_got_ip = false;" in fail
 
     # BLE is restored so the phone can retry without a BOOT-button recovery.
-    assert "RestoreBleAfterStationFailure(generation)" in fail
+    assert "RestoreBleAfterStationFailure(generation, provisioning_token)" in fail
 
     # The fail lane must NOT tear BLE down (same-session retry) — re-asserted in
     # this scope so the invariant is anchored to the FAIL branch specifically.
@@ -2432,12 +2432,14 @@ def test_fw36_rapid_boot_wifi_config_entries_are_epoch_scoped_and_single_flight(
     wifi_board = read("main/boards/common/wifi_board.cc")
     enter = _function_body(wifi_board, "void WifiBoard::EnterWifiConfigMode")
     request = _function_body(wifi_board, "void WifiBoard::RequestWifiConfigMode")
+    drain = _function_body(wifi_board, "void WifiBoard::ScheduleWifiConfigIntentDrain")
 
     assert "wifi_config_entry_pending_" in header
     assert "RequestWifiConfigMode(true);" in enter
-    assert "wifi_config_entry_pending_.compare_exchange_strong" in request
-    assert "WiFi config request coalesced while entry is pending" in request
-    assert "wifi_config_entry_pending_.store(false)" in request
+    assert "wifi_config_entry_intent_.fetch_or" in request
+    assert "wifi_config_entry_pending_.compare_exchange_strong" in drain
+    assert "WiFi config request coalesced while entry is pending" in drain
+    assert "wifi_config_entry_pending_.store(false)" in drain
 
 
 def test_fw37_wifi_completion_generation_is_captured_before_spawn_and_rechecked_on_app_task():
@@ -2568,7 +2570,7 @@ def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_facto
     assert "SsidManager::GetInstance().AddSsid(ssid, password);" not in helper[:success_idx]
     failure = helper[failure_branch_idx:]
     assert "m_provisioned = false;" in failure
-    assert "RestoreBleAfterStationFailure(generation)" in failure
+    assert "RestoreBleAfterStationFailure(generation, provisioning_token)" in failure
     assert "ClearProvisioningSecrets" not in failure
 
     for method in (
@@ -2697,11 +2699,11 @@ def test_fw41b_exact_start_rejection_uses_the_single_terminal_failure_lane():
     terminal_start = helper.index(
         "} else {", helper.index("if (credentials_committed)")
     )
-    restore_call = "self->RestoreBleAfterStationFailure(generation);"
+    restore_call = "self->RestoreBleAfterStationFailure(generation, provisioning_token);"
     terminal_end = helper.index(restore_call, terminal_start) + len(restore_call)
     terminal = helper[terminal_start:terminal_end]
     assert terminal.count("ProvisioningStatusReporter::Report(") == 1
-    assert terminal.count("RestoreBleAfterStationFailure(generation)") == 1
+    assert terminal.count(restore_call) == 1
 
 
 def test_fw42_wifi_connect_single_flight_is_atomic_and_teardown_errors_are_preserved():

@@ -13,11 +13,20 @@
 class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
-    bool in_config_mode_ = false;
+    std::atomic<bool> in_config_mode_{false};
     std::atomic<bool> wifi_config_entry_pending_{false};
+    std::atomic<uint32_t> wifi_config_entry_intent_{0};
+    std::atomic<uint32_t> wifi_config_entry_request_generation_{0};
     NetworkEventCallback network_event_callback_ = nullptr;
-    std::atomic<uint32_t> wifi_config_entry_generation_{0};
-    std::atomic<bool> wifi_config_entry_inflight_{false};
+
+    enum class WifiConfigEntryResult : uint8_t {
+        kStarted,
+        kCancelled,
+        kRetry,
+    };
+    static constexpr uint32_t kWifiConfigIntentConditional = 1u << 0;
+    static constexpr uint32_t kWifiConfigIntentExplicit = 1u << 1;
+    static constexpr uint32_t kWifiConfigIntentNotify = 1u << 2;
 
     // AP-setup hard-timeout safety gate (mirrors the BLE gate in blufi.cpp).
     // SoftAP/Hotspot provisioning must NOT run forever: when this one-shot timer
@@ -64,8 +73,11 @@ protected:
     /**
      * Enter WiFi configuration mode
      */
-    void RequestWifiConfigMode(bool show_notification = false);
-    void StartWifiConfigMode(bool show_notification = false);
+    void RequestWifiConfigMode(bool show_notification = false, bool require_disconnected = false);
+    void ScheduleWifiConfigIntentDrain();
+    void ArmWifiConfigIntentRetry();
+    WifiConfigEntryResult StartWifiConfigMode(bool show_notification = false,
+                                              bool require_disconnected = false);
 
     /**
      * WiFi connection timeout callback
@@ -100,6 +112,7 @@ public:
      * Check if in WiFi config mode
      */
     bool IsInWifiConfigMode() const;
+    void ResumePendingWifiConfigMode();
 };
 
 #endif // WIFI_BOARD_H

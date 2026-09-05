@@ -151,6 +151,18 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             break;
         case NetworkEvent::Disconnected:
             ESP_LOGW(TAG, "WiFi disconnected");
+            // A runtime outage must converge to the same automatic recovery as
+            // an initial connection failure. Keep the first deadline fixed so
+            // repeated disconnect callbacks cannot postpone BLE setup forever.
+            if (!in_config_mode_
+                    && !esp_timer_is_active(connect_timer_)) {
+                const esp_err_t timer_error =
+                    esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+                if (timer_error != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to arm WiFi recovery timeout: %s",
+                        esp_err_to_name(timer_error));
+                }
+            }
             break;
         case NetworkEvent::WifiConfigModeEnter:
             ESP_LOGI(TAG, "WiFi config mode entered");
@@ -182,12 +194,22 @@ void WifiBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
 void WifiBoard::OnWifiConnectTimeout(void* arg) {
     auto* board = static_cast<WifiBoard*>(arg);
     ESP_LOGW(TAG, "WiFi connection timeout, entering config mode");
+    if (board->in_config_mode_) {
+        ESP_LOGI(TAG, "WiFi connection timeout ignored because config mode is active");
+        return;
+    }
     if (Application::GetInstance().IsLessonRuntimeActive()) {
-        ESP_LOGI(TAG, "WiFi connection timeout ignored during lesson");
+        ESP_LOGI(TAG, "WiFi connection timeout deferred during lesson");
+        const esp_err_t timer_error =
+            esp_timer_start_once(board->connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+        if (timer_error != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to defer WiFi recovery timeout: %s",
+                esp_err_to_name(timer_error));
+        }
         return;
     }
 
-    board->RequestWifiConfigMode();
+    board->RequestWifiConfigMode(false, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -268,28 +290,99 @@ const char* WifiBoard::GetApStateString() const {
     return "off";
 }
 
-void WifiBoard::RequestWifiConfigMode(bool show_notification) {
+void WifiBoard::RequestWifiConfigMode(bool show_notification, bool require_disconnected) {
+    uint32_t requested_flags = require_disconnected
+        ? kWifiConfigIntentConditional
+        : kWifiConfigIntentExplicit;
+    if (show_notification) {
+        requested_flags |= kWifiConfigIntentNotify;
+    }
+    wifi_config_entry_intent_.fetch_or(
+        requested_flags, std::memory_order_acq_rel);
+    wifi_config_entry_request_generation_.fetch_add(
+        1, std::memory_order_acq_rel);
+    ScheduleWifiConfigIntentDrain();
+}
+
+void WifiBoard::ScheduleWifiConfigIntentDrain() {
     bool expected = false;
     if (!wifi_config_entry_pending_.compare_exchange_strong(expected, true)) {
         ESP_LOGI(TAG, "WiFi config request coalesced while entry is pending");
         return;
     }
-    Application::GetInstance().Schedule([this, show_notification]() {
-        StartWifiConfigMode(show_notification);
+    Application::GetInstance().Schedule([this]() {
+        const uint32_t snapshot =
+            wifi_config_entry_intent_.load(std::memory_order_acquire);
+        const uint32_t request_generation =
+            wifi_config_entry_request_generation_.load(
+                std::memory_order_acquire);
+        const uint32_t flags = snapshot;
+        const bool explicit_entry = (flags & kWifiConfigIntentExplicit) != 0;
+        const bool conditional_entry =
+            !explicit_entry && (flags & kWifiConfigIntentConditional) != 0;
+        WifiConfigEntryResult result = WifiConfigEntryResult::kCancelled;
+        if (flags != 0) {
+            result = StartWifiConfigMode(
+                (flags & kWifiConfigIntentNotify) != 0, conditional_entry);
+        }
+
+        if (result == WifiConfigEntryResult::kStarted) {
+            wifi_config_entry_intent_.fetch_and(
+                ~(kWifiConfigIntentConditional | kWifiConfigIntentExplicit |
+                  kWifiConfigIntentNotify),
+                std::memory_order_acq_rel);
+        } else if (result == WifiConfigEntryResult::kCancelled) {
+            wifi_config_entry_intent_.fetch_and(
+                ~kWifiConfigIntentConditional,
+                std::memory_order_acq_rel);
+        } else {
+            ArmWifiConfigIntentRetry();
+        }
         wifi_config_entry_pending_.store(false);
+
+        const uint32_t remaining =
+            wifi_config_entry_intent_.load(std::memory_order_acquire);
+        const bool newer_request =
+            wifi_config_entry_request_generation_.load(
+                std::memory_order_acquire) != request_generation;
+        if (remaining != 0 &&
+            (result != WifiConfigEntryResult::kRetry || newer_request)) {
+            ScheduleWifiConfigIntentDrain();
+        }
     });
 }
 
-void WifiBoard::StartWifiConfigMode(bool show_notification) {
-    if (Application::GetInstance().IsLessonRuntimeActive()) {
-        ESP_LOGI(TAG, "StartWifiConfigMode ignored during lesson");
+void WifiBoard::ArmWifiConfigIntentRetry() {
+    if (esp_timer_is_active(connect_timer_)) {
         return;
+    }
+    const esp_err_t timer_error =
+        esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+    if (timer_error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to arm WiFi config intent retry: %s",
+                 esp_err_to_name(timer_error));
+    }
+}
+
+WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(
+        bool show_notification, bool require_disconnected) {
+    if (in_config_mode_ && WifiManager::GetInstance().IsConfigMode()) {
+        return WifiConfigEntryResult::kStarted;
+    }
+    if (require_disconnected && WifiManager::GetInstance().IsConnected()) {
+        ESP_LOGI(TAG, "WiFi recovery cancelled because station reconnected");
+        return WifiConfigEntryResult::kCancelled;
+    }
+    if (Application::GetInstance().IsLessonRuntimeActive()) {
+        ESP_LOGI(TAG, "StartWifiConfigMode deferred during lesson");
+        ArmWifiConfigIntentRetry();
+        return WifiConfigEntryResult::kRetry;
     }
     auto& app = Application::GetInstance();
     Application::WifiConfigEntryPreparation preparation;
     if (!app.PrepareWifiConfigEntry(preparation)) {
         ESP_LOGE(TAG, "WiFi config aborted: realtime preparation failed");
-        return;
+        return WifiConfigEntryResult::kRetry;
     }
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();
@@ -298,7 +391,7 @@ void WifiBoard::StartWifiConfigMode(bool show_notification) {
     if (!provisioning_reservation) {
         ESP_LOGE(TAG, "WiFi config aborted: prior provisioning completion still active");
         app.RollbackWifiConfigEntry(preparation);
-        return;
+        return WifiConfigEntryResult::kRetry;
     }
     const auto begin_result = audio_service.BeginWifiProvisioning();
     if (!begin_result) {
@@ -306,7 +399,7 @@ void WifiBoard::StartWifiConfigMode(bool show_notification) {
         if (begin_result.rollback_complete) {
             app.RollbackWifiConfigEntry(preparation);
         }
-        return;
+        return WifiConfigEntryResult::kRetry;
     }
     const auto provisioning_token = begin_result.token;
     if (!provisioning_reservation.Commit(provisioning_token)) {
@@ -316,7 +409,7 @@ void WifiBoard::StartWifiConfigMode(bool show_notification) {
         } else {
             app.RollbackWifiConfigEntry(preparation);
         }
-        return;
+        return WifiConfigEntryResult::kRetry;
     }
     const esp_err_t blufi_restart_error = blufi.RestartForSetup();
     if (blufi_restart_error != ESP_OK) {
@@ -327,26 +420,54 @@ void WifiBoard::StartWifiConfigMode(bool show_notification) {
         } else if (!app.RollbackWifiConfigEntry(preparation)) {
             ESP_LOGE(TAG, "BLUFI restart rollback could not restore application state");
         }
-        return;
+        return WifiConfigEntryResult::kRetry;
     }
 #endif
 
+    if (require_disconnected && WifiManager::GetInstance().IsConnected()) {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        if (!blufi.AbortProvisioningSetup(provisioning_token)) {
+            ESP_LOGE(TAG, "WiFi recovery cancellation could not restore provisioning state");
+            return WifiConfigEntryResult::kRetry;
+        }
+#endif
+        if (!app.RollbackWifiConfigEntry(preparation)) {
+            ESP_LOGE(TAG, "WiFi recovery cancellation could not restore application state");
+            return WifiConfigEntryResult::kRetry;
+        }
+        ESP_LOGI(TAG, "WiFi recovery cancelled at commit because station reconnected");
+        return WifiConfigEntryResult::kCancelled;
+    }
     if (!app.PublishWifiConfigEntry(preparation)) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
         if (!blufi.AbortProvisioningSetup(provisioning_token)) {
             ESP_LOGE(TAG, "WiFi config publication rollback remains fail-closed");
-            return;
+            return WifiConfigEntryResult::kRetry;
         }
 #endif
         if (!app.RollbackWifiConfigEntry(preparation)) {
             ESP_LOGE(TAG, "WiFi config publication rollback could not restore application state");
         }
-        return;
+        return WifiConfigEntryResult::kRetry;
+    }
+    if (require_disconnected && WifiManager::GetInstance().IsConnected()) {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        if (!blufi.AbortProvisioningSetup(provisioning_token)) {
+            ESP_LOGE(TAG, "WiFi recovery commit cancellation could not restore provisioning state");
+            return WifiConfigEntryResult::kRetry;
+        }
+#endif
+        if (!app.RollbackWifiConfigEntry(preparation)) {
+            ESP_LOGE(TAG, "WiFi recovery commit cancellation could not restore application state");
+            return WifiConfigEntryResult::kRetry;
+        }
+        ESP_LOGI(TAG, "WiFi recovery cancelled immediately before station teardown");
+        return WifiConfigEntryResult::kCancelled;
     }
     AppExitToChatboxForSystemFlow();
     esp_timer_stop(connect_timer_);
-    WifiManager::GetInstance().StopStation();
     in_config_mode_ = true;
+    WifiManager::GetInstance().StopStation();
     if (show_notification) {
         GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
     }
@@ -396,16 +517,18 @@ void WifiBoard::StartWifiConfigMode(bool show_notification) {
         vTaskDelete(NULL);
     }, "acoustic_wifi", 4096, reinterpret_cast<void*>(channel), 2, NULL);
 #endif
+    return WifiConfigEntryResult::kStarted;
 }
 
 void WifiBoard::EnterWifiConfigMode() {
     ESP_LOGI(TAG, "EnterWifiConfigMode called");
-    auto& app = Application::GetInstance();
-    if (app.IsLessonRuntimeActive()) {
-        ESP_LOGI(TAG, "EnterWifiConfigMode ignored during lesson");
-        return;
-    }
     RequestWifiConfigMode(true);
+}
+
+void WifiBoard::ResumePendingWifiConfigMode() {
+    if (wifi_config_entry_intent_.load(std::memory_order_acquire) != 0) {
+        ScheduleWifiConfigIntentDrain();
+    }
 }
 
 bool WifiBoard::IsInWifiConfigMode() const {

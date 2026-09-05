@@ -8,7 +8,7 @@ CURRENT_PRODUCTION_PROVISIONING_STATUS_URL = (
     "https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
 )
 CURRENT_PRODUCTION_WEBSOCKET_URL = "wss://esp.tjbot.vn/tbot/v1/"
-CURRENT_OTA_BUILD_VERSION = "2.2.92"
+CURRENT_OTA_BUILD_VERSION = "2.2.93"
 
 
 def read(path: str) -> str:

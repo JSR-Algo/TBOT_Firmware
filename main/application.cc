@@ -4691,6 +4691,10 @@ void Application::SetLessonRuntimeActive(bool active) {
                 HandleHeartbeatAuthFailure(status_code);
             });
         }
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+        static_cast<WifiBoard&>(Board::GetInstance())
+            .ResumePendingWifiConfigMode();
+#endif
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
 }
