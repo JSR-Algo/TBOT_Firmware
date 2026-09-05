@@ -423,6 +423,7 @@ private:
     // Activation task (runs in background)
     void ActivationTask();
     void CompleteUnclaimedProtocolOnlyActivation();
+    void CompleteClaimedWifiReprovisionActivation();
     bool EnsureLocalAssetsAppliedForClaim();
     bool FinishClaimActivationAfterLocalAssetsReady();
     void ScheduleClaimLocalAssetsRetry();
@@ -441,10 +442,10 @@ private:
     // and HandleNetworkConnectedEvent ignores Connected in that state), so the
     // claim FSM would otherwise dead-end in setup and the claim would only
     // complete after an extra manual power-cycle. This drives the FSM out of
-    // WifiConfiguring via the proven normal-boot path (Activating -> ActivationTask
-    // -> Idle -> RefreshPendingTbotClaim) on the genuine provisioning-success entry
-    // point only; the stale-event guards on HandleNetworkConnectedEvent/
-    // RefreshPendingTbotClaim are left untouched.
+    // WifiConfiguring via a lightweight activation that reuses persisted runtime
+    // configuration on the genuine provisioning-success entry point only; the
+    // stale-event guards on HandleNetworkConnectedEvent/RefreshPendingTbotClaim
+    // are left untouched.
     void PromoteFromWifiConfigAfterProvisioning();
     enum class ClaimBleLifecycleIntent {
         kNone,

@@ -1204,7 +1204,9 @@ void Application::HandleNetworkDisconnectedEvent() {
 void Application::RearmClaimedIdleWakeWord() {
     if (!IsDeviceClaimed() || lesson_runtime_active_.load() ||
         lesson_asset_sync_quiet_.load() || GetDeviceState() != kDeviceStateIdle ||
-        connect_in_flight_.load() || passive_ws_intent_.load()) {
+        connect_in_flight_.load() ||
+        (passive_ws_intent_.load() &&
+         (protocol_ == nullptr || !protocol_->IsAudioChannelOpened()))) {
         return;
     }
     audio_service_.EnableWakeWordDetection(true);
@@ -2064,28 +2066,8 @@ void Application::PromoteFromWifiConfigAfterProvisioning() {
         return;
     }
 
-    if (activation_task_handle_ != nullptr) {
-        ESP_LOGW(TAG, "Activation task already running");
-        return;  // Activation already running -> it will reach Idle on its own.
-    }
-    // Reuse the same activation worker as a normal boot (OTA check + protocol/WS),
-    // which ends by setting MAIN_EVENT_ACTIVATION_DONE -> HandleActivationDoneEvent
-    // -> kDeviceStateIdle -> RefreshPendingTbotClaim() (the proven auto-confirm path).
-    BaseType_t created = xTaskCreate([](void* arg) {
-        Application* app = static_cast<Application*>(arg);
-        app->ActivationTask();
-        app->activation_task_handle_ = nullptr;
-        vTaskDelete(NULL);
-    }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
-    if (created != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create activation task after provisioning");
-        activation_task_handle_ = nullptr;
-        if (!ota_) {
-            ota_ = std::make_unique<Ota>();
-            ota_->MarkCurrentVersionValid();
-        }
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
-    }
+    ESP_LOGI(TAG, "Claimed after BluFi Wi-Fi success: run lightweight activation");
+    CompleteClaimedWifiReprovisionActivation();
 }
 
 void Application::PromoteCourseModeFromWifiConfigAfterProvisioning() {
@@ -2108,6 +2090,18 @@ void Application::CompleteUnclaimedProtocolOnlyActivation() {
     SystemInfo::StopHeapPhaseMonitor();
 
     SystemInfo::PrintHeapCheckpoint("activation.complete");
+    xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+}
+
+void Application::CompleteClaimedWifiReprovisionActivation() {
+    if (!ota_) {
+        ota_ = std::make_unique<Ota>();
+    }
+    ota_->MarkCurrentVersionValid();
+
+    DoResetProtocol();
+    InitializeProtocol();
+    SystemInfo::PrintHeapCheckpoint("wifi_reprovision_activation.complete");
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
 
@@ -4779,7 +4773,11 @@ void Application::EndLessonAssetSyncQuiet() {
         !lesson_runtime_active_.load() &&
         !connect_in_flight_.load() &&
         !reset_pending_.load()) {
-        audio_service_.EnableWakeWordDetection(true);
+        // Run after the current sync completion callback and its captured
+        // response have been destroyed, so AFE sees the reclaimed heap.
+        Schedule([this]() {
+            RearmClaimedIdleWakeWord();
+        });
     }
     ESP_LOGI(TAG, "lesson asset sync quiet end");
 }

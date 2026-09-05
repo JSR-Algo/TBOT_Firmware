@@ -31,6 +31,19 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def test_claimed_blufi_reprovision_uses_lightweight_activation():
+    header = read("main/application.h")
+    source = read("main/application.cc")
+    promote = function_body(
+        source, "void Application::PromoteFromWifiConfigAfterProvisioning"
+    )
+
+    assert "void CompleteClaimedWifiReprovisionActivation();" in header
+    assert "CompleteClaimedWifiReprovisionActivation();" in promote
+    assert "xTaskCreate" not in promote
+    assert "ActivationTask();" not in promote
+
+
 def test_wifi_provisioning_uses_tbot_brand_names():
     wifi_board = read("main/boards/common/wifi_board.cc")
     blufi = read("main/boards/common/blufi.cpp")
