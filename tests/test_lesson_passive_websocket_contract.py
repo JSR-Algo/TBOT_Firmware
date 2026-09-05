@@ -166,9 +166,8 @@ def test_passive_lesson_socket_success_rearms_wake_word_after_connect_worker_fin
     rearm = passive_success[
         passive_success.index("else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load())") :
     ]
-    assert "self->audio_service_.EnableWakeWordDetection(true);" in rearm
-    assert "passive_lesson_wake_word_rearmed" in rearm
-    assert "self->audio_service_.IsWakeWordRunning()" in rearm
+    assert "self->ScheduleLessonAssetSyncWakeRearm(5000ULL * 1000ULL);" in rearm
+    assert "self->audio_service_.EnableWakeWordDetection(true);" not in rearm
 
 def test_passive_lesson_socket_success_finishes_deferred_wake_before_rearming():
     source = read("main/application.cc")
@@ -188,7 +187,7 @@ def test_passive_lesson_socket_success_finishes_deferred_wake_before_rearming():
 
     finish = passive_success[
         passive_success.index("const std::string deferred_wake_word = self->deferred_wake_word_;") :
-        passive_success.index("self->audio_service_.EnableWakeWordDetection(true);")
+        passive_success.index("self->ScheduleLessonAssetSyncWakeRearm(5000ULL * 1000ULL);")
     ]
     assert "self->FinishWakeWordInvoke(deferred_wake_word);" in finish
     assert finish.index("self->deferred_wake_word_.clear();") < finish.index(

@@ -160,7 +160,7 @@ def test_unclaimed_passive_websocket_success_does_not_rearm_wake_word_or_deferre
     assert "self->IsDeviceClaimed()" in passive_success
     for wake_action in (
         "self->FinishWakeWordInvoke(deferred_wake_word);",
-        "self->audio_service_.EnableWakeWordDetection(true);",
+        "self->ScheduleLessonAssetSyncWakeRearm(5000ULL * 1000ULL);",
     ):
         assert wake_action in passive_success
         assert passive_success.index("self->IsDeviceClaimed()") < passive_success.index(wake_action)

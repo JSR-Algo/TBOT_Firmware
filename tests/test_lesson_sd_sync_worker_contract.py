@@ -145,6 +145,7 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
     assert "std::atomic<bool> lesson_asset_sync_quiet_" in app_header
     assert "esp_timer_handle_t lesson_asset_sync_wake_rearm_timer_" in app_header
     assert "void ScheduleLessonAssetSyncWakeRearm();" in app_header
+    assert "void ScheduleLessonAssetSyncWakeRearm(uint64_t delay_us);" in app_header
 
     begin = function_body(app_source, "bool Application::BeginLessonAssetSyncQuiet")
     assert "esp_timer_stop(lesson_asset_sync_wake_rearm_timer_)" in begin
@@ -170,10 +171,16 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
     schedule = function_body(
         app_source, "void Application::ScheduleLessonAssetSyncWakeRearm"
     )
-    assert "esp_timer_start_once" in schedule
     assert "1500ULL * 1000ULL" in schedule
-    assert "self->Schedule" in schedule
-    assert "self->RearmClaimedIdleWakeWord();" in schedule
+
+    delayed_schedule = function_body(
+        app_source,
+        "void Application::ScheduleLessonAssetSyncWakeRearm(uint64_t delay_us)",
+    )
+    assert "esp_timer_start_once" in delayed_schedule
+    assert "delay_us" in delayed_schedule
+    assert "self->Schedule" in delayed_schedule
+    assert "self->RearmClaimedIdleWakeWord();" in delayed_schedule
 
     rearm = function_body(app_source, "void Application::RearmClaimedIdleWakeWord")
     # A connected passive lesson WebSocket keeps this intent true while the

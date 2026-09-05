@@ -400,6 +400,7 @@ private:
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
     void ScheduleLessonAssetSyncWakeRearm();
+    void ScheduleLessonAssetSyncWakeRearm(uint64_t delay_us);
     void RunScheduledTasks();
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);

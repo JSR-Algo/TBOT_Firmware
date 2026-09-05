@@ -4787,6 +4787,10 @@ void Application::EndLessonAssetSyncQuiet() {
 }
 
 void Application::ScheduleLessonAssetSyncWakeRearm() {
+    ScheduleLessonAssetSyncWakeRearm(1500ULL * 1000ULL);
+}
+
+void Application::ScheduleLessonAssetSyncWakeRearm(uint64_t delay_us) {
     if (lesson_asset_sync_wake_rearm_timer_ == nullptr) {
         esp_timer_create_args_t args = {};
         args.callback = [](void* arg) {
@@ -4807,8 +4811,7 @@ void Application::ScheduleLessonAssetSyncWakeRearm() {
     }
 
     esp_timer_stop(lesson_asset_sync_wake_rearm_timer_);
-    esp_timer_start_once(
-        lesson_asset_sync_wake_rearm_timer_, 1500ULL * 1000ULL);
+    esp_timer_start_once(lesson_asset_sync_wake_rearm_timer_, delay_us);
 }
 
 void Application::StopListening() {
@@ -5114,9 +5117,9 @@ void Application::OpenChannelTask(void* arg) {
                                 ESP_LOGI(TAG, "passive_lesson_deferred_wake_resumed");
                                 self->FinishWakeWordInvoke(deferred_wake_word);
                             } else {
-                                self->audio_service_.EnableWakeWordDetection(true);
-                                ESP_LOGI(TAG, "passive_lesson_wake_word_rearmed running=%d",
-                                         self->audio_service_.IsWakeWordRunning() ? 1 : 0);
+                                // Give the server's initial asset burst time to
+                                // enter quiet mode before allocating the AFE.
+                                self->ScheduleLessonAssetSyncWakeRearm(5000ULL * 1000ULL);
                             }
                         }
                     }

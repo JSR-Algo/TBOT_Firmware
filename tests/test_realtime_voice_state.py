@@ -1933,7 +1933,8 @@ def test_lesson_runtime_audio_open_callback_leaves_wake_rearm_to_worker_continua
     claimed_success = passive_success[
         passive_success.index("else if (self->IsDeviceClaimed() && !self->lesson_runtime_active_.load())") :
     ]
-    assert "self->audio_service_.EnableWakeWordDetection(true);" in claimed_success
+    assert "self->ScheduleLessonAssetSyncWakeRearm(5000ULL * 1000ULL);" in claimed_success
+    assert "self->audio_service_.EnableWakeWordDetection(true);" not in claimed_success
 
     generic_branch = opened_body[
         opened_body.index("} else {") :
