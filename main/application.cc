@@ -267,6 +267,10 @@ Application::~Application() {
         esp_timer_stop(speaking_timeout_timer_);
         esp_timer_delete(speaking_timeout_timer_);
     }
+    if (lesson_asset_sync_wake_rearm_timer_ != nullptr) {
+        esp_timer_stop(lesson_asset_sync_wake_rearm_timer_);
+        esp_timer_delete(lesson_asset_sync_wake_rearm_timer_);
+    }
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     if (lesson_message_task_handle_ != nullptr) {
         vTaskDelete(lesson_message_task_handle_);
@@ -4727,6 +4731,10 @@ bool Application::BeginLessonAssetSyncQuiet() {
         return false;
     }
 
+    if (lesson_asset_sync_wake_rearm_timer_ != nullptr) {
+        esp_timer_stop(lesson_asset_sync_wake_rearm_timer_);
+    }
+
     if (passive_listening) {
         lesson_idle_repaint_suppressed_.store(true);
         if (protocol_) {
@@ -4773,13 +4781,34 @@ void Application::EndLessonAssetSyncQuiet() {
         !lesson_runtime_active_.load() &&
         !connect_in_flight_.load() &&
         !reset_pending_.load()) {
-        // Run after the current sync completion callback and its captured
-        // response have been destroyed, so AFE sees the reclaimed heap.
-        Schedule([this]() {
-            RearmClaimedIdleWakeWord();
-        });
+        ScheduleLessonAssetSyncWakeRearm();
     }
     ESP_LOGI(TAG, "lesson asset sync quiet end");
+}
+
+void Application::ScheduleLessonAssetSyncWakeRearm() {
+    if (lesson_asset_sync_wake_rearm_timer_ == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = [](void* arg) {
+            auto* self = static_cast<Application*>(arg);
+            self->Schedule([self]() {
+                self->RearmClaimedIdleWakeWord();
+            });
+        };
+        args.arg = this;
+        args.dispatch_method = ESP_TIMER_TASK;
+        args.name = "asset_wake";
+        args.skip_unhandled_events = true;
+        if (esp_timer_create(&args, &lesson_asset_sync_wake_rearm_timer_) != ESP_OK) {
+            lesson_asset_sync_wake_rearm_timer_ = nullptr;
+            ESP_LOGE(TAG, "Failed to create lesson asset wake rearm timer");
+            return;
+        }
+    }
+
+    esp_timer_stop(lesson_asset_sync_wake_rearm_timer_);
+    esp_timer_start_once(
+        lesson_asset_sync_wake_rearm_timer_, 1500ULL * 1000ULL);
 }
 
 void Application::StopListening() {

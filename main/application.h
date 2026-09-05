@@ -254,6 +254,7 @@ private:
     std::atomic<bool> lesson_idle_repaint_suppressed_{false};
     std::atomic<int> lesson_network_render_quiet_{0};
     std::atomic<bool> lesson_asset_sync_quiet_{false};
+    esp_timer_handle_t lesson_asset_sync_wake_rearm_timer_ = nullptr;
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
@@ -398,6 +399,7 @@ private:
     void RearmClaimedIdleWakeWord();
     void HandleActivationDoneEvent();
     void HandleWakeWordDetectedEvent();
+    void ScheduleLessonAssetSyncWakeRearm();
     void RunScheduledTasks();
     void ArmSpeakingTimeout();
     void HandleSpeakingTimeout(uint32_t generation);

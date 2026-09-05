@@ -143,8 +143,11 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
     assert "bool BeginLessonAssetSyncQuiet();" in app_header
     assert "void EndLessonAssetSyncQuiet();" in app_header
     assert "std::atomic<bool> lesson_asset_sync_quiet_" in app_header
+    assert "esp_timer_handle_t lesson_asset_sync_wake_rearm_timer_" in app_header
+    assert "void ScheduleLessonAssetSyncWakeRearm();" in app_header
 
     begin = function_body(app_source, "bool Application::BeginLessonAssetSyncQuiet")
+    assert "esp_timer_stop(lesson_asset_sync_wake_rearm_timer_)" in begin
     for guard in (
         "lesson_runtime_active_.load()",
         "connect_in_flight_.load()",
@@ -160,7 +163,27 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
     assert "lesson_asset_sync_quiet_.exchange(false)" in end
     assert "GetDeviceState() == kDeviceStateIdle" in end
     assert "IsDeviceClaimed()" in end
-    assert "audio_service_.EnableWakeWordDetection(true)" in end
+    assert "ScheduleLessonAssetSyncWakeRearm();" in end
+    assert "RearmClaimedIdleWakeWord();" not in end
+    assert "audio_service_.EnableWakeWordDetection(true)" not in end
+
+    schedule = function_body(
+        app_source, "void Application::ScheduleLessonAssetSyncWakeRearm"
+    )
+    assert "esp_timer_start_once" in schedule
+    assert "1500ULL * 1000ULL" in schedule
+    assert "self->Schedule" in schedule
+    assert "self->RearmClaimedIdleWakeWord();" in schedule
+
+    rearm = function_body(app_source, "void Application::RearmClaimedIdleWakeWord")
+    # A connected passive lesson WebSocket keeps this intent true while the
+    # robot is idle, so only an unopened/in-flight passive socket may suppress
+    # the post-sync wake-word rearm.
+    compact_rearm = "".join(rearm.split())
+    assert (
+        "passive_ws_intent_.load()&&"
+        "(protocol_==nullptr||!protocol_->IsAudioChannelOpened())"
+    ) in compact_rearm
 
     claim_finish = function_body(
         app_source, "bool Application::FinishClaimActivationAfterLocalAssetsReady"
