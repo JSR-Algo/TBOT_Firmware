@@ -2786,6 +2786,19 @@ static int ExtractWifiRssi(cJSON* status_root) {
     return ClampInt(rssi->valueint, -127, 0);
 }
 
+static std::string ExtractWifiSsid(cJSON* status_root) {
+    cJSON* network = status_root == nullptr ? nullptr : cJSON_GetObjectItem(status_root, "network");
+    cJSON* ssid = network == nullptr ? nullptr : cJSON_GetObjectItem(network, "ssid");
+    if (!cJSON_IsString(ssid) || ssid->valuestring == nullptr) {
+        return "";
+    }
+    const std::size_t length = std::strlen(ssid->valuestring);
+    if (length == 0 || length > 32) {
+        return "";
+    }
+    return ssid->valuestring;
+}
+
 bool Application::ShouldKeepManagementHeartbeat() const {
     return IsDeviceClaimed() &&
            !lesson_runtime_active_.load() &&
@@ -2815,6 +2828,10 @@ static std::string BuildTbotHeartbeatBody(const std::string& status_json,
     cJSON* connectivity = cJSON_CreateObject();
     cJSON_AddStringToObject(connectivity, "connectivity_state", "online");
     cJSON_AddNumberToObject(connectivity, "wifi_rssi", wifi_rssi);
+    const std::string wifi_ssid = ExtractWifiSsid(status_root);
+    if (!wifi_ssid.empty()) {
+        cJSON_AddStringToObject(connectivity, "wifi_ssid", wifi_ssid.c_str());
+    }
     cJSON_AddItemToObject(root, "connectivity_metrics", connectivity);
 
     const std::string ble_state = CopyStringField(status_root, "ble_state", "off");

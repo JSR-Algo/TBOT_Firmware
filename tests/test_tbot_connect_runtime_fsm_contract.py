@@ -120,6 +120,21 @@ def test_heartbeat_reuses_board_status_radio_fields_so_online_reports_live_radio
     assert 'CopyStringField(status_root, "ble_state", "off")' in source
     assert 'CopyStringField(status_root, "ap_state", "off")' in source
 
+
+def test_management_heartbeat_reports_active_wifi_ssid_without_credentials():
+    source = read("main/application.cc")
+    heartbeat = function_body(source, "std::string BuildTbotHeartbeatBody")
+    extract = function_body(source, "std::string ExtractWifiSsid")
+
+    assert 'cJSON_GetObjectItem(status_root, "network")' in extract
+    assert 'cJSON_GetObjectItem(network, "ssid")' in extract
+    assert "length == 0 || length > 32" in extract
+    assert "ExtractWifiSsid(status_root)" in heartbeat
+    assert 'cJSON_AddStringToObject(connectivity, "wifi_ssid", wifi_ssid.c_str())' in heartbeat
+    assert "if (!wifi_ssid.empty())" in heartbeat
+    assert "wifi_password" not in heartbeat
+    assert "password" not in heartbeat.lower()
+
 def test_websocket_audio_channel_open_starts_and_close_stops_heartbeat():
     source = read("main/application.cc")
 
