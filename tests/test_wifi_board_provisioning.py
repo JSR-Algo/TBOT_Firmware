@@ -805,6 +805,22 @@ def test_wb18_automatic_timeout_request_rechecks_connection_on_main_task():
     assert start_body.index("IsConnected()") < start_body.index("PrepareWifiConfigEntry(")
 
 
+def test_wb18a_timeout_does_not_request_ble_after_wifi_recovers():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _func_body(
+        wifi_board,
+        "void WifiBoard::OnWifiConnectTimeout(",
+        "// ---",
+    )
+
+    connected_idx = body.index("WifiManager::GetInstance().IsConnected()")
+    request_idx = body.index("board->RequestWifiConfigMode(false, true);")
+    assert connected_idx < request_idx
+    guard = body[connected_idx:request_idx]
+    assert "WiFi recovery timeout ignored because station recovered" in guard
+    assert "return;" in guard
+
+
 def test_wb19_explicit_setup_upgrades_a_pending_conditional_recovery():
     wifi_board = read("main/boards/common/wifi_board.cc")
     wifi_header = read("main/boards/common/wifi_board.h")

@@ -206,6 +206,10 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
         ESP_LOGI(TAG, "WiFi connection timeout ignored because config mode is active");
         return;
     }
+    if (WifiManager::GetInstance().IsConnected()) {
+        ESP_LOGI(TAG, "WiFi recovery timeout ignored because station recovered");
+        return;
+    }
     if (Application::GetInstance().IsLessonRuntimeActive()) {
         ESP_LOGI(TAG, "WiFi connection timeout deferred during lesson");
         const esp_err_t timer_error =
