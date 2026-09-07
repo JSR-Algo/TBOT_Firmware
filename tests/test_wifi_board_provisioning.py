@@ -218,7 +218,7 @@ def test_wb5_station_connect_timeout_is_60_seconds():
         "void WifiBoard::OnWifiConnectTimeout(",
         "// ---",
     )
-    assert "RequestWifiConfigMode(false, true);" in timeout_body
+    assert "RequestWifiConfigMode(false, true, recovery_generation);" in timeout_body
     assert "StopStation" not in timeout_body
 
 
@@ -232,7 +232,9 @@ def test_wifi_connect_timeout_ignores_active_lesson_before_station_or_setup_side
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in timeout_body
     guard_idx = timeout_body.index("Application::GetInstance().IsLessonRuntimeActive()")
-    setup_idx = timeout_body.index("RequestWifiConfigMode(false, true);")
+    setup_idx = timeout_body.index(
+        "RequestWifiConfigMode(false, true, recovery_generation);"
+    )
     assert guard_idx < setup_idx
     guard = timeout_body[guard_idx:setup_idx]
     assert "return;" in guard
@@ -763,12 +765,11 @@ def test_wb16_runtime_recovery_rearms_while_lesson_owns_the_robot():
     )
 
     lesson_idx = body.index("IsLessonRuntimeActive()")
-    rearm_idx = body.index(
-        "esp_timer_start_once(board->connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)",
-        lesson_idx,
-    )
+    rearm_idx = body.index("board->ArmWifiConfigIntentRetry();", lesson_idx)
     return_idx = body.index("return;", lesson_idx)
-    request_idx = body.index("board->RequestWifiConfigMode(false, true);")
+    request_idx = body.index(
+        "board->RequestWifiConfigMode(false, true, recovery_generation);"
+    )
     assert lesson_idx < rearm_idx < return_idx < request_idx
     assert "board->in_config_mode_" in body[:request_idx]
 
@@ -799,7 +800,7 @@ def test_wb18_automatic_timeout_request_rechecks_connection_on_main_task():
     )
     start_body = _start_wifi_config_body(wifi_board)
 
-    assert "board->RequestWifiConfigMode(false, true);" in timeout_body
+    assert "board->RequestWifiConfigMode(false, true, recovery_generation);" in timeout_body
     assert "require_disconnected" in request_body
     assert "WifiManager::GetInstance().IsConnected()" in start_body
     assert start_body.index("IsConnected()") < start_body.index("PrepareWifiConfigEntry(")
@@ -814,11 +815,58 @@ def test_wb18a_timeout_does_not_request_ble_after_wifi_recovers():
     )
 
     connected_idx = body.index("WifiManager::GetInstance().IsConnected()")
-    request_idx = body.index("board->RequestWifiConfigMode(false, true);")
+    request_idx = body.index(
+        "board->RequestWifiConfigMode(false, true, recovery_generation);"
+    )
     assert connected_idx < request_idx
     guard = body[connected_idx:request_idx]
     assert "WiFi recovery timeout ignored because station recovered" in guard
     assert "return;" in guard
+
+
+def test_wb18b_stale_timeout_intent_cannot_enter_ble_after_new_outage():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    wifi_header = read("main/boards/common/wifi_board.h")
+    timeout = _func_body(
+        wifi_board,
+        "void WifiBoard::OnWifiConnectTimeout(",
+        "// ---",
+    )
+    connected = _connected_event_body(wifi_board)
+    drain = _func_body(
+        wifi_board,
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+        "void WifiBoard::ArmWifiConfigIntentRetry(",
+    )
+    start = _start_wifi_config_body(wifi_board)
+
+    assert "std::atomic<uint32_t> wifi_recovery_generation_{0};" in wifi_header
+    assert "wifi_config_entry_recovery_generation_" in wifi_header
+    assert "wifi_recovery_deadline_us_" in wifi_header
+
+    capture_idx = timeout.index("wifi_recovery_generation_.load")
+    deadline_idx = timeout.index("wifi_recovery_deadline_us_.load")
+    connected_check_idx = timeout.index("WifiManager::GetInstance().IsConnected()")
+    request_idx = timeout.index("RequestWifiConfigMode(false, true, recovery_generation)")
+    assert capture_idx < deadline_idx < connected_check_idx < request_idx
+    assert "esp_timer_get_time() < recovery_deadline_us" in timeout
+
+    invalidate_idx = connected.index("wifi_recovery_generation_.fetch_add")
+    clear_deadline_idx = connected.index("wifi_recovery_deadline_us_.store(0")
+    stop_idx = connected.index("esp_timer_stop(connect_timer_);")
+    assert invalidate_idx < clear_deadline_idx < stop_idx
+
+    assert "wifi_config_entry_recovery_generation_.load" in drain
+    assert "StartWifiConfigMode(" in drain
+    assert "recovery_generation" in drain
+
+    generation_guard = "recovery_generation != wifi_recovery_generation_.load"
+    assert generation_guard in start
+    guard_idx = start.index(generation_guard)
+    prepare_idx = start.index("PrepareWifiConfigEntry")
+    stop_station_idx = start.index("WifiManager::GetInstance().StopStation()")
+    assert guard_idx < prepare_idx
+    assert start.rindex(generation_guard, 0, stop_station_idx) > prepare_idx
 
 
 def test_wb19_explicit_setup_upgrades_a_pending_conditional_recovery():

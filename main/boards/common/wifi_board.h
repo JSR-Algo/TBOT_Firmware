@@ -17,6 +17,9 @@ protected:
     std::atomic<bool> wifi_config_entry_pending_{false};
     std::atomic<uint32_t> wifi_config_entry_intent_{0};
     std::atomic<uint32_t> wifi_config_entry_request_generation_{0};
+    std::atomic<uint32_t> wifi_recovery_generation_{0};
+    std::atomic<uint32_t> wifi_config_entry_recovery_generation_{0};
+    std::atomic<int64_t> wifi_recovery_deadline_us_{0};
     NetworkEventCallback network_event_callback_ = nullptr;
 
     enum class WifiConfigEntryResult : uint8_t {
@@ -74,11 +77,14 @@ protected:
     /**
      * Enter WiFi configuration mode
      */
-    void RequestWifiConfigMode(bool show_notification = false, bool require_disconnected = false);
+    void RequestWifiConfigMode(bool show_notification = false,
+                               bool require_disconnected = false,
+                               uint32_t recovery_generation = 0);
     void ScheduleWifiConfigIntentDrain();
     void ArmWifiConfigIntentRetry();
     WifiConfigEntryResult StartWifiConfigMode(bool show_notification = false,
-                                              bool require_disconnected = false);
+                                              bool require_disconnected = false,
+                                              uint32_t recovery_generation = 0);
 
     /**
      * WiFi connection timeout callback

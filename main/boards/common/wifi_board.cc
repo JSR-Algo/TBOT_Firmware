@@ -110,9 +110,13 @@ void WifiBoard::EnsureWifiRecoveryTimeout() {
         return;
     }
 
+    const int64_t deadline_us =
+        esp_timer_get_time() + CONNECT_TIMEOUT_SEC * 1000000LL;
+    wifi_recovery_deadline_us_.store(deadline_us, std::memory_order_release);
     const esp_err_t timer_error =
         esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
     if (timer_error != ESP_OK) {
+        wifi_recovery_deadline_us_.store(0, std::memory_order_release);
         ESP_LOGE(TAG, "Failed to arm WiFi recovery timeout: %s",
                  esp_err_to_name(timer_error));
         return;
@@ -150,7 +154,9 @@ WifiStationStartResult WifiBoard::TryWifiConnect() {
 void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
     switch (event) {
         case NetworkEvent::Connected:
-            // Stop timeout timer
+            // Invalidate both the timer and any conditional entry it already queued.
+            wifi_recovery_generation_.fetch_add(1, std::memory_order_acq_rel);
+            wifi_recovery_deadline_us_.store(0, std::memory_order_release);
             esp_timer_stop(connect_timer_);
             // Provisioning succeeded → AP (if it was open) must stop. Cancel the
             // AP hard-timeout so a stale callback cannot post a redundant
@@ -202,6 +208,14 @@ void WifiBoard::SetNetworkEventCallback(NetworkEventCallback callback) {
 void WifiBoard::OnWifiConnectTimeout(void* arg) {
     auto* board = static_cast<WifiBoard*>(arg);
     ESP_LOGW(TAG, "WiFi connection timeout, entering config mode");
+    const uint32_t recovery_generation =
+        board->wifi_recovery_generation_.load(std::memory_order_acquire);
+    const int64_t recovery_deadline_us =
+        board->wifi_recovery_deadline_us_.load(std::memory_order_acquire);
+    if (recovery_deadline_us <= 0 || esp_timer_get_time() < recovery_deadline_us) {
+        ESP_LOGI(TAG, "WiFi recovery timeout ignored because its deadline is stale");
+        return;
+    }
     if (board->in_config_mode_) {
         ESP_LOGI(TAG, "WiFi connection timeout ignored because config mode is active");
         return;
@@ -212,16 +226,11 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
     }
     if (Application::GetInstance().IsLessonRuntimeActive()) {
         ESP_LOGI(TAG, "WiFi connection timeout deferred during lesson");
-        const esp_err_t timer_error =
-            esp_timer_start_once(board->connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
-        if (timer_error != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to defer WiFi recovery timeout: %s",
-                esp_err_to_name(timer_error));
-        }
+        board->ArmWifiConfigIntentRetry();
         return;
     }
 
-    board->RequestWifiConfigMode(false, true);
+    board->RequestWifiConfigMode(false, true, recovery_generation);
 }
 
 // ---------------------------------------------------------------------------
@@ -302,12 +311,18 @@ const char* WifiBoard::GetApStateString() const {
     return "off";
 }
 
-void WifiBoard::RequestWifiConfigMode(bool show_notification, bool require_disconnected) {
+void WifiBoard::RequestWifiConfigMode(bool show_notification,
+                                      bool require_disconnected,
+                                      uint32_t recovery_generation) {
     uint32_t requested_flags = require_disconnected
         ? kWifiConfigIntentConditional
         : kWifiConfigIntentExplicit;
     if (show_notification) {
         requested_flags |= kWifiConfigIntentNotify;
+    }
+    if (require_disconnected) {
+        wifi_config_entry_recovery_generation_.store(
+            recovery_generation, std::memory_order_release);
     }
     wifi_config_entry_intent_.fetch_or(
         requested_flags, std::memory_order_acq_rel);
@@ -332,10 +347,15 @@ void WifiBoard::ScheduleWifiConfigIntentDrain() {
         const bool explicit_entry = (flags & kWifiConfigIntentExplicit) != 0;
         const bool conditional_entry =
             !explicit_entry && (flags & kWifiConfigIntentConditional) != 0;
+        const uint32_t recovery_generation =
+            wifi_config_entry_recovery_generation_.load(
+                std::memory_order_acquire);
         WifiConfigEntryResult result = WifiConfigEntryResult::kCancelled;
         if (flags != 0) {
             result = StartWifiConfigMode(
-                (flags & kWifiConfigIntentNotify) != 0, conditional_entry);
+                (flags & kWifiConfigIntentNotify) != 0,
+                conditional_entry,
+                recovery_generation);
         }
 
         if (result == WifiConfigEntryResult::kStarted) {
@@ -368,20 +388,28 @@ void WifiBoard::ArmWifiConfigIntentRetry() {
     if (esp_timer_is_active(connect_timer_)) {
         return;
     }
+    const int64_t deadline_us =
+        esp_timer_get_time() + CONNECT_TIMEOUT_SEC * 1000000LL;
+    wifi_recovery_deadline_us_.store(deadline_us, std::memory_order_release);
     const esp_err_t timer_error =
         esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
     if (timer_error != ESP_OK) {
+        wifi_recovery_deadline_us_.store(0, std::memory_order_release);
         ESP_LOGE(TAG, "Failed to arm WiFi config intent retry: %s",
                  esp_err_to_name(timer_error));
     }
 }
 
 WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(
-        bool show_notification, bool require_disconnected) {
+        bool show_notification,
+        bool require_disconnected,
+        uint32_t recovery_generation) {
     if (in_config_mode_ && WifiManager::GetInstance().IsConfigMode()) {
         return WifiConfigEntryResult::kStarted;
     }
-    if (require_disconnected && WifiManager::GetInstance().IsConnected()) {
+    if (require_disconnected &&
+        (recovery_generation != wifi_recovery_generation_.load(std::memory_order_acquire) ||
+         WifiManager::GetInstance().IsConnected())) {
         ESP_LOGI(TAG, "WiFi recovery cancelled because station reconnected");
         return WifiConfigEntryResult::kCancelled;
     }
@@ -436,7 +464,9 @@ WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(
     }
 #endif
 
-    if (require_disconnected && WifiManager::GetInstance().IsConnected()) {
+    if (require_disconnected &&
+        (recovery_generation != wifi_recovery_generation_.load(std::memory_order_acquire) ||
+         WifiManager::GetInstance().IsConnected())) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
         if (!blufi.AbortProvisioningSetup(provisioning_token)) {
             ESP_LOGE(TAG, "WiFi recovery cancellation could not restore provisioning state");
@@ -462,7 +492,9 @@ WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(
         }
         return WifiConfigEntryResult::kRetry;
     }
-    if (require_disconnected && WifiManager::GetInstance().IsConnected()) {
+    if (require_disconnected &&
+        (recovery_generation != wifi_recovery_generation_.load(std::memory_order_acquire) ||
+         WifiManager::GetInstance().IsConnected())) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
         if (!blufi.AbortProvisioningSetup(provisioning_token)) {
             ESP_LOGE(TAG, "WiFi recovery commit cancellation could not restore provisioning state");
