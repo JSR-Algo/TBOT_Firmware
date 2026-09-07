@@ -45,6 +45,16 @@ def test_audio_service_routes_every_wake_word_access_through_controller_or_feed_
     assert provision.index("xEventGroupClearBits", quiesced) > quiesced
 
 
+def test_enabling_an_already_running_wake_word_is_idempotent():
+    source = read("main/audio/audio_service.cc")
+    enable = function_body(source, "void AudioService::EnableWakeWordDetection")
+
+    running_guard = enable.index("if (enable && IsWakeWordRunning())")
+    start = enable.index("wake_word_->Start()")
+    assert running_guard < start
+    assert "return;" in function_body(enable, "if (enable && IsWakeWordRunning())")
+
+
 def test_begin_failure_after_quiescence_stays_fail_closed_without_rearm():
     source = read("main/audio/audio_service.cc")
     wifi = read("main/boards/common/wifi_board.cc")

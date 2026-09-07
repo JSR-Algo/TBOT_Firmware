@@ -1176,6 +1176,7 @@ void Application::HandleNetworkConnectedEvent() {
 
 void Application::HandleNetworkDisconnectedEvent() {
     RequestLessonStorageAbandonment();
+    backend_recovery_window_.Reset();
     // H2: network is gone -> stop the heartbeat (no live online session to report
     // and no point blocking the main task on an unreachable backend). It restarts
     // only from OnConnected.
@@ -2102,6 +2103,19 @@ void Application::CompleteClaimedWifiReprovisionActivation() {
         ota_ = std::make_unique<Ota>();
     }
     ota_->MarkCurrentVersionValid();
+
+    // Normal Wi-Fi changes reuse the realtime token from the previous online
+    // session. Recovery pairing can legitimately arrive here without one (for
+    // example after an operator releases stale cloud ownership), so refresh the
+    // signed runtime config before opening the WebSocket.
+    Settings websocket_settings("websocket", false);
+    if (websocket_settings.GetString("token").empty()) {
+        const esp_err_t refresh_result = ota_->CheckVersion();
+        if (refresh_result != ESP_OK) {
+            ESP_LOGW(TAG, "WebSocket config refresh after WiFi provisioning failed: 0x%x",
+                     refresh_result);
+        }
+    }
 
     DoResetProtocol();
     InitializeProtocol();
@@ -3544,6 +3558,7 @@ void Application::CheckNewVersion() {
 }
 
 void Application::InitializeProtocol() {
+    backend_recovery_window_.Reset();
     auto& board = Board::GetInstance();
     auto display = board.GetDisplay();
     auto codec = board.GetAudioCodec();
@@ -3599,6 +3614,7 @@ void Application::InitializeProtocol() {
     const uint64_t callback_protocol_generation =
         protocol_generation_.load(std::memory_order_acquire);
     protocol_->OnConnected([this]() {
+        backend_recovery_window_.Reset();
         if (IsConnectSuccessPublicationSuppressed()) {
             ESP_LOGI(TAG, "connect success publication suppressed");
             online_intent_.store(false);
@@ -3648,6 +3664,7 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
+        backend_recovery_window_.Reset();
         if (IsConnectSuccessPublicationSuppressed()) {
             ESP_LOGI(TAG, "audio channel success publication suppressed");
             online_intent_.store(false);
@@ -5372,6 +5389,18 @@ void Application::ScheduleReconnect(ListeningMode mode, bool resume_listening) {
 }
 
 void Application::SchedulePassiveLessonReconnect() {
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+    if (IsDeviceClaimed() && !lesson_runtime_active_.load() &&
+        WifiManager::GetInstance().IsConnected() &&
+        backend_recovery_window_.ShouldEnterWifiConfig(
+            static_cast<uint64_t>(esp_timer_get_time() / 1000))) {
+        ESP_LOGW(TAG, "passive_backend_timeout_entering_wifi_config");
+        reconnect_passive_.store(false);
+        passive_ws_intent_.store(false);
+        static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
+        return;
+    }
+#endif
     if (reconnect_passive_.load()) {
         ESP_LOGD(TAG, "passive_lesson_reconnect_already_pending");
         return;
@@ -6474,6 +6503,7 @@ void Application::CloseAudioChannelByIntent() {
     microphone_uplink_authorized_.store(false);
     reconnect_attempt_ = 0;
     passive_reconnect_attempt_ = 0;
+    backend_recovery_window_.Reset();
     connect_attempt_active_.store(false);
     if (reconnect_timer_ != nullptr) {
         esp_timer_stop(reconnect_timer_);

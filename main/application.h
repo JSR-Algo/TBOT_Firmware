@@ -28,6 +28,7 @@
 #include "claim_confirmation_reporter.h"
 #include "tbot_connect_mapper.h"
 #include "connect_close_deferral.h"
+#include "backend_recovery_window.h"
 #if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
 #include "course_mode_hil_diagnostic.h"
 #endif
@@ -344,6 +345,7 @@ private:
     esp_timer_handle_t reconnect_timer_ = nullptr;          // one-shot
     int reconnect_attempt_ = 0;
     int passive_reconnect_attempt_ = 0;
+    BackendRecoveryWindow backend_recovery_window_{60000};
     ListeningMode reconnect_mode_ = kListeningModeAutoStop;
     std::atomic<bool> reconnect_passive_{false};
     std::atomic<bool> reconnect_resume_listening_{true};

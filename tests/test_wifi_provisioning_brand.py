@@ -44,6 +44,20 @@ def test_claimed_blufi_reprovision_uses_lightweight_activation():
     assert "ActivationTask();" not in promote
 
 
+def test_claimed_blufi_reprovision_refreshes_missing_websocket_token_before_protocol_start():
+    source = read("main/application.cc")
+    activation = function_body(
+        source, "void Application::CompleteClaimedWifiReprovisionActivation"
+    )
+
+    token_read = activation.index('websocket_settings.GetString("token")')
+    token_refresh = activation.index("ota_->CheckVersion()")
+    protocol_start = activation.index("InitializeProtocol()")
+
+    assert token_read < token_refresh < protocol_start
+    assert 'if (websocket_settings.GetString("token").empty())' in activation
+
+
 def test_wifi_provisioning_uses_tbot_brand_names():
     wifi_board = read("main/boards/common/wifi_board.cc")
     blufi = read("main/boards/common/blufi.cpp")

@@ -871,6 +871,9 @@ void AudioService::EnableWakeWordDetection(bool enable) {
     auto lease = wake_word_lifecycle_.TryAcquireAccess();
     if (!lease) return;
     std::lock_guard<std::mutex> control_lock(wake_word_control_mutex_);
+    if (enable && IsWakeWordRunning()) {
+        return;
+    }
     if (!wake_word_ && enable) {
         CreateWakeWordIfAvailable();
     }

@@ -453,6 +453,24 @@ def test_passive_lesson_socket_connect_failure_retries_passively():
     assert "SetDeviceState(kDeviceStateConnecting)" not in reconnect_tick[: reconnect_tick.index("StartPassiveLessonWebsocket();")]
     assert "passive_lesson_reconnect_scheduled" in passive_scheduler
 
+
+def test_continuous_passive_backend_failure_enters_wifi_config_after_bounded_window():
+    source = read("main/application.cc")
+    header = read("main/application.h")
+    scheduler = function_body(source, "void Application::SchedulePassiveLessonReconnect")
+    close = function_body(source, "void Application::CloseAudioChannelByIntent")
+    initialize = function_body(source, "void Application::InitializeProtocol")
+
+    assert '#include "backend_recovery_window.h"' in header
+    assert "BackendRecoveryWindow backend_recovery_window_" in header
+    assert "backend_recovery_window_.ShouldEnterWifiConfig" in scheduler
+    assert "passive_backend_timeout_entering_wifi_config" in scheduler
+    assert "EnterWifiConfigMode();" in scheduler
+    assert scheduler.index("ShouldEnterWifiConfig") < scheduler.index("EnterWifiConfigMode();")
+    assert "return;" in scheduler[scheduler.index("EnterWifiConfigMode();") :]
+    assert "backend_recovery_window_.Reset();" in close
+    assert "backend_recovery_window_.Reset();" in initialize
+
 def test_passive_lesson_socket_worker_unavailable_retries_passively():
     source = read("main/application.cc")
     passive = function_body(source, "void Application::StartPassiveLessonWebsocket")
