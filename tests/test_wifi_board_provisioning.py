@@ -632,7 +632,8 @@ def test_wb12aa_wifi_recovery_timeout_helper_is_non_sliding_and_offline_only():
         "esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)"
     )
     assert active_idx < arm_idx
-    assert "return;" in body[:arm_idx]
+    assert "return false;" in body[:arm_idx]
+    assert "wifi_recovery_timer_gate_.RunArmTransaction" in body
     assert "WiFi recovery timeout armed" in body
 
 
@@ -765,7 +766,9 @@ def test_wb16_runtime_recovery_rearms_while_lesson_owns_the_robot():
     )
 
     lesson_idx = body.index("IsLessonRuntimeActive()")
-    rearm_idx = body.index("board->ArmWifiConfigIntentRetry();", lesson_idx)
+    rearm_idx = body.index(
+        "board->ArmWifiRecoveryRetry(recovery_generation);", lesson_idx
+    )
     return_idx = body.index("return;", lesson_idx)
     request_idx = body.index(
         "board->RequestWifiConfigMode(false, true, recovery_generation);"
@@ -851,10 +854,13 @@ def test_wb18b_stale_timeout_intent_cannot_enter_ble_after_new_outage():
     assert capture_idx < deadline_idx < connected_check_idx < request_idx
     assert "esp_timer_get_time() < recovery_deadline_us" in timeout
 
-    invalidate_idx = connected.index("wifi_recovery_generation_.fetch_add")
     clear_deadline_idx = connected.index("wifi_recovery_deadline_us_.store(0")
+    invalidate_idx = connected.index("wifi_recovery_generation_.fetch_add")
     stop_idx = connected.index("esp_timer_stop(connect_timer_);")
-    assert invalidate_idx < clear_deadline_idx < stop_idx
+    assert clear_deadline_idx < invalidate_idx < stop_idx
+
+    assert "WifiRecoveryTimerGate wifi_recovery_timer_gate_;" in wifi_header
+    assert "wifi_recovery_timer_gate_.RunInvalidationTransaction" in connected
 
     assert "wifi_config_entry_recovery_generation_.load" in drain
     assert "StartWifiConfigMode(" in drain
@@ -867,6 +873,48 @@ def test_wb18b_stale_timeout_intent_cannot_enter_ble_after_new_outage():
     stop_station_idx = start.index("WifiManager::GetInstance().StopStation()")
     assert guard_idx < prepare_idx
     assert start.rindex(generation_guard, 0, stop_station_idx) > prepare_idx
+
+
+def test_wb18c_conditional_retry_is_generation_gated_and_serialized_with_reconnect():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    wifi_header = read("main/boards/common/wifi_board.h")
+    timeout = _func_body(
+        wifi_board,
+        "void WifiBoard::OnWifiConnectTimeout(",
+        "// ---",
+    )
+    drain = _func_body(
+        wifi_board,
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+        "void WifiBoard::ArmWifiConfigIntentRetry(",
+    )
+    assert "wifi_recovery_timer_gate.h" in wifi_header
+    assert "wifi_recovery_timer_gate_.RunInvalidationTransaction" in wifi_board
+    assert "board->ArmWifiRecoveryRetry(recovery_generation);" in timeout
+    assert "ArmWifiConfigIntentRetry();" in drain
+
+
+def test_wb18d_explicit_config_retry_has_a_dedicated_timer_and_runs_while_online():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    wifi_header = read("main/boards/common/wifi_board.h")
+    retry = _func_body(
+        wifi_board,
+        "void WifiBoard::ArmWifiConfigIntentRetry(",
+        "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(",
+    )
+    callback = _func_body(
+        wifi_board,
+        "void WifiBoard::OnWifiConfigIntentRetry(",
+        "void WifiBoard::ArmWifiConfigIntentRetry(",
+    )
+
+    assert "esp_timer_handle_t wifi_config_retry_timer_" in wifi_header
+    assert "static void OnWifiConfigIntentRetry(void* arg);" in wifi_header
+    assert "esp_timer_start_once(" in retry
+    assert "wifi_config_retry_timer_" in retry
+    assert "esp_timer_start_once(connect_timer_" not in retry
+    assert "ScheduleWifiConfigIntentDrain();" in callback
+    assert "WifiManager::GetInstance().IsConnected()" not in callback
 
 
 def test_wb19_explicit_setup_upgrades_a_pending_conditional_recovery():

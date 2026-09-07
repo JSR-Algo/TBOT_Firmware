@@ -3,6 +3,7 @@
 
 #include "board.h"
 #include "wifi_station_start_result.h"
+#include "wifi_recovery_timer_gate.h"
 #include <atomic>
 #include <cstdint>
 #include <freertos/FreeRTOS.h>
@@ -13,6 +14,7 @@
 class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
+    esp_timer_handle_t wifi_config_retry_timer_ = nullptr;
     std::atomic<bool> in_config_mode_{false};
     std::atomic<bool> wifi_config_entry_pending_{false};
     std::atomic<uint32_t> wifi_config_entry_intent_{0};
@@ -20,6 +22,7 @@ protected:
     std::atomic<uint32_t> wifi_recovery_generation_{0};
     std::atomic<uint32_t> wifi_config_entry_recovery_generation_{0};
     std::atomic<int64_t> wifi_recovery_deadline_us_{0};
+    WifiRecoveryTimerGate wifi_recovery_timer_gate_;
     NetworkEventCallback network_event_callback_ = nullptr;
 
     enum class WifiConfigEntryResult : uint8_t {
@@ -81,6 +84,8 @@ protected:
                                bool require_disconnected = false,
                                uint32_t recovery_generation = 0);
     void ScheduleWifiConfigIntentDrain();
+    void ArmWifiRecoveryRetry(uint32_t recovery_generation);
+    static void OnWifiConfigIntentRetry(void* arg);
     void ArmWifiConfigIntentRetry();
     WifiConfigEntryResult StartWifiConfigMode(bool show_notification = false,
                                               bool require_disconnected = false,

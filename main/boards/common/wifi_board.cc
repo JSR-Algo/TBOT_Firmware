@@ -41,12 +41,25 @@ WifiBoard::WifiBoard() {
         .skip_unhandled_events = true
     };
     esp_timer_create(&timer_args, &connect_timer_);
+
+    esp_timer_create_args_t retry_timer_args = {
+        .callback = OnWifiConfigIntentRetry,
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "wifi_config_retry",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&retry_timer_args, &wifi_config_retry_timer_);
 }
 
 WifiBoard::~WifiBoard() {
     if (connect_timer_) {
         esp_timer_stop(connect_timer_);
         esp_timer_delete(connect_timer_);
+    }
+    if (wifi_config_retry_timer_) {
+        esp_timer_stop(wifi_config_retry_timer_);
+        esp_timer_delete(wifi_config_retry_timer_);
     }
     if (ap_setup_timer_) {
         esp_timer_stop(ap_setup_timer_);
@@ -102,26 +115,31 @@ void WifiBoard::StartNetwork() {
 }
 
 void WifiBoard::EnsureWifiRecoveryTimeout() {
-    if (in_config_mode_ || WifiManager::GetInstance().IsConnected()) {
-        return;
-    }
-    if (esp_timer_is_active(connect_timer_)) {
-        ESP_LOGI(TAG, "WiFi recovery timeout already armed; retaining deadline");
-        return;
-    }
-
-    const int64_t deadline_us =
-        esp_timer_get_time() + CONNECT_TIMEOUT_SEC * 1000000LL;
-    wifi_recovery_deadline_us_.store(deadline_us, std::memory_order_release);
-    const esp_err_t timer_error =
-        esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
-    if (timer_error != ESP_OK) {
-        wifi_recovery_deadline_us_.store(0, std::memory_order_release);
-        ESP_LOGE(TAG, "Failed to arm WiFi recovery timeout: %s",
-                 esp_err_to_name(timer_error));
-        return;
-    }
-    ESP_LOGI(TAG, "WiFi recovery timeout armed for %ds", CONNECT_TIMEOUT_SEC);
+    wifi_recovery_timer_gate_.RunArmTransaction(
+        [this]() {
+            if (in_config_mode_ || WifiManager::GetInstance().IsConnected()) {
+                return false;
+            }
+            if (esp_timer_is_active(connect_timer_)) {
+                ESP_LOGI(TAG, "WiFi recovery timeout already armed; retaining deadline");
+                return false;
+            }
+            return true;
+        },
+        [this]() {
+            const int64_t deadline_us =
+                esp_timer_get_time() + CONNECT_TIMEOUT_SEC * 1000000LL;
+            wifi_recovery_deadline_us_.store(deadline_us, std::memory_order_release);
+            const esp_err_t timer_error =
+                esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+            if (timer_error != ESP_OK) {
+                wifi_recovery_deadline_us_.store(0, std::memory_order_release);
+                ESP_LOGE(TAG, "Failed to arm WiFi recovery timeout: %s",
+                         esp_err_to_name(timer_error));
+                return;
+            }
+            ESP_LOGI(TAG, "WiFi recovery timeout armed for %ds", CONNECT_TIMEOUT_SEC);
+        });
 }
 
 WifiStationStartResult WifiBoard::TryWifiConnect() {
@@ -155,9 +173,11 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
     switch (event) {
         case NetworkEvent::Connected:
             // Invalidate both the timer and any conditional entry it already queued.
-            wifi_recovery_generation_.fetch_add(1, std::memory_order_acq_rel);
-            wifi_recovery_deadline_us_.store(0, std::memory_order_release);
-            esp_timer_stop(connect_timer_);
+            wifi_recovery_timer_gate_.RunInvalidationTransaction([this]() {
+                wifi_recovery_deadline_us_.store(0, std::memory_order_release);
+                wifi_recovery_generation_.fetch_add(1, std::memory_order_acq_rel);
+                esp_timer_stop(connect_timer_);
+            });
             // Provisioning succeeded → AP (if it was open) must stop. Cancel the
             // AP hard-timeout so a stale callback cannot post a redundant
             // StopConfigAp after we have already moved on.
@@ -226,7 +246,7 @@ void WifiBoard::OnWifiConnectTimeout(void* arg) {
     }
     if (Application::GetInstance().IsLessonRuntimeActive()) {
         ESP_LOGI(TAG, "WiFi connection timeout deferred during lesson");
-        board->ArmWifiConfigIntentRetry();
+        board->ArmWifiRecoveryRetry(recovery_generation);
         return;
     }
 
@@ -359,11 +379,13 @@ void WifiBoard::ScheduleWifiConfigIntentDrain() {
         }
 
         if (result == WifiConfigEntryResult::kStarted) {
+            esp_timer_stop(wifi_config_retry_timer_);
             wifi_config_entry_intent_.fetch_and(
                 ~(kWifiConfigIntentConditional | kWifiConfigIntentExplicit |
                   kWifiConfigIntentNotify),
                 std::memory_order_acq_rel);
         } else if (result == WifiConfigEntryResult::kCancelled) {
+            esp_timer_stop(wifi_config_retry_timer_);
             wifi_config_entry_intent_.fetch_and(
                 ~kWifiConfigIntentConditional,
                 std::memory_order_acq_rel);
@@ -384,17 +406,46 @@ void WifiBoard::ScheduleWifiConfigIntentDrain() {
     });
 }
 
+void WifiBoard::ArmWifiRecoveryRetry(uint32_t recovery_generation) {
+    wifi_recovery_timer_gate_.RunArmTransaction(
+        [this, recovery_generation]() {
+            if (in_config_mode_ || esp_timer_is_active(connect_timer_)) {
+                return false;
+            }
+            if (recovery_generation != wifi_recovery_generation_.load(
+                    std::memory_order_acquire) ||
+                WifiManager::GetInstance().IsConnected()) {
+                ESP_LOGI(TAG, "WiFi recovery retry cancelled because station reconnected");
+                return false;
+            }
+            return true;
+        },
+        [this]() {
+            const int64_t deadline_us =
+                esp_timer_get_time() + CONNECT_TIMEOUT_SEC * 1000000LL;
+            wifi_recovery_deadline_us_.store(deadline_us, std::memory_order_release);
+            const esp_err_t timer_error = esp_timer_start_once(
+                connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+            if (timer_error != ESP_OK) {
+                wifi_recovery_deadline_us_.store(0, std::memory_order_release);
+                ESP_LOGE(TAG, "Failed to arm WiFi config intent retry: %s",
+                         esp_err_to_name(timer_error));
+            }
+        });
+}
+
+void WifiBoard::OnWifiConfigIntentRetry(void* arg) {
+    auto* board = static_cast<WifiBoard*>(arg);
+    board->ScheduleWifiConfigIntentDrain();
+}
+
 void WifiBoard::ArmWifiConfigIntentRetry() {
-    if (esp_timer_is_active(connect_timer_)) {
+    if (in_config_mode_ || esp_timer_is_active(wifi_config_retry_timer_)) {
         return;
     }
-    const int64_t deadline_us =
-        esp_timer_get_time() + CONNECT_TIMEOUT_SEC * 1000000LL;
-    wifi_recovery_deadline_us_.store(deadline_us, std::memory_order_release);
-    const esp_err_t timer_error =
-        esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+    const esp_err_t timer_error = esp_timer_start_once(
+        wifi_config_retry_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
     if (timer_error != ESP_OK) {
-        wifi_recovery_deadline_us_.store(0, std::memory_order_release);
         ESP_LOGE(TAG, "Failed to arm WiFi config intent retry: %s",
                  esp_err_to_name(timer_error));
     }
@@ -509,8 +560,11 @@ WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(
         return WifiConfigEntryResult::kCancelled;
     }
     AppExitToChatboxForSystemFlow();
-    esp_timer_stop(connect_timer_);
     in_config_mode_ = true;
+    wifi_recovery_timer_gate_.RunInvalidationTransaction([this]() {
+        wifi_recovery_deadline_us_.store(0, std::memory_order_release);
+        esp_timer_stop(connect_timer_);
+    });
     WifiManager::GetInstance().StopStation();
     if (show_notification) {
         GetDisplay()->ShowNotification(Lang::Strings::ENTERING_WIFI_CONFIG_MODE);
