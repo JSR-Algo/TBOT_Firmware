@@ -594,6 +594,46 @@ def test_wb12_try_wifi_connect_branches_on_stored_ssids():
     assert "ShouldArmWifiConnectTimeout(start_result)" in body[start_idx:arm_idx]
 
 
+def test_wb12a_saved_wifi_arms_recovery_before_station_start_outcome():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    body = _func_body(
+        wifi_board,
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
+        "void WifiBoard::OnNetworkEvent(",
+    )
+
+    have_idx = body.index("if (have_ssid)")
+    arm_idx = body.index("EnsureWifiRecoveryTimeout();", have_idx)
+    start_idx = body.index(
+        "WifiManager::GetInstance().StartStationIfScanIdle()", have_idx
+    )
+    return_idx = body.index("return start_result;", start_idx)
+
+    assert have_idx < arm_idx < start_idx < return_idx
+    assert "ShouldArmWifiConnectTimeout(start_result)" not in body
+
+
+def test_wb12aa_wifi_recovery_timeout_helper_is_non_sliding_and_offline_only():
+    wifi_board = read("main/boards/common/wifi_board.cc")
+    wifi_header = read("main/boards/common/wifi_board.h")
+    body = _func_body(
+        wifi_board,
+        "void WifiBoard::EnsureWifiRecoveryTimeout()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
+    )
+
+    assert "void EnsureWifiRecoveryTimeout();" in wifi_header
+    assert "in_config_mode_" in body
+    assert "WifiManager::GetInstance().IsConnected()" in body
+    active_idx = body.index("esp_timer_is_active(connect_timer_)")
+    arm_idx = body.index(
+        "esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)"
+    )
+    assert active_idx < arm_idx
+    assert "return;" in body[:arm_idx]
+    assert "WiFi recovery timeout armed" in body
+
+
 # ---------------------------------------------------------------------------
 # WB12b: Half-provisioned recovery. If a previous BluFi attempt saved Wi-Fi
 #        credentials but never completed TBOT claim confirmation, startup must
