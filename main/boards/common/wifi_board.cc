@@ -101,6 +101,25 @@ void WifiBoard::StartNetwork() {
     TryWifiConnect();
 }
 
+void WifiBoard::EnsureWifiRecoveryTimeout() {
+    if (in_config_mode_ || WifiManager::GetInstance().IsConnected()) {
+        return;
+    }
+    if (esp_timer_is_active(connect_timer_)) {
+        ESP_LOGI(TAG, "WiFi recovery timeout already armed; retaining deadline");
+        return;
+    }
+
+    const esp_err_t timer_error =
+        esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+    if (timer_error != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to arm WiFi recovery timeout: %s",
+                 esp_err_to_name(timer_error));
+        return;
+    }
+    ESP_LOGI(TAG, "WiFi recovery timeout armed for %ds", CONNECT_TIMEOUT_SEC);
+}
+
 WifiStationStartResult WifiBoard::TryWifiConnect() {
     auto& ssid_manager = SsidManager::GetInstance();
     bool have_ssid = !ssid_manager.GetSsidList().empty();
@@ -108,15 +127,15 @@ WifiStationStartResult WifiBoard::TryWifiConnect() {
     if (have_ssid) {
         auto& app = Application::GetInstance();
         app.EnsureBleAdvertisingForUnclaimedSavedWifi();
-        // Start connection attempt with timeout
+        EnsureWifiRecoveryTimeout();
+
         ESP_LOGI(TAG, "Starting WiFi connection attempt");
         const auto start_result =
             WifiManager::GetInstance().StartStationIfScanIdle();
         if (start_result == WifiStationStartResult::kBusyOrFailed) {
-            return start_result;
-        }
-        if (ShouldArmWifiConnectTimeout(start_result)) {
-            esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
+            ESP_LOGW(TAG, "WiFi station start busy; recovery deadline remains armed");
+        } else if (start_result == WifiStationStartResult::kAlreadyActive) {
+            ESP_LOGI(TAG, "WiFi station already active; recovery deadline remains armed");
         }
         return start_result;
     } else {
@@ -151,18 +170,7 @@ void WifiBoard::OnNetworkEvent(NetworkEvent event, const std::string& data) {
             break;
         case NetworkEvent::Disconnected:
             ESP_LOGW(TAG, "WiFi disconnected");
-            // A runtime outage must converge to the same automatic recovery as
-            // an initial connection failure. Keep the first deadline fixed so
-            // repeated disconnect callbacks cannot postpone BLE setup forever.
-            if (!in_config_mode_
-                    && !esp_timer_is_active(connect_timer_)) {
-                const esp_err_t timer_error =
-                    esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL);
-                if (timer_error != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to arm WiFi recovery timeout: %s",
-                        esp_err_to_name(timer_error));
-                }
-            }
+            EnsureWifiRecoveryTimeout();
             break;
         case NetworkEvent::WifiConfigModeEnter:
             ESP_LOGI(TAG, "WiFi config mode entered");

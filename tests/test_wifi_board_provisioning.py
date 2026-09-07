@@ -582,16 +582,16 @@ def test_wb12_try_wifi_connect_branches_on_stored_ssids():
 
     assert "bool have_ssid = !ssid_manager.GetSsidList().empty();" in body
     have_idx = body.index("if (have_ssid)")
-    # Connect lane: reserve/start station, then arm its timeout.
-    arm_idx = body.index("esp_timer_start_once(connect_timer_,")
+    # Connect lane: arm the offline deadline before starting the station.
+    arm_idx = body.index("EnsureWifiRecoveryTimeout();")
     start_idx = body.index("WifiManager::GetInstance().StartStationIfScanIdle()")
     # Fallback lane: enter config mode.
     cfg_idx = body.index("RequestWifiConfigMode();")
-    assert have_idx < start_idx < arm_idx < cfg_idx, (
-        "TryWifiConnect() must reserve/start station before arming its timeout, "
+    assert have_idx < arm_idx < start_idx < cfg_idx, (
+        "TryWifiConnect() must arm its timeout before starting the station, "
         "and fall back to StartWifiConfigMode() when none are stored"
     )
-    assert "ShouldArmWifiConnectTimeout(start_result)" in body[start_idx:arm_idx]
+    assert "ShouldArmWifiConnectTimeout(start_result)" not in body
 
 
 def test_wb12a_saved_wifi_arms_recovery_before_station_start_outcome():
@@ -722,7 +722,7 @@ def test_wb13_config_mode_exit_reattempts_connect_after_cancel():
 #       repeated disconnect events must not slide the deadline indefinitely.
 #       Active lessons and an already-open config session keep ownership.
 # ---------------------------------------------------------------------------
-def test_wb14_runtime_disconnect_arms_non_sliding_recovery_timeout():
+def test_wb14_runtime_disconnect_uses_non_sliding_recovery_helper():
     wifi_board = read("main/boards/common/wifi_board.cc")
     fn = _func_body(
         wifi_board,
@@ -733,14 +733,17 @@ def test_wb14_runtime_disconnect_arms_non_sliding_recovery_timeout():
     case_end = fn.index("case NetworkEvent::WifiConfigModeEnter:", case_idx)
     body = fn[case_idx:case_end]
 
-    assert "!in_config_mode_" in body
-    active_guard = "!esp_timer_is_active(connect_timer_)"
-    assert active_guard in body
-    arm = "esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)"
-    assert arm in body
-    assert body.index(active_guard) < body.index(arm), (
-        "runtime disconnect must only arm an inactive timer so repeated events "
-        "cannot restart the 60-second recovery window"
+    helper = _func_body(
+        wifi_board,
+        "void WifiBoard::EnsureWifiRecoveryTimeout()",
+        "WifiStationStartResult WifiBoard::TryWifiConnect()",
+    )
+
+    assert "EnsureWifiRecoveryTimeout();" in body
+    assert "esp_timer_start_once" not in body
+    assert "esp_timer_is_active(connect_timer_)" in helper
+    assert helper.index("esp_timer_is_active(connect_timer_)") < helper.index(
+        "esp_timer_start_once(connect_timer_, CONNECT_TIMEOUT_SEC * 1000000ULL)"
     )
 
 

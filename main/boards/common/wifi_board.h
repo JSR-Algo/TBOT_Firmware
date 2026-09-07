@@ -68,6 +68,7 @@ protected:
     /**
      * Start WiFi connection attempt
      */
+    void EnsureWifiRecoveryTimeout();
     WifiStationStartResult TryWifiConnect();
 
     /**
