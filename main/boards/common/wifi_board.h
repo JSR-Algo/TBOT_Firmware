@@ -3,20 +3,31 @@
 
 #include "board.h"
 #include "wifi_station_start_result.h"
+#include "wifi_config_intent_state.h"
+#include "wifi_recovery_timer_gate.h"
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <esp_timer.h>
-#include <atomic>
 
 class WifiBoard : public Board {
 protected:
     esp_timer_handle_t connect_timer_ = nullptr;
+    esp_timer_handle_t wifi_config_retry_timer_ = nullptr;
     std::atomic<bool> in_config_mode_{false};
+    std::atomic<bool> wifi_config_station_teardown_pending_{false};
+    bool wifi_config_deferred_connected_ = false;
+    std::string wifi_config_deferred_connected_data_;
+    uint64_t wifi_config_deferred_connected_sequence_ = 0;
+    std::recursive_mutex network_event_mutex_;
+    uint64_t network_event_sequence_ = 0;
     std::atomic<bool> wifi_config_entry_pending_{false};
-    std::atomic<uint32_t> wifi_config_entry_intent_{0};
-    std::atomic<uint32_t> wifi_config_entry_request_generation_{0};
+    WifiConfigIntentState wifi_config_entry_intent_;
+    std::atomic<uint32_t> wifi_recovery_generation_{0};
+    std::atomic<int64_t> wifi_recovery_deadline_us_{0};
+    WifiRecoveryTimerGate wifi_recovery_timer_gate_;
     NetworkEventCallback network_event_callback_ = nullptr;
 
     enum class WifiConfigEntryResult : uint8_t {
@@ -24,9 +35,12 @@ protected:
         kCancelled,
         kRetry,
     };
-    static constexpr uint32_t kWifiConfigIntentConditional = 1u << 0;
-    static constexpr uint32_t kWifiConfigIntentExplicit = 1u << 1;
-    static constexpr uint32_t kWifiConfigIntentNotify = 1u << 2;
+    static constexpr uint32_t kWifiConfigIntentConditional =
+        WifiConfigIntentState::kConditional;
+    static constexpr uint32_t kWifiConfigIntentExplicit =
+        WifiConfigIntentState::kExplicit;
+    static constexpr uint32_t kWifiConfigIntentNotify =
+        WifiConfigIntentState::kNotify;
 
     // AP-setup hard-timeout safety gate (mirrors the BLE gate in blufi.cpp).
     // SoftAP/Hotspot provisioning must NOT run forever: when this one-shot timer
@@ -68,16 +82,22 @@ protected:
     /**
      * Start WiFi connection attempt
      */
+    void EnsureWifiRecoveryTimeout();
     WifiStationStartResult TryWifiConnect();
 
     /**
      * Enter WiFi configuration mode
      */
-    void RequestWifiConfigMode(bool show_notification = false, bool require_disconnected = false);
+    void RequestWifiConfigMode(bool show_notification = false,
+                               bool require_disconnected = false,
+                               uint32_t recovery_generation = 0);
     void ScheduleWifiConfigIntentDrain();
+    void ArmWifiRecoveryRetry(uint32_t recovery_generation);
+    static void OnWifiConfigIntentRetry(void* arg);
     void ArmWifiConfigIntentRetry();
     WifiConfigEntryResult StartWifiConfigMode(bool show_notification = false,
-                                              bool require_disconnected = false);
+                                              bool require_disconnected = false,
+                                              uint32_t recovery_generation = 0);
 
     /**
      * WiFi connection timeout callback

@@ -2436,7 +2436,7 @@ def test_fw36_rapid_boot_wifi_config_entries_are_epoch_scoped_and_single_flight(
 
     assert "wifi_config_entry_pending_" in header
     assert "RequestWifiConfigMode(true);" in enter
-    assert "wifi_config_entry_intent_.fetch_or" in request
+    assert "wifi_config_entry_intent_.Request" in request
     assert "wifi_config_entry_pending_.compare_exchange_strong" in drain
     assert "WiFi config request coalesced while entry is pending" in drain
     assert "wifi_config_entry_pending_.store(false)" in drain
