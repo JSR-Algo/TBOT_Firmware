@@ -457,8 +457,8 @@ def test_wifi_manager_never_waits_for_station_stop_under_manager_mutex():
     assert "uint64_t lifecycle_generation_ = 0;" in header
     assert "bool lifecycle_transition_in_progress_ = false;" in header
     for signature in (
-        "void WifiManager::StopStation",
-        "void WifiManager::StartConfigAp",
+        "bool WifiManager::TryStopStation",
+        "bool WifiManager::StartConfigApTransition",
         "bool WifiManager::StopRadio",
     ):
         body = function_body(source, signature)
@@ -660,6 +660,8 @@ def test_failed_config_boundary_retains_resources_and_blocks_manager_transitions
             manager,
             "bool WifiManager::TryStartStationTransition"
             if signature == "void WifiManager::StartStation"
+            else "bool WifiManager::StartConfigApTransition"
+            if signature == "void WifiManager::StartConfigAp"
             else signature,
         )
         assert "wifi_teardown_faulted_" in body
@@ -900,6 +902,10 @@ def test_manager_lifecycle_entry_points_are_blocked_during_scan_recovery():
             manager,
             "bool WifiManager::TryStartStationTransition"
             if signature == "void WifiManager::StartStation"
+            else "bool WifiManager::TryStopStation"
+            if signature == "void WifiManager::StopStation"
+            else "bool WifiManager::StartConfigApTransition"
+            if signature == "void WifiManager::StartConfigAp"
             else signature,
         )
         assert "scan_recovery_active_" in body
@@ -931,6 +937,8 @@ def test_mode_transitions_defer_target_start_until_exact_scan_recovery_finishes(
             manager,
             "bool WifiManager::TryStartStationTransition"
             if signature == "void WifiManager::StartStation"
+            else "bool WifiManager::StartConfigApTransition"
+            if signature == "void WifiManager::StartConfigAp"
             else signature,
         )
         source_stop = body.index(stopped_source)
@@ -943,7 +951,7 @@ def test_mode_transitions_defer_target_start_until_exact_scan_recovery_finishes(
     assert start_station.index("config_ap_to_stop->Stop()") < start_station.index(
         "config_mode_active_ = false"
     )
-    start_config = function_body(manager, "void WifiManager::StartConfigAp")
+    start_config = function_body(manager, "bool WifiManager::StartConfigApTransition")
     assert start_config.index("station_to_stop->Stop()") < start_config.index(
         "station_active_ = false"
     )
@@ -1026,6 +1034,10 @@ def test_manager_active_flags_stay_false_while_target_transition_is_pending():
         inspected_signature = (
             "bool WifiManager::TryStartStationTransition"
             if signature == "void WifiManager::StartStation"
+            else "bool WifiManager::TryStopStation"
+            if signature == "void WifiManager::StopStation"
+            else "bool WifiManager::StartConfigApTransition"
+            if signature == "void WifiManager::StartConfigAp"
             else signature
         )
         assert "pending_lifecycle_target_" in function_body(

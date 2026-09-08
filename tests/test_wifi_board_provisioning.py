@@ -71,10 +71,10 @@ def test_wifi_config_entry_closes_full_screen_app_overlay():
 
     publish = body.index("app.PublishWifiConfigEntry(preparation)")
     close_overlay = body.index("AppExitToChatboxForSystemFlow()", publish)
-    stop_station = body.index("WifiManager::GetInstance().StopStation()", close_overlay)
+    stop_station = body.index("WifiManager::GetInstance().TryStopStation()")
 
     assert "void AppExitToChatboxForSystemFlow();" in app_manager_header
-    assert publish < close_overlay < stop_station
+    assert stop_station < publish < close_overlay
 
 
 # ---------------------------------------------------------------------------
@@ -93,16 +93,17 @@ def test_wb1_start_config_mode_setup_step_ordering():
     release_idx = body.index("BeginWifiProvisioning")
     commit_idx = body.index("provisioning_reservation.Commit(provisioning_token)")
     restart_idx = body.index("blufi.RestartForSetup();")
-    stop_idx = body.index("WifiManager::GetInstance().StopStation();")
+    stop_idx = body.index("WifiManager::GetInstance().TryStopStation()")
     config_idx = body.index("in_config_mode_ = true;")
     state_idx = body.index("PublishWifiConfigEntry(preparation)")
     timer_idx = body.index("blufi.StartBleSetupTimeout(")
 
     assert reserve_idx < release_idx < commit_idx < restart_idx
-    assert restart_idx < state_idx < config_idx < stop_idx < timer_idx, (
+    assert restart_idx < config_idx < stop_idx < state_idx < timer_idx, (
         "StartWifiConfigMode() BLE setup steps must run in order: "
         "reservation -> wake-word release -> binding -> restart success -> "
-        "checked state publication -> config/station mutation -> StartBleSetupTimeout()"
+        "config claim -> station teardown -> checked state publication -> "
+        "StartBleSetupTimeout()"
     )
     assert "if (blufi_restart_error != ESP_OK)" in body
     restart_failure = body[body.index("if (blufi_restart_error != ESP_OK)"):stop_idx]
@@ -290,7 +291,7 @@ def test_wifi_config_entry_is_one_idempotent_main_task_transaction():
         "void WifiBoard::RequestWifiConfigMode(",
         "void WifiBoard::ScheduleWifiConfigIntentDrain(",
     )
-    assert "wifi_config_entry_intent_.fetch_or" in request_body
+    assert "wifi_config_entry_intent_.Request" in request_body
     drain = _func_body(
         wifi_board,
         "void WifiBoard::ScheduleWifiConfigIntentDrain(",
@@ -311,7 +312,7 @@ def test_application_prepares_realtime_before_blufi_and_checks_publication():
     restart = start.index("blufi.RestartForSetup()")
     publish = start.index("PublishWifiConfigEntry")
     stop = start.index("StopStation")
-    assert prepare < reserve < restart < publish < stop
+    assert prepare < reserve < restart < stop < publish
     assert "struct WifiConfigEntryPreparation" in app_h
     assert "bool PrepareWifiConfigEntry(WifiConfigEntryPreparation&" in app_h
     assert "bool PublishWifiConfigEntry(const WifiConfigEntryPreparation&" in app_h
@@ -378,7 +379,7 @@ def test_start_wifi_config_mode_ignores_active_lesson_before_setup_side_effects(
     preflight_idx = body.index("TryReserveProvisioningSession()")
     config_flag_idx = body.index("in_config_mode_ = true;")
     state_idx = body.index("PublishWifiConfigEntry(preparation)")
-    assert guard_idx < preflight_idx < state_idx < config_flag_idx
+    assert guard_idx < preflight_idx < config_flag_idx < state_idx
     guard = body[guard_idx:preflight_idx]
     assert "return WifiConfigEntryResult::kRetry;" in guard
     assert "in_config_mode_" not in guard
@@ -447,14 +448,9 @@ def test_wb8_hotspot_path_arms_ap_setup_timeout_after_opening_ap():
     wifi_board = read("main/boards/common/wifi_board.cc")
     body = _start_wifi_config_body(wifi_board)
 
-    # The hotspot branch opens the AP then arms the hard-timeout.
-    assert "wifi_manager.StartConfigAp();" in body
-    assert "StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC);" in body
-    open_idx = body.index("wifi_manager.StartConfigAp();")
-    arm_idx = body.index("StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC);")
-    assert open_idx < arm_idx, (
-        "AP-setup hard-timeout must be armed AFTER StartConfigAp() opens the AP"
-    )
+    # The hotspot branch requests the AP; the entered event arms its timeout.
+    assert "wifi_manager.TryStartConfigAp()" in body
+    assert "StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC);" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -782,7 +778,7 @@ def test_wb17_config_entry_marks_mode_before_synchronous_station_stop():
     body = _start_wifi_config_body(wifi_board)
 
     mark_idx = body.index("in_config_mode_ = true;")
-    stop_idx = body.index("WifiManager::GetInstance().StopStation();")
+    stop_idx = body.index("WifiManager::GetInstance().TryStopStation()")
     assert mark_idx < stop_idx, (
         "StopStation emits Disconnected synchronously, so config ownership must "
         "be visible before the event can try to arm runtime recovery"
@@ -844,7 +840,7 @@ def test_wb18b_stale_timeout_intent_cannot_enter_ble_after_new_outage():
     start = _start_wifi_config_body(wifi_board)
 
     assert "std::atomic<uint32_t> wifi_recovery_generation_{0};" in wifi_header
-    assert "wifi_config_entry_recovery_generation_" in wifi_header
+    assert "WifiConfigIntentState wifi_config_entry_intent_;" in wifi_header
     assert "wifi_recovery_deadline_us_" in wifi_header
 
     capture_idx = timeout.index("wifi_recovery_generation_.load")
@@ -862,7 +858,7 @@ def test_wb18b_stale_timeout_intent_cannot_enter_ble_after_new_outage():
     assert "WifiRecoveryTimerGate wifi_recovery_timer_gate_;" in wifi_header
     assert "wifi_recovery_timer_gate_.RunInvalidationTransaction" in connected
 
-    assert "wifi_config_entry_recovery_generation_.load" in drain
+    assert "snapshot.recovery_generation" in drain
     assert "StartWifiConfigMode(" in drain
     assert "recovery_generation" in drain
 
@@ -870,7 +866,7 @@ def test_wb18b_stale_timeout_intent_cannot_enter_ble_after_new_outage():
     assert generation_guard in start
     guard_idx = start.index(generation_guard)
     prepare_idx = start.index("PrepareWifiConfigEntry")
-    stop_station_idx = start.index("WifiManager::GetInstance().StopStation()")
+    stop_station_idx = start.index("WifiManager::GetInstance().TryStopStation()")
     assert guard_idx < prepare_idx
     assert start.rindex(generation_guard, 0, stop_station_idx) > prepare_idx
 
@@ -934,7 +930,7 @@ def test_wb19_explicit_setup_upgrades_a_pending_conditional_recovery():
     assert "wifi_config_entry_intent_" in wifi_header
     assert "kWifiConfigIntentConditional" in body
     assert "kWifiConfigIntentExplicit" in body
-    assert "wifi_config_entry_intent_.fetch_or" in body
+    assert "wifi_config_entry_intent_.Request" in body
     explicit = drain.index("kWifiConfigIntentExplicit")
     conditional = drain.index("conditional_entry", explicit)
     assert explicit < conditional
@@ -973,7 +969,7 @@ def test_wb22_lesson_deferral_preserves_explicit_setup_intent():
     start_body = _start_wifi_config_body(wifi_board)
 
     assert "WifiConfigEntryResult StartWifiConfigMode" in wifi_header
-    assert "wifi_config_entry_intent_.fetch_or" in request_body
+    assert "wifi_config_entry_intent_.Request" in request_body
     lesson_idx = start_body.index("IsLessonRuntimeActive()")
     return_idx = start_body.index("return WifiConfigEntryResult::kRetry;", lesson_idx)
     assert "wifi_config_entry_intent_" not in start_body[lesson_idx:return_idx]
@@ -998,8 +994,8 @@ def test_wb23_config_entry_uses_one_level_triggered_intent_word():
         "void WifiBoard::RequestWifiConfigMode(",
         "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(",
     )
-    assert "fetch_or" in request
-    assert "wifi_config_entry_intent_.store(0)" not in request
+    assert "wifi_config_entry_intent_.Request" in request
+    assert "wifi_config_entry_intent_.ConsumeAll" in request
 
 
 def test_wb24_conditional_recovery_rechecks_connection_at_commit_boundary():
@@ -1007,13 +1003,146 @@ def test_wb24_conditional_recovery_rechecks_connection_at_commit_boundary():
     start = _start_wifi_config_body(source)
 
     publish = start.index("app.PublishWifiConfigEntry(preparation)")
-    stop = start.index("WifiManager::GetInstance().StopStation()", publish)
-    commit_guard = start.index("WifiManager::GetInstance().IsConnected()", publish)
-    assert publish < commit_guard < stop
+    stop = start.index("WifiManager::GetInstance().TryStopStation()")
+    commit_guard = start.index("WifiManager::GetInstance().IsConnected()")
+    assert commit_guard < stop < publish
     rollback = start[commit_guard:stop]
     assert "AbortProvisioningSetup" in rollback
     assert "RollbackWifiConfigEntry" in rollback
     assert "kCancelled" in rollback
+
+
+def test_wb24a_commit_claim_is_serialized_with_connected_invalidation():
+    source = read("main/boards/common/wifi_board.cc")
+    start = _start_wifi_config_body(source)
+    connected = _connected_event_body(source)
+    header = read("main/boards/common/wifi_board.h")
+
+    claim = start.index("wifi_recovery_timer_gate_.RunArmTransaction")
+    connected_check = start.index("WifiManager::GetInstance().IsConnected()", claim)
+    mark = start.index("wifi_config_station_teardown_pending_ = true", claim)
+    stop = start.index("WifiManager::GetInstance().TryStopStation()", mark)
+    assert claim < connected_check < mark < stop
+    assert "std::atomic<bool> wifi_config_station_teardown_pending_{false};" in header
+    assert "if (wifi_config_station_teardown_pending_)" in connected
+    assert "if (in_config_mode_)" not in connected
+    assert "WifiManager::GetInstance().IsConnected()" not in connected
+    clear = start.index("wifi_config_station_teardown_pending_ = false", stop)
+    assert stop < clear
+
+
+def test_wb24b_timer_creation_is_fail_fast_not_silently_ignored():
+    source = read("main/boards/common/wifi_board.cc")
+    constructor = _func_body(source, "WifiBoard::WifiBoard()", "WifiBoard::~WifiBoard()")
+
+    assert constructor.count("ESP_ERROR_CHECK(esp_timer_create(") == 2
+
+
+def test_wb24c_newer_conditional_intent_is_not_consumed_by_older_drain():
+    source = read("main/boards/common/wifi_board.cc")
+    header = read("main/boards/common/wifi_board.h")
+    drain = _func_body(
+        source,
+        "void WifiBoard::ScheduleWifiConfigIntentDrain(",
+        "void WifiBoard::ArmWifiRecoveryRetry(",
+    )
+
+    assert "WifiConfigIntentState wifi_config_entry_intent_;" in header
+    assert "ConsumeIfCurrent(" in drain
+    assert "request_generation" in drain
+
+
+def test_wb24d_busy_station_teardown_retains_config_intent_for_retry():
+    source = read("main/boards/common/wifi_board.cc")
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager_source = read("components/esp-wifi-connect/wifi_manager.cc")
+    start = _start_wifi_config_body(source)
+
+    assert "bool TryStopStation();" in manager_header
+    assert "bool WifiManager::TryStopStation()" in manager_source
+    assert "if (!WifiManager::GetInstance().TryStopStation())" in start
+    failure = start[start.index("if (!WifiManager::GetInstance().TryStopStation())"):]
+    publish = start.index("app.PublishWifiConfigEntry(preparation)")
+    assert start.index("TryStopStation()") < publish
+    assert "wifi_config_station_teardown_pending_ = false" in failure
+    assert "in_config_mode_ = false" in failure
+    assert "AbortProvisioningSetup" in failure
+    assert "RollbackWifiConfigEntry" in failure
+    assert "return WifiConfigEntryResult::kRetry;" in failure
+
+
+def test_wb24e_hotspot_start_rejection_retains_config_intent_for_retry():
+    source = read("main/boards/common/wifi_board.cc")
+    manager_header = read("components/esp-wifi-connect/include/wifi_manager.h")
+    manager_source = read("components/esp-wifi-connect/wifi_manager.cc")
+    start = _start_wifi_config_body(source)
+
+    assert "bool TryStartConfigAp();" in manager_header
+    assert "bool WifiManager::TryStartConfigAp()" in manager_source
+    assert "StartConfigApTransition(false)" in manager_source
+    assert "StartConfigApTransition(bool allow_defer)" in manager_source
+    transition = manager_source[manager_source.index("bool WifiManager::StartConfigApTransition("):]
+    transition = transition[:transition.index("void WifiManager::StartConfigApTarget(")]
+    assert "transition_generation," in transition
+    assert "allow_defer" in transition
+    defer = manager_source[manager_source.index("bool WifiManager::DeferLifecycleTransitionForRecovery("):]
+    defer = defer[:defer.index("void WifiManager::ResumePendingLifecycleTransition(")]
+    reject = defer.index("if (!allow_defer)")
+    publish_pending = defer.index("pending_lifecycle_target_ = target")
+    assert reject < publish_pending
+    assert "if (!wifi_manager.TryStartConfigAp())" in start
+    assert start.index("wifi_manager.TryStartConfigAp()") < start.index(
+        "app.PublishWifiConfigEntry(preparation)"
+    )
+    failure = start[start.index("if (!wifi_manager.TryStartConfigAp())"):]
+    assert "in_config_mode_ = false" in failure
+    assert "RollbackWifiConfigEntry" in failure
+    assert "return WifiConfigEntryResult::kRetry;" in failure
+
+
+def test_wb24f_hotspot_timeout_starts_only_after_ap_enter_event():
+    source = read("main/boards/common/wifi_board.cc")
+    start = _start_wifi_config_body(source)
+    event = _func_body(
+        source,
+        "void WifiBoard::OnNetworkEvent(",
+        "void WifiBoard::SetNetworkEventCallback(",
+    )
+    enter = event[event.index("case NetworkEvent::WifiConfigModeEnter:"):]
+    enter = enter[:enter.index("case NetworkEvent::WifiConfigModeExit:")]
+
+    assert "StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC)" not in start
+    assert "StartApSetupTimeout(CONFIG_AP_SETUP_TIMEOUT_SEC)" in enter
+
+
+def test_wb24g_connected_event_is_replayed_when_station_teardown_is_busy():
+    source = read("main/boards/common/wifi_board.cc")
+    header = read("main/boards/common/wifi_board.h")
+    connected = _connected_event_body(source)
+    start = _start_wifi_config_body(source)
+
+    assert "wifi_config_deferred_connected_" in header
+    assert "wifi_config_deferred_connected_data_" in header
+    assert "network_event_sequence_" in header
+    assert "network_event_mutex_" in header
+    on_event = _func_body(
+        source,
+        "void WifiBoard::OnNetworkEvent(",
+        "void WifiBoard::SetNetworkEventCallback(",
+    )
+    assert "std::lock_guard<std::recursive_mutex> event_lock(network_event_mutex_)" in on_event
+    assert "++network_event_sequence_" in on_event
+    assert "wifi_config_deferred_connected_ = true" in connected
+    assert "wifi_config_deferred_connected_data_ = data" in connected
+    assert "wifi_config_deferred_connected_sequence_ = event_sequence" in connected
+    busy = start[start.index("if (!WifiManager::GetInstance().TryStopStation())"):]
+    busy = busy[:busy.index("wifi_recovery_timer_gate_.RunInvalidationTransaction", 1)]
+    assert "replay_connected" in busy
+    assert "network_event_sequence_ == replay_connected_sequence" in start
+    assert "replay_connected_sequence" in start
+    assert "OnNetworkEvent(NetworkEvent::Connected, replay_connected_data)" in start
+    success = start[start.index("wifi_config_station_teardown_pending_ = false", start.index("TryStopStation")):]
+    assert "wifi_config_deferred_connected_ = false" in success
 
 
 def test_wb25_failed_or_lesson_deferred_entry_keeps_intent_for_retry():
@@ -1029,7 +1158,7 @@ def test_wb25_failed_or_lesson_deferred_entry_keeps_intent_for_retry():
     assert "enum class WifiConfigEntryResult" in header
     assert "kStarted" in header and "kCancelled" in header and "kRetry" in header
     assert "if (result == WifiConfigEntryResult::kStarted)" in request
-    assert "wifi_config_entry_intent_.fetch_and" in request
+    assert "wifi_config_entry_intent_.ConsumeIfCurrent" in request
     assert "ScheduleWifiConfigIntentDrain" in request
     assert "return WifiConfigEntryResult::kRetry;" in start
     lesson = start[start.index("IsLessonRuntimeActive()"):]
