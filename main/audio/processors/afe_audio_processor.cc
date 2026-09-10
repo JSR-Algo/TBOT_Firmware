@@ -241,7 +241,9 @@ void AfeAudioProcessor::AudioProcessorTask() {
         xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE, portMAX_DELAY);
         if (shutdown_.load()) break;
         FetchAudio();
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // At 100 Hz, pdMS_TO_TICKS(1) is zero. Block for a real tick so the
+        // lower-priority capture cleanup can acquire callback_mutex_.
+        vTaskDelay(1);
     }
     xEventGroupSetBits(event_group_, PROCESSOR_EXITED);
 }

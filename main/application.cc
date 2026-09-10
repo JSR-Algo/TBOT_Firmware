@@ -1318,6 +1318,19 @@ void Application::HandleNetworkDisconnectedEvent() {
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     auto display = Board::GetInstance().GetDisplay();
+    if (chat_cleanup_enabled_ && chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
+        !IsLessonVoiceRoute() && (online_intent_.load() || passive_ws_intent_.load())) {
+        // Radio loss must retain recovery intent; an intentional close cancels it.
+        ConnectionSource source;
+        if (chat_protocol_signals_->TrySource(source)) {
+            ESP_LOGW(TAG, "chat_source_fault reason=wifi_disconnected");
+            chat_protocol_signals_->PublishConnectionFault(source, chat_source_connect_generation_.load(),
+                ChatProtocolSignals::Error);
+        }
+        PollChatProtocolSignals();
+        display->UpdateStatusBar(true);
+        return;
+    }
     if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
         backend_offline_.store(true);
@@ -4668,6 +4681,9 @@ bool Application::HasLessonAssetSyncWakeOpportunity() {
 }
 
 bool Application::BeginLessonAssetSyncQuiet() {
+#if CONFIG_TBOT_VOICE_DEMO
+    return false;
+#endif
     // Busy retries must not stop the settling timer or revoke the wake window.
     if (!HasLessonAssetSyncWakeOpportunity()) return false;
     const DeviceState state = GetDeviceState();
@@ -5606,7 +5622,11 @@ void Application::HandleChatAudio(const std::shared_ptr<ChatProtocolSignals>& si
         !tts_audio_accepting_.load() || !audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) return;
     packet->generation = response.response_generation;
     packet->conversation_audio = true;
-    audio_service_.PushChatPacketToDecodeQueue(std::move(packet), response.reset_token);
+    if (audio_service_.PushChatPacketToDecodeQueue(std::move(packet), response.reset_token) &&
+        response.response_generation == speaking_generation_.load() &&
+        audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) {
+        last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
+    }
 }
 
 void Application::RecoverChatStart(const ChatStartHandoff::Request& request, uint32_t site) {
@@ -5755,9 +5775,6 @@ void Application::HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSigna
     if (response.source.source_id != source.source_id || response.source.connection_epoch != source.connection_epoch ||
         response.protocol_generation != protocol_generation || response.connect_generation != connect_generation_.load() ||
         response.response_generation != speaking_generation_.load()) return;
-    // Seal only receiver-owned audio admission. Keep the application-published
-    // intake identity intact so duplicate/conflicting STOPs retain their clock.
-    signals->start_audio = {};
     stop.received_us = received_us;
     const auto* reason = cJSON_GetObjectItem(root, "reason");
     stop.interrupt = cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0;
@@ -5767,6 +5784,14 @@ void Application::HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSigna
     stop.realtime = cJSON_IsString(mode) && strcmp(mode->valuestring, "realtime") == 0;
     stop.explicit_manual_stop = cJSON_IsFalse(resume) && cJSON_IsString(mode) && strcmp(mode->valuestring, "manual") == 0;
     const auto* id = cJSON_GetObjectItem(root, "drainId");
+    // A no-audio server keepalive refreshes an already active listener. It has
+    // no drain identity and must not invalidate the previous completed reply.
+    if (!id && !reason && stop.continue_listening && stop.realtime &&
+        GetDeviceState() == kDeviceStateListening && microphone_uplink_authorized_.load() &&
+        !signals->start_audio.reset_token && audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) return;
+    // Seal only receiver-owned audio admission. Keep the application-published
+    // intake identity intact so duplicate/conflicting STOPs retain their clock.
+    signals->start_audio = {};
     if (cJSON_IsString(id)) {
         const size_t size = strnlen(id->valuestring, stop.drain_id.size());
         stop.valid = size > 5 && size <= 128 && strncmp(id->valuestring, "chat:", 5) == 0;
@@ -5894,6 +5919,9 @@ void Application::PollChatPlayout(uint64_t now_us) {
                     completion.result == Result::Busy ? Controller::Delivery::Busy :
                     completion.result == Result::Stale ? Controller::Delivery::Stale : Controller::Delivery::Failed;
                 chat_playout_controller_.Deliver(chat_playout_ack_controller_id_,delivery);
+                // Delivery retires the physical ACK even if drain observation is Busy.
+                chat_playout_ack_admitted_ = false;
+                chat_playout_ack_controller_id_ = 0;
             }
         }
         if (chat_outbound_fault_) { RecoverChatPlayout(210); return; }
@@ -7133,6 +7161,11 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                 }
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
+#if CONFIG_TBOT_VOICE_DEMO
+            // Keep the current animated face; transcript chunks can otherwise
+            // reconstruct a GIF faster than the screen can render it.
+            return;
+#endif
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
                 if (!lesson_runtime_active_.load()) {
@@ -7470,6 +7503,9 @@ void Application::PollChatLessonCapture(uint64_t now_us) {
 
 void Application::PollChatInboundMessages() {
     for (size_t count = 0; count < 4; ++count) {
+        // A START can arrive during the previous display update. Admit it
+        // before another update consumes the receiver's 250 ms deadline.
+        PollChatStart(static_cast<uint64_t>(esp_timer_get_time()));
         auto next = chat_inbound_messages_.TryTake();
         if (next.status == ChatInboundMessages::ReadStatus::Busy) {
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
@@ -7484,6 +7520,7 @@ void Application::PollChatInboundMessages() {
         }
         try { DispatchIncomingJson(context->root.get(), context->lesson_epoch, true, context); }
         catch (...) { FailChatRequest(context); }
+        PollChatStart(static_cast<uint64_t>(esp_timer_get_time()));
     }
     if (chat_inbound_messages_.Pending()) xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
 }
@@ -7770,7 +7807,8 @@ bool Application::HandleChatStopListening() {
     if (!RetainChatActiveListen()) return true;
     chat_rearm_voice_intent_ = false;
     microphone_uplink_authorized_.store(false);
-    RequestChatAudioCleanup(speaking_generation_.load(), false, false, false);
+    RequestChatAudioCleanup(speaking_generation_.load(), false, false,
+        IsDeviceClaimed() && !connect_in_flight_.load() && !lesson_asset_sync_quiet_.load());
     chat_rearm_phase_ = ChatRearmPhase::IdleComplete;
     RequestChatControl(ChatOutboundMailbox::Kind::ListenStop);
     chat_playout_ready_ = false;
@@ -7853,7 +7891,8 @@ bool Application::HandleChatAbort(AbortReason reason, bool resume) {
     last_speaking_activity_ms_.store(0);
     chat_rearm_voice_intent_ = false;
     microphone_uplink_authorized_.store(false);
-    RequestChatAudioCleanup(speaking_generation_.load(), true, false, false);
+    RequestChatAudioCleanup(speaking_generation_.load(), true, false,
+        !resume && IsDeviceClaimed() && !connect_in_flight_.load() && !lesson_asset_sync_quiet_.load());
     RequestChatControl(ChatOutboundMailbox::Kind::Abort, reason);
     chat_playout_response_.reset_token = chat_audio_reset_serial_;
     chat_rearm_owner_ = chat_playout_response_;
@@ -8356,6 +8395,13 @@ void Application::RenderChatRearm() {
          chat_rearm_owner_.connect_generation != connect_generation_.load() ||
          chat_rearm_owner_.response_generation != speaking_generation_.load() ||
          !audio_service_.IsCurrentChatPlaybackReset(chat_rearm_owner_.reset_token))) return;
+    if (chat_rearm_phase_ == chat_rearm_rendered_phase_ &&
+        chat_rearm_owner_.reset_token == chat_rearm_rendered_reset_ &&
+        backend_offline_.load() == chat_rearm_rendered_offline_) return;
+    // Polling audio readiness must not continuously rebuild the same GIF.
+    chat_rearm_rendered_phase_ = chat_rearm_phase_;
+    chat_rearm_rendered_reset_ = chat_rearm_owner_.reset_token;
+    chat_rearm_rendered_offline_ = backend_offline_.load();
     auto& board = Board::GetInstance();
     board.GetLed()->OnStateChanged();
     auto* display = board.GetDisplay();

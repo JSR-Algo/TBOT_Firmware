@@ -3236,7 +3236,7 @@ def test_afe_audio_loops_yield_to_avoid_watchdog_starvation():
 
     processor_start = processor.index("void AfeAudioProcessor::AudioProcessorTask()")
     processor_end = processor.index("void AfeAudioProcessor::EnableDeviceAec", processor_start)
-    assert "vTaskDelay(pdMS_TO_TICKS(1));" in processor[processor_start:processor_end]
+    assert "vTaskDelay(1);" in processor[processor_start:processor_end]
 
 
 def test_afe_background_tasks_keep_fetch_below_feed_but_above_idle():

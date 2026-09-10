@@ -7,7 +7,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("sanitize", ["address,undefined", "thread"])
-def test_actual_quiet_admission_gives_running_wake_a_fixed_opportunity(tmp_path, sanitize):
+@pytest.mark.parametrize("voice_demo", [False, True])
+def test_actual_quiet_admission_gives_running_wake_a_fixed_opportunity(tmp_path, sanitize, voice_demo):
     source = (ROOT / "main/application.cc").read_text()
     signatures = ["bool Application::BeginLessonAssetSyncQuiet", "void Application::EndLessonAssetSyncQuiet",
                   "void Application::ScheduleLessonAssetSyncWakeRearm()",
@@ -134,6 +135,15 @@ int main(){
  for(int i=0;i<10000;++i)stress.HasLessonAssetSyncWakeOpportunity();buttons.join();
 }
 '''
+    if voice_demo:
+        fixture = fixture[:fixture.index("int main(){")] + r'''
+int main(){
+ Application app;app.audio_service_.wake=true;
+ for(int i=0;i<100;++i) assert(!app.BeginLessonAssetSyncQuiet());
+ assert(app.audio_service_.wake && !app.audio_service_.effects);
+ assert(!app.lesson_asset_sync_quiet_ && !app.lesson_asset_sync_wake_rearm_timer_);
+}
+'''
     generated=tmp_path / "fairness.cc";generated.write_text(fixture);binary=tmp_path / "fairness"
-    subprocess.run(["c++", "-std=c++17", "-pthread", f"-fsanitize={sanitize}", str(generated), "-o", str(binary)],check=True)
+    subprocess.run(["c++", "-std=c++17", "-pthread", f"-DCONFIG_TBOT_VOICE_DEMO={int(voice_demo)}", f"-fsanitize={sanitize}", str(generated), "-o", str(binary)],check=True)
     subprocess.run([str(binary)],check=True)

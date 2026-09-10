@@ -506,6 +506,9 @@ private:
     bool DeliverChatControl(const ChatOutboundMailbox::Completion& completion);
     enum class ChatRearmPhase { None, Pending, Armed, IdleComplete, Recovery };
     ChatRearmPhase chat_rearm_phase_ = ChatRearmPhase::None;
+    ChatRearmPhase chat_rearm_rendered_phase_ = ChatRearmPhase::None;
+    uint32_t chat_rearm_rendered_reset_ = 0;
+    bool chat_rearm_rendered_offline_ = false;
     ChatPlayoutIntake::Response chat_rearm_owner_;
     std::shared_ptr<ChatProtocolSignals> chat_rearm_signals_;
     uint32_t chat_rearm_source_era_ = 0;

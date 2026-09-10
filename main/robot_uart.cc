@@ -383,6 +383,13 @@ void RobotUart::HandleReaderLine(const char* line) {
         return;
     }
 
+#if CONFIG_TBOT_VOICE_DEMO
+    if (strncmp(line, "{\"ok\":", 6) == 0 || strcmp(line, "PONG") == 0) {
+        ESP_LOGI(TAG, "Servo board reply: %.128s", line);
+        return;
+    }
+#endif
+
     // PONG/ERR va ACK servo: chi ghi log muc thap, khong xu ly.
     ESP_LOGD(TAG, "Slave line ignored: %s", line);
 }

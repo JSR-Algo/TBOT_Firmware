@@ -72,6 +72,7 @@ struct Application {
     }
     Protocol::SourceCallbacks MakeChatSourceCallbacks(uint64_t,std::shared_ptr<ChatProtocolSignals>);
     void PollChatInboundMessages();
+    void PollChatStart(uint64_t) {}
     bool IsChatConnectionCurrent(ConnectionSource,uint64_t,uint32_t) const;
     bool IsChatRequestCurrent(const ChatRequestContext&) const;
     void FailChatRequest(const ChatRequestContext&);
