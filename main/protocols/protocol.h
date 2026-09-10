@@ -1,5 +1,6 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
+#include "connection_source.h"
 
 #include <cJSON.h>
 #include <atomic>
@@ -8,12 +9,18 @@
 #include <functional>
 #include <chrono>
 #include <vector>
+#include <memory>
+#include "audio/chat_uplink_authorization.h"
+#include "chat_outbound_mailbox.h"
 
 struct AudioStreamPacket {
+    ChatCaptureTag capture_tag{};
+    uint32_t chat_reset_token = 0;
     int sample_rate = 0;
     int frame_duration = 0;
     uint32_t timestamp = 0;
     uint32_t generation = 0;   // response/turn generation, stamped at intake for barge-in gen-gating
+    bool conversation_audio = false;
     std::vector<uint8_t> payload;
 };
 
@@ -62,8 +69,21 @@ inline bool IsValidOpusFrameDuration(int frame_duration) {
            frame_duration == 40 || frame_duration == 60;
 }
 
+enum class ConversationTtsAckResult { Busy, Stale, Sent, Failed };
+
 class Protocol {
 public:
+    struct SourceCallbacks {
+        std::function<void(ConnectionSource, std::unique_ptr<AudioStreamPacket>)> audio;
+        std::function<void(ConnectionSource, const cJSON*, uint64_t, ConnectionReceipt)> json;
+        std::function<void(ConnectionSource)> closed;
+        std::function<void(ConnectionSource, uint64_t)> opened;
+        std::function<bool(ConnectionSource)> adopted;
+        std::function<void(ConnectionSource, const std::string&)> error;
+    };
+    // Install only before transport callbacks can run; legacy registrations and
+    // MQTT dispatch remain independent of this opt-in WebSocket surface.
+    void SetSourceCallbacks(SourceCallbacks callbacks) { source_callbacks_ = std::move(callbacks); }
     virtual ~Protocol() = default;
 
     inline int server_sample_rate() const {
@@ -93,6 +113,8 @@ public:
     // Maintains a passive WebSocket without starting voice or HTTP heartbeat
     // intent. Non-WebSocket transports have no passive liveness work.
     virtual bool MaintainPassiveLiveness() { return true; }
+    // Nonwaiting observation only: -1 failed, 0 pending/healthy, 1 ping due.
+    virtual int ObserveChatPassiveLiveness(ConnectionSource) { return -1; }
     // Resets the passive-liveness ping/pong timer. Used after a long lesson SD
     // asset sync legitimately blocks the WS receive path (pongs cannot be read in
     // time), so the timer must restart fresh instead of firing a stale timeout.
@@ -102,18 +124,80 @@ public:
         (void)connection_epoch;
     }
     virtual bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) = 0;
+    // Worker-only: caller holds protocol lifetime and validates its current job
+    // generation/protocol identity in authorize. Socket I/O may block.
+    // Busy means gate contention or socket not installed for the healthy epoch;
+    // Stale means revoked epoch/authorization; Failed means invalid data or a
+    // failed write; Sent means the transport accepted the write, not server ACK.
+    // Predicates must be read-only and must not reenter protocol lifecycle APIs.
+    virtual ChatOutboundMailbox::Result SendChatControlIfCurrent(
+        const ChatOutboundMailbox::Job& job, const std::function<bool()>& authorize) {
+        (void)job;
+        (void)authorize;
+        return ChatOutboundMailbox::Result::Failed;
+    }
+    // Borrows the packet on every result, including Busy. Caller retains sole
+    // ownership and decides retry/drop; this method never queues or consumes it.
+    // authorize must check the captured tag against current uplink authorization.
+    virtual ChatOutboundMailbox::Result SendChatAudioIfCurrent(
+        const AudioStreamPacket& packet, uint32_t expected_connection_epoch,
+        const std::function<bool(const ChatCaptureTag&)>& authorize) {
+        (void)packet;
+        (void)expected_connection_epoch;
+        (void)authorize;
+        return ChatOutboundMailbox::Result::Failed;
+    }
     virtual void SendWakeWordDetected(const std::string& wake_word);
     virtual void SendStartListening(ListeningMode mode);
     virtual void SendStopListening();
     virtual void SendAbortSpeaking(AbortReason reason);
     virtual void SendMcpMessage(const std::string& message);
+    virtual ChatOutboundMailbox::Result SendChatFullTextIfCurrent(
+        const ChatOutboundMailbox::Job&, const std::function<bool()>&) {
+        return ChatOutboundMailbox::Result::Failed;
+    }
     void SendTtsDrainAck(const std::string& drain_id);
+    virtual uint32_t CurrentConnectionEpoch() const { return 0; }
+    // Conditional send: gate acquisition never waits, but socket I/O can block.
+    // Call from a lifetime-protected worker, never the application poll task.
+    virtual ConversationTtsAckResult SendConversationTtsDrainAckIfCurrent(
+        const std::string& drain_id, uint32_t expected_connection_epoch) {
+        (void)drain_id;
+        (void)expected_connection_epoch;
+        return ConversationTtsAckResult::Failed;
+    }
     // US-006 Slice-01: send a pre-built lesson_* control frame (a complete envelope)
     // over the realtime channel. Additive PUBLIC sender — SendText is protected.
     // Inherited unchanged by both the WebSocket and MQTT transports.
     bool SendLessonFrame(const std::string& frame);
 
 protected:
+    void DeliverIncomingAudio(std::unique_ptr<AudioStreamPacket> packet, ConnectionSource source) {
+        if (source_callbacks_.audio) {
+            if (source.Valid()) source_callbacks_.audio(source, std::move(packet));
+        } else if (on_incoming_audio_) on_incoming_audio_(std::move(packet));
+    }
+    void DeliverIncomingJson(const cJSON* root, uint64_t lesson_epoch, ConnectionSource source, ConnectionReceipt receipt = ConnectionReceipt()) {
+        if (source_callbacks_.json) {
+            if (source.Valid()) source_callbacks_.json(source, root, lesson_epoch, receipt);
+        } else if (on_incoming_json_) on_incoming_json_(root, lesson_epoch);
+    }
+    void DeliverAudioChannelOpened(ConnectionSource source, uint64_t deadline_us = 0) {
+        if (source_callbacks_.opened) {
+            if (source.Valid()) source_callbacks_.opened(source, deadline_us);
+        } else if (on_audio_channel_opened_) on_audio_channel_opened_();
+    }
+    void DeliverAudioChannelClosed(ConnectionSource source) {
+        if (source_callbacks_.closed) {
+            if (source.Valid()) source_callbacks_.closed(source);
+        } else if (on_audio_channel_closed_) on_audio_channel_closed_();
+    }
+    void DeliverNetworkError(const std::string& message, ConnectionSource source) {
+        if (source_callbacks_.error) {
+            if (source.Valid()) source_callbacks_.error(source, message);
+        } else if (on_network_error_) on_network_error_(message);
+    }
+    SourceCallbacks source_callbacks_;
     std::uint64_t IncomingJsonTransportEpoch() const;
     std::function<void(const cJSON* root, std::uint64_t transport_epoch)> on_incoming_json_;
     std::atomic<std::uint64_t> incoming_json_transport_epoch_{1};

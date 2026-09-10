@@ -1,4 +1,5 @@
 #include "lcd_display.h"
+#include "chat_runtime_timing.h"
 #include "gif/lvgl_gif.h"
 #include "settings.h"
 #include "lvgl_theme.h"
@@ -2035,7 +2036,54 @@ bool LcdDisplay::ApplyLessonVisualState(
 void LcdDisplay::SetLessonMode(bool active) { (void)active; }
 #endif
 
+void LcdDisplay::StyleConversationOverlays() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE
+    for (auto* bar : {top_bar_, status_bar_, bottom_bar_}) {
+        if (bar) {
+            lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(bar, 0, 0);
+        }
+    }
+    for (auto* label : {status_label_, notification_label_, chat_message_label_,
+                        network_label_, battery_label_, mute_label_}) {
+        if (label) lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    }
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    if (container_) lv_obj_set_style_bg_color(container_, lv_color_black(), 0);
+#endif
+}
+
+void LcdDisplay::UpdateConversationFaceLayout() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE
+    if (emoji_box_ == nullptr || emoji_image_ == nullptr) return;
+    lv_obj_update_layout(lv_screen_active());
+    if (lv_obj_get_width(emoji_box_) != width_ ||
+        lv_obj_get_height(emoji_box_) != height_) {
+        ESP_LOGI(TAG, "Conversation face: %dx%d, transparent bars, white text",
+                 width_, height_);
+    }
+    lv_obj_set_style_radius(emoji_box_, 0, 0);
+    lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(emoji_box_, width_, height_);
+    lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_size(emoji_image_, width_, height_);
+    lv_obj_center(emoji_image_);
+    lv_image_set_inner_align(emoji_image_, LV_IMAGE_ALIGN_COVER);
+    lv_obj_center(emoji_label_);
+    StyleConversationOverlays();
+    if (top_bar_) lv_obj_move_foreground(top_bar_);
+    if (status_bar_) lv_obj_move_foreground(status_bar_);
+    if (bottom_bar_) lv_obj_move_foreground(bottom_bar_);
+#endif
+}
+
 void LcdDisplay::SetEmotion(const char* emotion) {
+    // Construct before either display guard so the timing log follows unlock.
+    ChatRuntimeTiming timing(3, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
+        [](uint32_t site, uint32_t hi, uint32_t lo) {
+            ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
+                static_cast<unsigned>(site), static_cast<unsigned long>(hi), static_cast<unsigned long>(lo));
+        });
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!", emotion);
     }
@@ -2076,7 +2124,11 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     }
     if (image->IsGif()) {
         // Create new GIF controller
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE
+        gif_controller_ = std::make_unique<LvglGif>(image->image_dsc(), width_ == 480 && height_ == 320);
+#else
         gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
+#endif
         
         if (gif_controller_->IsLoaded()) {
             // emoji_image_ uses LV_IMAGE_ALIGN_COVER (set in SetupUI), so LVGL
@@ -2122,6 +2174,8 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         if (lesson_caption_bar_ != nullptr) lv_obj_move_foreground(lesson_caption_bar_);
         if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
     }
+
+    UpdateConversationFaceLayout();
 
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
     // In WeChat message style, if emotion is neutral, don't display it
@@ -2279,6 +2333,7 @@ void LcdDisplay::SetTheme(Theme* theme) {
 
     // No errors occurred. Save theme to settings
     Display::SetTheme(lvgl_theme);
+    StyleConversationOverlays();
 }
 
 void LcdDisplay::SetHideSubtitle(bool hide) {

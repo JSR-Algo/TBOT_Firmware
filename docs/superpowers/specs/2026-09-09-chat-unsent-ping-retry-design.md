@@ -3,7 +3,7 @@
 ## Status And Scope
 
 Operator approved the narrow design in conversation on 2026-09-09.
-Written specification review is pending before implementation planning.
+Operator confirmed the written specification before implementation planning.
 This is a high-risk maintenance slice of US-004: existing robot conversation,
 asynchronous transport ownership, and physical acceptance are involved.
 Work directly in the existing main checkout as requested; preserve unrelated
@@ -11,8 +11,8 @@ dirty changes. Do not merge, clean worktrees, or commit existing production
 changes as part of this specification.
 
 Design checklist: context and constraints reviewed; alternatives presented;
-narrow design approved; written spec and self-review completed; written review
-pending; implementation planning follows written approval. No visual decisions.
+narrow design approved; written spec, self-review and written approval completed;
+implementation planning follows. No visual decisions.
 
 ## Evidence And Limits
 

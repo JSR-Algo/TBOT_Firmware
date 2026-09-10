@@ -111,11 +111,11 @@ def test_incoming_lesson_frame_uses_originating_transport_epoch():
     incoming = initialize[initialize.index("protocol_->OnIncomingJson(") :]
     incoming = incoming[: incoming.index("protocol_->OnIncomingAudio(", 1)] if "protocol_->OnIncomingAudio(" in incoming[1:] else incoming
     open_task = app[app.index("void Application::OpenChannelTask") :]
-    open_task = open_task[: open_task.index("self->Schedule(")]
+    open_task = open_task[: open_task.index("self->Schedule([self, ok")]
     websocket_open = websocket[websocket.index("bool WebsocketProtocol::OpenAudioChannel()") :]
     websocket_open = websocket_open[: websocket_open.index("std::string WebsocketProtocol::GetHelloMessage")]
 
-    assert "void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);" in header
+    assert "void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch, ChatRequestContext context = {});" in header
     assert "SetIncomingJsonTransportEpoch" in protocol_header
     assert "std::uint64_t transport_epoch" in protocol_header
     open_attempt = open_task[open_task.index("for (int attempt = 1;") :]
@@ -132,10 +132,12 @@ def test_incoming_lesson_frame_uses_originating_transport_epoch():
     assert "connection_epoch" in capture
     assert "callback_transport_epoch" in capture
     assert "hello_signal" in capture
-    assert "on_incoming_json_(root, callback_transport_epoch);" in websocket_open
-    assert "[this, display, is_websocket_protocol](" in incoming
-    assert "const cJSON* root, std::uint64_t callback_transport_epoch" in incoming
-    assert "EnqueueLessonMessage(root, callback_transport_epoch);" in incoming
+    assert "DeliverIncomingJson(root, callback_transport_epoch, source, receipt);" in websocket_open
+    assert "on_incoming_json_(root, lesson_epoch);" in protocol_header
+    assert "[this, is_websocket_protocol](const cJSON* root, uint64_t epoch)" in incoming
+    assert "DispatchIncomingJson(root, epoch, is_websocket_protocol);" in incoming
+    assert "uint64_t callback_transport_epoch" in incoming
+    assert "EnqueueLessonMessage(root, callback_transport_epoch, context);" in incoming
     enqueue = app[app.index("void Application::EnqueueLessonMessage") :]
     enqueue = enqueue[: enqueue.index("void Application::RequestLessonStorageAbandonment")]
     assert "PublishedEpoch()" not in enqueue

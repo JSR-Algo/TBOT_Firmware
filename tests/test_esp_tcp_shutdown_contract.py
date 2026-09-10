@@ -325,9 +325,12 @@ def test_protocol_releases_gate_before_websocket_join_and_keeps_callbacks_stable
     detach = function_body(protocol, "void WebsocketProtocol::DetachAndResetWebsocket")
     destructor = function_body(protocol, "WebsocketProtocol::~WebsocketProtocol")
 
-    assert "}\n    DetachAndResetWebsocket();" in close
-    assert "}\n    DetachAndResetWebsocket();" in deferred
-    assert "}\n    DetachAndResetWebsocket();" in destructor
+    assert "}\n    DetachAndResetWebsocket(failure_epoch, true, source);" in close
+    assert "}\n    DetachAndResetWebsocket(failure_epoch, true, source);" in deferred
+    assert "}\n    DetachAndResetWebsocket(failure_epoch);" in destructor
+    assert "}\n    // Socket destruction" in detach
+    assert "retired_websocket.reset();" in detach
+    assert "if (!detach_lease.IsCurrentEpoch()) return;" in detach
     assert "OnData(nullptr)" not in detach
     assert "OnDisconnected(nullptr)" not in detach
 

@@ -27,6 +27,7 @@ def test_eight_legacy_dispatch_branches_present_and_ordered():
 
 def test_null_guard_added_immediately_after_type_fetch_and_before_first_branch():
     app = read("main/application.cc")
+    app = app[app.index("void Application::DispatchIncomingJson"):]
     fetch = app.index('cJSON_GetObjectItem(root, "type")')
     guard = app.index("if (!cJSON_IsString(type)) {", fetch)
     first_branch = app.index('strcmp(type->valuestring, "tts") == 0', fetch)
@@ -43,7 +44,7 @@ def test_lesson_branch_is_additive_above_the_unknown_type_noop():
     branch = app[lesson:noop]
     # The lesson branch dispatches through the serialized worker instead of doing
     # blocking HTTP/TLS asset fetches on the WebSocket receive callback stack.
-    assert "EnqueueLessonMessage(root, callback_transport_epoch);" in branch
+    assert "EnqueueLessonMessage(root, callback_transport_epoch, context);" in branch
     assert "HandleLessonMessage(root);" not in branch
     # ...sits BELOW the custom branch and ABOVE the unchanged unknown-type no-op,
     # so un-upgraded firmware keeps dropping lesson_* silently (backward compat).
@@ -57,7 +58,7 @@ def test_lesson_frames_are_serialized_off_websocket_receive_stack():
 
     assert "QueueHandle_t lesson_message_queue_" in header
     assert "static void LessonMessageTask(void* arg);" in header
-    assert "void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);" in header
+    assert "void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch, ChatRequestContext context = {});" in header
     assert "kLessonMessageWorkerStackDepth = 32768" in app
     assert 'xTaskCreateStatic(\n            &Application::LessonMessageTask, "lesson_worker"' in constructor
     assert "kLessonMessageWorkerStackDepth, this" in constructor
@@ -68,7 +69,7 @@ def test_lesson_frames_are_serialized_off_websocket_receive_stack():
     assert "transport_epoch" in app
     worker = app[app.index("void Application::LessonMessageTask") : app.index("bool Application::SetDeviceState")]
     assert "xQueueReceive" in worker
-    assert "HandleLessonMessage(root);" in worker
+    assert "HandleLessonMessage(root, context);" in worker
 
 
 def test_lesson_worker_logs_stack_watermark_around_each_frame():
@@ -111,7 +112,7 @@ def test_handle_robot_action_message_untouched_and_mcp_arm_tools_have_no_lesson_
     # MCP arm tools (mcp_server.cc) must carry zero lesson control coupling. A source
     # comment may reference the shared image-fetch hardening, but MCP must not dispatch
     # lesson frames or call the lesson handler.
-    assert "bool Application::HandleRobotActionMessage(const cJSON* root)" in read("main/application.cc")
+    assert "bool Application::HandleRobotActionMessage(const cJSON* root, ChatRequestContext context)" in read("main/application.cc")
     mcp = read("main/mcp_server.cc")
     assert "HandleLessonMessage" not in mcp
     assert "SendLessonFrame" not in mcp
@@ -275,15 +276,15 @@ def test_interactive_step_opens_listening_instead_of_completing_from_render():
     assert "const uint32_t listen_generation =" in render_tail
     assert "BeginLessonInteractiveListeningRequest();" in render_tail
     listen_schedule = re.search(
-        r"Schedule\(\[listen_generation\]\(\)\s*\{\s*Application::GetInstance\(\)\.PrepareLessonInteractiveListening\(listen_generation\);\s*\}\);",
+        r"ScheduleChatLesson\(context, \[listen_generation\]\(\)\s*\{\s*Application::GetInstance\(\)\.PrepareLessonInteractiveListening\(listen_generation\);\s*\}\);",
         render_tail,
         re.S,
     )
     assert listen_schedule is not None
     assert render_tail.index("const bool has_visible_child_prompt") < render_tail.index("const bool should_listen")
     assert render_tail.index("if (!should_listen)") < render_tail.index("if (should_listen)")
-    assert render_tail.index("BeginLessonInteractiveListeningRequest") < render_tail.index("Schedule([listen_generation]")
-    assert render_tail.index("if (should_listen)") < render_tail.index("Schedule([listen_generation]") < render_tail.index("PrepareLessonInteractiveListening")
+    assert render_tail.index("BeginLessonInteractiveListeningRequest") < render_tail.index("ScheduleChatLesson(context, [listen_generation]")
+    assert render_tail.index("if (should_listen)") < render_tail.index("ScheduleChatLesson(context, [listen_generation]") < render_tail.index("PrepareLessonInteractiveListening")
 
 
 # ── FW-02: prepare validates before either transactional commit path ────────────────
@@ -363,9 +364,9 @@ def test_non_prepare_session_guard_runs_before_version_profile_error_emit():
 # ── FW-LESSON-03: emit() always consumes frame_body (no leak when protocol_ null) ──
 def test_emit_builds_frame_before_guarding_send_so_body_is_always_consumed():
     h = read("main/lesson_handler.cc")
-    emit_start = h.index("auto emit = [this]")
+    emit_start = h.index("auto emit = [this, context]")
     build = h.index("BuildFrame(in, frame_type, seq, frame_body)", emit_start)
-    guard = h.index("if (protocol_ && !frame.empty())", emit_start)
+    guard = h.index("if (IsChatLessonRequestCurrent(context) && protocol_ && !frame.empty())", emit_start)
     # BuildFrame (the sole consumer of frame_body) is called unconditionally, BEFORE
     # the protocol_ guard, so frame_body is freed even when protocol_ is null.
     assert build < guard

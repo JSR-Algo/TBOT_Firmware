@@ -207,6 +207,8 @@ protected:
     lv_obj_t* container_ = nullptr;
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* bottom_bar_ = nullptr;
+    void UpdateConversationFaceLayout();
+    void StyleConversationOverlays();
     lv_obj_t* preview_image_ = nullptr;
     lv_obj_t* lesson_background_ = nullptr;  // US-006: full-screen, persistent lesson poster
     std::unique_ptr<LvglImage> lesson_background_cached_ = nullptr;

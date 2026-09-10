@@ -81,8 +81,8 @@ def test_unclaimed_protocol_only_activation_helper_excludes_assets_ota_wake_and_
         "void Application::CompleteUnclaimedProtocolOnlyActivation"
     )
 
-    assert "InitializeProtocol();" in helper
-    assert "MAIN_EVENT_ACTIVATION_DONE" in helper
+    assert "RequestInitializeProtocol(ProtocolActivation::kNormal);" in helper
+    assert "MAIN_EVENT_ACTIVATION_DONE" not in helper
     assert "ota_->MarkCurrentVersionValid();" in helper
     for claimed_only_or_blocking in (
         "CheckAssetsVersion",
@@ -101,10 +101,11 @@ def test_unclaimed_activation_initializes_protocol_before_activation_done():
     activation = function_body(read("main/application.cc"), "void Application::ActivationTask")
 
     unclaimed = activation.index("if (!IsDeviceClaimed())")
-    protocol_init = activation.index("InitializeProtocol();")
-    activation_done = activation.index("MAIN_EVENT_ACTIVATION_DONE", protocol_init)
-
-    assert unclaimed < protocol_init < activation_done
+    protocol_init = activation.index("RequestInitializeProtocol(ProtocolActivation::kNormal);")
+    assert "MAIN_EVENT_ACTIVATION_DONE" not in activation
+    initialize = function_body(read("main/application.cc"), "void Application::InitializeProtocol")
+    assert initialize.index("StartPassiveLessonWebsocket();") < initialize.index("CompleteProtocolActivation();")
+    assert unclaimed < protocol_init
     assert "return;" not in activation[unclaimed:protocol_init]
     assert "CheckAssetsVersion();" in activation[unclaimed:protocol_init]
 
@@ -113,7 +114,7 @@ def test_unclaimed_activation_does_not_run_claimed_only_bootstrap_work():
     activation = function_body(read("main/application.cc"), "void Application::ActivationTask")
 
     unclaimed = activation.index("if (!IsDeviceClaimed())")
-    protocol_init = activation.index("InitializeProtocol();")
+    protocol_init = activation.index("RequestInitializeProtocol(ProtocolActivation::kNormal);")
     before_transport = block_after_marker(activation, "if (!IsDeviceClaimed())")
     claimed_only = activation[activation.index("} else {", unclaimed):protocol_init]
 
@@ -130,7 +131,7 @@ def test_websocket_protocol_opens_passive_raw_session_without_claim_heartbeat():
     initialize = function_body(read("main/application.cc"), "void Application::InitializeProtocol")
     websocket_branch = initialize[
         initialize.index("if (is_websocket_protocol)") :
-        initialize.index("} else {\n        protocol_->Start();", initialize.index("if (is_websocket_protocol)"))
+        initialize.index("} else {\n        StartProtocolWorker();", initialize.index("if (is_websocket_protocol)"))
     ]
 
     assert websocket_branch.count("StartPassiveLessonWebsocket();") == 2
@@ -239,7 +240,7 @@ def test_sync_to_sd_registration_and_dispatch_are_not_claim_or_token_gated():
     for token_gate in forbidden:
         assert token_gate not in sync_body
 
-    dispatch = function_body(source, "void McpServer::ParseMessage(const cJSON* json)")
+    dispatch = function_body(source, "void McpServer::ParseMessage(const cJSON* json,")
     mcp_call = dispatch[dispatch.index('method_str == "tools/call"') :]
     for token_gate in forbidden:
         assert token_gate not in mcp_call

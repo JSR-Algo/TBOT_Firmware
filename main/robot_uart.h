@@ -45,6 +45,7 @@ public:
     bool SendHeadSetAngle(int angle);
     bool SendHeadSetPercent(int percent);
     bool SendServoSweep(const std::string& part, const std::string& action, int from, int to, int step, int delay_ms);
+    bool TrySendAutomaticArm(bool left, int percent, const std::function<bool()>& owns);
 
 private:
     bool SendArmAction(const std::string& part, const std::string& action);

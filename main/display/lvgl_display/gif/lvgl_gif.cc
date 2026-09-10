@@ -1,10 +1,13 @@
 #include "lvgl_gif.h"
 #include <esp_log.h>
+#include <esp_timer.h>
+#include <esp_heap_caps.h>
+#include "gif_rgb565.h"
 #include <cstring>
 
 #define TAG "LvglGif"
 
-LvglGif::LvglGif(const lv_img_dsc_t* img_dsc)
+LvglGif::LvglGif(const lv_img_dsc_t* img_dsc, bool opaque_scale_2x)
     : gif_(nullptr), timer_(nullptr), last_call_(0), playing_(false), loaded_(false),
       loop_delay_ms_(0), loop_waiting_(false), loop_wait_start_(0) {
     if (!img_dsc || !img_dsc->data) {
@@ -29,9 +32,25 @@ LvglGif::LvglGif(const lv_img_dsc_t* img_dsc)
     img_dsc_.data = gif_->canvas;
     img_dsc_.data_size = gif_->width * gif_->height * 4;
 
+    if (opaque_scale_2x && gif_->width == 240 && gif_->height == 160) {
+        const size_t bytes = 480 * 320 * sizeof(uint16_t);
+        opaque_frame_ = static_cast<uint16_t*>(heap_caps_malloc(
+            bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (opaque_frame_) {
+            img_dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
+            img_dsc_.header.w = 480;
+            img_dsc_.header.h = 320;
+            img_dsc_.header.stride = 480 * sizeof(uint16_t);
+            img_dsc_.data = reinterpret_cast<uint8_t*>(opaque_frame_);
+            img_dsc_.data_size = bytes;
+            ESP_LOGI(TAG, "Conversation GIF uses native RGB565 480x320");
+        }
+    }
+
     // Render first frame
     if (gif_->canvas) {
         gd_render_frame(gif_, gif_->canvas);
+        UpdateOpaqueFrame();
     }
 
     loaded_ = true;
@@ -69,6 +88,8 @@ void LvglGif::Start() {
         playing_ = true;
         loop_waiting_ = false;  // Reset loop waiting state
         last_call_ = lv_tick_get();
+        stats_start_ = last_call_;
+        stats_frames_ = stats_decode_us_ = stats_max_gap_ms_ = 0;
         lv_timer_resume(timer_);
         lv_timer_reset(timer_);
         
@@ -114,6 +135,7 @@ void LvglGif::Stop() {
         // Render first frame without advancing
         if (gif_->canvas) {
             gd_render_frame(gif_, gif_->canvas);
+            UpdateOpaqueFrame();
         }
         ESP_LOGD(TAG, "GIF animation stopped and rewound");
     }
@@ -198,6 +220,7 @@ void LvglGif::NextFrame() {
     uint32_t pos_before = gif_->f_rw_p;
 
     // Get next frame
+    const int64_t decode_start = esp_timer_get_time();
     int has_next = gd_get_frame(gif_);
     if (has_next == 0) {
         // Animation truly finished (non-infinite loop)
@@ -223,11 +246,31 @@ void LvglGif::NextFrame() {
     // Render current frame
     if (gif_->canvas) {
         gd_render_frame(gif_, gif_->canvas);
+        UpdateOpaqueFrame();
         
         // Call frame callback if set
         if (frame_callback_) {
             frame_callback_();
         }
+        stats_decode_us_ += static_cast<uint32_t>(esp_timer_get_time() - decode_start);
+        ++stats_frames_;
+        if (elapsed > stats_max_gap_ms_) stats_max_gap_ms_ = elapsed;
+        const uint32_t window_ms = lv_tick_elaps(stats_start_);
+        if (window_ms >= 10000) {
+            ESP_LOGI(TAG, "gif_perf size=%ux%u fps_x10=%lu decode_avg_us=%lu max_gap_ms=%lu",
+                     gif_->width, gif_->height,
+                     static_cast<unsigned long>(stats_frames_ * 10000 / window_ms),
+                     static_cast<unsigned long>(stats_decode_us_ / stats_frames_),
+                     static_cast<unsigned long>(stats_max_gap_ms_));
+            stats_start_ = lv_tick_get();
+            stats_frames_ = stats_decode_us_ = stats_max_gap_ms_ = 0;
+        }
+    }
+}
+
+void LvglGif::UpdateOpaqueFrame() {
+    if (opaque_frame_ && gif_ && gif_->canvas) {
+        UpscaleOpaqueGifRgb565(gif_->canvas, opaque_frame_, gif_->width, gif_->height);
     }
 }
 
@@ -246,6 +289,10 @@ void LvglGif::Cleanup() {
 
     playing_ = false;
     loaded_ = false;
+    if (opaque_frame_) {
+        heap_caps_free(opaque_frame_);
+        opaque_frame_ = nullptr;
+    }
     
     // Clear image descriptor
     memset(&img_dsc_, 0, sizeof(img_dsc_));

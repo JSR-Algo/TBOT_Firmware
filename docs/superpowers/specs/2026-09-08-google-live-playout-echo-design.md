@@ -1,6 +1,6 @@
 # Google Live playout, distortion and echo repair
 
-Status: design direction approved; written specification awaiting user review.
+Status: written specification approved by the user on 2026-09-08.
 Scope: high-risk maintenance of US-004, current firmware checkout and existing
 Google Live server branch. Preserve unrelated display/GIF edits and agent-only
 credentials. No motor commands, NVS erase or buffer-capacity increases.
@@ -89,7 +89,9 @@ full target build and server tests using the deployed Python/dependency versions
 
 Deploy only a verified matched candidate with rollback artifacts. Preserve
 Wi-Fi, pairing, assets, agent credentials and server model selection. Verify MAC
-28:84:85:85:1a:80, image hash, boot health and actual applied volume.
+14:c1:9f:d1:ac:20 (the currently confirmed single connected robot), image hash,
+boot health and actual applied volume. Older log identities do not identify a
+second physical robot or authorize flashing a different target.
 
 Attended E2E acceptance requires:
 

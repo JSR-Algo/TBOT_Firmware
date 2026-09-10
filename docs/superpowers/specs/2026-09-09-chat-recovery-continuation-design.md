@@ -1,7 +1,7 @@
 # Chat Recovery Continuation
 
 Date: 2026-09-09. Parent: US-004 Google Live production audio gateway.
-Status: direction approved by the user; written-spec review pending.
+Status: direction and written specification approved by the user on 2026-09-09.
 Lane: high-risk maintenance. Work directly in the existing firmware checkout,
 preserving its dirty changes. Flash, server deployment and robot/Mac testing
 are authorized within this repair; successful software tests alone do not
@@ -147,4 +147,4 @@ condition or a repeat failure that requires a different root-cause investigation
 - User approved the three-stage direction ("duyet"). No visual design needed.
 - Written self-review: ownership, cancellation, bounded retry and release gates
   checked; no queue/timeout or audio-policy change hidden in recovery.
-- Written-spec approval is required before the test-first implementation plan.
+- Written specification approved ("duyet"); execute the test-first plan.

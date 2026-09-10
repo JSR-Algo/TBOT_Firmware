@@ -68,7 +68,7 @@ def test_cloud_wifi_setup_keeps_ownership_and_enters_wifi_config_without_boot():
 
 def test_repair_flow_shows_initializing_before_wifi_is_cleared_and_robot_restarts():
     source = app_source()
-    start = source.index("void Application::EnterRepairPairingMode()")
+    start = source.index("void Application::EnterRepairPairingMode(ChatRequestContext context)")
     end = source.index("namespace {", start)
     body = source[start:end]
 

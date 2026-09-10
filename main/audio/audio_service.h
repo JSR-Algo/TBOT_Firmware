@@ -20,6 +20,10 @@
 #include "esp_audio_types.h"
 
 #include "audio_codec.h"
+#include "audio_decode_fence.h"
+#include "chat_playback_reset.h"
+#include "audio_reset_epoch_publication.h"
+#include "audio_playback_drain_snapshot.h"
 #include "audio_processor.h"
 #include "processors/audio_debugger.h"
 #include "wake_word.h"
@@ -89,6 +93,7 @@
     }
 
 struct AudioServiceCallbacks {
+    std::function<void(uint32_t, bool, uint32_t)> on_output_completed;
     std::function<void(void)> on_send_queue_available;
     std::function<void(const std::string&)> on_wake_word_detected;
     std::function<void(bool)> on_vad_change;
@@ -104,6 +109,10 @@ enum AudioTaskType {
 
 struct AudioTask {
     AudioTaskType type;
+    ChatCaptureTag capture_tag{};
+    uint32_t chat_reset_token = 0;
+    uint32_t response_generation = 0;
+    bool conversation_audio = false;
     std::vector<int16_t> pcm;
     uint32_t timestamp;
 };
@@ -150,6 +159,13 @@ public:
     }
     bool IsIdle();
     bool WaitForPlaybackQueueEmpty(uint32_t timeout_ms = 0);
+    // Returns false without changing out when the queue mutex is busy.
+    // Generation is published outside that mutex: callers must recheck identity
+    // before acting on this observation, including a stopped service snapshot.
+    bool TryGetPlaybackDrainSnapshot(PlaybackDrainSnapshot& out);
+    // Capture at the original stop callback. False leaves out unchanged and
+    // must fail closed; a later capture cannot establish original ownership.
+    bool TryGetPlaybackResetEpoch(uint64_t& out) const;
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
     bool IsAfeWakeWord();
@@ -184,13 +200,39 @@ public:
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
     bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+    bool PushChatPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, uint32_t reset_token);
+    uint32_t RequestChatPlaybackReset();
+    bool ResetChatDecoder(uint32_t reset_token);
+    bool IsChatPlaybackResetPending() const { return chat_playback_reset_.Pending(); }
+    uint32_t ChatPlaybackResetToken() const { return chat_playback_reset_.Requested(); }
+    bool IsCurrentChatPlaybackReset(uint32_t token) const { return chat_playback_reset_.Current(token); }
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
+    enum class ChatCueResult { Accepted, Busy, Stale, Failed };
+    ChatCueResult TryPlayChatCue(std::string_view sound, uint32_t generation, uint32_t reset_token, uint64_t deadline_us);
     // Phat truc tiep PCM 16-bit mono o output_sample_rate (24kHz) — dung cho SFX
     // game doc tu SD (WAV). Chia frame va day thang vao playback queue, khong qua
     // opus decoder. Best-effort: bo qua neu service dung hoac playback queue day.
     void QueuePcmForPlayback(const std::vector<int16_t>& pcm);
-    bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
+    bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples,
+                       const ChatCaptureTag* capture_tag = nullptr);
+    // Application single writer; neither operation waits on audio work.
+    uint32_t RevokeChatUplink() { return chat_uplink_authorization_.Revoke(); }
+    bool ArmChatUplink(uint32_t revoked, bool chat_scope = true) {
+        return chat_uplink_authorization_.Arm(revoked, chat_scope);
+    }
+    // Serialized cleanup worker only. Never call inline on Application. The
+    // target scope also supports returning to lesson/legacy with a fresh era.
+    bool PrepareChatUplink(uint32_t revoked, bool chat_scope = true);
+    // Serialized audio cleanup task only; preserves already-drained playback.
+    bool PrepareChatAudioTransition(uint32_t revoked, bool processing,
+                                    bool wake, bool chat_scope);
+    bool IsCurrentChatUplink(const AudioStreamPacket& packet) const {
+        return chat_uplink_authorization_.IsCurrentChat(packet.capture_tag);
+    }
+    bool IsCurrentUplink(const AudioStreamPacket& packet) const {
+        return chat_uplink_authorization_.Accepts(packet.capture_tag);
+    }
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
     // Publish the active response generation. Decode frames whose stamped
@@ -214,7 +256,14 @@ private:
     void* opus_encoder_ = nullptr;
     void* opus_decoder_ = nullptr;
     std::mutex decoder_mutex_;
+    std::mutex chat_decode_transition_mutex_;
+    ChatPlaybackReset chat_playback_reset_;
     std::mutex input_resampler_mutex_;
+    std::mutex chat_prepare_mutex_;
+    uint32_t chat_prepared_revoked_ = 0;
+    bool chat_prepared_scope_ = false;
+    ChatUplinkAuthorization chat_uplink_authorization_;
+    ChatCaptureTag input_resampler_tag_{};
     esp_ae_rate_cvt_handle_t input_resampler_ = nullptr;
     esp_ae_rate_cvt_handle_t output_resampler_ = nullptr;
     
@@ -244,11 +293,14 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_encode_queue_;
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     bool audio_playback_in_flight_ = false;
+    AudioDecodeFence audio_decode_fence_;
+    AudioResetEpochPublication audio_reset_epoch_publication_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
 
     bool wake_word_initialized_ = false;
-    bool audio_processor_initialized_ = false;
+    std::atomic<bool> audio_processor_initialized_{false};
+    bool chat_processor_initialization_attempted_ = false;
     std::atomic<bool> voice_detected_{false};
     std::atomic<bool> service_stopped_{true};
     std::atomic<bool> service_running_{false};
@@ -260,7 +312,7 @@ private:
     bool audio_input_need_warmup_ = false;
 
     // Active response generation for barge-in gen-gating. Written via
-    // SetPlaybackGeneration() (app/WS task), read on the codec task at dequeue.
+    // SetPlaybackGeneration() (app/WS task), checked at dequeue and decode completion.
     std::atomic<uint32_t> playback_generation_{0};
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
@@ -272,7 +324,8 @@ private:
     void OpusCodecTask();
     void CreateWakeWordIfAvailable();
     void FeedWakeWord(const std::vector<int16_t>& data);
-    void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm);
+    void PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t>&& pcm,
+                               ChatCaptureTag capture_tag = {});
     void SetDecodeSampleRate(int sample_rate, int frame_duration);
     void CheckAndUpdateAudioPowerState();
     bool StartWorkers(uint32_t attempt);

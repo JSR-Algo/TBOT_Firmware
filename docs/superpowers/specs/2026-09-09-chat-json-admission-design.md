@@ -1,7 +1,7 @@
 # Bounded Chat JSON Admission Recovery
 
 Date: 2026-09-09. Parent: US-004 Google Live production audio gateway.
-Status: approach approved by user; written specification awaiting user review.
+Status: approach and written specification approved by user on 2026-09-09.
 Work directly in the existing firmware checkout and preserve unrelated changes.
 
 ## Evidence And Scope
@@ -132,5 +132,5 @@ stack buffer, microphone or server changes onto an unverified hypothesis.
 - User approved the proposed approach on 2026-09-09.
 - Written spec self-review: scope, timing, ownership, failure semantics and
   hardware evidence requirements checked; no implementation performed.
-- Next: user reviews this written spec, then writing-plans produces the test-first
+- Written specification approved; writing-plans produces the test-first
   implementation plan. Build, flash and production acceptance remain pending.

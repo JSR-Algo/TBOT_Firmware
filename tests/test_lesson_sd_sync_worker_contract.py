@@ -71,10 +71,13 @@ def test_sync_to_sd_dispatches_to_single_flight_low_priority_worker():
 
     worker = function_body(source, "void McpServer::LessonAssetSyncTaskBody")
     assert "tool->Call" in worker
-    assert "ReplyResult" in worker
-    assert "ReplyError" in worker
-    assert "lesson_asset_sync_in_flight_.store(false)" in worker
-    assert "vTaskDeleteWithCaps(nullptr)" in worker
+    completion = function_body(source, "void McpServer::PollLessonAssetSyncCompletion")
+    assert "ReplyResult" in completion
+    assert "ReplyError" in completion
+    assert "lesson_asset_sync_in_flight_.store(false" in completion
+    assert "PublishLessonAssetSyncCompletion" in worker
+    assert "vTaskDeleteWithCaps(nullptr)" not in worker
+    assert entry.index("LessonAssetSyncTaskBody(arg);") < entry.index("vTaskDeleteWithCaps(nullptr)") < entry.index("abort();")
 
 
 def test_sync_worker_body_has_nonthrowing_failsafe_cleanup_boundary():
@@ -82,20 +85,17 @@ def test_sync_worker_body_has_nonthrowing_failsafe_cleanup_boundary():
     worker = function_body(source, "void McpServer::LessonAssetSyncTaskBody")
 
     assert "lesson asset sync worker failed outside tool boundary" in worker
-    assert worker.count("lesson_asset_sync_in_flight_.store(false)") == 2
+    assert "lesson_asset_sync_in_flight_.store(false" not in worker
     assert worker.count("esp_task_wdt_delete(nullptr)") == 2
-    assert worker.count("vTaskDeleteWithCaps(nullptr)") == 2
-    assert "lesson asset sync failsafe publication failed" in worker
+    assert "vTaskDeleteWithCaps(nullptr)" not in worker
+    assert worker.count("PublishLessonAssetSyncCompletion") == 2
 
     failsafe = worker[worker.index("lesson asset sync worker failed outside tool boundary") :]
-    schedule = failsafe.index("Application::GetInstance().Schedule")
-    quiet_end = failsafe.index("EndLessonAssetSyncQuiet")
-    schedule_catch = failsafe.index("lesson asset sync failsafe publication failed")
-    in_flight_reset = failsafe.index("lesson_asset_sync_in_flight_.store(false)")
+    publication = failsafe.index("PublishLessonAssetSyncCompletion")
     watchdog_delete = failsafe.index("esp_task_wdt_delete(nullptr)")
-    task_delete = failsafe.index("vTaskDeleteWithCaps(nullptr)")
-    assert schedule < quiet_end < schedule_catch < in_flight_reset
-    assert in_flight_reset < watchdog_delete < task_delete
+    assert publication < watchdog_delete
+    assert "request_context" in failsafe[:watchdog_delete]
+    assert "Schedule" not in worker
 
 
 def test_each_asset_sync_worker_owns_one_complete_quiet_interval():
@@ -113,26 +113,17 @@ def test_each_asset_sync_worker_owns_one_complete_quiet_interval():
     allocation_failure = starter[
         starter.index("if (context == nullptr)") : task_creation
     ]
-    assert "app.Schedule" in allocation_failure
-    assert "EndLessonAssetSyncQuiet" in allocation_failure
-    assert allocation_failure.index("app.Schedule") < allocation_failure.index(
-        "EndLessonAssetSyncQuiet"
-    )
+    assert "PublishLessonAssetSyncCompletion" in allocation_failure
+    assert "lesson_asset_sync_in_flight_.store(false" not in allocation_failure
 
     creation_failure = starter[
         task_creation : starter.index("return true;", task_creation)
     ]
-    assert "app.Schedule" in creation_failure
-    assert "EndLessonAssetSyncQuiet" in creation_failure
-    assert creation_failure.index("app.Schedule") < creation_failure.index(
-        "EndLessonAssetSyncQuiet"
-    )
+    assert "PublishLessonAssetSyncCompletion" in creation_failure
+    assert "lesson_asset_sync_in_flight_.store(false" not in creation_failure
 
-    assert "context->tool->Call(context->arguments)" in worker
-    assert worker.count("EndLessonAssetSyncQuiet") == 2
-    assert worker.index("context->tool->Call(context->arguments)") < worker.index(
-        "EndLessonAssetSyncQuiet"
-    )
+    assert "context->tool->Call(context->arguments, request_context)" in worker
+    assert worker.index("context->tool->Call") < worker.index("PublishLessonAssetSyncCompletion")
 
 
 def test_sync_worker_owns_application_audio_quiet_lifecycle():
@@ -193,7 +184,7 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
     ) in compact_rearm
 
     claim_finish = function_body(
-        app_source, "bool Application::FinishClaimActivationAfterLocalAssetsReady"
+        app_source, "void Application::CompleteClaimProtocolActivation"
     )
     claim_rearm = claim_finish[
         claim_finish.index("if (!audio_service_.Start())") :
@@ -205,12 +196,12 @@ def test_sync_worker_owns_application_audio_quiet_lifecycle():
     assert "ScheduleAndWait" in starter
     assert "BeginLessonAssetSyncQuiet" in starter
     assert starter.index("BeginLessonAssetSyncQuiet") < starter.index("xTaskCreateWithCaps")
-    assert starter.count("EndLessonAssetSyncQuiet") >= 2
+    assert starter.count("PublishLessonAssetSyncCompletion") == 2
 
-    worker = function_body(mcp_source, "void McpServer::LessonAssetSyncTaskBody")
-    assert worker.count("EndLessonAssetSyncQuiet") == 2
+    worker = function_body(mcp_source, "void McpServer::PollLessonAssetSyncCompletion")
+    assert worker.count("EndLessonAssetSyncQuiet") == 1
     assert worker.index("EndLessonAssetSyncQuiet") < worker.index(
-        "lesson_asset_sync_in_flight_.store(false)"
+        "lesson_asset_sync_in_flight_.store(false"
     )
     assert worker.index("EndLessonAssetSyncQuiet") < worker.index("ReplyResult")
     assert worker.index("EndLessonAssetSyncQuiet") < worker.index("ReplyError")
@@ -224,7 +215,8 @@ def test_sync_quiet_admits_only_idle_or_voice_silent_passive_listening():
     compact_begin = "".join(begin.split())
     assert (
         "constboolpassive_listening="
-        "state==kDeviceStateListening&&!IsVoiceDetected();"
+        "state==kDeviceStateListening&&!chat_cleanup_enabled_.load()&&passive_ws_intent_.load()&&"
+        "!online_intent_.load()&&!microphone_uplink_authorized_.load()&&!IsVoiceDetected();"
     ) in compact_begin
     assert "state != kDeviceStateIdle && !passive_listening" in begin
 
@@ -255,9 +247,7 @@ def test_sync_quiet_blocks_voice_transitions_but_not_mcp_dispatch():
     assert "lesson_asset_sync_quiet_.load()" in wake
     assert "lesson_asset_sync_quiet_.load()" in direct_wake
 
-    incoming_start = source.index("protocol_->OnIncomingJson")
-    incoming_end = source.index("// WebSocket Start() opens", incoming_start)
-    incoming = source[incoming_start:incoming_end]
+    incoming = function_body(source, "void Application::DispatchIncomingJson")
     assert "lesson_asset_sync_quiet_.load()" in incoming
     assert 'strcmp(type->valuestring, "tts") == 0' in incoming
     assert 'strcmp(type->valuestring, "stt") == 0' in incoming

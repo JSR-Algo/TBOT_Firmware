@@ -395,12 +395,15 @@ def test_lcdwiki_es3c35p_uses_lcdwiki_audio_and_uart_pins():
     assert "#define AUDIO_I2S_GPIO_WS   GPIO_NUM_21" in config
     assert "#define AUDIO_I2S_GPIO_DIN  GPIO_NUM_16" in config
     assert "#define AUDIO_I2S_GPIO_DOUT GPIO_NUM_15" in config
-    # 92 is the measured Live TTS sweet spot for this PA without clipping.
+    # Preserve the legacy ceiling, not an unconditional boot-time volume override.
     assert "constexpr int kLcdWikiOutputVolume = 92" in board
     assert "class LcdWikiAudioCodec : public Es8311AudioCodec" in board
     assert "input_channels_ = 1;" in board
     assert "output_channels_ = 1;" in board
-    assert "SetOutputVolume(kLcdWikiOutputVolume);" in board
+    assert "SetOutputVolume(kLcdWikiOutputVolume);" not in board
+    assert "SetOutputVolume(output_volume());" in board
+    assert "if (output_volume() > kLcdWikiOutputVolume)" in board
+    assert "output_volume_ = kLcdWikiOutputVolume;" in board
     assert "static LcdWikiAudioCodec audio_codec" in board
     assert "#define ROBOT_UART_TX_PIN     GPIO_NUM_43" in config
     assert "#define ROBOT_UART_RX_PIN     GPIO_NUM_44" in config

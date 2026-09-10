@@ -1044,7 +1044,7 @@ def test_tts_start_arms_speaking_timeout_watchdog():
     assert "SpeakingTimeoutTask" not in app_cc
     assert "void Application::HandleSpeakingTimeout" in app_cc
 
-    start = app_cc.index('strcmp(state->valuestring, "start") == 0')
+    start = app_cc.index('strcmp(state->valuestring, "start") == 0', app_cc.index("void Application::DispatchIncomingJson"))
     end = app_cc.index('} else if (strcmp(state->valuestring, "stop") == 0)', start)
     tts_start_body = app_cc[start:end]
     assert "ArmSpeakingTimeout();" in tts_start_body
@@ -1062,7 +1062,7 @@ def test_tts_audio_is_accepted_before_scheduled_speaking_state_runs():
     assert "tts_audio_accepting_.load()" in incoming_audio_body
     assert "PushPacketToDecodeQueue" in incoming_audio_body
 
-    start = app_cc.index('strcmp(state->valuestring, "start") == 0')
+    start = app_cc.index('strcmp(state->valuestring, "start") == 0', app_cc.index("void Application::DispatchIncomingJson"))
     start_schedule = app_cc.index("Schedule([this]()", start)
     start_body_before_schedule = app_cc[start:start_schedule]
     assert "tts_audio_accepting_.store(true);" in start_body_before_schedule
@@ -1080,7 +1080,7 @@ def test_tts_audio_is_accepted_before_scheduled_speaking_state_runs():
 def test_speaking_state_does_not_clear_tts_audio_accepted_before_state_transition():
     app_cc = read("main/application.cc")
 
-    start = app_cc.index('strcmp(state->valuestring, "start") == 0')
+    start = app_cc.index('strcmp(state->valuestring, "start") == 0', app_cc.index("void Application::DispatchIncomingJson"))
     start_schedule = app_cc.index("Schedule([this]()", start)
     start_body_before_schedule = app_cc[start:start_schedule]
     assert "audio_service_.ResetDecoder();" in start_body_before_schedule
@@ -1096,7 +1096,7 @@ def test_speaking_state_does_not_clear_tts_audio_accepted_before_state_transitio
 def test_tts_start_stops_listening_audio_before_accepting_downlink_audio():
     app_cc = read("main/application.cc")
 
-    start = app_cc.index('strcmp(state->valuestring, "start") == 0')
+    start = app_cc.index('strcmp(state->valuestring, "start") == 0', app_cc.index("void Application::DispatchIncomingJson"))
     start_schedule = app_cc.index("Schedule([this]()", start)
     start_body_before_schedule = app_cc[start:start_schedule]
 
@@ -1232,7 +1232,7 @@ def test_lesson_snapshot_allowance_is_rechecked_after_scheduling():
     assert "if (!lesson_tool_allowed &&" in scheduled
     assert "scheduled MCP tool call rejected during lesson" in scheduled
     assert scheduled.index("if (!lesson_tool_allowed &&") < scheduled.index(
-        "(*tool_iter)->Call(arguments)"
+        "(*tool_iter)->Call(arguments, request_context)"
     )
 
 
@@ -1243,7 +1243,7 @@ def test_lesson_runtime_rejects_mcp_tool_calls_before_scheduling():
     body = mcp_cc[start:]
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in body
-    assert 'ReplyError(id, "MCP tools disabled during lesson");' in body
+    assert 'ReplyError(id, "MCP tools disabled during lesson", request_context);' in body
     assert body.index("Application::GetInstance().IsLessonRuntimeActive()") < body.index("app.Schedule(")
     guard = body[
         body.index("Application::GetInstance().IsLessonRuntimeActive()") :
@@ -1261,13 +1261,13 @@ def test_lesson_runtime_rejects_scheduled_mcp_tool_calls_before_callback():
 
     assert "Application::GetInstance().IsLessonRuntimeActive()" in scheduled
     assert "scheduled MCP tool call rejected during lesson" in scheduled
-    assert 'ReplyError(id, "MCP tools disabled during lesson");' in scheduled
+    assert 'ReplyError(id, "MCP tools disabled during lesson", request_context);' in scheduled
     assert scheduled.index("Application::GetInstance().IsLessonRuntimeActive()") < scheduled.index(
-        "(*tool_iter)->Call(arguments)"
+        "(*tool_iter)->Call(arguments, request_context)"
     )
     guard = scheduled[
         scheduled.index("Application::GetInstance().IsLessonRuntimeActive()") :
-        scheduled.index("(*tool_iter)->Call(arguments)")
+        scheduled.index("(*tool_iter)->Call(arguments, request_context)")
     ]
     assert "return;" in guard
 
@@ -1295,7 +1295,7 @@ def test_lesson_runtime_rejects_system_reboot_before_scheduling():
 def test_lesson_runtime_direct_reboot_ignored_before_restart_side_effects():
     app_cc = read("main/application.cc")
 
-    start = app_cc.index("void Application::Reboot()")
+    start = app_cc.index("void Application::Reboot(ChatRequestContext context)")
     end = app_cc.index("bool Application::UpgradeFirmware", start)
     body = app_cc[start:end]
 
@@ -1343,7 +1343,7 @@ def test_lesson_runtime_reset_protocol_ignored_before_scheduling_teardown():
     guard_idx = body.index("lesson_runtime_active_.load()")
     schedule_idx = body.index("Schedule([this]()")
     generation_idx = body.index("++connect_generation_;")
-    reset_idx = body.index("DoResetProtocol();")
+    reset_idx = body.index("CompletePendingProtocolWork();")
     assert guard_idx < schedule_idx < generation_idx < reset_idx
     guard = body[guard_idx:schedule_idx]
     assert "return;" in guard
@@ -1486,7 +1486,7 @@ def test_lesson_runtime_blocks_sleep_mode_eligibility_before_idle_checks():
 def test_lesson_runtime_repair_pairing_ignored_before_claim_reset_wifi_clear_and_reboot():
     app_cc = read("main/application.cc")
 
-    start = app_cc.index("void Application::EnterRepairPairingMode()")
+    start = app_cc.index("void Application::EnterRepairPairingMode(ChatRequestContext context)")
     end = app_cc.index("void Application::MaybeDispatchDeferredCloudRelease", start)
     body = app_cc[start:end]
 
@@ -2073,7 +2073,7 @@ def test_lesson_runtime_alert_preserves_lesson_ui_and_audio():
     assert alert_body.index("lesson_runtime_active_.load()") < alert_body.index("display->SetStatus(status);")
     assert alert_body.index("lesson_runtime_active_.load()") < alert_body.index("display->SetEmotion(emotion);")
     assert alert_body.index("lesson_runtime_active_.load()") < alert_body.index('display->SetChatMessage("system", message);')
-    assert alert_body.index("lesson_runtime_active_.load()") < alert_body.index("audio_service_.PlaySound(sound);")
+    assert alert_body.index("lesson_runtime_active_.load()") < alert_body.index("PlaySound(sound);")
     guard = alert_body[
         alert_body.index("lesson_runtime_active_.load()") :
         alert_body.index("auto display = Board::GetInstance().GetDisplay();")
@@ -2244,7 +2244,7 @@ def test_lesson_terminal_stop_quarantines_only_matching_tts_generation():
     )
 
     tts_stop = app_cc[
-        app_cc.index('strcmp(state->valuestring, "stop") == 0') :
+        app_cc.index('strcmp(state->valuestring, "stop") == 0', app_cc.index("void Application::DispatchIncomingJson")) :
         app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)')
     ]
     compact_stop = " ".join(tts_stop.split())
@@ -2717,10 +2717,7 @@ def test_lesson_runtime_connect_watchdog_suppresses_generic_reconnect_and_idle_r
         "ScheduleReconnect(reconnect_mode_, reconnect_resume_listening_.load());",
         lesson_start,
     )
-    lesson_branch = watchdog_body[
-        lesson_start :
-        watchdog_body.index('ESP_LOGW(TAG, "connect_watchdog_timeout -> idle + backoff"', lesson_start)
-    ]
+    lesson_branch = function_body(watchdog_body, "if (lesson_runtime_active_.load())")
     assert "lesson connect watchdog timeout -> suppress generic reconnect" in lesson_branch
     assert "lesson_idle_repaint_suppressed_.store(true);" in lesson_branch
     assert "online_intent_.store(false);" in lesson_branch
@@ -3207,7 +3204,7 @@ def test_wake_word_open_finishes_after_stale_passive_socket_close_returns_idle()
     open_start = app_cc.index("void Application::OpenChannelTask")
     open_end = app_cc.index("void Application::ArmConnectWatchdog", open_start)
     open_body = app_cc[open_start:open_end]
-    callback_start = open_body.index("self->Schedule")
+    callback_start = open_body.index("self->Schedule([self, ok")
     state_guard = open_body[
         open_body.index("if (!passive_preconnect", callback_start) :
         open_body.index("if (ok)", callback_start)
@@ -3722,9 +3719,9 @@ def test_lesson_runtime_suppresses_generic_custom_payload_chat():
     lesson_start = app_cc.index('strncmp(type->valuestring, "lesson_", 7) == 0', custom_start)
     custom_body = app_cc[custom_start:lesson_start]
 
-    assert "HandleRobotActionMessage(payload)" in custom_body
+    assert "HandleRobotActionMessage(payload, context)" in custom_body
     assert "if (!lesson_runtime_active_.load())" in custom_body
-    assert custom_body.index("HandleRobotActionMessage(payload)") < custom_body.index(
+    assert custom_body.index("HandleRobotActionMessage(payload, context)") < custom_body.index(
         "if (!lesson_runtime_active_.load())"
     )
     assert custom_body.index("if (!lesson_runtime_active_.load())") < custom_body.index(
@@ -3859,7 +3856,7 @@ def test_listening_state_always_sends_listen_start_even_if_audio_processor_is_ru
     listening_body = app_cc[listening_start:speaking_start]
 
     start_idx = listening_body.index("protocol_->SendStartListening(listening_mode_);")
-    processor_guard_idx = listening_body.index("if (play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning())")
+    processor_guard_idx = listening_body.index("if (lesson_capture_requested || play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning())")
 
     assert start_idx < processor_guard_idx
 

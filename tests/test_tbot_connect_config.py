@@ -202,7 +202,7 @@ def test_firmware_refreshes_websocket_url_from_authenticated_config_fetch_at_boo
     unclaimed_idx = activation_body.index("if (!IsDeviceClaimed())")
     check_idx = activation_body.index("CheckNewVersion();")
     refresh_idx = activation_body.index("RefreshWebsocketUrlFromConfigFetch();")
-    init_idx = activation_body.index("InitializeProtocol();")
+    init_idx = activation_body.index("RequestInitializeProtocol(ProtocolActivation::kNormal);")
     # Claimed path still runs OTA -> websocket refresh -> protocol in order.
     # Unclaimed path returns before CheckNewVersion to avoid Loading-setup hang.
     assert unclaimed_idx < check_idx < refresh_idx < init_idx

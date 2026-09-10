@@ -20,15 +20,29 @@ enum class WebsocketSessionMode {
 
 class WebsocketProtocol : public Protocol {
 public:
+    ChatOutboundMailbox::Result SendChatFullTextIfCurrent(
+        const ChatOutboundMailbox::Job&, const std::function<bool()>&) override;
     WebsocketProtocol();
     ~WebsocketProtocol();
 
     bool Start() override;
+    void SetConversationAudioDrainAck(bool ready) { conversation_audio_drain_ack_ = ready; }
     bool SendAudio(std::unique_ptr<AudioStreamPacket> packet) override;
+    ChatOutboundMailbox::Result SendChatControlIfCurrent(
+        const ChatOutboundMailbox::Job& job, const std::function<bool()>& authorize) override;
+    ChatOutboundMailbox::Result SendChatAudioIfCurrent(
+        const AudioStreamPacket& packet, uint32_t expected_connection_epoch,
+        const std::function<bool(const ChatCaptureTag&)>& authorize) override;
+    uint32_t CurrentConnectionEpoch() const override {
+        return inbound_gate_.HealthyEpoch();
+    }
+    ConversationTtsAckResult SendConversationTtsDrainAckIfCurrent(
+        const std::string& drain_id, uint32_t expected_connection_epoch) override;
     bool OpenAudioChannel() override;
     void CloseAudioChannel(bool send_goodbye = true) override;
     bool IsAudioChannelOpened() const override;
     bool MaintainPassiveLiveness() override;
+    int ObserveChatPassiveLiveness(ConnectionSource source) override;
     void ResetPassiveLiveness() override;
     void CompleteDeferredClose(uint32_t connection_epoch) override;
     void SetUnclaimedPublicLessonOnly(bool enabled);
@@ -42,11 +56,16 @@ private:
     // callback that acquires the lifecycle gate.
     ConnectionInboundGate inbound_gate_;
     std::unique_ptr<WebSocket> websocket_;
+    // Owned by inbound_gate_; a handshake epoch is not yet a sendable socket.
+    uint32_t websocket_connection_epoch_ = 0;
+    ConnectionSourceSequence source_sequence_;
+    ConnectionSource current_source_, websocket_source_;
     std::string url_;
     std::string token_;
     std::string transient_evidence_journey_id_;
     bool transient_configured_ = false;
     int version_ = 1;
+    bool conversation_audio_drain_ack_ = false;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     bool unclaimed_public_lesson_only_ = true;
     WebsocketSessionMode session_mode_ = WebsocketSessionMode::kUnclaimedPublicLesson;
@@ -62,8 +81,11 @@ private:
     bool IsAllowedUnclaimedPublicLessonMessage(const cJSON* root) const;
     bool SendText(const std::string& text) override;
     void SetError(const std::string& message) override;
-    void DetachAndResetWebsocket();
-    void NotifyAudioChannelClosedOnce();
+    void SetError(const std::string& message, ConnectionSource source);
+    bool SendTextForSource(const std::string& text, ConnectionSource source);
+    void DetachAndResetWebsocket(uint32_t expected_epoch, bool notify = false,
+                                ConnectionSource source = {});
+    void NotifyAudioChannelClosedOnce(ConnectionSource source);
     void CompleteCloseAndNotify();
     std::string GetHelloMessage();
 };

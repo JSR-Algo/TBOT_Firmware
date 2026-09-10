@@ -1,11 +1,30 @@
 #include "es8311_audio_codec.h"
 
 #include <algorithm>
+#include <climits>
 #include <esp_err.h>
 #include <esp_log.h>
+#include <esp_timer.h>
+#include <esp_heap_caps.h>
+#include <esp_attr.h>
 #include <vector>
 
 #define TAG "Es8311AudioCodec"
+
+namespace {
+bool IRAM_ATTR OnTxSent(i2s_chan_handle_t, i2s_event_data_t*, void* context) {
+    // This ISR is the sole writer; tasks never reset the counter. IDF's
+    // stdatomic_s32c1i workaround does not guarantee lock-free RMW operations.
+    // Target disassembly tests verify these loads/stores have no calls or loops.
+    auto* counter = static_cast<std::atomic<uint32_t>*>(context);
+    counter->store(counter->load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    return false;
+}
+
+int CheckedI2sWrite(void* channel, const void* data, size_t size, size_t* written, uint32_t timeout) {
+    return i2s_channel_write(static_cast<i2s_chan_handle_t>(channel), data, size, written, timeout);
+}
+}  // namespace
 
 Es8311AudioCodec::Es8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port, int input_sample_rate, int output_sample_rate,
     gpio_num_t mclk, gpio_num_t bclk, gpio_num_t ws, gpio_num_t dout, gpio_num_t din,
@@ -20,6 +39,10 @@ Es8311AudioCodec::Es8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
     input_gain_ = 40;  // increased from 30 for better mic sensitivity (built-in MEMS LMA2718 is weak)
 
     assert(input_sample_rate_ == output_sample_rate_);
+    void* counter_memory = heap_caps_malloc(sizeof(std::atomic<uint32_t>), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    assert(counter_memory != nullptr);
+    tx_eof_count_ = new (counter_memory) std::atomic<uint32_t>(0);
+    output_drain_ = std::make_unique<Es8311HardwareDrain>(*tx_eof_count_, AUDIO_CODEC_DMA_DESC_NUM);
     CreateDuplexChannels(mclk, bclk, ws, dout, din);
 
     // Do initialize of related interface: data_if, ctrl_if and gpio_if
@@ -30,6 +53,7 @@ Es8311AudioCodec::Es8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
     };
     data_if_ = audio_codec_new_i2s_data(&i2s_cfg);
     assert(data_if_ != NULL);
+    checked_data_if_ = std::make_unique<Es8311DataAdapter>(data_if_, tx_handle_, CheckedI2sWrite, *output_drain_);
 
     // Output
     audio_codec_i2c_cfg_t i2c_cfg = {
@@ -62,12 +86,50 @@ Es8311AudioCodec::Es8311AudioCodec(void* i2c_master_handle, i2c_port_t i2c_port,
 }
 
 Es8311AudioCodec::~Es8311AudioCodec() {
+    // The owner must stop audio workers before destroying this codec.
+    std::scoped_lock lock(data_if_mutex_, read_mutex_);
+    output_drain_->Invalidate();
     esp_codec_dev_delete(dev_);
 
     audio_codec_delete_codec_if(codec_if_);
     audio_codec_delete_ctrl_if(ctrl_if_);
     audio_codec_delete_gpio_if(gpio_if_);
     audio_codec_delete_data_if(data_if_);
+    checked_data_if_.reset();
+    const bool released = Es8311ReleaseIsrContext(
+        [&] {
+            const auto tx = i2s_channel_disable(tx_handle_);
+            const auto rx = i2s_channel_disable(rx_handle_);
+            return (tx == ESP_OK || tx == ESP_ERR_INVALID_STATE) &&
+                   (rx == ESP_OK || rx == ESP_ERR_INVALID_STATE);
+        },
+        [&] {
+            i2s_event_callbacks_t callbacks = {};
+            return i2s_channel_register_event_callback(tx_handle_, &callbacks, nullptr) == ESP_OK;
+        },
+        [&] {
+            const auto tx = i2s_del_channel(tx_handle_);
+            const auto rx = i2s_del_channel(rx_handle_);
+            return tx == ESP_OK && rx == ESP_OK;
+        },
+        [&] { tx_eof_count_->~atomic(); heap_caps_free(tx_eof_count_); });
+    if (!released) {
+        // A surviving driver may still reference its ISR context. Retain it.
+        ESP_LOGE(TAG, "I2S teardown failed; retaining ISR counter context");
+    }
+}
+
+AudioOutputDrainSnapshot Es8311AudioCodec::GetOutputDrainSnapshot() const {
+    return output_drain_->Snapshot();
+}
+
+bool Es8311AudioCodec::ResetOutputDrain() {
+    std::unique_lock<std::mutex> lock(data_if_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+        output_drain_->Fail();
+        return false;
+    }
+    return output_drain_->Reset();
 }
 
 void Es8311AudioCodec::UpdateDeviceState() {
@@ -76,7 +138,7 @@ void Es8311AudioCodec::UpdateDeviceState() {
         esp_codec_dev_cfg_t dev_cfg = {
             .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
             .codec_if = codec_if_,
-            .data_if = data_if_,
+            .data_if = checked_data_if_.get(),
         };
         dev_ = esp_codec_dev_new(&dev_cfg);
         assert(dev_ != NULL);
@@ -88,7 +150,10 @@ void Es8311AudioCodec::UpdateDeviceState() {
             .sample_rate = (uint32_t)input_sample_rate_,
             .mclk_multiple = 0,
         };
-        ESP_ERROR_CHECK(esp_codec_dev_open(dev_, &fs));
+        output_drain_->Invalidate();
+        const auto open_result = esp_codec_dev_open(dev_, &fs);
+        if (open_result != ESP_OK) output_drain_->Fail();
+        ESP_ERROR_CHECK(open_result);
         ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, input_gain_));
         // Stock top is 0 dB; +2 dB is a small step for quieter Live TTS without
         // the PA clipping we hit at +4/+12 dB. No extra PCM digital multiply.
@@ -106,7 +171,9 @@ void Es8311AudioCodec::UpdateDeviceState() {
         ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, output_volume_));
         opened = true;
     } else if (!input_enabled_ && !output_enabled_ && dev_ != nullptr) {
-        esp_codec_dev_close(dev_);
+        output_drain_->Invalidate();
+        if (esp_codec_dev_close(dev_) != ESP_OK) output_drain_->Fail();
+        esp_codec_dev_delete(dev_);
         dev_ = nullptr;
     }
     if (dev_ != nullptr && input_enabled_) {
@@ -181,6 +248,9 @@ void Es8311AudioCodec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gp
 
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle_, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle_, &std_cfg));
+    i2s_event_callbacks_t callbacks = {};
+    callbacks.on_sent = OnTxSent;
+    ESP_ERROR_CHECK(i2s_channel_register_event_callback(tx_handle_, &callbacks, tx_eof_count_));
     ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle_));
     ESP_LOGI(TAG, "Duplex channels created");
@@ -195,31 +265,36 @@ void Es8311AudioCodec::SetOutputVolume(int volume) {
 }
 
 void Es8311AudioCodec::EnableInput(bool enable) {
-    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    std::scoped_lock lock(data_if_mutex_, read_mutex_);
     if (codec_if_ == nullptr) {
+        output_drain_->Fail();
         return;
     }
     if (enable == input_enabled_) {
         return;
     }
     AudioCodec::EnableInput(enable);
+    output_drain_->Invalidate();
     UpdateDeviceState();
 }
 
 void Es8311AudioCodec::EnableOutput(bool enable) {
-    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    std::scoped_lock lock(data_if_mutex_, read_mutex_);
     if (codec_if_ == nullptr) {
+        output_drain_->Fail();
         return;
     }
     if (enable == output_enabled_) {
         return;
     }
     AudioCodec::EnableOutput(enable);
+    output_drain_->Invalidate();
     UpdateDeviceState();
 }
 
 int Es8311AudioCodec::Read(int16_t* dest, int samples) {
-    if (input_enabled_) {
+    std::lock_guard<std::mutex> lock(read_mutex_);
+    if (input_enabled_ && dev_ != nullptr) {
         ESP_ERROR_CHECK_WITHOUT_ABORT(esp_codec_dev_read(dev_, (void*)dest, samples * sizeof(int16_t)));
         // The built-in MEMS mic (LMA2718) is very weak even at max analog PGA
         // (input_gain_ = 40): captured speech lands around rms 15-41, far below
@@ -243,8 +318,16 @@ int Es8311AudioCodec::Read(int16_t* dest, int samples) {
 }
 
 int Es8311AudioCodec::Write(const int16_t* data, int samples) {
+    output_drain_->BeginWrite();
+    std::lock_guard<std::mutex> lock(data_if_mutex_);
+    const int64_t prepare_start_us = esp_timer_get_time();
+    if (data == nullptr || samples <= 0 || samples > INT_MAX / (2 * int(sizeof(int16_t)))) {
+        output_drain_->FinishWrite(false);
+        return 0;
+    }
     if (output_enabled_) {
         if (dev_ == nullptr) {
+            output_drain_->FinishWrite(false);
             ESP_LOGE(TAG, "es8311_write failed reason=device_not_open samples=%d", samples);
             return 0;
         }
@@ -260,15 +343,36 @@ int Es8311AudioCodec::Write(const int16_t* data, int samples) {
             write_data = stereo_data.data();
             write_samples = static_cast<int>(stereo_data.size());
         }
+        const int64_t driver_start_us = esp_timer_get_time();
         esp_err_t ret = esp_codec_dev_write(dev_, (void*)write_data, write_samples * sizeof(int16_t));
+        const int64_t driver_end_us = esp_timer_get_time();
+        output_drain_->FinishWrite(ret == ESP_OK);
         write_count_++;
-        if (write_count_ <= 5 || (write_count_ % 20) == 0 || ret != ESP_OK) {
+        const bool logged = write_count_ <= 5 || (write_count_ % 20) == 0 || ret != ESP_OK;
+        if (logged) {
             ESP_LOGI(TAG, "es8311_write count=%lu samples=%d write_samples=%d bytes=%u channels=%d ret=%s(%d) output_enabled=%d volume=%d",
                      static_cast<unsigned long>(write_count_), samples, write_samples,
                      static_cast<unsigned>(write_samples * sizeof(int16_t)), output_channels_,
                      esp_err_to_name(ret), ret, output_enabled_, output_volume_);
         }
         ESP_ERROR_CHECK_WITHOUT_ABORT(ret);
+        const int64_t log_end_us = esp_timer_get_time();
+        write_timing_.Record(driver_start_us - prepare_start_us,
+                             driver_end_us - driver_start_us,
+                             log_end_us - driver_end_us, logged, ret != ESP_OK);
+        if (write_timing_.WindowReady()) {
+            // Summary logging itself is excluded; AudioOutputTiming includes it.
+            ESP_LOGI(TAG, "es8311_write_timing frames=%lu logged=%lu errors=%lu max_prepare_us=%lu max_driver_us=%lu max_log_us=%lu",
+                     static_cast<unsigned long>(write_timing_.frames),
+                     static_cast<unsigned long>(write_timing_.logged_frames),
+                     static_cast<unsigned long>(write_timing_.errors),
+                     static_cast<unsigned long>(write_timing_.max_prepare_us),
+                     static_cast<unsigned long>(write_timing_.max_driver_us),
+                     static_cast<unsigned long>(write_timing_.max_log_us));
+            write_timing_.ClearWindow();
+        }
+        return ret == ESP_OK ? samples : 0;
     }
-    return samples;
+    output_drain_->FinishWrite(false);
+    return 0;
 }

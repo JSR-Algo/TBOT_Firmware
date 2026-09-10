@@ -39,6 +39,8 @@ struct ServerHelloSignal {
     }
 
     EventGroupHandle_t handle = nullptr;
+    std::atomic<bool> validated{false}, published{false};
+    uint64_t deadline_us = 0;
 };
 }  // namespace
 
@@ -199,10 +201,12 @@ void WebsocketProtocol::SetUnclaimedPublicLessonOnly(bool enabled) {
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
+    uint32_t failure_epoch = 0;
     {
         auto failure_mutation = inbound_gate_.BeginFailureMutation();
+        failure_epoch = failure_mutation.epoch();
     }
-    DetachAndResetWebsocket();
+    DetachAndResetWebsocket(failure_epoch);
     vEventGroupDelete(event_group_handle_);
 }
 
@@ -272,6 +276,169 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     return sent;
 }
 
+ChatOutboundMailbox::Result WebsocketProtocol::SendChatFullTextIfCurrent(
+    const ChatOutboundMailbox::Job& job, const std::function<bool()>& authorize) {
+    using Result = ChatOutboundMailbox::Result;
+    try {
+        if (!job.full_text || job.full_text->empty() || job.full_text->size() > 65535) return Result::Failed;
+        auto lease = inbound_gate_.TryAcquire(job.connection_epoch);
+        if (lease.status() == ConnectionInboundGate::LeaseStatus::Busy) return Result::Busy;
+        if (!lease || !job.source.Valid() || job.source.source_id != websocket_source_.source_id ||
+            job.source.connection_epoch != websocket_source_.connection_epoch ||
+            job.connection_epoch != websocket_connection_epoch_ || !authorize || !authorize()) return Result::Stale;
+        if (!job.deadline_us || static_cast<uint64_t>(esp_timer_get_time()) >= job.deadline_us) return Result::Failed;
+        if (*job.full_text == "{\"type\":\"ping\"}")
+            passive_liveness_.OnPingSent(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+        return SendTextForSource(*job.full_text, job.source) ? Result::Sent : Result::Failed;
+    } catch (...) {
+        // An exception may follow partial socket submission; never report unsent.
+        return Result::Failed;
+    }
+}
+
+ChatOutboundMailbox::Result WebsocketProtocol::SendChatControlIfCurrent(
+    const ChatOutboundMailbox::Job& job, const std::function<bool()>& authorize) {
+    using Result = ChatOutboundMailbox::Result;
+    using Kind = ChatOutboundMailbox::Kind;
+    try {
+        auto lease = inbound_gate_.TryAcquire(job.connection_epoch);
+        if (lease.status() == ConnectionInboundGate::LeaseStatus::Busy) return Result::Busy;
+        if (!lease) return Result::Stale;
+        if (websocket_connection_epoch_ != job.connection_epoch) return Result::Busy;
+        if (!authorize || !authorize()) return Result::Stale;
+        if (job.payload_size > ChatOutboundMailbox::kMaxPayloadSize ||
+            std::memchr(job.payload.data(), '\0', job.payload_size) != nullptr ||
+            session_id_.find('\0') != std::string::npos) return Result::Failed;
+        const std::string payload(job.payload.data(), job.payload_size);
+        if (job.kind == Kind::DrainAck &&
+            (payload.size() <= 5 || payload.compare(0, 5, "chat:") != 0)) return Result::Failed;
+
+        cJSON* root = cJSON_CreateObject();
+        if (!root) return Result::Failed;
+        auto add = [root](const char* name, const char* value) {
+            return cJSON_AddStringToObject(root, name, value) != nullptr;
+        };
+        bool valid = add("session_id", session_id_.c_str());
+        switch (job.kind) {
+            case Kind::ListenStart:
+                valid = valid && add("type", "listen") && add("state", "start") &&
+                    add("mode", job.argument == kListeningModeRealtime ? "realtime" :
+                        job.argument == kListeningModeAutoStop ? "auto" : "manual");
+                break;
+            case Kind::ListenStop:
+                valid = valid && add("type", "listen") && add("state", "stop");
+                break;
+            case Kind::Abort:
+                valid = valid && add("type", "abort");
+                if (job.argument == kAbortReasonWakeWordDetected)
+                    valid = valid && add("reason", "wake_word_detected");
+                break;
+            case Kind::Wake:
+                valid = valid && add("type", "listen") && add("state", "detect") &&
+                    add("text", payload.c_str());
+                break;
+            case Kind::DrainAck:
+                valid = valid && add("type", "tts_ack") && add("state", "stop") &&
+                    add("drainId", payload.c_str());
+                break;
+            default:
+                valid = false;
+                break;
+        }
+        char* encoded = valid ? cJSON_PrintUnformatted(root) : nullptr;
+        cJSON_Delete(root);
+        if (!encoded) return Result::Failed;
+        const std::unique_ptr<char, decltype(&cJSON_free)> encoded_owner(encoded, cJSON_free);
+        const std::string text(encoded_owner.get());
+        // Recheck after all formatting/allocation. The lease holds socket identity
+        // through SendText and its existing failure callbacks; cancellation after
+        // submission cannot retract bytes and does not change the send result.
+        if (!authorize()) return Result::Stale;
+        return SendTextForSource(text, websocket_source_) ? Result::Sent : Result::Failed;
+    } catch (const std::bad_alloc&) {
+        return Result::Failed;
+    }
+}
+
+ChatOutboundMailbox::Result WebsocketProtocol::SendChatAudioIfCurrent(
+    const AudioStreamPacket& packet, uint32_t expected_connection_epoch,
+    const std::function<bool(const ChatCaptureTag&)>& authorize) {
+    using Result = ChatOutboundMailbox::Result;
+    try {
+        auto lease = inbound_gate_.TryAcquire(expected_connection_epoch);
+        if (lease.status() == ConnectionInboundGate::LeaseStatus::Busy) return Result::Busy;
+        if (!lease) return Result::Stale;
+        if (websocket_connection_epoch_ != expected_connection_epoch) return Result::Busy;
+        if (!authorize || !authorize(packet.capture_tag)) return Result::Stale;
+        if (!IsAudioChannelOpened()) return Result::Failed;
+        std::string serialized;
+        const void* data = packet.payload.data();
+        size_t size = packet.payload.size();
+        if (version_ == 2) {
+            serialized.resize(sizeof(BinaryProtocol2) + size);
+            auto* header = reinterpret_cast<BinaryProtocol2*>(serialized.data());
+            header->version = htons(version_);
+            header->type = 0;
+            header->reserved = 0;
+            header->timestamp = htonl(packet.timestamp);
+            header->payload_size = htonl(size);
+            memcpy(header->payload, data, size);
+        } else if (version_ == 3) {
+            serialized.resize(sizeof(BinaryProtocol3) + size);
+            auto* header = reinterpret_cast<BinaryProtocol3*>(serialized.data());
+            header->type = 0;
+            header->reserved = 0;
+            header->payload_size = htons(size);
+            memcpy(header->payload, data, size);
+        }
+        if (!serialized.empty()) {
+            data = serialized.data();
+            size = serialized.size();
+        }
+        if (!authorize(packet.capture_tag)) return Result::Stale;
+        const bool sent = websocket_->Send(data, size, true);
+        if (sent) last_incoming_time_ = std::chrono::steady_clock::now();
+        return sent ? Result::Sent : Result::Failed;
+    } catch (const std::bad_alloc&) {
+        return Result::Failed;
+    }
+}
+
+ConversationTtsAckResult WebsocketProtocol::SendConversationTtsDrainAckIfCurrent(
+    const std::string& drain_id, uint32_t expected_connection_epoch) {
+    auto lease = inbound_gate_.TryAcquire(expected_connection_epoch);
+    if (lease.status() == ConnectionInboundGate::LeaseStatus::Busy) {
+        return ConversationTtsAckResult::Busy;
+    }
+    if (!lease) return ConversationTtsAckResult::Stale;
+    if (websocket_connection_epoch_ != expected_connection_epoch) {
+        return ConversationTtsAckResult::Busy;
+    }
+    if (drain_id.size() <= 5 || drain_id.size() > 128 ||
+        drain_id.compare(0, 5, "chat:") != 0 ||
+        drain_id.find('\0') != std::string::npos ||
+        session_id_.find('\0') != std::string::npos) {
+        return ConversationTtsAckResult::Failed;
+    }
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return ConversationTtsAckResult::Failed;
+    if (!cJSON_AddStringToObject(root, "type", "tts_ack") ||
+        !cJSON_AddStringToObject(root, "state", "stop") ||
+        !cJSON_AddStringToObject(root, "drainId", drain_id.c_str()) ||
+        !cJSON_AddStringToObject(root, "session_id", session_id_.c_str())) {
+        cJSON_Delete(root);
+        return ConversationTtsAckResult::Failed;
+    }
+    char* encoded = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!encoded) return ConversationTtsAckResult::Failed;
+    // The matching lease spans construction and blocking socket I/O, preventing
+    // reconnect from redirecting this acknowledgement onto a replacement socket.
+    const bool sent = SendText(encoded);
+    cJSON_free(encoded);
+    return sent ? ConversationTtsAckResult::Sent : ConversationTtsAckResult::Failed;
+}
+
 bool WebsocketProtocol::SendText(const std::string& text) {
     if (!IsAudioChannelOpened()) {
         return false;
@@ -315,6 +482,15 @@ bool WebsocketProtocol::MaintainPassiveLiveness() {
     return true;
 }
 
+int WebsocketProtocol::ObserveChatPassiveLiveness(ConnectionSource source) {
+    auto lease = inbound_gate_.TryAcquire(source.connection_epoch);
+    if (lease.status() == ConnectionInboundGate::LeaseStatus::Busy) return 0;
+    if (!lease || source.source_id != websocket_source_.source_id || !IsAudioChannelOpened()) return -1;
+    const auto action = passive_liveness_.Observe(static_cast<uint32_t>(esp_timer_get_time() / 1000));
+    return action == PassiveWebsocketLiveness::Action::kTimedOut ? -1 :
+        action == PassiveWebsocketLiveness::Action::kSendPing ? 1 : 0;
+}
+
 void WebsocketProtocol::ResetPassiveLiveness() {
     // Restart the ping/pong timer with a clean slate. Called when a lesson SD
     // asset sync ends: during the sync the WS receive path is starved (the robot
@@ -326,6 +502,23 @@ void WebsocketProtocol::ResetPassiveLiveness() {
 void WebsocketProtocol::SetError(const std::string& message) {
     inbound_gate_.FailCurrent();
     Protocol::SetError(message);
+}
+
+void WebsocketProtocol::SetError(const std::string& message, ConnectionSource source) {
+    auto lease = inbound_gate_.Acquire(source.connection_epoch);
+    if (!lease.IsCurrentEpoch() || source.source_id != current_source_.source_id) return;
+    inbound_gate_.FailCurrent();
+    error_occurred_ = true;
+    DeliverNetworkError(message, source);
+}
+
+bool WebsocketProtocol::SendTextForSource(const std::string& text, ConnectionSource source) {
+    // Selected senders already own the matching gate lease across this call.
+    if (!source.Valid() || source.source_id != websocket_source_.source_id ||
+        source.connection_epoch != websocket_connection_epoch_ || !IsAudioChannelOpened()) return false;
+    if (websocket_->Send(text)) return true;
+    SetError(Lang::Strings::SERVER_ERROR, source);
+    return false;
 }
 
 void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
@@ -345,6 +538,8 @@ void WebsocketProtocol::CloseAudioChannel(bool send_goodbye) {
 }
 
 void WebsocketProtocol::CompleteDeferredClose(uint32_t connection_epoch) {
+    uint32_t failure_epoch = 0;
+    ConnectionSource source;
     {
         auto failure_mutation =
             inbound_gate_.BeginFailureMutationIfCurrent(connection_epoch);
@@ -354,32 +549,45 @@ void WebsocketProtocol::CompleteDeferredClose(uint32_t connection_epoch) {
         if (!close_state_.TakeDeferred(connection_epoch)) {
             return;
         }
+        source = websocket_ ? websocket_source_ : current_source_;
         error_occurred_ = true;
+        failure_epoch = failure_mutation.epoch();
     }
-    DetachAndResetWebsocket();
-    NotifyAudioChannelClosedOnce();
+    DetachAndResetWebsocket(failure_epoch, true, source);
 }
 
 void WebsocketProtocol::CompleteCloseAndNotify() {
+    uint32_t failure_epoch = 0;
+    ConnectionSource source;
     {
         auto failure_mutation = inbound_gate_.BeginFailureMutation();
+        source = websocket_ ? websocket_source_ : current_source_;
         error_occurred_ = true;
+        failure_epoch = failure_mutation.epoch();
     }
-    DetachAndResetWebsocket();
-    NotifyAudioChannelClosedOnce();
+    DetachAndResetWebsocket(failure_epoch, true, source);
 }
 
-void WebsocketProtocol::DetachAndResetWebsocket() {
-    if (websocket_ == nullptr) {
-        return;
+void WebsocketProtocol::DetachAndResetWebsocket(uint32_t expected_epoch, bool notify,
+                                              ConnectionSource source) {
+    std::unique_ptr<WebSocket> retired_websocket;
+    {
+        auto detach_lease = inbound_gate_.Acquire(expected_epoch);
+        if (!detach_lease.IsCurrentEpoch()) return;
+        retired_websocket = std::move(websocket_);
+        websocket_connection_epoch_ = 0;
+        websocket_source_ = {};
     }
-    websocket_.reset();
+    // Socket destruction can join a callback that needs the gate.
+    retired_websocket.reset();
+    if (notify) {
+        auto notification_lease = inbound_gate_.Acquire(expected_epoch);
+        if (notification_lease.IsCurrentEpoch()) NotifyAudioChannelClosedOnce(source);
+    }
 }
 
-void WebsocketProtocol::NotifyAudioChannelClosedOnce() {
-    if (close_state_.TakeNotification() && on_audio_channel_closed_ != nullptr) {
-        on_audio_channel_closed_();
-    }
+void WebsocketProtocol::NotifyAudioChannelClosedOnce(ConnectionSource source) {
+    if (close_state_.TakeNotification()) DeliverAudioChannelClosed(source);
 }
 
 bool WebsocketProtocol::OpenAudioChannel() {
@@ -450,17 +658,40 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     uint32_t connection_epoch = 0;
+    ConnectionSource source;
     {
         auto connection_mutation = inbound_gate_.BeginConnectionMutation();
         connection_epoch = connection_mutation.epoch();
+        source = source_sequence_.Next(connection_epoch);
+        current_source_ = source;
+        if (!source.Valid()) {
+            inbound_gate_.FailCurrent();
+            error_occurred_ = true;
+            return false;
+        }
         error_occurred_ = false;
         close_state_.ResetForConnection();
     }
 
     WebSocket* candidate_websocket = replacement_websocket.get();
-    candidate_websocket->OnData([this, connection_epoch, callback_transport_epoch, hello_signal](const char* data, size_t len, bool binary) {
+    candidate_websocket->OnData([this, connection_epoch, callback_transport_epoch, hello_signal, source](const char* data, size_t len, bool binary) {
+        ConnectionReceipt receipt{static_cast<uint64_t>(esp_timer_get_time()), 0};
+        if (source_callbacks_.adopted && hello_signal->validated.load(std::memory_order_acquire)) {
+            if (!hello_signal->published.load(std::memory_order_acquire) || !source_callbacks_.adopted(source))
+                receipt.admission_deadline_us = hello_signal->deadline_us;
+            // The Open worker must acquire the inbound gate to install this socket.
+            // Keep the transport-owned frame here, outside that gate, until adoption.
+            while (!hello_signal->published.load(std::memory_order_acquire) || !source_callbacks_.adopted(source)) {
+                if (inbound_gate_.HealthyEpoch() != connection_epoch) return;
+                if (static_cast<uint64_t>(esp_timer_get_time()) >= hello_signal->deadline_us) {
+                    SetError("Chat source adoption timed out", source);
+                    return;
+                }
+                vTaskDelay(1);
+            }
+        }
         auto inbound_lease = inbound_gate_.Acquire(connection_epoch);
-        if (!inbound_lease || error_occurred_) {
+        if (!inbound_lease || error_occurred_ || source.source_id != current_source_.source_id) {
             ESP_LOGD(TAG, "ws_stale_inbound_dropped");
             return;
         }
@@ -469,7 +700,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 ESP_LOGW(TAG, "unclaimed_public_ws_binary_frame_rejected");
                 return;
             }
-            if (on_incoming_audio_ != nullptr) {
+            if (on_incoming_audio_ != nullptr || source_callbacks_.audio) {
                 if (version_ == 2) {
                     // Bounds-check the server-supplied frame before any deref: the
                     // header must fit, and payload_size must not exceed the bytes that
@@ -491,12 +722,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         return;
                     }
                     auto payload = (uint8_t*)bp2->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                    DeliverIncomingAudio(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
                         .timestamp = bp2->timestamp,
                         .payload = std::vector<uint8_t>(payload, payload + bp2->payload_size)
-                    }));
+                    }), source);
                 } else if (version_ == 3) {
                     if (len < sizeof(BinaryProtocol3)) {
                         ESP_LOGE(TAG, "binary v3 frame too short: %u", (unsigned)len);
@@ -512,19 +743,19 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         return;
                     }
                     auto payload = (uint8_t*)bp3->payload;
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                    DeliverIncomingAudio(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
                         .timestamp = 0,
                         .payload = std::vector<uint8_t>(payload, payload + bp3->payload_size)
-                    }));
+                    }), source);
                 } else {
-                    on_incoming_audio_(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                    DeliverIncomingAudio(std::make_unique<AudioStreamPacket>(AudioStreamPacket{
                         .sample_rate = server_sample_rate_,
                         .frame_duration = server_frame_duration_,
                         .timestamp = 0,
                         .payload = std::vector<uint8_t>((uint8_t*)data, (uint8_t*)data + len)
-                    }));
+                    }), source);
                 }
             }
         } else {
@@ -538,6 +769,10 @@ bool WebsocketProtocol::OpenAudioChannel() {
             if (cJSON_IsString(type)) {
                 if (strcmp(type->valuestring, "hello") == 0) {
                     if (ParseServerHello(root)) {
+                        if (!hello_signal->validated.load(std::memory_order_relaxed)) {
+                            hello_signal->deadline_us = static_cast<uint64_t>(esp_timer_get_time()) + 250000ULL;
+                            hello_signal->validated.store(true, std::memory_order_release);
+                        }
                         xEventGroupSetBits(
                             hello_signal->handle,
                             WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT);
@@ -553,9 +788,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
                             cJSON_Delete(root);
                             return;
                         }
-                        if (on_incoming_json_ != nullptr) {
-                            on_incoming_json_(root, callback_transport_epoch);
-                        }
+                        DeliverIncomingJson(root, callback_transport_epoch, source, receipt);
                         cJSON_Delete(root);
                         return;
                     }
@@ -566,9 +799,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
                                  cJSON_IsNumber(sequence) ? sequence->valueint : -1,
                                  (unsigned)len);
                     }
-                    if (on_incoming_json_ != nullptr) {
-                        on_incoming_json_(root, callback_transport_epoch);
-                    }
+                    DeliverIncomingJson(root, callback_transport_epoch, source, receipt);
                 }
             } else {
                 ESP_LOGE(TAG, "Missing message type, data: %s", std::string(data, len).c_str());
@@ -578,28 +809,30 @@ bool WebsocketProtocol::OpenAudioChannel() {
         last_incoming_time_ = std::chrono::steady_clock::now();
     });
 
-    candidate_websocket->OnDisconnected([this, connection_epoch, candidate_websocket]() {
+    candidate_websocket->OnDisconnected([this, connection_epoch, candidate_websocket, source]() {
         auto disconnect_lease = inbound_gate_.Acquire(connection_epoch);
         // A replaced socket may synchronously invoke this callback from its
         // destructor. Only the current epoch may dereference websocket_.
         const bool current_connection = disconnect_lease.IsCurrentEpoch();
-        if (!current_connection) {
+        if (!current_connection || source.source_id != current_source_.source_id) {
             ESP_LOGD(TAG, "stale_ws_disconnect_dropped");
             return;
         }
+        inbound_gate_.FailCurrent();
         int err_code = candidate_websocket != nullptr ? candidate_websocket->GetLastError() : -1;
         ESP_LOGW(TAG, "ws_disconnect err_code=%d idle_timeout=%d",
                  err_code, IsTimeout() ? 1 : 0);
-        NotifyAudioChannelClosedOnce();
+        NotifyAudioChannelClosedOnce(source);
     });
 
     ESP_LOGI(TAG, "Connecting to websocket server with protocol version %d", version_);
     if (!replacement_websocket->Connect(connect_url.c_str())) {
         ESP_LOGE(TAG, "Failed to connect to websocket server, code=%d", replacement_websocket->GetLastError());
-        if (connection_epoch != inbound_gate_.CurrentEpoch()) {
+        auto failure_lease = inbound_gate_.Acquire(connection_epoch);
+        if (!failure_lease.IsCurrentEpoch()) {
             return false;
         }
-        SetError(Lang::Strings::SERVER_NOT_CONNECTED);
+        SetError(Lang::Strings::SERVER_NOT_CONNECTED, source);
         return false;
     }
 
@@ -607,10 +840,11 @@ bool WebsocketProtocol::OpenAudioChannel() {
     auto message = GetHelloMessage();
     if (!replacement_websocket->Send(message)) {
         ESP_LOGE(TAG, "Failed to send text frame bytes=%u", (unsigned)message.size());
-        if (connection_epoch != inbound_gate_.CurrentEpoch()) {
+        auto failure_lease = inbound_gate_.Acquire(connection_epoch);
+        if (!failure_lease.IsCurrentEpoch()) {
             return false;
         }
-        SetError(Lang::Strings::SERVER_ERROR);
+        SetError(Lang::Strings::SERVER_ERROR, source);
         return false;
     }
 
@@ -618,24 +852,26 @@ bool WebsocketProtocol::OpenAudioChannel() {
     EventBits_t bits = xEventGroupWaitBits(hello_signal->handle, WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(10000));
     if (!(bits & WEBSOCKET_PROTOCOL_SERVER_HELLO_EVENT)) {
         ESP_LOGE(TAG, "Failed to receive server hello");
-        if (connection_epoch != inbound_gate_.CurrentEpoch()) {
+        auto failure_lease = inbound_gate_.Acquire(connection_epoch);
+        if (!failure_lease.IsCurrentEpoch()) {
             return false;
         }
-        SetError(Lang::Strings::SERVER_TIMEOUT);
+        SetError(Lang::Strings::SERVER_TIMEOUT, source);
         return false;
     }
-    if (connection_epoch != inbound_gate_.CurrentEpoch() || error_occurred_) {
-        return false;
+    std::unique_ptr<WebSocket> retired_websocket;
+    {
+        auto publication_lease = inbound_gate_.Acquire(connection_epoch);
+        if (!publication_lease || error_occurred_) return false;
+        passive_liveness_.OnOpened(
+            static_cast<uint32_t>(esp_timer_get_time() / 1000));
+        retired_websocket = std::move(websocket_);
+        websocket_ = std::move(replacement_websocket);
+        websocket_connection_epoch_ = connection_epoch;
+        websocket_source_ = source;
+        DeliverAudioChannelOpened(source, hello_signal->deadline_us);
     }
-
-    passive_liveness_.OnOpened(
-        static_cast<uint32_t>(esp_timer_get_time() / 1000));
-
-    websocket_ = std::move(replacement_websocket);
-
-    if (on_audio_channel_opened_ != nullptr) {
-        on_audio_channel_opened_();
-    }
+    hello_signal->published.store(true, std::memory_order_release);
 
     return true;
 }
@@ -662,6 +898,12 @@ std::string WebsocketProtocol::GetHelloMessage() {
     cJSON_AddBoolToObject(features, "aec", true);
 #endif
     cJSON_AddBoolToObject(features, "mcp", true);
+    if (conversation_audio_drain_ack_ &&
+        !cJSON_AddBoolToObject(features, "conversationAudioDrainAck", true)) {
+        cJSON_Delete(features);
+        cJSON_Delete(root);
+        return {};
+    }
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     // US-006 Slice-01 (D-CAP-FLAG, ADR 0013 §I): advertise lesson-render capability.
     // Absence == no support; the ESP Server MUST NOT send lesson_prepare to firmware

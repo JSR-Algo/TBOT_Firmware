@@ -54,7 +54,8 @@ def test_claimed_websocket_devices_open_passive_lesson_channel_at_boot():
 
     assert "std::atomic<bool> passive_ws_intent_" in header
     assert "bool passive_preconnect" in source
-    assert "wake_word_invoke, passive_preconnect]" in source
+    assert "wake_word_invoke, passive_preconnect," in source
+    assert "reservation, worker_protocol_generation]" in source
     assert "StartPassiveLessonWebsocket();" in initialize
     assert "IsDeviceClaimed()" in initialize
     assert "passive_ws_intent_.store(true)" in passive
@@ -319,7 +320,7 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     binary = on_data.index("if (binary)")
     parse = on_data.index("cJSON_ParseWithLength")
     audio = on_data.index("on_incoming_audio_")
-    config_or_lesson = on_data.index("on_incoming_json_")
+    config_or_lesson = on_data.index("DeliverIncomingJson(")
     assert lease < fail_closed < binary
     assert fail_closed < parse
     assert fail_closed < audio
@@ -337,12 +338,12 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     replace = open_channel.index("websocket_ = std::move(replacement_websocket)")
     assert mutation < on_data_install < connect < hello_wait < replace
     assert "connection_mutation.epoch()" in open_channel[mutation:replace]
-    assert "[this, connection_epoch, callback_transport_epoch, hello_signal]" in open_channel
+    assert "[this, connection_epoch, callback_transport_epoch, hello_signal, source]" in open_channel
     disconnect = websocket_callback_body(source, "OnDisconnected")
     assert "inbound_gate_.Acquire(connection_epoch)" in disconnect
     assert "disconnect_lease.IsCurrentEpoch()" in disconnect
     stale = disconnect[disconnect.index("const bool current_connection") :]
-    assert "if (!current_connection)" in stale
+    assert "if (!current_connection || source.source_id != current_source_.source_id)" in stale
     stale_return = stale[:stale.index("int err_code")]
     assert "return;" in stale_return
     assert "on_audio_channel_closed_" not in stale_return
@@ -359,12 +360,13 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     detach = function_body(source, "void WebsocketProtocol::DetachAndResetWebsocket")
     assert "websocket_->OnData(nullptr);" not in detach
     assert "websocket_->OnDisconnected(nullptr);" not in detach
-    assert "websocket_.reset();" in detach
+    assert "retired_websocket.reset();" in detach
     complete_close = function_body(source, "void WebsocketProtocol::CompleteCloseAndNotify")
-    assert "}\n    DetachAndResetWebsocket();" in complete_close
-    assert "websocket_.reset();" in detach
+    assert "}\n    DetachAndResetWebsocket(failure_epoch, true, source);" in complete_close
+    assert "}\n    // Socket destruction" in detach
+    assert "retired_websocket.reset();" in detach
     destructor = function_body(source, "WebsocketProtocol::~WebsocketProtocol")
-    assert "DetachAndResetWebsocket();" in destructor
+    assert "DetachAndResetWebsocket(failure_epoch);" in destructor
     assert "NotifyAudioChannelClosedOnce" not in destructor
 
     assert "void WebsocketProtocol::CompleteDeferredClose(uint32_t connection_epoch)" in source
@@ -372,12 +374,11 @@ def test_websocket_liveness_failure_drops_all_inbound_before_voice_lesson_or_con
     assert "BeginFailureMutationIfCurrent(connection_epoch)" in complete
     assert "if (!failure_mutation.Matched())" in complete
     assert "close_state_.TakeDeferred(connection_epoch)" in complete
-    assert "DetachAndResetWebsocket();" in complete
-    assert "}\n    DetachAndResetWebsocket();\n    NotifyAudioChannelClosedOnce();" in complete
+    assert "}\n    DetachAndResetWebsocket(failure_epoch, true, source);" in complete
     complete_now = function_body(source, "void WebsocketProtocol::CompleteCloseAndNotify")
     assert "BeginFailureMutation()" in complete_now
-    assert "DetachAndResetWebsocket();" in complete_now
-    assert "}\n    DetachAndResetWebsocket();\n    NotifyAudioChannelClosedOnce();" in complete_now
+    assert "}\n    DetachAndResetWebsocket(failure_epoch, true, source);" in complete_now
+    assert "notification_lease.IsCurrentEpoch()) NotifyAudioChannelClosedOnce(source);" in detach
     reentrant = close[close.index("if (inbound_gate_.CurrentThreadHasLease())") :]
     assert "const uint32_t connection_epoch = inbound_gate_.CurrentEpoch();" in reentrant
     assert "close_state_.MarkDeferred(connection_epoch)" in reentrant
@@ -515,19 +516,20 @@ def test_network_disconnect_defers_channel_close_until_connect_worker_exits():
     network_drop = function_body(source, "void Application::HandleNetworkDisconnectedEvent")
 
     assert "ConnectCloseDeferral connect_close_deferral_;" in header
-    assert "connect_close_deferral_.Request(connect_in_flight_.load())" in close
+    assert "connect_close_deferral_.Request(protocol_work_lifetime_.Busy())" in close
     defer = close[close.index("connect_close_deferral_.Request") :]
     assert "++connect_generation_;" in defer
     assert "channel_close_deferred_until_connect_worker_exit" in defer
     assert defer.index("return;") < defer.index("protocol_->CloseAudioChannel()")
 
     worker_done = worker.index("connect_in_flight_.store(false)")
-    drain = worker.index("connect_close_deferral_.TakeAfterWorker()")
-    generation_check = worker.index("gen != self->connect_generation_.load()")
+    drain = worker.index("CompletePendingProtocolWork()", worker_done)
+    generation_check = worker.index("gen != self->connect_generation_.load()", worker_done)
     assert worker_done < drain < generation_check
-    drain_body = worker[drain:generation_check]
+    drain_body = function_body(source, "bool Application::CompletePendingProtocolWork")
     assert "protocol_->CloseAudioChannel();" in drain_body
-    assert "return;" in drain_body
+    assert "protocol_work_lifetime_.TakeReady()" in drain_body
+    assert "return;" in worker[drain:generation_check]
 
     assert "CloseAudioChannelByIntent();" in network_drop
     assert "protocol_->CloseAudioChannel();" not in network_drop
@@ -564,25 +566,28 @@ def test_connect_cancellation_suppresses_success_publication_and_defers_reboot()
         assert "online_intent_.store(false);" in suppressed
         assert "StopHeartbeat();" in suppressed
 
-    assert "if (connect_in_flight_.load())" in reboot
-    deferred_reboot = reboot[reboot.index("if (connect_in_flight_.load())") :]
+    assert "Schedule([this, context]()" in reboot
+    assert "IsChatRequestCurrent(context)" in reboot
+    deferred_reboot = reboot[reboot.index("Schedule([this, context]()") :]
     assert "CloseAudioChannelByIntent();" in deferred_reboot
     assert "reboot_pending_.store(true);" in deferred_reboot
-    assert "reboot_deferred_until_connect_worker_exit" in deferred_reboot
-    assert deferred_reboot.index("return;") < deferred_reboot.index("CompleteReboot();")
+    assert "protocol_work_lifetime_.Request(ProtocolWorkLifetime::Action::kReboot)" in deferred_reboot
+    assert "CompletePendingProtocolWork();" in deferred_reboot
+    assert complete_reboot.index("protocol_work_lifetime_.Busy()") < complete_reboot.index("protocol_.reset();")
     assert "protocol_.reset();" in complete_reboot
     assert "audio_service_.Stop();" in complete_reboot
     assert "esp_restart();" in complete_reboot
 
     worker_done = worker.index("connect_in_flight_.store(false)")
-    reboot_drain = worker.index("reboot_pending_.exchange(false)")
-    reset_drain = worker.index("reset_pending_.exchange(false)")
-    close_drain = worker.index("connect_close_deferral_.TakeAfterWorker()")
-    assert worker_done < reboot_drain < reset_drain < close_drain
-    reboot_branch = worker[reboot_drain:reset_drain]
-    assert "connect_close_deferral_.Cancel();" in reboot_branch
+    assert worker_done < worker.index("CompletePendingProtocolWork()", worker_done)
+    drain = function_body(source, "bool Application::CompletePendingProtocolWork")
+    reboot_drain = drain.index("if (action == Action::kReboot)")
+    reset_drain = drain.index("if (action == Action::kReinitialize")
+    close_drain = drain.index("if (intentional_close)")
+    assert reboot_drain < reset_drain < close_drain
+    reboot_branch = drain[reboot_drain:reset_drain]
     assert "CompleteReboot();" in reboot_branch
-    assert "return;" in reboot_branch
+    assert "return true;" in reboot_branch
 
 def test_passive_lesson_socket_failure_during_answer_turn_retries_passively():
     source = read("main/application.cc")
@@ -646,7 +651,7 @@ def test_websocket_candidate_is_not_published_until_connect_and_hello_finish():
     connect = open_channel.index("replacement_websocket->Connect(connect_url.c_str())")
     hello_wait = open_channel.index("xEventGroupWaitBits")
     publish = open_channel.index("websocket_ = std::move(replacement_websocket);")
-    opened_callback = open_channel.index("on_audio_channel_opened_()")
+    opened_callback = open_channel.index("DeliverAudioChannelOpened(source, hello_signal->deadline_us)")
 
     assert create < connect < hello_wait < publish < opened_callback
 

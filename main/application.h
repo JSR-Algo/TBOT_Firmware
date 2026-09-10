@@ -25,9 +25,16 @@
 #include "device_state.h"
 #include "device_state_machine.h"
 #include "robot_uart.h"
+#include "speaking_arm_dispatch.h"
 #include "claim_confirmation_reporter.h"
 #include "tbot_connect_mapper.h"
 #include "connect_close_deferral.h"
+#include "protocol_work_lifetime.h"
+#include "chat_outbound_worker.h"
+#include "chat_protocol_signals.h"
+#include "chat_control_intents.h"
+#include "chat_inbound_messages.h"
+#include "audio/conversation_playout_controller.h"
 #include "backend_recovery_window.h"
 #if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
 #include "course_mode_hil_diagnostic.h"
@@ -47,6 +54,7 @@
 #define MAIN_EVENT_START_LISTENING      (1 << 10)
 #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
 #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
+#define MAIN_EVENT_CHAT_OUTBOUND        (1 << 13)
 
 
 enum AecMode {
@@ -103,6 +111,7 @@ public:
      * Schedule a callback to be executed in the main task
      */
     void Schedule(std::function<void()>&& callback);
+    void ScheduleChatLesson(ChatRequestContext context, std::function<void()> callback);
     void ScheduleDeferredProtocolClose(Protocol* expected, uint32_t connection_epoch);
     bool ScheduleAndWait(std::function<bool()>&& callback, int timeout_ms);
 
@@ -163,11 +172,13 @@ public:
      */
     void StopListening();
 
-    void Reboot();
+    void Reboot(ChatRequestContext context = {});
     void WakeWordInvoke(const std::string& wake_word);
     bool UpgradeFirmware(const std::string& url, const std::string& version = "");
     bool CanEnterSleepMode();
-    void SendMcpMessage(const std::string& payload);
+    void SendMcpMessage(const std::string& payload, ChatRequestContext context = {});
+    bool IsChatRequestCurrent(const ChatRequestContext& context) const;
+    void FailChatRequest(const ChatRequestContext& context);
     bool SendLeftArmRaise();
     bool SendRightArmRaise();
     bool SendLeftArmLower();
@@ -208,7 +219,7 @@ public:
     // re-claim the robot. Thread-safe (marshals all work onto the Application task).
     // Does NOT block on Wi-Fi/cloud at press time — cloud ownership release is
     // deferred via backend.release_pending (see MaybeDispatchDeferredCloudRelease).
-    void EnterRepairPairingMode();
+    void EnterRepairPairingMode(ChatRequestContext context = {});
 
     // Renderer callbacks may run after the inbound cJSON frame is gone. This bridge
     // copies all correlation data into the lesson worker queue by value.
@@ -256,10 +267,16 @@ private:
     std::atomic<int> lesson_network_render_quiet_{0};
     std::atomic<bool> lesson_asset_sync_quiet_{false};
     esp_timer_handle_t lesson_asset_sync_wake_rearm_timer_ = nullptr;
+    bool lesson_asset_sync_wake_pending_ = false;
+    std::atomic<bool> lesson_asset_sync_wake_invalidated_{false};
+    uint64_t lesson_asset_sync_wake_deadline_us_ = 0;
+    uint32_t lesson_asset_sync_wake_revoked_ = 0;
+    bool HasLessonAssetSyncWakeOpportunity();
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
     RobotUart robot_uart_;
+    SpeakingArmDispatch speaking_arm_dispatch_;
     std::unique_ptr<Ota> ota_;
     // OQ1: main-task-only. pending_tbot_claim_ / claim_substate_ (and the
     // pending_tbot_claim_*_ companions below) are read and written ONLY from the
@@ -321,17 +338,225 @@ private:
     // never stack overlapping HeartbeatTask workers when the backend is slow.
     std::atomic<bool> heartbeat_inflight_{false};
 
-    // T1/SM-1: connect runs on a short-lived worker so the long blocking
+    // T1/SM-1: connect runs on the persistent network worker so the long blocking
     // OpenAudioChannel() (TCP+TLS handshake + server hello, up to ~20s) never
     // freezes the app task. connect_generation_ invalidates a stale result;
-    // connect_in_flight_ gates double-workers and defers ResetProtocol;
-    // reset_pending_ honors a reset that arrived mid-connect.
+    // connect_in_flight_ describes the watchdog-visible attempt, not ownership.
+    // protocol_work_lifetime_ retains queued/running work until app completion.
     std::atomic<uint32_t> connect_generation_{0};
+    std::atomic<uint32_t> protocol_callback_connect_generation_{0};
+    TaskHandle_t application_task_ = nullptr;
     std::atomic<bool> connect_in_flight_{false};
     std::atomic<bool> reset_pending_{false};
     std::atomic<bool> protocol_reinit_pending_{false};
     std::atomic<bool> reboot_pending_{false};
     ConnectCloseDeferral connect_close_deferral_;
+    ProtocolWorkLifetime protocol_work_lifetime_;
+    ChatOutboundWorker chat_outbound_worker_;
+    TaskHandle_t chat_outbound_task_ = nullptr;
+    uint64_t chat_outbound_reservation_ = 0;
+    uint64_t chat_outbound_request_id_ = 0;
+    uint64_t chat_outbound_last_admitted_id_ = 0;
+    uint64_t chat_outbound_protocol_generation_ = 0;
+    uint32_t chat_outbound_generation_ = 0;
+    uint32_t chat_outbound_connection_epoch_ = 0;
+    bool chat_outbound_fault_ = false;
+    // Task 4 owns normal-chat routing and current-intent completion effects.
+    bool InitializeChatOutboundWorker();
+    // Sent from these two admission APIs means ownership was accepted, not that
+    // bytes were sent. Only a collected Sent completion, fresh identity, and
+    // Task 4's current intent/audio readiness may authorize listening effects.
+    ChatOutboundMailbox::Result ActivateChatOutbound(uint32_t connection_epoch);
+    ChatOutboundMailbox::Result SubmitChatOutbound(ChatOutboundMailbox::Job& job);
+    void RetireChatOutbound();
+    bool PollChatOutbound(ChatOutboundMailbox::Completion* completion = nullptr);
+    bool IsChatOutboundCompletionCurrent(const ChatOutboundMailbox::Completion& completion) const;
+    void NotifyChatOutbound();
+    void PollChatOutboundEvents(uint32_t bits);
+    static void ChatOutboundTask(void* context);
+    enum class ChatWakePolicy { Explicit, Listening };
+    struct ChatAudioCleanup {
+        uint32_t revoked = 0;
+        uint32_t reset_serial = 0;
+        bool processing = false, wake = false, chat_scope = true;
+        bool reset = false, prepared = false, reset_done = false, stop_service = false;
+        bool playback_only = false;
+        ChatWakePolicy wake_policy = ChatWakePolicy::Explicit;
+        bool read_wake = false;
+        uint32_t wake_serial = 0;
+        std::string wake_text;
+        bool cue = false;
+        uint32_t cue_serial = 0, cue_generation = 0;
+        uint64_t cue_deadline_us = 0;
+        std::string_view cue_sound;
+        std::shared_ptr<const std::string> cue_owner;
+        int cue_result = 1;
+    };
+    ChatAudioCleanup chat_audio_desired_{}, chat_audio_work_{};
+    // App publishes 1; worker publishes 2 after its final work access.
+    std::atomic<uint32_t> chat_audio_state_{0};
+    uint32_t chat_audio_reset_serial_ = 0, chat_audio_reset_completed_ = 0;
+    uint32_t chat_audio_prepared_ = 0, chat_audio_completed_revoked_ = 0;
+    uint32_t chat_playback_desired_ = 0, chat_playback_attempted_ = 0;
+    bool chat_playback_fault_ = false;
+    bool chat_wake_read_pending_ = false;
+    uint32_t chat_wake_read_serial_ = 0;
+    std::optional<std::string> chat_wake_read_result_;
+    std::string_view chat_cue_sound_;
+    std::shared_ptr<const std::string> chat_cue_owner_;
+    std::mutex chat_cue_mutex_;
+    uint32_t chat_cue_serial_ = 0, chat_cue_generation_ = 0, chat_cue_reset_ = 0;
+    uint64_t chat_cue_deadline_us_ = 0;
+    bool chat_cue_pending_ = false, chat_cue_retry_ = false;
+    int chat_cue_result_ = 1;
+    bool RequestChatCue(std::string_view sound);
+    TaskHandle_t chat_audio_task_ = nullptr;
+    bool chat_audio_fault_ = false, chat_audio_exhausted_ = false;
+    bool InitializeChatAudioCleanupWorker();
+    bool InitializeChatSourceRoute(bool is_websocket_protocol);
+    uint32_t RequestChatPlaybackCleanup(uint32_t playback_generation);
+    uint32_t RequestChatAudioCleanup(uint32_t playback_generation, bool reset,
+                                     bool processing, bool wake, bool chat_scope = true,
+                                     bool stop_service = false,
+                                     ChatWakePolicy wake_policy = ChatWakePolicy::Explicit);
+    void PollChatAudioCleanup();
+    void RunChatAudioCleanup();
+    void RetryChatAudioCleanup();
+    static void ChatAudioCleanupTask(void* context);
+    // Sticky once the new chat path is selected; Task 4b owns selection.
+    std::atomic<bool> chat_cleanup_enabled_{false};
+    struct ChatProtocolCleanup {
+        std::unique_ptr<Protocol> protocol;
+        ProtocolWorkLifetime::Action action = ProtocolWorkLifetime::Action::kNone;
+        uint32_t epoch = 0;
+        bool intentional = false, success = false, destructive_prepared = false;
+    } chat_protocol_work_;
+    // 0 idle, 1 retained awaiting admission, 2 worker owns, 3 completed.
+    std::atomic<uint32_t> chat_protocol_state_{0};
+    std::atomic<bool> chat_protocol_owned_{false};
+    bool chat_protocol_fault_ = false;
+    bool chat_protocol_infrastructure_fault_ = false;
+    uint64_t chat_protocol_fault_generation_ = 0;
+    uint32_t chat_protocol_fault_era_ = 0;
+    std::shared_ptr<ChatProtocolSignals> chat_protocol_signals_;
+    void PollChatProtocolSignals();
+    Protocol::SourceCallbacks MakeChatSourceCallbacks(
+        uint64_t protocol_generation, std::shared_ptr<ChatProtocolSignals> signals);
+    bool SelectChatProtocolSource(ConnectionSource source, uint64_t protocol_generation,
+                                  uint32_t connect_generation);
+    std::atomic<uint32_t> chat_source_connect_generation_{0};
+    uint32_t chat_source_open_handled_ = 0;
+    uint32_t chat_source_failure_handled_ = 0;
+    void PollChatSourceOpen(uint64_t now_us);
+    void HandleChatSourceFailure();
+    bool EstablishChatPlayoutResponse(const ChatPlayoutIntake::Response& response);
+    struct ChatRecoveryIntent {
+        // App-owned continuation, never a source-bound wire job. Outcome markers:
+        // 1 deferred, 2 cancelled, 3 expired, 4 adopted, 5 rejected, 6 accepted.
+        enum class Kind { None, Background, Wake, Listen };
+        Kind kind = Kind::None;
+        uint64_t protocol_generation = 0, received_us = 0, deadline_us = 0, retry_at_us = 0;
+        uint64_t lesson_generation = 0;
+        uint32_t connect_generation = 0;
+        ListeningMode mode = kListeningModeAutoStop;
+        bool ready = false, opening = false, adopted = false, attempted = false;
+        bool read_wake = true;
+        std::array<char, ChatOutboundMailbox::kMaxPayloadSize + 1> wake_text{};
+        size_t wake_size = 0;
+    } chat_recovery_;
+    void CancelChatRecovery(uint32_t outcome = 2);
+    bool RetainChatRecovery(ChatRecoveryIntent::Kind kind, ListeningMode mode);
+    void PollChatRecovery(uint64_t now_us);
+    bool CompleteChatRecoveryOpen(uint32_t generation, bool success);
+    ChatControlIntents chat_control_intents_;
+    ChatConnectionMessages chat_connection_messages_;
+    ChatInboundMessages chat_inbound_messages_;
+    bool IsChatConnectionCurrent(ConnectionSource source, uint64_t protocol_generation, uint32_t connect_generation) const;
+    uint64_t RequestChatConnectionText(const std::string& text, ChatRequestContext context = {}, uint64_t received_us = 0);
+    void PollChatConnectionMessages(uint64_t now_us);
+    bool MaintainChatPassiveLiveness();
+    uint64_t chat_passive_ping_id_ = 0;
+    ChatConnectionMessages::Owner chat_lesson_capture_owner_;
+    uint64_t chat_lesson_capture_epoch_ = 0, chat_lesson_capture_deadline_us_ = 0;
+    uint32_t chat_lesson_capture_token_ = 0;
+    bool RequestChatLessonCapture();
+    void PollChatLessonCapture(uint64_t now_us);
+    void BeginChatUnpair(const cJSON* root, ChatRequestContext context);
+    void PollChatUnpair(uint64_t now_us);
+    ChatRequestContext chat_unpair_context_;
+    uint64_t chat_unpair_id_ = 0, chat_unpair_deadline_us_ = 0;
+    bool chat_unpair_completed_ = false;
+    void PollChatInboundMessages();
+    void DispatchIncomingJson(const cJSON* root, uint64_t lesson_epoch, bool is_websocket, ChatRequestContext context = {});
+    bool IsLessonVoiceRoute() const;
+    bool IsChatLessonRequestCurrent(const ChatRequestContext& context) const;
+    void HandleChatLessonAudio(const std::shared_ptr<ChatProtocolSignals>& signals,
+        uint64_t protocol_generation, ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet);
+    bool IsSelectedNormalChatRoute() const;
+    bool HandleChatStopListening();
+    bool RetainChatActiveListen();
+    enum class ChatListenOrigin { Drain, User, Wake, Abort };
+    ChatListenOrigin chat_listen_origin_ = ChatListenOrigin::Drain;
+    uint64_t chat_listen_received_us_ = 0;
+    bool BeginChatListen(ListeningMode mode, ChatListenOrigin origin);
+    bool HandleChatAbort(AbortReason reason, bool resume);
+    bool HandleChatWake(const std::string& wake_word, bool read_worker = false);
+    bool RequestChatControl(ChatOutboundMailbox::Kind kind, int32_t argument = 0, const std::string& payload = {}, bool read_wake = false);
+    void PollChatControls(uint64_t now_us);
+    bool DeliverChatControl(const ChatOutboundMailbox::Completion& completion);
+    enum class ChatRearmPhase { None, Pending, Armed, IdleComplete, Recovery };
+    ChatRearmPhase chat_rearm_phase_ = ChatRearmPhase::None;
+    ChatPlayoutIntake::Response chat_rearm_owner_;
+    std::shared_ptr<ChatProtocolSignals> chat_rearm_signals_;
+    uint32_t chat_rearm_source_era_ = 0;
+    ChatOutboundMailbox::Job chat_rearm_job_;
+    std::optional<ChatOutboundMailbox::Completion> chat_rearm_delivery_;
+    uint32_t chat_rearm_prepared_ = 0;
+    bool chat_rearm_admitted_ = false;
+    bool chat_rearm_voice_intent_ = false;
+    ListeningMode chat_rearm_mode_ = kListeningModeAutoStop;
+    bool AdvanceChatRearm(uint64_t now_us);
+    bool IsChatRearmRecoveryCurrent() const;
+    void RenderChatRearm();
+    void HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& signals,
+        uint64_t protocol_generation, ConnectionSource source, const cJSON* root, ConnectionReceipt receipt = {});
+    void HandleChatAudio(const std::shared_ptr<ChatProtocolSignals>& signals,
+        uint64_t protocol_generation, ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet);
+    void PollChatStart(uint64_t now_us);
+    void RecoverChatStart(const ChatStartHandoff::Request& request, uint32_t site = 0);
+    uint32_t chat_start_handled_serial_ = 0, chat_start_failed_serial_ = 0;
+    uint32_t chat_start_effects_serial_ = 0;
+    uint32_t chat_start_obsolete_generation_ = 0;
+    ChatOutboundMailbox::Job chat_start_obsolete_ack_;
+    uint64_t chat_start_obsolete_reservation_ = 0;
+    void HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSignals>& signals,
+        uint64_t protocol_generation, ConnectionSource source, const cJSON* root, uint64_t received_us = 0);
+    void PollChatPlayout(uint64_t now_us);
+    void RecoverChatPlayout(uint32_t site = 0);
+    ConversationPlayoutController chat_playout_controller_;
+    ChatPlayoutIntake::Response chat_playout_response_;
+    ChatPlayoutIntake::Stop chat_playout_stop_;
+    uint32_t chat_playout_stamp_ = 0;
+    bool chat_playout_begun_ = false, chat_playout_ready_ = false, chat_playout_recovery_ = false;
+    bool chat_playout_cancelled_ = false;
+    // Ready is a retained, identity/deadline-bearing handoff, never mic authorization.
+    ChatOutboundMailbox::Job chat_playout_ack_;
+    uint64_t chat_playout_ack_controller_id_ = 0;
+    bool chat_playout_ack_admitted_ = false;
+    std::optional<ChatOutboundMailbox::Completion> chat_playout_unhandled_completion_;
+    bool PollChatProtocolCleanup();
+    void RunChatProtocolCleanup();
+    void BeginChatRebootAudioCleanup();
+    void PollChatReboot();
+    bool chat_reboot_audio_requested_ = false;
+    uint64_t chat_reboot_deadline_us_ = 0;
+    enum class ProtocolActivation { kNone, kNormal, kWifiReprovision };
+    ProtocolActivation protocol_activation_pending_ = ProtocolActivation::kNone;
+    bool protocol_heap_monitor_pending_ = false;
+    bool claim_protocol_completion_pending_ = false;
+    uint64_t protocol_start_pending_generation_ = 0;
+    uint64_t deferred_close_generation_ = 0;
+    uint32_t deferred_close_epoch_ = 0;
     // WSS-8: true from the start of a wake/listen/reconnect connect cycle until it
     // succeeds or the user/system cancels the online intent. While true, a per-attempt SetError is a
     // RECOVERABLE transient (the wake loop / ScheduleReconnect backoff retries),
@@ -360,6 +585,10 @@ private:
     std::string deferred_wake_word_;
     QueueHandle_t lesson_message_queue_ = nullptr;
     TaskHandle_t lesson_message_task_handle_ = nullptr;
+    std::atomic<bool> lesson_message_stop_{false}, lesson_message_retired_{false};
+    std::atomic<unsigned> lesson_message_producers_{0};
+    void StopLessonMessageTask();
+    std::atomic<uint32_t> lesson_protocol_readers_{0};
     LessonTransportEpochGate lesson_transport_epoch_gate_;
     LessonTransportTerminalControl lesson_terminal_control_;
     LessonQueueDataAdmission lesson_queue_data_admission_{kLessonMessageDataQueueDepth};
@@ -438,7 +667,12 @@ private:
     // Helper methods
     void CheckAssetsVersion();
     void CheckNewVersion();
+    void RequestInitializeProtocol(ProtocolActivation activation = ProtocolActivation::kNone);
     void InitializeProtocol();
+    bool CompletePendingProtocolWork();
+    void CompleteProtocolActivation();
+    void CompleteClaimProtocolActivation();
+    void StartProtocolWorker();
     void RefreshPendingTbotClaim();
     void DispatchPendingTbotClaimRefreshForSetupGeneration(
         uint32_t expected_setup_generation);
@@ -567,14 +801,14 @@ private:
 
     // Current BLE setup sub-state for the connect mapper (Off in AP/other builds).
     TbotBleSubstate GetBleSubstate() const;
-    bool HandleRobotActionMessage(const cJSON* root);
-    void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch);
+    bool HandleRobotActionMessage(const cJSON* root, ChatRequestContext context = {});
+    void EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch, ChatRequestContext context = {});
     void RequestLessonStorageAbandonment();
     static void LessonMessageTask(void* arg);
     // US-006 Slice-01 (S10): additive lesson_* renderer entry — see lesson_handler.cc.
     // Reached only via the additive `lesson_` branch in OnIncomingJson, above the
     // unknown-type no-op. Never touches the 8 legacy types / voice / MCP arm tools.
-    void HandleLessonMessage(const cJSON* root);
+    void HandleLessonMessage(const cJSON* root, ChatRequestContext context = {});
     bool AbandonLessonStorageSession();
     void HandleEmotionGesture(const char* emotion);
     void ShowActivationCode(const std::string& code, const std::string& message);

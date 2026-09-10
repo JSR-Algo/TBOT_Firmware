@@ -52,7 +52,7 @@ def test_claimed_blufi_reprovision_refreshes_missing_websocket_token_before_prot
 
     token_read = activation.index('websocket_settings.GetString("token")')
     token_refresh = activation.index("ota_->CheckVersion()")
-    protocol_start = activation.index("InitializeProtocol()")
+    protocol_start = activation.index("RequestInitializeProtocol(ProtocolActivation::kWifiReprovision)")
 
     assert token_read < token_refresh < protocol_start
     assert 'if (websocket_settings.GetString("token").empty())' in activation

@@ -121,7 +121,7 @@ const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
 
 constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
 constexpr bool kHoldBootProbePattern = false;
-// Default Live TTS output for this PA; user can still raise/lower via MCP (0-100).
+// Legacy first-boot default and maximum; preserve lower user-selected levels.
 constexpr int kLcdWikiOutputVolume = 92;
 
 void EnableBacklightForBoot() {
@@ -226,6 +226,7 @@ public:
         // stereo can report successful writes while leaving the speaker silent.
         input_channels_ = 1;
         output_channels_ = 1;
+        output_volume_ = kLcdWikiOutputVolume;
     }
 
     void SetOutputVolume(int volume) override {
@@ -239,8 +240,9 @@ public:
 
     void Start() override {
         Es8311AudioCodec::Start();
-        if (output_volume() != kLcdWikiOutputVolume) {
-            SetOutputVolume(kLcdWikiOutputVolume);
+        // Start loads the persisted level; only clamp values above the board cap.
+        if (output_volume() > kLcdWikiOutputVolume) {
+            SetOutputVolume(output_volume());
         }
         RunDiagnosticTone();
     }

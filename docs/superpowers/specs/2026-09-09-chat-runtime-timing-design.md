@@ -48,7 +48,7 @@ diagnostic slice. Any correction follows measured evidence and a scoped design.
 - [x] Compare diagnosis, capacity tuning and display separation approaches.
 - [x] Present diagnostic design; operator requests proceeding with robot repair.
 - [x] Write and self-review this diagnostic specification.
-- [ ] Operator review of this written specification.
+- [x] Operator review of this written specification ("duyet", 2026-09-09).
 - [ ] Write implementation plan and execute test-first diagnostic slice.
 
 No visual companion is needed: this is runtime diagnosis, not visual design.

@@ -380,7 +380,7 @@ def test_lesson_step_always_updates_caption_to_clear_stale_prompt():
     body = function_body(source, "void Application::HandleLessonMessage")
 
     step_branch = body[body.index('const cJSON* scene = Obj(body, "scene")') : body.index("ESP_LOGI(TAG, \"lesson_step rendered")]
-    schedule_branch = step_branch[step_branch.index("Schedule([display") : step_branch.index("});", step_branch.index("Schedule([display"))]
+    schedule_branch = step_branch[step_branch.index("ScheduleChatLesson(context, [display") : step_branch.index("});", step_branch.index("ScheduleChatLesson(context, [display"))]
     assert "display->SetLessonCaption(cap.c_str())" in schedule_branch
     assert "if (!cap.empty())" not in schedule_branch
 
@@ -511,7 +511,7 @@ def test_lesson_step_ack_reports_measured_render_elapsed_after_layer_work():
     poster_idx = step_branch.index("FetchLessonImage(poster_src)")
     object_idx = step_branch.index("FetchLessonImage(object_src)")
     overlay_idx = step_branch.index("FetchLessonImage(overlay_src)")
-    schedule_idx = step_branch.index("Schedule([display, lvgl_display")
+    schedule_idx = step_branch.index("ScheduleChatLesson(context, [display, lvgl_display")
     elapsed_idx = step_branch.index("const int64_t render_elapsed_ms =")
     ack_idx = step_branch.index("emit_ack(root, sequence, rendered, degraded, nullptr, true, render_elapsed_ms,")
     log_idx = step_branch.index("renderElapsedMs=%ld")
