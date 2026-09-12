@@ -9,7 +9,8 @@ void AddLessonAssetSyncAttestation(
     const char* manifest_checksum,
     int asset_count,
     int verified_count,
-    int failed_count
+    int failed_count,
+    bool activated
 );
 
 #endif  // LESSON_ASSET_SYNC_ATTESTATION_H

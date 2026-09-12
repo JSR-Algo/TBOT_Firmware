@@ -527,7 +527,7 @@ def test_generic_sync_optional_failure_activates_but_attestation_ready_requires_
     lease_start = body.index('TryBeginMutation("sync")')
     lease_end = body.index("EvictPreviousLessonAssetPackAfterActivation(")
     assert lease_start < activation < lease_end
-    assert "AddLessonAssetSyncAttestation(\n                json.get(), cache_key, manifest_checksum, asset_count,\n                verified, failed);" in body
+    assert "AddLessonAssetSyncAttestation(\n                json.get(), cache_key, manifest_checksum, asset_count,\n                verified, failed, activation.activated);" in body
     assert "all_critical_verified ? asset_count : verified" not in body
 
 

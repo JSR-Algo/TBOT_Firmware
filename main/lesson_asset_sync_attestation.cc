@@ -33,7 +33,8 @@ void AddLessonAssetSyncAttestation(
     const char* manifest_checksum,
     int asset_count,
     int verified_count,
-    int failed_count
+    int failed_count,
+    bool activated
 ) {
     const std::string manifest_checksum_value =
         manifest_checksum == nullptr ? "" : Trim(manifest_checksum);
@@ -46,7 +47,7 @@ void AddLessonAssetSyncAttestation(
         manifest_checksum_valid && !cache_key_value.empty() &&
         cache_key_value.find(manifest_checksum_value) != std::string::npos;
     const bool pack_verified =
-        asset_count > 0 && verified_count == asset_count && failed_count == 0 &&
+        activated && asset_count > 0 && verified_count == asset_count && failed_count == 0 &&
         cache_key_matches_manifest;
 
     if (pack_verified) {

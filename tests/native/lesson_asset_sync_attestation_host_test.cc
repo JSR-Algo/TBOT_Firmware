@@ -25,7 +25,8 @@ void ExpectResult(
     int verified_count,
     int failed_count,
     bool expected_ready,
-    const char* expected_checksum
+    const char* expected_checksum,
+    bool activated = true
 ) {
     cJSON* response = cJSON_CreateObject();
     AddLessonAssetSyncAttestation(
@@ -34,7 +35,8 @@ void ExpectResult(
         manifest_checksum,
         asset_count,
         verified_count,
-        failed_count
+        failed_count,
+        activated
     );
 
     const cJSON* ready = cJSON_GetObjectItem(response, "ready");
@@ -64,6 +66,7 @@ int main() {
     ExpectResult(cache_key.c_str(), checksum.c_str(), 2, 1, 1, false, nullptr);
     ExpectResult(cache_key.c_str(), checksum.c_str(), 0, 0, 0, false, nullptr);
     ExpectResult(cache_key.c_str(), checksum.c_str(), 2, 1, 0, false, nullptr);
+    ExpectResult(cache_key.c_str(), checksum.c_str(), 2, 2, 0, false, nullptr, false);
 
     std::cout << "lesson asset sync attestation host test OK (" << checks << " checks)"
               << std::endl;

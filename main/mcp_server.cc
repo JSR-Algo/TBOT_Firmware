@@ -1399,7 +1399,7 @@ void McpServer::AddUserOnlyTools() {
                 activation, lesson_id, cache_key);
             AddLessonAssetSyncAttestation(
                 json.get(), cache_key, manifest_checksum, asset_count,
-                verified, failed);
+                verified, failed, activation.activated);
             CheckedCJsonAddNumberToObject(json.get(), "downloadedCount", downloaded);
             CheckedCJsonAddNumberToObject(json.get(), "reusedCount", reused);
             CheckedCJsonAddNumberToObject(json.get(), "skippedCount", skipped);
