@@ -17,8 +17,10 @@ class Protocol {
 public:
     virtual ~Protocol() = default;
     std::vector<std::string> sent_frames;
+    bool fail_lesson_send = false;
 
     bool SendLessonFrame(const std::string& frame) {
+        if (fail_lesson_send) return false;
         sent_frames.push_back(frame);
         return true;
     }

@@ -225,6 +225,8 @@ private:
 
 void SetLessonTransportEpoch(std::uint64_t transport_epoch);
 void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch);
+std::uint64_t PendingLessonCinematicErrorEpoch();
+bool DispatchPendingLessonCinematicError(Protocol* protocol);
 bool AcceptLessonVisualCompletion(
     const LessonQueueItem& item, std::string* ack_frame, RobotUart* robot_uart = nullptr);
 bool DispatchLessonVisualCompletion(

@@ -387,8 +387,10 @@ def test_lesson_step_always_updates_caption_to_clear_stale_prompt():
 def test_lesson_mode_hides_face_without_emoji_box_in_wechat_layout():
     source = SOURCE.read_text(encoding="utf-8")
     body = function_body(source, "void LcdDisplay::SetLessonMode")
-    active_branch = body[body.index("if (active)") : body.index("} else {")]
-    missing_surface_guard = body[body.index("if (emoji_box_ == nullptr") : body.index("if (active)")]
+    emoji_guard = body.index("if (emoji_box_ == nullptr")
+    active_start = body.index("if (active)", emoji_guard)
+    active_branch = body[active_start : body.index("} else {", active_start)]
+    missing_surface_guard = body[emoji_guard : active_start]
 
     assert "emoji_image_ == nullptr" in missing_surface_guard
     assert "emoji_label_ == nullptr" in missing_surface_guard
@@ -400,12 +402,12 @@ def test_lesson_mode_hides_face_without_emoji_box_in_wechat_layout():
 
 def test_lesson_mode_keeps_conversation_emotions_behind_lesson_scene():
     source = SOURCE.read_text(encoding="utf-8")
-    header = (ROOT / "main/display/lcd_display.h").read_text(encoding="utf-8")
+    header = (ROOT / "main/display/lvgl_display/lvgl_display.h").read_text(encoding="utf-8")
     mode_body = function_body(source, "void LcdDisplay::SetLessonMode")
     body = function_body(source, "void LcdDisplay::SetEmotion")
 
     assert "std::atomic<bool> lesson_mode_active_" in header
-    assert "lesson_mode_active_ = active" in mode_body
+    assert "lesson_mode_active_.exchange(active) == active" in mode_body
     assert "if (lesson_mode_active_)" in body
     assert 'strcmp(emotion, "thinking") == 0' in body
     thinking_branch = body[body.index('strcmp(emotion, "thinking") == 0') :]
@@ -428,10 +430,9 @@ def test_cinematic_renderer_claims_lesson_display_mode_before_playback():
     cinematic = enclosing_block(body, "auto claim_cinematic_display")
 
     assert "claim_cinematic_display" in cinematic
-    start_accepted = cinematic[
-        cinematic.index("if (response.accepted) {", cinematic.index("} else if (start_command)")) :
-        cinematic.index("}", cinematic.index("if (response.accepted) {", cinematic.index("} else if (start_command)")))
-    ]
+    start = cinematic.index("if (response.accepted && !g_session.cinematic_runtime_failed)",
+                            cinematic.index("} else if (start_command)"))
+    start_accepted = cinematic[start:cinematic.index("}", start)]
     assert "claim_cinematic_display();" in start_accepted
 
 

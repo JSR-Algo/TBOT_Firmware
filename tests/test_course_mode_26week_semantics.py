@@ -38,7 +38,8 @@ def _node() -> str:
 
 
 def _canonical_curriculum(tmp_path: Path) -> dict:
-    backend = Path(os.environ.get("COURSE_MODE_BACKEND_ROOT", _workspace_root() / "tbot-backend"))
+    selected_backend = os.environ.get("COURSE_MODE_BACKEND_ROOT") or os.environ.get("TBOT_BACKEND_REPO")
+    backend = Path(selected_backend) if selected_backend else _workspace_root() / "tbot-backend"
     verifier = backend / "scripts" / "verify-course-mode-curriculum.mjs"
     assert verifier.is_file(), f"canonical curriculum verifier missing: {verifier}"
     output = tmp_path / "curriculum.json"
@@ -57,7 +58,9 @@ def _canonical_curriculum(tmp_path: Path) -> dict:
 
 
 def _firmware_activity_frames(export: dict, tmp_path: Path) -> list[dict]:
-    server = _workspace_root() / "robot" / "esp32-server" / "main" / "tbot-server"
+    selected_esp = os.environ.get("TBOT_ESP32_SERVER_REPO")
+    esp = Path(selected_esp) if selected_esp else _workspace_root() / "robot" / "esp32-server"
+    server = esp / "main" / "tbot-server"
     assert (server / "core" / "lesson" / "runtime.py").is_file()
     source = tmp_path / "canonical.json"
     output = tmp_path / "wire-frames.json"

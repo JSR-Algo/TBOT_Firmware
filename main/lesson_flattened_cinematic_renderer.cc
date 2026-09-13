@@ -768,6 +768,15 @@ LessonCinematicResponse LessonFlattenedCinematicRenderer::Tick(std::uint64_t now
         return TickApplied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
     if (!loops && frame >= metadata_.frame_count) {
+        if (!native_mode_ && displayed_frame_ != metadata_.frame_count - 1) {
+            const auto error = RenderFrame(metadata_.frame_count - 1);
+            if (error != LessonCinematicError::kNone) {
+                CloseStream();
+                ReleaseBuffer();
+                state_ = State::kFailed;
+                return Failure(last_sequence_, error);
+            }
+        }
         if (native_mode_) {
             if (!FinishNativeTransfer(100)) {
                 state_ = State::kFailed;

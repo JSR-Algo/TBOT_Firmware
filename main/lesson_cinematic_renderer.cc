@@ -638,24 +638,32 @@ LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
                                                  last_sequence_);
     if (state_ != State::kRunning) return Failure(last_sequence_, LessonCinematicError::kInvalidState);
     const std::uint64_t elapsed = now_ms >= clock_origin_ms_ ? now_ms - clock_origin_ms_ : 0;
-    const std::uint64_t frame = elapsed * metadata_[0].fps / 1000;
-    if (frame >= metadata_[0].frame_count) {
-        state_ = State::kPrepared;
-        displayed_frame_ = metadata_[0].frame_count - 1;
-        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    std::uint64_t frame = elapsed * metadata_[0].fps / 1000;
+    const bool complete = frame >= metadata_[0].frame_count;
+    if (complete) frame = metadata_[0].frame_count - 1;
+    if (frame == displayed_frame_) {
+        if (complete) {
+            state_ = State::kPrepared;
+            return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+        }
+        return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
-    if (frame == displayed_frame_) return Applied(LessonCinematicResponseType::kCommandApplied,
-                                                   last_sequence_);
     constexpr std::uint64_t kPlaybackBackgroundDecodeDeadlineMs = 150;
     constexpr std::uint64_t kPlaybackForegroundDecodeDeadlineMs = 100;
     const LessonCinematicError render_error = RenderFrame(
         static_cast<std::size_t>(frame), kPlaybackBackgroundDecodeDeadlineMs,
         kPlaybackForegroundDecodeDeadlineMs);
     if (render_error != LessonCinematicError::kNone) {
+        CloseStreams();
+        ReleaseBuffers();
         state_ = State::kFailed;
         return Failure(last_sequence_, render_error);
     }
     displayed_frame_ = static_cast<std::size_t>(frame);
+    if (complete) {
+        state_ = State::kPrepared;
+        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    }
     return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
 }
 

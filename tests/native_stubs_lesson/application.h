@@ -12,6 +12,7 @@
 #include "robot_uart.h"
 #include "lesson_handler.h"
 #include "lesson_embodied_action.h"
+#include "chat_inbound_messages.h"
 
 #include <cJSON.h>
 
@@ -47,6 +48,8 @@ public:
         lesson_terminal_audio_quiet = false;
         lesson_network_render_quiet = 0;
         schedule_calls = 0;
+        fail_next_schedule = false;
+        before_terminal_quiet = {};
         defer_scheduled_callbacks = false;
         schedule_wait_succeeds = true;
         schedule_wait_starts_before_timeout = false;
@@ -74,6 +77,8 @@ public:
     bool lesson_terminal_audio_quiet = false;
     int lesson_network_render_quiet = 0;
     int schedule_calls = 0;
+    bool fail_next_schedule = false;
+    std::function<void()> before_terminal_quiet;
     bool defer_scheduled_callbacks = false;
     bool schedule_wait_succeeds = true;
     bool schedule_wait_starts_before_timeout = false;
@@ -88,11 +93,30 @@ public:
 
     void Schedule(std::function<void()>&& cb) {
         schedule_calls++;
+        if (fail_next_schedule) {
+            fail_next_schedule = false;
+            throw std::bad_alloc();
+        }
         if (defer_scheduled_callbacks) {
             deferred_callbacks.push_back(std::move(cb));
             return;
         }
         if (cb) cb();  // run inline so the draw-lambda body executes against fakes
+    }
+    // The actual context and source/epoch checks are compiled from application.cc
+    // by the native runner; this is only the simulated connection boundary.
+    ChatConnectionMessages::Owner host_chat_owner{{1, 1}, 1, 1};
+    LessonTransportEpochGate lesson_transport_epoch_gate_;
+    int failed_chat_requests = 0;
+    bool IsChatConnectionCurrent(ConnectionSource source, uint64_t protocol_generation,
+                                 uint32_t connect_generation) const {
+        return host_chat_owner.Matches({source, protocol_generation, connect_generation});
+    }
+    bool IsChatRequestCurrent(const ChatRequestContext& context) const;
+    bool IsChatLessonRequestCurrent(const ChatRequestContext& context) const;
+    void ScheduleChatLesson(ChatRequestContext context, std::function<void()> callback);
+    void FailChatRequest(const ChatRequestContext& context) {
+        if (context && IsChatRequestCurrent(context)) ++failed_chat_requests;
     }
     bool ScheduleAndWait(std::function<bool()>&& cb, int) {
         schedule_calls++;
@@ -164,7 +188,14 @@ public:
         last_abort_reason = reason;
         device_state = kDeviceStateIdle;
     }
-    void BeginLessonTerminalAudioQuiet() { lesson_terminal_audio_quiet = true; }
+    void BeginLessonTerminalAudioQuiet() {
+        if (before_terminal_quiet) {
+            auto callback = std::move(before_terminal_quiet);
+            before_terminal_quiet = {};
+            callback();
+        }
+        lesson_terminal_audio_quiet = true;
+    }
     void SetLessonRuntimeActive(bool active) {
         if (active != lesson_runtime_active) {
             lesson_runtime_generation++;
@@ -207,6 +238,6 @@ public:
     bool IsLessonNetworkRenderQuiet() const { return lesson_network_render_quiet > 0; }
 
     // Defined in lesson_handler.cc (the unit under test).
-    void HandleLessonMessage(const cJSON* root);
+    void HandleLessonMessage(const cJSON* root, ChatRequestContext context = {});
     bool AbandonLessonStorageSession();
 };

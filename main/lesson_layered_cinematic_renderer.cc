@@ -153,6 +153,49 @@ bool LessonLayeredCinematicRenderer::last_apply_presented() const {
     return last_apply_presented_;
 }
 
+std::uint64_t LessonLayeredCinematicRenderer::RuntimeGeneration() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return runtime_generation_;
+}
+
+std::optional<LessonLayeredRuntimeError> LessonLayeredCinematicRenderer::PendingRuntimeError() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pending_runtime_error_;
+}
+
+bool LessonLayeredCinematicRenderer::AcknowledgeRuntimeError(
+    std::uint64_t generation, std::uint64_t sequence) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!pending_runtime_error_ || pending_runtime_error_->generation != generation ||
+        pending_runtime_error_->command_sequence_id != sequence) return false;
+    pending_runtime_error_.reset();
+    return true;
+}
+
+bool LessonLayeredCinematicRenderer::ReleaseFailedRuntimeResources(
+    std::uint64_t generation, std::uint64_t sequence) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!pending_runtime_error_ || pending_runtime_error_->generation != generation ||
+        pending_runtime_error_->command_sequence_id != sequence) return false;
+    Release();
+    state_ = State::kFailed;
+    return true;
+}
+
+void LessonLayeredCinematicRenderer::AdvanceRuntimeGeneration() {
+    ++runtime_generation_;
+    if (runtime_generation_ == 0) ++runtime_generation_;
+    pending_runtime_error_.reset();
+}
+
+bool LessonLayeredCinematicRenderer::WithRuntimeGeneration(
+    std::uint64_t generation, const std::function<void()>& operation) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (runtime_generation_ != generation) return false;
+    operation();
+    return true;
+}
+
 LessonCinematicResponse LessonLayeredCinematicRenderer::Failure(
     std::uint64_t sequence, LessonCinematicError error) const {
     return {LessonCinematicResponseType::kFailure, false, sequence, phase_id_, error};
@@ -203,6 +246,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     const auto old_object_rect = object_rect_;
     const auto old_has_object = has_teaching_object_;
     const auto old_robot_config = robot_config_;
+    const auto old_robot_path = robot_path_;
     const auto old_playback_mode = playback_mode_;
     const auto old_state = state_;
     const auto old_phase_id = phase_id_;
@@ -248,6 +292,8 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
             object_rect_ = old_object_rect;
             has_teaching_object_ = old_has_object;
             robot_config_ = old_robot_config;
+            robot_path_ = old_robot_path;
+            robot_config_.sd_path = robot_path_.c_str();
             playback_mode_ = old_playback_mode;
             state_ = old_state;
             phase_id_ = old_phase_id;
@@ -365,6 +411,8 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     has_teaching_object_ = config.has_teaching_object;
     object_rect_ = config.teaching_object.rect;
     robot_config_ = config.robot;
+    robot_path_ = config.robot.sd_path;
+    robot_config_.sd_path = robot_path_.c_str();
     playback_mode_ = config.playback_mode;
 
     const bool robot_opened =
@@ -386,6 +434,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
         last_sequence_ = config.command_sequence_id;
         last_response_ = Applied(LessonCinematicResponseType::kFrameZeroReady, last_sequence_);
         last_command_ = "prepare";
+        AdvanceRuntimeGeneration();
         committed = true;
         return last_response_;
     }
@@ -421,6 +470,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Prepare(
     last_sequence_ = config.command_sequence_id;
     last_response_ = Applied(LessonCinematicResponseType::kFrameZeroReady, last_sequence_);
     last_command_ = "prepare";
+    AdvanceRuntimeGeneration();
     committed = true;
     return last_response_;
 }
@@ -492,9 +542,15 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::ApplyVisualState(
             return Failure(sequence, static_error);
         }
         last_apply_presented_ = true;
+        if (robot_stream_ == nullptr) {
+            last_apply_degraded_ = true;
+            last_degraded_error_ = old_degraded_error != LessonCinematicError::kNone
+                ? old_degraded_error : LessonCinematicError::kFileOpen;
+        }
     }
     state_ = State::kPrepared;
     displayed_frame_ = 0;
+    AdvanceRuntimeGeneration();
     return Applied(LessonCinematicResponseType::kCommandApplied, sequence);
 }
 
@@ -504,6 +560,10 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Start(
     const auto valid = ValidateControl(sequence, phase_id, "start");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     if (state_ != State::kPrepared) return Failure(sequence, LessonCinematicError::kInvalidState);
+    if (last_apply_degraded_) return Failure(sequence, last_degraded_error_);
+    if (robot_stream_ == nullptr || robot_metadata_.frame_count == 0) {
+        return Failure(sequence, LessonCinematicError::kFileOpen);
+    }
     last_apply_degraded_ = false;
     last_degraded_error_ = LessonCinematicError::kNone;
     state_ = State::kRunning;
@@ -548,6 +608,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Stop(
     const auto valid = ValidateControl(sequence, phase_id, "stop");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     Release();
+    AdvanceRuntimeGeneration();
     state_ = State::kIdle;
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
@@ -561,6 +622,7 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Cancel(
     const auto valid = ValidateControl(sequence, phase_id, "cancel");
     if (!valid.accepted || sequence == last_sequence_) return valid;
     Release();
+    AdvanceRuntimeGeneration();
     state_ = State::kIdle;
     last_sequence_ = sequence;
     last_response_ = Applied(LessonCinematicResponseType::kCommandApplied, sequence);
@@ -585,14 +647,19 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Tick(std::uint64_t now_m
     }
     const std::uint64_t elapsed = now_ms >= clock_origin_ms_ ? now_ms - clock_origin_ms_ : 0;
     std::uint64_t frame = elapsed * robot_metadata_.fps / 1000;
+    const bool complete = playback_mode_ == LessonLayeredPlaybackMode::kOnce &&
+        frame >= robot_metadata_.frame_count;
     if (playback_mode_ == LessonLayeredPlaybackMode::kLoop) {
         frame %= robot_metadata_.frame_count;
-    } else if (frame >= robot_metadata_.frame_count) {
-        state_ = State::kPrepared;
-        displayed_frame_ = robot_metadata_.frame_count - 1;
-        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    } else if (complete) {
+        // A delayed timer must still present the terminal pixels before completion.
+        frame = robot_metadata_.frame_count - 1;
     }
     if (frame == displayed_frame_) {
+        if (complete) {
+            state_ = State::kPrepared;
+            return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+        }
         return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
     const auto error = RenderFrame(static_cast<std::size_t>(frame));
@@ -603,13 +670,21 @@ LessonCinematicResponse LessonLayeredCinematicRenderer::Tick(std::uint64_t now_m
         if (static_error != LessonCinematicError::kNone) {
             last_degraded_error_ = static_error;
             state_ = State::kFailed;
+            pending_runtime_error_ = LessonLayeredRuntimeError{
+                runtime_generation_, last_sequence_, phase_id_, static_error};
             return Failure(last_sequence_, static_error);
         }
         last_degraded_error_ = error;
         state_ = State::kPrepared;
+        pending_runtime_error_ = LessonLayeredRuntimeError{
+            runtime_generation_, last_sequence_, phase_id_, error};
         return Failure(last_sequence_, error);
     }
     displayed_frame_ = static_cast<std::size_t>(frame);
+    if (complete) {
+        state_ = State::kPrepared;
+        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    }
     return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
 }
 
@@ -702,11 +777,14 @@ void LessonLayeredCinematicRenderer::Release() {
     last_apply_degraded_ = false;
     last_apply_presented_ = false;
     last_degraded_error_ = LessonCinematicError::kNone;
+    robot_config_ = {};
+    robot_path_.clear();
 }
 
 void LessonLayeredCinematicRenderer::DiscardSession() {
     std::lock_guard<std::mutex> lock(mutex_);
     Release();
+    AdvanceRuntimeGeneration();
     state_ = State::kIdle;
     phase_id_.clear();
     last_sequence_ = 0;

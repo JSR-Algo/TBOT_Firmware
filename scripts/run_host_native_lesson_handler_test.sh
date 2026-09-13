@@ -21,6 +21,8 @@ cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
 cp main/lesson_layer_state.cc "${BUILD_DIR}/src/lesson_layer_state.cc"
 cp main/lesson_asset_storage_coordinator.cc \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc"
+python3 scripts/extract_lesson_host_application.py main/application.cc \
+    "${BUILD_DIR}/src/lesson_application_context.cc"
 
 "${CC}" -std=c11 -O0 -g -Wall -Wextra -Werror \
     -I"${CJSON_DIR}" -c "${CJSON_DIR}/cJSON.c" -o "${BUILD_DIR}/cJSON.o"
@@ -37,6 +39,7 @@ cp main/lesson_asset_storage_coordinator.cc \
     -Imain \
     -Imain/protocols \
     tests/native/lesson_handler_host_test.cc \
+    "${BUILD_DIR}/src/lesson_application_context.cc" \
     "${BUILD_DIR}/src/lesson_handler.cc" \
     "${BUILD_DIR}/src/lesson_embodied_action.cc" \
     "${BUILD_DIR}/src/lesson_motion_presets.cc" \

@@ -631,6 +631,25 @@ void TestTemplateV2OnceCompletesAtEof() {
     Require(response.accepted &&
                 response.type == tbot::LessonCinematicResponseType::kPhaseComplete,
             "v2 once cue completes at EOF");
+    Require(fake.last_frame == 5 && fake.decoded_indices == std::vector<std::size_t>({0, 5}),
+            "v2 once completion presents final pixels after a delayed tick");
+}
+
+void TestLateMjpegFinalFailureCannotComplete() {
+    for (bool present_failure : {false, true}) {
+        FakeRuntime fake;
+        tbot::LessonFlattenedCinematicRenderer renderer(Ops(&fake));
+        Require(renderer.Prepare(Config(), 0).accepted && renderer.Start(42, "opening", 0).accepted,
+                "late MJPEG final failure fixture starts");
+        fake.fail_decode = !present_failure;
+        fake.fail_present = present_failure;
+        const auto response = renderer.Tick(350);
+        Require(!response.accepted && response.error == (present_failure
+                    ? tbot::LessonCinematicError::kPresentFailed : tbot::LessonCinematicError::kDecodeFailed),
+                "late MJPEG final failure preserves decode or presentation error");
+        Require(fake.closes == 1 && fake.frees == 1,
+                "late MJPEG final failure closes stream and frees framebuffer");
+    }
 }
 
 void TestTemplateV2LoopCrossesSeamsWithoutResourceChurn() {
@@ -841,6 +860,8 @@ void TestStartNativePlaybackReplayPrefetchFailureRelinquishesDmaOwnership() {
             "replay prefetch-failure fixture completes first pass");
     Require(fake.begins == 1 && fake.ends == 1,
             "natural completion returns DMA ownership exactly once");
+    Require(fake.dma_owned == nullptr && fake.decoded_indices == std::vector<std::size_t>({0, 1, 2}),
+            "native completion drains the final frame without skipping or decoding past EOF");
 
     fake.fail_decode_at_index = 1;
     const auto response = renderer.Start(43, "barn-opening", 300);
@@ -951,6 +972,7 @@ int main() {
     TestDecodeStallWatchdogAllowsExpectedS3Latency();
     TestFailedRepreparePreservesPreparedStreamTransactionally();
     TestTemplateV2OnceCompletesAtEof();
+    TestLateMjpegFinalFailureCannotComplete();
     TestTemplateV2LoopCrossesSeamsWithoutResourceChurn();
     TestTemplateV2LoopPauseResumePreservesPhase();
     TestTemplateV2IdentityFencingAndTransactionalReplacement();
@@ -960,6 +982,6 @@ int main() {
     TestStartNativePlaybackReplayPrefetchFailureRelinquishesDmaOwnership();
     TestTickDecodeTimeoutQuarantineRecoversOnSubsequentTicks();
     TestExactCourseModeCompatibilityAdmitsOnlyFrozenPilotCues();
-    std::cout << "lesson_flattened_cinematic_renderer tests passed\n";
+    std::cout << "lesson_flattened_cinematic_renderer tests: 19 passed, 0 failed, 0 skipped\n";
     return 0;
 }
