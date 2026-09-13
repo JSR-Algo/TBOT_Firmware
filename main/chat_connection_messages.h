@@ -22,11 +22,13 @@ public:
         Owner owner;
         uint64_t id = 0, deadline_us = 0, reservation = 0;
         std::shared_ptr<const std::string> payload;
+        std::shared_ptr<std::atomic<bool>> authorization;
         ChatOutboundMailbox::Job physical;
         bool submitted = false, unsent_completion = false;
         Outcome outcome = Outcome::Pending;
     };
-    uint64_t Admit(Owner owner, const std::string& text, uint64_t received_us) {
+    uint64_t Admit(Owner owner, const std::string& text, uint64_t received_us,
+                   std::shared_ptr<std::atomic<bool>> authorization = {}) {
         if (size_ == records_.size() || text.empty() || text.size() > 65535 ||
             !owner.source.Valid() || !owner.protocol_generation || !owner.connect_generation ||
             next_id_ == UINT64_MAX || received_us > UINT64_MAX - 10000000ULL) return 0;
@@ -38,6 +40,7 @@ public:
         record.id = ++next_id_;
         record.deadline_us = received_us + 10000000ULL;
         record.payload = std::move(payload);
+        record.authorization = std::move(authorization);
         ++size_;
         return record.id;
     }
@@ -57,6 +60,8 @@ public:
                 record.physical.connection_epoch != completion.job.connection_epoch) continue;
             using Result = ChatOutboundMailbox::Result;
             if (completion.result == Result::Sent || completion.result == Result::Failed) {
+                if (completion.result == Result::Failed && record.authorization)
+                    record.authorization->store(false, std::memory_order_release);
                 if (record.outcome == Outcome::Pending)
                     record.outcome = completion.result == Result::Sent ? Outcome::Sent : Outcome::Failed;
                 record.submitted = false;

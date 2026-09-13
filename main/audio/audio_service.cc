@@ -612,15 +612,24 @@ void AudioService::AudioOutputTask() {
                      codec_->output_enabled(), codec_->output_volume());
         }
         const int64_t output_start_us = esp_timer_get_time();
-        const bool current_output = !task->chat_reset_token ||
-            (chat_playback_reset_.AllowsDecode(task->chat_reset_token) &&
-             task->response_generation == playback_generation_.load());
+        const bool current_output =
+            (!task->conversation_audio || task->response_generation == playback_generation_.load()) &&
+            (!task->chat_reset_token ||
+             (chat_playback_reset_.AllowsDecode(task->chat_reset_token) &&
+              task->response_generation == playback_generation_.load()));
         if (current_output) codec_->OutputData(task->pcm);
+        const bool owned_conversation_output = current_output && task->conversation_audio &&
+            !task->pcm.empty() && task->response_generation == playback_generation_.load() &&
+            (!task->chat_reset_token || chat_playback_reset_.AllowsDecode(task->chat_reset_token));
+        const auto drain = codec_->GetOutputDrainSnapshot();
+        if (owned_conversation_output && callbacks_.on_playback_failed &&
+            (drain.state == AudioOutputDrainState::Failed ||
+             drain.state == AudioOutputDrainState::Unsupported)) {
+            callbacks_.on_playback_failed(task->response_generation);
+        }
         if (callbacks_.on_output_completed) {
-            const auto drain = codec_->GetOutputDrainSnapshot();
             callbacks_.on_output_completed(task->response_generation,
-                current_output && task->conversation_audio && !task->pcm.empty() &&
-                    drain.state != AudioOutputDrainState::Failed,
+                owned_conversation_output && drain.state != AudioOutputDrainState::Failed,
                 static_cast<uint32_t>(esp_timer_get_time() / 1000));
         }
         output_timing.Record(output_start_us, esp_timer_get_time());

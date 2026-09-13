@@ -105,6 +105,38 @@ void Protocol::SendTtsDrainAck(const std::string& drain_id) {
     cJSON_Delete(root);
 }
 
+std::string Protocol::EncodeLessonPlayoutAck(const std::string& id, const char* state,
+    uint64_t at_ms, const std::string& session_id) {
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return {};
+    const bool complete = cJSON_AddStringToObject(root, "type", "tts_ack") &&
+        cJSON_AddStringToObject(root, "state", state) &&
+        cJSON_AddStringToObject(root, "playoutId", id.c_str()) &&
+        cJSON_AddNumberToObject(root, "playoutAtMs", at_ms) &&
+        cJSON_AddStringToObject(root, "session_id", session_id.c_str());
+    char* encoded = complete ? cJSON_PrintUnformatted(root) : nullptr;
+    std::string text;
+    try { if (encoded) text = encoded; } catch (...) {}
+    if (encoded) cJSON_free(encoded);
+    cJSON_Delete(root);
+    return text;
+}
+
+std::string Protocol::EncodeTtsDrainAck(const std::string& drain_id, const std::string& session_id) {
+    cJSON* root = cJSON_CreateObject();
+    if (!root) return {};
+    const bool complete = cJSON_AddStringToObject(root, "type", "tts_ack") &&
+        cJSON_AddStringToObject(root, "state", "stop") &&
+        cJSON_AddStringToObject(root, "drainId", drain_id.c_str()) &&
+        cJSON_AddStringToObject(root, "session_id", session_id.c_str());
+    char* encoded = complete ? cJSON_PrintUnformatted(root) : nullptr;
+    std::string text;
+    try { if (encoded) text = encoded; } catch (...) {}
+    if (encoded) cJSON_free(encoded);
+    cJSON_Delete(root);
+    return text;
+}
+
 bool Protocol::SendLessonFrame(const std::string& frame) {
     // US-006 Slice-01: the lesson frame is already a complete envelope (built by
     // lesson_handler.cc); send it verbatim. Additive — does not touch the voice/MCP

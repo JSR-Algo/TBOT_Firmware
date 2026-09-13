@@ -77,6 +77,9 @@ def test_actual_output_reset_fence(tmp_path, sanitize, server_aec):
     source = (ROOT / "main/audio/audio_service.cc").read_text()
     output = method(source, "void AudioService::AudioOutputTask")
     assert "chat_playback_reset_.AllowsDecode(task->chat_reset_token)" in output, "Missing pre-output reset fence"
+    callbacks = (ROOT / "main/audio/audio_service.h").read_text()
+    assert "std::function<void(uint32_t)> on_playback_failed;" in callbacks
+    assert "callbacks_.on_playback_failed(task->response_generation)" in output
     fixture = (ROOT / "tests/native/chat_playback_output_test.cc").read_text()
     generated = tmp_path / "output.cc"
     generated.write_text(fixture.replace("// PRODUCTION_OUTPUT", output))

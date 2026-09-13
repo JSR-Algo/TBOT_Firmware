@@ -3157,6 +3157,7 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
                                      &abort_speaking_if_needed,
                                      &end_lesson_asset_session](bool release_asset_session = true) {
         InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
+        Application::GetInstance().BeginLessonTerminalAudioQuiet();
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         CancelAndRestoreActiveLessonEmbodiedAction();
@@ -3171,6 +3172,7 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
     };
     auto clear_stale_lesson_for_fresh_prepare = [this, context](bool show_waiting_state) {
         InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
+        Application::GetInstance().BeginLessonTerminalAudioQuiet();
         Application::GetInstance().CancelLessonInteractiveListening();
         CancelAndRestoreActiveLessonEmbodiedAction();
         Application::GetInstance().SetLessonRuntimeActive(false);

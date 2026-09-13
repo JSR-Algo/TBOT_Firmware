@@ -910,6 +910,7 @@ std::string WebsocketProtocol::GetHelloMessage() {
     // that did not advertise this. Purely additive — does not disturb aec/mcp/voice.
     cJSON_AddBoolToObject(features, "lesson", true);
     cJSON_AddBoolToObject(features, "lessonAudioDrainAck", true);
+    cJSON_AddBoolToObject(features, "lessonAudioPlayoutAck", true);
     cJSON_AddStringToObject(features, "renderer", kLessonRendererName);
     AddLessonRendererFeatures(features);
 #endif

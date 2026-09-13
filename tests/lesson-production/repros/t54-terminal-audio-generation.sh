@@ -42,8 +42,9 @@ require(
     "terminal quiet does not arm the current encoded speaking generation",
 )
 
+dispatch = source.index("void Application::DispatchIncomingJson")
 stop = source[
-    source.index('strcmp(state->valuestring, "stop") == 0'):
+    source.index('strcmp(state->valuestring, "stop") == 0', dispatch):
     source.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)')
 ]
 compact_stop = " ".join(stop.split())

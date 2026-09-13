@@ -2168,7 +2168,8 @@ def test_google_live_manual_tts_stop_exits_stale_listening_state():
 def test_lesson_prompt_tts_stop_continue_listening_does_not_take_over_realtime():
     app_cc = read("main/application.cc")
 
-    stop = app_cc.index('strcmp(state->valuestring, "stop") == 0')
+    dispatch = app_cc.index("void Application::DispatchIncomingJson")
+    stop = app_cc.index('strcmp(state->valuestring, "stop") == 0', dispatch)
     sentence_start = app_cc.index('} else if (strcmp(state->valuestring, "sentence_start") == 0)', stop)
     stop_body = app_cc[stop:sentence_start]
     schedule_body = stop_body[stop_body.index("Schedule([this") :]

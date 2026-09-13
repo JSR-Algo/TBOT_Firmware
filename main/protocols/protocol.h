@@ -157,6 +157,9 @@ public:
         return ChatOutboundMailbox::Result::Failed;
     }
     void SendTtsDrainAck(const std::string& drain_id);
+    static std::string EncodeLessonPlayoutAck(const std::string& id, const char* state,
+        uint64_t at_ms, const std::string& session_id);
+    static std::string EncodeTtsDrainAck(const std::string& drain_id, const std::string& session_id);
     virtual uint32_t CurrentConnectionEpoch() const { return 0; }
     // Conditional send: gate acquisition never waits, but socket I/O can block.
     // Call from a lifetime-protected worker, never the application poll task.

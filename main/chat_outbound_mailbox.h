@@ -33,6 +33,7 @@ public:
         ConnectionSource source;
         uint32_t connect_generation = 0;
         std::shared_ptr<const std::string> full_text;
+        std::shared_ptr<std::atomic<bool>> authorization;
 
         // Accept up to 128 text bytes plus an owned terminator. Failure preserves
         // the existing payload; nullptr is allowed only for empty text.

@@ -94,6 +94,7 @@
 
 struct AudioServiceCallbacks {
     std::function<void(uint32_t, bool, uint32_t)> on_output_completed;
+    std::function<void(uint32_t)> on_playback_failed;
     std::function<void(void)> on_send_queue_available;
     std::function<void(const std::string&)> on_wake_word_detected;
     std::function<void(bool)> on_vad_change;

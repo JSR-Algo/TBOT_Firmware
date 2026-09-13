@@ -62,7 +62,8 @@ bool ChatOutboundWorker::RunOnce(uint64_t now_us) {
         else if (active_.deadline_us && now_us >= active_.deadline_us) active_result_ = Result::Failed;
         else if (active_.kind == ChatOutboundMailbox::Kind::FullText)
             active_result_ = activation_.protocol->SendChatFullTextIfCurrent(active_, [this] {
-                return activation_.current_connection && activation_.current_connection(activation_.context,
+                return (!active_.authorization || active_.authorization->load(std::memory_order_acquire)) &&
+                    activation_.current_connection && activation_.current_connection(activation_.context,
                     active_.source, active_.protocol_generation, active_.connect_generation);
             });
         else active_result_ = activation_.protocol->SendChatControlIfCurrent(active_, [this] {

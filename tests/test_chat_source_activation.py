@@ -499,6 +499,10 @@ struct Application {
  } audio_service_;
  struct Gesture {unsigned begins=0;void BeginResponse(uint32_t){++begins;}void Cancel(){}} speaking_arm_dispatch_;
  struct Protocol {void SendTtsDrainAck(const std::string&){}void SendStartListening(int){}} protocol;Protocol* protocol_=&protocol;
+ // This fixture executes only the untagged legacy TTS branch.
+ bool HandleLessonPlayoutTts(const cJSON* root,ChatRequestContext) {
+  assert(!cJSON_GetObjectItem(root,"playoutId"));return false;
+ }
  bool IsChatRequestCurrent(const ChatRequestContext& c)const{return !c || current;}
  bool IsChatLessonRequestCurrent(const ChatRequestContext& c)const{return IsChatRequestCurrent(c);}
  int GetDeviceState(){return state;}void SetDeviceState(int s){state=s;}int GetDefaultListeningMode(){return kListeningModeRealtime;}
