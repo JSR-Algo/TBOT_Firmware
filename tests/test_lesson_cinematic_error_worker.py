@@ -1,6 +1,8 @@
 """Execute the complete production lesson worker with bounded host queue adapters."""
 import os
+import json
 from pathlib import Path
+import shlex
 import subprocess
 
 import pytest
@@ -8,6 +10,27 @@ import pytest
 from test_protocol_work_lifetime import method
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_cinematic_error_source_guard_is_accessible_on_target(tmp_path):
+    commands = ROOT / "build/compile_commands.json"
+    if not commands.exists():
+        pytest.skip("Configured target compilation database required")
+    entry = next(item for item in json.loads(commands.read_text())
+                 if item["file"].endswith("/lesson_handler.cc"))
+    args = shlex.split(entry["command"])
+    if not Path(args[0]).exists():
+        pytest.skip("Configured target toolchain required")
+    source = tmp_path / "cinematic_source_guard.cc"
+    source.write_text(
+        '#include "application.h"\n'
+        'bool CinematicSourceCurrent(Application& app, const ChatRequestContext& context) {\n'
+        '    return app.IsChatLessonRequestCurrent(context);\n'
+        '}\n'
+    )
+    args[args.index("-o") + 1] = str(tmp_path / "cinematic_source_guard.o")
+    args[args.index("-c") + 1] = str(source)
+    subprocess.run(args, cwd=entry["directory"], check=True, timeout=60)
 
 
 @pytest.fixture(scope="module")
