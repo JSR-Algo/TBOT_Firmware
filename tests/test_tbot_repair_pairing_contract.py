@@ -157,7 +157,7 @@ def test_cloud_release_worker_clears_state_only_on_success():
     assert 'backend_settings.SetString("device_id", "");' in body
     assert 'backend_settings.SetString("device_secret", "");' in body
     assert "self->RefreshPendingTbotClaim();" in body
-    assert "vTaskDelete(nullptr);" in body
+    assert "vTaskDeleteWithCaps(nullptr);" in body
 
 
 def test_deferred_release_uses_captured_credentials_and_cannot_clear_a_later_claim():

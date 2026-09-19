@@ -39,6 +39,7 @@ void SetLessonCourseDeliveryWriteFailureForTest(bool fail);
 void FailNextLessonCourseDeliveryWriteForTest(int write_number);
 }
 #include "lesson_asset_storage_coordinator.h"
+#include "lesson_asset_retained_selection.h"
 #include "lesson_motion_presets.h"
 #include "system_info.h"
 
@@ -1495,7 +1496,8 @@ void test_renderer_v2_capability_shape_and_exact_tokens() {
     char* encoded = cJSON_PrintUnformatted(features);
     require(encoded != nullptr, "renderer capability serializes");
     require(std::string(encoded) ==
-                "{\"lesson\":true,\"renderer\":[\"teebot-lesson-renderer.v1\","
+                "{\"lesson\":true,\"retainedSelection\":\"retained-assignment-device.v1\","
+                "\"renderer\":[\"teebot-lesson-renderer.v1\","
                 "\"teebot-lesson-renderer.v2\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
@@ -1523,7 +1525,8 @@ void test_renderer_v3_capability_is_fail_closed_until_initialized() {
     AddLessonRendererFeatures(features);
     encoded = cJSON_PrintUnformatted(features);
     require(encoded != nullptr && std::string(encoded) ==
-                "{\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
+                "{\"retainedSelection\":\"retained-assignment-device.v1\","
+                "\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
                 "\"teebot-lesson-renderer.v3\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
@@ -3169,7 +3172,8 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
     AddLessonRendererFeatures(features);
     char* encoded = cJSON_PrintUnformatted(features);
     require(encoded != nullptr && std::string(encoded) ==
-                "{\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
+                "{\"retainedSelection\":\"retained-assignment-device.v1\","
+                "\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
                 "\"teebot-lesson-renderer.v4\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
@@ -9797,6 +9801,103 @@ void test_layer_install_timeout_degrades_without_committing_layer_state() {
 
 }  // namespace
 
+void test_retained_owner_refuses_unowned_prepare_at_session_reservation() {
+    cJSON* features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    const auto capability = cJSON_GetObjectItemCaseSensitive(features, "retainedSelection");
+    require(cJSON_IsString(capability) && std::string(capability->valuestring) == "retained-assignment-device.v1",
+            "hello advertises exact retained selection contract");
+    cJSON_Delete(features);
+    ResetObservable();
+    FreshSession();
+    RetainedSelectionOwner owner;
+    owner.operation_id = "10000000-0000-0000-0000-000000000001";
+    owner.request_id = "20000000-0000-0000-0000-000000000001";
+    owner.device_id = "30000000-0000-0000-0000-000000000001";
+    owner.consumer_id = "40000000-0000-0000-0000-000000000001";
+    owner.lesson_row_id = "50000000-0000-0000-0000-000000000001";
+    owner.assignment_id = "60000000-0000-0000-0000-000000000001";
+    owner.request_revision = 2; owner.selection_revision = 2; owner.assignment_version = 1;
+    owner.lesson_key = "retained-farm"; owner.lesson_version = 1;
+    owner.manifest_version = "teebot-lesson-renderer.v5";
+    owner.manifest_checksum = std::string(64, 'a');
+    owner.descriptor_checksum = std::string(64, 'b');
+    owner.cache_key = owner.lesson_key + "/v1-" + owner.manifest_checksum;
+    {
+        auto lease = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("retained");
+        require(static_cast<bool>(lease), "retained fixture gets actual mutation lease");
+        ApplyRetainedSelection(lease, owner, false);
+    }
+    Handle(PrepareFrame(1));
+    require(Sent().size() == 1 && FrameType(0) == "lesson_error",
+            "unowned prepare cannot reserve a retained device lesson");
+    require(FrameBodyStr(0, nullptr, "code") == "RETAINED_SELECTION_MISMATCH",
+            "retained refusal has a specific correlated error");
+    {
+        auto lease = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("retained");
+        require(static_cast<bool>(lease), "rejected retained prepare releases only its new reservation");
+    }
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer v3({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                    V3Decode, V3Present});
+    tbot::LessonFlattenedCinematicRenderer v4({&fake, V3Allocate, V3Free, V3Open,
+                                              V3Close, V3Decode, V3Present});
+    tbot::LessonLayeredCinematicRenderer v5(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonCinematicRenderer(&v3);
+    ActivateV4Renderer(&v4);
+    tbot::SetActiveLessonLayeredCinematicRenderer(&v5);
+    for (int version : {3, 4, 5}) {
+        ResetObservable();
+        FreshSession();
+        Handle(version == 3 ? V3PrepareFrame(1) : version == 4 ? V4PrepareFrame(1)
+                                                                : V5PrepareFrame(1));
+        require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "RETAINED_SELECTION_MISMATCH",
+                "every cinematic prepare enforces the retained owner");
+        require(fake.opens == 0 && fake.jpeg_decodes == 0 && fake.png_decodes == 0 &&
+                    !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "cinematic refusal precedes media IO and releases its reservation");
+    }
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    ActivateV4Renderer(nullptr);
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+
+    const std::string operation =
+        "{\"contractVersion\":\"retained-assignment-pack.v1\",\"action\":\"bind\","
+        "\"operationId\":\"" + owner.operation_id + "\",\"requestId\":\"" + owner.request_id +
+        "\",\"requestRevision\":2,\"deviceId\":\"" + owner.device_id +
+        "\",\"consumerIdentity\":\"" + owner.consumer_id +
+        "\",\"desiredSelectionRevision\":2,\"assignmentId\":\"" + owner.assignment_id +
+        "\",\"assignmentVersion\":1,\"selection\":{\"lessonRowId\":\"" + owner.lesson_row_id +
+        "\",\"lessonKey\":\"retained-farm\",\"lessonVersion\":1,\"profile\":\"espTft\","
+        "\"manifestVersion\":\"teebot-lesson-renderer.v5\",\"manifestChecksum\":\"" +
+        owner.manifest_checksum + "\",\"cacheKey\":\"" + owner.cache_key +
+        "\",\"packDescriptorChecksum\":\"" + owner.descriptor_checksum + "\"}}";
+    const auto owned_frame = PrepareFrameFor(owner.assignment_id, "retained-owned", 1,
+        ",\"selectionRevision\":2,\"assignmentVersion\":1,\"manifestRef\":{\"manifestChecksum\":\"" +
+        owner.manifest_checksum + "\"},\"assetPack\":{\"cacheKey\":\"" + owner.cache_key +
+        "\"},\"retainedSelection\":" + operation);
+    for (const auto& refused : {
+            ReplaceOnce(owned_frame, "\"selectionRevision\":2", "\"selectionRevision\":-1"),
+            ReplaceOnce(owned_frame, "\"assignmentVersion\":1", "\"assignmentVersion\":2"),
+            ReplaceOnce(owned_frame, owner.manifest_checksum, std::string(64, 'c')),
+            ReplaceOnce(owned_frame, owner.assignment_id, "wrong-assignment")}) {
+        ResetObservable();
+        Handle(refused);
+        require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "RETAINED_SELECTION_MISMATCH",
+                "bound prepare rejects invalid revision, version, checksum, or assignment");
+        require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "bound prepare refusal releases its reservation");
+    }
+    ResetObservable();
+    Handle(owned_frame);
+    require(Sent().size() == 1 && FrameType(0) == "lesson_ack",
+            "matching retained owner may prepare its lesson");
+}
+
 int main() {
     {
         Application app;
@@ -10005,6 +10106,7 @@ int main() {
     test_layer_install_timeout_degrades_without_committing_layer_state();
     test_renderer_v2_visual_motion_is_allowlisted_once_per_generation();
     test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata();
+    test_retained_owner_refuses_unowned_prepare_at_session_reservation();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }

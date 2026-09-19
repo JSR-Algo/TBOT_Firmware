@@ -18,7 +18,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr const char* kRoot = "/tmp/tbot-lesson-asset-cache-evict-host";
+constexpr const char* kRoot = TBOT_LESSON_ASSET_ROOT;
 const std::string kChecksum(64, 'a');
 const std::string kKey = "pip-farm-3m/v1-" + kChecksum;
 const std::string kHilKey = "hil-task14/v1-" + kChecksum;
@@ -237,7 +237,7 @@ void TestExactFlatLeafDeletionAndPreservation() {
     WriteFile(Leaf() / "two.json");
     const fs::path sibling = fs::path(kRoot) / "pip-farm-3m" / ("v2-" + kChecksum);
     WriteFile(sibling / "keep.bin");
-    WriteFile(fs::path(kRoot) / "current.json", "current");
+    WriteFile(fs::path(kRoot) / "unreferenced-metadata.json", "metadata");
     WriteFile(fs::path(kRoot) / "pvg" / "manifest.json", "pvg");
     WriteFile(fs::path(kRoot) / "shared" / "keep.bin", "shared");
 
@@ -250,8 +250,8 @@ void TestExactFlatLeafDeletionAndPreservation() {
     Expect(fs::exists(sibling / "keep.bin"), "sibling version must remain");
     Expect(ReadFile(sibling / "keep.bin") == "asset",
            "sibling version bytes must remain");
-    Expect(ReadFile(fs::path(kRoot) / "current.json") == "current",
-           "current metadata bytes must remain");
+    Expect(ReadFile(fs::path(kRoot) / "unreferenced-metadata.json") == "metadata",
+           "unreferenced metadata bytes must remain");
     Expect(ReadFile(fs::path(kRoot) / "pvg" / "manifest.json") == "pvg",
            "PVG directory bytes must remain");
     Expect(ReadFile(fs::path(kRoot) / "shared" / "keep.bin") == "shared",
@@ -536,6 +536,31 @@ void TestLeafTypeRefusals() {
 
 }
 
+void TestIndependentPointerProtection() {
+    for (const char* pointer : {"current.json", "pvg.json"}) {
+        ResetRoot();
+        WriteFile(Leaf() / "asset.bin", "owned bytes");
+        WriteFile(fs::path(kRoot) / pointer, "unknown legacy pointer");
+        Expect(!EvictLessonAssetCacheKey(kKey, false).evicted && fs::exists(Leaf() / "asset.bin"),
+               "unknown global pointers protect bytes conservatively");
+    }
+    for (const char* pointer : {"active.json", "active.json.tmp", "active.json.backup",
+                                "current.json", "pvg.json"}) {
+        ResetRoot();
+        WriteFile(Leaf() / "asset.bin", "owned bytes");
+        const auto path = Leaf().parent_path() / pointer;
+        WriteFile(path, "{\"lessonId\":\"pip-farm-3m\",\"cacheKey\":\"" + kKey +
+                        "\",\"manifestChecksum\":\"" + kChecksum + "\"}");
+        auto result = EvictLessonAssetCacheKey(kKey, false);
+        Expect(!result.evicted && !result.not_found && fs::exists(Leaf() / "asset.bin"),
+               "independent pointer protects bytes without a retained request owner");
+        WriteFile(path, "{corrupt");
+        result = EvictLessonAssetCacheKey(kKey, false);
+        Expect(!result.evicted && fs::exists(Leaf() / "asset.bin"),
+               "uncertain pointer cannot authorize deletion");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -556,6 +581,7 @@ int main() {
     TestFinalAbsenceVerification();
     TestAuthoritativeNotFoundOnly();
     TestLeafTypeRefusals();
+    TestIndependentPointerProtection();
     ResetRoot();
     std::cout << "lesson asset cache eviction host test OK (" << checks << " checks)"
               << std::endl;

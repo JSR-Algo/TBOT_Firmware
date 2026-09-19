@@ -90,7 +90,7 @@ constexpr const char* TAG="test";
     fixture=fixture.replace("    struct Controls { size_t Size() const { return 0; } } chat_control_intents_;\n    bool DeliverChatControl(const Completion&) { return false; }\n    void PollChatControls(uint64_t) {}", "")
     fixture=fixture.replace("constexpr DeviceState kDeviceStateConnecting = 1, kDeviceStateIdle = 2;",
         "constexpr DeviceState kDeviceStateConnecting = 1, kDeviceStateIdle = 2, kDeviceStateSpeaking = 3, kDeviceStateListening = 4, kDeviceStateAudioTesting=5,kDeviceStateWifiConfiguring=6;")
-    fixture=fixture.replace('const char* PLEASE_WAIT = "wait";', 'const char* PLEASE_WAIT = "wait"; const char* LISTENING="listening";const char* SERVER_UNAVAILABLE_RETRYING="retry";')
+    fixture=fixture.replace('const char* PLEASE_WAIT = "wait";', 'const char* PLEASE_WAIT = "wait"; const char* LISTENING="listening";const char* SPEAKING="speaking";const char* SERVER_UNAVAILABLE_RETRYING="retry";')
     fixture=fixture.replace('namespace Lang { namespace Strings', 'namespace Lang { namespace Sounds { const char* OGG_POPUP="popup"; const char* OGG_EXCLAMATION="exclamation"; } }\nnamespace Lang { namespace Strings')
     fixture=fixture.replace('    void SetStatus(const char*) {}', '''
     std::string status;
@@ -114,7 +114,9 @@ class Application;
     fields=header[start:end]
     fields='\n'.join(line for line in fields.split('\n') if 'void DispatchIncomingJson(' not in line)
     fields=fields.replace('    bool IsLessonVoiceRoute() const;', '    bool IsLessonVoiceRoute() const { return false; }')
-    fields=fields.replace('    bool IsChatLessonRequestCurrent(const ChatRequestContext& context) const;', '    bool IsChatLessonRequestCurrent(const ChatRequestContext&) const { return true; }')
+    # This public guard sits outside the extracted private-field range.
+    assert '    bool IsChatLessonRequestCurrent(const ChatRequestContext& context) const;' in header
+    fields += '\n    bool IsChatLessonRequestCurrent(const ChatRequestContext&) const { return true; }\n'
     fields=fields.replace('    void HandleChatLessonAudio(const std::shared_ptr<ChatProtocolSignals>& signals,\n        uint64_t protocol_generation, ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet);', '    void HandleChatLessonAudio(const std::shared_ptr<ChatProtocolSignals>&, uint64_t, ConnectionSource, std::unique_ptr<AudioStreamPacket>) { assert(false); }')
     fixture=fixture.replace("    bool chat_cleanup_enabled_ = false;",fields+'''
     std::atomic<uint32_t> chat_protocol_state_{0};
@@ -181,6 +183,7 @@ class Application;
     uint32_t RequestChatPlaybackCleanup(uint32_t) { return ++audio_service_.reset_token; }
     uint32_t RequestChatAudioCleanup(uint32_t,bool,bool,bool,bool=true,bool=false,ChatWakePolicy=ChatWakePolicy::Explicit) { ++cleanups;audio_service_.current=false;return 1; }
     bool chat_cleanup_enabled_ = false;
+    bool IsWifiConfigEntryPending() const { return false; }
 ''')
     fixture=fixture.replace("        void Stop() {}",'''
         bool reset_busy=false,snapshot_busy=false;

@@ -33,6 +33,7 @@
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_pack_activation.h"
+#include "lesson_asset_retained_parser.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_asset_download_raii.h"
 #include "lesson_asset_download_staging.h"
@@ -490,6 +491,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
     static constexpr const char* kPackFields[] = {
         "assignmentVersion", "lessonId", "lessonVersion", "manifestChecksum",
         "cacheKey", "localRoot", "ready", "assets", "courseModeCompatibility",
+        "selectionRevision", "retainedSelection",
     };
     static constexpr const char* kAssetFields[] = {
         "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
@@ -1265,6 +1267,27 @@ void McpServer::AddUserOnlyTools() {
             return json.release();
         });
 
+    AddUserOnlyTool("self.lesson_assets.selection_state",
+        "Read the durable lesson selection watermark and owner.", PropertyList(),
+        [](const PropertyList&) -> ReturnValue {
+            auto json = MakeCheckedCJsonObject();
+            AddRetainedDeviceState(json.get(), ReadRetainedSelection());
+            return json.release();
+        });
+    AddUserOnlyTool("self.lesson_assets.retained_selection",
+        "Fence an exact retained assignment under storage mutation ownership.",
+        PropertyList({Property("operation", kPropertyTypeObject)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            const auto body = properties["operation"].value<std::string>();
+            std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(cJSON_Parse(body.c_str()), cJSON_Delete);
+            const auto operation = ParseRetainedDeviceOperation(json.get());
+            auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("retained");
+            ApplyRetainedSelection(mutation, operation.owner, operation.release);
+            auto result = MakeCheckedCJsonObject();
+            AddRetainedDeviceReceipt(result.get(), operation);
+            return result.release();
+        });
+
     AddUserOnlyTool("self.lesson_assets.sync_to_sd",
         "Download a lesson assetPack to the SD card and verify each asset by sha256.",
         PropertyList({
@@ -1281,6 +1304,13 @@ void McpServer::AddUserOnlyTools() {
             const char* lesson_id = nullptr;
             const auto validated_assets =
                 ValidateLessonAssetSyncPackOrThrow(pack.get(), cache_key, lesson_id);
+            const auto selection_revision = ParseRetainedSyncRevision(pack.get());
+            std::optional<RetainedDeviceOperation> retained;
+            const auto retained_json = cJSON_GetObjectItemCaseSensitive(pack.get(), "retainedSelection");
+            if (retained_json) {
+                retained = ParseRetainedDeviceOperation(retained_json);
+                if (retained->release) throw std::runtime_error("invalid_retained_sync_owner");
+            }
             auto json = MakeCheckedCJsonObject();
             CheckedCJsonAddStringToObject(json.get(), "cacheKey", cache_key);
             const char* manifest_checksum = JsonStringField(pack.get(), "manifestChecksum");
@@ -1302,6 +1332,9 @@ void McpServer::AddUserOnlyTools() {
                     LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
                 if (!mutation) {
                     ThrowLessonAssetMutationRefusal(mutation.code());
+                }
+                if (!RetainedSyncAllowed(cache_key, selection_revision, retained ? &retained->owner : nullptr)) {
+                    throw std::runtime_error("retained_selection_conflict");
                 }
 
                 for (const auto& asset : validated_assets) {
@@ -1392,7 +1425,12 @@ void McpServer::AddUserOnlyTools() {
                     lesson_id,
                     cache_key,
                     manifest_checksum,
-                    all_critical_verified);
+                    all_critical_verified, selection_revision, retained ? &retained->owner : nullptr);
+                if (retained && activation.activated) {
+                    auto receipt = MakeCheckedCJsonObject();
+                    AddRetainedDeviceReceipt(receipt.get(), *retained);
+                    CheckedCJsonAddItemToObject(json.get(), "retainedSelection", std::move(receipt));
+                }
             }
 
             EvictPreviousLessonAssetPackAfterActivation(

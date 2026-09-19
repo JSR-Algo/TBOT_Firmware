@@ -2,8 +2,10 @@
 #define LESSON_ASSET_PACK_ACTIVATION_H
 
 #include <string>
+#include <cstdint>
 
 class LessonAssetMutationLease;
+struct RetainedSelectionOwner;
 
 struct LessonAssetPackActivationResult {
     bool activated;
@@ -25,7 +27,9 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
     const std::string& lesson_id,
     const std::string& cache_key,
     const std::string& manifest_checksum,
-    bool all_critical_verified
+    bool all_critical_verified,
+    std::uint64_t selection_revision = 0,
+    const RetainedSelectionOwner* retained_owner = nullptr
 );
 
 void EvictPreviousLessonAssetPackAfterActivation(

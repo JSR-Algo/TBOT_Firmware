@@ -1,5 +1,10 @@
 from pathlib import Path
+import json
 import re
+import shlex
+import subprocess
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +18,21 @@ SYNC_POLICY_HEADER = ROOT / "main" / "lesson_asset_sync_path_policy.h"
 SYNC_POLICY_SOURCE = ROOT / "main" / "lesson_asset_sync_path_policy.cc"
 ACTIVATION_HEADER = ROOT / "main" / "lesson_asset_pack_activation.h"
 ACTIVATION_SOURCE = ROOT / "main" / "lesson_asset_pack_activation.cc"
+
+
+def test_cache_eviction_compiles_with_configured_target_filesystem(tmp_path):
+    commands = ROOT / "build/compile_commands.json"
+    if not commands.exists():
+        pytest.skip("Configured target compilation database required")
+    entry = next(item for item in json.loads(commands.read_text())
+                 if item["file"].endswith("/lesson_asset_cache_evict.cc"))
+    args = shlex.split(entry["command"])
+    if not Path(args[0]).exists():
+        pytest.skip("Configured target toolchain required")
+    args[args.index("-o") + 1] = str(tmp_path / "cache_evict.o")
+    if "-MF" in args:
+        args[args.index("-MF") + 1] = str(tmp_path / "cache_evict.d")
+    subprocess.run(args, cwd=entry["directory"], check=True, timeout=60)
 
 
 def test_exact_eviction_helper_is_built_and_exposed_as_user_only_after_task4():
@@ -52,9 +72,11 @@ def test_pack_activation_pointer_updates_before_exact_previous_eviction():
     assert 'RecoverInterruptedActivePointerReplacement(' in source
     assert 'active_path + ".backup"' in source
     assert 'RenamePath(active_path, backup_path)' in source
-    assert 'EvictLessonAssetCacheKey(previous_cache_key, false)' in source
+    eviction = ('EvictLessonAssetCacheKey(previous_cache_key, false,\n'
+                '                ExtractFlatJsonString(ReadTextFileIfPresent(ActivePointerPath(lesson_id)), "cacheKey"))')
+    assert eviction in source
     assert source.index('WriteActivePointerAtomically(') < source.index(
-        'EvictLessonAssetCacheKey(previous_cache_key, false)'
+        eviction
     )
     public_helper = source[
         source.index("LessonAssetPackActivationResult ActivateLessonAssetPack(\n    const std::string& lesson_id") :
@@ -179,6 +201,10 @@ def test_public_helper_surface_and_privacy_contract_are_stable():
 
 def test_helper_uses_only_target_supported_fat_path_apis():
     source = HELPER_SOURCE.read_text(encoding="utf-8")
+    host_only = '#else\n    return lstat(path, info);\n#endif'
+    assert source.count(host_only) == 1
+    assert re.search(r'#ifdef ESP_PLATFORM\n[^#]*return stat\(path, info\);\n#else', source)
+    source = source.replace(host_only, '')
 
     for unsupported in (
         "lstat(",

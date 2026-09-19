@@ -61,3 +61,32 @@ def test_rearm_polling_does_not_restart_the_same_face(tmp_path):
         assert(face_renders==before+2);
     }
 ''', fixture_transform=count_rendering)
+
+
+def test_start_renders_speaking_after_listening_and_admission_poll(tmp_path):
+    run_terminal_application(tmp_path, "address", 0, r'''
+    {
+        now_us=100;Application app;Setup(app);app.state=kDeviceStateListening;
+        app.chat_rearm_phase_=Application::ChatRearmPhase::Armed;
+        app.RenderChatRearm();
+        assert(Board::GetInstance().status=="listening");
+        receiver_wait=[&]{
+            app.PollChatStart(now_us);
+            // Admission can render None before the receiver confirms START.
+            app.RenderChatRearm();
+        };
+        Start(app);receiver_wait={};app.PollChatStart(now_us);
+        assert(app.state==kDeviceStateSpeaking);
+        assert(app.AdvanceChatRearm(now_us));
+        app.RenderChatRearm();
+        assert(Board::GetInstance().status=="speaking");
+        app.chat_rearm_phase_=Application::ChatRearmPhase::Pending;
+        app.RenderChatRearm();assert(Board::GetInstance().status=="wait");
+        app.chat_rearm_phase_=Application::ChatRearmPhase::Armed;
+        app.state=kDeviceStateListening;app.RenderChatRearm();
+        assert(Board::GetInstance().status=="listening");
+        app.chat_rearm_owner_.source={9,9};app.state=kDeviceStateSpeaking;
+        app.chat_rearm_phase_=Application::ChatRearmPhase::None;
+        app.RenderChatRearm();assert(Board::GetInstance().status=="listening");
+    }
+''')

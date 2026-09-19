@@ -2,8 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tbot-host-native-lesson-handler.XXXXXX")"
-trap 'rm -rf "${BUILD_DIR}"' EXIT
+: "${TMPDIR:?owned TMPDIR required}"
+BUILD_DIR="$(mktemp -d "${TMPDIR}/tbot-host-native-lesson-handler.XXXXXX")"
+export TBOT_RETAINED_TEST_STATE_PATH="${BUILD_DIR}/selection.record"
 
 CXX="${CXX:-clang++}"
 CC="${CC:-clang}"
@@ -15,6 +16,16 @@ fi
 
 cd "${ROOT}"
 mkdir -p "${BUILD_DIR}/src"
+python3 - "${BUILD_DIR}" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+assert all(c.isalnum() or c in '/-._' for c in str(root)), 'fixture shell paths require a simple owned root'
+fixture = root / 'fixtures'
+fixture.mkdir()
+source = Path('tests/native/lesson_handler_host_test.cc').read_text()
+(root / 'src/lesson_handler_host_test.cc').write_text(source.replace('/tmp', str(fixture)))
+PY
 cp main/lesson_handler.cc "${BUILD_DIR}/src/lesson_handler.cc"
 cp main/lesson_embodied_action.cc "${BUILD_DIR}/src/lesson_embodied_action.cc"
 cp main/lesson_motion_presets.cc "${BUILD_DIR}/src/lesson_motion_presets.cc"
@@ -38,7 +49,7 @@ python3 scripts/extract_lesson_host_application.py main/application.cc \
     -I"${CJSON_DIR}" \
     -Imain \
     -Imain/protocols \
-    tests/native/lesson_handler_host_test.cc \
+    "${BUILD_DIR}/src/lesson_handler_host_test.cc" \
     "${BUILD_DIR}/src/lesson_application_context.cc" \
     "${BUILD_DIR}/src/lesson_handler.cc" \
     "${BUILD_DIR}/src/lesson_embodied_action.cc" \
@@ -53,6 +64,9 @@ python3 scripts/extract_lesson_host_application.py main/application.cc \
     main/lesson_chroma_compositor.cc \
     main/json_payload_safety.cc \
     main/sd_fat_session_guard.cc \
+    main/lesson_asset_retained_selection.cc \
+    main/lesson_asset_retained_parser.cc \
+    main/lesson_asset_cache_evict.cc \
     "${BUILD_DIR}/cJSON.o" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 

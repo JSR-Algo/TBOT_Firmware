@@ -41,6 +41,7 @@ void esp_timer_start_once(Timer* timer,uint64_t delay){timer->due=now+delay;}
 struct ConnectionSource{};
 struct Signals{bool TrySource(ConnectionSource&){return true;}};
 struct Application{
+ bool IsWifiConfigEntryPending() const {return false;}
  std::atomic<bool> lesson_asset_sync_quiet_{false},lesson_runtime_active_{false},connect_in_flight_{false},reset_pending_{false};
  std::atomic<bool> chat_cleanup_enabled_{true},passive_ws_intent_{true},online_intent_{false},microphone_uplink_authorized_{false};
  std::atomic<bool> lesson_idle_repaint_suppressed_{false},tts_audio_accepting_{true};

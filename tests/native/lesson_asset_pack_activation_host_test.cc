@@ -11,7 +11,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr const char* kRoot = "/tmp/tbot-lesson-asset-pack-activation-host";
+constexpr const char* kRoot = TBOT_LESSON_ASSET_ROOT;
 const std::string kChecksumA(64, 'a');
 const std::string kChecksumB(64, 'b');
 const std::string kChecksumC(64, 'c');

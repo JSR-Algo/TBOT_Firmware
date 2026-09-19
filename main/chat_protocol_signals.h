@@ -5,6 +5,7 @@
 #include "protocols/connection_source.h"
 #include "chat_playout_intake.h"
 #include "chat_start_handoff.h"
+#include "chat_caption_mailbox.h"
 
 // One app era writer; callbacks only publish small retained flags. The mutex
 // never spans application callbacks, allocation, audio work, or transport I/O.
@@ -12,6 +13,9 @@ class ChatProtocolSignals {
 public:
     ChatPlayoutIntake intake;
     ChatStartHandoff start;
+#if CONFIG_TBOT_VOICE_DEMO
+    ChatCaptionMailbox captions;
+#endif
     // Serialized source receiver only; application never reads or writes this.
     ChatPlayoutIntake::Response start_audio;
     uint64_t lesson_audio_epoch = 0;

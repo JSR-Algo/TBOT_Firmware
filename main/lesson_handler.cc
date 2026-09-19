@@ -17,6 +17,7 @@
 #include <cinttypes>
 #include "lesson_tvideo_template.h"
 #include "lesson_asset_storage_coordinator.h"
+#include "lesson_asset_retained_parser.h"
 #include "lesson_motion_presets.h"
 #include "lesson_embodied_action.h"
 #include "lesson_layer_state.h"
@@ -213,6 +214,7 @@ void SetLessonCourseModeCapabilityForTest(bool ready, bool reduced_motion) {
 
 void AddLessonRendererFeatures(cJSON* features) {
     if (features == nullptr) return;
+    cJSON_AddStringToObject(features, "retainedSelection", "retained-assignment-device.v1");
     cJSON_DeleteItemFromObject(features, "renderer");
     cJSON* renderers = cJSON_CreateArray();
     cJSON_AddItemToArray(renderers, cJSON_CreateString(kLessonRendererV1));
@@ -487,6 +489,25 @@ const cJSON* Obj(const cJSON* o, const char* k) {
     if (o == nullptr) return nullptr;
     const cJSON* v = cJSON_GetObjectItem(o, k);
     return cJSON_IsObject(v) ? v : nullptr;
+}
+
+bool RetainedPrepareAllowed(const cJSON* body, const std::string& assignment_id) {
+    try {
+        const auto revision = ParseRetainedSyncRevision(body);
+        const auto retained = cJSON_GetObjectItemCaseSensitive(body, "retainedSelection");
+        RetainedDeviceOperation operation;
+        if (retained) operation = ParseRetainedDeviceOperation(retained);
+        const char* cache_key = Str(Obj(body, "assetPack"), "cacheKey");
+        if (!RetainedSyncAllowed(cache_key ? cache_key : "", revision,
+                                 retained ? &operation.owner : nullptr)) return false;
+        if (!retained) return true;
+        double assignment_version = 0;
+        const char* checksum = Str(Obj(body, "manifestRef"), "manifestChecksum");
+        return !operation.release && operation.owner.assignment_id == assignment_id &&
+            Num(body, "assignmentVersion", assignment_version) &&
+            assignment_version == static_cast<double>(operation.owner.assignment_version) &&
+            checksum && operation.owner.manifest_checksum == checksum;
+    } catch (...) { return false; }
 }
 
 bool ExactObjectKeys(const cJSON* object, const std::set<std::string_view>& expected) {
@@ -3784,6 +3805,16 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
         }
 
         const std::uint64_t now_ms = static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+        auto retained_cinematic_allowed = [&](const LessonAssetSessionResult& reservation) {
+            if (RetainedPrepareAllowed(body, assignment_id)) return true;
+            if (!reservation.idempotent) {
+                LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                    assignment_id, session_id, reservation.generation);
+            }
+            emit(root, "lesson_error", MakeErrorBody("RETAINED_SELECTION_MISMATCH",
+                "lesson selection owner or revision changed", true, "retainedSelection"));
+            return false;
+        };
         auto commit_cinematic_prepare_session = [&](std::uint64_t generation) {
             const bool fresh_session = !g_session.prepared ||
                 g_session.assignment_id != assignment_id || g_session.session_id != session_id;
@@ -4061,6 +4092,7 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
                     if (!reservation.acquired) {
                         response = cinematic_failure_response(tbot::LessonCinematicError::kFileOpen);
                     } else {
+                        if (!retained_cinematic_allowed(reservation)) return;
                         tbot::ConfigureProductionLessonLayeredCinematicSession(
                             assignment_id, session_id, reservation.generation);
                         response = renderer_v5->Prepare(config, now_ms);
@@ -4224,6 +4256,7 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
                         response = cinematic_failure_response(
                             tbot::LessonCinematicError::kFileOpen);
                     } else {
+                        if (!retained_cinematic_allowed(reservation)) return;
                         tbot::ConfigureProductionLessonFlattenedCinematicSession(
                             assignment_id, session_id, reservation.generation);
                         response = renderer_v4->Prepare(config, now_ms);
@@ -4300,6 +4333,7 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
                                 command_sequence_id, phase_id,
                                 tbot::LessonCinematicError::kFileOpen};
                 } else {
+                    if (!retained_cinematic_allowed(reservation)) return;
                     tbot::ConfigureProductionLessonCinematicSession(
                         assignment_id, session_id, reservation.generation);
                     response = renderer_v3->Prepare(config, now_ms);
@@ -4497,6 +4531,17 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
             prepare_newly_acquired_asset_session = false;
         }
     };
+
+    if (is_prepare) {
+        // The actual session reservation excludes concurrent selection mutations.
+        // Check here before asset reads or committing renderer/session state.
+        if (!RetainedPrepareAllowed(body, assignment_id)) {
+            release_new_lesson_asset_session();
+            emit_prepare_error(MakeErrorBody("RETAINED_SELECTION_MISMATCH",
+                "lesson selection owner or revision changed", true, "retainedSelection"));
+            return;
+        }
+    }
 
     // --- session context (per (assignmentId,sessionId)) ---
     // Prepare candidates are still uncommitted here. Reject non-prepare frames outside

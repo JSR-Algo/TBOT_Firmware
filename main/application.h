@@ -35,6 +35,7 @@
 #include "chat_control_intents.h"
 #include "chat_inbound_messages.h"
 #include "audio/conversation_playout_controller.h"
+#include "lesson_audio_playout.h"
 #include "backend_recovery_window.h"
 #if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
 #include "course_mode_hil_diagnostic.h"
@@ -96,6 +97,7 @@ public:
     void Run();
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
+    bool TakeChatCaption(ChatCaptionMailbox::Message& caption);
     bool IsVoiceDetected() const { return audio_service_.IsVoiceDetected(); }
     
     /**
@@ -104,6 +106,7 @@ public:
      */
     bool SetDeviceState(DeviceState state);
     bool PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation);
+    bool IsWifiConfigEntryPending() const { return wifi_config_preparation_.valid; }
     bool PublishWifiConfigEntry(const WifiConfigEntryPreparation& preparation);
     bool RollbackWifiConfigEntry(const WifiConfigEntryPreparation& preparation);
 
@@ -178,6 +181,8 @@ public:
     bool CanEnterSleepMode();
     void SendMcpMessage(const std::string& payload, ChatRequestContext context = {});
     bool IsChatRequestCurrent(const ChatRequestContext& context) const;
+    // Lesson workers also fence retained callbacks by their original lesson epoch.
+    bool IsChatLessonRequestCurrent(const ChatRequestContext& context) const;
     void FailChatRequest(const ChatRequestContext& context);
     bool SendLeftArmRaise();
     bool SendRightArmRaise();
@@ -245,6 +250,8 @@ public:
         std::uint64_t embodied_nonce);
 
 private:
+    WifiConfigEntryPreparation wifi_config_preparation_;
+    uint32_t wifi_config_audio_revoked_ = 0;
     Application();
     ~Application();
 
@@ -260,6 +267,21 @@ private:
     std::atomic<bool> lesson_runtime_active_{false};
     std::atomic<std::uint64_t> lesson_runtime_generation_{0};
     std::atomic<std::uint64_t> lesson_terminal_audio_generation_{0};
+    LessonAudioPlayout lesson_audio_playout_;
+    std::mutex lesson_playout_mutex_;
+    std::atomic<bool> lesson_playout_pending_{false};
+    ChatRequestContext lesson_playout_context_;
+    std::string lesson_playout_id_, lesson_playout_drain_id_;
+    uint32_t lesson_playout_generation_ = 0;
+    uint64_t lesson_playout_protocol_generation_ = 0, lesson_playout_epoch_ = 0;
+    int64_t lesson_playout_stop_ms_ = 0;
+    uint64_t lesson_playout_drained_at_ms_ = 0;
+    bool lesson_playout_start_sent_ = false;
+    bool lesson_playout_stop_sent_ = false;
+    std::shared_ptr<std::atomic<bool>> lesson_playout_authorization_;
+    bool QueueLessonPlayoutAck(const char* state, uint64_t at_ms, bool drain = false);
+    bool HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext context);
+    void PollLessonAudioPlayout();
     std::atomic<uint32_t> lesson_interactive_listen_generation_{0};
     std::atomic<bool> lesson_interactive_listen_pending_{false};
     std::atomic<bool> lesson_interactive_listening_active_{false};
@@ -472,7 +494,8 @@ private:
     ChatConnectionMessages chat_connection_messages_;
     ChatInboundMessages chat_inbound_messages_;
     bool IsChatConnectionCurrent(ConnectionSource source, uint64_t protocol_generation, uint32_t connect_generation) const;
-    uint64_t RequestChatConnectionText(const std::string& text, ChatRequestContext context = {}, uint64_t received_us = 0);
+    uint64_t RequestChatConnectionText(const std::string& text, ChatRequestContext context = {}, uint64_t received_us = 0,
+        std::shared_ptr<std::atomic<bool>> authorization = {});
     void PollChatConnectionMessages(uint64_t now_us);
     bool MaintainChatPassiveLiveness();
     uint64_t chat_passive_ping_id_ = 0;
@@ -489,7 +512,6 @@ private:
     void PollChatInboundMessages();
     void DispatchIncomingJson(const cJSON* root, uint64_t lesson_epoch, bool is_websocket, ChatRequestContext context = {});
     bool IsLessonVoiceRoute() const;
-    bool IsChatLessonRequestCurrent(const ChatRequestContext& context) const;
     void HandleChatLessonAudio(const std::shared_ptr<ChatProtocolSignals>& signals,
         uint64_t protocol_generation, ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet);
     bool IsSelectedNormalChatRoute() const;

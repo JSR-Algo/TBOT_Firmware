@@ -251,9 +251,14 @@ protected:
     lv_obj_t* emoji_box_ = nullptr;
     lv_obj_t* chat_message_label_ = nullptr;
     esp_timer_handle_t preview_timer_ = nullptr;
+#if CONFIG_TBOT_VOICE_DEMO
+    lv_timer_t* chat_caption_timer_ = nullptr;
+    void StartChatCaptionTimer();
+#endif
     std::unique_ptr<LvglImage> preview_image_cached_ = nullptr;
     bool hide_subtitle_ = false;  // Control whether to hide chat messages/subtitles
-    std::atomic<bool> lesson_mode_active_{false};
+    std::uint8_t lesson_chat_visibility_ = 0;
+    bool lesson_caption_active_ = false;
 
     void InitializeLcdThemes();
     void CancelLessonRobotEntranceLocked();

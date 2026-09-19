@@ -465,7 +465,8 @@ WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(
     }
     if (require_disconnected &&
         (recovery_generation != wifi_recovery_generation_.load(std::memory_order_acquire) ||
-         WifiManager::GetInstance().IsConnected())) {
+         WifiManager::GetInstance().IsConnected()) &&
+        !Application::GetInstance().IsWifiConfigEntryPending()) {
         ESP_LOGI(TAG, "WiFi recovery cancelled because station reconnected");
         return WifiConfigEntryResult::kCancelled;
     }
@@ -479,6 +480,12 @@ WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(
     if (!app.PrepareWifiConfigEntry(preparation)) {
         ESP_LOGE(TAG, "WiFi config aborted: realtime preparation failed");
         return WifiConfigEntryResult::kRetry;
+    }
+    if (require_disconnected &&
+        (recovery_generation != wifi_recovery_generation_.load(std::memory_order_acquire) ||
+         WifiManager::GetInstance().IsConnected())) {
+        app.RollbackWifiConfigEntry(preparation);
+        return WifiConfigEntryResult::kCancelled;
     }
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto &blufi = Blufi::GetInstance();

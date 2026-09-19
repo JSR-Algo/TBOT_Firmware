@@ -42,6 +42,17 @@ fi
 cd "${ROOT}"
 rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}/src"
+export TBOT_RETAINED_TEST_STATE_PATH="${BUILD_DIR}/selection.record"
+python3 - "${BUILD_DIR}" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+assert all(c.isalnum() or c in '/-._' for c in str(root)), 'fixture shell paths require a simple owned root'
+fixture = root / 'fixtures'
+fixture.mkdir()
+source = Path('tests/native/lesson_handler_host_test.cc').read_text()
+(root / 'src/lesson_handler_host_test.cc').write_text(source.replace('/tmp', str(fixture)))
+PY
 
 # Copy the unit-under-test into a neutral build dir so its quoted #includes
 # ("application.h", "assets.h", ...) resolve via our -I stub dir instead of the real
@@ -78,7 +89,7 @@ python3 scripts/extract_lesson_host_application.py main/application.cc \
     -I"${CJSON_DIR}" \
     -Imain \
     -Imain/protocols \
-    tests/native/lesson_handler_host_test.cc \
+    "${BUILD_DIR}/src/lesson_handler_host_test.cc" \
     "${BUILD_DIR}/src/lesson_application_context.cc" \
     "${BUILD_DIR}/src/lesson_handler.cc" \
     "${BUILD_DIR}/src/lesson_embodied_action.cc" \
@@ -93,6 +104,9 @@ python3 scripts/extract_lesson_host_application.py main/application.cc \
     "${BUILD_DIR}/src/lesson_asset_storage_coordinator.cc" \
     main/json_payload_safety.cc \
     main/sd_fat_session_guard.cc \
+    main/lesson_asset_retained_selection.cc \
+    main/lesson_asset_retained_parser.cc \
+    main/lesson_asset_cache_evict.cc \
     "${BUILD_DIR}/cJSON.o" \
     -o "${BUILD_DIR}/lesson_handler_host_test"
 

@@ -128,10 +128,12 @@ def test_lesson_message_worker_reserves_persistent_psram_buffers_with_internal_c
 
 
 def test_websocket_open_worker_reserves_one_reusable_internal_stack():
+    from test_protocol_work_lifetime import method
+
     app = read("main/application.cc")
     constructor = app[app.index("Application::Application()"): app.index("Application::~Application()")]
-    starter = app[app.index("bool Application::StartOpenChannelWorker"): app.index("void Application::OpenChannelTask")]
-    worker = app[app.index("void Application::OpenChannelTask"): app.index("void Application::ArmConnectWatchdog")]
+    starter = method(app, "bool Application::StartOpenChannelWorker")
+    worker = method(app, "void Application::OpenChannelTask")
 
     assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in app
     assert "DRAM_ATTR StaticTask_t open_channel_task_buffer;" in app

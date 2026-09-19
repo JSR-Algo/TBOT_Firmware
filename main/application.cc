@@ -495,6 +495,11 @@ void Application::RequestLessonStorageAbandonment() {
 void Application::LessonMessageTask(void* arg) {
     auto* self = static_cast<Application*>(arg);
     LessonQueueItem item;
+    struct LessonProtocolRead {
+        std::atomic<uint32_t>& readers;
+        explicit LessonProtocolRead(std::atomic<uint32_t>& value) : readers(value) { readers.fetch_add(1); }
+        ~LessonProtocolRead() { readers.fetch_sub(1); }
+    };
     const auto drain_terminal = [self]() {
         constexpr int kLessonStorageAbandonMaxAttempts = 4;
         constexpr uint32_t kLessonStorageAbandonRetryDelayMs = 10;
@@ -529,8 +534,24 @@ void Application::LessonMessageTask(void* arg) {
         }
         return true;
     };
+    const auto poll_cinematic_error = [self]() {
+        const auto epoch = PendingLessonCinematicErrorEpoch();
+        if (epoch == 0) return;
+        LessonProtocolRead protocol_read(self->lesson_protocol_readers_);
+        if (!self->chat_protocol_owned_.load() &&
+            self->lesson_transport_epoch_gate_.WorkerAcceptFrame(epoch)) {
+            try {
+                DispatchPendingLessonCinematicError(self->protocol_.get());
+            } catch (...) {
+                // Allocation or transport exceptions leave the diagnostic pending
+                // for the next bounded poll, without terminating this worker.
+            }
+        }
+    };
     while (!self->lesson_message_stop_.load()) {
-        if (xQueueReceive(self->lesson_message_queue_, &item, portMAX_DELAY) != pdTRUE) {
+        drain_terminal();
+        poll_cinematic_error();
+        if (xQueueReceive(self->lesson_message_queue_, &item, pdMS_TO_TICKS(100)) != pdTRUE) {
             continue;
         }
         std::unique_ptr<ChatRequestContext> source_context(static_cast<ChatRequestContext*>(item.source_context));
@@ -542,11 +563,7 @@ void Application::LessonMessageTask(void* arg) {
         }
         self->lesson_queue_data_admission_.Release();
         drain_terminal();
-        struct LessonProtocolRead {
-            std::atomic<uint32_t>& readers;
-            explicit LessonProtocolRead(std::atomic<uint32_t>& value) : readers(value) { readers.fetch_add(1); }
-            ~LessonProtocolRead() { readers.fetch_sub(1); }
-        } protocol_read(self->lesson_protocol_readers_);
+        LessonProtocolRead protocol_read(self->lesson_protocol_readers_);
         if (!self->lesson_transport_epoch_gate_.WorkerAcceptFrame(item.transport_epoch) ||
             self->chat_protocol_owned_.load() || !self->IsChatLessonRequestCurrent(context)) {
             if (item.kind == LessonQueueItemKind::kFrame && item.payload != nullptr) {
@@ -606,6 +623,22 @@ bool Application::SetDeviceState(DeviceState state) {
 
 bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation) {
     preparation = {};
+    if (wifi_config_preparation_.valid) {
+        PollChatAudioCleanup();
+        PollChatProtocolCleanup();
+        if (lesson_runtime_active_.load() || reset_pending_.load() ||
+            chat_protocol_state_.load(std::memory_order_acquire) != 0 ||
+            protocol_work_lifetime_.Pending() || protocol_work_lifetime_.Busy() ||
+            chat_audio_state_.load(std::memory_order_acquire) != 0 ||
+            chat_audio_completed_revoked_ != wifi_config_audio_revoked_ ||
+            chat_audio_fault_) {
+            return false;
+        }
+        preparation = wifi_config_preparation_;
+        wifi_config_preparation_ = {};
+        ESP_LOGI(TAG, "WiFi config audio and protocol cleanup complete");
+        return true;
+    }
     const DeviceState state = GetDeviceState();
     if (!WifiConfigEntryPolicy::CanPrepare(
             state, lesson_runtime_active_.load(), connect_in_flight_.load(),
@@ -642,14 +675,19 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
         speaking_arm_dispatch_.Cancel();
         listening_started_ms_.store(0);
         last_listening_activity_ms_.store(0);
-        RequestChatAudioCleanup(speaking_generation_.load(), true, false, false);
+        wifi_config_audio_revoked_ =
+            RequestChatAudioCleanup(speaking_generation_.load(), true, false, false);
         CloseAudioChannelByIntent();
         if (state != kDeviceStateStarting && state != kDeviceStateWifiConfiguring && state != kDeviceStateIdle &&
             !SetDeviceState(kDeviceStateIdle)) {
             preparation.valid = false;
             return false;
         }
-        return true;
+        // The network worker still owns the transport until cleanup is collected.
+        // Retain the original state for rollback and resume on an application tick.
+        wifi_config_preparation_ = preparation;
+        preparation.valid = false;
+        return false;
     }
 
     if (state == kDeviceStateSpeaking) {
@@ -815,8 +853,15 @@ void Application::Initialize() {
     });
 
     AudioServiceCallbacks callbacks;
+    callbacks.on_playback_failed = [this](uint32_t response) {
+        lesson_audio_playout_.PublishFailure(response);
+        xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
+    };
     callbacks.on_output_completed = [this](uint32_t response, bool conversation, uint32_t now_ms) {
         speaking_arm_dispatch_.PublishOutput(response, conversation, now_ms);
+        lesson_audio_playout_.PublishOutput(response, conversation,
+            static_cast<uint64_t>(esp_timer_get_time() / 1000));
+        xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
     };
     callbacks.on_send_queue_available = [this]() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
@@ -961,7 +1006,9 @@ void Application::Run() {
     while (true) {
         // req#1: bounded wait (was portMAX_DELAY) so the loop always makes a pass,
         // feeds the watchdog, and never blocks forever.
-        auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
+        auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE,
+            pdMS_TO_TICKS(lesson_playout_pending_.load() ? 20 : 2000));
+        PollLessonAudioPlayout();
         PollChatOutboundEvents(bits & MAIN_EVENT_CHAT_OUTBOUND);
         esp_task_wdt_reset();  // WDT-1: prove the main loop is iterating
 
@@ -1133,6 +1180,11 @@ void Application::Run() {
                 StartProtocolWorker();
             }
             PollChatOutboundEvents(MAIN_EVENT_CLOCK_TICK);
+#ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+            if (wifi_config_preparation_.valid) {
+                static_cast<WifiBoard&>(Board::GetInstance()).ResumePendingWifiConfigMode();
+            }
+#endif
             auto display = Board::GetInstance().GetDisplay();
             display->UpdateStatusBar();
             HandleListeningWatchdogTick();
@@ -1359,6 +1411,7 @@ void Application::HandleNetworkDisconnectedEvent() {
 }
 
 void Application::RearmClaimedIdleWakeWord() {
+    if (IsWifiConfigEntryPending()) return;
     if (chat_cleanup_enabled_) {
         ConnectionSource source;
         if (IsDeviceClaimed() && !lesson_runtime_active_.load() && !lesson_asset_sync_quiet_.load() &&
@@ -2008,53 +2061,55 @@ bool Application::DispatchPendingTbotClaimConfirmation(
 }
 
 void Application::ClaimConfirmationTask(void* arg) {
-    auto* ctx = static_cast<ClaimConfirmationContext*>(arg);
-    Application* self = ctx->app;
-    PendingTbotClaim claim = ctx->claim;
-    std::string api_url = std::move(ctx->api_url);
-    std::string token = std::move(ctx->token);
-    const auto provisioning_token = ctx->provisioning_token;
-    const uint32_t expected_setup_generation = ctx->expected_setup_generation;
-    const bool enforce_setup_generation = ctx->enforce_setup_generation;
-    delete ctx;
+    {
+        auto* ctx = static_cast<ClaimConfirmationContext*>(arg);
+        Application* self = ctx->app;
+        PendingTbotClaim claim = ctx->claim;
+        std::string api_url = std::move(ctx->api_url);
+        std::string token = std::move(ctx->token);
+        const auto provisioning_token = ctx->provisioning_token;
+        const uint32_t expected_setup_generation = ctx->expected_setup_generation;
+        const bool enforce_setup_generation = ctx->enforce_setup_generation;
+        delete ctx;
 
-    std::string success_response;
-    const ClaimConfirmationResult result = ClaimConfirmationReporter::Confirm(
-        claim, api_url, token, &success_response);
-    self->Schedule([self, result, token = std::move(token), provisioning_token,
-                    success_response = std::move(success_response),
-                    expected_setup_generation, enforce_setup_generation]() mutable {
-        self->claim_confirm_inflight_.store(false);
-        ClaimDeferredEffects deferred_effects;
-        auto apply_result = [&](bool defer_successful_teardown,
-                                ClaimDeferredEffects* effects) {
-            ClaimConfirmationResult effective_result = result;
-            if (effective_result == ClaimConfirmationResult::Confirmed &&
-                !PersistTbotClaimConfirmationResponse(success_response)) {
-                effective_result = ClaimConfirmationResult::AmbiguousSuccess;
+        std::string success_response;
+        const ClaimConfirmationResult result = ClaimConfirmationReporter::Confirm(
+            claim, api_url, token, &success_response);
+        self->Schedule([self, result, token = std::move(token), provisioning_token,
+                        success_response = std::move(success_response),
+                        expected_setup_generation, enforce_setup_generation]() mutable {
+            self->claim_confirm_inflight_.store(false);
+            ClaimDeferredEffects deferred_effects;
+            auto apply_result = [&](bool defer_successful_teardown,
+                                    ClaimDeferredEffects* effects) {
+                ClaimConfirmationResult effective_result = result;
+                if (effective_result == ClaimConfirmationResult::Confirmed &&
+                    !PersistTbotClaimConfirmationResponse(success_response)) {
+                    effective_result = ClaimConfirmationResult::AmbiguousSuccess;
+                }
+                self->ApplyPendingTbotClaimConfirmationResult(
+                    effective_result, provisioning_token, defer_successful_teardown, effects);
+                return effective_result == ClaimConfirmationResult::Confirmed;
+            };
+            if (enforce_setup_generation) {
+                const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
+                    expected_setup_generation, [&]() {
+                        apply_result(true, &deferred_effects);
+                    });
+                if (applied) {
+                    self->ExecuteClaimDeferredEffects(
+                        deferred_effects, expected_setup_generation, provisioning_token);
+                }
+            } else {
+                apply_result(false, nullptr);
             }
-            self->ApplyPendingTbotClaimConfirmationResult(
-                effective_result, provisioning_token, defer_successful_teardown, effects);
-            return effective_result == ClaimConfirmationResult::Confirmed;
-        };
-        if (enforce_setup_generation) {
-            const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
-                expected_setup_generation, [&]() {
-                    apply_result(true, &deferred_effects);
-                });
-            if (applied) {
-                self->ExecuteClaimDeferredEffects(
-                    deferred_effects, expected_setup_generation, provisioning_token);
-            }
-        } else {
-            apply_result(false, nullptr);
-        }
+            SecureClearString(token);
+            SecureClearString(success_response);
+        });
         SecureClearString(token);
         SecureClearString(success_response);
-    });
-    SecureClearString(token);
-    SecureClearString(success_response);
-    vTaskDelete(nullptr);
+    }
+    vTaskDeleteWithCaps(nullptr);
 }
 
 void Application::SchedulePendingTbotClaimRefresh(uint32_t expected_setup_generation) {
@@ -2451,74 +2506,75 @@ bool Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
 }
 
 void Application::ClaimFetchTask(void* arg) {
-    auto* ctx = static_cast<ClaimFetchContext*>(arg);
-    Application* self = ctx->app;
-    std::string api_url = ctx->api_url;
-    std::string token = ctx->token;
-    const bool apply_when_poll_inactive = ctx->apply_when_poll_inactive;
-    const uint32_t expected_setup_generation = ctx->expected_setup_generation;
-    const bool enforce_setup_generation = ctx->enforce_setup_generation;
-    SecureClearString(ctx->token);
-    delete ctx;
+    {
+        auto* ctx = static_cast<ClaimFetchContext*>(arg);
+        Application* self = ctx->app;
+        std::string api_url = ctx->api_url;
+        std::string token = ctx->token;
+        const bool apply_when_poll_inactive = ctx->apply_when_poll_inactive;
+        const uint32_t expected_setup_generation = ctx->expected_setup_generation;
+        const bool enforce_setup_generation = ctx->enforce_setup_generation;
+        SecureClearString(ctx->token);
+        delete ctx;
 
-    // The ONLY work on this worker: the blocking ~3s HTTP/TLS fetch. No shared
-    // state is touched here.
-    if (api_url.empty()) {
-        api_url = FetchBackendApiUrlFromBootstrap(token, false);
-    }
-    PendingTbotClaim pending_claim;
-    int device_config_status = 0;
-    const bool fetched = !api_url.empty() &&
-        FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim,
-                                              &device_config_status);
-
-    // Marshal result-application back onto the Application task (OQ1): all
-    // claim_substate_/pending_tbot_claim_*/BLE/SetDeviceState mutation stays on
-    // the one task that owns them. Clear the single-flight guard there so the
-    // next tick can dispatch again.
-    self->Schedule([self, api_url, token, pending_claim, fetched, device_config_status,
-                    apply_when_poll_inactive, expected_setup_generation,
-                    enforce_setup_generation]() mutable {
-        self->claim_poll_inflight_.store(false);
-        // The periodic poll may have been stopped (claimed+online / WiFiConfiguring)
-        // while this fetch was outstanding; honor that and drop pure poll ticks
-        // that finished after stop.
-        //
-        // One-shot fetches (post-BluFi / unclaimed boot with bootstrap token)
-        // dispatch BEFORE StartClaimPoll() is active. Those must ALWAYS apply:
-        //  - active claim + token -> auto-confirm
-        //  - claim_present=0 + token -> Apply... reopens BLE standby
-        // Without the claim_present=0 branch, BLE stays down after the
-        // "Bootstrap token present; stopping BLE" path and phone scan times out
-        // (live E2E 2026-07-11: BLE_SCAN_TIMEOUT after claim_fetch http=200
-        // claim_present=0 with no EnsureBleAdvertisingForStandby).
-        if (!self->claim_poll_active_ && token.empty() && !apply_when_poll_inactive) {
-            SecureClearString(token);
-            return;
+        // The ONLY work on this worker: the blocking ~3s HTTP/TLS fetch. No shared
+        // state is touched here.
+        if (api_url.empty()) {
+            api_url = FetchBackendApiUrlFromBootstrap(token, false);
         }
-        ClaimDeferredEffects deferred_effects;
-        auto apply_result = [&]() {
-            self->ApplyPendingTbotClaimFetchResult(
-                api_url, token, pending_claim, fetched, device_config_status,
-                enforce_setup_generation, expected_setup_generation, &deferred_effects);
-        };
-        if (enforce_setup_generation) {
-            const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
-                expected_setup_generation, apply_result);
-            if (applied) {
-                self->ExecuteClaimDeferredEffects(
-                    deferred_effects, expected_setup_generation);
+        PendingTbotClaim pending_claim;
+        int device_config_status = 0;
+        const bool fetched = !api_url.empty() &&
+            FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim,
+                                                  &device_config_status);
+
+        // Marshal result-application back onto the Application task (OQ1): all
+        // claim_substate_/pending_tbot_claim_*/BLE/SetDeviceState mutation stays on
+        // the one task that owns them. Clear the single-flight guard there so the
+        // next tick can dispatch again.
+        self->Schedule([self, api_url, token, pending_claim, fetched, device_config_status,
+                        apply_when_poll_inactive, expected_setup_generation,
+                        enforce_setup_generation]() mutable {
+            self->claim_poll_inflight_.store(false);
+            // The periodic poll may have been stopped (claimed+online / WiFiConfiguring)
+            // while this fetch was outstanding; honor that and drop pure poll ticks
+            // that finished after stop.
+            //
+            // One-shot fetches (post-BluFi / unclaimed boot with bootstrap token)
+            // dispatch BEFORE StartClaimPoll() is active. Those must ALWAYS apply:
+            //  - active claim + token -> auto-confirm
+            //  - claim_present=0 + token -> Apply... reopens BLE standby
+            // Without the claim_present=0 branch, BLE stays down after the
+            // "Bootstrap token present; stopping BLE" path and phone scan times out
+            // (live E2E 2026-07-11: BLE_SCAN_TIMEOUT after claim_fetch http=200
+            // claim_present=0 with no EnsureBleAdvertisingForStandby).
+            if (!self->claim_poll_active_ && token.empty() && !apply_when_poll_inactive) {
+                SecureClearString(token);
+                return;
             }
-        } else {
-            self->ApplyPendingTbotClaimFetchResult(
-                api_url, token, pending_claim, fetched, device_config_status,
-                false, expected_setup_generation, nullptr);
-        }
+            ClaimDeferredEffects deferred_effects;
+            auto apply_result = [&]() {
+                self->ApplyPendingTbotClaimFetchResult(
+                    api_url, token, pending_claim, fetched, device_config_status,
+                    enforce_setup_generation, expected_setup_generation, &deferred_effects);
+            };
+            if (enforce_setup_generation) {
+                const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
+                    expected_setup_generation, apply_result);
+                if (applied) {
+                    self->ExecuteClaimDeferredEffects(
+                        deferred_effects, expected_setup_generation);
+                }
+            } else {
+                self->ApplyPendingTbotClaimFetchResult(
+                    api_url, token, pending_claim, fetched, device_config_status,
+                    false, expected_setup_generation, nullptr);
+            }
+            SecureClearString(token);
+        });
         SecureClearString(token);
-    });
-    SecureClearString(token);
-
-    vTaskDelete(nullptr);
+    }
+    vTaskDeleteWithCaps(nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -3294,50 +3350,51 @@ void Application::MaybeDispatchDeferredCloudRelease() {
 }
 
 void Application::CloudReleaseTask(void* arg) {
-    auto* ctx = static_cast<CloudReleaseContext*>(arg);
-    Application* self = ctx->app;
+    {
+        auto* ctx = static_cast<CloudReleaseContext*>(arg);
+        Application* self = ctx->app;
 
-    // Use the credentials captured before task creation. Reading NVS here could
-    // release a newer claim that arrived while this worker was waiting to run.
-    const bool released = SystemReset::ReleaseCloudOwnership(ctx->api_url, ctx->device_id, ctx->device_secret);
-    std::string api_url = std::move(ctx->api_url);
-    std::string device_id = std::move(ctx->device_id);
-    std::string device_secret = std::move(ctx->device_secret);
-    delete ctx;
+        // Use the credentials captured before task creation. Reading NVS here could
+        // release a newer claim that arrived while this worker was waiting to run.
+        const bool released = SystemReset::ReleaseCloudOwnership(ctx->api_url, ctx->device_id, ctx->device_secret);
+        std::string api_url = std::move(ctx->api_url);
+        std::string device_id = std::move(ctx->device_id);
+        std::string device_secret = std::move(ctx->device_secret);
+        delete ctx;
 
-    // Marshal the result back onto the Application task (OQ1) and clear the
-    // single-flight guard there.
-    self->Schedule([self, released, api_url = std::move(api_url),
-                    device_id = std::move(device_id),
-                    device_secret = std::move(device_secret)]() mutable {
-        self->cloud_release_inflight_.store(false);
-        Settings current_settings("backend", false);
-        const bool credentials_unchanged =
-            current_settings.GetString("api_url") == api_url &&
-            current_settings.GetString("device_id") == device_id &&
-            current_settings.GetString("device_secret") == device_secret;
-        if (!credentials_unchanged) {
+        // Marshal the result back onto the Application task (OQ1) and clear the
+        // single-flight guard there.
+        self->Schedule([self, released, api_url = std::move(api_url),
+                        device_id = std::move(device_id),
+                        device_secret = std::move(device_secret)]() mutable {
+            self->cloud_release_inflight_.store(false);
+            Settings current_settings("backend", false);
+            const bool credentials_unchanged =
+                current_settings.GetString("api_url") == api_url &&
+                current_settings.GetString("device_id") == device_id &&
+                current_settings.GetString("device_secret") == device_secret;
+            if (!credentials_unchanged) {
+                Settings backend_settings("backend", true);
+                backend_settings.SetInt("release_pending", 0);
+                ESP_LOGI(TAG, "Deferred cloud release completed against superseded credentials");
+                std::fill(device_secret.begin(), device_secret.end(), '\0');
+                return;
+            }
+            if (!released) {
+                ESP_LOGW(TAG, "Deferred cloud ownership release failed; will retry on next refresh");
+                std::fill(device_secret.begin(), device_secret.end(), '\0');
+                return;
+            }
             Settings backend_settings("backend", true);
             backend_settings.SetInt("release_pending", 0);
-            ESP_LOGI(TAG, "Deferred cloud release completed against superseded credentials");
+            backend_settings.SetString("device_id", "");
+            backend_settings.SetString("device_secret", "");
             std::fill(device_secret.begin(), device_secret.end(), '\0');
-            return;
-        }
-        if (!released) {
-            ESP_LOGW(TAG, "Deferred cloud ownership release failed; will retry on next refresh");
-            std::fill(device_secret.begin(), device_secret.end(), '\0');
-            return;
-        }
-        Settings backend_settings("backend", true);
-        backend_settings.SetInt("release_pending", 0);
-        backend_settings.SetString("device_id", "");
-        backend_settings.SetString("device_secret", "");
-        std::fill(device_secret.begin(), device_secret.end(), '\0');
-        ESP_LOGI(TAG, "Deferred cloud ownership released; robot is free for a new parent to claim");
-        self->RefreshPendingTbotClaim();
-    });
-
-    vTaskDelete(nullptr);
+            ESP_LOGI(TAG, "Deferred cloud ownership released; robot is free for a new parent to claim");
+            self->RefreshPendingTbotClaim();
+        });
+    }
+    vTaskDeleteWithCaps(nullptr);
 }
 
 namespace {
@@ -3865,6 +3922,7 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+        if (!lesson_audio_playout_.AllowsAudio(speaking_generation_.load())) return;
         if (GetDeviceState() == kDeviceStateSpeaking || tts_audio_accepting_.load()) {
             last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
             // Stamp the active response generation so a frame that slips in just
@@ -4624,8 +4682,23 @@ void Application::SetLessonRuntimeActive(bool active) {
 }
 
 void Application::BeginLessonTerminalAudioQuiet() {
+    std::lock_guard<std::mutex> lock(lesson_playout_mutex_);
+    if (auto token = std::atomic_load(&lesson_playout_authorization_)) token->store(false);
+    lesson_audio_playout_.Cancel();
     lesson_terminal_audio_generation_.store(
         static_cast<std::uint64_t>(speaking_generation_.load()) + 1);
+    tts_audio_accepting_.store(false);
+    speaking_arm_dispatch_.Cancel();
+    // Terminal errors may have no subsequent TTS STOP. Fence in-flight decode
+    // before clearing queued output, without rearming a child listening turn.
+    audio_service_.SetPlaybackGeneration(++speaking_generation_);
+    audio_service_.ResetDecoder();
+    last_speaking_activity_ms_.store(0);
+    CancelLessonInteractiveListening();
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        lesson_idle_repaint_suppressed_.store(true);
+        SetDeviceState(kDeviceStateIdle);
+    }
 }
 
 bool Application::IsLessonRuntimeActive() const {
@@ -4805,6 +4878,7 @@ void Application::StopListening() {
 }
 
 void Application::HandleToggleChatEvent() {
+    if (IsWifiConfigEntryPending()) return;
     auto state = GetDeviceState();
 
     if (lesson_runtime_active_.load()) {
@@ -5429,6 +5503,22 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
         if (lesson_asset_sync_quiet_.load() && cJSON_IsString(message_type) &&
             (strcmp(message_type->valuestring, "tts") == 0 || strcmp(message_type->valuestring, "stt") == 0)) return;
         const auto* message_state = cJSON_GetObjectItem(root, "state");
+#if CONFIG_TBOT_VOICE_DEMO
+        // Presentation bursts must not occupy the bounded control queue.
+        if (!IsLessonVoiceRoute() && cJSON_IsString(message_type) &&
+            (strcmp(message_type->valuestring, "stt") == 0 ||
+             strcmp(message_type->valuestring, "llm") == 0 ||
+             (strcmp(message_type->valuestring, "tts") == 0 && cJSON_IsString(message_state) &&
+              strcmp(message_state->valuestring, "sentence_start") == 0))) {
+            const auto* text = cJSON_GetObjectItem(root, "text");
+            if (strcmp(message_type->valuestring, "llm") != 0 && cJSON_IsString(text)) {
+                signals->captions.Publish({source, protocol_generation, owner.connect_generation,
+                    speaking_generation_.load(), 0}, strcmp(message_type->valuestring, "tts") == 0,
+                    text->valuestring);
+            }
+            return;
+        }
+#endif
         if (IsLessonVoiceRoute() && cJSON_IsString(message_type) && strcmp(message_type->valuestring, "tts") == 0 &&
             cJSON_IsString(message_state) && (strcmp(message_state->valuestring, "start") == 0 ||
                 strcmp(message_state->valuestring, "stop") == 0)) {
@@ -5554,6 +5644,7 @@ void Application::HandleChatLessonAudio(const std::shared_ptr<ChatProtocolSignal
     uint64_t protocol_generation, ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet) {
     if (!packet || !signals || !IsChatConnectionCurrent(source, protocol_generation, chat_source_connect_generation_.load()) ||
         signals->lesson_audio_epoch != lesson_transport_epoch_gate_.PublishedEpoch() || lesson_asset_sync_quiet_.load()) return;
+    if (!lesson_audio_playout_.AllowsAudio(speaking_generation_.load())) return;
     if (GetDeviceState() == kDeviceStateSpeaking || tts_audio_accepting_.load()) {
         last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
         packet->generation = speaking_generation_.load();
@@ -5661,6 +5752,8 @@ void Application::PollChatStart(uint64_t now_us) {
     if (!handoff.TryRequest(request) || !chat_protocol_signals_->MatchesSource(request.source) ||
         request.protocol_generation != protocol_generation_.load() || chat_protocol_owned_.load() ||
         request.connect_generation != connect_generation_.load()) return;
+    // The receiver may publish START after the caller samples the poll clock.
+    if (now_us < request.received_us) now_us = static_cast<uint64_t>(esp_timer_get_time());
     if (request.serial == UINT32_MAX || (!handoff.Confirmed(request) && handoff.Expired(request, now_us))) {
         RecoverChatStart(request, 101); return;
     }
@@ -5878,6 +5971,8 @@ void Application::PollChatPlayout(uint64_t now_us) {
     }
     if (!chat_playout_begun_ && read == ChatPlayoutIntake::Read::Ready) {
         chat_playout_stop_ = stop;
+        // Observe time after a newer STOP without moving its original deadline.
+        if (now_us < stop.received_us) now_us = static_cast<uint64_t>(esp_timer_get_time());
         if (now_us - stop.received_us >= Controller::kTimeoutUs) { RecoverChatPlayout(205); return; }
         const Controller::Ownership owner{response.source.connection_epoch,response.response_generation,stop.reset_epoch,false};
         const Controller::Token token{owner.connection_epoch,owner.response_generation,owner.reset_epoch,
@@ -6802,6 +6897,7 @@ void Application::HandleReconnectTick() {
 }
 
 void Application::HandleStartListeningEvent() {
+    if (IsWifiConfigEntryPending()) return;
     if (chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() && !lesson_runtime_active_.load() &&
         (chat_protocol_owned_.load() || chat_source_connect_generation_.load() != connect_generation_.load())) {
         BeginChatListen(kListeningModeManualStop, ChatListenOrigin::User);
@@ -6900,6 +6996,191 @@ void Application::HandleStartListeningEvent() {
     }
 }
 
+bool Application::HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext context) {
+    std::lock_guard<std::mutex> lock(lesson_playout_mutex_);
+    const auto* id = cJSON_GetObjectItem(root, "playoutId");
+    const auto* state = cJSON_GetObjectItem(root, "state");
+    const auto* reason = cJSON_GetObjectItem(root, "reason");
+    const bool interrupt = cJSON_IsString(state) && strcmp(state->valuestring, "stop") == 0 &&
+        cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0;
+    if (!id && lesson_playout_id_.empty()) return false;
+    if (!id && !interrupt) return true;
+    const std::string playout_id = id && cJSON_IsString(id) ? id->valuestring :
+        !id ? lesson_playout_id_ : std::string{};
+    if (!IsChatLessonRequestCurrent(context) || !lesson_runtime_active_.load() ||
+        lesson_terminal_audio_generation_.load() != 0 ||
+        !LessonAudioPlayout::ValidId(playout_id)) return true;
+    if (!cJSON_IsString(state)) return true;
+    if (strcmp(state->valuestring, "start") == 0) {
+        lesson_audio_playout_.SetScope(protocol_generation_.load(), lesson_transport_epoch_gate_.PublishedEpoch());
+        if (lesson_audio_playout_.Seen(playout_id)) return true;
+        if (auto token = std::atomic_load(&lesson_playout_authorization_)) token->store(false);
+        tts_audio_accepting_.store(false);
+        lesson_audio_playout_.Cancel();
+        lesson_playout_id_.clear();
+        lesson_playout_pending_.store(false);
+        lesson_idle_repaint_suppressed_.store(true);
+        if (GetDeviceState() == kDeviceStateSpeaking && listening_mode_ != kListeningModeRealtime)
+            SetDeviceState(kDeviceStateIdle);
+        audio_service_.SetPlaybackGeneration(++speaking_generation_);
+        audio_service_.ResetDecoder();
+        uint64_t reset_epoch = 0;
+        if (!audio_service_.TryGetPlaybackResetEpoch(reset_epoch) ||
+            !lesson_audio_playout_.Begin(speaking_generation_.load(), playout_id, reset_epoch)) return true;
+        lesson_playout_context_ = context;
+        lesson_playout_protocol_generation_ = protocol_generation_.load();
+        lesson_playout_epoch_ = lesson_transport_epoch_gate_.PublishedEpoch();
+        lesson_playout_generation_ = speaking_generation_.load();
+        lesson_playout_id_ = playout_id;
+        lesson_playout_pending_.store(true);
+        lesson_playout_drain_id_.clear();
+        lesson_playout_stop_ms_ = 0;
+        lesson_playout_drained_at_ms_ = 0;
+        lesson_playout_start_sent_ = false;
+        lesson_playout_stop_sent_ = false;
+        std::atomic_store(&lesson_playout_authorization_, std::make_shared<std::atomic<bool>>(true));
+        aborted_ = false;
+        if (GetDeviceState() == kDeviceStateListening && listening_mode_ != kListeningModeRealtime) {
+            audio_service_.EnableVoiceProcessing(false);
+            listening_started_ms_.store(0);
+            last_listening_activity_ms_.store(0);
+        }
+        last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
+        // START admits bytes. The output callback below owns the speech cue.
+        lesson_idle_repaint_suppressed_.store(true);
+        if (GetDeviceState() == kDeviceStateSpeaking && listening_mode_ != kListeningModeRealtime)
+            SetDeviceState(kDeviceStateIdle);
+        tts_audio_accepting_.store(true);
+    } else if (strcmp(state->valuestring, "stop") == 0 &&
+               lesson_audio_playout_.Current(playout_id, speaking_generation_.load())) {
+        if (cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0) {
+            if (auto token = std::atomic_load(&lesson_playout_authorization_)) token->store(false);
+            lesson_audio_playout_.Cancel();
+            lesson_playout_id_.clear();
+            lesson_playout_pending_.store(false);
+            tts_audio_accepting_.store(false);
+            audio_service_.SetPlaybackGeneration(++speaking_generation_);
+            audio_service_.ResetDecoder();
+            speaking_arm_dispatch_.Cancel();
+            lesson_idle_repaint_suppressed_.store(true);
+            if (GetDeviceState() == kDeviceStateSpeaking) SetDeviceState(kDeviceStateIdle);
+        } else if (lesson_playout_stop_ms_ == 0 && lesson_audio_playout_.Stop(playout_id)) {
+            const auto* drain = cJSON_GetObjectItem(root, "drainId");
+            if (cJSON_IsString(drain) && strlen(drain->valuestring) <= 64)
+                lesson_playout_drain_id_ = drain->valuestring;
+            lesson_playout_stop_ms_ = esp_timer_get_time() / 1000;
+            tts_audio_accepting_.store(false);
+        }
+    }
+    return true;
+}
+
+bool Application::QueueLessonPlayoutAck(const char* state, uint64_t at_ms, bool drain) {
+    if (!lesson_playout_context_ || chat_connection_messages_.Size() >= 2 ||
+        !IsChatLessonRequestCurrent(lesson_playout_context_)) return false;
+    const auto authorization = std::atomic_load(&lesson_playout_authorization_);
+    if (!authorization || !authorization->load(std::memory_order_acquire)) return false;
+    const auto text = drain
+        ? Protocol::EncodeTtsDrainAck(lesson_playout_drain_id_, lesson_playout_context_->session_id)
+        : Protocol::EncodeLessonPlayoutAck(lesson_playout_id_, state, at_ms, lesson_playout_context_->session_id);
+    return !text.empty() && RequestChatConnectionText(text, lesson_playout_context_, 0, authorization) != 0;
+}
+
+void Application::PollLessonAudioPlayout() {
+    std::unique_lock<std::mutex> lock(lesson_playout_mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return;
+    if (lesson_playout_id_.empty()) return;
+    const auto now_ms = esp_timer_get_time() / 1000;
+    const auto owned = [this]() {
+        const auto authorization = std::atomic_load(&lesson_playout_authorization_);
+        return authorization && authorization->load(std::memory_order_acquire) &&
+        protocol_ && lesson_runtime_active_.load() &&
+        IsChatLessonRequestCurrent(lesson_playout_context_) &&
+        lesson_playout_protocol_generation_ == protocol_generation_.load() &&
+        lesson_playout_epoch_ == lesson_transport_epoch_gate_.PublishedEpoch() &&
+        lesson_audio_playout_.Current(lesson_playout_id_, speaking_generation_.load()); };
+    const bool timed_out = lesson_playout_stop_ms_ ?
+        now_ms - lesson_playout_stop_ms_ >= kTtsStopPlaybackDrainTimeoutMs :
+        now_ms - last_speaking_activity_ms_.load() >= kSpeakingTimeoutMs;
+    auto retire = [this](bool flush) {
+        if (flush) {
+            const auto authorization = std::atomic_load(&lesson_playout_authorization_);
+            if (authorization) authorization->store(false, std::memory_order_release);
+        }
+        lesson_audio_playout_.Cancel();
+        lesson_playout_id_.clear();
+        lesson_playout_pending_.store(false);
+        lesson_playout_context_.reset();
+        if (lesson_playout_generation_ == speaking_generation_.load()) {
+            tts_audio_accepting_.store(false);
+            if (flush) {
+                audio_service_.SetPlaybackGeneration(++speaking_generation_);
+                audio_service_.ResetDecoder();
+            }
+            last_speaking_activity_ms_.store(0);
+            lesson_idle_repaint_suppressed_.store(true);
+            if (GetDeviceState() == kDeviceStateSpeaking) SetDeviceState(kDeviceStateIdle);
+        }
+    };
+    if (!owned()) { retire(true); return; }
+    if (timed_out || lesson_audio_playout_.Failed()) {
+        const auto context = lesson_playout_context_;
+        retire(true);
+        if (context) FailChatRequest(context);
+        return;
+    }
+    if (!lesson_playout_start_sent_ && chat_connection_messages_.Size() >= 2) return;
+    if (const auto start = lesson_audio_playout_.TakeStart()) {
+        if (start->generation != lesson_playout_generation_ ||
+            !QueueLessonPlayoutAck("start", start->at_ms)) {
+            retire(true);
+            return;
+        }
+        if (!owned()) { retire(true); return; }
+        lesson_playout_start_sent_ = true;
+        SetDeviceState(kDeviceStateSpeaking);
+        ArmSpeakingTimeout();
+    }
+    if (!lesson_playout_stop_ms_ || !lesson_playout_start_sent_) return;
+    PlaybackDrainSnapshot snapshot;
+    if (!audio_service_.TryGetPlaybackDrainSnapshot(snapshot) ||
+        !lesson_audio_playout_.Drained(snapshot)) return;
+    // Revalidate after the audio lock boundary and before sending either receipt.
+    if (!protocol_ || !lesson_runtime_active_.load() ||
+        lesson_playout_protocol_generation_ != protocol_generation_.load() ||
+        !IsChatLessonRequestCurrent(lesson_playout_context_) ||
+        lesson_playout_epoch_ != lesson_transport_epoch_gate_.PublishedEpoch() ||
+        !lesson_audio_playout_.Current(lesson_playout_id_, speaking_generation_.load())) {
+        retire(true);
+        return;
+    }
+    if (!lesson_playout_drained_at_ms_) lesson_playout_drained_at_ms_ = static_cast<uint64_t>(now_ms);
+    lesson_idle_repaint_suppressed_.store(true);
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load() ||
+            lesson_interactive_listening_active_.load();
+        SetDeviceState(lesson_interactive_turn && listening_mode_ != kListeningModeAutoStop
+            ? kDeviceStateListening : kDeviceStateIdle);
+    }
+    if (!lesson_playout_stop_sent_) {
+        if (chat_connection_messages_.Size() >= 2) return;
+        if (!QueueLessonPlayoutAck("stop", lesson_playout_drained_at_ms_)) {
+            retire(true);
+            return;
+        }
+        lesson_playout_stop_sent_ = true;
+    }
+    if (!owned()) { retire(true); return; }
+    if (!lesson_playout_drain_id_.empty()) {
+        if (chat_connection_messages_.Size() >= 2) return;
+        if (!QueueLessonPlayoutAck("stop", lesson_playout_drained_at_ms_, true)) {
+            retire(true);
+            return;
+        }
+    }
+    retire(false);
+}
+
 void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_transport_epoch,
     bool is_websocket_protocol, ChatRequestContext context) {
     ChatRuntimeTiming timing(1, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
@@ -6929,6 +7210,7 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
         }
         if (strcmp(type->valuestring, "tts") == 0) {
             if (!IsChatLessonRequestCurrent(context)) return;
+            if (HandleLessonPlayoutTts(root, context)) return;
             auto state = cJSON_GetObjectItem(root, "state");
             // Guard the state deref: a tts frame with no "state" or a non-string
             // state null-derefs state->valuestring below (deep-audit #4 HIGH — a
@@ -6953,8 +7235,10 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                 audio_service_.SetPlaybackGeneration(++speaking_generation_);
                 speaking_arm_dispatch_.BeginResponse(speaking_generation_.load());
                 tts_audio_accepting_.store(true);
-                Schedule([this, context]() {
-                    if (!IsChatLessonRequestCurrent(context)) return;
+                const auto started_generation = speaking_generation_.load();
+                Schedule([this, context, started_generation]() {
+                    if (!IsChatLessonRequestCurrent(context) ||
+                        started_generation != speaking_generation_.load()) return;
                     aborted_ = false;
                     auto current_generation = speaking_generation_.load();
                     last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
@@ -7008,10 +7292,12 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                 // User reported: "phản hồi không ổn định chưa trả lời hết câu
                 // chuyển sang đang lắng nghe". Normal stops rely on natural queue
                 // drain; only the interrupt branch above cuts early.
+                const auto stop_callback_generation = speaking_generation_.load();
                 Schedule([this, force_continue_listening, force_realtime_listen,
                           explicit_stop_listening, stopped_audio_generation,
-                          is_interrupt, tts_drain_id, context]() {
-                    if (!IsChatLessonRequestCurrent(context)) return;
+                          is_interrupt, tts_drain_id, context, stop_callback_generation]() {
+                    if (!IsChatLessonRequestCurrent(context) ||
+                        stop_callback_generation != speaking_generation_.load()) return;
                     ++speaking_generation_;
                     last_speaking_activity_ms_.store(0);
                     if (!is_interrupt && !tts_drain_id.empty()) {
@@ -7315,6 +7601,7 @@ void Application::CancelChatRecovery(uint32_t outcome) {
 }
 
 bool Application::RetainChatRecovery(ChatRecoveryIntent::Kind kind, ListeningMode mode) {
+    if (IsWifiConfigEntryPending()) return false;
     using Kind = ChatRecoveryIntent::Kind;
     const auto state = GetDeviceState();
     if (!chat_cleanup_enabled_ || !chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() ||
@@ -7542,12 +7829,29 @@ bool Application::IsChatConnectionCurrent(ConnectionSource source, uint64_t prot
         connect_generation == connect_generation_.load();
 }
 
+bool Application::TakeChatCaption(ChatCaptionMailbox::Message& caption) {
+#if CONFIG_TBOT_VOICE_DEMO
+    const auto signals = std::atomic_load(&chat_protocol_signals_);
+    if (!signals || !signals->captions.TryTake(caption)) return false;
+    const auto state = GetDeviceState();
+    return !IsLessonVoiceRoute() && !lesson_asset_sync_quiet_.load() &&
+        (state == kDeviceStateSpeaking || state == kDeviceStateListening) &&
+        caption.owner.response_generation == speaking_generation_.load() &&
+        IsChatConnectionCurrent(caption.owner.source, caption.owner.protocol_generation,
+            caption.owner.connect_generation);
+#else
+    (void)caption;
+    return false;
+#endif
+}
+
 bool Application::IsChatRequestCurrent(const ChatRequestContext& context) const {
     return !context || IsChatConnectionCurrent(context->owner.source, context->owner.protocol_generation,
         context->owner.connect_generation);
 }
 
-uint64_t Application::RequestChatConnectionText(const std::string& text, ChatRequestContext context, uint64_t received_us) {
+uint64_t Application::RequestChatConnectionText(const std::string& text, ChatRequestContext context, uint64_t received_us,
+    std::shared_ptr<std::atomic<bool>> authorization) {
     ChatConnectionMessages::Owner owner;
     if (context) owner = context->owner;
     else {
@@ -7556,7 +7860,8 @@ uint64_t Application::RequestChatConnectionText(const std::string& text, ChatReq
         owner.connect_generation = connect_generation_.load();
     }
     if (!IsChatConnectionCurrent(owner.source, owner.protocol_generation, owner.connect_generation)) return 0;
-    const auto id = chat_connection_messages_.Admit(owner, text, received_us ? received_us : static_cast<uint64_t>(esp_timer_get_time()));
+    const auto id = chat_connection_messages_.Admit(owner, text,
+        received_us ? received_us : static_cast<uint64_t>(esp_timer_get_time()), std::move(authorization));
     if (!id) {
         ESP_LOGW(TAG, "chat_source_fault reason=reply_admission");
         chat_protocol_signals_->PublishConnectionFault(owner.source, owner.connect_generation, ChatProtocolSignals::Error);
@@ -7574,15 +7879,23 @@ void Application::PollChatConnectionMessages(uint64_t now_us) {
     }
     using Outcome = ChatConnectionMessages::Outcome;
     using Result = ChatOutboundMailbox::Result;
-    if (!IsChatConnectionCurrent(record->owner.source, record->owner.protocol_generation, record->owner.connect_generation)) {
+    if (!IsChatConnectionCurrent(record->owner.source, record->owner.protocol_generation, record->owner.connect_generation) ||
+        (record->outcome == Outcome::Pending && record->authorization &&
+         !record->authorization->load(std::memory_order_acquire))) {
         record->outcome = Outcome::Cancelled;
         if (record->submitted) RetireChatOutbound();
     }
     if (record->outcome == Outcome::Pending && now_us >= record->deadline_us) {
         record->outcome = Outcome::Failed;
+        if (record->authorization) record->authorization->store(false, std::memory_order_release);
         if (record->submitted) RetireChatOutbound();
     }
     if (record->outcome != Outcome::Pending) {
+        if (record->outcome == Outcome::Failed && record->authorization && !record->submitted) {
+            ESP_LOGW(TAG, "chat_source_fault reason=playout_receipt_delivery");
+            chat_protocol_signals_->PublishConnectionFault(record->owner.source,
+                record->owner.connect_generation, ChatProtocolSignals::Error);
+        }
         if (record->id == chat_unpair_id_) chat_unpair_completed_ = !record->submitted;
         if (!record->submitted && record->id == chat_passive_ping_id_) {
             chat_passive_ping_id_ = 0;
@@ -7605,6 +7918,7 @@ void Application::PollChatConnectionMessages(uint64_t now_us) {
     job.source = record->owner.source;
     job.connect_generation = record->owner.connect_generation;
     job.full_text = record->payload;
+    job.authorization = record->authorization;
     job.deadline_us = record->deadline_us;
     const auto result = SubmitChatOutbound(job);
     if (result == Result::Sent) {
@@ -7613,7 +7927,10 @@ void Application::PollChatConnectionMessages(uint64_t now_us) {
     } else if (result == Result::Busy) {
         // No admission occurred; a newer control may overtake this attempt.
         record->physical = {};
-    } else record->outcome = Outcome::Failed;
+    } else {
+        record->outcome = Outcome::Failed;
+        if (record->authorization) record->authorization->store(false, std::memory_order_release);
+    }
 }
 
 bool Application::MaintainChatPassiveLiveness() {
@@ -7818,6 +8135,7 @@ bool Application::HandleChatStopListening() {
 }
 
 bool Application::BeginChatListen(ListeningMode mode, ChatListenOrigin origin) {
+    if (IsWifiConfigEntryPending()) return false;
     ConnectionSource available;
     if (origin == ChatListenOrigin::User && chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
         !lesson_runtime_active_.load() && (chat_recovery_.kind != ChatRecoveryIntent::Kind::None ||
@@ -7909,6 +8227,7 @@ bool Application::HandleChatAbort(AbortReason reason, bool resume) {
 }
 
 bool Application::HandleChatWake(const std::string& wake_word, bool read_worker) {
+    if (IsWifiConfigEntryPending()) return true;
     if (!chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() || lesson_runtime_active_.load()) return false;
     ConnectionSource available;
     if (chat_recovery_.kind != ChatRecoveryIntent::Kind::None || chat_protocol_owned_.load() ||
@@ -8387,6 +8706,8 @@ bool Application::AdvanceChatRearm(uint64_t now_us) {
 }
 
 void Application::RenderChatRearm() {
+    // START admission can precede its confirmed Speaking state event.
+    if (chat_rearm_phase_ == ChatRearmPhase::None && GetDeviceState() != kDeviceStateSpeaking) return;
     if (chat_rearm_phase_ == ChatRearmPhase::Recovery && !IsChatRearmRecoveryCurrent()) return;
     if (chat_rearm_phase_ != ChatRearmPhase::Recovery &&
         (!chat_protocol_signals_ || chat_rearm_signals_ != chat_protocol_signals_ ||
@@ -8405,7 +8726,9 @@ void Application::RenderChatRearm() {
     auto& board = Board::GetInstance();
     board.GetLed()->OnStateChanged();
     auto* display = board.GetDisplay();
-    if (chat_rearm_phase_ == ChatRearmPhase::Pending) {
+    if (chat_rearm_phase_ == ChatRearmPhase::None) {
+        display->SetStatus(Lang::Strings::SPEAKING);
+    } else if (chat_rearm_phase_ == ChatRearmPhase::Pending) {
         display->SetStatus(Lang::Strings::PLEASE_WAIT);
     } else if (chat_rearm_phase_ == ChatRearmPhase::Armed) {
         display->SetStatus(Lang::Strings::LISTENING);
@@ -8456,6 +8779,7 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle: {
+            if (IsWifiConfigEntryPending()) break;
             const bool suppress_lesson_idle_repaint =
                 lesson_idle_repaint_suppressed_.exchange(false);
             if (lesson_runtime_active_.load()) {

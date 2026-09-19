@@ -6,6 +6,7 @@ from test_protocol_work_lifetime import method
 
 
 def recovery_fixture(fixture, source, header):
+    fixture=fixture.replace("bool IsWifiConfigEntryPending() const { return false; }", "bool IsWifiConfigEntryPending() const { return wifi_config_preparation_.valid; }")
     fixture=fixture.replace(method(source,"bool Application::StartOpenChannelWorker"), "")
     fixture=fixture.replace("static bool forbid_allocation = false;", r'''
 static bool fail_next_context=false;
@@ -44,6 +45,10 @@ class Application;
         bool resume_realtime=false,resume_listening=true,valid=false;
     };
     bool PrepareWifiConfigEntry(WifiConfigEntryPreparation&);
+    WifiConfigEntryPreparation wifi_config_preparation_;
+    uint32_t wifi_config_audio_revoked_=0;
+    std::atomic<uint32_t> chat_audio_state_{0};
+    uint32_t chat_audio_completed_revoked_=1;
     bool PublishWifiConfigEntry(const WifiConfigEntryPreparation&);
     bool RollbackWifiConfigEntry(const WifiConfigEntryPreparation&) { assert(false);return false; }
     void SetLessonRuntimeActive(bool);
@@ -202,7 +207,22 @@ int main() {
     if (RECOVERY_CASE==22) {app.connect_generation_=UINT32_MAX;app.chat_recovery_.connect_generation=UINT32_MAX;}
     if (RECOVERY_CASE==27) {
         Application::WifiConfigEntryPreparation preparation;
+        const auto cleanups_before=app.cleanups;
+        app.chat_audio_state_=1;
+        assert(!app.PrepareWifiConfigEntry(preparation));
+        assert(!preparation.valid);
+        assert(app.HandleChatWake({},true));
+        assert(!app.BeginChatListen(kListeningModeAutoStop,Application::ChatListenOrigin::User));
+        app.RearmClaimedIdleWakeWord();
+        assert(app.chat_recovery_.kind==Application::ChatRecoveryIntent::Kind::None);
+        assert(!app.PrepareWifiConfigEntry(preparation));
+        app.chat_outbound_worker_.RunOnce(now_us);
+        app.PollChatOutbound();
+        RunNetwork(app);
+        assert(!app.PrepareWifiConfigEntry(preparation));
+        app.chat_audio_state_=0;
         assert(app.PrepareWifiConfigEntry(preparation) && preparation.valid);
+        assert(app.cleanups==cleanups_before+1);
         assert(app.PublishWifiConfigEntry(preparation));
     }
     if (RECOVERY_CASE==30) {

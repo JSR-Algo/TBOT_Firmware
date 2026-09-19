@@ -22,6 +22,8 @@ mkdir -p "${BUILD_DIR}/src"
 cp "${ROOT}/main/lesson_handler.cc" "${BUILD_DIR}/src/lesson_handler.cc"
 cp "${ROOT}/main/lesson_motion_presets.cc" "${BUILD_DIR}/src/lesson_motion_presets.cc"
 cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/lesson_renderer_trace_host_test.cc"
+python3 "${ROOT}/scripts/extract_lesson_host_application.py" "${ROOT}/main/application.cc" \
+  "${BUILD_DIR}/src/lesson_application_context.cc"
 
 "${CC}" -std=c11 -O0 -Wall -Wextra -Werror \
   -I"${CJSON_DIR}" -c "${CJSON_DIR}/cJSON.c" -o "${BUILD_DIR}/cJSON.o"
@@ -38,6 +40,7 @@ cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/l
   -I"${ROOT}/main" \
   -I"${ROOT}/main/protocols" \
   "${BUILD_DIR}/src/lesson_renderer_trace_host_test.cc" \
+  "${BUILD_DIR}/src/lesson_application_context.cc" \
   "${BUILD_DIR}/src/lesson_motion_presets.cc" \
   "${ROOT}/main/lesson_embodied_action.cc" \
   "${ROOT}/main/lesson_layer_state.cc" \
@@ -50,6 +53,9 @@ cp "${ROOT}/tests/native/lesson_renderer_trace_host_test.cc" "${BUILD_DIR}/src/l
   "${ROOT}/main/lesson_chroma_compositor.cc" \
   "${ROOT}/main/json_payload_safety.cc" \
   "${ROOT}/main/sd_fat_session_guard.cc" \
+  "${ROOT}/main/lesson_asset_retained_selection.cc" \
+  "${ROOT}/main/lesson_asset_retained_parser.cc" \
+  "${ROOT}/main/lesson_asset_cache_evict.cc" \
   "${BUILD_DIR}/cJSON.o" \
   -o "${BUILD_DIR}/lesson_renderer_trace_host_test"
 

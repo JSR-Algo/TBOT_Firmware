@@ -16,6 +16,8 @@ enum class LessonAssetCacheEvictCode {
     kNotFound,
     kInvalidCacheKey,
     kLessonSessionActive,
+    kRetainedSelectionProtected,
+    kPointerProtected,
     kPathMismatch,
     kNestedDirectory,
     kUnexpectedNodeType,
@@ -37,7 +39,8 @@ bool IsCanonicalLessonCacheKey(const std::string& value);
 const char* LessonAssetCacheEvictCodeName(LessonAssetCacheEvictCode code);
 LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
     const std::string& cache_key,
-    bool lesson_session_active
+    bool lesson_session_active,
+    const std::string& replacement_cache_key = std::string()
 );
 
 #ifdef TBOT_LESSON_ASSET_CACHE_EVICT_TESTING

@@ -866,6 +866,8 @@ if(CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P)
         "lesson_asset_download_staging.cc"
         "lesson_asset_http_transfer.cc"
         "lesson_asset_pack_activation.cc"
+        "lesson_asset_retained_selection.cc"
+        "lesson_asset_retained_parser.cc"
         "lesson_asset_sample_url_policy.cc"
         "lesson_asset_storage_coordinator.cc"
         "lesson_asset_sync_path_policy.cc"
