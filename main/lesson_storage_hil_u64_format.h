@@ -29,4 +29,23 @@ inline LessonStorageHilUint64Text FormatLessonStorageHilUint64(
     return result;
 }
 
+inline LessonStorageHilUint64Text FormatLessonStorageHilUint64Hex(
+    std::uint64_t value
+) noexcept {
+    static constexpr char digits[] = "0123456789abcdef";
+    LessonStorageHilUint64Text result{};
+    std::size_t length = 0;
+    do {
+        result.text[length++] = digits[value & 0xFU];
+        value >>= 4U;
+    } while (value != 0);
+    for (std::size_t left = 0, right = length - 1; left < right; ++left, --right) {
+        const char digit = result.text[left];
+        result.text[left] = result.text[right];
+        result.text[right] = digit;
+    }
+    result.text[length] = '\0';
+    return result;
+}
+
 #endif  // LESSON_STORAGE_HIL_U64_FORMAT_H
