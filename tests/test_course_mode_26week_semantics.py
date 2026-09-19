@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,11 +31,57 @@ def _workspace_root() -> Path:
     return root
 
 
-def _node() -> str:
+def _node(backend: Path) -> str:
     explicit = os.environ.get("COURSE_MODE_NODE")
-    node = explicit or shutil.which("node")
-    assert node, "COURSE_MODE_NODE or node on PATH is required for canonical source export"
+    node = explicit
+    if node is None:
+        nvmrc = backend / ".nvmrc"
+        pinned = nvmrc.read_text(encoding="utf-8").strip().removeprefix("v") \
+            if nvmrc.is_file() else ""
+        pinned_parts = tuple(int(part) for part in pinned.split(".")) \
+            if re.fullmatch(r"\d+(?:\.\d+){0,2}", pinned) else ()
+        nvm_dir = Path(os.environ.get("NVM_DIR", "")).expanduser() \
+            if os.environ.get("NVM_DIR") else Path.home() / ".nvm"
+        version_pattern = re.compile(r"v(\d+)\.(\d+)\.(\d+)$")
+        candidates = sorted(
+            (
+                (tuple(int(part) for part in match.groups()), path)
+                for path in nvm_dir.glob("versions/node/v*/bin/node")
+                if path.is_file() and os.access(path, os.X_OK)
+                if (match := version_pattern.fullmatch(path.parents[1].name)) is not None
+                if pinned_parts and tuple(int(part) for part in match.groups())[
+                    :len(pinned_parts)
+                ] == pinned_parts
+            ),
+            key=lambda item: item[0],
+        )
+        node = str(candidates[-1][1]) if candidates else None
+    node = node or shutil.which("node")
+    assert node, (
+        "COURSE_MODE_NODE, node on PATH, or the backend-pinned NVM runtime is required "
+        "for canonical source export"
+    )
     return node
+
+
+def test_node_falls_back_to_backend_pinned_nvm_runtime(tmp_path: Path, monkeypatch) -> None:
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    (backend / ".nvmrc").write_text("20\n", encoding="utf-8")
+    nvm_dir = tmp_path / "custom-nvm"
+    older = nvm_dir / "versions" / "node" / "v20.18.1" / "bin" / "node"
+    pinned = nvm_dir / "versions" / "node" / "v20.20.2" / "bin" / "node"
+    unrelated = nvm_dir / "versions" / "node" / "v22.23.2" / "bin" / "node"
+    prerelease = nvm_dir / "versions" / "node" / "v99.0.0-rc.1" / "bin" / "node"
+    for executable in (older, pinned, unrelated, prerelease):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        executable.chmod(0o755)
+    monkeypatch.delenv("COURSE_MODE_NODE", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("NVM_DIR", str(nvm_dir))
+
+    assert _node(backend) == str(pinned)
 
 
 def _canonical_curriculum(tmp_path: Path) -> dict:
@@ -43,9 +90,10 @@ def _canonical_curriculum(tmp_path: Path) -> dict:
     verifier = backend / "scripts" / "verify-course-mode-curriculum.mjs"
     assert verifier.is_file(), f"canonical curriculum verifier missing: {verifier}"
     output = tmp_path / "curriculum.json"
-    env = {**os.environ, "PATH": f"{Path(_node()).parent}:{os.environ.get('PATH', '')}"}
+    node = _node(backend)
+    env = {**os.environ, "PATH": f"{Path(node).parent}:{os.environ.get('PATH', '')}"}
     result = subprocess.run(
-        [_node(), str(verifier), "--contracts-output", str(output)],
+        [node, str(verifier), "--contracts-output", str(output)],
         cwd=backend,
         env=env,
         text=True,
