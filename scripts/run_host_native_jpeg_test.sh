@@ -13,6 +13,7 @@ if [[ ! -d "${JPEG_COMPONENT_ROOT}" ]]; then
 fi
 
 cd "${ROOT}"
+python3 "${ROOT}/scripts/prepare_host_jpeg_decoder.py" "${JPEG_COMPONENT_ROOT}/jpeg_decoder.c" "${BUILD_DIR}/jpeg_decoder.c"
 
 COMMON_INCLUDES=(
     -Itests/native_stubs_jpeg
@@ -38,8 +39,8 @@ rg -q 'ESP32-S3 JPEG decoding requires CONFIG_JD_USE_ROM=y' "${BUILD_DIR}/invali
 
 "${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" "${COMMON_INCLUDES[@]}" \
     -c main/display/lvgl_display/jpg/jpeg_to_image.c -o "${BUILD_DIR}/jpeg_to_image.o"
-"${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" -Wno-incompatible-function-pointer-types "${COMMON_INCLUDES[@]}" "${HOST_IDF_COMPAT[@]}" \
-    -c "${JPEG_COMPONENT_ROOT}/jpeg_decoder.c" -o "${BUILD_DIR}/jpeg_decoder.o"
+"${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" -Werror=incompatible-function-pointer-types "${COMMON_INCLUDES[@]}" "${HOST_IDF_COMPAT[@]}" \
+    -c "${BUILD_DIR}/jpeg_decoder.c" -o "${BUILD_DIR}/jpeg_decoder.o"
 "${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" "${COMMON_INCLUDES[@]}" "${HOST_IDF_COMPAT[@]}" \
     -c "${JPEG_COMPONENT_ROOT}/tjpgd/tjpgd.c" -o "${BUILD_DIR}/tjpgd.o"
 "${CXX}" -std=c++17 -O0 -g "${SANITIZERS[@]}" "${COMMON_INCLUDES[@]}" \
