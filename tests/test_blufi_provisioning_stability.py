@@ -247,25 +247,19 @@ def test_fw3f_password_frame_schedules_duplicate_safe_connect_fallback():
 
     assert "ScheduleStationConnectFallback(candidate_epoch);" in passwd_body
     assert '"password_fallback", candidate_epoch' in fallback_body
-    assert "uint64_t candidate_epoch" in fallback_body
+    assert "[this, generation, candidate_epoch]" in fallback_body
     assert "m_wifi_connect_task_started" in fallback_body
-    assert "vTaskDelay" in fallback_body
+    assert "esp_timer_start_once(ctx->timer, 500000)" in fallback_body
 
 
-def test_fw3f_connect_fallback_task_deletes_itself_on_all_exits():
+def test_fw3f_connect_fallback_timer_releases_context_on_all_exits():
     blufi = read("main/boards/common/blufi.cpp")
     fallback_body = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
-    early_exit = fallback_body[
-        fallback_body.index("if (!self->m_sta_is_connecting") : fallback_body.index("ESP_LOGW")
-    ]
-
-    # FreeRTOS task entry functions must not return directly on ESP-IDF; doing
-    # so can abort/panic during the delayed password fallback path.
-    assert "vTaskDelete(nullptr);" in early_exit
-    assert early_exit.index("vTaskDelete(nullptr);") < early_exit.index("return;")
-    assert fallback_body.rfind("vTaskDelete(nullptr);") > fallback_body.index(
-        '"password_fallback", candidate_epoch'
-    )
+    callback = fallback_body[fallback_body.index(".callback ="):fallback_body.index(".arg =")]
+    assert callback.index("esp_timer_delete(ctx->timer)") < callback.index("delete ctx;")
+    assert callback.index("delete ctx;") < callback.index("dispatch();")
+    assert "xTaskCreate" not in fallback_body
+    assert fallback_body.count("delete ctx;") == 3
 
 
 # ---------------------------------------------------------------------------
@@ -2496,18 +2490,16 @@ def test_fw37b_stale_ble_release_failure_cannot_clear_new_wifi_attempt_flags():
     assert guard < failure.index("self->m_sta_is_connecting.store(false);")
 
 
-def test_fw38_password_fallback_is_generation_scoped_and_spawn_failure_is_recoverable():
+def test_fw38_password_fallback_is_generation_scoped_and_timer_failure_is_recoverable():
     blufi = read("main/boards/common/blufi.cpp")
     fallback = _function_body(blufi, "void Blufi::ScheduleStationConnectFallback")
 
     assert "const uint32_t generation = setup_generation_.load();" in fallback
-    assert "generation != self->setup_generation_.load()" in fallback
-    assert "BaseType_t created = xTaskCreate(" in fallback
-    assert "if (created != pdPASS)" in fallback
-    failure = fallback[fallback.index("if (created != pdPASS)") :]
-    assert "Application::GetInstance().Schedule" in failure
-    assert "generation != setup_generation_.load()" in failure
-    assert '"password_fallback_task_create_failed", candidate_epoch' in failure
+    assert "generation != setup_generation_.load()" in fallback
+    assert "Application::GetInstance().Schedule" in fallback
+    for boundary in ("if (ctx == nullptr)", "if (esp_timer_create", "if (esp_timer_start_once"):
+        failure = _function_body(fallback, boundary)
+        assert "dispatch();" in failure
 
 
 def test_fw39_failed_wifi_candidate_is_transactional_and_retryable_without_factory_reset():
@@ -2847,7 +2839,7 @@ def test_fw44b_rejected_blufi_field_invalidates_the_whole_candidate():
         "BeginSsidTransaction"
     )
     assert "m_sta_config" not in helper
-    assert "uint64_t candidate_epoch" in fallback
+    assert "[this, generation, candidate_epoch]" in fallback
     assert '"password_fallback", candidate_epoch' in fallback
 
 

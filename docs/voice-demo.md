@@ -4,17 +4,35 @@ The attended demo uses the existing Hi ESP wake model, Google Live conversation,
 and playback-driven arm gestures on the LCDWiki ES3C35P. No server deployment,
 credentials, audio gain, echo policy, servo speed or servo limits are changed.
 
+Speaking gestures use the full calibrated arm travel: left 100%, left 0%,
+right 100%, right 0%, repeating while conversation audio plays. Each target
+is at least one second apart. Explicit arm commands and playback cancellation
+retain priority over automatic gestures.
+
 Enable `CONFIG_TBOT_VOICE_DEMO=y` in the existing board sdkconfig to defer lesson
-SD downloads and ignore per-transcript emotion changes. The current animated
-face, status and captions remain available. This option defaults off. Disable it
-and rebuild to restore those lesson/expression features after the demo.
+SD downloads and per-transcript emotion changes. LCD conversation captions use
+one latest-message slot (767 UTF-8 bytes maximum), consumed every 100 ms by the
+existing LVGL task. Intermediate captions can coalesce while the display is
+busy; source, response, cancellation and lesson checks discard obsolete text.
+STT, LLM and TTS sentence-start frames bypass the bounded control queue, so
+caption bursts cannot starve control admission. TTS START/STOP, audio, arm
+commands, system/MCP controls and lesson-routed frames retain their handlers.
+The animated face and speaking/listening status remain available. This option
+defaults off; disable it to restore normal lesson downloads and expressions.
 
 ## Fixes In This Candidate
 
 - Admit a newly arrived TTS START between JSON presentation operations, retaining
   the original 250 ms admission deadline and source checks.
+- Refresh a stale poll clock after observing a newer receiver START or STOP.
+  Otherwise START can falsely expire, or STOP's unsigned elapsed time can wrap
+  and immediately enter recovery without a drain ACK. The original 250 ms START
+  and 10 second drain deadlines still apply, including after a stalled poll.
 - Render a relistening phase once per playback-reset token and offline status,
   rather than restarting its GIF on every audio readiness poll.
+- Render Speaking after confirmed START, including when admission was polled
+  before its state change. Pending rearm and confirmed listening retain their
+  own status; displaying Speaking does not reconfigure audio.
 - Block the AFE fetch task for one actual tick between fetches. On the board's
   100 Hz FreeRTOS configuration, the previous 1 ms conversion produced zero
   ticks and could starve lower-priority capture preparation.

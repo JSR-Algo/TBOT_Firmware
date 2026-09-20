@@ -11,7 +11,7 @@ void RequiresResponseAndPlayback() {
     assert(!gesture.Observe(1, true, false, 0));
     assert(!gesture.Observe(1, true, false, 5000));
     const auto target = gesture.Observe(1, true, true, 5000);
-    assert(target && target->response == 1 && target->left && target->percent == 20);
+    assert(target && target->response == 1 && target->left && target->percent == 100);
 }
 
 void CadenceAndBoundedPattern() {
@@ -21,8 +21,8 @@ void CadenceAndBoundedPattern() {
         const auto target = gesture.Observe(7, true, true, step * 1000);
         assert(target && target->response == 7);
         assert(target->left == (step % 4 < 2));
-        assert(target->percent == (step % 2 == 0 ? 20 : 0));
-        assert(target->percent >= 0 && target->percent <= 20);
+        assert(target->percent == (step % 2 == 0 ? 100 : 0));
+        assert(target->percent >= 0 && target->percent <= 100);
         assert(!gesture.Observe(7, true, true, step * 1000));
         assert(!gesture.Observe(7, true, true, step * 1000 + 999));
     }
@@ -48,7 +48,7 @@ void ReplacementPreservesGlobalCadenceAndRejectsStaleWork() {
     assert(!gesture.Observe(1, false, true, 1300));
     gesture.Cancel(1);
     const auto target = gesture.Observe(2, true, true, 1300);
-    assert(target && target->response == 2 && target->left && target->percent == 20);
+    assert(target && target->response == 2 && target->left && target->percent == 100);
     assert(!gesture.Observe(1, true, true, 2300));
 }
 

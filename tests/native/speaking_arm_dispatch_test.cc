@@ -21,7 +21,7 @@ int main() {
     assert(sent.empty()); // Old decoded output retains its original identity.
     dispatch.PublishOutput(10, true, 1000);
     dispatch.Poll(1000, true, transport);
-    assert(sent.size() == 1 && sent.back().left && sent.back().percent == 20);
+    assert(sent.size() == 1 && sent.back().left && sent.back().percent == 100);
     dispatch.Cancel(); // Disconnect, tts stop and abort share this boundary.
     dispatch.BeginResponse(10);
     dispatch.PublishOutput(10, true, 2100);

@@ -1263,6 +1263,7 @@ void Blufi::RestoreBleAfterStationFailure(
 
 #ifdef CONFIG_BT_BLUEDROID_ENABLED
 esp_err_t Blufi::_host_init() {
+    LogBlufiHeapSnapshot("before_host_init");
     esp_err_t ret = esp_bluedroid_init();
     if (ret) {
         ESP_LOGE(BLUFI_TAG, "%s init bluedroid failed: %s", __func__, esp_err_to_name(ret));
@@ -2435,60 +2436,51 @@ void Blufi::SendStationConnectFailureReport() {
 
 void Blufi::ScheduleStationConnectFallback(uint64_t candidate_epoch) {
     const uint32_t generation = setup_generation_.load();
-    struct StationConnectFallbackContext {
-        Blufi* self;
-        uint32_t generation;
-        uint64_t candidate_epoch;
-    };
-    auto* ctx = new (std::nothrow) StationConnectFallbackContext{
-        this, generation, candidate_epoch};
-    if (ctx == nullptr) {
-        ESP_LOGE(BLUFI_TAG, "Failed to allocate password fallback context");
+    auto dispatch = [this, generation, candidate_epoch]() {
         Application::GetInstance().Schedule([this, generation, candidate_epoch]() {
-            if (generation != setup_generation_.load()) {
+            if (generation != setup_generation_.load() ||
+                !m_sta_is_connecting.load() || m_wifi_connect_task_started.load()) {
                 return;
             }
-            StartStationConnectFromCredentials(
-                "password_fallback_task_create_failed", candidate_epoch);
+            StartStationConnectFromCredentials("password_fallback", candidate_epoch);
         });
+    };
+    struct StationConnectFallbackContext {
+        std::function<void()> dispatch;
+        esp_timer_handle_t timer = nullptr;
+    };
+    auto* ctx = new (std::nothrow) StationConnectFallbackContext{dispatch};
+    if (ctx == nullptr) {
+        ESP_LOGE(BLUFI_TAG, "Failed to allocate password fallback context");
+        dispatch();
         return;
     }
 
-    BaseType_t created = xTaskCreate(
-        [](void* ctx) {
-            auto* task_ctx = static_cast<StationConnectFallbackContext*>(ctx);
-            auto* self = task_ctx->self;
-            const uint32_t generation = task_ctx->generation;
-            const uint64_t candidate_epoch = task_ctx->candidate_epoch;
-            delete task_ctx;
-            vTaskDelay(pdMS_TO_TICKS(500));
-            if (generation != self->setup_generation_.load()) {
-                ESP_LOGI(BLUFI_TAG, "Ignoring stale password fallback worker");
-                vTaskDelete(nullptr);
-                return;
-            }
-            if (!self->m_sta_is_connecting.load() ||
-                self->m_wifi_connect_task_started.load()) {
-                vTaskDelete(nullptr);
-                return;
-            }
-            ESP_LOGW(BLUFI_TAG,
-                     "CONNECT_TO_AP not observed after password; starting WiFi fallback");
-            self->StartStationConnectFromCredentials(
-                "password_fallback", candidate_epoch);
-            vTaskDelete(nullptr);
+    // Use the existing timer task: a sleeping worker needs 3 KB of scarce
+    // internal RAM while Bluetooth still owns its buffers.
+    const esp_timer_create_args_t args{
+        .callback = [](void* arg) {
+            auto* ctx = static_cast<StationConnectFallbackContext*>(arg);
+            auto dispatch = std::move(ctx->dispatch);
+            esp_timer_delete(ctx->timer);
+            delete ctx;
+            dispatch();
         },
-        "blufi_conn_fb", 3072, ctx, 5, nullptr);
-    if (created != pdPASS) {
+        .arg = ctx,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "blufi_conn_fb",
+    };
+    if (esp_timer_create(&args, &ctx->timer) != ESP_OK) {
         delete ctx;
-        ESP_LOGE(BLUFI_TAG, "Failed to create password fallback task");
-        Application::GetInstance().Schedule([this, generation, candidate_epoch]() {
-            if (generation != setup_generation_.load()) {
-                return;
-            }
-            StartStationConnectFromCredentials(
-                "password_fallback_task_create_failed", candidate_epoch);
-        });
+        ESP_LOGE(BLUFI_TAG, "Failed to create password fallback timer");
+        dispatch();
+        return;
+    }
+    if (esp_timer_start_once(ctx->timer, 500000) != ESP_OK) {
+        esp_timer_delete(ctx->timer);
+        delete ctx;
+        ESP_LOGE(BLUFI_TAG, "Failed to start password fallback timer");
+        dispatch();
     }
 }
 

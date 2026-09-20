@@ -21,8 +21,9 @@ without an attended safe setup. Explicit user arm commands take priority.
 Use a bounded gesture controller and a separate UART worker; audio callbacks and
 the application task never wait for UART writes or servant acknowledgements.
 Start only after actual reply playback begins, not when the model is merely
-thinking. Alternate small arm gestures within 0-20 percent of existing calibrated
-travel, at most one new target per second. Do not change global servo speed.
+thinking. Updated by the user's 2026-09-10 demo request: alternate left 100%,
+left 0%, right 100%, right 0% of existing calibrated travel, at most one new
+target per second. Do not change global servo speed.
 Validate whether the existing servant can make this trajectory smoothly before
 making any physical smoothness claim.
 

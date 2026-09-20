@@ -44,8 +44,8 @@ public:
             return std::nullopt;
         }
 
-        // Left 20, left 0, right 20, right 0; late polls advance only once.
-        const Target target{response_, step_ < 2, step_ % 2 == 0 ? 20 : 0};
+        // Left 100, left 0, right 100, right 0; late polls advance only once.
+        const Target target{response_, step_ < 2, step_ % 2 == 0 ? 100 : 0};
         step_ = (step_ + 1) % 4;
         has_target_ = true;
         last_target_ms_ = now_ms;

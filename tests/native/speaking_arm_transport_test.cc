@@ -20,11 +20,17 @@ int main() {
     std::recursive_mutex mutex;
     FakeUart uart;
     bool owner = true;
-    auto send = [&](bool left) { return TrySpeakingArmWrite(mutex, left, 20, uart, [&] { return owner; }); };
+    auto send = [&](bool left, int percent = 100) {
+        return TrySpeakingArmWrite(mutex, left, percent, uart, [&] { return owner; });
+    };
     assert(send(true));
-    assert(uart.lines.back() == "{\"cmd\":\"servo\",\"part\":\"left_arm\",\"action\":\"set_percent\",\"from\":0,\"to\":12,\"step\":2,\"delay_ms\":20}\n");
+    assert(uart.lines.back() == "{\"cmd\":\"servo\",\"part\":\"left_arm\",\"action\":\"set_percent\",\"from\":0,\"to\":60,\"step\":2,\"delay_ms\":20}\n");
+    assert(send(true, 0));
+    assert(uart.lines.back() == "{\"cmd\":\"servo\",\"part\":\"left_arm\",\"action\":\"set_percent\",\"from\":0,\"to\":0,\"step\":2,\"delay_ms\":20}\n");
     assert(send(false));
-    assert(uart.lines.back() == "{\"cmd\":\"servo\",\"part\":\"right_arm\",\"action\":\"set_percent\",\"from\":60,\"to\":48,\"step\":2,\"delay_ms\":20}\n");
+    assert(uart.lines.back() == "{\"cmd\":\"servo\",\"part\":\"right_arm\",\"action\":\"set_percent\",\"from\":60,\"to\":0,\"step\":2,\"delay_ms\":20}\n");
+    assert(send(false, 0));
+    assert(uart.lines.back() == "{\"cmd\":\"servo\",\"part\":\"right_arm\",\"action\":\"set_percent\",\"from\":60,\"to\":60,\"step\":2,\"delay_ms\":20}\n");
     uart.idle = false; assert(!send(true)); uart.idle = true;
     uart.ready = false; assert(!send(true)); uart.ready = true;
     uart.free = 128; assert(!send(true)); uart.free = 1024;
@@ -34,5 +40,5 @@ int main() {
     mutex.unlock();
     uart.select = [&] { owner = false; };
     assert(!send(true)); // Explicit owner changes after lock/profile selection.
-    assert(uart.lines.size() == 2);
+    assert(uart.lines.size() == 4);
 }
