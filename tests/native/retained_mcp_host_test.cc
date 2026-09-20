@@ -141,6 +141,14 @@ int main(int argc, char** argv) {
         {"url", "https://cdn.example.com/fixture.png"}, {"sha256", Hash(bytes)}, {"mediaType", "image/png"}, {"localPath", path}})
         cJSON_AddStringToObject(asset, pair.first.c_str(), pair.second.c_str());
     cJSON_AddNumberToObject(asset, "size", bytes.size()); cJSON_AddBoolToObject(asset, "critical", true);
+    const std::string previous_checksum(64, 'b');
+    const std::string previous_key = owner.lesson_key + "/v1-" + previous_checksum;
+    const std::string previous_path = std::string(kLessonAssetPackRoot) + previous_key + "/fixture.png";
+    std::filesystem::create_directories(std::filesystem::path(previous_path).parent_path());
+    std::ofstream(previous_path, std::ios::binary) << bytes;
+    Expect(ActivateLessonAssetPack(owner.lesson_key, previous_key, previous_checksum, true).activated);
+    const std::string active_path = std::string(kLessonAssetPackRoot) + owner.lesson_key + "/active.json";
+    const std::string previous_pointer = Read(active_path);
     Call("self.lesson_assets.retained_selection", "operation", bind);
     Call("self.lesson_assets.retained_selection", "operation", bind);
     Refuses([&] { Call("self.lesson_assets.sync_to_sd", "assetPack", pack.get()); });
@@ -151,6 +159,16 @@ int main(int argc, char** argv) {
     auto failed = Call("self.lesson_assets.sync_to_sd", "assetPack", pack.get());
     Expect(!cJSON_IsTrue(cJSON_GetObjectItem(failed.get(), "ready")) &&
            !cJSON_GetObjectItem(failed.get(), "retainedSelection") && ReadRetainedSelection().active);
+    cJSON_ReplaceItemInObject(asset, "critical", cJSON_CreateBool(false));
+    auto optional_failed = Call("self.lesson_assets.sync_to_sd", "assetPack", pack.get());
+    Expect(cJSON_GetObjectItem(optional_failed.get(), "failedCount")->valueint == 1 &&
+           cJSON_GetObjectItem(optional_failed.get(), "criticalFailedCount")->valueint == 0);
+    Expect(!cJSON_IsTrue(cJSON_GetObjectItem(optional_failed.get(), "activated")) &&
+           !cJSON_IsTrue(cJSON_GetObjectItem(optional_failed.get(), "ready")) &&
+           !cJSON_GetObjectItem(optional_failed.get(), "retainedSelection"));
+    Expect(!cJSON_IsTrue(cJSON_GetObjectItem(optional_failed.get(), "previousEvicted")) &&
+           Read(active_path) == previous_pointer && Read(previous_path) == bytes);
+    Expect(std::string(JsonStringField(optional_failed.get(), "errorCode")) == "assets_unverified");
     fail_download = false;
     auto ready = Call("self.lesson_assets.sync_to_sd", "assetPack", pack.get());
     Expect(cJSON_IsTrue(cJSON_GetObjectItem(ready.get(), "ready")) &&

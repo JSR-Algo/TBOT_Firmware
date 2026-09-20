@@ -477,7 +477,7 @@ def test_renderer_v4_assets_require_exact_flattened_cinematic_phase_key(tmp_path
     )
     subprocess.run([str(executable)], check=True)
 
-def test_generic_sync_counts_critical_failures_and_activates_only_verified_critical_pack():
+def test_generic_sync_counts_critical_failures_and_activates_only_complete_pack():
     source = SOURCE.read_text(encoding="utf-8")
     body = sync_body()
     cmake = MAIN_CMAKE.read_text(encoding="utf-8")
@@ -487,7 +487,8 @@ def test_generic_sync_counts_critical_failures_and_activates_only_verified_criti
     assert "bool critical;" in source
     assert "critical_failed += 1" in body
     assert "asset.critical" in body
-    assert "const bool all_critical_verified = critical_failed == 0" in body
+    assert "const bool all_assets_verified = failed == 0 && verified == asset_count" in body
+    assert "all_assets_verified, selection_revision" in body
     assert "ActivateLessonAssetPack(" in body
     activation = body.index("ActivateLessonAssetPack(")
     counts = body.index('CheckedCJsonAddNumberToObject(json.get(), "criticalFailedCount", critical_failed)')
@@ -517,7 +518,7 @@ def test_generic_sync_stops_before_opening_later_assets_after_critical_failure()
     assert "break;" not in generic_catch[: generic_catch.index("if (asset.critical)")]
 
 
-def test_generic_sync_optional_failure_activates_but_attestation_ready_requires_all_assets():
+def test_generic_sync_optional_failure_blocks_activation_and_ready():
     source = SOURCE.read_text(encoding="utf-8")
     body = sync_body()
 
@@ -529,6 +530,7 @@ def test_generic_sync_optional_failure_activates_but_attestation_ready_requires_
     assert lease_start < activation < lease_end
     assert "AddLessonAssetSyncAttestation(\n                json.get(), cache_key, manifest_checksum, asset_count,\n                verified, failed, activation.activated);" in body
     assert "all_critical_verified ? asset_count : verified" not in body
+    assert 'activation.error_code = "assets_unverified";' in body
 
 
 def test_missing_whitespace_or_cache_key_mismatch_cannot_claim_ready_or_checksum():

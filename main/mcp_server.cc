@@ -1419,13 +1419,16 @@ void McpServer::AddUserOnlyTools() {
                     }
                 }
 
-                const bool all_critical_verified = critical_failed == 0;
+                const bool all_assets_verified = failed == 0 && verified == asset_count;
                 activation = ActivateLessonAssetPack(
                     mutation,
                     lesson_id,
                     cache_key,
                     manifest_checksum,
-                    all_critical_verified, selection_revision, retained ? &retained->owner : nullptr);
+                    all_assets_verified, selection_revision, retained ? &retained->owner : nullptr);
+                if (!all_assets_verified && critical_failed == 0) {
+                    activation.error_code = "assets_unverified";
+                }
                 if (retained && activation.activated) {
                     auto receipt = MakeCheckedCJsonObject();
                     AddRetainedDeviceReceipt(receipt.get(), *retained);
