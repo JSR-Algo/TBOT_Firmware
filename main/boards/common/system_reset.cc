@@ -1,3 +1,4 @@
+#include "m1_staging_policy.h"
 #include "system_reset.h"
 
 #include <esp_log.h>
@@ -68,6 +69,7 @@ static std::string UrlEncodeQueryParam(const std::string& value) {
 }
 
 static std::string BuildFactoryResetUrl(const std::string& api_url, const std::string& device_id) {
+    if (!M1Staging::ApiAllowed(api_url)) return "";
     if (api_url.empty() || device_id.empty()) {
         return "";
     }
@@ -195,6 +197,7 @@ bool SystemReset::ReleaseCloudOwnership(const std::string& api_url,
 }
 
 void SystemReset::ResetNvsFlash() {
+#if !CONFIG_TBOT_M1_STAGING
     ESP_LOGI(TAG, "Resetting NVS flash");
     esp_err_t ret = nvs_flash_erase();
     if (ret != ESP_OK) {
@@ -204,9 +207,13 @@ void SystemReset::ResetNvsFlash() {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize NVS flash");
     }
+#else
+    ESP_LOGW(TAG, "M1 staging preserves protected partitions");
+#endif
 }
 
 void SystemReset::ResetToFactory() {
+#if !CONFIG_TBOT_M1_STAGING
     ESP_LOGI(TAG, "Resetting to factory");
     // Erase otadata partition
     const esp_partition_t* partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_OTA, NULL);
@@ -219,6 +226,9 @@ void SystemReset::ResetToFactory() {
 
     // Reboot in 3 seconds
     RestartInSeconds(3);
+#else
+    ESP_LOGW(TAG, "M1 staging preserves protected partitions");
+#endif
 }
 
 void SystemReset::RestartInSeconds(int seconds) {

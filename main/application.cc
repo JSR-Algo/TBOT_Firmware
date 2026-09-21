@@ -3166,12 +3166,14 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
     // A revoked heartbeat is the durable fallback when the backend invalidates
     // ownership before its WebSocket unpair command reaches the robot. Forget
     // the old network so the normal boot path opens BLUFI without a BOOT press.
+#if !CONFIG_TBOT_M1_STAGING
     const auto wifi_clear_result =
         SsidManager::GetInstance().ForceClearAndCancelTransaction();
     if (wifi_clear_result != SsidMutationResult::kApplied) {
         ESP_LOGE(TAG, "Heartbeat auth recovery could not clear saved WiFi");
         return;
     }
+#endif
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
 }
@@ -3271,12 +3273,14 @@ void Application::EnterRepairPairingMode(ChatRequestContext context) {
         // networks (the reported "can't set a different Wi-Fi"). The cloud row was freed
         // synchronously above (while still online); the offline case keeps
         // release_pending so the deferred release fires once the NEW network connects.
+#if !CONFIG_TBOT_M1_STAGING
         const auto wifi_clear_result =
             SsidManager::GetInstance().ForceClearAndCancelTransaction();
         if (wifi_clear_result != SsidMutationResult::kApplied) {
             ESP_LOGE(TAG, "BOOT re-pair could not clear saved WiFi");
             return;
         }
+#endif
         ESP_LOGW(TAG, "BOOT re-pair: Wi-Fi forgotten; rebooting into Wi-Fi setup for a new network");
         vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
@@ -3629,6 +3633,7 @@ void Application::CheckAssetsVersion() {
         return;
     }
     
+#if !CONFIG_TBOT_M1_STAGING
     Settings settings("assets", true);
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
@@ -3664,6 +3669,8 @@ void Application::CheckAssetsVersion() {
             return;
         }
     }
+
+#endif
 
     // Apply assets
     assets.Apply();
@@ -9232,6 +9239,9 @@ bool Application::IsConnectSuccessPublicationSuppressed() const {
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
+#if CONFIG_TBOT_M1_STAGING
+    return false;
+#else
     if (lesson_runtime_active_.load()) {
         ESP_LOGI(TAG, "lesson firmware upgrade ignored");
         return false;
@@ -9287,6 +9297,8 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         Reboot();
         return true;
     }
+
+#endif
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {

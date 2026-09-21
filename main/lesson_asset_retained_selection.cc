@@ -1,3 +1,4 @@
+#include "m1_staging_policy.h"
 #include "lesson_asset_retained_selection.h"
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_storage_coordinator.h"
@@ -87,7 +88,7 @@ std::string StatePath() {
 std::string ReadRecord() {
 #ifdef ESP_PLATFORM
     nvs_handle_t handle;
-    esp_err_t error = nvs_open("lesson_select", NVS_READONLY, &handle);
+    esp_err_t error = nvs_open(M1Staging::StorageNamespace("lesson_select").c_str(), NVS_READONLY, &handle);
     if (error == ESP_ERR_NVS_NOT_FOUND) return {};
     if (error != ESP_OK) Refuse();
     std::size_t size = 0;
@@ -115,7 +116,7 @@ std::string ReadRecord() {
 void WriteRecord(const std::string& text) {
 #ifdef ESP_PLATFORM
     nvs_handle_t handle;
-    if (nvs_open("lesson_select", NVS_READWRITE, &handle) != ESP_OK) Refuse();
+    if (nvs_open(M1Staging::StorageNamespace("lesson_select").c_str(), NVS_READWRITE, &handle) != ESP_OK) Refuse();
     const esp_err_t set = nvs_set_blob(handle, "owner", text.data(), text.size());
     const esp_err_t commit = set == ESP_OK ? nvs_commit(handle) : set;
     nvs_close(handle);

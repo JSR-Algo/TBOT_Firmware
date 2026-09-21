@@ -1,0 +1,9 @@
+CONFIG_TBOT_M1_STAGING=y
+# CONFIG_TBOT_VOICE_DEMO is not set
+# CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT is not set
+# CONFIG_TBOT_HIL_STORAGE_FAULTS is not set
+# CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY is not set
+# CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS is not set
+CONFIG_OTA_URL="https://m0-esp.tjbot.vn/tbot/ota/"
+CONFIG_WEBSOCKET_URL="wss://m0-esp.tjbot.vn/tbot/v1/"
+CONFIG_PROVISIONING_STATUS_URL="https://m0-api.tjbot.vn/v1/device/provisioning/status"

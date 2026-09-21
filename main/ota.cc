@@ -1,4 +1,5 @@
 #include "ota.h"
+#include "m1_staging_policy.h"
 #include "system_info.h"
 #include "settings.h"
 #include "assets/lang_config.h"
@@ -131,6 +132,9 @@ int RemainingCheckTimeoutMs(int64_t deadline_us) {
 }
 
 std::vector<std::string> BuildCheckVersionUrls(const std::string& configured_url) {
+#if CONFIG_TBOT_M1_STAGING
+    return {M1Staging::kOta};
+#endif
     std::vector<std::string> urls;
     const std::string canonical_url = CONFIG_OTA_URL;
     auto add_unique = [&urls](const std::string& url) {
@@ -171,6 +175,19 @@ bool IsValidCheckVersionResponse(const cJSON* root,
     const bool force_install = cJSON_IsNumber(force) && force->valueint == 1;
     const FirmwareResponseDecision decision = EvaluateFirmwareResponse(
         current_version, version->valuestring, url->valuestring, force_install);
+#if CONFIG_TBOT_M1_STAGING
+    const cJSON* api = cJSON_GetObjectItem(root, "api_url");
+    const cJSON* websocket = cJSON_GetObjectItem(root, "websocket");
+    const cJSON* ws_url = cJSON_GetObjectItem(websocket, "url");
+    const cJSON* token = cJSON_GetObjectItem(websocket, "token");
+    // Validate before any credentials, claim flags or protocol state are changed.
+    if (decision.should_download || cJSON_GetObjectItem(root, "mqtt") != nullptr ||
+        cJSON_GetObjectItem(root, "factory_test_claimed") != nullptr ||
+        cJSON_GetObjectItem(websocket, "factory_test_claimed") != nullptr ||
+        !cJSON_IsString(api) || !M1Staging::ApiAllowed(api->valuestring) ||
+        !cJSON_IsString(ws_url) || !M1Staging::WebsocketAllowed(ws_url->valuestring) ||
+        !cJSON_IsString(token) || token->valuestring[0] == '\0') return false;
+#endif
     *should_download = decision.should_download;
     return decision.valid;
 }
@@ -651,6 +668,9 @@ void Ota::MarkCurrentVersionValid() {
 }
 
 bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progress, size_t speed)> callback) {
+#if CONFIG_TBOT_M1_STAGING
+    return false;
+#else
     ESP_LOGI(TAG, "Upgrading firmware from authenticated URL");
     esp_ota_handle_t update_handle = 0;
     auto update_partition = esp_ota_get_next_update_partition(NULL);
@@ -796,6 +816,8 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
 
     ESP_LOGI(TAG, "Firmware upgrade successful");
     return true;
+
+#endif
 }
 
 bool Ota::StartUpgrade(std::function<void(int progress, size_t speed)> callback) {

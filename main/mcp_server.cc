@@ -1462,10 +1462,14 @@ void McpServer::AddUserOnlyTools() {
                 Property("url", kPropertyTypeString)
             }),
             [](const PropertyList& properties) -> ReturnValue {
+#if CONFIG_TBOT_M1_STAGING
+                return false;
+#else
                 auto url = properties["url"].value<std::string>();
                 Settings settings("assets", true);
                 settings.SetString("download_url", url);
                 return true;
+#endif
             });
 }
 

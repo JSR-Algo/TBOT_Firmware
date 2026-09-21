@@ -1,3 +1,4 @@
+#include "m1_staging_policy.h"
 #include "claim_confirmation_reporter.h"
 
 #include <cJSON.h>
@@ -113,6 +114,7 @@ bool IsPendingTbotClaimExpired(const PendingTbotClaim& claim, time_t now_epoch_s
 }
 
 std::string BuildTbotClaimConfirmUrl(const std::string& api_base_url) {
+    if (!M1Staging::ApiAllowed(api_base_url)) return "";
     if (api_base_url.empty()) {
         return "";
     }
@@ -167,6 +169,7 @@ std::string UrlEncodeQueryParam(const std::string& value) {
 
 std::string BuildTbotDeviceConfigUrl(const std::string& api_base_url,
                                      const std::string& device_id) {
+    if (!M1Staging::ApiAllowed(api_base_url)) return "";
     if (api_base_url.empty() || device_id.empty()) {
         return "";
     }
@@ -184,6 +187,7 @@ std::string BuildTbotDeviceConfigUrl(const std::string& api_base_url,
 }
 
 std::string BuildTbotConfigFetchUrl(const std::string& api_base_url) {
+    if (!M1Staging::ApiAllowed(api_base_url)) return "";
     if (api_base_url.empty()) {
         return "";
     }
@@ -356,7 +360,7 @@ std::string FetchBackendApiUrlFromBootstrap(const std::string& bootstrap_token,
     }
     cJSON_Delete(root);
 
-    if (result.empty()) {
+    if (result.empty() || !M1Staging::ApiAllowed(result)) {
         ESP_LOGW(TAG, "Bootstrap response did not carry a non-empty api_url");
         return "";
     }
@@ -427,7 +431,8 @@ bool RefreshWebsocketUrlFromConfigFetch() {
     cJSON* config_blob = cJSON_GetObjectItem(root, "configBlob");
     cJSON* websocket = cJSON_IsObject(config_blob) ? cJSON_GetObjectItem(config_blob, "websocket") : nullptr;
     cJSON* ws_url = cJSON_IsObject(websocket) ? cJSON_GetObjectItem(websocket, "url") : nullptr;
-    if (!cJSON_IsString(ws_url) || ws_url->valuestring[0] == '\0') {
+    if (!cJSON_IsString(ws_url) || ws_url->valuestring[0] == '\0' ||
+        !M1Staging::WebsocketAllowed(ws_url->valuestring)) {
         cJSON_Delete(root);
         ESP_LOGW(TAG, "Config fetch response did not carry configBlob.websocket.url");
         return false;
@@ -459,6 +464,12 @@ static bool ProcessTbotClaimConfirmationResponse(const std::string& json, bool p
     };
     if (!is_nonempty_string(device_id) || !is_nonempty_string(device_secret) ||
         !is_nonempty_string(ws_url) || (require_api_url && !is_nonempty_string(api_url))) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    if (!M1Staging::WebsocketAllowed(ws_url->valuestring) ||
+        (cJSON_IsString(api_url) && !M1Staging::ApiAllowed(api_url->valuestring))) {
         cJSON_Delete(root);
         return false;
     }

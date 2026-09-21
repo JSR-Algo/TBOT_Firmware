@@ -10,6 +10,15 @@ config TBOT_VOICE_DEMO
         Show the latest LCD caption on the UI task outside the control queue.
         Disable this option to restore normal lesson downloads and expressions.
 
+config TBOT_M1_STAGING
+    bool "M1 attended public-staging profile"
+    depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P
+    depends on !TBOT_COURSE_MODE_LOCAL_ENDPOINT && !TBOT_VOICE_DEMO
+    default n
+    help
+        Pins public M0 endpoints and isolates staging credentials and claims.
+        Requires distinct staging admission; never use for production rollout.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://esp.tjbot.vn/tbot/ota/"

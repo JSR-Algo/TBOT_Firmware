@@ -443,6 +443,9 @@ bool Assets::EmoteStrategy::Apply(Assets* assets, bool refresh_display_theme) {
 }
 
 bool Assets::Download(std::string url, std::function<void(int progress, size_t speed)> progress_callback) {
+#if CONFIG_TBOT_M1_STAGING
+    return false;
+#else
     ESP_LOGI(TAG, "Downloading new version of assets");
 
     // 取消当前资源分区的内存映射
@@ -576,4 +579,6 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
     }
 
     return true;
+
+#endif
 }

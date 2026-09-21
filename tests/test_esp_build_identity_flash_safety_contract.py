@@ -35,7 +35,7 @@ def test_course_mode_local_endpoint_identity_is_lab_only_and_precedes_production
 
     assert f"defined({local_flag}) && {local_flag}" in identity
     assert local_profile in identity
-    identity_selection = identity[identity.index(f"#if defined({local_flag})") :]
+    identity_selection = identity[identity.index(f"#elif defined({local_flag})") :]
     assert identity_selection.index(local_flag) < identity_selection.index(
         "CONFIG_TBOT_HIL_STORAGE_FAULTS"
     )
