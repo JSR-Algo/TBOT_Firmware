@@ -87,6 +87,31 @@ template<class Fn> static void Refuses(Fn fn) {
 }
 int main(int argc, char** argv) {
     Register();
+    if (argc == 3 && std::string(argv[1]) == "--selection-rpc") {
+        try {
+            const std::string tool(argv[2]);
+            if (tool != "self.lesson_assets.selection_state" &&
+                tool != "self.lesson_assets.retained_selection") {
+                throw std::runtime_error("selection tool required");
+            }
+            const std::string input((std::istreambuf_iterator<char>(std::cin)), {});
+            if (input.size() > 16384) throw std::runtime_error("selection input too large");
+            CheckedCJsonPtr args(cJSON_Parse(input.c_str()));
+            if (!cJSON_IsObject(args.get())) throw std::runtime_error("selection arguments required");
+            const bool mutation = tool == "self.lesson_assets.retained_selection";
+            const auto operation = cJSON_GetObjectItemCaseSensitive(args.get(), "operation");
+            if (mutation && !cJSON_IsObject(operation)) throw std::runtime_error("operation required");
+            const auto result = Call(tool, mutation ? "operation" : nullptr, operation);
+            char* encoded = cJSON_PrintUnformatted(result.get());
+            if (!encoded) throw std::runtime_error("selection serialization failed");
+            std::cout << encoded << '\n';
+            cJSON_free(encoded);
+            return 0;
+        } catch (const std::exception& error) {
+            std::cerr << "selection RPC refused: " << error.what() << '\n';
+            return 1;
+        }
+    }
     if (argc == 6) {
         CheckedCJsonPtr bind(cJSON_Parse(Read(argv[1]).c_str()));
         CheckedCJsonPtr pack(cJSON_Parse(Read(argv[2]).c_str()));
