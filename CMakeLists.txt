@@ -2,6 +2,8 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
+set(CMAKE_NINJA_FORCE_RESPONSE_FILE ON CACHE BOOL "Use response files for Ninja commands" FORCE)
+
 option(TBOT_NATIVE_COVERAGE "Instrument firmware sources for ESP-IDF gcov coverage" OFF)
 
 # ESP-IDF does not auto-load sdkconfig.defaults.local. Keep the production
@@ -23,7 +25,7 @@ else()
 endif()
 
 set(PROJECT_VER "2.2.90")
-project(xiaozhi)
+project(jsr-algo-tbot)
 
 if(TBOT_NATIVE_COVERAGE)
     include($ENV{IDF_PATH}/components/app_trace/project_include.cmake)
