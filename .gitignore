@@ -21,7 +21,6 @@ mmap_generate_*.h
 *.bin
 
 # sdkconfig (project uses sdkconfig.defaults.* instead)
-sdkconfig
 sdkconfig.*
 !sdkconfig.defaults
 !sdkconfig.defaults.*
