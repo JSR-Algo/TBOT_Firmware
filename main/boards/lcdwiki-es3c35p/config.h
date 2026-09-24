@@ -61,7 +61,7 @@
 
 #define DISPLAY_BACKLIGHT_PIN           GPIO_NUM_41
 #define DISPLAY_BACKLIGHT_OUTPUT_INVERT false
-#define DISPLAY_QSPI_PCLK_HZ            (20 * 1000 * 1000)  // 20MHz an toàn; có thể thử 40/80MHz
+#define DISPLAY_QSPI_PCLK_HZ            (40 * 1000 * 1000)  // 20MHz an toàn; có thể thử 40/80MHz
 
 #define DISPLAY_RGB_ORDER   LCD_RGB_ELEMENT_ORDER_RGB
 #define DISPLAY_INVERT_COLOR false
