@@ -27,7 +27,7 @@ sdkconfig.*
 
 # Editor / tooling
 .worktrees/
-.vscode/
+.vscode/settings.json
 .devcontainer/
 .clangd
 .cache
