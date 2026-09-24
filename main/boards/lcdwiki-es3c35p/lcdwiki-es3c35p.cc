@@ -496,7 +496,7 @@ private:
             static_cast<std::uint64_t>(esp_timer_get_time() / 1000));
         lesson_cinematic_completion_gate_.ArmNextCompletion();
         lesson_cinematic_pending_.store(true, std::memory_order_release);
-        const esp_err_t result = esp_lcd_panel_draw_bitmap(panel_, 0, 0, 320, 480, pixels);
+        const esp_err_t result = esp_lcd_panel_draw_bitmap(panel_, 0, 0, DISPLAY_HEIGHT, DISPLAY_WIDTH, pixels);
         if (result != ESP_OK) {
             lesson_cinematic_pending_.store(false, std::memory_order_release);
             lesson_cinematic_completion_gate_.Disarm();
