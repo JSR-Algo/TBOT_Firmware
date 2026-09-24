@@ -119,7 +119,7 @@ const st77922_lcd_init_cmd_t kSt77922InitCmds[] = {
     {0x35, (uint8_t []){0x01}, 1, 20},
 };
 
-constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
+// constexpr int kLcdQspiClockHz = 20 * 1000 * 1000;
 constexpr bool kHoldBootProbePattern = false;
 // Default Live TTS output for this PA; user can still raise/lower via MCP (0-100).
 constexpr int kLcdWikiOutputVolume = 92;
@@ -639,7 +639,7 @@ private:
         ESP_LOGI(TAG, "Install ST77922 QSPI panel IO");
         esp_lcd_panel_io_spi_config_t io_config = ST77922_PANEL_IO_QSPI_CONFIG(
             DISPLAY_CS_PIN, nullptr, nullptr);
-        io_config.pclk_hz = kLcdQspiClockHz;
+        io_config.pclk_hz = DISPLAY_QSPI_PCLK_HZ;
         // Lesson cinematic frames are decoded into PSRAM (MALLOC_CAP_SPIRAM).
         // Without this flag the driver never sets SPI_TRANS_DMA_USE_PSRAM, so
         // spi_device_queue_trans rejects the buffer ("spi transmit (queue)
