@@ -1,5 +1,9 @@
 #include "system_info.h"
 
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
+
 #include <esp_app_desc.h>
 #include <esp_flash.h>
 #include <esp_heap_caps.h>
@@ -8,8 +12,12 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_pm.h>
+#include <esp_memory_utils.h>
 #include <esp_system.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_private/freertos_debug.h>
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_wifi_remote.h"
 #endif
@@ -144,9 +152,113 @@ exit:  // Common return path
 }
 
 void SystemInfo::PrintTaskList() {
-    char buffer[1000];
-    vTaskList(buffer);
-    ESP_LOGI(TAG, "Task list: \n%s", buffer);
+    // Headroom for tasks created between the count and the snapshot
+    UBaseType_t capacity = uxTaskGetNumberOfTasks() + 5;
+    TaskStatus_t* tasks = (TaskStatus_t*)malloc(sizeof(TaskStatus_t) * capacity);
+    if (tasks == NULL) {
+        ESP_LOGE(TAG, "PrintTaskList: out of memory");
+        return;
+    }
+    configRUN_TIME_COUNTER_TYPE total_run_time = 0;
+    UBaseType_t count = uxTaskGetSystemState(tasks, capacity, &total_run_time);
+    if (count == 0) {
+        ESP_LOGE(TAG, "PrintTaskList: snapshot failed");
+        free(tasks);
+        return;
+    }
+
+    // Sort by priority (desc), then name, so the output is stable between prints
+    std::sort(tasks, tasks + count, [](const TaskStatus_t& a, const TaskStatus_t& b) {
+        if (a.uxCurrentPriority != b.uxCurrentPriority) {
+            return a.uxCurrentPriority > b.uxCurrentPriority;
+        }
+        return strcmp(a.pcTaskName, b.pcTaskName) < 0;
+    });
+
+    ESP_LOGI(TAG, "Task list (%u tasks, uptime %lu ms):", (unsigned)count,
+             (unsigned long)(esp_timer_get_time() / 1000));
+    ESP_LOGI(TAG, "%-3s %-16s %-5s %4s %4s %4s %6s %6s %6s %6s %5s %-5s %12s %6s", "#", "Name",
+             "State", "Prio", "Base", "Core", "Stack", "UsedNow", "Peak", "MinFree", "Peak%", "Mem",
+             "RunTime(us)", "CPU%");
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    uint32_t total_stack = 0;
+    uint32_t low_stack_count = 0;
+    for (UBaseType_t i = 0; i < count; i++) {
+        const TaskStatus_t& t = tasks[i];
+        const char* state;
+        switch (t.eCurrentState) {
+            case eRunning:   state = "Run"; break;
+            case eReady:     state = "Ready"; break;
+            case eBlocked:   state = "Block"; break;
+            case eSuspended: state = "Susp"; break;
+            case eDeleted:   state = "Del"; break;
+            default:         state = "?"; break;
+        }
+        BaseType_t core = xTaskGetCoreID(t.xHandle);
+        char core_str[12];
+        if (core == tskNO_AFFINITY) {
+            snprintf(core_str, sizeof(core_str), "any");
+        } else {
+            snprintf(core_str, sizeof(core_str), "%d", (int)core);
+        }
+        // ESP-IDF StackType_t is uint8_t, so the high water mark is already in bytes
+        uint32_t stack_free = t.usStackHighWaterMark;
+        const char* stack_mem = esp_ptr_external_ram(t.pxStackBase) ? "PSRAM" : "INT";
+
+        // FreeRTOS has no public "stack size" getter, so read the stack bounds from the TCB.
+        // pxEndOfStack is fixed at task creation. A task deleted after the snapshot above
+        // could give garbage numbers for that one row (read-only, no crash).
+        char size_str[12] = "?";
+        char used_str[12] = "?";
+        char peak_str[12] = "?";
+        char pct_str[12] = "?";
+        TaskSnapshot_t snap = {};
+        if (vTaskGetSnapshot(t.xHandle, &snap) == pdTRUE && snap.pxEndOfStack != NULL) {
+            uintptr_t base = (uintptr_t)t.pxStackBase;
+            uintptr_t end = (uintptr_t)snap.pxEndOfStack + sizeof(StackType_t);
+            if (end > base) {
+                uint32_t size = end - base;
+                uint32_t peak = size > stack_free ? size - stack_free : 0;
+                total_stack += size;
+                snprintf(size_str, sizeof(size_str), "%lu", (unsigned long)size);
+                snprintf(peak_str, sizeof(peak_str), "%lu", (unsigned long)peak);
+                snprintf(pct_str, sizeof(pct_str), "%lu%%", (unsigned long)(peak * 100 / size));
+                // Saved stack pointer is only valid for tasks that are switched out.
+                // For this task use the live SP; a task running on the other core is unknown.
+                uintptr_t sp = 0;
+                if (t.xHandle == self) {
+                    sp = (uintptr_t)__builtin_frame_address(0);
+                } else if (t.eCurrentState != eRunning) {
+                    sp = (uintptr_t)snap.pxTopOfStack;
+                }
+                if (sp > base && sp <= end) {
+                    snprintf(used_str, sizeof(used_str), "%lu", (unsigned long)(end - sp));
+                } else {
+                    snprintf(used_str, sizeof(used_str), "-");
+                }
+            }
+        }
+        // Cumulative CPU share since boot, summed across both cores
+        float cpu_percent = total_run_time > 0
+                                ? (float)t.ulRunTimeCounter * 100.0f /
+                                      ((float)total_run_time * CONFIG_FREERTOS_NUMBER_OF_CORES)
+                                : 0.0f;
+        const char* warn = "";
+        if (stack_free < 512) {
+            warn = "  <-- LOW STACK";
+            low_stack_count++;
+        }
+        ESP_LOGI(TAG, "%-3u %-16s %-5s %4u %4u %4s %6s %6s %6s %6lu %5s %-5s %12lu %5.1f%%%s",
+                 (unsigned)t.xTaskNumber, t.pcTaskName, state, (unsigned)t.uxCurrentPriority,
+                 (unsigned)t.uxBasePriority, core_str, size_str, used_str, peak_str,
+                 (unsigned long)stack_free, pct_str, stack_mem, (unsigned long)t.ulRunTimeCounter,
+                 cpu_percent, warn);
+    }
+    ESP_LOGI(TAG, "Total task stack allocated: %lu bytes", (unsigned long)total_stack);
+    if (low_stack_count > 0) {
+        ESP_LOGW(TAG, "%lu task(s) with < 512 bytes of stack left", (unsigned long)low_stack_count);
+    }
+    free(tasks);
 }
 
 void SystemInfo::PrintHeapStats() {
