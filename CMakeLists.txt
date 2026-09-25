@@ -2,6 +2,7 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
+include_directories("${CMAKE_CURRENT_LIST_DIR}/main")
 set(CMAKE_NINJA_FORCE_RESPONSE_FILE ON CACHE BOOL "Use response files for Ninja commands" FORCE)
 
 option(TBOT_NATIVE_COVERAGE "Instrument firmware sources for ESP-IDF gcov coverage" OFF)
