@@ -1,10 +1,26 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <future>
 #include <iostream>
+#include <string>
+#include <thread>
 #include <vector>
 
 #include "lesson_layered_cinematic_renderer.h"
+
+#ifdef ESP_PLATFORM
+namespace tbot {
+LessonCinematicRendererOps ProductionLessonCinematicRendererOps() { return {}; }
+void ConfigureProductionLessonCinematicSession(const std::string&, const std::string&,
+                                               std::uint64_t) {}
+bool DecodeLessonLayeredJpeg(const char*, std::uint16_t*, std::size_t, std::uint16_t*,
+                            std::uint16_t*, std::size_t*) { return false; }
+bool DecodeLessonLayeredPng(const char*, std::uint8_t*, std::size_t, std::uint16_t*,
+                           std::uint16_t*, std::size_t*) { return false; }
+}
+#endif
 
 namespace {
 
@@ -32,6 +48,7 @@ struct FakeRuntime {
     bool fail_present = false;
     bool enough_memory = true;
     std::vector<std::size_t> video_frames;
+    std::vector<std::uint16_t> pixels;
 };
 
 void* Allocate(void* raw, std::size_t size) {
@@ -105,11 +122,12 @@ bool DecodeVideo(void* raw, void*, std::size_t frame_index, std::uint8_t* destin
     return true;
 }
 
-bool Present(void* raw, const std::uint16_t*, std::uint16_t width, std::uint16_t height,
+bool Present(void* raw, const std::uint16_t* pixels, std::uint16_t width, std::uint16_t height,
              std::size_t frame_index) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
     ++fake.presents;
     fake.last_frame = frame_index;
+    fake.pixels.assign(pixels, pixels + static_cast<std::size_t>(width) * height);
     return !fake.fail_present && width == 480 && height == 320;
 }
 
@@ -409,8 +427,13 @@ void TestFirstCoursePrepareKeepsNewStaticWhenRobotFails() {
     Require(renderer.prepared() && fake.jpeg_decodes == 1 && fake.png_decodes == 1 &&
                 fake.presents == 1,
             "newly decoded static composition remains prepared and visible");
-    Require(renderer.Start(8, "teach", 0).accepted && renderer.Tick(100).accepted,
-            "static-only degraded phase remains safe when runtime starts and ticks it");
+    const auto start = renderer.Start(8, "teach", 0);
+    Require(!start.accepted && start.error == tbot::LessonCinematicError::kFileOpen &&
+                renderer.last_apply_degraded(),
+            "static-only degraded phase cannot acknowledge animation readiness");
+    const auto tick = renderer.Tick(100);
+    Require(!tick.accepted && tick.error == tbot::LessonCinematicError::kFileOpen,
+            "static-only degraded phase cannot acknowledge animation completion");
 
     FakeRuntime decode_fake;
     tbot::LessonLayeredCinematicRenderer decode_renderer(Ops(&decode_fake));
@@ -456,9 +479,218 @@ void TestTickFailsWhenStaticFallbackCannotPresent() {
     Require(!renderer.prepared(), "failed static fallback leaves a coherent failed state");
 }
 
+void TestLateOnceTickPresentsFinalFrameBeforeCompletion() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "late once fixture prepares");
+    Require(renderer.Start(8, "teach", 0).accepted, "late once fixture starts");
+    const auto complete = renderer.Tick(350);
+    Require(complete.accepted && complete.type == tbot::LessonCinematicResponseType::kPhaseComplete,
+            "late once tick completes");
+    Require(fake.last_frame == 2 && fake.video_frames == std::vector<std::size_t>({0, 2}),
+            "late once completion presents final pixels without queuing skipped frames");
+}
+
+void TestFinalFrameFailureCannotComplete() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "final failure fixture prepares");
+    Require(renderer.Start(8, "teach", 0).accepted, "final failure fixture starts");
+    fake.fail_video_decode = true;
+    const auto complete = renderer.Tick(350);
+    Require(!complete.accepted && complete.error == tbot::LessonCinematicError::kDecodeFailed &&
+                renderer.last_apply_degraded(),
+            "failed final decode reports degradation instead of animation completion");
+    Require(fake.video_closes == 1 && fake.frees == 1,
+            "failed final decode releases stream and robot scratch");
+    Require(!renderer.Start(9, "teach", 400).accepted,
+            "restarting degraded final frame cannot erase failure");
+}
+
+void TestStaticVisualAfterDecodeFailureCannotStartAnimation() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "static transition fixture prepares");
+    Require(renderer.Start(8, "teach", 0).accepted, "static transition fixture starts");
+    fake.fail_video_decode = true;
+    Require(!renderer.Tick(110).accepted, "robot decoding fails before static transition");
+    tbot::LessonLayeredVisualState visual{};
+    visual.activity_id = "next-activity";
+    visual.phase_id = "listen";
+    Require(renderer.ApplyVisualState(visual, 9, 110).accepted,
+            "static activity presentation remains accepted without animation");
+    const auto start = renderer.Start(10, "listen", 120);
+    Require(!start.accepted && start.error == tbot::LessonCinematicError::kDecodeFailed &&
+                renderer.last_apply_degraded(),
+            "static activity cannot restart a released animation stream");
+}
+
+void TestRuntimeFailureRetainsWorkerDiagnostic() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted && renderer.Start(8, "teach", 0).accepted,
+            "runtime diagnostic fixture starts");
+    fake.fail_video_decode = true;
+    Require(!renderer.Tick(110).accepted, "runtime diagnostic fixture fails decode");
+    Require(renderer.PendingRuntimeError().has_value(),
+            "asynchronous renderer failure remains available for lesson worker reporting");
+    const auto failure = *renderer.PendingRuntimeError();
+    Require(failure.generation == renderer.RuntimeGeneration() &&
+                failure.command_sequence_id == 8 && failure.phase_id == "teach" &&
+                failure.error == tbot::LessonCinematicError::kDecodeFailed,
+            "worker diagnostic owns exact playback identity and typed error");
+    Require(!renderer.AcknowledgeRuntimeError(failure.generation + 1, 8) &&
+                !renderer.AcknowledgeRuntimeError(failure.generation, 9),
+            "stale diagnostic acknowledgement cannot consume current failure");
+    Require(!renderer.Tick(220).accepted && renderer.PendingRuntimeError().has_value(),
+            "failed playback retains one pending error over repeated ticks");
+    Require(!renderer.ReleaseFailedRuntimeResources(failure.generation + 1, 8) &&
+                !renderer.ReleaseFailedRuntimeResources(failure.generation, 9),
+            "stale cleanup cannot release current runtime resources");
+    Require(renderer.ReleaseFailedRuntimeResources(failure.generation, 8) &&
+                renderer.ReleaseFailedRuntimeResources(failure.generation, 8) &&
+                fake.allocations == fake.frees && fake.video_opens == fake.video_closes &&
+                renderer.RuntimeGeneration() == failure.generation && renderer.PendingRuntimeError().has_value(),
+            "failure cleanup releases once while preserving exact pending terminal identity");
+    Require(renderer.Start(8, "teach", 240).accepted && !renderer.Start(9, "teach", 240).accepted,
+            "failed runtime keeps prior ACK replay but rejects fresh playback");
+    Require(renderer.AcknowledgeRuntimeError(failure.generation, 8) &&
+                !renderer.PendingRuntimeError().has_value(),
+            "successful worker handoff consumes one exact diagnostic");
+    renderer.Tick(330);
+    Require(!renderer.PendingRuntimeError().has_value(),
+            "repeated degraded ticks do not regenerate a reported error");
+    Require(renderer.Stop(9, "teach").accepted && fake.allocations == fake.frees,
+            "real later terminal command accepts original phase without duplicate cleanup");
+}
+
+void TestRuntimeDiagnosticFencesReplacementAndDiscard() {
+    for (int replacement = 0; replacement < 4; ++replacement) {
+        FakeRuntime fake;
+        tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+        Require(renderer.Prepare(Config(), 0).accepted && renderer.Start(8, "teach", 0).accepted,
+                "diagnostic replacement fixture starts");
+        fake.fail_video_decode = true;
+        fake.fail_present = replacement == 3;
+        renderer.Tick(110);
+        const auto failure = renderer.PendingRuntimeError();
+        Require(failure.has_value(), "replacement fixture captures error");
+        if (replacement == 0) {
+            auto invalid = Config();
+            invalid.command_sequence_id = 9;
+            invalid.background.sd_path = "invalid";
+            Require(!renderer.Prepare(invalid, 0).accepted && renderer.PendingRuntimeError().has_value(),
+                    "failed replacement preserves pending old diagnostic");
+            fake.fail_video_decode = false;
+            auto next = Config();
+            next.command_sequence_id = 9;
+            Require(renderer.Prepare(next, 0).accepted, "successful replacement prepares");
+        } else if (replacement == 1) {
+            tbot::LessonLayeredVisualState visual{};
+            visual.activity_id = "replacement";
+            visual.phase_id = "listen";
+            Require(renderer.ApplyVisualState(visual, 9, 120).accepted,
+                    "accepted activity replaces diagnostic identity");
+        } else if (replacement == 2) {
+            Require(renderer.Cancel(9, "teach").accepted, "cancel clears pending error");
+        } else {
+            Require(failure->error == tbot::LessonCinematicError::kPresentFailed,
+                    "failed static fallback retains presentation error");
+            renderer.DiscardSession();
+        }
+        Require(renderer.RuntimeGeneration() != failure->generation &&
+                    !renderer.PendingRuntimeError().has_value(),
+                "replacement, activity, cancellation and discard fence old diagnostics");
+    }
+}
+
+void TestGenerationGuardSerializesReplacementPrepare() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    Require(renderer.Prepare(Config(), 0).accepted, "generation guard fixture prepares");
+    const auto generation = renderer.RuntimeGeneration();
+    auto next = Config();
+    next.command_sequence_id = 9;
+    std::promise<void> attempting;
+    std::promise<bool> completed;
+    auto attempting_future = attempting.get_future();
+    auto completed_future = completed.get_future();
+    std::thread replacement;
+    Require(renderer.WithRuntimeGeneration(generation, [&]() {
+        replacement = std::thread([&]() {
+            attempting.set_value();
+            completed.set_value(renderer.Prepare(next, 0).accepted);
+        });
+        attempting_future.wait();
+        Require(completed_future.wait_for(std::chrono::milliseconds(50)) == std::future_status::timeout,
+                "concurrent replacement must wait until generation-guarded display cleanup exits");
+    }), "current generation executes its cleanup");
+    replacement.join();
+    Require(completed_future.get() && renderer.RuntimeGeneration() != generation,
+            "replacement prepares after guarded cleanup releases its lock");
+    bool stale_called = false;
+    Require(!renderer.WithRuntimeGeneration(generation, [&]() { stale_called = true; }) && !stale_called,
+            "late old-generation cleanup cannot mutate the replacement display");
+}
+
+void TestRobotPathOutlivesPrepareCaller() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    {
+        std::string path = "/sd/" + std::string(200, 'r') + ".mp4";
+        auto config = Config();
+        config.robot.sd_path = path.c_str();
+        Require(renderer.Prepare(config, 0).accepted, "temporary path prepares");
+    }
+    Require(renderer.Start(8, "teach", 0).accepted, "temporary path starts");
+    Require(renderer.Tick(110).accepted && fake.last_frame == 1,
+            "deferred frame diagnostics do not borrow the destroyed prepare path");
+}
+
+void TestThreeLayerPixelsSurviveFramesAndClipReplacement() {
+    FakeRuntime fake;
+    tbot::LessonLayeredCinematicRenderer renderer(Ops(&fake));
+    auto config = Config();
+    config.retain_static_layers = true;
+    config.robot.rect = {10, 10, 2, 2};
+    Require(renderer.Prepare(config, 0).accepted, "pixel fixture prepares");
+    const auto initial = fake.pixels;
+    Require(initial[0] == 0x001f, "background stays blue outside foregrounds");
+    Require(initial[10 * 480 + 10] == 0xf800, "robot opaque red covers object");
+    Require(initial[10 * 480 + 11] == 0x040f,
+            "robot chroma reveals half-alpha object over blue background");
+    Require(initial[11 * 480 + 10] == 0xffff,
+            "robot opaque white covers transparent object");
+    Require(renderer.Start(8, "teach", 0).accepted && renderer.Tick(110).accepted,
+            "pixel fixture advances");
+    Require(fake.pixels == initial, "all layer pixels persist across robot frame");
+    config.command_sequence_id = 9;
+    config.phase_id = "listen";
+    config.robot.rect = {20, 20, 2, 2};
+    Require(renderer.Prepare(config, 110).accepted, "replacement clip prepares");
+    Require(fake.jpeg_decodes == 1 && fake.png_decodes == 1,
+            "replacement clip reuses both static decodes");
+    Require(fake.pixels[10 * 480 + 10] == 0xf800 &&
+                fake.pixels[10 * 480 + 11] == 0x040f &&
+                fake.pixels[11 * 480 + 10] == 0x001f &&
+                fake.pixels[11 * 480 + 11] == 0xffff,
+            "clip replacement retains opaque partial-alpha transparent object pixels");
+    Require(renderer.Cancel(10, "listen").accepted && fake.allocations == fake.frees,
+            "pixel lifecycle releases buffers exactly once on cancel");
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const std::string selected = argc > 1 ? argv[1] : "all";
+    if (selected == "late-final") { TestLateOnceTickPresentsFinalFrameBeforeCompletion(); return 0; }
+    if (selected == "degraded") { TestFirstCoursePrepareKeepsNewStaticWhenRobotFails(); return 0; }
+    if (selected == "path") { TestRobotPathOutlivesPrepareCaller(); return 0; }
+    if (selected == "static-transition") {
+        TestStaticVisualAfterDecodeFailureCannotStartAnimation(); return 0;
+    }
+    if (selected == "runtime-error") { TestRuntimeFailureRetainsWorkerDiagnostic(); return 0; }
+    Require(selected == "all", "unknown test selection must not silently run another scope");
     TestStaticLayersDecodeOnceAndRobotOwnsClock();
     TestTypedFailuresAndLoopPlayback();
     TestDiscardSessionAllowsSequenceRestart();
@@ -473,6 +705,14 @@ int main() {
     TestFirstCoursePrepareKeepsNewStaticWhenRobotFails();
     TestTickRobotFailureFallsBackToStaticComposition();
     TestTickFailsWhenStaticFallbackCannotPresent();
-    std::cout << "lesson_layered_cinematic_renderer tests passed\n";
+    TestLateOnceTickPresentsFinalFrameBeforeCompletion();
+    TestFinalFrameFailureCannotComplete();
+    TestRobotPathOutlivesPrepareCaller();
+    TestThreeLayerPixelsSurviveFramesAndClipReplacement();
+    TestStaticVisualAfterDecodeFailureCannotStartAnimation();
+    TestRuntimeFailureRetainsWorkerDiagnostic();
+    TestRuntimeDiagnosticFencesReplacementAndDiscard();
+    TestGenerationGuardSerializesReplacementPrepare();
+    std::cout << "lesson_layered_cinematic_renderer tests: 22 passed, 0 failed, 0 skipped\n";
     return 0;
 }

@@ -75,19 +75,22 @@ def test_lesson_protocol_dispatch_remains_websocket_only_with_persistent_worker(
     assert "auto websocket_protocol = std::make_unique<WebsocketProtocol>();" in app
     assert "protocol_ = std::move(websocket_protocol);" in app
 
-    incoming_start = app.index("protocol_->OnIncomingJson(")
-    incoming = app[incoming_start:app.index("// WebSocket Start()", incoming_start)]
+    callback_start = app.index("protocol_->OnIncomingJson(")
+    callback = app[callback_start:app.index("// WebSocket Start()", callback_start)]
+    assert "DispatchIncomingJson(root, epoch, is_websocket_protocol);" in callback
+    incoming_start = app.index("void Application::DispatchIncomingJson")
+    incoming = app[incoming_start:app.index("bool Application::IsSelectedNormalChatRoute", incoming_start)]
     lesson_start = incoming.index('strncmp(type->valuestring, "lesson_", 7) == 0')
     lesson_branch = incoming[lesson_start:incoming.index("#endif", lesson_start)]
 
-    assert "[this, display, is_websocket_protocol]" in incoming
+    assert "bool is_websocket_protocol" in incoming
     assert "if (!is_websocket_protocol)" in lesson_branch
     assert lesson_branch.index("if (!is_websocket_protocol)") < lesson_branch.index(
-        "EnqueueLessonMessage(root, callback_transport_epoch);"
+        "EnqueueLessonMessage(root, callback_transport_epoch, context);"
     )
     assert 'ESP_LOGW(TAG, "lesson_* ignored on non-WebSocket transport");' in lesson_branch
     assert lesson_branch.index("return;") < lesson_branch.index(
-        "EnqueueLessonMessage(root, callback_transport_epoch);"
+        "EnqueueLessonMessage(root, callback_transport_epoch, context);"
     )
 
 
@@ -117,7 +120,7 @@ def test_lesson_message_worker_reserves_persistent_psram_buffers_with_internal_c
     assert "Failed to create persistent PSRAM lesson worker" in constructor
     assert constructor.count("heap_caps_free(") >= 2
     assert "vQueueDelete(lesson_message_queue_)" not in destructor
-    task_delete = destructor.index("vTaskDelete(lesson_message_task_handle_)")
+    task_delete = destructor.index("StopLessonMessageTask();")
     queue_drain = destructor.index("xQueueReceive(lesson_message_queue_", task_delete)
     queue_free = destructor.index("heap_caps_free(lesson_message_queue_storage)", queue_drain)
     stack_free = destructor.index("heap_caps_free(lesson_message_task_stack)", queue_free)
@@ -125,10 +128,12 @@ def test_lesson_message_worker_reserves_persistent_psram_buffers_with_internal_c
 
 
 def test_websocket_open_worker_reserves_one_reusable_internal_stack():
+    from test_protocol_work_lifetime import method
+
     app = read("main/application.cc")
     constructor = app[app.index("Application::Application()"): app.index("Application::~Application()")]
-    starter = app[app.index("bool Application::StartOpenChannelWorker"): app.index("void Application::OpenChannelTask")]
-    worker = app[app.index("void Application::OpenChannelTask"): app.index("void Application::ArmConnectWatchdog")]
+    starter = method(app, "bool Application::StartOpenChannelWorker")
+    worker = method(app, "void Application::OpenChannelTask")
 
     assert "DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth]" in app
     assert "DRAM_ATTR StaticTask_t open_channel_task_buffer;" in app
@@ -158,5 +163,5 @@ def test_each_channel_open_path_queues_the_persistent_worker_after_intent_is_pub
 
     close = app[app.index("void Application::CloseAudioChannelByIntent"): app.index("void Application::DoResetProtocol")]
     reset = app[app.index("void Application::ResetProtocol"):]
-    assert "connect_close_deferral_.Request(connect_in_flight_.load())" in close
+    assert "connect_close_deferral_.Request(protocol_work_lifetime_.Busy())" in close
     assert "reset_pending_.store(true);" in reset

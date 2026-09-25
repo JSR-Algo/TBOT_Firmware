@@ -1,4 +1,6 @@
 #include "lcd_display.h"
+#include "application.h"
+#include "chat_runtime_timing.h"
 #include "gif/lvgl_gif.h"
 #include "settings.h"
 #include "lvgl_theme.h"
@@ -364,6 +366,13 @@ MipiLcdDisplay::MipiLcdDisplay(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel
 }
 
 LcdDisplay::~LcdDisplay() {
+#if CONFIG_TBOT_VOICE_DEMO
+    {
+        DisplayLockGuard lock(this);
+        if (chat_caption_timer_) lv_timer_delete(chat_caption_timer_);
+        chat_caption_timer_ = nullptr;
+    }
+#endif
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     CancelLessonRobotEntrance();
 #ifdef TBOT_RENDERER_MEMORY_DIAGNOSTICS
@@ -449,6 +458,21 @@ LcdDisplay::~LcdDisplay() {
     }
 }
 
+#if CONFIG_TBOT_VOICE_DEMO
+void LcdDisplay::StartChatCaptionTimer() {
+    // SetupUI holds the LVGL lock. Render on the existing UI task, never RX/app.
+    chat_caption_timer_ = lv_timer_create([](lv_timer_t* timer) {
+        auto* display = static_cast<LcdDisplay*>(lv_timer_get_user_data(timer));
+        ChatCaptionMailbox::Message caption;
+        if (!display->lesson_mode_active_.load() &&
+            Application::GetInstance().TakeChatCaption(caption)) {
+            display->SetChatMessage(caption.assistant ? "assistant" : "user", caption.text);
+        }
+    }, 100, this);
+    if (!chat_caption_timer_) ESP_LOGW(TAG, "chat_caption_timer_unavailable");
+}
+#endif
+
 bool LcdDisplay::Lock(int timeout_ms) {
     return lvgl_port_lock(timeout_ms);
 }
@@ -496,6 +520,9 @@ bool LcdDisplay::PresentLessonFramebuffer(const std::uint16_t* pixels,
             LV_COLOR_FORMAT_RGB565);
     }
     std::memcpy(lesson_cinematic_pixels_, pixels, framebuffer_bytes);
+    // Preparation presents frame zero before lesson_start. The LVGL port uses a
+    // recursive mutex, so claim ownership inside the same lock before exposure.
+    SetLessonMode(true);
     const lv_img_dsc_t* image = lesson_cinematic_framebuffer_->image_dsc();
     lv_image_set_src(lesson_background_, image);
     lv_image_set_scale(lesson_background_, LessonImageCoverScale(
@@ -528,6 +555,9 @@ void LcdDisplay::SetupUI() {
     
     Display::SetupUI();  // Mark SetupUI as called
     DisplayLockGuard lock(this);
+#if CONFIG_TBOT_VOICE_DEMO
+    StartChatCaptionTimer();
+#endif
 
     auto lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     auto text_font = lvgl_theme->text_font()->font();
@@ -742,6 +772,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
     }
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     if (content_ == nullptr) {
         if (setup_ui_called_) {
             ESP_LOGW(TAG, "SetChatMessage('%s', '%s') failed: content_ is nullptr (SetupUI() was called but container not created)", role, content);
@@ -935,6 +966,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
 
 void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     if (content_ == nullptr) {
         return;
     }
@@ -1172,6 +1204,7 @@ void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) { (void
 
 void LcdDisplay::ClearChatMessages() {
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     if (content_ == nullptr) {
         return;
     }
@@ -1199,6 +1232,9 @@ void LcdDisplay::SetupUI() {
     
     Display::SetupUI();  // Mark SetupUI as called
     DisplayLockGuard lock(this);
+#if CONFIG_TBOT_VOICE_DEMO
+    StartChatCaptionTimer();
+#endif
     LvglTheme* lvgl_theme = static_cast<LvglTheme*>(current_theme_);
     auto text_font = lvgl_theme->text_font()->font();
     auto icon_font = lvgl_theme->icon_font()->font();
@@ -1426,6 +1462,7 @@ void LcdDisplay::SetupUI() {
 
 void LcdDisplay::SetPreviewImage(std::unique_ptr<LvglImage> image) {
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     if (preview_image_ == nullptr) {
         ESP_LOGE(TAG, "Preview image is not initialized");
         return;
@@ -1624,6 +1661,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
     }
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     if (chat_message_label_ == nullptr) {
         if (setup_ui_called_) {
             ESP_LOGW(TAG, "SetChatMessage('%s', '%s') failed: chat_message_label_ is nullptr (SetupUI() was called but label not created)", role, content);
@@ -1650,6 +1688,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
 
 void LcdDisplay::ClearChatMessages() {
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     // In non-wechat mode, just clear the chat message label and hide the bar
     if (chat_message_label_ != nullptr) {
         lv_label_set_text(chat_message_label_, "");
@@ -1664,6 +1703,7 @@ void LcdDisplay::ClearChatMessages() {
 void LcdDisplay::SetLessonCaption(const char* content) {
     DisplayLockGuard lock(this);
     const bool empty = content == nullptr || content[0] == '\0';
+    lesson_caption_active_ = !empty;
     if (lesson_caption_bar_ != nullptr && lesson_caption_label_ != nullptr) {
         lv_label_set_text(lesson_caption_label_, empty ? "" : content);
         if (empty || hide_subtitle_) {
@@ -1978,7 +2018,36 @@ bool LcdDisplay::ApplyLessonVisualState(
 // layers become the whole scene.
 void LcdDisplay::SetLessonMode(bool active) {
     DisplayLockGuard lock(this);
-    lesson_mode_active_ = active;
+    if (lesson_mode_active_.exchange(active) == active) return;
+    lesson_caption_active_ = false;
+    // Conversation callbacks and transitions share this lock, including callbacks
+    // already queued when their timers are stopped.
+    std::uint8_t bit = 1;
+    if (active) lesson_chat_visibility_ = 0;
+    for (auto* bar : {top_bar_, status_bar_, bottom_bar_}) {
+        if (bar != nullptr) {
+            if (active) {
+                if (!lv_obj_has_flag(bar, LV_OBJ_FLAG_HIDDEN)) lesson_chat_visibility_ |= bit;
+                lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+            } else if ((lesson_chat_visibility_ & bit) != 0 &&
+                       (bar != bottom_bar_ || !hide_subtitle_)) {
+                lv_obj_remove_flag(bar, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        bit <<= 1;
+    }
+    if (active) {
+        if (notification_timer_) esp_timer_stop(notification_timer_);
+        if (preview_timer_) esp_timer_stop(preview_timer_);
+        if (notification_label_) lv_obj_add_flag(notification_label_, LV_OBJ_FLAG_HIDDEN);
+        if (preview_image_) lv_obj_add_flag(preview_image_, LV_OBJ_FLAG_HIDDEN);
+        preview_image_cached_.reset();
+        if (low_battery_popup_) lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+    } else if (status_label_) {
+        lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
+    }
     if (!active && lesson_focus_cue_ != nullptr) {
         lv_obj_add_flag(lesson_focus_cue_, LV_OBJ_FLAG_HIDDEN);
     }
@@ -2035,7 +2104,54 @@ bool LcdDisplay::ApplyLessonVisualState(
 void LcdDisplay::SetLessonMode(bool active) { (void)active; }
 #endif
 
+void LcdDisplay::StyleConversationOverlays() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE
+    for (auto* bar : {top_bar_, status_bar_, bottom_bar_}) {
+        if (bar) {
+            lv_obj_set_style_bg_opa(bar, LV_OPA_TRANSP, 0);
+            lv_obj_set_style_border_width(bar, 0, 0);
+        }
+    }
+    for (auto* label : {status_label_, notification_label_, chat_message_label_,
+                        network_label_, battery_label_, mute_label_}) {
+        if (label) lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    }
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_black(), 0);
+    if (container_) lv_obj_set_style_bg_color(container_, lv_color_black(), 0);
+#endif
+}
+
+void LcdDisplay::UpdateConversationFaceLayout() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE
+    if (emoji_box_ == nullptr || emoji_image_ == nullptr) return;
+    lv_obj_update_layout(lv_screen_active());
+    if (lv_obj_get_width(emoji_box_) != width_ ||
+        lv_obj_get_height(emoji_box_) != height_) {
+        ESP_LOGI(TAG, "Conversation face: %dx%d, transparent bars, white text",
+                 width_, height_);
+    }
+    lv_obj_set_style_radius(emoji_box_, 0, 0);
+    lv_obj_remove_flag(emoji_box_, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(emoji_box_, width_, height_);
+    lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_size(emoji_image_, width_, height_);
+    lv_obj_center(emoji_image_);
+    lv_image_set_inner_align(emoji_image_, LV_IMAGE_ALIGN_COVER);
+    lv_obj_center(emoji_label_);
+    StyleConversationOverlays();
+    if (top_bar_) lv_obj_move_foreground(top_bar_);
+    if (status_bar_) lv_obj_move_foreground(status_bar_);
+    if (bottom_bar_) lv_obj_move_foreground(bottom_bar_);
+#endif
+}
+
 void LcdDisplay::SetEmotion(const char* emotion) {
+    // Construct before either display guard so the timing log follows unlock.
+    ChatRuntimeTiming timing(3, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
+        [](uint32_t site, uint32_t hi, uint32_t lo) {
+            ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
+                static_cast<unsigned>(site), static_cast<unsigned long>(hi), static_cast<unsigned long>(lo));
+        });
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!", emotion);
     }
@@ -2056,6 +2172,7 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         const char* utf8 = font_awesome_get_utf8(emotion);
         if (utf8 != nullptr && emoji_label_ != nullptr) {
             DisplayLockGuard lock(this);
+            if (lesson_mode_active_) return;
             if (gif_controller_) {
                 gif_controller_->Stop();
                 gif_controller_.reset();
@@ -2068,6 +2185,7 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     }
 
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     // Stop any running GIF animation in the same lock scope as setting new image
     // to prevent LVGL from accessing freed image data between operations
     if (gif_controller_) {
@@ -2076,7 +2194,11 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     }
     if (image->IsGif()) {
         // Create new GIF controller
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE
+        gif_controller_ = std::make_unique<LvglGif>(image->image_dsc(), width_ == 480 && height_ == 320);
+#else
         gif_controller_ = std::make_unique<LvglGif>(image->image_dsc());
+#endif
         
         if (gif_controller_->IsLoaded()) {
             // emoji_image_ uses LV_IMAGE_ALIGN_COVER (set in SetupUI), so LVGL
@@ -2122,6 +2244,8 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         if (lesson_caption_bar_ != nullptr) lv_obj_move_foreground(lesson_caption_bar_);
         if (bottom_bar_ != nullptr) lv_obj_move_foreground(bottom_bar_);
     }
+
+    UpdateConversationFaceLayout();
 
 #if CONFIG_USE_WECHAT_MESSAGE_STYLE
     // In WeChat message style, if emotion is neutral, don't display it
@@ -2279,11 +2403,24 @@ void LcdDisplay::SetTheme(Theme* theme) {
 
     // No errors occurred. Save theme to settings
     Display::SetTheme(lvgl_theme);
+    StyleConversationOverlays();
 }
 
 void LcdDisplay::SetHideSubtitle(bool hide) {
     DisplayLockGuard lock(this);
     hide_subtitle_ = hide;
+    if (lesson_mode_active_) {
+        auto* caption_bar = lesson_caption_bar_ != nullptr ? lesson_caption_bar_ : bottom_bar_;
+        if (caption_bar != nullptr) {
+            if (hide || !lesson_caption_active_) lv_obj_add_flag(caption_bar, LV_OBJ_FLAG_HIDDEN);
+            else lv_obj_remove_flag(caption_bar, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (!lesson_caption_active_ && !hide && chat_message_label_ != nullptr &&
+            lv_label_get_text(chat_message_label_)[0] != '\0') {
+            lesson_chat_visibility_ |= 4;
+        }
+        return;
+    }
     
     // Immediately update UI visibility based on the setting
     if (bottom_bar_ != nullptr) {

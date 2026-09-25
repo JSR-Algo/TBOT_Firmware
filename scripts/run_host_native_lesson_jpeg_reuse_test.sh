@@ -11,6 +11,7 @@ if [[ ! -d "${JPEG_COMPONENT_ROOT}" ]]; then
   JPEG_COMPONENT_ROOT="${ROOT}/../../managed_components/espressif__esp_jpeg"
 fi
 touch "${BUILD_DIR}/sdkconfig.h"
+python3 "${ROOT}/scripts/prepare_host_jpeg_decoder.py" "${JPEG_COMPONENT_ROOT}/jpeg_decoder.c" "${BUILD_DIR}/jpeg_decoder.c"
 INCLUDES=(
   -I"${BUILD_DIR}"
   -I"${ROOT}/tests/native_stubs_jpeg"
@@ -36,9 +37,9 @@ ALLOC_INTERCEPT=(
 "${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" "${INCLUDES[@]}" \
   "${ALLOC_INTERCEPT[@]}" -c "${ROOT}/main/display/lvgl_display/jpg/jpeg_to_image.c" \
   -o "${BUILD_DIR}/jpeg_to_image.o"
-"${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" -Wno-incompatible-function-pointer-types \
+"${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" -Werror=incompatible-function-pointer-types \
   "${INCLUDES[@]}" "${COMPAT[@]}" "${JPEG_CONFIG[@]}" "${ALLOC_INTERCEPT[@]}" \
-  -c "${JPEG_COMPONENT_ROOT}/jpeg_decoder.c" \
+  -c "${BUILD_DIR}/jpeg_decoder.c" \
   -o "${BUILD_DIR}/jpeg_decoder.o"
 "${CC}" -std=c11 -O0 -g "${SANITIZERS[@]}" "${INCLUDES[@]}" "${COMPAT[@]}" "${JPEG_CONFIG[@]}" \
   "${ALLOC_INTERCEPT[@]}" -c "${JPEG_COMPONENT_ROOT}/tjpgd/tjpgd.c" -o "${BUILD_DIR}/tjpgd.o"

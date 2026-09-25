@@ -5,6 +5,7 @@ steps should model, invite a response, and continue after the child speaks; they
 must not turn into immediate pronunciation scoring or correction.
 """
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,9 +13,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 LESSON = json.loads((ROOT / "lesson" / "lesson.json").read_text(encoding="utf-8"))["lesson"]
 RENDER_CONTRACT = json.loads((ROOT / "lesson" / "render-contract.json").read_text(encoding="utf-8"))
+SELECTED_BACKEND = os.environ.get("COURSE_MODE_BACKEND_ROOT") or os.environ.get("TBOT_BACKEND_REPO")
+BACKEND_ROOT = Path(SELECTED_BACKEND) if SELECTED_BACKEND else ROOT.parent.parent / "tbot-backend"
 BACKEND_CANONICAL_MANIFEST = (
-    ROOT.parent.parent
-    / "tbot-backend"
+    BACKEND_ROOT
     / "scripts"
     / "seed"
     / "076_canonical-manifest.espTft.json"
@@ -83,6 +85,7 @@ def _combined_text(step: dict) -> str:
 
 def _backend_canonical_manifest() -> dict:
     if not BACKEND_CANONICAL_MANIFEST.exists():
+        assert not SELECTED_BACKEND, f"selected backend canonical manifest missing: {BACKEND_CANONICAL_MANIFEST}"
         pytest.skip("backend canonical espTft manifest lives in sibling tbot-backend checkout")
     return json.loads(BACKEND_CANONICAL_MANIFEST.read_text(encoding="utf-8"))
 

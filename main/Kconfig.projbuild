@@ -1,5 +1,15 @@
 menu "Tbot Assistant"
 
+config TBOT_VOICE_DEMO
+    bool "Voice demo: defer lesson sync and coalesce conversation captions"
+    default n
+    help
+        Keep wake detection available during an attended voice and arm demo.
+        Reject lesson SD sync before it pauses microphone processing.
+        Keep the current animated face instead of changing it per transcript.
+        Show the latest LCD caption on the UI task outside the control queue.
+        Disable this option to restore normal lesson downloads and expressions.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://esp.tjbot.vn/tbot/ota/"

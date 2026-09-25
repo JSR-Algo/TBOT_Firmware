@@ -1013,13 +1013,22 @@ def test_retryable_auto_confirm_keeps_cached_pending_claim_and_token():
     assert "StartClaimPoll();" in retry_body
 
 
+def claim_activation_flow(source):
+    requested = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
+    completion = function_body(source, "void Application::CompleteProtocolActivation")
+    assert requested.index("claim_protocol_completion_pending_ = true;") < requested.index("ReloadProtocolAfterClaimCredentials();")
+    assert "if (claim_protocol_completion_pending_)" in completion
+    assert "CompleteClaimProtocolActivation();" in completion
+    return requested + function_body(source, "void Application::CompleteClaimProtocolActivation")
+
+
 def test_same_session_claim_applies_local_assets_before_starting_audio_or_wake():
     header = read("main/application.h")
     source = read("main/application.cc")
     result_body = function_body(
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
-    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
+    finish_body = claim_activation_flow(source)
 
     assert "bool EnsureLocalAssetsAppliedForClaim();" in header
     assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
@@ -1031,7 +1040,8 @@ def test_same_session_claim_applies_local_assets_before_starting_audio_or_wake()
     assert ready_idx < start_idx < idle_idx < wake_idx
 
     start_failure = function_body(finish_body, "if (!audio_service_.Start())")
-    assert "return false;" in start_failure
+    assert "ScheduleClaimLocalAssetsRetry();" in start_failure
+    assert "return;" in start_failure
     gated_body = finish_body[start_idx:finish_body.index("StartHeartbeat();", start_idx)]
     assert "SetDeviceState(kDeviceStateIdle);" in gated_body
     assert "if (!audio_service_.Start())" in gated_body
@@ -1043,7 +1053,7 @@ def test_same_session_claim_asset_failure_is_recoverable_and_does_not_show_succe
     result_body = function_body(
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
-    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
+    finish_body = claim_activation_flow(source)
     retry_body = function_body(source, "void Application::ScheduleClaimLocalAssetsRetry")
     retry_tick = function_body(source, "void Application::HandleClaimLocalAssetsRetry")
 
@@ -1073,7 +1083,7 @@ def test_claim_confirm_defers_protocol_reload_until_local_assets_are_ready():
     result_body = function_body(
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
-    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
+    finish_body = claim_activation_flow(source)
     reload_body = function_body(source, "void Application::ReloadProtocolAfterClaimCredentials")
     open_body = function_body(websocket, "bool WebsocketProtocol::OpenAudioChannel")
 
@@ -1088,9 +1098,10 @@ def test_claim_confirm_defers_protocol_reload_until_local_assets_are_ready():
     idle_idx = finish_body.index("SetDeviceState(kDeviceStateIdle);")
     assert assets_idx < reload_idx < idle_idx
     assert "CloseAudioChannelByIntent();" in reload_body
-    assert "DoResetProtocol();" in reload_body
-    assert "InitializeProtocol();" in reload_body
-    assert "reset_pending_.store(true);" in reload_body
+    assert "RequestInitializeProtocol();" in reload_body
+    request = function_body(source, "void Application::RequestInitializeProtocol")
+    assert "reset_pending_.store(true);" in request
+    assert "CompletePendingProtocolWork();" in request
     assert "RefreshSettings();" in open_body
     assert open_body.index("RefreshSettings();") < open_body.index("std::string url = url_;")
 
@@ -1099,7 +1110,7 @@ def test_claim_local_asset_failure_does_not_reload_or_start_claimed_passive_unti
     result_body = function_body(
         source, "bool Application::ApplyPendingTbotClaimConfirmationResult"
     )
-    finish_body = function_body(source, "bool Application::FinishClaimActivationAfterLocalAssetsReady")
+    finish_body = claim_activation_flow(source)
     retry_tick = function_body(source, "void Application::HandleClaimLocalAssetsRetry")
     initialize = function_body(source, "void Application::InitializeProtocol")
 

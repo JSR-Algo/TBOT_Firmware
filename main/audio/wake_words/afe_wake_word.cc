@@ -126,6 +126,13 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
         afe_feed_channels_ = codec_input_channels_;
     }
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), models_, AFE_TYPE_SR, AFE_MODE_LOW_COST);
+    if (afe_config == nullptr) {
+        ESP_LOGE(TAG, "Failed to allocate AFE configuration");
+        return false;
+    }
+    // This product only exposes the primary "Hi ESP" wake phrase. Loading the
+    // unused secondary model consumes the internal RAM Wi-Fi needs for DMA/TLS.
+    afe_config->wakenet_model_name_2 = nullptr;
     char* configured_wakenet_models[] = {
         afe_config->wakenet_model_name,
         afe_config->wakenet_model_name_2,
@@ -164,7 +171,17 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     afe_config->ns_init = false;
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
+    if (afe_iface_ == nullptr) {
+        afe_config_free(afe_config);
+        ESP_LOGE(TAG, "Failed to resolve AFE interface");
+        return false;
+    }
     afe_data_ = afe_iface_->create_from_config(afe_config);
+    afe_config_free(afe_config);
+    if (afe_data_ == nullptr) {
+        ESP_LOGE(TAG, "Failed to create AFE pipeline");
+        return false;
+    }
     // ponytail: fixed LCDWiki Hi ESP sensitivity; add board/env tuning if false wakes show up.
     int threshold_ret = afe_iface_->set_wakenet_threshold(afe_data_, 1, kHiEspWakeThreshold);
     ESP_LOGI(TAG, "hiesp_wakenet_threshold index=1 value=%.2f ret=%d",
@@ -175,7 +192,7 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
     // feed/uplink paths stay dominant.
     shutting_down_.store(false);
     xEventGroupClearBits(event_group_, DETECTION_EXITED_EVENT);
-    const BaseType_t detection_created = xTaskCreate([](void* arg) {
+    const BaseType_t detection_created = xTaskCreateWithCaps([](void* arg) {
         auto this_ = (AfeWakeWord*)arg;
         this_->audio_detection_task_handle_.store(
             xTaskGetCurrentTaskHandle(), std::memory_order_release);
@@ -186,11 +203,14 @@ bool AfeWakeWord::Initialize(AudioCodec* codec, srmodel_list_t* models_list) {
             this_->audio_detection_task_handle_.store(nullptr, std::memory_order_release);
         }
         xEventGroupSetBits(exit_events, DETECTION_EXITED_EVENT);
-        vTaskDelete(NULL);
-    }, "audio_detection", 4096, this, tskIDLE_PRIORITY + 1, nullptr);
+        vTaskDeleteWithCaps(nullptr);
+    }, "audio_detection", 4096, this, tskIDLE_PRIORITY + 1, nullptr,
+       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (detection_created != pdPASS) {
         xEventGroupSetBits(event_group_, DETECTION_EXITED_EVENT);
         audio_detection_task_handle_.store(nullptr, std::memory_order_release);
+        afe_iface_->destroy(afe_data_);
+        afe_data_ = nullptr;
         return false;
     }
 

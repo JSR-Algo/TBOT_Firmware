@@ -131,7 +131,7 @@ bool EspSsl::Connect(const std::string& host, int port) {
         ssl->receive_task_handle_.store(nullptr);
         ssl->shutdown_state_.TaskExited();
         xEventGroupSetBits(event_group, ESP_SSL_EVENT_RECEIVE_TASK_EXIT);
-        vTaskDelete(nullptr);
+        vTaskDeleteWithCaps(nullptr);
     }, "ssl_receive", 4096, this, 1, &receive_task,
        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {

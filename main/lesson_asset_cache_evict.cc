@@ -1,4 +1,5 @@
 #include "lesson_asset_cache_evict.h"
+#include "lesson_asset_retained_selection.h"
 
 #if defined(ESP_PLATFORM) || defined(TBOT_LESSON_ASSET_CACHE_EVICT_TESTING)
 #include "lesson_asset_storage_coordinator.h"
@@ -16,6 +17,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
+#include <cstdio>
 #include <limits>
 #include <new>
 #include <string>
@@ -78,6 +80,64 @@ LessonAssetCacheEvictResult Finish(LessonAssetCacheEvictResult result) {
 
 bool IsLowerAlphaNumeric(char ch) {
     return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+}
+
+int InspectPointerNode(const char* path, struct stat* info) {
+#ifdef ESP_PLATFORM
+    // The SD mount uses FAT, which has no symlinks; ESP-IDF omits lstat.
+    return stat(path, info);
+#else
+    return lstat(path, info);
+#endif
+}
+
+// Only the activation writer's canonical pointer is evidence for deleting a
+// different pack. Missing is distinct from corrupt, unreadable, or uncertain.
+bool ReadPointerKey(const std::string& path, const std::string& lesson,
+                    std::string* key) {
+    struct stat info {};
+    if (InspectPointerNode(path.c_str(), &info) != 0) return errno == ENOENT;
+    if (!S_ISREG(info.st_mode) || info.st_size <= 0 || info.st_size > 1024) return false;
+    FILE* file = std::fopen(path.c_str(), "rb");
+    if (!file) return false;
+    char bytes[1025];
+    const auto count = std::fread(bytes, 1, sizeof(bytes), file);
+    const bool read_ok = !std::ferror(file) && count == static_cast<size_t>(info.st_size);
+    const bool close_ok = std::fclose(file) == 0;
+    if (!read_ok || !close_ok) return false;
+    const std::string body(bytes, count);
+    const std::string prefix = "{\"lessonId\":\"" + lesson + "\",\"cacheKey\":\"";
+    if (body.compare(0, prefix.size(), prefix) != 0) return false;
+    const auto end = body.find('"', prefix.size());
+    if (end == std::string::npos) return false;
+    const auto candidate = body.substr(prefix.size(), end - prefix.size());
+    if (!IsCanonicalLessonCacheKey(candidate) || candidate.substr(0, candidate.find('/')) != lesson)
+        return false;
+    const auto checksum = candidate.substr(candidate.size() - 64);
+    if (body != prefix + candidate + "\",\"manifestChecksum\":\"" + checksum + "\"}") return false;
+    *key = candidate;
+    return true;
+}
+
+bool PointersPermitEviction(const std::string& root, const std::string& lesson,
+                           const std::string& cache_key, const std::string& replacement) {
+    const auto directory = root + "/" + lesson + "/";
+    std::string active;
+    if (!ReadPointerKey(directory + "active.json", lesson, &active) || active == cache_key)
+        return false;
+    for (const char* name : {"active.json.tmp", "active.json.backup", "current.json", "pvg.json"}) {
+        std::string key;
+        if (!ReadPointerKey(directory + name, lesson, &key)) return false;
+        if (key == cache_key && !(std::string(name) == "active.json.backup" &&
+                !replacement.empty() && replacement != cache_key && active == replacement)) return false;
+    }
+    // Reserved legacy global pointers have no supported writer here; their
+    // presence is uncertainty, never deletion authority.
+    for (const char* name : {"current.json", "pvg.json"}) {
+        struct stat info {};
+        if (InspectPointerNode((root + "/" + name).c_str(), &info) == 0 || errno != ENOENT) return false;
+    }
+    return true;
 }
 
 bool IsLowerHex(char ch) {
@@ -348,6 +408,10 @@ const char* LessonAssetCacheEvictCodeName(LessonAssetCacheEvictCode code) {
             return "invalid_cache_key";
         case LessonAssetCacheEvictCode::kLessonSessionActive:
             return "lesson_session_active";
+        case LessonAssetCacheEvictCode::kRetainedSelectionProtected:
+            return "retained_selection_protected";
+        case LessonAssetCacheEvictCode::kPointerProtected:
+            return "pointer_protected";
         case LessonAssetCacheEvictCode::kPathMismatch:
             return "path_mismatch";
         case LessonAssetCacheEvictCode::kNestedDirectory:
@@ -368,7 +432,8 @@ const char* LessonAssetCacheEvictCodeName(LessonAssetCacheEvictCode code) {
 
 LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
     const std::string& cache_key,
-    bool lesson_session_active
+    bool lesson_session_active,
+    const std::string& replacement_cache_key
 ) {
     if (!IsCanonicalLessonCacheKey(cache_key)) {
         return Finish(MakeResult(LessonAssetCacheEvictCode::kInvalidCacheKey));
@@ -399,6 +464,9 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
         return Finish(MakeResult(
             LessonAssetCacheEvictCode::kLessonSessionActive, cache_key));
     }
+    if (!RetainedEvictionAllowed(cache_key)) {
+        return Finish(MakeResult(LessonAssetCacheEvictCode::kRetainedSelectionProtected, cache_key));
+    }
 
     auto code = InspectRequiredDirectory(root);
     if (code != LessonAssetCacheEvictCode::kEvicted) {
@@ -407,6 +475,10 @@ LessonAssetCacheEvictResult EvictLessonAssetCacheKey(
     code = InspectRequiredDirectory(slug_path);
     if (code != LessonAssetCacheEvictCode::kEvicted) {
         return Finish(MakeResult(code, cache_key));
+    }
+    if (!PointersPermitEviction(root, cache_key.substr(0, cache_separator), cache_key,
+                               replacement_cache_key)) {
+        return Finish(MakeResult(LessonAssetCacheEvictCode::kPointerProtected, cache_key));
     }
 
     struct stat leaf_stat {};

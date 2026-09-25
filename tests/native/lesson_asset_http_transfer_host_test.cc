@@ -654,6 +654,66 @@ void TestExhaustedResumeRetriesCleanPartialStaging() {
     Expect(Read(destination) == "known-good", "exhausted resume replaced destination");
 }
 
+void TestInitialHttpFailuresPreserveOldFileAndBoundAttempts() {
+    for (const bool missing : {true, false}) {
+        const std::string destination = std::string(kRoot) + "/initial-failure.bin";
+        Write(destination, "known-good");
+        ResumableHttp http("replacement");
+        http.PushResponse({missing ? 404 : 200, 0, 11, "", 0, !missing});
+        size_t bytes = 0;
+        std::string error;
+        {
+            LessonAssetDownloadStagingFile staging(destination);
+            try {
+                DownloadLessonAssetHttpBodyToFile(
+                    http, nullptr, true, 11, "https://assets.example/failure.bin",
+                    staging.path(), bytes);
+            } catch (const std::runtime_error& failure) {
+                error = failure.what();
+            }
+            Expect(error.find(missing ? "unexpected status 404" : "read error") !=
+                       std::string::npos,
+                   "initial HTTP failure did not expose its cause");
+            Expect(http.open_count == 1 && http.close_count == 1,
+                   "initial HTTP failure did not close after a bounded attempt");
+            Expect(bytes == 0 && !fs::exists(staging.path() + ".tmp"),
+                   "initial HTTP failure left partial bytes");
+        }
+        Expect(Read(destination) == "known-good", "initial HTTP failure replaced old file");
+        Expect(!fs::exists(destination + ".download"), "initial HTTP failure left staging");
+    }
+}
+
+void TestMissingOrInvalidStorageParentFailsWithoutActivationBytes() {
+    for (const bool corrupt : {false, true}) {
+        const std::string parent = std::string(kRoot) +
+            (corrupt ? "/invalid-sd-parent" : "/missing-sd-parent");
+        if (corrupt) Write(parent, "not-a-directory");
+        ResumableHttp http("replacement");
+        http.PushResponse({200, 0, 11, ""});
+        size_t bytes = 0;
+        const std::string destination = parent + "/asset.bin";
+        std::string error;
+        try {
+            LessonAssetDownloadStagingFile staging(destination);
+            DownloadLessonAssetHttpBodyToFile(
+                http, nullptr, true, 11, "https://assets.example/storage.bin",
+                staging.path(), bytes);
+        } catch (const std::runtime_error& failure) {
+            error = failure.what();
+        }
+        Expect(error.find(corrupt ? "lesson asset backup is not a regular file" :
+                                   "failed to open SD file") != std::string::npos,
+               "unavailable storage did not expose its cause");
+        Expect(bytes == 0 && !fs::exists(destination),
+               "unavailable storage produced activation bytes");
+        const size_t expected_attempts = corrupt ? 0 : 1;
+        Expect(http.open_count == expected_attempts && http.close_count == expected_attempts,
+               "unavailable storage retried or leaked HTTP connection");
+        if (corrupt) Expect(Read(parent) == "not-a-directory", "invalid storage parent changed");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -673,6 +733,8 @@ int main() {
     TestResumeRejectsUnexpectedStatusAndCleansPartial();
     TestResumeRejectsOversizeResponseAndCleansPartial();
     TestExhaustedResumeRetriesCleanPartialStaging();
+    TestInitialHttpFailuresPreserveOldFileAndBoundAttempts();
+    TestMissingOrInvalidStorageParentFailsWithoutActivationBytes();
     fs::remove_all(kRoot);
     std::cout << "lesson asset HTTP transfer host tests passed\n";
     return 0;

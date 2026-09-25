@@ -13,6 +13,7 @@
 #include <string>
 #include <chrono>
 #include <functional>
+#include <atomic>
 
 enum class LessonVisualApplyResult {
     kApplied,
@@ -97,6 +98,7 @@ public:
     virtual bool SnapshotToJpeg(std::string& jpeg_data, int quality = 80);
 
 protected:
+    std::atomic<bool> lesson_mode_active_{false};
     esp_pm_lock_handle_t pm_lock_ = nullptr;
     lv_display_t *display_ = nullptr;
 

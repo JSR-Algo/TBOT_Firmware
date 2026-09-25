@@ -12,7 +12,7 @@
  */
 class LvglGif {
 public:
-    explicit LvglGif(const lv_img_dsc_t* img_dsc);
+    explicit LvglGif(const lv_img_dsc_t* img_dsc, bool opaque_scale_2x = false);
     virtual ~LvglGif();
 
     // LvglImage interface implementation
@@ -92,6 +92,12 @@ private:
     
     // Last frame update time
     uint32_t last_call_;
+    uint32_t stats_start_ = 0;
+    uint32_t stats_frames_ = 0;
+    uint32_t stats_decode_us_ = 0;
+    uint32_t stats_max_gap_ms_ = 0;
+    uint16_t* opaque_frame_ = nullptr;
+    void UpdateOpaqueFrame();
     
     // Animation state
     bool playing_;

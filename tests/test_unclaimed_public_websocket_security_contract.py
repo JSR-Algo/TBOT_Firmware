@@ -111,17 +111,17 @@ def test_unclaimed_public_websocket_drops_forbidden_realtime_and_mcp_frames_befo
 
     assert "IsAllowedUnclaimedPublicLessonMessage(root)" in public_gate
     assert "return;" in public_gate
-    assert "on_incoming_json_(root, callback_transport_epoch);" in public_gate
+    assert "DeliverIncomingJson(root, callback_transport_epoch, source, receipt);" in public_gate
     assert public_gate.index("IsAllowedUnclaimedPublicLessonMessage(root)") < public_gate.index(
-        "on_incoming_json_(root, callback_transport_epoch);"
+        "DeliverIncomingJson(root, callback_transport_epoch, source, receipt);"
     )
     for forbidden_type in ("tts", "system", "alert", "custom", "robot_action", "stt", "llm", "lesson_"):
         assert forbidden_type not in public_gate
 
     authenticated = on_data[
-        on_data.index("if (on_incoming_json_ != nullptr)", on_data.index("if (session_mode_ == WebsocketSessionMode::kUnclaimedPublicLesson)")) :
+        on_data.index("if (strncmp(type->valuestring") :
     ]
-    assert "on_incoming_json_(root, callback_transport_epoch);" in authenticated
+    assert "DeliverIncomingJson(root, callback_transport_epoch, source, receipt);" in authenticated
 
 def test_unclaimed_public_websocket_drops_binary_before_audio_dispatch():
     source = read("main/protocols/websocket_protocol.cc")
@@ -152,7 +152,7 @@ def test_unclaimed_public_websocket_deletes_json_root_on_allow_and_reject_paths(
     reject_idx = public_gate.index("unclaimed_public_ws_frame_rejected")
     reject_delete_idx = public_gate.index("cJSON_Delete(root);", reject_idx)
     reject_return_idx = public_gate.index("return;", reject_delete_idx)
-    allow_idx = public_gate.index("on_incoming_json_(root, callback_transport_epoch);")
+    allow_idx = public_gate.index("DeliverIncomingJson(root, callback_transport_epoch, source, receipt);")
     allow_delete_idx = public_gate.index("cJSON_Delete(root);", allow_idx)
     allow_return_idx = public_gate.index("return;", allow_delete_idx)
 

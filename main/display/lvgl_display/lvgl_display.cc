@@ -21,6 +21,7 @@ LvglDisplay::LvglDisplay() {
         .callback = [](void *arg) {
             LvglDisplay *display = static_cast<LvglDisplay*>(arg);
             DisplayLockGuard lock(display);
+            if (display->lesson_mode_active_) return;
             lv_obj_add_flag(display->notification_label_, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(display->status_label_, LV_OBJ_FLAG_HIDDEN);
         },
@@ -74,6 +75,7 @@ void LvglDisplay::SetStatus(const char* status) {
         ESP_LOGW(TAG, "SetStatus('%s') called before SetupUI() - message will be lost!", status);
     }
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     if (status_label_ == nullptr) {
         if (setup_ui_called_) {
             ESP_LOGW(TAG, "SetStatus('%s') failed: status_label_ is nullptr (SetupUI() was called but label not created)", status);
@@ -100,6 +102,7 @@ void LvglDisplay::ShowNotification(const char* notification, int duration_ms) {
         return;
     }
     DisplayLockGuard lock(this);
+    if (lesson_mode_active_) return;
     if (notification_label_ == nullptr) {
         if (setup_ui_called_) {
             ESP_LOGW(TAG, "ShowNotification('%s') failed: notification_label_ is nullptr (SetupUI() was called but label not created)", notification);
@@ -127,10 +130,10 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         }
 
         // Update icon if mute state changes
-        if (codec->output_volume() == 0 && !muted_) {
+        if (!lesson_mode_active_ && codec->output_volume() == 0 && !muted_) {
             muted_ = true;
             lv_label_set_text(mute_label_, FONT_AWESOME_VOLUME_XMARK);
-        } else if (codec->output_volume() > 0 && muted_) {
+        } else if (!lesson_mode_active_ && codec->output_volume() > 0 && muted_) {
             muted_ = false;
             lv_label_set_text(mute_label_, "");
         }
@@ -181,7 +184,7 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         // Check low battery popup only when clock tick event is triggered
         // Because when initializing, the battery level is not ready yet.
         if (low_battery_popup_ != nullptr && !update_all) {
-            if (app.IsLessonRuntimeActive()) {
+            if (lesson_mode_active_ || app.IsLessonRuntimeActive()) {
                 if (!lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) {
                     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
                 }
@@ -215,10 +218,12 @@ void LvglDisplay::UpdateStatusBar(bool update_all) {
         };
         if (std::find(allowed_states.begin(), allowed_states.end(), device_state) != allowed_states.end()) {
             icon = board.GetNetworkStateIcon();
-            if (network_label_ != nullptr && icon != nullptr && network_icon_ != icon) {
+            if (icon != nullptr) {
                 DisplayLockGuard lock(this);
-                network_icon_ = icon;
-                lv_label_set_text(network_label_, network_icon_);
+                if (!lesson_mode_active_ && network_label_ != nullptr && network_icon_ != icon) {
+                    network_icon_ = icon;
+                    lv_label_set_text(network_label_, network_icon_);
+                }
             }
         }
     }

@@ -17,6 +17,7 @@
 #include <cinttypes>
 #include "lesson_tvideo_template.h"
 #include "lesson_asset_storage_coordinator.h"
+#include "lesson_asset_retained_parser.h"
 #include "lesson_motion_presets.h"
 #include "lesson_embodied_action.h"
 #include "lesson_layer_state.h"
@@ -213,6 +214,7 @@ void SetLessonCourseModeCapabilityForTest(bool ready, bool reduced_motion) {
 
 void AddLessonRendererFeatures(cJSON* features) {
     if (features == nullptr) return;
+    cJSON_AddStringToObject(features, "retainedSelection", "retained-assignment-device.v1");
     cJSON_DeleteItemFromObject(features, "renderer");
     cJSON* renderers = cJSON_CreateArray();
     cJSON_AddItemToArray(renderers, cJSON_CreateString(kLessonRendererV1));
@@ -487,6 +489,25 @@ const cJSON* Obj(const cJSON* o, const char* k) {
     if (o == nullptr) return nullptr;
     const cJSON* v = cJSON_GetObjectItem(o, k);
     return cJSON_IsObject(v) ? v : nullptr;
+}
+
+bool RetainedPrepareAllowed(const cJSON* body, const std::string& assignment_id) {
+    try {
+        const auto revision = ParseRetainedSyncRevision(body);
+        const auto retained = cJSON_GetObjectItemCaseSensitive(body, "retainedSelection");
+        RetainedDeviceOperation operation;
+        if (retained) operation = ParseRetainedDeviceOperation(retained);
+        const char* cache_key = Str(Obj(body, "assetPack"), "cacheKey");
+        if (!RetainedSyncAllowed(cache_key ? cache_key : "", revision,
+                                 retained ? &operation.owner : nullptr)) return false;
+        if (!retained) return true;
+        double assignment_version = 0;
+        const char* checksum = Str(Obj(body, "manifestRef"), "manifestChecksum");
+        return !operation.release && operation.owner.assignment_id == assignment_id &&
+            Num(body, "assignmentVersion", assignment_version) &&
+            assignment_version == static_cast<double>(operation.owner.assignment_version) &&
+            checksum && operation.owner.manifest_checksum == checksum;
+    } catch (...) { return false; }
 }
 
 bool ExactObjectKeys(const cJSON* object, const std::set<std::string_view>& expected) {
@@ -811,7 +832,32 @@ int64_t NowMs() { return static_cast<int64_t>(time(nullptr)) * 1000LL; }
 // the app task via Application::Schedule(). The F->S sequence is the only
 // firmware-owned wire state (shared by acks + progress, monotonic per
 // (assignmentId,sessionId), starting at 1 — fixture sequenceStreams F->S).
+struct LessonCinematicRuntimeOrigin {
+    ChatRequestContext source_context;
+    std::uint64_t transport_epoch = 0;
+    std::uint64_t renderer_generation = 0;
+    std::uint64_t command_sequence_id = 0;
+    std::string protocol_version;
+    std::string assignment_id;
+    std::string session_id;
+    std::string lesson_id;
+    std::string step_id;
+    std::string phase_id;
+    double lesson_version = 0;
+    bool has_lesson_id = false;
+    bool has_step_id = false;
+    bool has_lesson_version = false;
+    bool reported = false;
+    bool local_runtime_released = false;
+    // 0 = retryable, 1 = one callback queued, 2 = completed or superseded.
+    std::shared_ptr<std::atomic<unsigned>> display_release;
+};
+
 struct LessonSession {
+    ChatRequestContext source_context;
+    LessonCinematicRuntimeOrigin cinematic_runtime_origin;
+    bool cinematic_runtime_failed = false;
+    bool cinematic_failed_display_released = false;
     struct AckReplay {
         int64_t sequence = 0;
         std::string body_json;
@@ -1280,6 +1326,7 @@ std::atomic<std::uint64_t> g_visual_completion_nonce{0};
 std::atomic<std::uint64_t> g_embodied_completion_nonce{0};
 
 struct EmbodiedTimerContext {
+    ChatRequestContext source_context;
     LessonQueueItemKind kind;
     std::uint64_t transport_epoch;
     std::string assignment_id;
@@ -1294,6 +1341,7 @@ struct EmbodiedTimerContext {
 void LessonEmbodiedTimerCallback(void* raw) {
     std::unique_ptr<EmbodiedTimerContext> context(
         static_cast<EmbodiedTimerContext*>(raw));
+    if (Application::GetInstance().IsChatRequestCurrent(context->source_context))
     Application::GetInstance().EnqueueLessonEmbodiedCompletion(
         context->kind, context->transport_epoch,
         context->assignment_id.c_str(), context->session_id.c_str(),
@@ -1304,6 +1352,7 @@ void LessonEmbodiedTimerCallback(void* raw) {
 
 bool ArmLessonEmbodiedTimer(LessonQueueItemKind kind, std::uint32_t delay_ms) {
     auto context = std::make_unique<EmbodiedTimerContext>();
+    context->source_context = g_session.source_context;
     context->kind = kind;
     context->transport_epoch = g_session.current_transport_epoch;
     context->assignment_id = g_session.assignment_id;
@@ -1385,6 +1434,8 @@ namespace {
 #endif
 
 void ClearTerminalLessonCursor() {
+    g_session.source_context.reset();
+    g_session.cinematic_runtime_origin = {};
     // A completed/failed lesson is terminal. The server may reuse the same assignmentId
     // / sessionId for the next sample lesson and restart S->F sequence at 1; clear the
     // inbound cursor so fresh prepare is not treated as an old duplicate.
@@ -1504,7 +1555,7 @@ void ClearActiveLessonEmbodiedAction() {
     Display* display = Board::GetInstance().GetDisplay();
     LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
     if (lvgl_display != nullptr) {
-        Application::GetInstance().Schedule([lvgl_display]() {
+        Application::GetInstance().ScheduleChatLesson(g_session.source_context, [lvgl_display]() {
             lvgl_display->ClearLessonVisualFocus();
         });
     }
@@ -1640,6 +1691,50 @@ cJSON* MakeErrorBody(const char* code, const char* message, bool retryable, cons
         return nullptr;
     }
     return b;
+}
+
+const char* CinematicErrorName(tbot::LessonCinematicError error) {
+    switch (error) {
+    case tbot::LessonCinematicError::kUnsupportedContract: return "CINEMATIC_CAPABILITY_UNSUPPORTED";
+    case tbot::LessonCinematicError::kInvalidPath:
+    case tbot::LessonCinematicError::kFileOpen: return "CINEMATIC_SD_PATH_MISSING";
+    case tbot::LessonCinematicError::kParserFailed: return "CINEMATIC_PARSER_FAILED";
+    case tbot::LessonCinematicError::kFileRead: return "CINEMATIC_FILE_READ_FAILED";
+    case tbot::LessonCinematicError::kSessionMismatch: return "CINEMATIC_SESSION_MISMATCH";
+    case tbot::LessonCinematicError::kInsufficientPsram: return "CINEMATIC_INSUFFICIENT_PSRAM";
+    case tbot::LessonCinematicError::kDecodeFailed: return "CINEMATIC_DECODE_FAILED";
+    case tbot::LessonCinematicError::kDecodeTimeout: return "CINEMATIC_DECODE_TIMEOUT";
+    case tbot::LessonCinematicError::kPresentFailed: return "CINEMATIC_PRESENT_FAILED";
+    case tbot::LessonCinematicError::kStaleCommand: return "CINEMATIC_STALE_COMMAND";
+    case tbot::LessonCinematicError::kSessionReleaseFailed: return "CINEMATIC_SESSION_RELEASE_FAILED";
+    case tbot::LessonCinematicError::kInvalidPhase:
+    case tbot::LessonCinematicError::kMetadataMismatch:
+    case tbot::LessonCinematicError::kInvalidState:
+    case tbot::LessonCinematicError::kNone: return "CINEMATIC_METADATA_MISMATCH";
+    }
+    return "CINEMATIC_METADATA_MISMATCH";
+}
+
+void RetainCinematicRuntimeOrigin(const cJSON* root, ChatRequestContext context,
+                                tbot::LessonLayeredCinematicRenderer* renderer,
+                                std::uint64_t sequence, const char* phase_id) {
+    LessonCinematicRuntimeOrigin origin;
+    origin.source_context = std::move(context);
+    origin.transport_epoch = g_session.current_transport_epoch;
+    origin.renderer_generation = renderer->RuntimeGeneration();
+    origin.command_sequence_id = sequence;
+    origin.protocol_version = Str(root, "protocolVersion");
+    origin.assignment_id = Str(root, "assignmentId");
+    origin.session_id = Str(root, "sessionId");
+    origin.phase_id = phase_id;
+    const auto* lesson_id = Str(root, "lessonId");
+    const auto* step_id = Str(root, "stepId");
+    origin.has_lesson_id = lesson_id != nullptr;
+    origin.lesson_id = lesson_id != nullptr ? lesson_id : "";
+    origin.has_step_id = step_id != nullptr;
+    origin.step_id = step_id != nullptr ? step_id : "";
+    origin.has_lesson_version = Num(root, "lessonVersion", origin.lesson_version);
+    g_session.cinematic_runtime_origin = std::move(origin);
 }
 
 // FW-01 / FW-LESSON-01 — per-step completion class. The frozen contract splits the 9
@@ -2471,6 +2566,8 @@ void SetLessonTransportEpoch(std::uint64_t transport_epoch) {
 }
 
 void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch) {
+    g_session.source_context.reset();
+    g_session.cinematic_runtime_origin = {};
     g_visual_callback_token.fetch_add(1, std::memory_order_acq_rel);
     g_session.current_transport_epoch = transport_epoch;
     ++g_session.visual_generation;
@@ -2488,8 +2585,136 @@ void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch) {
     g_session.pending_visual_motion_preset.clear();
 }
 
+std::uint64_t PendingLessonCinematicErrorEpoch() {
+    const auto& origin = g_session.cinematic_runtime_origin;
+    return origin.source_context ? origin.transport_epoch : 0;
+}
+
+bool DispatchPendingLessonCinematicError(Protocol* protocol) {
+    auto& origin = g_session.cinematic_runtime_origin;
+    auto& app = Application::GetInstance();
+    if (!origin.source_context) return false;
+    if (!app.IsChatLessonRequestCurrent(origin.source_context) ||
+        origin.transport_epoch != g_session.current_transport_epoch ||
+        origin.assignment_id != g_session.assignment_id || origin.session_id != g_session.session_id ||
+        g_session.cinematic_renderer_id != tbot::kLessonRendererV5) {
+        origin = {};
+        return false;
+    }
+    auto* renderer = tbot::ActiveLessonLayeredCinematicRenderer();
+    if (renderer == nullptr || renderer->RuntimeGeneration() != origin.renderer_generation) {
+        origin = {};
+        return false;
+    }
+    const auto failure = renderer->PendingRuntimeError();
+    if (!failure || failure->generation != origin.renderer_generation ||
+        failure->command_sequence_id != origin.command_sequence_id ||
+        failure->phase_id != origin.phase_id || protocol == nullptr) return false;
+
+    if (!origin.reported) {
+        cJSON* envelope = LessonJsonCreateObject();
+        cJSON* body = MakeErrorBody(CinematicErrorName(failure->error),
+                                  "cinematic playback failed", false, "cinematicPhase");
+        cJSON* detail = body != nullptr ? cJSON_GetObjectItem(body, "context") : nullptr;
+        bool built = envelope != nullptr && body != nullptr && detail != nullptr &&
+            LessonJsonAddString(envelope, "protocolVersion", origin.protocol_version.c_str()) &&
+            LessonJsonAddString(envelope, "assignmentId", origin.assignment_id.c_str()) &&
+            LessonJsonAddString(envelope, "sessionId", origin.session_id.c_str()) &&
+            LessonJsonAddString(detail, "phaseId", failure->phase_id.c_str()) &&
+            LessonJsonAddNumber(detail, "commandSequenceId", static_cast<double>(failure->command_sequence_id));
+        if (built && origin.has_lesson_id)
+            built = LessonJsonAddString(envelope, "lessonId", origin.lesson_id.c_str()) != nullptr;
+        if (built && origin.has_lesson_version)
+            built = LessonJsonAddNumber(envelope, "lessonVersion", origin.lesson_version) != nullptr;
+        if (built && origin.has_step_id)
+            built = LessonJsonAddString(envelope, "stepId", origin.step_id.c_str()) != nullptr;
+        if (built && !origin.has_step_id)
+            built = LessonJsonAddNull(envelope, "stepId") != nullptr;
+        const auto outbound_sequence = g_session.fs_sequence + 1;
+        built = built && LessonJsonAddString(envelope, "type", "lesson_error") != nullptr &&
+            LessonJsonAddNumber(envelope, "sequence", static_cast<double>(outbound_sequence)) != nullptr &&
+            LessonJsonAddNumber(envelope, "timestamp", static_cast<double>(NowMs())) != nullptr;
+        if (!built) {
+            cJSON_Delete(envelope);
+            cJSON_Delete(body);
+            return false;
+        }
+        if (!LessonJsonAttachItem(envelope, "body", body)) {
+            cJSON_Delete(envelope);
+            cJSON_Delete(body);
+            return false;
+        }
+        std::unique_ptr<char, decltype(&cJSON_free)> serialized(
+            LessonJsonPrintUnformatted(envelope), &cJSON_free);
+        cJSON_Delete(envelope);
+        if (!serialized) return false;
+        const std::string frame(serialized.get());
+        if (frame.empty() || !app.IsChatLessonRequestCurrent(origin.source_context) ||
+            !protocol->SendLessonFrame(frame)) return false;
+        g_session.fs_sequence = outbound_sequence;
+        origin.reported = true;
+    }
+    g_session.cinematic_runtime_failed = true;
+    if (!origin.local_runtime_released) {
+        app.BeginLessonTerminalAudioQuiet();
+        app.CancelLessonInteractiveListening();
+        CancelAndRestoreActiveLessonEmbodiedAction();
+        app.SetLessonRuntimeActive(false);
+        g_session.running = false;
+        g_session.paused = false;
+        g_layer_state.ClearAll();
+        if (!renderer->ReleaseFailedRuntimeResources(failure->generation, failure->command_sequence_id))
+            return false;
+        origin.local_runtime_released = true;
+    }
+    if (!origin.display_release) origin.display_release = std::make_shared<std::atomic<unsigned>>(0);
+    if (origin.display_release->load() == 0) {
+        auto* display = Board::GetInstance().GetDisplay();
+        auto* lvgl_display = dynamic_cast<LvglDisplay*>(display);
+        const auto generation = origin.renderer_generation;
+        const auto context = origin.source_context;
+        const auto receipt = origin.display_release;
+        receipt->store(1);
+        try {
+            app.Schedule([display, lvgl_display, renderer, generation, context, receipt]() {
+                try {
+                    if (Application::GetInstance().IsChatLessonRequestCurrent(context) &&
+                        tbot::ActiveLessonLayeredCinematicRenderer() == renderer) {
+                        renderer->WithRuntimeGeneration(generation, [display, lvgl_display]() {
+                            if (lvgl_display) {
+                                lvgl_display->CancelLessonRobotEntrance();
+                                lvgl_display->SetLessonBackground(nullptr);
+                                lvgl_display->SetLessonObject(nullptr);
+                                lvgl_display->SetLessonRobotOverlay(nullptr);
+                                lvgl_display->SetLessonTeachingWord("");
+                                lvgl_display->SetLessonMode(false);
+                            }
+                            if (display) display->SetLessonCaption("");
+                        });
+                    }
+                    receipt->store(2);
+                } catch (...) { receipt->store(0); }
+            });
+        } catch (...) {
+            receipt->store(0);
+            throw;
+        }
+    }
+    if (origin.display_release->load() != 2) return false;
+    g_session.cinematic_failed_display_released = true;
+    if (g_session.lesson_asset_generation != 0) {
+        if (!LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                g_session.assignment_id, g_session.session_id, g_session.lesson_asset_generation)) return false;
+        g_session.lesson_asset_generation = 0;
+    }
+    renderer->AcknowledgeRuntimeError(failure->generation, failure->command_sequence_id);
+    origin = {};
+    return true;
+}
+
 bool AcceptLessonVisualCompletion(
     const LessonQueueItem& item, std::string* ack_frame, RobotUart* robot_uart) {
+    if (!Application::GetInstance().IsChatRequestCurrent(g_session.source_context)) return false;
     if (ack_frame == nullptr) return false;
     ack_frame->clear();
     if ((item.kind != LessonQueueItemKind::kVisualCompleted &&
@@ -2645,6 +2870,7 @@ bool DispatchLessonVisualCompletion(
 }
 
 bool DispatchLessonEmbodiedCompletion(const LessonQueueItem& item, Protocol* protocol) {
+    if (!Application::GetInstance().IsChatRequestCurrent(g_session.source_context)) return false;
     if ((item.kind != LessonQueueItemKind::kEmbodiedHoldCompleted &&
          item.kind != LessonQueueItemKind::kEmbodiedSettled) ||
         item.transport_epoch != g_session.current_transport_epoch ||
@@ -2694,7 +2920,7 @@ bool DispatchLessonEmbodiedCompletion(const LessonQueueItem& item, Protocol* pro
     if (listen_generation != 0 && returned_to_rest && g_session.running && !g_session.paused &&
         g_session.current_step_id == listen_step_id) {
         g_session.assessment_window_open = true;
-        Application::GetInstance().Schedule([listen_generation]() {
+        Application::GetInstance().ScheduleChatLesson(g_session.source_context, [listen_generation]() {
             Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
         });
     } else if (listen_generation != 0) {
@@ -2774,7 +3000,19 @@ bool Application::AbandonLessonStorageSession() {
     return ended;
 }
 
-void Application::HandleLessonMessage(const cJSON* root) {
+void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext context) {
+    if (!IsChatLessonRequestCurrent(context)) return;
+    // Keep one source permit while the session owns timer/visual continuations.
+    struct RetainSessionSource {
+        Application* app;
+        ChatRequestContext context;
+        ~RetainSessionSource() {
+            if (context && app->IsChatRequestCurrent(context) &&
+                g_session.current_transport_epoch == context->lesson_epoch &&
+                (g_session.running || g_session.prepared || g_session.pending_ack))
+                g_session.source_context = std::move(context);
+        }
+    } retain_source{this, context};
     const char* type = Str(root, "type");
     if (type == nullptr) return;  // defensive (transports pre-guard; see DIV note)
 
@@ -2804,19 +3042,19 @@ void Application::HandleLessonMessage(const cJSON* root) {
     // consumed, then guard only the SEND on protocol_ — otherwise a null protocol_
     // would leak frame_body (a latent per-frame heap leak if protocol_ is ever torn
     // down with a frame in flight).
-    auto emit = [this](const cJSON* in, const char* frame_type, cJSON* frame_body) {
+    auto emit = [this, context](const cJSON* in, const char* frame_type, cJSON* frame_body) {
         if (frame_body == nullptr) return;
         const int64_t seq = g_session.fs_sequence + 1;
         std::string frame = BuildFrame(in, frame_type, seq, frame_body);
-        if (protocol_ && !frame.empty()) {
+        if (IsChatLessonRequestCurrent(context) && protocol_ && !frame.empty()) {
             g_session.fs_sequence = seq;
             protocol_->SendLessonFrame(frame);
         }
     };
-    auto emit_isolated_prepare_error = [this](const cJSON* in, cJSON* frame_body) {
+    auto emit_isolated_prepare_error = [this, context](const cJSON* in, cJSON* frame_body) {
         if (frame_body == nullptr) return;
         std::string frame = BuildFrame(in, "lesson_error", 1, frame_body);
-        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
+        if (IsChatLessonRequestCurrent(context) && protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
     };
     // Canonical lesson_ack (plan §5.3 / P0): body.acks echoes the ACKED sequence;
     // the ack's own envelope.sequence is the firmware F->S counter; there is NO
@@ -2888,7 +3126,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         emit(in, "lesson_ack", b);
     };
-    auto emit_isolated_prepare_ack = [this](const cJSON* in, int64_t acked,
+    auto emit_isolated_prepare_ack = [this, context](const cJSON* in, int64_t acked,
                                             cJSON* asset_pack_ack) {
         cJSON* body = cJSON_CreateObject();
         cJSON_AddNumberToObject(body, "acks", static_cast<double>(acked));
@@ -2899,13 +3137,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
         LogLessonAckEvidence(in, body);
         std::string frame = BuildFrame(in, "lesson_ack", 1, body);
-        if (protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
+        if (IsChatLessonRequestCurrent(context) && protocol_ && !frame.empty()) protocol_->SendLessonFrame(frame);
     };
-    auto show_lesson_failure_display = [this]() {
+    auto show_lesson_failure_display = [this, context]() {
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display, lvgl_display]() {
+            ScheduleChatLesson(context, [display, lvgl_display]() {
                 if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
@@ -2940,6 +3178,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                                      &abort_speaking_if_needed,
                                      &end_lesson_asset_session](bool release_asset_session = true) {
         InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
+        Application::GetInstance().BeginLessonTerminalAudioQuiet();
         abort_speaking_if_needed();
         Application::GetInstance().CancelLessonInteractiveListening();
         CancelAndRestoreActiveLessonEmbodiedAction();
@@ -2952,8 +3191,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
         if (release_asset_session) end_lesson_asset_session();
         show_lesson_failure_display();
     };
-    auto clear_stale_lesson_for_fresh_prepare = [this](bool show_waiting_state) {
+    auto clear_stale_lesson_for_fresh_prepare = [this, context](bool show_waiting_state) {
         InvalidateLessonVisualCompletionState(g_session.current_transport_epoch);
+        Application::GetInstance().BeginLessonTerminalAudioQuiet();
         Application::GetInstance().CancelLessonInteractiveListening();
         CancelAndRestoreActiveLessonEmbodiedAction();
         Application::GetInstance().SetLessonRuntimeActive(false);
@@ -2961,7 +3201,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display, lvgl_display, show_waiting_state]() {
+            ScheduleChatLesson(context, [display, lvgl_display, show_waiting_state]() {
                 if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
@@ -2981,12 +3221,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
     const bool is_embodied_action = strcmp(type, "lesson_embodied_action") == 0;
     const bool is_embodied_cancel = strcmp(type, "lesson_embodied_cancel") == 0;
     if (is_embodied_action || is_embodied_cancel) {
+        g_session.source_context = context;
         if (g_session.assignment_id != assignment_id || g_session.session_id != session_id ||
             !g_session.prepared || !g_session.running || g_session.paused ||
             g_session.current_step_id.empty()) {
             return;
         }
-        LessonEmbodiedParseContext context{
+        LessonEmbodiedParseContext parse_context{
             g_session.assignment_id.c_str(),
             g_session.session_id.c_str(),
             g_session.current_step_id.c_str(),
@@ -3009,13 +3250,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 outbound_sequence, sequence, assignment_id, session_id,
                 Str(root, "stepId"), rejected_action_id,
                 static_cast<std::uint64_t>(rejected_generation), "rejected", false);
-            if (protocol_ != nullptr && !ack.empty() && protocol_->SendLessonFrame(ack)) {
+            if (IsChatLessonRequestCurrent(context) && protocol_ != nullptr && !ack.empty() && protocol_->SendLessonFrame(ack)) {
                 g_session.fs_sequence = outbound_sequence;
             }
         };
         if (is_embodied_cancel) {
             LessonEmbodiedCancel cancel;
-            if (!ParseLessonEmbodiedCancelFrame(root, context, &cancel) ||
+            if (!ParseLessonEmbodiedCancelFrame(root, parse_context, &cancel) ||
                 cancel.action_id != g_session.active_action_id ||
                 cancel.action_generation != g_session.active_action_generation) {
                 return;
@@ -3062,7 +3303,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.active_action_id == inbound_action_id) {
             return;
         }
-        if (!ParseLessonEmbodiedActionFrame(root, context, &action, &parse_error) ||
+        if (!ParseLessonEmbodiedActionFrame(root, parse_context, &action, &parse_error) ||
             sequence <= g_session.last_in_sequence ||
             g_session.consumed_action_ids.count(action.action_id) != 0) {
             emit_embodied_rejected();
@@ -3100,7 +3341,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         Display* embodied_display = Board::GetInstance().GetDisplay();
         LvglDisplay* embodied_lvgl_display = dynamic_cast<LvglDisplay*>(embodied_display);
         if (embodied_display != nullptr) {
-            Schedule([embodied_display, embodied_lvgl_display,
+            ScheduleChatLesson(context, [embodied_display, embodied_lvgl_display,
                       face = std::string(preset.face),
                       focus = action.visual_focus_region]() {
                 embodied_display->SetEmotion(face.c_str());
@@ -3331,6 +3572,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             return;
         }
         g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
+        g_session.cinematic_runtime_origin = {};
         const bool degraded = renderer->last_apply_degraded();
         if (has_delivery_id && !ResolveLessonCourseDelivery(
                 session_id, delivery_id,
@@ -3358,17 +3600,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
         (renderer_v3_lesson_step ||
          (strcmp(type, "lesson_stop") == 0 && Obj(body, "cinematicPhase") == nullptr));
     if ((cinematic_v3 && !renderer_v3_standard_frame) || cinematic_v4 || cinematic_v5) {
-        auto claim_cinematic_display = [this]() {
+        auto claim_cinematic_display = [this, context]() {
             Display* display = Board::GetInstance().GetDisplay();
             LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
             if (lvgl_display == nullptr) return;
-            Schedule([lvgl_display]() { lvgl_display->SetLessonMode(true); });
+            ScheduleChatLesson(context, [lvgl_display]() { lvgl_display->SetLessonMode(true); });
         };
-        auto release_cinematic_display = [this]() {
+        auto release_cinematic_display = [this, context]() {
             Display* display = Board::GetInstance().GetDisplay();
             LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
             if (lvgl_display == nullptr) return;
-            Schedule([lvgl_display]() {
+            ScheduleChatLesson(context, [lvgl_display]() {
                 lvgl_display->SetLessonBackground(nullptr);
                 lvgl_display->SetLessonObject(nullptr);
                 lvgl_display->SetLessonRobotOverlay(nullptr);
@@ -3481,32 +3723,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
             return failure;
         };
 
-        auto cinematic_error_name = [](tbot::LessonCinematicError error) {
-            switch (error) {
-            case tbot::LessonCinematicError::kUnsupportedContract: return "CINEMATIC_CAPABILITY_UNSUPPORTED";
-            case tbot::LessonCinematicError::kInvalidPath:
-            case tbot::LessonCinematicError::kFileOpen: return "CINEMATIC_SD_PATH_MISSING";
-            case tbot::LessonCinematicError::kParserFailed: return "CINEMATIC_PARSER_FAILED";
-            case tbot::LessonCinematicError::kFileRead: return "CINEMATIC_FILE_READ_FAILED";
-            case tbot::LessonCinematicError::kSessionMismatch: return "CINEMATIC_SESSION_MISMATCH";
-            case tbot::LessonCinematicError::kInsufficientPsram: return "CINEMATIC_INSUFFICIENT_PSRAM";
-            case tbot::LessonCinematicError::kDecodeFailed: return "CINEMATIC_DECODE_FAILED";
-            case tbot::LessonCinematicError::kDecodeTimeout: return "CINEMATIC_DECODE_TIMEOUT";
-            case tbot::LessonCinematicError::kPresentFailed: return "CINEMATIC_PRESENT_FAILED";
-            case tbot::LessonCinematicError::kStaleCommand: return "CINEMATIC_STALE_COMMAND";
-            case tbot::LessonCinematicError::kSessionReleaseFailed:
-                return "CINEMATIC_SESSION_RELEASE_FAILED";
-            case tbot::LessonCinematicError::kInvalidPhase:
-            case tbot::LessonCinematicError::kMetadataMismatch:
-            case tbot::LessonCinematicError::kInvalidState:
-            case tbot::LessonCinematicError::kNone: return "CINEMATIC_METADATA_MISMATCH";
-            }
-            return "CINEMATIC_METADATA_MISMATCH";
-        };
         auto emit_cinematic_ack = [&](const tbot::LessonCinematicResponse& response) {
             if (!response.accepted) {
                 emit(root, "lesson_error", MakeErrorBody(
-                    cinematic_error_name(response.error), "cinematic command rejected",
+                    CinematicErrorName(response.error), "cinematic command rejected",
                     false, "cinematicPhase"));
                 return;
             }
@@ -3556,7 +3776,8 @@ void Application::HandleLessonMessage(const cJSON* root) {
         };
 
         if (!prepare_frame &&
-            (!g_session.prepared || g_session.lesson_asset_generation == 0 ||
+            (!g_session.prepared ||
+             (g_session.lesson_asset_generation == 0 && !g_session.cinematic_runtime_failed) ||
              g_session.assignment_id != assignment_id || g_session.session_id != session_id ||
              g_session.cinematic_renderer_id != protocol_version)) {
             emit_isolated_prepare_error(root, MakeErrorBody(
@@ -3584,6 +3805,16 @@ void Application::HandleLessonMessage(const cJSON* root) {
         }
 
         const std::uint64_t now_ms = static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+        auto retained_cinematic_allowed = [&](const LessonAssetSessionResult& reservation) {
+            if (RetainedPrepareAllowed(body, assignment_id)) return true;
+            if (!reservation.idempotent) {
+                LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                    assignment_id, session_id, reservation.generation);
+            }
+            emit(root, "lesson_error", MakeErrorBody("RETAINED_SELECTION_MISMATCH",
+                "lesson selection owner or revision changed", true, "retainedSelection"));
+            return false;
+        };
         auto commit_cinematic_prepare_session = [&](std::uint64_t generation) {
             const bool fresh_session = !g_session.prepared ||
                 g_session.assignment_id != assignment_id || g_session.session_id != session_id;
@@ -3602,6 +3833,9 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.last_in_sequence = sequence;
             g_session.cinematic_renderer_id = protocol_version;
             g_session.cinematic_template_version = cinematic_template_version;
+            g_session.cinematic_runtime_origin = {};
+            g_session.cinematic_runtime_failed = false;
+            g_session.cinematic_failed_display_released = false;
             g_session.prepared = true;
             g_session.running = false;
             g_session.paused = false;
@@ -3858,6 +4092,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     if (!reservation.acquired) {
                         response = cinematic_failure_response(tbot::LessonCinematicError::kFileOpen);
                     } else {
+                        if (!retained_cinematic_allowed(reservation)) return;
                         tbot::ConfigureProductionLessonLayeredCinematicSession(
                             assignment_id, session_id, reservation.generation);
                         response = renderer_v5->Prepare(config, now_ms);
@@ -4021,6 +4256,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                         response = cinematic_failure_response(
                             tbot::LessonCinematicError::kFileOpen);
                     } else {
+                        if (!retained_cinematic_allowed(reservation)) return;
                         tbot::ConfigureProductionLessonFlattenedCinematicSession(
                             assignment_id, session_id, reservation.generation);
                         response = renderer_v4->Prepare(config, now_ms);
@@ -4097,6 +4333,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                                 command_sequence_id, phase_id,
                                 tbot::LessonCinematicError::kFileOpen};
                 } else {
+                    if (!retained_cinematic_allowed(reservation)) return;
                     tbot::ConfigureProductionLessonCinematicSession(
                         assignment_id, session_id, reservation.generation);
                     response = renderer_v3->Prepare(config, now_ms);
@@ -4114,7 +4351,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 : cinematic_v4 ? renderer_v4->Start(command_sequence_id,
                                                      cinematic_identity, now_ms)
                                : renderer_v3->Start(command_sequence_id, phase_id, now_ms);
-            if (response.accepted) {
+            if (response.accepted && !g_session.cinematic_runtime_failed) {
                 g_session.running = true;
                 g_session.paused = false;
                 SetLessonRuntimeActive(true);
@@ -4125,13 +4362,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 : cinematic_v4 ? renderer_v4->Pause(command_sequence_id,
                                                      cinematic_identity, now_ms)
                                : renderer_v3->Pause(command_sequence_id, phase_id, now_ms);
-            if (response.accepted) g_session.paused = true;
+            if (response.accepted && !g_session.cinematic_runtime_failed) g_session.paused = true;
         } else if (control_frame && strcmp(command, "resume") == 0) {
             response = cinematic_v5 ? renderer_v5->Resume(command_sequence_id, phase_id, now_ms)
                 : cinematic_v4 ? renderer_v4->Resume(command_sequence_id,
                                                       cinematic_identity, now_ms)
                                : renderer_v3->Resume(command_sequence_id, phase_id, now_ms);
-            if (response.accepted) g_session.paused = false;
+            if (response.accepted && !g_session.cinematic_runtime_failed) g_session.paused = false;
         } else if (control_frame) {
             response = cinematic_v5 ? renderer_v5->Cancel(command_sequence_id, phase_id)
                 : cinematic_v4 ? renderer_v4->Cancel(command_sequence_id, cinematic_identity)
@@ -4145,9 +4382,13 @@ void Application::HandleLessonMessage(const cJSON* root) {
             (control_frame && strcmp(command, "cancel") == 0);
         bool reset_cinematic_session_after_ack = false;
         if (response.accepted && terminal_command) {
+            const bool display_already_released = g_session.cinematic_failed_display_released ||
+                (g_session.cinematic_runtime_origin.display_release &&
+                 g_session.cinematic_runtime_origin.display_release->load() == 2);
+            g_session.cinematic_runtime_origin = {};
             Application::GetInstance().BeginLessonTerminalAudioQuiet();
             SetLessonRuntimeActive(false);
-            release_cinematic_display();
+            if (!display_already_released) release_cinematic_display();
             g_session.running = false;
             g_session.paused = false;
             if (cinematic_v5) renderer_v5->DiscardSession();
@@ -4165,6 +4406,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
                 response = cinematic_failure_response(
                     tbot::LessonCinematicError::kSessionReleaseFailed);
             }
+        }
+        if (response.accepted && cinematic_v5 && !prepare_frame && !terminal_command &&
+            !g_session.cinematic_runtime_failed) {
+            RetainCinematicRuntimeOrigin(root, context, renderer_v5, command_sequence_id, phase_id);
         }
         emit_cinematic_ack(response);
         if (reset_cinematic_session_after_ack) g_session = LessonSession{};
@@ -4286,6 +4531,17 @@ void Application::HandleLessonMessage(const cJSON* root) {
             prepare_newly_acquired_asset_session = false;
         }
     };
+
+    if (is_prepare) {
+        // The actual session reservation excludes concurrent selection mutations.
+        // Check here before asset reads or committing renderer/session state.
+        if (!RetainedPrepareAllowed(body, assignment_id)) {
+            release_new_lesson_asset_session();
+            emit_prepare_error(MakeErrorBody("RETAINED_SELECTION_MISMATCH",
+                "lesson selection owner or revision changed", true, "retainedSelection"));
+            return;
+        }
+    }
 
     // --- session context (per (assignmentId,sessionId)) ---
     // Prepare candidates are still uncommitted here. Reject non-prepare frames outside
@@ -4417,7 +4673,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             "superseded",
             g_session.pending_visual_nonce);
         std::string superseded_ack;
-        if (AcceptLessonVisualCompletion(superseded, &superseded_ack) && protocol_) {
+        if (IsChatLessonRequestCurrent(context) && AcceptLessonVisualCompletion(superseded, &superseded_ack) && protocol_) {
             protocol_->SendLessonFrame(superseded_ack);
         }
     }
@@ -4558,7 +4814,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             const std::string callback_session_id = g_session.session_id;
             const char* opening_layout = Str(Obj(body, "openingEntrance"), "layoutPreset");
             const std::string callback_layout = opening_layout != nullptr ? opening_layout : "";
-            Schedule([start_display, start_lvgl, renderer_v2_callback, visual_callback_token,
+            ScheduleChatLesson(context, [context, start_display, start_lvgl, renderer_v2_callback, visual_callback_token,
                       callback_transport_epoch, callback_visual_generation, sequence,
                       callback_visual_nonce, callback_assignment_id, callback_session_id,
                       callback_layout, opening_background, opening_robot,
@@ -4598,9 +4854,10 @@ void Application::HandleLessonMessage(const cJSON* root) {
                     }
                     start_lvgl->StartLessonRobotEntrance(
                         {callback_layout.c_str(), false},
-                        [callback_transport_epoch, callback_visual_generation, sequence,
+                        [context, callback_transport_epoch, callback_visual_generation, sequence,
                          callback_visual_nonce, callback_assignment_id, callback_session_id](
                             LessonVisualApplyResult result, const char* degraded_reason) {
+                            if (!Application::GetInstance().IsChatRequestCurrent(context)) return;
                             Application::GetInstance().EnqueueLessonVisualCompletion(
                                 result == LessonVisualApplyResult::kPhaseTimeout
                                     ? LessonQueueItemKind::kVisualTimedOut
@@ -4643,7 +4900,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
             const bool renderer_v2_pause = g_session.renderer_v2;
-            Schedule([display, lvgl_display, renderer_v2_pause]() {
+            ScheduleChatLesson(context, [display, lvgl_display, renderer_v2_pause]() {
                 if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (renderer_v2_pause && lvgl_display) {
                     lvgl_display->ApplyLessonVisualState(
@@ -4674,7 +4931,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
             const bool renderer_v2_resume = g_session.renderer_v2;
-            Schedule([display, lvgl_display, renderer_v2_resume]() {
+            ScheduleChatLesson(context, [display, lvgl_display, renderer_v2_resume]() {
                 if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (renderer_v2_resume && lvgl_display) {
                     lvgl_display->ApplyLessonVisualState(
@@ -4741,7 +4998,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         Display* display = Board::GetInstance().GetDisplay();
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         if (display) {
-            Schedule([display, lvgl_display, stop_status, stop_emotion, stop_message, stop_sound]() {
+            ScheduleChatLesson(context, [display, lvgl_display, stop_status, stop_emotion, stop_message, stop_sound]() {
                 if (lvgl_display) lvgl_display->CancelLessonRobotEntrance();
                 if (lvgl_display) lvgl_display->SetLessonBackground(nullptr);
                 if (lvgl_display) lvgl_display->SetLessonObject(nullptr);
@@ -4825,7 +5082,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const std::string callback_step_id = g_session.pending_step_id;
         LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(display);
         const LessonVisualStateKind visual_state = VisualStateKind(Str(body, "state"));
-        Schedule([display, lvgl_display, presentation, visual_state, visual_callback_token,
+        ScheduleChatLesson(context, [context, display, lvgl_display, presentation, visual_state, visual_callback_token,
                   callback_transport_epoch, callback_visual_generation, callback_visual_nonce,
                   sequence, callback_assignment_id, callback_session_id, callback_step_id]() {
             if (g_visual_callback_token.load(std::memory_order_acquire) !=
@@ -4837,10 +5094,11 @@ void Application::HandleLessonMessage(const cJSON* root) {
             if (lvgl_display) {
                 lvgl_display->ApplyLessonVisualState(
                     {visual_state, true},
-                    [callback_transport_epoch, callback_visual_generation, sequence,
+                    [context, callback_transport_epoch, callback_visual_generation, sequence,
                      callback_visual_nonce, callback_assignment_id, callback_session_id,
                      callback_step_id](
                         LessonVisualApplyResult result, const char* degraded_reason) {
+                        if (!Application::GetInstance().IsChatRequestCurrent(context)) return;
                         Application::GetInstance().EnqueueLessonVisualCompletion(
                             result == LessonVisualApplyResult::kPhaseTimeout
                                 ? LessonQueueItemKind::kVisualTimedOut
@@ -5210,7 +5468,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
         const bool clear_bg = !poster_drew;
         const bool clear_object = !object_drew;
         const bool clear_overlay = !overlay_drew;
-        Schedule([display, lvgl_display, clear_bg, clear_object, clear_overlay,
+        ScheduleChatLesson(context, [display, lvgl_display, clear_bg, clear_object, clear_overlay,
                   tvideo_use_bounds, tvideo_arrived_bounds,
                   has_visible_content, cap = caption,
                   word = normalized_teaching_word]() {
@@ -5330,7 +5588,7 @@ void Application::HandleLessonMessage(const cJSON* root) {
             g_session.assessment_window_open = true;
             ESP_LOGI(TAG, "lesson_step interactive opening listen window stepId=%s",
                      step_id != nullptr ? step_id : "?");
-            Schedule([listen_generation]() {
+            ScheduleChatLesson(context, [listen_generation]() {
                 Application::GetInstance().PrepareLessonInteractiveListening(listen_generation);
             });
         }

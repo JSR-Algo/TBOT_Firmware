@@ -39,6 +39,7 @@ void SetLessonCourseDeliveryWriteFailureForTest(bool fail);
 void FailNextLessonCourseDeliveryWriteForTest(int write_number);
 }
 #include "lesson_asset_storage_coordinator.h"
+#include "lesson_asset_retained_selection.h"
 #include "lesson_motion_presets.h"
 #include "system_info.h"
 
@@ -948,6 +949,10 @@ void test_envelope_guards() {
     // has assignment+session but no sequence -> dropped (has_seq false)
     Handle("{\"type\":\"lesson_prepare\",\"assignmentId\":\"a\",\"sessionId\":\"s\"}");
     require(Sent().empty(), "missing sequence emits nothing");
+    for (const char* sequence : {"-1", "1.5", "2147483648", "1e999"}) {
+        Handle(std::string("{\"type\":\"lesson_prepare\",\"assignmentId\":\"a\",\"sessionId\":\"s\",\"sequence\":") + sequence + "}");
+        require(Sent().empty(), "invalid numeric sequence emits nothing");
+    }
 }
 
 void test_embodied_action_capability_and_async_terminal_ack() {
@@ -1491,7 +1496,8 @@ void test_renderer_v2_capability_shape_and_exact_tokens() {
     char* encoded = cJSON_PrintUnformatted(features);
     require(encoded != nullptr, "renderer capability serializes");
     require(std::string(encoded) ==
-                "{\"lesson\":true,\"renderer\":[\"teebot-lesson-renderer.v1\","
+                "{\"lesson\":true,\"retainedSelection\":\"retained-assignment-device.v1\","
+                "\"renderer\":[\"teebot-lesson-renderer.v1\","
                 "\"teebot-lesson-renderer.v2\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
@@ -1519,7 +1525,8 @@ void test_renderer_v3_capability_is_fail_closed_until_initialized() {
     AddLessonRendererFeatures(features);
     encoded = cJSON_PrintUnformatted(features);
     require(encoded != nullptr && std::string(encoded) ==
-                "{\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
+                "{\"retainedSelection\":\"retained-assignment-device.v1\","
+                "\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
                 "\"teebot-lesson-renderer.v3\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
@@ -1984,6 +1991,8 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
     require(FrameType(1) == "lesson_ack" &&
                 FrameBodyStr(1, "cinematicPhase", "event") == "phaseReady",
             "v5 start routes to the layered renderer");
+    require(display.lesson_mode_calls == std::vector<bool>({true}),
+            "accepted v5 start claims display ownership exactly once");
     Handle(V5Frame("lesson_cinematic_control", 3,
         "{\"command\":\"pause\",\"phaseId\":\"flyIn\",\"commandSequenceId\":93}"));
     require(FrameType(2) == "lesson_ack", "v5 pause routes to the layered renderer");
@@ -2002,6 +2011,15 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
     require(!display.lesson_mode_calls.empty() && !display.lesson_mode_calls.back() &&
                 !display.background_calls.empty() && !display.background_calls.back(),
             "v5 stop releases the cinematic display surface and layers");
+    const auto released_modes = display.lesson_mode_calls;
+    const auto released_backgrounds = display.background_calls;
+    Handle(V5Frame("lesson_stop", 5,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"flyIn\","
+        "\"commandSequenceId\":95}}"));
+    require(display.lesson_mode_calls == released_modes &&
+                display.background_calls == released_backgrounds &&
+                fake.closes == 1 && fake.frees == 4,
+            "duplicate terminal does not release display or buffers again");
 
     ResetObservable();
     FreshSession();
@@ -2016,6 +2034,308 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
     Board::GetInstance().display_ = nullptr;
 
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+}
+
+void test_renderer_v5_async_error_identity_retry_and_stale_source() {
+    for (int scenario = 0; scenario < 12; ++scenario) {
+        ResetObservable();
+        FreshSession();
+        V3RendererFake fake;
+        tbot::LessonLayeredCinematicRenderer renderer(
+            {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+             V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+        tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+        LvglDisplay display;
+        Board::GetInstance().display_ = &display;
+        auto context = std::make_shared<ChatInboundMessage>();
+        context->owner = App().host_chat_owner;
+        context->lesson_epoch = App().lesson_transport_epoch_gate_.PublishedEpoch();
+        SetLessonTransportEpoch(context->lesson_epoch);
+        auto handle_current = [&](const std::string& frame) {
+            cJSON* root = cJSON_Parse(frame.c_str());
+            require(root != nullptr, "current-source fixture parses");
+            App().HandleLessonMessage(root, context);
+            cJSON_Delete(root);
+        };
+        handle_current(V5PrepareFrame(1));
+        std::string start = V5Frame("lesson_start", 2,
+            "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"flyIn\",\"commandSequenceId\":92}}");
+        if (scenario != 9)
+            start.insert(1, "\"lessonId\":\"identity-lesson\",\"lessonVersion\":7,\"stepId\":\"identity-step\",");
+        handle_current(start);
+        require(Sent().size() == 2 && PendingLessonCinematicErrorEpoch() == context->lesson_epoch,
+                "accepted current-source start retains its asynchronous error origin");
+        fake.fail_decode = true;
+        require(!renderer.Tick(static_cast<std::uint64_t>(esp_timer_get_time() / 1000) + 100).accepted && renderer.PendingRuntimeError().has_value(),
+                "actual running Tick publishes a sticky decode failure");
+        const size_t before = Sent().size();
+        const auto owned_modes = display.lesson_mode_calls;
+        if (scenario == 1) {
+            ++App().host_chat_owner.protocol_generation;
+        } else if (scenario == 2) {
+            App().lesson_transport_epoch_gate_.PublishTerminalEpoch();
+        } else if (scenario == 3) {
+            handle_current(V5Frame("lesson_stop", 3,
+                "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"flyIn\",\"commandSequenceId\":93}}"));
+        } else if (scenario == 4) {
+            fake.fail_decode = false;
+            handle_current(V5PrepareFrame(3, 93));
+        } else if (scenario == 5) {
+            renderer.DiscardSession();
+        }
+        if (scenario == 10) {
+            App().fail_next_schedule = true;
+            bool threw = false;
+            try { DispatchPendingLessonCinematicError(App().protocol_.get()); }
+            catch (const std::bad_alloc&) { threw = true; }
+            require(threw && Sent().size() == before + 1 && renderer.PendingRuntimeError(),
+                    "display queue allocation refusal retains reported error for worker retry");
+            require(DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == before + 1 &&
+                        !renderer.PendingRuntimeError() && !App().lesson_runtime_active,
+                    "display queue admission recovery releases ownership without duplicate error");
+        } else if (scenario == 11) {
+            App().before_terminal_quiet = [&] { renderer.DiscardSession(); };
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == before + 1,
+                    "generation change between failure read and resource release refuses stale teardown");
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()) &&
+                        PendingLessonCinematicErrorEpoch() == 0 && Sent().size() == before + 1 &&
+                        !App().lesson_runtime_active && fake.allocations == fake.frees,
+                    "next worker poll discards obsolete cleanup origin without replay or reactivation");
+        } else if (scenario == 9) {
+            require(DispatchPendingLessonCinematicError(App().protocol_.get()),
+                    "lifecycle error without optional lesson fields dispatches");
+            cJSON* frame = cJSON_Parse(Sent().back().c_str());
+            require(frame != nullptr && cJSON_IsNull(cJSON_GetObjectItem(frame, "stepId")) &&
+                        cJSON_GetObjectItem(frame, "lessonId") == nullptr &&
+                        cJSON_GetObjectItem(frame, "lessonVersion") == nullptr,
+                    "absent optional identity remains absent while required lifecycle stepId is null");
+            cJSON_Delete(frame);
+        } else if (scenario == 6) {
+            auto& storage = LessonAssetStorageCoordinator::GetInstance();
+            const auto session = storage.TryBeginLessonSession(AID(), SID());
+            auto lease = storage.TryRetainLessonSession(AID(), SID(), session.generation);
+            require(static_cast<bool>(lease), "outstanding reader retains actual lesson reservation");
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == before + 1 &&
+                        renderer.PendingRuntimeError().has_value() && storage.HasLessonSession(),
+                    "blocked storage release retains reported pending failure for cleanup retry");
+            require(!App().lesson_runtime_active && fake.allocations == fake.frees && fake.opens == fake.closes,
+                    "blocked storage release still drops local runtime resources");
+            const auto modes = display.lesson_mode_calls;
+            lease = {};
+            require(DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == before + 1 &&
+                        !renderer.PendingRuntimeError() && !storage.HasLessonSession(),
+                    "storage recovery completes cleanup without duplicating the delivered error");
+            require(display.lesson_mode_calls == modes, "cleanup retry does not reschedule display release");
+        } else if (scenario == 7 || scenario == 8) {
+            App().defer_scheduled_callbacks = true;
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()),
+                    "error cleanup can queue a delayed display release");
+            require(!App().deferred_callbacks.empty(), "actual display cleanup callback is queued");
+            const auto queued = App().deferred_callbacks.size();
+            for (int poll = 0; poll < 20; ++poll) {
+                require(!DispatchPendingLessonCinematicError(App().protocol_.get()) &&
+                            App().deferred_callbacks.size() == queued && Sent().size() == before + 1,
+                        "repeated pending cleanup polls neither grow the display queue nor resend error");
+            }
+            if (scenario == 8) {
+                App().defer_scheduled_callbacks = false;
+                App().FlushScheduledCallbacks();
+                const auto modes = display.lesson_mode_calls;
+                const auto backgrounds = display.background_calls;
+                handle_current(V5Frame("lesson_stop", 3,
+                    "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"flyIn\",\"commandSequenceId\":93}}"));
+                require(FrameType(Sent().size() - 1) == "lesson_ack" && FrameSeq(Sent().size() - 1) == 4 &&
+                            display.lesson_mode_calls == modes && display.background_calls == backgrounds,
+                        "terminal after callback before cleanup poll preserves ACK and avoids second display release");
+                App().AbandonLessonStorageSession();
+                Board::GetInstance().display_ = nullptr;
+                tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+                continue;
+            }
+            fake.fail_decode = false;
+            handle_current(V5PrepareFrame(3, 93));
+            require(renderer.prepared(), "replacement preparation succeeds before old display callback");
+            const auto modes = display.lesson_mode_calls;
+            const auto backgrounds = display.background_calls;
+            App().defer_scheduled_callbacks = false;
+            App().FlushScheduledCallbacks();
+            require(display.lesson_mode_calls == modes && display.background_calls == backgrounds,
+                    "renderer generation fences delayed old cleanup from replacement lesson scene");
+        } else if (scenario != 0) {
+            const auto after_control = Sent().size();
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == after_control,
+                    "connection, epoch, terminal, or prepare replacement fences the old error");
+        } else {
+            require(!DispatchPendingLessonCinematicError(nullptr), "missing protocol retains pending error");
+            tbot::SetLessonJsonFailAfterForTest(0);
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()), "allocation failure retains pending error");
+            tbot::SetLessonJsonFailAfterForTest(-1);
+            App().protocol_->fail_lesson_send = true;
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == before,
+                    "send refusal emits no frame and retains pending error");
+            App().protocol_->fail_lesson_send = false;
+            require(App().lesson_runtime_active && display.lesson_mode_calls == owned_modes,
+                    "refused error sends retain lesson ownership until delivery succeeds");
+            bool dispatched = false;
+            for (int budget = 0; budget < 128; ++budget) {
+                tbot::SetLessonJsonFailAfterForTest(budget);
+                dispatched = DispatchPendingLessonCinematicError(App().protocol_.get());
+                tbot::SetLessonJsonFailAfterForTest(-1);
+                if (dispatched) break;
+                require(Sent().size() == before && renderer.PendingRuntimeError().has_value(),
+                        "every refused JSON construction preserves pending error and sends no partial frame");
+            }
+            require(dispatched, "pending error retries successfully when the allocation budget is sufficient");
+            require(Sent().size() == before + 1 && FrameType(before) == "lesson_error" && FrameSeq(before) == 3 &&
+                        FrameBodyStr(before, nullptr, "code") == "CINEMATIC_DECODE_FAILED" &&
+                        FrameBodyStr(before, "context", "phaseId") == "flyIn",
+                    "one canonical typed error uses next sequence without false ACK or completion");
+            cJSON* sent = cJSON_Parse(Sent().back().c_str());
+            for (const auto& field : std::vector<std::pair<const char*, std::string>>{
+                    {"assignmentId", AID()}, {"sessionId", SID()},
+                    {"protocolVersion", "teebot-lesson-renderer.v5"},
+                    {"lessonId", "identity-lesson"}, {"stepId", "identity-step"}}) {
+                require(std::string(cJSON_GetObjectItem(sent, field.first)->valuestring) == field.second,
+                        "asynchronous error retains original envelope identity");
+            }
+            require(cJSON_GetObjectItem(sent, "lessonVersion")->valueint == 7 &&
+                        cJSON_GetObjectItem(cJSON_GetObjectItem(cJSON_GetObjectItem(sent, "body"), "context"),
+                                           "commandSequenceId")->valueint == 92,
+                    "asynchronous error retains lesson version and original command identity");
+            cJSON_Delete(sent);
+            if (const char* capture = std::getenv("TBOT_RENDERER_ERROR_CAPTURE")) {
+                std::ofstream output(capture);
+                output << Sent().back() << '\n';
+                require(output.good(), "actual asynchronous error capture writes successfully");
+            }
+            require(!DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == before + 1 &&
+                        !renderer.PendingRuntimeError(), "successful send consumes error exactly once");
+            require(!App().lesson_runtime_active && fake.allocations == fake.frees && fake.opens == fake.closes,
+                    "delivered runtime error releases playback resources and lesson activity");
+            require(display.lesson_mode_calls.size() == owned_modes.size() + 1 &&
+                        !display.lesson_mode_calls.back() && !display.background_calls.back() &&
+                        !display.object_calls.back() && !display.overlay_calls.back(),
+                    "delivered runtime error returns display ownership and clears all layers once");
+            const auto released_modes = display.lesson_mode_calls;
+            const auto released_backgrounds = display.background_calls;
+            const auto error_frames = Sent().size();
+            handle_current(start);
+            require(!App().lesson_runtime_active && display.lesson_mode_calls == released_modes,
+                    "duplicate start cannot reactivate a failed runtime");
+            require(Sent().size() == error_frames + 1 && FrameType(error_frames) == "lesson_ack" &&
+                        FrameBodyJson(error_frames) == FrameBodyJson(1) && FrameSeq(error_frames) == 4,
+                    ("duplicate start replays its original ACK without replaying content: original=" +
+                     FrameBodyJson(1) + " replay=" + (Sent().size() > error_frames ? Sent().back() : "absent")).c_str());
+            handle_current(V5Frame("lesson_stop", 3,
+                "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"flyIn\",\"commandSequenceId\":93}}"));
+            require(FrameType(Sent().size() - 1) == "lesson_ack" && FrameSeq(Sent().size() - 1) == 5 &&
+                        Sent().back().find("\"commandSequenceId\":93") != std::string::npos,
+                    "later original terminal stop is ACKed with exact command identity and next sequence");
+            require(display.lesson_mode_calls == released_modes && display.background_calls == released_backgrounds,
+                    "later terminal stop does not return display ownership twice");
+        }
+        App().AbandonLessonStorageSession();
+        Board::GetInstance().display_ = nullptr;
+        tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+    }
+}
+
+int g_async_json_fail_once = -1;
+int g_async_json_allocations = 0;
+bool g_async_json_failed = false;
+
+void* AsyncJsonFailOnceMalloc(std::size_t size) {
+    if (g_async_json_allocations++ == g_async_json_fail_once) {
+        g_async_json_failed = true;
+        return nullptr;
+    }
+    return std::malloc(size);
+}
+
+void test_renderer_v5_async_error_transient_json_oom_is_atomic() {
+    bool exhausted_allocations = false;
+    for (int allocation = 0; allocation < 256; ++allocation) {
+        ResetObservable();
+        FreshSession();
+        V3RendererFake fake;
+        tbot::LessonLayeredCinematicRenderer renderer(
+            {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+             V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+        tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+        auto context = std::make_shared<ChatInboundMessage>();
+        context->owner = App().host_chat_owner;
+        context->lesson_epoch = App().lesson_transport_epoch_gate_.PublishedEpoch();
+        SetLessonTransportEpoch(context->lesson_epoch);
+        auto handle = [&](const std::string& frame) {
+            cJSON* root = cJSON_Parse(frame.c_str());
+            require(root != nullptr, "transient OOM setup frame parses");
+            App().HandleLessonMessage(root, context);
+            cJSON_Delete(root);
+        };
+        handle(V5PrepareFrame(1));
+        auto start = V5Frame("lesson_start", 2,
+            "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"flyIn\",\"commandSequenceId\":92}}");
+        start.insert(1, "\"lessonId\":\"identity-lesson\",\"lessonVersion\":7,\"stepId\":\"identity-step\",");
+        handle(start);
+        fake.fail_decode = true;
+        require(!renderer.Tick(static_cast<std::uint64_t>(esp_timer_get_time() / 1000) + 100).accepted,
+                "transient OOM begins with actual asynchronous decode failure");
+        const auto before = Sent().size();
+        g_async_json_fail_once = allocation;
+        g_async_json_allocations = 0;
+        g_async_json_failed = false;
+        cJSON_Hooks hooks{AsyncJsonFailOnceMalloc, std::free};
+        cJSON_InitHooks(&hooks);
+        const bool dispatched = DispatchPendingLessonCinematicError(App().protocol_.get());
+        cJSON_InitHooks(nullptr);
+        if (!dispatched) {
+            require(Sent().size() == before && renderer.PendingRuntimeError().has_value(),
+                    "transient per-allocation OOM retains the pending error without emitting partial identity");
+            require(DispatchPendingLessonCinematicError(App().protocol_.get()),
+                    "transient OOM retries the same pending error after allocator recovery");
+        }
+        require(Sent().size() == before + 1 && !renderer.PendingRuntimeError(),
+                "only one complete error consumes the pending failure");
+        cJSON* frame = cJSON_Parse(Sent().back().c_str());
+        require(frame != nullptr, "transient OOM never emits invalid JSON");
+        for (const auto& expected : std::vector<std::pair<const char*, std::string>>{
+                {"type", "lesson_error"}, {"protocolVersion", "teebot-lesson-renderer.v5"},
+                {"assignmentId", AID()}, {"sessionId", SID()},
+                {"lessonId", "identity-lesson"}, {"stepId", "identity-step"}}) {
+            const auto* field = cJSON_GetObjectItemCaseSensitive(frame, expected.first);
+            require(cJSON_IsString(field) && expected.second == field->valuestring,
+                    ("transient allocation " + std::to_string(allocation) +
+                     " preserves original field " + expected.first).c_str());
+        }
+        require(cJSON_IsNumber(cJSON_GetObjectItem(frame, "lessonVersion")) &&
+                    cJSON_GetObjectItem(frame, "lessonVersion")->valueint == 7 &&
+                    cJSON_IsNumber(cJSON_GetObjectItem(frame, "sequence")) &&
+                    cJSON_GetObjectItem(frame, "sequence")->valueint == 3 &&
+                    cJSON_IsNumber(cJSON_GetObjectItem(frame, "timestamp")),
+                "transient OOM cannot erase numeric identity or advance sequence on refusal");
+        const auto* body = cJSON_GetObjectItem(frame, "body");
+        const auto* code = cJSON_GetObjectItem(body, "code");
+        require(cJSON_IsString(code) && std::string(code->valuestring) == "CINEMATIC_DECODE_FAILED",
+                "transient OOM preserves typed failure body");
+        const auto* detail = cJSON_GetObjectItem(body, "context");
+        const auto* phase = cJSON_GetObjectItem(detail, "phaseId");
+        const auto* reason = cJSON_GetObjectItem(detail, "reason");
+        const auto* command = cJSON_GetObjectItem(detail, "commandSequenceId");
+        require(cJSON_IsString(phase) && std::string(phase->valuestring) == "flyIn" &&
+                    cJSON_IsString(reason) && std::string(reason->valuestring) == "cinematicPhase" &&
+                    cJSON_IsNumber(command) && command->valueint == 92 &&
+                    cJSON_IsFalse(cJSON_GetObjectItem(body, "retryable")) &&
+                    cJSON_IsString(cJSON_GetObjectItem(body, "message")),
+                "transient OOM preserves the complete canonical error context");
+        cJSON_Delete(frame);
+        App().AbandonLessonStorageSession();
+        tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+        if (!g_async_json_failed) {
+            exhausted_allocations = true;
+            break;
+        }
+    }
+    require(exhausted_allocations, "single-allocation failures cover every async JSON allocation through successful dispatch");
 }
 
 void test_renderer_v5_course_mode_activity_fallback_without_object() {
@@ -2061,10 +2381,20 @@ void test_renderer_v5_first_course_prepare_reports_static_degradation() {
                 FrameBodyStr(0, "cinematicPhase", "degradedReason") ==
                     "animationStartFailed" && renderer.prepared(),
             "first Course Mode Robot open failure ACKs retained static degradation");
-    Handle(V5Frame("lesson_stop", 2,
-        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+    const int presents_before_start = fake.presents;
+    Handle(V5Frame("lesson_start", 2,
+        "{\"cinematicPhase\":{\"command\":\"start\",\"phaseId\":\"listen\","
         "\"commandSequenceId\":192}}"));
-    require(FrameBodyStr(1, "cinematicPhase", "degradedReason").empty(),
+    require(FrameType(1) == "lesson_error" &&
+                FrameBodyStr(1, nullptr, "code") == "CINEMATIC_SD_PATH_MISSING" &&
+                renderer.last_apply_degraded() && fake.presents == presents_before_start &&
+                !App().lesson_runtime_active,
+            "static-only fallback cannot emit phaseReady or claim active playback");
+    Handle(V5Frame("lesson_stop", 3,
+        "{\"cinematicPhase\":{\"command\":\"stop\",\"phaseId\":\"listen\","
+        "\"commandSequenceId\":193}}"));
+    require(FrameType(2) == "lesson_ack" &&
+                FrameBodyStr(2, "cinematicPhase", "degradedReason").empty(),
             "successful stop ACK does not inherit prepare degradation");
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
     RemoveV5CourseModeAssetPack();
@@ -2842,7 +3172,8 @@ void test_renderer_v4_capability_and_exact_single_asset_routing() {
     AddLessonRendererFeatures(features);
     char* encoded = cJSON_PrintUnformatted(features);
     require(encoded != nullptr && std::string(encoded) ==
-                "{\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
+                "{\"retainedSelection\":\"retained-assignment-device.v1\","
+                "\"renderer\":[\"teebot-lesson-renderer.v1\",\"teebot-lesson-renderer.v2\","
                 "\"teebot-lesson-renderer.v4\"],\"lessonRendererV2\":{"
                 "\"openingEntrance\":true,\"visualStateEvents\":true,"
                 "\"physicalMotionOwner\":\"server\",\"singleSpriteEntrance\":true},"
@@ -4715,6 +5046,24 @@ void test_renderer_v2_visual_outside_running_session_is_dropped() {
     require(Sent().size() == frames_before_visual && display.visual_state_calls == 0 &&
                 App().lesson_visual_queue.empty(),
             "renderer-v2 visual outside a running session is dropped without display or ACK work");
+}
+
+void test_legacy_visual_and_terminal_after_rejected_runtime_are_dropped() {
+    ResetObservable();
+    FreshSession();
+    Board::GetInstance().display_ = nullptr;
+    Handle(PrepareFrame(1));
+    const auto prepared_count = Sent().size();
+    Handle(ReplaceOnce(StartFrame(2), "lesson_start", "lesson_visual_state"));
+    require(Sent().size() == prepared_count, "legacy visual cannot enter renderer-v2 work");
+    require(LogContains("lesson_visual_state outside renderer-v2 running session"), "visual guard executes");
+    Handle(ReplaceOnce(StartFrame(3), kLessonProtocolVersion, "unsupported"));
+    const auto failed_count = Sent().size();
+    require(FrameType(failed_count - 1) == "lesson_error", "unsupported runtime invalidates preparation");
+    Handle(StopFrame(4));
+    require(LogContains("lesson_stop outside prepared session"), "unprepared stop guard executes");
+    Handle(ReplaceOnce(StopFrame(5), "lesson_stop", "lesson_error"));
+    require(Sent().size() == failed_count, "terminal after invalidated preparation emits no new ACK");
 }
 
 void test_renderer_v2_repeated_start_acks_once_and_resume_restores_teach_state() {
@@ -9452,7 +9801,128 @@ void test_layer_install_timeout_degrades_without_committing_layer_state() {
 
 }  // namespace
 
+void test_retained_owner_refuses_unowned_prepare_at_session_reservation() {
+    cJSON* features = cJSON_CreateObject();
+    AddLessonRendererFeatures(features);
+    const auto capability = cJSON_GetObjectItemCaseSensitive(features, "retainedSelection");
+    require(cJSON_IsString(capability) && std::string(capability->valuestring) == "retained-assignment-device.v1",
+            "hello advertises exact retained selection contract");
+    cJSON_Delete(features);
+    ResetObservable();
+    FreshSession();
+    RetainedSelectionOwner owner;
+    owner.operation_id = "10000000-0000-0000-0000-000000000001";
+    owner.request_id = "20000000-0000-0000-0000-000000000001";
+    owner.device_id = "30000000-0000-0000-0000-000000000001";
+    owner.consumer_id = "40000000-0000-0000-0000-000000000001";
+    owner.lesson_row_id = "50000000-0000-0000-0000-000000000001";
+    owner.assignment_id = "60000000-0000-0000-0000-000000000001";
+    owner.request_revision = 2; owner.selection_revision = 2; owner.assignment_version = 1;
+    owner.lesson_key = "retained-farm"; owner.lesson_version = 1;
+    owner.manifest_version = "teebot-lesson-renderer.v5";
+    owner.manifest_checksum = std::string(64, 'a');
+    owner.descriptor_checksum = std::string(64, 'b');
+    owner.cache_key = owner.lesson_key + "/v1-" + owner.manifest_checksum;
+    {
+        auto lease = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("retained");
+        require(static_cast<bool>(lease), "retained fixture gets actual mutation lease");
+        ApplyRetainedSelection(lease, owner, false);
+    }
+    Handle(PrepareFrame(1));
+    require(Sent().size() == 1 && FrameType(0) == "lesson_error",
+            "unowned prepare cannot reserve a retained device lesson");
+    require(FrameBodyStr(0, nullptr, "code") == "RETAINED_SELECTION_MISMATCH",
+            "retained refusal has a specific correlated error");
+    {
+        auto lease = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("retained");
+        require(static_cast<bool>(lease), "rejected retained prepare releases only its new reservation");
+    }
+    V3RendererFake fake;
+    tbot::LessonCinematicRenderer v3({&fake, V3Allocate, V3Free, V3Open, V3Close,
+                                    V3Decode, V3Present});
+    tbot::LessonFlattenedCinematicRenderer v4({&fake, V3Allocate, V3Free, V3Open,
+                                              V3Close, V3Decode, V3Present});
+    tbot::LessonLayeredCinematicRenderer v5(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonCinematicRenderer(&v3);
+    ActivateV4Renderer(&v4);
+    tbot::SetActiveLessonLayeredCinematicRenderer(&v5);
+    for (int version : {3, 4, 5}) {
+        ResetObservable();
+        FreshSession();
+        Handle(version == 3 ? V3PrepareFrame(1) : version == 4 ? V4PrepareFrame(1)
+                                                                : V5PrepareFrame(1));
+        require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "RETAINED_SELECTION_MISMATCH",
+                "every cinematic prepare enforces the retained owner");
+        require(fake.opens == 0 && fake.jpeg_decodes == 0 && fake.png_decodes == 0 &&
+                    !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "cinematic refusal precedes media IO and releases its reservation");
+    }
+    tbot::SetActiveLessonCinematicRenderer(nullptr);
+    ActivateV4Renderer(nullptr);
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+
+    const std::string operation =
+        "{\"contractVersion\":\"retained-assignment-pack.v1\",\"action\":\"bind\","
+        "\"operationId\":\"" + owner.operation_id + "\",\"requestId\":\"" + owner.request_id +
+        "\",\"requestRevision\":2,\"deviceId\":\"" + owner.device_id +
+        "\",\"consumerIdentity\":\"" + owner.consumer_id +
+        "\",\"desiredSelectionRevision\":2,\"assignmentId\":\"" + owner.assignment_id +
+        "\",\"assignmentVersion\":1,\"selection\":{\"lessonRowId\":\"" + owner.lesson_row_id +
+        "\",\"lessonKey\":\"retained-farm\",\"lessonVersion\":1,\"profile\":\"espTft\","
+        "\"manifestVersion\":\"teebot-lesson-renderer.v5\",\"manifestChecksum\":\"" +
+        owner.manifest_checksum + "\",\"cacheKey\":\"" + owner.cache_key +
+        "\",\"packDescriptorChecksum\":\"" + owner.descriptor_checksum + "\"}}";
+    const auto owned_frame = PrepareFrameFor(owner.assignment_id, "retained-owned", 1,
+        ",\"selectionRevision\":2,\"assignmentVersion\":1,\"manifestRef\":{\"manifestChecksum\":\"" +
+        owner.manifest_checksum + "\"},\"assetPack\":{\"cacheKey\":\"" + owner.cache_key +
+        "\"},\"retainedSelection\":" + operation);
+    for (const auto& refused : {
+            ReplaceOnce(owned_frame, "\"selectionRevision\":2", "\"selectionRevision\":-1"),
+            ReplaceOnce(owned_frame, "\"assignmentVersion\":1", "\"assignmentVersion\":2"),
+            ReplaceOnce(owned_frame, owner.manifest_checksum, std::string(64, 'c')),
+            ReplaceOnce(owned_frame, owner.assignment_id, "wrong-assignment")}) {
+        ResetObservable();
+        Handle(refused);
+        require(Sent().size() == 1 && FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "RETAINED_SELECTION_MISMATCH",
+                "bound prepare rejects invalid revision, version, checksum, or assignment");
+        require(!LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "bound prepare refusal releases its reservation");
+    }
+    ResetObservable();
+    Handle(owned_frame);
+    require(Sent().size() == 1 && FrameType(0) == "lesson_ack",
+            "matching retained owner may prepare its lesson");
+}
+
 int main() {
+    {
+        Application app;
+        auto context = std::make_shared<ChatInboundMessage>();
+        context->owner = app.host_chat_owner;
+        context->lesson_epoch = app.lesson_transport_epoch_gate_.PublishedEpoch();
+        int draws = 0;
+        app.defer_scheduled_callbacks = true;
+        app.ScheduleChatLesson(context, [&] { ++draws; });
+        require(app.deferred_callbacks.size() == 1 && draws == 0,
+                "real scheduling adapter defers valid lesson display work");
+        app.lesson_transport_epoch_gate_.PublishTerminalEpoch();
+        app.FlushScheduledCallbacks();
+        require(draws == 0, "terminal epoch prevents queued old lesson display takeover");
+        app.ScheduleChatLesson(context, [&] { ++draws; });
+        require(app.deferred_callbacks.empty(), "stale epoch is refused before scheduling");
+        context->lesson_epoch = app.lesson_transport_epoch_gate_.PublishedEpoch();
+        app.ScheduleChatLesson(context, [&] { ++draws; });
+        ++app.host_chat_owner.protocol_generation;
+        app.FlushScheduledCallbacks();
+        require(draws == 0, "replaced connection prevents queued old lesson display takeover");
+        app.ScheduleChatLesson({}, [&] { ++draws; });
+        app.FlushScheduledCallbacks();
+        require(draws == 1, "local context-free cleanup still executes");
+    }
     test_embodied_action_capability_and_async_terminal_ack();
     test_embodied_action_reduced_motion_and_partial_servo_degrade();
     test_embodied_action_cancel_duplicate_and_supersession_are_safe();
@@ -9473,6 +9943,8 @@ int main() {
     test_cinematic_renderer_failures_use_stable_error_mapping();
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v5_capability_exact_layers_and_lifecycle();
+    test_renderer_v5_async_error_identity_retry_and_stale_source();
+    test_renderer_v5_async_error_transient_json_oom_is_atomic();
     test_renderer_v5_course_mode_activity_fallback_without_object();
     test_renderer_v5_first_course_prepare_reports_static_degradation();
     test_course_activity_durable_outcome_replay_and_write_failure();
@@ -9523,6 +9995,7 @@ int main() {
     test_renderer_v2_start_ack_is_serialized_before_early_visual_ack();
     test_renderer_v2_old_completion_cannot_claim_reused_identity();
     test_renderer_v2_visual_outside_running_session_is_dropped();
+    test_legacy_visual_and_terminal_after_rejected_runtime_are_dropped();
     test_renderer_v2_repeated_start_acks_once_and_resume_restores_teach_state();
     test_renderer_v2_verified_opening_assets_and_identity_mismatch();
     test_renderer_v2_stale_visual_callback_and_non_lvgl_degraded_completion();
@@ -9633,6 +10106,7 @@ int main() {
     test_layer_install_timeout_degrades_without_committing_layer_state();
     test_renderer_v2_visual_motion_is_allowlisted_once_per_generation();
     test_renderer_v5_course_mode_exact_identity_and_fail_closed_metadata();
+    test_retained_owner_refuses_unowned_prepare_at_session_reservation();
     std::cout << "lesson host test OK (" << g_checks << " checks)\n";
     return 0;
 }

@@ -50,7 +50,7 @@ def test_enter_repair_pairing_is_thread_safe_and_unclaims_locally():
 
     # Callable from the BOOT button task -> all claim-FSM/NVS mutation must be
     # marshalled onto the Application task (OQ1 single-threaded claim FSM).
-    assert "Schedule([this]()" in body
+    assert "Schedule([this, context]()" in body
 
     # Drop the local "claimed" signal + the live WS/claim tokens so the robot
     # stops acting owned and re-advertises for pairing.
@@ -157,7 +157,7 @@ def test_cloud_release_worker_clears_state_only_on_success():
     assert 'backend_settings.SetString("device_id", "");' in body
     assert 'backend_settings.SetString("device_secret", "");' in body
     assert "self->RefreshPendingTbotClaim();" in body
-    assert "vTaskDelete(nullptr);" in body
+    assert "vTaskDeleteWithCaps(nullptr);" in body
 
 
 def test_deferred_release_uses_captured_credentials_and_cannot_clear_a_later_claim():

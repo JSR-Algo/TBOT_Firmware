@@ -292,6 +292,20 @@ def test_esp_ssl_callback_completes_before_exit_publication():
     signal = wrapper.index("xEventGroupSetBits(event_group")
     assert wrapper.index("ssl->shutdown_state_.TaskExited();") < signal
     assert "ssl->" not in wrapper[signal:]
+    assert "vTaskDeleteWithCaps(nullptr);" in wrapper[signal:]
+    assert "vTaskDelete(nullptr);" not in wrapper[signal:]
+
+
+def test_capability_allocated_tcp_receive_stack_uses_matching_delete_api():
+    source = read("components/esp-ml307/src/esp/esp_tcp.cc")
+    connect = function_body(source, "bool EspTcp::Connect")
+    wrapper_start = connect.index("BaseType_t created = xTaskCreateWithCaps")
+    wrapper_end = connect.index('}, "tcp_receive"', wrapper_start)
+    wrapper = connect[wrapper_start:wrapper_end]
+    signal = wrapper.index("xEventGroupSetBits(event_group")
+
+    assert "vTaskDeleteWithCaps(nullptr);" in wrapper[signal:]
+    assert "vTaskDelete(NULL);" not in wrapper[signal:]
 
 
 def test_esp_ssl_send_does_not_block_receive_exit_on_lifecycle_lock():
@@ -311,9 +325,12 @@ def test_protocol_releases_gate_before_websocket_join_and_keeps_callbacks_stable
     detach = function_body(protocol, "void WebsocketProtocol::DetachAndResetWebsocket")
     destructor = function_body(protocol, "WebsocketProtocol::~WebsocketProtocol")
 
-    assert "}\n    DetachAndResetWebsocket();" in close
-    assert "}\n    DetachAndResetWebsocket();" in deferred
-    assert "}\n    DetachAndResetWebsocket();" in destructor
+    assert "}\n    DetachAndResetWebsocket(failure_epoch, true, source);" in close
+    assert "}\n    DetachAndResetWebsocket(failure_epoch, true, source);" in deferred
+    assert "}\n    DetachAndResetWebsocket(failure_epoch);" in destructor
+    assert "}\n    // Socket destruction" in detach
+    assert "retired_websocket.reset();" in detach
+    assert "if (!detach_lease.IsCurrentEpoch()) return;" in detach
     assert "OnData(nullptr)" not in detach
     assert "OnDisconnected(nullptr)" not in detach
 

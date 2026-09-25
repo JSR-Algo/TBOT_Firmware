@@ -1,4 +1,5 @@
 #include "lesson_asset_pack_activation.h"
+#include "lesson_asset_retained_selection.h"
 
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_storage_coordinator.h"
@@ -350,7 +351,9 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
     const std::string& lesson_id,
     const std::string& cache_key,
     const std::string& manifest_checksum,
-    bool all_critical_verified
+    bool all_critical_verified,
+    std::uint64_t selection_revision,
+    const RetainedSelectionOwner* retained_owner
 ) {
     LessonAssetPackActivationResult activation{
         false, false, false, std::string(), std::string()};
@@ -367,6 +370,10 @@ LessonAssetPackActivationResult ActivateLessonAssetPack(
     }
     if (!mutation) {
         activation.error_code = "activation_storage_busy";
+        return activation;
+    }
+    if (!RetainedSyncAllowed(cache_key, selection_revision, retained_owner)) {
+        activation.error_code = "retained_selection_conflict";
         return activation;
     }
 
@@ -432,7 +439,8 @@ void EvictPreviousLessonAssetPackAfterActivation(
     if (PreviousKeyBelongsToLesson(previous_cache_key, lesson_id) &&
         previous_cache_key != cache_key) {
         const auto evict_result =
-            EvictLessonAssetCacheKey(previous_cache_key, false);
+            EvictLessonAssetCacheKey(previous_cache_key, false,
+                ExtractFlatJsonString(ReadTextFileIfPresent(ActivePointerPath(lesson_id)), "cacheKey"));
         activation.previous_evicted = evict_result.evicted;
         if (!evict_result.evicted && !evict_result.not_found) {
             activation.error_code = "previous_evict_retryable";

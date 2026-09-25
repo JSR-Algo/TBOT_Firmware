@@ -57,7 +57,7 @@ def test_lesson_worker_probes_parse_handler_and_delete_in_ownership_order():
     after_parse = worker.index(
         'LogLessonHeapBoundary("worker.after_parse", payload_bytes);', parse
     )
-    handle = worker.index("self->HandleLessonMessage(root);", after_parse)
+    handle = worker.index("self->HandleLessonMessage(root, context);", after_parse)
     after_handle = worker.index(
         'LogLessonHeapBoundary("worker.after_handle", payload_bytes);', handle
     )

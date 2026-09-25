@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tbot-lesson-staging.XXXXXX")"
-trap 'rm -rf "${BUILD_DIR}"' EXIT
+: "${TMPDIR:?owned TMPDIR required}"
+BUILD_DIR="$(mktemp -d "${TMPDIR}/tbot-lesson-staging.XXXXXX")"
+export TBOT_RETAINED_TEST_STATE_PATH="${BUILD_DIR}/selection.record"
 CXX_BIN="${CXX:-clang++}"
 IDF_ROOT="${IDF_PATH:-${HOME:+${HOME}/esp/esp-idf}}"
 SANITIZER_FLAGS=()
@@ -31,6 +32,9 @@ fi
   -I"${ROOT}/main" \
   "${ROOT}/main/lesson_asset_download_staging.cc" \
   "${ROOT}/main/lesson_asset_cache_evict.cc" \
+  "${ROOT}/main/lesson_asset_retained_selection.cc" \
+  "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
+  "${ROOT}/main/sd_fat_session_guard.cc" \
   "${ROOT}/main/lesson_storage_hil_controller.cc" \
   "${ROOT}/main/lesson_storage_hil_hooks.cc" \
   "${ROOT}/tests/native/lesson_asset_download_staging_host_test.cc" \

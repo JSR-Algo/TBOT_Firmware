@@ -64,7 +64,7 @@ def test_wifi_begin_token_is_bound_to_the_exact_blufi_setup_session():
     audio_h = read("main/audio/audio_service.h")
     wifi = read("main/boards/common/wifi_board.cc")
     blufi_h = read("main/boards/common/blufi.h")
-    start = function_body(wifi, "void WifiBoard::StartWifiConfigMode")
+    start = function_body(wifi, "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode")
     assert "WifiProvisioningBeginResult BeginWifiProvisioning();" in audio_h
     reserve = start.index("TryReserveProvisioningSession()")
     begin = start.index("BeginWifiProvisioning()", reserve)
@@ -113,7 +113,7 @@ def test_wifi_connect_worker_captures_session_before_any_delayed_work():
     body = function_body(blufi, "void Blufi::StartStationConnectFromCredentials")
     capture = body.index("CaptureProvisioningSession()")
     delay = body.index("vTaskDelay(pdMS_TO_TICKS(500))")
-    task = body.index("xTaskCreate(", delay)
+    task = body.index("xTaskCreateStatic(", delay)
     assert capture < delay < task
 
 
@@ -289,5 +289,5 @@ def test_timeout_failure_preconfirm_and_manual_teardown_never_rearm():
     confirmed_tail = result_handler[result_handler.index("CancelClaimExpiryTimer();"):]
     assert '"claim_confirmed", provisioning_token' in confirmed_tail
     failed_wifi = blufi[blufi.index("Failed to connect to WiFi via esp-wifi-connect"):]
-    failed_wifi = failed_wifi[:failed_wifi.index("vTaskDelete(nullptr)")]
+    failed_wifi = failed_wifi[:failed_wifi.index("continue;")]
     assert "CompleteSuccessfulProvisioningTeardown" not in failed_wifi

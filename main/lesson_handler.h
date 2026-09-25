@@ -9,6 +9,7 @@
 #include "lesson_transport_epoch_gate.h"
 
 struct cJSON;
+struct ChatInboundMessage;
 class Protocol;
 class RobotUart;
 enum class LessonAssetReservationCode;
@@ -126,6 +127,8 @@ struct LessonQueueItem {
     std::uint64_t embodied_nonce = 0;
     char degraded_reason[kReasonBytes] = {};
     LessonVisualCompletionResult completion_result = LessonVisualCompletionResult::kRejected;
+    // Queue copies are POD; the receiver owns and deletes this shared owner box.
+    void* source_context = nullptr;
 };
 
 inline LessonQueueItem MakeLessonVisualQueueItem(
@@ -222,6 +225,8 @@ private:
 
 void SetLessonTransportEpoch(std::uint64_t transport_epoch);
 void InvalidateLessonVisualCompletionState(std::uint64_t transport_epoch);
+std::uint64_t PendingLessonCinematicErrorEpoch();
+bool DispatchPendingLessonCinematicError(Protocol* protocol);
 bool AcceptLessonVisualCompletion(
     const LessonQueueItem& item, std::string* ack_frame, RobotUart* robot_uart = nullptr);
 bool DispatchLessonVisualCompletion(

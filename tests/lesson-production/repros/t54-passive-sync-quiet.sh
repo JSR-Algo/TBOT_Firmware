@@ -28,10 +28,14 @@ def function_body(text: str, signature: str) -> str:
 source = Path("main/application.cc").read_text(encoding="utf-8")
 body = function_body(source, "bool Application::BeginLessonAssetSyncQuiet")
 compact = " ".join(body.split())
-require(
-    "state == kDeviceStateListening && !IsVoiceDetected()" in compact,
-    "missing passive listening detection",
-)
+predicate = compact[compact.index("const bool passive_listening ="):]
+predicate = predicate[:predicate.index(";")]
+for clause in (
+    "state == kDeviceStateListening", "!chat_cleanup_enabled_.load()",
+    "passive_ws_intent_.load()", "!online_intent_.load()",
+    "!microphone_uplink_authorized_.load()", "!IsVoiceDetected()",
+):
+    require(clause in predicate, f"missing passive listening requirement: {clause}")
 require(
     "state != kDeviceStateIdle && !passive_listening" in compact,
     "missing active-state rejection",

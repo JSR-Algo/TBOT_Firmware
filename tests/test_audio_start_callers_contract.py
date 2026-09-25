@@ -44,6 +44,8 @@ def test_claim_completion_publishes_idle_only_after_checked_audio_start():
     )
 
     reload_protocol = finish.index("ReloadProtocolAfterClaimCredentials();")
+    assert "claim_protocol_completion_pending_ = true;" in finish
+    finish += function_body(source, "void Application::CompleteClaimProtocolActivation")
     checked_start = finish.index("if (!audio_service_.Start())", reload_protocol)
     failure = function_body(finish, "if (!audio_service_.Start())")
     idle = finish.index("SetDeviceState(kDeviceStateIdle);", checked_start)
@@ -53,7 +55,8 @@ def test_claim_completion_publishes_idle_only_after_checked_audio_start():
 
     assert reload_protocol < checked_start < idle < wake < heartbeat < success
     assert "ESP_LOGE" in failure
-    assert "return false;" in failure
+    assert "ScheduleClaimLocalAssetsRetry();" in failure
+    assert "return;" in failure
     for forbidden in (
         "SetDeviceState(kDeviceStateIdle)",
         "EnableWakeWordDetection",

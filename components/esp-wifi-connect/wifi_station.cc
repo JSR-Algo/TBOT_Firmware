@@ -504,6 +504,10 @@ std::string WifiStation::StartConnectForSession(WifiApRecord ap_record,
         wifi_config.sta.bssid_set = true;
     }
     wifi_config.sta.listen_interval = 10;
+    // Try other APs for this SSID when the first AP does not complete association.
+    wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    wifi_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+    wifi_config.sta.failure_retry_cnt = 1;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     {
         std::lock_guard<std::mutex> data_lock(session_data_mutex_);

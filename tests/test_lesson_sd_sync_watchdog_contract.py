@@ -29,9 +29,10 @@ def test_sd_sync_worker_owns_and_releases_its_watchdog_subscription():
     add = worker.index("esp_task_wdt_add(nullptr)")
     tool_call = worker.index("context->tool->Call")
     delete = worker.index("esp_task_wdt_delete(nullptr)")
-    task_delete = worker.index("vTaskDeleteWithCaps(nullptr)")
-
-    assert add < tool_call < delete < task_delete
+    entry = function_body(source, "void McpServer::LessonAssetSyncTaskEntry")
+    assert add < tool_call < delete
+    assert "vTaskDeleteWithCaps(nullptr)" not in worker
+    assert entry.index("LessonAssetSyncTaskBody(arg);") < entry.index("vTaskDeleteWithCaps(nullptr)")
     assert "watchdog_registered" in worker
 
 

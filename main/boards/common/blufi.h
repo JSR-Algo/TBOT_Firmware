@@ -276,7 +276,8 @@ private:
         const char* reason, ProvisioningToken provisioning_token,
         const std::function<void()>& on_current = {});
     bool ReleaseBleForStationAssociation(uint32_t expected_generation);
-    void RestoreBleAfterStationFailure(uint32_t expected_generation);
+    void RestoreBleAfterStationFailure(uint32_t expected_generation,
+                                       ProvisioningToken provisioning_token);
     void StartStationConnectFromCredentials(
         const char* reason, std::optional<uint64_t> expected_candidate_epoch = std::nullopt);
     void SendStationConnectFailureReport();

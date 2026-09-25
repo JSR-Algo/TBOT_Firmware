@@ -16,6 +16,7 @@
 #include <cJSON.h>
 
 #include "checked_cjson.h"
+#include "chat_inbound_messages.h"
 
 class ImageContent {
 private:
@@ -50,6 +51,7 @@ public:
 using ReturnValue = std::variant<bool, int, std::string, cJSON*, ImageContent*>;
 
 struct PreparedMcpCall {};
+struct SourceMcpCall {};
 
 // HIL mutations use this envelope so every cJSON allocation and both print
 // buffers exist before the side effect. Finish only updates preallocated
@@ -270,10 +272,17 @@ private:
     std::string description_;
     PropertyList properties_;
     std::function<ReturnValue(const PropertyList&)> callback_;
+    std::function<ReturnValue(const PropertyList&, ChatRequestContext)> source_callback_;
     std::function<std::string(const PropertyList&)> prepared_callback_;
     bool user_only_ = false;
 
 public:
+    McpTool(const std::string& name, const std::string& description,
+            const PropertyList& properties, SourceMcpCall,
+            std::function<ReturnValue(const PropertyList&, ChatRequestContext)> callback)
+        : name_(name), description_(description), properties_(properties),
+          source_callback_(std::move(callback)) {}
+
     McpTool(const std::string& name, 
             const std::string& description, 
             const PropertyList& properties, 
@@ -339,11 +348,11 @@ public:
         return CheckedCJsonPrint(json.get());
     }
 
-    std::string Call(const PropertyList& properties) {
+    std::string Call(const PropertyList& properties, ChatRequestContext context = {}) {
         if (prepared_callback_) {
             return prepared_callback_(properties);
         }
-        ReturnValue return_value = callback_(properties);
+        ReturnValue return_value = source_callback_ ? source_callback_(properties, context) : callback_(properties);
         std::string payload;
         if (std::holds_alternative<ImageContent*>(return_value)) {
             std::unique_ptr<ImageContent> image(std::get<ImageContent*>(return_value));
@@ -390,14 +399,18 @@ public:
     void AddTool(McpTool* tool);
     void AddTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
     void AddUserOnlyTool(const std::string& name, const std::string& description, const PropertyList& properties, std::function<ReturnValue(const PropertyList&)> callback);
+    void AddUserOnlyTool(const std::string& name, const std::string& description,
+        const PropertyList& properties, SourceMcpCall mode,
+        std::function<ReturnValue(const PropertyList&, ChatRequestContext)> callback);
     void AddUserOnlyTool(
         const std::string& name,
         const std::string& description,
         const PropertyList& properties,
         PreparedMcpCall mode,
         std::function<std::string(const PropertyList&)> callback);
-    void ParseMessage(const cJSON* json);
+    void ParseMessage(const cJSON* json, ChatRequestContext request_context = {});
     void ParseMessage(const std::string& message);
+    void PollLessonAssetSyncCompletion();
 
 private:
     McpServer();
@@ -405,17 +418,25 @@ private:
 
     void ParseCapabilities(const cJSON* capabilities);
 
-    void ReplyResult(int id, const std::string& result);
-    void ReplyError(int id, const std::string& message);
+    void ReplyResult(int id, const std::string& result, ChatRequestContext context = {});
+    void ReplyError(int id, const std::string& message, ChatRequestContext context = {});
 
-    void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools);
-    void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments);
-    bool StartLessonAssetSyncTask(int id, McpTool* tool, PropertyList arguments);
+    void GetToolsList(int id, const std::string& cursor, bool list_user_only_tools, ChatRequestContext request_context = {});
+    void DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments, ChatRequestContext request_context = {});
+    bool StartLessonAssetSyncTask(int id, McpTool* tool, PropertyList arguments, ChatRequestContext request_context = {});
     static void LessonAssetSyncTaskEntry(void* arg) noexcept;
     static void LessonAssetSyncTaskBody(void* arg) noexcept __attribute__((noinline));
+    void PublishLessonAssetSyncCompletion(int id, bool succeeded, std::string response,
+                                         ChatRequestContext context, bool send_reply = true) noexcept;
 
     std::vector<McpTool*> tools_;
     std::atomic<bool> lesson_asset_sync_in_flight_{false};
+    std::atomic<bool> lesson_asset_sync_completion_ready_{false};
+    int lesson_asset_sync_response_id_ = 0;
+    bool lesson_asset_sync_succeeded_ = false;
+    bool lesson_asset_sync_send_reply_ = true;
+    std::string lesson_asset_sync_response_;
+    ChatRequestContext lesson_asset_sync_request_;
 };
 
 #endif // MCP_SERVER_H

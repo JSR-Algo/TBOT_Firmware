@@ -120,6 +120,21 @@ def test_heartbeat_reuses_board_status_radio_fields_so_online_reports_live_radio
     assert 'CopyStringField(status_root, "ble_state", "off")' in source
     assert 'CopyStringField(status_root, "ap_state", "off")' in source
 
+
+def test_management_heartbeat_reports_active_wifi_ssid_without_credentials():
+    source = read("main/application.cc")
+    heartbeat = function_body(source, "std::string BuildTbotHeartbeatBody")
+    extract = function_body(source, "std::string ExtractWifiSsid")
+
+    assert 'cJSON_GetObjectItem(status_root, "network")' in extract
+    assert 'cJSON_GetObjectItem(network, "ssid")' in extract
+    assert "length == 0 || length > 32" in extract
+    assert "ExtractWifiSsid(status_root)" in heartbeat
+    assert 'cJSON_AddStringToObject(connectivity, "wifi_ssid", wifi_ssid.c_str())' in heartbeat
+    assert "if (!wifi_ssid.empty())" in heartbeat
+    assert "wifi_password" not in heartbeat
+    assert "password" not in heartbeat.lower()
+
 def test_websocket_audio_channel_open_starts_and_close_stops_heartbeat():
     source = read("main/application.cc")
 
@@ -165,6 +180,8 @@ def test_claim_confirm_returns_to_idle_wake_word_instead_of_starting_listening_s
     # is off.
     assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm_body
     assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
+    assert "claim_protocol_completion_pending_ = true;" in finish_body
+    finish_body = function_body(source, "void Application::CompleteClaimProtocolActivation")
     assert "SetDeviceState(kDeviceStateIdle);" in finish_body
     assert "audio_service_.EnableWakeWordDetection(true);" in finish_body
     assert "protocol_->Start()" not in result_body
@@ -181,7 +198,8 @@ def test_claim_confirm_starts_heartbeat_after_credentials_are_persisted():
 
     assert "ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token)" in confirm_body
     assert "if (!FinishClaimActivationAfterLocalAssetsReady())" in result_body
-    success_body = finish_body[finish_body.index("ReloadProtocolAfterClaimCredentials();"):]
+    assert "ReloadProtocolAfterClaimCredentials();" in finish_body
+    success_body = function_body(source, "void Application::CompleteClaimProtocolActivation")
 
     idle_index = success_body.index("SetDeviceState(kDeviceStateIdle);")
     wake_index = success_body.index("audio_service_.EnableWakeWordDetection(true);")
@@ -201,11 +219,13 @@ def test_websocket_protocol_does_not_auto_start_until_wake_or_explicit_click():
     assert "if (is_websocket_protocol)" in initialize_body
     websocket_branch = initialize_body[
         initialize_body.index("if (is_websocket_protocol)") :
-        initialize_body.index("} else {\n        protocol_->Start();\n    }")
+        initialize_body.index("} else {\n        StartProtocolWorker();\n    }")
     ]
     assert "StartPassiveLessonWebsocket();" in websocket_branch
     assert "protocol_->Start();" not in websocket_branch
-    assert "else {\n        protocol_->Start();\n    }" in initialize_body
+    assert "else {\n        StartProtocolWorker();\n    }" in initialize_body
+    worker = function_body(source, "void Application::OpenChannelTask")
+    assert "worker_protocol->Start();" in worker
     assert "is_websocket_protocol && !IsDeviceClaimed()" not in initialize_body
 
 def test_late_activation_done_does_not_cut_wake_connect_or_voice_session_to_idle():

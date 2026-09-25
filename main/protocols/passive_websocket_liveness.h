@@ -45,6 +45,17 @@ public:
         return Action::kSendPing;
     }
 
+    Action Observe(uint32_t now_ms) const {
+        const bool awaiting = awaiting_pong_.load(std::memory_order_acquire);
+        const uint32_t elapsed = now_ms - last_ping_ms_.load(std::memory_order_relaxed);
+        return awaiting ? (elapsed >= kPongTimeoutMs ? Action::kTimedOut : Action::kNone)
+            : (elapsed >= kPingIntervalMs ? Action::kSendPing : Action::kNone);
+    }
+    void OnPingSent(uint32_t now_ms) {
+        last_ping_ms_.store(now_ms, std::memory_order_relaxed);
+        awaiting_pong_.store(true, std::memory_order_release);
+    }
+
 private:
     static constexpr uint32_t kPingIntervalMs = 2000;
     // Passive lesson sync can load the LCD/SD path enough that the server's JSON

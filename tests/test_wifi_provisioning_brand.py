@@ -31,6 +31,33 @@ def function_body(text: str, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature}")
 
 
+def test_claimed_blufi_reprovision_uses_lightweight_activation():
+    header = read("main/application.h")
+    source = read("main/application.cc")
+    promote = function_body(
+        source, "void Application::PromoteFromWifiConfigAfterProvisioning"
+    )
+
+    assert "void CompleteClaimedWifiReprovisionActivation();" in header
+    assert "CompleteClaimedWifiReprovisionActivation();" in promote
+    assert "xTaskCreate" not in promote
+    assert "ActivationTask();" not in promote
+
+
+def test_claimed_blufi_reprovision_refreshes_missing_websocket_token_before_protocol_start():
+    source = read("main/application.cc")
+    activation = function_body(
+        source, "void Application::CompleteClaimedWifiReprovisionActivation"
+    )
+
+    token_read = activation.index('websocket_settings.GetString("token")')
+    token_refresh = activation.index("ota_->CheckVersion()")
+    protocol_start = activation.index("RequestInitializeProtocol(ProtocolActivation::kWifiReprovision)")
+
+    assert token_read < token_refresh < protocol_start
+    assert 'if (websocket_settings.GetString("token").empty())' in activation
+
+
 def test_wifi_provisioning_uses_tbot_brand_names():
     wifi_board = read("main/boards/common/wifi_board.cc")
     blufi = read("main/boards/common/blufi.cpp")
@@ -255,7 +282,7 @@ def test_blufi_config_mode_is_wired_into_firmware():
 
 def test_blufi_config_mode_reopens_robot_scan_after_ble_timeout():
     wifi_board = read("main/boards/common/wifi_board.cc")
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
+    start = wifi_board.index("WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
 
     restart_idx = body.index("blufi.RestartForSetup();")
@@ -280,7 +307,7 @@ def test_wifi_config_releases_wake_word_resources_before_ble_init():
     afe_h = read("main/audio/wake_words/afe_wake_word.h")
     afe_cc = read("main/audio/wake_words/afe_wake_word.cc")
 
-    start = wifi_board.index("void WifiBoard::StartWifiConfigMode(")
+    start = wifi_board.index("WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode(")
     body = wifi_board[start : wifi_board.index("void WifiBoard::EnterWifiConfigMode()", start)]
     release_idx = body.index("BeginWifiProvisioning")
     restart_idx = body.index("blufi.RestartForSetup();")
@@ -335,19 +362,10 @@ def test_wifi_config_mode_can_be_rearmed_while_already_configuring():
 def test_wifi_config_entry_ignores_active_lesson_before_setup_side_effects():
     wifi_board = read("main/boards/common/wifi_board.cc")
     enter_body = function_body(wifi_board, "void WifiBoard::EnterWifiConfigMode")
-    start_body = function_body(wifi_board, "void WifiBoard::StartWifiConfigMode")
+    start_body = function_body(wifi_board, "WifiBoard::WifiConfigEntryResult WifiBoard::StartWifiConfigMode")
 
-    assert "app.IsLessonRuntimeActive()" in enter_body
-    assert enter_body.index("app.IsLessonRuntimeActive()") < enter_body.index("RequestWifiConfigMode")
-    guard = enter_body[
-        enter_body.index("app.IsLessonRuntimeActive()") :
-        enter_body.index("RequestWifiConfigMode(true)")
-    ]
-    assert "return;" in guard
-    assert "ShowNotification" not in guard
-    assert "ResetProtocol" not in guard
-    assert "StopStation" not in guard
-    assert "RequestWifiConfigMode" not in guard
+    assert "RequestWifiConfigMode(true)" in enter_body
+    assert "IsLessonRuntimeActive" not in enter_body
     assert "ShowNotification" in start_body
     assert "PrepareWifiConfigEntry" in start_body
     assert "StopStation" in start_body

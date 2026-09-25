@@ -33,6 +33,7 @@
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_pack_activation.h"
+#include "lesson_asset_retained_parser.h"
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_asset_download_raii.h"
 #include "lesson_asset_download_staging.h"
@@ -64,6 +65,7 @@ struct LessonAssetSyncTaskContext {
     int id;
     McpTool* tool;
     PropertyList arguments;
+    ChatRequestContext request_context;
 };
 
 bool IsLessonSnapshotEvidenceCall(
@@ -489,6 +491,7 @@ std::vector<ValidatedLessonAsset> ValidateLessonAssetSyncPackOrThrow(
     static constexpr const char* kPackFields[] = {
         "assignmentVersion", "lessonId", "lessonVersion", "manifestChecksum",
         "cacheKey", "localRoot", "ready", "assets", "courseModeCompatibility",
+        "selectionRevision", "retainedSelection",
     };
     static constexpr const char* kAssetFields[] = {
         "key", "path", "url", "onlineUrl", "sha256", "sourceSha256", "size",
@@ -950,13 +953,15 @@ void McpServer::AddUserOnlyTools() {
 
     AddUserOnlyTool("self.reboot", "Reboot the system",
         PropertyList(),
-        [this](const PropertyList& properties) -> ReturnValue {
+        SourceMcpCall{},
+        [this](const PropertyList& properties, ChatRequestContext request_context) -> ReturnValue {
             auto& app = Application::GetInstance();
-            app.Schedule([&app]() {
+            app.Schedule([&app, request_context]() {
+                if (!app.IsChatRequestCurrent(request_context)) return;
                 ESP_LOGW(TAG, "User requested reboot");
-                vTaskDelay(pdMS_TO_TICKS(1000));
+                if (!request_context) vTaskDelay(pdMS_TO_TICKS(1000));
 
-                app.Reboot();
+                app.Reboot(request_context);
             });
             return true;
         });
@@ -966,12 +971,14 @@ void McpServer::AddUserOnlyTools() {
         PropertyList({
             Property("url", kPropertyTypeString, "The URL of the firmware binary file to download and install")
         }),
-        [this](const PropertyList& properties) -> ReturnValue {
+        SourceMcpCall{},
+        [this](const PropertyList& properties, ChatRequestContext request_context) -> ReturnValue {
             auto url = properties["url"].value<std::string>();
             ESP_LOGI(TAG, "User requested firmware upgrade");
             
             auto& app = Application::GetInstance();
-            app.Schedule([url, &app]() {
+            app.Schedule([url, &app, request_context]() {
+                if (!app.IsChatRequestCurrent(request_context)) return;
                 bool success = app.UpgradeFirmware(url);
                 if (!success) {
                     ESP_LOGE(TAG, "Firmware upgrade failed");
@@ -1260,6 +1267,27 @@ void McpServer::AddUserOnlyTools() {
             return json.release();
         });
 
+    AddUserOnlyTool("self.lesson_assets.selection_state",
+        "Read the durable lesson selection watermark and owner.", PropertyList(),
+        [](const PropertyList&) -> ReturnValue {
+            auto json = MakeCheckedCJsonObject();
+            AddRetainedDeviceState(json.get(), ReadRetainedSelection());
+            return json.release();
+        });
+    AddUserOnlyTool("self.lesson_assets.retained_selection",
+        "Fence an exact retained assignment under storage mutation ownership.",
+        PropertyList({Property("operation", kPropertyTypeObject)}),
+        [](const PropertyList& properties) -> ReturnValue {
+            const auto body = properties["operation"].value<std::string>();
+            std::unique_ptr<cJSON, decltype(&cJSON_Delete)> json(cJSON_Parse(body.c_str()), cJSON_Delete);
+            const auto operation = ParseRetainedDeviceOperation(json.get());
+            auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("retained");
+            ApplyRetainedSelection(mutation, operation.owner, operation.release);
+            auto result = MakeCheckedCJsonObject();
+            AddRetainedDeviceReceipt(result.get(), operation);
+            return result.release();
+        });
+
     AddUserOnlyTool("self.lesson_assets.sync_to_sd",
         "Download a lesson assetPack to the SD card and verify each asset by sha256.",
         PropertyList({
@@ -1276,6 +1304,13 @@ void McpServer::AddUserOnlyTools() {
             const char* lesson_id = nullptr;
             const auto validated_assets =
                 ValidateLessonAssetSyncPackOrThrow(pack.get(), cache_key, lesson_id);
+            const auto selection_revision = ParseRetainedSyncRevision(pack.get());
+            std::optional<RetainedDeviceOperation> retained;
+            const auto retained_json = cJSON_GetObjectItemCaseSensitive(pack.get(), "retainedSelection");
+            if (retained_json) {
+                retained = ParseRetainedDeviceOperation(retained_json);
+                if (retained->release) throw std::runtime_error("invalid_retained_sync_owner");
+            }
             auto json = MakeCheckedCJsonObject();
             CheckedCJsonAddStringToObject(json.get(), "cacheKey", cache_key);
             const char* manifest_checksum = JsonStringField(pack.get(), "manifestChecksum");
@@ -1297,6 +1332,9 @@ void McpServer::AddUserOnlyTools() {
                     LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
                 if (!mutation) {
                     ThrowLessonAssetMutationRefusal(mutation.code());
+                }
+                if (!RetainedSyncAllowed(cache_key, selection_revision, retained ? &retained->owner : nullptr)) {
+                    throw std::runtime_error("retained_selection_conflict");
                 }
 
                 for (const auto& asset : validated_assets) {
@@ -1381,20 +1419,28 @@ void McpServer::AddUserOnlyTools() {
                     }
                 }
 
-                const bool all_critical_verified = critical_failed == 0;
+                const bool all_assets_verified = failed == 0 && verified == asset_count;
                 activation = ActivateLessonAssetPack(
                     mutation,
                     lesson_id,
                     cache_key,
                     manifest_checksum,
-                    all_critical_verified);
+                    all_assets_verified, selection_revision, retained ? &retained->owner : nullptr);
+                if (!all_assets_verified && critical_failed == 0) {
+                    activation.error_code = "assets_unverified";
+                }
+                if (retained && activation.activated) {
+                    auto receipt = MakeCheckedCJsonObject();
+                    AddRetainedDeviceReceipt(receipt.get(), *retained);
+                    CheckedCJsonAddItemToObject(json.get(), "retainedSelection", std::move(receipt));
+                }
             }
 
             EvictPreviousLessonAssetPackAfterActivation(
                 activation, lesson_id, cache_key);
             AddLessonAssetSyncAttestation(
                 json.get(), cache_key, manifest_checksum, asset_count,
-                verified, failed);
+                verified, failed, activation.activated);
             CheckedCJsonAddNumberToObject(json.get(), "downloadedCount", downloaded);
             CheckedCJsonAddNumberToObject(json.get(), "reusedCount", reused);
             CheckedCJsonAddNumberToObject(json.get(), "skippedCount", skipped);
@@ -1445,6 +1491,16 @@ void McpServer::AddUserOnlyTool(const std::string& name, const std::string& desc
 }
 
 void McpServer::AddUserOnlyTool(
+    const std::string& name, const std::string& description,
+    const PropertyList& properties, SourceMcpCall mode,
+    std::function<ReturnValue(const PropertyList&, ChatRequestContext)> callback
+) {
+    auto tool = new McpTool(name, description, properties, mode, std::move(callback));
+    tool->set_user_only(true);
+    AddTool(tool);
+}
+
+void McpServer::AddUserOnlyTool(
     const std::string& name,
     const std::string& description,
     const PropertyList& properties,
@@ -1485,7 +1541,8 @@ void McpServer::ParseCapabilities(const cJSON* capabilities) {
     }
 }
 
-void McpServer::ParseMessage(const cJSON* json) {
+void McpServer::ParseMessage(const cJSON* json, ChatRequestContext request_context) {
+    if (!Application::GetInstance().IsChatRequestCurrent(request_context)) return;
     // Check JSONRPC version
     auto version = cJSON_GetObjectItem(json, "jsonrpc");
     if (version == nullptr || !cJSON_IsString(version) || strcmp(version->valuestring, "2.0") != 0) {
@@ -1530,7 +1587,7 @@ void McpServer::ParseMessage(const cJSON* json) {
         std::string message = "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"" BOARD_NAME "\",\"version\":\"";
         message += app_desc->version;
         message += "\"}}";
-        ReplyResult(id_int, message);
+        ReplyResult(id_int, message, request_context);
     } else if (method_str == "tools/list") {
         std::string cursor_str = "";
         bool list_user_only_tools = false;
@@ -1544,50 +1601,66 @@ void McpServer::ParseMessage(const cJSON* json) {
                 list_user_only_tools = with_user_tools->valueint == 1;
             }
         }
-        GetToolsList(id_int, cursor_str, list_user_only_tools);
+        GetToolsList(id_int, cursor_str, list_user_only_tools, request_context);
     } else if (method_str == "tools/call") {
         if (!cJSON_IsObject(params)) {
             ESP_LOGE(TAG, "tools/call: Missing params");
-            ReplyError(id_int, "Missing params");
+            ReplyError(id_int, "Missing params", request_context);
             return;
         }
         auto tool_name = cJSON_GetObjectItem(params, "name");
         if (!cJSON_IsString(tool_name)) {
             ESP_LOGE(TAG, "tools/call: Missing name");
-            ReplyError(id_int, "Missing name");
+            ReplyError(id_int, "Missing name", request_context);
             return;
         }
         auto tool_arguments = cJSON_GetObjectItem(params, "arguments");
         if (tool_arguments != nullptr && !cJSON_IsObject(tool_arguments)) {
             ESP_LOGE(TAG, "tools/call: Invalid arguments");
-            ReplyError(id_int, "Invalid arguments");
+            ReplyError(id_int, "Invalid arguments", request_context);
             return;
         }
-        DoToolCall(id_int, std::string(tool_name->valuestring), tool_arguments);
+        DoToolCall(id_int, std::string(tool_name->valuestring), tool_arguments, request_context);
     } else {
         ESP_LOGE(TAG, "Method not implemented: %s", method_str.c_str());
-        ReplyError(id_int, "Method not implemented: " + method_str);
+        ReplyError(id_int, "Method not implemented: " + method_str, request_context);
     }
 }
 
-void McpServer::ReplyResult(int id, const std::string& result) {
+void McpServer::ReplyResult(int id, const std::string& result, ChatRequestContext context) {
+    if (!Application::GetInstance().IsChatRequestCurrent(context)) return;
+    try {
     std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
     payload += std::to_string(id) + ",\"result\":";
     payload += result;
     payload += "}";
-    Application::GetInstance().SendMcpMessage(payload);
+    Application::GetInstance().SendMcpMessage(payload, context);
+    } catch (...) {
+        if (!context) throw;
+        Application::GetInstance().FailChatRequest(context);
+    }
 }
 
-void McpServer::ReplyError(int id, const std::string& message) {
+void McpServer::ReplyError(int id, const std::string& message, ChatRequestContext context) {
+    if (!Application::GetInstance().IsChatRequestCurrent(context)) return;
+    try {
+    std::unique_ptr<cJSON, decltype(&cJSON_Delete)> value(cJSON_CreateString(message.c_str()), cJSON_Delete);
+    if (!value) throw std::bad_alloc();
+    std::unique_ptr<char, decltype(&cJSON_free)> encoded(cJSON_PrintUnformatted(value.get()), cJSON_free);
+    if (!encoded) throw std::bad_alloc();
     std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
     payload += std::to_string(id);
-    payload += ",\"error\":{\"message\":\"";
-    payload += message;
-    payload += "\"}}";
-    Application::GetInstance().SendMcpMessage(payload);
+    payload += ",\"error\":{\"message\":";
+    payload += encoded.get();
+    payload += "}}";
+    Application::GetInstance().SendMcpMessage(payload, context);
+    } catch (...) {
+        if (!context) throw;
+        Application::GetInstance().FailChatRequest(context);
+    }
 }
 
-void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools) {
+void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_only_tools, ChatRequestContext request_context) {
     std::string json = "{\"tools\":[";
     
     bool found_cursor = cursor.empty();
@@ -1629,7 +1702,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     if (json.back() == '[' && !tools_.empty()) {
         // 如果没有添加任何tool，返回错误
         ESP_LOGE(TAG, "tools/list: Failed to add tool %s because of payload size limit", next_cursor.c_str());
-        ReplyError(id, "Failed to add tool " + next_cursor + " because of payload size limit");
+        ReplyError(id, "Failed to add tool " + next_cursor + " because of payload size limit", request_context);
         return;
     }
 
@@ -1642,10 +1715,11 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     ESP_LOGI(TAG, "tools/list page bytes=%u next_cursor=%s", (unsigned)json.size(),
              next_cursor.empty() ? "(none)" : next_cursor.c_str());
     
-    ReplyResult(id, json);
+    ReplyResult(id, json, request_context);
 }
 
-void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments) {
+void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* tool_arguments, ChatRequestContext request_context) {
+    if (!Application::GetInstance().IsChatRequestCurrent(request_context)) return;
     auto tool_iter = std::find_if(tools_.begin(), tools_.end(), 
                                  [&tool_name](const McpTool* tool) { 
                                      return tool->name() == tool_name; 
@@ -1653,7 +1727,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     
     if (tool_iter == tools_.end()) {
         ESP_LOGE(TAG, "tools/call: Unknown tool: %s", tool_name.c_str());
-        ReplyError(id, "Unknown tool: " + tool_name);
+        ReplyError(id, "Unknown tool: " + tool_name, request_context);
         return;
     }
 
@@ -1670,7 +1744,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
                      "HIL_STORAGE_REFUSAL tool=%s reason=invalid_request sequence=%s",
                      tool_name.c_str(),
                      sequence_text.c_str());
-            ReplyError(id, validation_error);
+            ReplyError(id, validation_error, request_context);
             return;
         }
     }
@@ -1685,7 +1759,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
     if (!lesson_tool_allowed &&
         Application::GetInstance().IsLessonRuntimeActive()) {
         ESP_LOGI(TAG, "MCP tool call rejected during lesson: %s", tool_name.c_str());
-        ReplyError(id, "MCP tools disabled during lesson");
+        ReplyError(id, "MCP tools disabled during lesson", request_context);
         return;
     }
 
@@ -1712,7 +1786,7 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 
             if (!argument.has_default_value() && !found) {
                 ESP_LOGE(TAG, "tools/call: Missing valid argument: %s", argument.name().c_str());
-                ReplyError(id, "Missing valid argument: " + argument.name());
+                ReplyError(id, "Missing valid argument: " + argument.name(), request_context);
                 return;
             }
         }
@@ -1720,12 +1794,12 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
         if (is_lesson_storage_hil) {
             ESP_LOGW(TAG, "HIL_STORAGE_REFUSAL reason=argument_conversion");
-            ReplyError(id, "lesson storage HIL operation failed");
+            ReplyError(id, "lesson storage HIL operation failed", request_context);
             return;
         }
 #endif
         ESP_LOGE(TAG, "tools/call: %s", e.what());
-        ReplyError(id, e.what());
+        ReplyError(id, e.what(), request_context);
         return;
     }
 
@@ -1740,37 +1814,38 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             (void)ValidateLessonAssetSyncPackOrThrow(
                 asset_pack, cache_key, lesson_id);
         } catch (const std::exception& error) {
-            ReplyError(id, error.what());
+            ReplyError(id, error.what(), request_context);
             return;
         }
 #endif
         auto& storage = LessonAssetStorageCoordinator::GetInstance();
         if (storage.HasLessonSession() || storage.HasMutation()) {
             ESP_LOGW(TAG, "lesson asset sync rejected before worker creation: storage busy");
-            ReplyError(id, "lesson asset sync unavailable while lesson storage is active");
+            ReplyError(id, "lesson asset sync unavailable while lesson storage is active", request_context);
             return;
         }
-        if (!StartLessonAssetSyncTask(id, *tool_iter, std::move(arguments))) {
-            ReplyError(id, "lesson asset sync busy or worker unavailable");
+        if (!StartLessonAssetSyncTask(id, *tool_iter, std::move(arguments), request_context)) {
+            ReplyError(id, "lesson asset sync busy or worker unavailable", request_context);
         }
         return;
     }
 
     // Use main thread to call short-running tools.
     auto& app = Application::GetInstance();
-    app.Schedule([this, id, tool_iter, tool_name, lesson_tool_allowed,
+    app.Schedule([this, id, tool_iter, tool_name, lesson_tool_allowed, request_context,
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
                   is_lesson_storage_hil,
 #endif
                   arguments = std::move(arguments)]() {
+        if (!Application::GetInstance().IsChatRequestCurrent(request_context)) return;
         if (!lesson_tool_allowed &&
             Application::GetInstance().IsLessonRuntimeActive()) {
             ESP_LOGI(TAG, "scheduled MCP tool call rejected during lesson: %s", tool_name.c_str());
-            ReplyError(id, "MCP tools disabled during lesson");
+            ReplyError(id, "MCP tools disabled during lesson", request_context);
             return;
         }
         try {
-            ReplyResult(id, (*tool_iter)->Call(arguments));
+            ReplyResult(id, (*tool_iter)->Call(arguments, request_context), request_context);
         } catch (const std::exception& e) {
 #if CONFIG_TBOT_HIL_STORAGE_FAULTS
             if (is_lesson_storage_hil) {
@@ -1780,12 +1855,15 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
                 ESP_LOGW(TAG,
                          "HIL_STORAGE_REFUSAL reason=operation_failed sequence=%s",
                          sequence_text.c_str());
-                ReplyError(id, "lesson storage HIL operation failed");
+                ReplyError(id, "lesson storage HIL operation failed", request_context);
                 return;
             }
 #endif
             ESP_LOGE(TAG, "tools/call: %s", e.what());
-            ReplyError(id, e.what());
+            ReplyError(id, e.what(), request_context);
+        } catch (...) {
+            if (!request_context) throw;
+            Application::GetInstance().FailChatRequest(request_context);
         }
     });
 }
@@ -1793,29 +1871,30 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
 bool McpServer::StartLessonAssetSyncTask(
     int id,
     McpTool* tool,
-    PropertyList arguments
+    PropertyList arguments,
+    ChatRequestContext request_context
 ) {
+    if (!Application::GetInstance().IsChatRequestCurrent(request_context)) return false;
     if (lesson_asset_sync_in_flight_.exchange(true)) {
         ESP_LOGW(TAG, "lesson asset sync already in flight");
         return false;
     }
 
     auto& app = Application::GetInstance();
-    if (!app.ScheduleAndWait([]() {
+    const auto begin_quiet = []() {
             return Application::GetInstance().BeginLessonAssetSyncQuiet();
-        }, 2000)) {
+        };
+    const bool quiet_ready = request_context ? begin_quiet() : app.ScheduleAndWait(begin_quiet, 2000);
+    if (!quiet_ready) {
         lesson_asset_sync_in_flight_.store(false);
         ESP_LOGW(TAG, "lesson asset sync rejected: application is not safely idle");
         return false;
     }
 
     auto* context = new (std::nothrow) LessonAssetSyncTaskContext{
-        this, id, tool, std::move(arguments)};
+        this, id, tool, std::move(arguments), request_context};
     if (context == nullptr) {
-        app.Schedule([]() {
-            Application::GetInstance().EndLessonAssetSyncQuiet();
-        });
-        lesson_asset_sync_in_flight_.store(false);
+        PublishLessonAssetSyncCompletion(id, false, {}, request_context, false);
         ESP_LOGE(TAG, "lesson asset sync context allocation failed");
         return false;
     }
@@ -1831,10 +1910,7 @@ bool McpServer::StartLessonAssetSyncTask(
             nullptr,
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         delete context;
-        app.Schedule([]() {
-            Application::GetInstance().EndLessonAssetSyncQuiet();
-        });
-        lesson_asset_sync_in_flight_.store(false);
+        PublishLessonAssetSyncCompletion(id, false, {}, request_context, false);
         ESP_LOGE(TAG, "lesson asset sync worker creation failed");
         return false;
     }
@@ -1843,13 +1919,49 @@ bool McpServer::StartLessonAssetSyncTask(
 
 void McpServer::LessonAssetSyncTaskEntry(void* arg) noexcept {
     LessonAssetSyncTaskBody(arg);
+    // Self-delete does not unwind C++ locals; the body must return first.
+    vTaskDeleteWithCaps(nullptr);
     abort();
+}
+
+void McpServer::PublishLessonAssetSyncCompletion(
+    int id, bool succeeded, std::string response, ChatRequestContext context, bool send_reply
+) noexcept {
+    // Single-flight ownership reserves this slot until Application ends quiet.
+    lesson_asset_sync_response_id_ = id;
+    lesson_asset_sync_succeeded_ = succeeded;
+    lesson_asset_sync_send_reply_ = send_reply;
+    lesson_asset_sync_response_ = std::move(response);
+    lesson_asset_sync_request_ = std::move(context);
+    lesson_asset_sync_completion_ready_.store(true, std::memory_order_release);
+}
+
+void McpServer::PollLessonAssetSyncCompletion() {
+    if (!lesson_asset_sync_completion_ready_.load(std::memory_order_acquire)) return;
+    Application::GetInstance().EndLessonAssetSyncQuiet();
+    try {
+        if (!lesson_asset_sync_send_reply_) {
+            // Starter already returned a dispatch error; only quiet cleanup remains.
+        } else if (lesson_asset_sync_succeeded_) {
+            ReplyResult(lesson_asset_sync_response_id_, lesson_asset_sync_response_, lesson_asset_sync_request_);
+        } else {
+            ReplyError(lesson_asset_sync_response_id_, lesson_asset_sync_response_.empty()
+                ? "lesson asset sync failed" : lesson_asset_sync_response_, lesson_asset_sync_request_);
+        }
+    } catch (...) {
+        ESP_LOGE(TAG, "lesson asset sync response publication failed");
+    }
+    lesson_asset_sync_request_.reset();
+    lesson_asset_sync_response_.clear();
+    lesson_asset_sync_completion_ready_.store(false, std::memory_order_release);
+    lesson_asset_sync_in_flight_.store(false, std::memory_order_release);
 }
 
 void McpServer::LessonAssetSyncTaskBody(void* arg) noexcept {
     auto* raw_context = static_cast<LessonAssetSyncTaskContext*>(arg);
     McpServer* server = raw_context->server;
     const int response_id = raw_context->id;
+    const auto request_context = raw_context->request_context;
     bool watchdog_registered = false;
 
     try {
@@ -1865,8 +1977,10 @@ void McpServer::LessonAssetSyncTaskBody(void* arg) noexcept {
         std::string response;
         try {
             try {
-                response = context->tool->Call(context->arguments);
-                succeeded = true;
+                if (Application::GetInstance().IsChatRequestCurrent(request_context)) {
+                    response = context->tool->Call(context->arguments, request_context);
+                    succeeded = true;
+                }
             } catch (const std::exception& error) {
                 ESP_LOGE(TAG, "lesson asset sync failed: %s", error.what());
                 response = error.what();
@@ -1881,21 +1995,7 @@ void McpServer::LessonAssetSyncTaskBody(void* arg) noexcept {
         }
 
         context.reset();
-        Application::GetInstance().Schedule(
-            [server, response_id, succeeded, response = std::move(response)]() {
-            auto& app = Application::GetInstance();
-            app.EndLessonAssetSyncQuiet();
-            try {
-                if (succeeded) {
-                    server->ReplyResult(response_id, response);
-                } else {
-                    server->ReplyError(response_id, response);
-                }
-            } catch (...) {
-                ESP_LOGE(TAG, "lesson asset sync response publication failed");
-            }
-        });
-        server->lesson_asset_sync_in_flight_.store(false);
+        server->PublishLessonAssetSyncCompletion(response_id, succeeded, std::move(response), request_context);
         if (watchdog_registered) {
             const esp_err_t watchdog_delete_result = esp_task_wdt_delete(nullptr);
             if (watchdog_delete_result != ESP_OK) {
@@ -1903,23 +2003,9 @@ void McpServer::LessonAssetSyncTaskBody(void* arg) noexcept {
                          esp_err_to_name(watchdog_delete_result));
             }
         }
-        vTaskDeleteWithCaps(nullptr);
     } catch (...) {
         ESP_LOGE(TAG, "lesson asset sync worker failed outside tool boundary");
-        try {
-            Application::GetInstance().Schedule([server, response_id]() {
-                auto& app = Application::GetInstance();
-                app.EndLessonAssetSyncQuiet();
-                try {
-                    server->ReplyError(response_id, "lesson asset sync failed");
-                } catch (...) {
-                    ESP_LOGE(TAG, "lesson asset sync failsafe response publication failed");
-                }
-            });
-        } catch (...) {
-            ESP_LOGE(TAG, "lesson asset sync failsafe publication failed");
-        }
-        server->lesson_asset_sync_in_flight_.store(false);
+        server->PublishLessonAssetSyncCompletion(response_id, false, {}, request_context);
         if (watchdog_registered) {
             const esp_err_t watchdog_delete_result = esp_task_wdt_delete(nullptr);
             if (watchdog_delete_result != ESP_OK) {
@@ -1927,6 +2013,5 @@ void McpServer::LessonAssetSyncTaskBody(void* arg) noexcept {
                          esp_err_to_name(watchdog_delete_result));
             }
         }
-        vTaskDeleteWithCaps(nullptr);
     }
 }

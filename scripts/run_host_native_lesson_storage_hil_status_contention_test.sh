@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/tbot-hil-status-contention.XXXXXX")"
+: "${TMPDIR:?owned TMPDIR required}"
+BUILD_DIR="$(mktemp -d "${TMPDIR}/tbot-hil-status-contention.XXXXXX")"
 IDF_CJSON="${IDF_PATH:?IDF_PATH must point to an ESP-IDF checkout}/components/json/cJSON"
-trap 'rm -rf "${BUILD_DIR}"' EXIT
 "${CC:-clang}" -std=c99 -Wall -Wextra -Werror \
   -I"${IDF_CJSON}" -c "${IDF_CJSON}/cJSON.c" -o "${BUILD_DIR}/cJSON.o"
+export TBOT_RETAINED_TEST_STATE_PATH="${BUILD_DIR}/selection.record"
 "${CXX:-clang++}" -std=c++17 -pthread -Wall -Wextra -Werror \
   -ffunction-sections -fdata-sections \
   -DTBOT_LESSON_STORAGE_HIL_MCP_TOOLS_TESTING \
@@ -24,6 +25,7 @@ trap 'rm -rf "${BUILD_DIR}"' EXIT
   "${ROOT}/main/lesson_storage_hil_controller.cc" \
   "${ROOT}/main/lesson_storage_hil_fixture.cc" \
   "${ROOT}/main/lesson_asset_cache_evict.cc" \
+  "${ROOT}/main/lesson_asset_retained_selection.cc" \
   "${ROOT}/main/lesson_storage_hil_hooks.cc" \
   "${ROOT}/main/lesson_asset_storage_coordinator.cc" \
   "${ROOT}/main/physical_sd_identity.cc" \

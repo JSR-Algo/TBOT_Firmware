@@ -39,7 +39,7 @@ def function_body(text: str, signature: str) -> str:
 def sample_sync_body() -> str:
     source = SOURCE.read_text(encoding="utf-8")
     start = source.index('AddUserOnlyTool("self.lesson_assets.sync_sample_to_sd"')
-    end = source.index('AddUserOnlyTool("self.lesson_assets.sync_to_sd"', start)
+    end = source.index('\n    AddUserOnlyTool(', start)
     return source[start:end]
 
 

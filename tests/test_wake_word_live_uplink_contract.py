@@ -70,7 +70,6 @@ def test_wake_preroll_storage_and_secondary_encoder_are_structurally_absent():
         "ENCODE_EXITED_EVENT",
         '"encode_wake_word"',
         "esp_opus_enc_",
-        "xTaskCreateWithCaps",
     ):
         assert forbidden not in wake_sources
 

@@ -221,6 +221,26 @@ def process_emoji_collection(emoji_collection_dir, assets_dir):
         return []
     
     emoji_list = []
+
+    # Share only the supplied TJBot GIFs until more replacement faces arrive.
+    if os.path.basename(os.path.dirname(os.path.normpath(emoji_collection_dir))) == 'tbot-neon-faces':
+        face_groups = {
+            'cool': ['neutral', 'cool', 'relaxed', 'confident', 'sleepy'],
+            'laughing': ['happy', 'laughing', 'funny', 'loving', 'winking',
+                         'delicious', 'kissy', 'silly'],
+            'confused': ['thinking', 'confused', 'embarrassed', 'surprised', 'shocked'],
+            'crying': ['sad', 'crying', 'angry'],
+        }
+        for target in face_groups:
+            path = os.path.join(emoji_collection_dir, target + '.gif')
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f'Required TJBot face missing: {path}')
+        for target, emotions in face_groups.items():
+            filename = target + '.gif'
+            shutil.copyfile(os.path.join(emoji_collection_dir, filename),
+                            os.path.join(assets_dir, filename))
+            emoji_list.extend({'name': name, 'file': filename} for name in emotions)
+        return emoji_list
     
     # Check if this is otto-gif collection
     is_otto_gif = 'otto-emoji-gif-component' in emoji_collection_dir or emoji_collection_dir.endswith('otto-gif')

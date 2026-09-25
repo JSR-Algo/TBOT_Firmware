@@ -107,6 +107,7 @@ public:
         const std::string& ssid, const std::string& password);
     void EnableStationAutomaticScans();
     void StopStation();    // Non-blocking
+    bool TryStopStation(); // False only when a lifecycle transition must retry
 
     bool IsConnected() const;
     std::string GetSsid() const;
@@ -118,6 +119,7 @@ public:
     // ==================== Config AP Mode ====================
 
     void StartConfigAp();  // Non-blocking, auto-stops station if active
+    bool TryStartConfigAp();
     void StopConfigAp();   // Non-blocking
 
     bool IsConfigMode() const;
@@ -228,7 +230,9 @@ private:
         kConfigAp,
     };
     bool DeferLifecycleTransitionForRecovery(
-        PendingLifecycleTarget target, uint64_t transition_generation);
+        PendingLifecycleTarget target, uint64_t transition_generation,
+        bool allow_defer = true);
+    bool StartConfigApTransition(bool allow_defer);
     void ResumePendingLifecycleTransition();
     void StartStationTarget(WifiStation* station,
                             const WifiManagerConfig& config,

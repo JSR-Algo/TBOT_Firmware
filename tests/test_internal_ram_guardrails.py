@@ -83,6 +83,23 @@ def test_management_heartbeat_reuses_the_persistent_network_worker_stack():
     assert "2, sizeof(NetworkWorkItem)" in " ".join(source.split())
 
 
+def test_wake_word_pipeline_disables_the_unused_secondary_model_before_creation():
+    source = read("main/audio/wake_words/afe_wake_word.cc")
+    initialize = function_body(
+        source,
+        "bool AfeWakeWord::Initialize",
+        "void AfeWakeWord::OnWakeWordDetected",
+    )
+
+    disable_secondary = initialize.index(
+        "afe_config->wakenet_model_name_2 = nullptr;"
+    )
+    configured_models = initialize.index("configured_wakenet_models")
+    create_pipeline = initialize.index("create_from_config")
+
+    assert disable_secondary < configured_models < create_pipeline
+
+
 def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
     application = read("main/application.cc")
     websocket = read("main/protocols/websocket_protocol.cc")
@@ -102,7 +119,8 @@ def test_websocket_open_worker_stack_is_safe_for_indirect_nvs_reads():
         "bool WebsocketProtocol::IsAllowedUnclaimedPublicLessonMessage",
     )
 
-    assert "protocol_->OpenAudioChannel()" in worker_body
+    assert "worker_protocol->OpenAudioChannel()" in worker_body
+    assert "Protocol* worker_protocol = ctx->protocol;" in worker_body
     assert "RefreshSettings();" in open_body
     assert 'Settings settings("websocket", false);' in refresh_body
     assert "settings.GetString(" in refresh_body
@@ -183,7 +201,9 @@ def test_websocket_close_callback_defers_nvs_dependent_work_to_application_task(
     callback_prefix = source[callback_start:schedule_start]
     scheduled_close = source[schedule_start:callback_end]
 
-    assert "tts_audio_accepting_.store(false);" in callback_prefix
+    # A delayed old close must not revoke newer playback from the network task.
+    assert "tts_audio_accepting_.store(false);" not in callback_prefix
+    assert "speaking_arm_dispatch_.Cancel();" not in callback_prefix
     assert "ShouldKeepManagementHeartbeat()" not in callback_prefix
     assert "StartHeartbeat();" not in callback_prefix
     assert "DispatchDeviceHeartbeat();" not in callback_prefix
@@ -197,7 +217,10 @@ def test_websocket_close_callback_defers_nvs_dependent_work_to_application_task(
     assert "callback_protocol_generation" in callback_prefix
     assert "ProtocolLifetimeMatches(" in scheduled_close
     guard = scheduled_close.index("ProtocolLifetimeMatches(")
+    assert scheduled_close.index("callback_signals->Capture() != callback_era") < guard
     for effect in (
+        "tts_audio_accepting_.store(false);",
+        "speaking_arm_dispatch_.Cancel();",
         "ShouldKeepManagementHeartbeat()",
         "StartHeartbeat();",
         "DispatchDeviceHeartbeat();",

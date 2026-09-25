@@ -10,6 +10,7 @@
 #include <functional>
 
 #include "board.h"
+#include "audio_output_drain.h"
 
 #define AUDIO_CODEC_DMA_DESC_NUM 6
 #define AUDIO_CODEC_DMA_FRAME_NUM 240
@@ -27,6 +28,11 @@ public:
     virtual void OutputData(std::vector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);
     virtual void Start();
+    // Digital hardware fence only; callers own the deadline and epoch matching.
+    virtual AudioOutputDrainSnapshot GetOutputDrainSnapshot() const { return {}; }
+    virtual bool SupportsChatOutputDrain() const { return false; }
+    // Explicit new-session/cancel reset. False means no reset was performed.
+    virtual bool ResetOutputDrain() { return false; }
 
     inline bool duplex() const { return duplex_; }
     inline bool input_reference() const { return input_reference_; }

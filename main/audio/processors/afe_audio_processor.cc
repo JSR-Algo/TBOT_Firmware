@@ -3,6 +3,7 @@
 #include <esp_log.h>
 
 #define PROCESSOR_RUNNING 0x01
+#define PROCESSOR_EXITED 0x02
 
 #define TAG "AfeAudioProcessor"
 
@@ -66,6 +67,9 @@ AfeAudioProcessor::AfeAudioProcessor()
 }
 
 void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srmodel_list_t* models_list) {
+    if (initialization_attempted_) return;
+    initialization_attempted_ = true;
+    if (!codec || !event_group_) return;
     codec_ = codec;
     frame_samples_ = frame_duration_ms * 16000 / 1000;
     codec_input_channels_ = std::max(1, codec_->input_channels());
@@ -96,10 +100,11 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
         models = models_list;
     }
 
-    char* ns_model_name = esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
-    char* vad_model_name = esp_srmodel_filter(models, ESP_VADN_PREFIX, NULL);
+    char* ns_model_name = models ? esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL) : nullptr;
+    char* vad_model_name = models ? esp_srmodel_filter(models, ESP_VADN_PREFIX, NULL) : nullptr;
     
     afe_config_t* afe_config = afe_config_init(input_format.c_str(), NULL, AFE_TYPE_VC, AFE_MODE_HIGH_PERF);
+    if (!afe_config) return;
     afe_config->aec_mode = AEC_MODE_VOIP_HIGH_PERF;
     afe_config->vad_mode = VAD_MODE_0;
     afe_config->vad_min_noise_ms = 100;
@@ -127,20 +132,28 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 #endif
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
+    if (!afe_iface_) { afe_config_free(afe_config); return; }
     afe_data_ = afe_iface_->create_from_config(afe_config);
+    afe_config_free(afe_config);
+    if (!afe_data_) return;
     
-    xTaskCreate([](void* arg) {
+    task_created_ = xTaskCreate([](void* arg) {
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();
         vTaskDelete(NULL);
-    }, "audio_communication", 4096, this, tskIDLE_PRIORITY + 9, NULL);
+    }, "audio_communication", 4096, this, tskIDLE_PRIORITY + 9, NULL) == pdPASS;
 }
 
 AfeAudioProcessor::~AfeAudioProcessor() {
+    shutdown_.store(true);
+    if (event_group_) xEventGroupSetBits(event_group_, PROCESSOR_RUNNING);
+    if (task_created_) {
+        xEventGroupWaitBits(event_group_, PROCESSOR_EXITED, pdFALSE, pdTRUE, portMAX_DELAY);
+    }
     if (afe_data_ != nullptr) {
         afe_iface_->destroy(afe_data_);
     }
-    vEventGroupDelete(event_group_);
+    if (event_group_) vEventGroupDelete(event_group_);
 }
 
 size_t AfeAudioProcessor::GetFeedSize() {
@@ -150,14 +163,14 @@ size_t AfeAudioProcessor::GetFeedSize() {
     return afe_iface_->get_feed_chunksize(afe_data_);
 }
 
-void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
+void AfeAudioProcessor::Feed(std::vector<int16_t>&& data, ChatCaptureTag tag) {
     if (afe_data_ == nullptr) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
     // Check running state inside lock to avoid TOCTOU race with Stop()
-    if (!IsRunning()) {
+    if (!IsRunning() || tag != capture_tag_) {
         return;
     }
     const std::vector<int16_t>* feed_data = &data;
@@ -175,28 +188,46 @@ void AfeAudioProcessor::Feed(std::vector<int16_t>&& data) {
 }
 
 void AfeAudioProcessor::Start() {
+    std::lock_guard<std::mutex> dispatch(callback_mutex_);
+    if (!IsCaptureReady()) return;
     xEventGroupSetBits(event_group_, PROCESSOR_RUNNING);
 }
 
 void AfeAudioProcessor::Stop() {
+    std::lock_guard<std::mutex> dispatch(callback_mutex_);
+    if (!event_group_) return;
     xEventGroupClearBits(event_group_, PROCESSOR_RUNNING);
 
     std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+    std::lock_guard<std::mutex> fetch(fetch_mutex_);
     if (afe_data_ != nullptr) {
         afe_iface_->reset_buffer(afe_data_);
     }
     input_buffer_.clear();
+    output_buffer_.clear();
+}
+
+void AfeAudioProcessor::PrepareCapture(ChatCaptureTag tag) {
+    std::lock_guard<std::mutex> dispatch(callback_mutex_);
+    std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+    std::lock_guard<std::mutex> fetch(fetch_mutex_);
+    if (afe_data_ != nullptr) afe_iface_->reset_buffer(afe_data_);
+    input_buffer_.clear();
+    output_buffer_.clear();
+    capture_tag_ = tag;
 }
 
 bool AfeAudioProcessor::IsRunning() {
-    return xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING;
+    return event_group_ && (xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING);
 }
 
-void AfeAudioProcessor::OnOutput(std::function<void(std::vector<int16_t>&& data)> callback) {
+void AfeAudioProcessor::OnOutput(std::function<void(std::vector<int16_t>&& data, ChatCaptureTag)> callback) {
+    std::lock_guard<std::mutex> lock(fetch_mutex_);
     output_callback_ = callback;
 }
 
 void AfeAudioProcessor::OnVadStateChange(std::function<void(bool speaking)> callback) {
+    std::lock_guard<std::mutex> lock(fetch_mutex_);
     vad_state_change_callback_ = callback;
 }
 
@@ -206,57 +237,51 @@ void AfeAudioProcessor::AudioProcessorTask() {
     ESP_LOGI(TAG, "Audio communication task started, feed size: %d fetch size: %d",
         feed_size, fetch_size);
 
-    while (true) {
+    while (!shutdown_.load()) {
         xEventGroupWaitBits(event_group_, PROCESSOR_RUNNING, pdFALSE, pdTRUE, portMAX_DELAY);
-
-        auto res = afe_iface_->fetch_with_delay(afe_data_, portMAX_DELAY);
-        if ((xEventGroupGetBits(event_group_) & PROCESSOR_RUNNING) == 0) {
-            continue;
-        }
-        if (res == nullptr || res->ret_value == ESP_FAIL) {
-            if (res != nullptr) {
-                ESP_LOGI(TAG, "Error code: %d", res->ret_value);
-            }
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
-
-        // VAD state change
-        if (vad_state_change_callback_) {
-            if (res->vad_state == VAD_SPEECH && !is_speaking_) {
-                is_speaking_ = true;
-                vad_state_change_callback_(true);
-            } else if (res->vad_state == VAD_SILENCE && is_speaking_) {
-                is_speaking_ = false;
-                vad_state_change_callback_(false);
-            }
-        }
-
-        if (output_callback_) {
-            size_t samples = res->data_size / sizeof(int16_t);
-            
-            // Add data to buffer
-            output_buffer_.insert(output_buffer_.end(), res->data, res->data + samples);
-            
-            // Output complete frames when buffer has enough data
-            while (output_buffer_.size() >= frame_samples_) {
-                if (output_buffer_.size() == frame_samples_) {
-                    // If buffer size equals frame size, move the entire buffer
-                    output_callback_(std::move(output_buffer_));
-                    output_buffer_.clear();
-                    output_buffer_.reserve(frame_samples_);
-                } else {
-                    // If buffer size exceeds frame size, copy one frame and remove it
-                    output_callback_(std::vector<int16_t>(output_buffer_.begin(), output_buffer_.begin() + frame_samples_));
-                    output_buffer_.erase(output_buffer_.begin(), output_buffer_.begin() + frame_samples_);
-                }
-            }
-        }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        if (shutdown_.load()) break;
+        FetchAudio();
+        // At 100 Hz, pdMS_TO_TICKS(1) is zero. Block for a real tick so the
+        // lower-priority capture cleanup can acquire callback_mutex_.
+        vTaskDelay(1);
     }
+    xEventGroupSetBits(event_group_, PROCESSOR_EXITED);
+}
+
+void AfeAudioProcessor::FetchAudio() {
+    // Transition order: dispatch -> feed -> fetch. The SDK supports concurrent
+    // feed/fetch; reset excludes both. Callbacks must not reenter Stop/Prepare.
+    std::lock_guard<std::mutex> dispatch(callback_mutex_);
+    std::unique_lock<std::mutex> lock(fetch_mutex_);
+    if (!IsRunning() || afe_data_ == nullptr) return;
+    // Never wait for feed while holding its mutex. SDK ring reset does not
+    // promise to erase DSP/filter history; this fences owned samples only.
+    const auto tag = capture_tag_;
+    auto res = afe_iface_->fetch_with_delay(afe_data_, pdMS_TO_TICKS(100));
+    if (res == nullptr || res->ret_value == ESP_FAIL) return;
+    auto output = output_callback_;
+    auto vad = vad_state_change_callback_;
+    const bool speaking = res->vad_state == VAD_SPEECH ? true :
+        res->vad_state == VAD_SILENCE ? false : is_speaking_;
+    const bool vad_changed = speaking != is_speaking_;
+    is_speaking_ = speaking;
+    std::vector<std::vector<int16_t>> frames;
+    if (output) {
+        const size_t samples = res->data_size / sizeof(int16_t);
+        output_buffer_.insert(output_buffer_.end(), res->data, res->data + samples);
+        while (output_buffer_.size() >= static_cast<size_t>(frame_samples_)) {
+            frames.emplace_back(output_buffer_.begin(), output_buffer_.begin() + frame_samples_);
+            output_buffer_.erase(output_buffer_.begin(), output_buffer_.begin() + frame_samples_);
+        }
+    }
+    lock.unlock();
+    if (vad && vad_changed) vad(speaking);
+    for (auto& frame : frames) output(std::move(frame), tag);
 }
 
 void AfeAudioProcessor::EnableDeviceAec(bool enable) {
+    std::lock_guard<std::mutex> lock(input_buffer_mutex_);
+    std::lock_guard<std::mutex> fetch(fetch_mutex_);
     if (enable) {
 #if CONFIG_USE_DEVICE_AEC
         afe_iface_->disable_vad(afe_data_);

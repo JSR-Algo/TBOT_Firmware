@@ -69,11 +69,17 @@ def test_activation_wraps_high_risk_boot_phases_with_local_minimum_monitors():
     assert_monitored_phase(
         activation, "RefreshWebsocketUrlFromConfigFetch();", "config_fetch.complete"
     )
-    assert_monitored_phase(activation, "InitializeProtocol();", "protocol_init.complete")
+    initialize = function_body(source, "void Application::InitializeProtocol")
+    complete = function_body(source, "void Application::CompleteProtocolActivation")
+    assert "RequestInitializeProtocol(ProtocolActivation::kNormal);" in activation
+    assert initialize.index("SystemInfo::StartHeapPhaseMonitor();") < initialize.index("std::make_unique")
+    assert complete.index('PrintHeapCheckpoint("protocol_init.complete")') < complete.index("StopHeapPhaseMonitor()")
     assert "PrewarmWakeWord" not in activation
     assert "afe_prewarm.complete" not in activation
     assert "PrewarmWakeWord" not in assets
-    assert activation.count('SystemInfo::PrintHeapCheckpoint("activation.complete");') == 1
+    assert "MAIN_EVENT_ACTIVATION_DONE" not in activation
+    assert complete.count("MAIN_EVENT_ACTIVATION_DONE") == 1
+    assert '"activation.complete"' in complete
 
 
 def test_claimed_activation_opens_protocol_without_materializing_wake_word_first():
@@ -83,12 +89,11 @@ def test_claimed_activation_opens_protocol_without_materializing_wake_word_first
     assets = activation.index("CheckAssetsVersion();", activation.index("if (!IsDeviceClaimed())"))
     ota = activation.index("CheckNewVersion();", assets)
     config = activation.index("RefreshWebsocketUrlFromConfigFetch();", ota)
-    protocol = activation.index("InitializeProtocol();", config)
-    activation_done = activation.index(
-        "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);", protocol
-    )
-
-    assert assets < ota < config < protocol < activation_done
+    protocol = activation.index("RequestInitializeProtocol(ProtocolActivation::kNormal);", config)
+    complete = function_body(source, "void Application::CompleteProtocolActivation")
+    assert "xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);" in complete
+    assert "MAIN_EVENT_ACTIVATION_DONE" not in activation
+    assert assets < ota < config < protocol
     assert "PrewarmWakeWord" not in activation[config:protocol]
 
 
@@ -99,7 +104,7 @@ def test_unclaimed_activation_skips_claimed_bootstrap_but_reaches_protocol():
     unclaimed_start = activation.index("if (!IsDeviceClaimed())")
     unclaimed_end = activation.index("} else {", unclaimed_start)
     unclaimed_branch = activation[unclaimed_start:unclaimed_end]
-    protocol = activation.index("InitializeProtocol();", unclaimed_end)
+    protocol = activation.index("RequestInitializeProtocol(ProtocolActivation::kNormal);", unclaimed_end)
 
     assert "CheckAssetsVersion();" in unclaimed_branch
     assert "PrewarmWakeWord" not in unclaimed_branch

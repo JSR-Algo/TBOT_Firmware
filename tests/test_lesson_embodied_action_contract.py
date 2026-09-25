@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,9 @@ HANDOFF_FIXTURE_RELATIVE = Path(
 
 
 def _find_enclosing_firmware_root(path: Path) -> Path:
+    selected = os.environ.get("TBOT_FIRMWARE_WORKTREE")
+    if selected and path.resolve() == Path(selected).resolve():
+        return Path(selected).resolve()
     for parent in (path, *path.parents):
         if parent.name == "TBOT-Firmware":
             return parent
@@ -21,6 +25,9 @@ def _find_enclosing_firmware_root(path: Path) -> Path:
 def _task02_fixture_candidates(firmware_root: Path) -> list[Path]:
     """Return only the canonical ESP sibling for the enclosing firmware repository."""
     repository_root = _find_enclosing_firmware_root(firmware_root)
+    selected_esp = os.environ.get("TBOT_ESP32_SERVER_REPO")
+    if selected_esp and repository_root.resolve() == ROOT:
+        return [Path(selected_esp) / HANDOFF_FIXTURE_RELATIVE]
     return [repository_root.parent / "esp32-server" / HANDOFF_FIXTURE_RELATIVE]
 
 
@@ -60,6 +67,12 @@ def test_task02_fixture_discovery_rejects_noncanonical_files(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError, match="canonical ESP sibling path"):
         _find_task02_fixture(worktree_root)
+
+
+def test_explicit_selected_worktrees_read_the_actual_frozen_fixture(monkeypatch):
+    monkeypatch.setenv("TBOT_FIRMWARE_WORKTREE", str(ROOT))
+    monkeypatch.setenv("TBOT_ESP32_SERVER_REPO", str(HANDOFF_FIXTURE.parents[5]))
+    assert _find_task02_fixture(ROOT) == HANDOFF_FIXTURE
 
 
 def test_frozen_task02_fixture_checksum_and_ack_outcomes():

@@ -102,6 +102,23 @@ void SecondFailureRemainsStopped() {
         "rearm is bounded to two attempts");
 }
 
+void ReservedBlockIsConsumedWithoutAnAllocationWindow() {
+    std::vector<std::string> events;
+    const bool rearmed = Transaction::Rearm(
+        [&](uint32_t delay_ms) {
+            events.emplace_back("delay:" + std::to_string(delay_ms));
+        },
+        [&](uint32_t attempt) {
+            events.emplace_back("attempt:" + std::to_string(attempt));
+            return true;
+        },
+        false);
+
+    Require(rearmed, "reserved contiguous block starts successfully");
+    Require(events == std::vector<std::string>({"attempt:1"}),
+            "nothing can allocate between releasing the reservation and Opus");
+}
+
 void IncompleteHandleSetCannotReportSuccess() {
     bool opus = false;
     bool input = false;
@@ -131,6 +148,7 @@ int main() {
     FailureAtEachCreationPointRollsBack();
     OneFailureRetriesAfterReclaim();
     SecondFailureRemainsStopped();
+    ReservedBlockIsConsumedWithoutAnAllocationWindow();
     IncompleteHandleSetCannotReportSuccess();
     std::cout << "audio worker start transaction test OK\n";
     return 0;

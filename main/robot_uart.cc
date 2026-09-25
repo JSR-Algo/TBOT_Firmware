@@ -1,5 +1,6 @@
 #include "robot_uart.h"
 #include "config.h"
+#include "speaking_arm_transport.h"
 
 #include <driver/uart.h>
 #include <esp_log.h>
@@ -236,6 +237,30 @@ bool RobotUart::SendArmAction(const std::string& part, const std::string& action
     return false;
 }
 
+bool RobotUart::TrySendAutomaticArm(bool left, int percent, const std::function<bool()>& owns) {
+    // Automatic gestures use the board's configured primary wiring only.
+    // Changing to alternate pins while TX is pending can truncate a frame.
+    struct Adapter {
+        RobotUart& robot;
+        bool Ready() { return robot.initialized_ && robot.primary_ready_; }
+        bool Idle() { return uart_wait_tx_done(ROBOT_UART_NUM, 0) == ESP_OK; }
+        size_t BufferSpace() {
+            size_t available = 0;
+            return uart_get_tx_buffer_free_size(ROBOT_UART_NUM, &available) == ESP_OK ? available : 0;
+        }
+        bool SelectProfile() {
+            return robot.SelectUartProfile("automatic", ROBOT_UART_NUM, ROBOT_UART_TX_PIN, ROBOT_UART_RX_PIN);
+        }
+        bool Write(const std::string& payload) {
+            return uart_write_bytes(ROBOT_UART_NUM, payload.data(), payload.size()) == static_cast<int>(payload.size());
+        }
+    } adapter{*this};
+    const bool sent = TrySpeakingArmWrite(uart_mutex_, left, percent, adapter, owns);
+    ESP_LOGI(TAG, "speaking_arm_target part=%s percent=%d result=%s",
+             left ? "left" : "right", percent, sent ? "sent" : "skipped");
+    return sent;
+}
+
 bool RobotUart::SendServoSweep(const std::string& part, const std::string& action, int from, int to, int step, int delay_ms) {
     std::lock_guard<std::recursive_mutex> lock(uart_mutex_);
     if (!Initialize()) {
@@ -357,6 +382,13 @@ void RobotUart::HandleReaderLine(const char* line) {
         }
         return;
     }
+
+#if CONFIG_TBOT_VOICE_DEMO
+    if (strncmp(line, "{\"ok\":", 6) == 0 || strcmp(line, "PONG") == 0) {
+        ESP_LOGI(TAG, "Servo board reply: %.128s", line);
+        return;
+    }
+#endif
 
     // PONG/ERR va ACK servo: chi ghi log muc thap, khong xu ly.
     ESP_LOGD(TAG, "Slave line ignored: %s", line);

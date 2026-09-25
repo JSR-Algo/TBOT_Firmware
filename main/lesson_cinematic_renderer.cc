@@ -1,4 +1,5 @@
 #include "lesson_cinematic_renderer.h"
+#include "lesson_storage_hil_u64_format.h"
 #include "lesson_flattened_cinematic_renderer.h"
 #include "lesson_layered_cinematic_renderer.h"
 
@@ -283,8 +284,8 @@ void ProductionRendererTask(void* raw) {
                 : TickActiveLessonCinematicRenderer(now_ms);
         if (response.type == LessonCinematicResponseType::kPhaseComplete) {
             ESP_LOGI("LessonCinematic",
-                     "phase complete at command sequence %" PRIu64 " stack_min=%u",
-                     response.command_sequence_id,
+                     "phase complete at command sequence %s stack_min=%u",
+                     FormatLessonStorageHilUint64(response.command_sequence_id).c_str(),
                      static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr)));
         } else if (!response.accepted &&
                    response.error != LessonCinematicError::kInvalidState) {
@@ -638,24 +639,32 @@ LessonCinematicResponse LessonCinematicRenderer::Tick(std::uint64_t now_ms) {
                                                  last_sequence_);
     if (state_ != State::kRunning) return Failure(last_sequence_, LessonCinematicError::kInvalidState);
     const std::uint64_t elapsed = now_ms >= clock_origin_ms_ ? now_ms - clock_origin_ms_ : 0;
-    const std::uint64_t frame = elapsed * metadata_[0].fps / 1000;
-    if (frame >= metadata_[0].frame_count) {
-        state_ = State::kPrepared;
-        displayed_frame_ = metadata_[0].frame_count - 1;
-        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    std::uint64_t frame = elapsed * metadata_[0].fps / 1000;
+    const bool complete = frame >= metadata_[0].frame_count;
+    if (complete) frame = metadata_[0].frame_count - 1;
+    if (frame == displayed_frame_) {
+        if (complete) {
+            state_ = State::kPrepared;
+            return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+        }
+        return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
     }
-    if (frame == displayed_frame_) return Applied(LessonCinematicResponseType::kCommandApplied,
-                                                   last_sequence_);
     constexpr std::uint64_t kPlaybackBackgroundDecodeDeadlineMs = 150;
     constexpr std::uint64_t kPlaybackForegroundDecodeDeadlineMs = 100;
     const LessonCinematicError render_error = RenderFrame(
         static_cast<std::size_t>(frame), kPlaybackBackgroundDecodeDeadlineMs,
         kPlaybackForegroundDecodeDeadlineMs);
     if (render_error != LessonCinematicError::kNone) {
+        CloseStreams();
+        ReleaseBuffers();
         state_ = State::kFailed;
         return Failure(last_sequence_, render_error);
     }
     displayed_frame_ = static_cast<std::size_t>(frame);
+    if (complete) {
+        state_ = State::kPrepared;
+        return Applied(LessonCinematicResponseType::kPhaseComplete, last_sequence_);
+    }
     return Applied(LessonCinematicResponseType::kCommandApplied, last_sequence_);
 }
 
@@ -683,10 +692,11 @@ LessonCinematicError LessonCinematicRenderer::RenderFrame(
             const std::uint64_t finished = ops_.monotonic_ms(ops_.context);
 #ifdef ESP_PLATFORM
             ESP_LOGI("LessonCinematic",
-                     "decode layer=%u frame=%u elapsed_ms=%" PRIu64
-                     " deadline_ms=%" PRIu64 " decoded=%d operation_error=%u",
+                     "decode layer=%u frame=%u elapsed_ms=%s"
+                     " deadline_ms=%s decoded=%d operation_error=%u",
                      static_cast<unsigned>(layer_index), static_cast<unsigned>(frame_index),
-                     finished >= started ? finished - started : 0, decode_deadline_ms,
+                     FormatLessonStorageHilUint64(finished >= started ? finished - started : 0).c_str(),
+                     FormatLessonStorageHilUint64(decode_deadline_ms).c_str(),
                      decoded ? 1 : 0, static_cast<unsigned>(operation_error));
 #endif
             if (!decoded) return operation_error;

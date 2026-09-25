@@ -5,7 +5,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace tbot {
@@ -65,6 +67,13 @@ struct LessonLayeredCinematicRendererOps {
     std::uint64_t (*monotonic_ms)(void*) = nullptr;
 };
 
+struct LessonLayeredRuntimeError {
+    std::uint64_t generation = 0;
+    std::uint64_t command_sequence_id = 0;
+    std::string phase_id;
+    LessonCinematicError error = LessonCinematicError::kNone;
+};
+
 class LessonLayeredCinematicRenderer {
 public:
     explicit LessonLayeredCinematicRenderer(LessonLayeredCinematicRendererOps ops);
@@ -89,6 +98,11 @@ public:
     bool prepared() const;
     bool last_apply_degraded() const;
     bool last_apply_presented() const;
+    std::uint64_t RuntimeGeneration() const;
+    std::optional<LessonLayeredRuntimeError> PendingRuntimeError() const;
+    bool AcknowledgeRuntimeError(std::uint64_t generation, std::uint64_t sequence);
+    bool ReleaseFailedRuntimeResources(std::uint64_t generation, std::uint64_t sequence);
+    bool WithRuntimeGeneration(std::uint64_t generation, const std::function<void()>& operation);
 
 private:
     enum class State : std::uint8_t { kIdle, kPrepared, kRunning, kPaused, kFailed };
@@ -103,6 +117,7 @@ private:
     LessonCinematicError OperationError(LessonCinematicError fallback) const;
     void Release();
     void ReleaseRobot();
+    void AdvanceRuntimeGeneration();
 
     LessonLayeredCinematicRendererOps ops_{};
     mutable std::mutex mutex_;
@@ -126,6 +141,7 @@ private:
     bool last_apply_presented_ = false;
     LessonCinematicError last_degraded_error_ = LessonCinematicError::kNone;
     LessonCinematicLayerConfig robot_config_{};
+    std::string robot_path_;
     LessonLayeredPlaybackMode playback_mode_ = LessonLayeredPlaybackMode::kOnce;
     std::string phase_id_;
     std::uint64_t last_sequence_ = 0;
@@ -134,6 +150,8 @@ private:
     std::size_t displayed_frame_ = 0;
     LessonCinematicResponse last_response_{};
     std::string last_command_;
+    std::uint64_t runtime_generation_ = 0;
+    std::optional<LessonLayeredRuntimeError> pending_runtime_error_;
 };
 
 bool LessonLayeredCinematicRendererCapabilityReady();

@@ -29,6 +29,7 @@ struct FakeRuntime {
     std::size_t presents = 0;
     std::size_t last_frame = 999;
     bool fail_decode = false;
+    bool fail_present = false;
     bool fail_open_psram = false;
     bool enough_memory = true;
     std::uint64_t decode_elapsed_ms = 0;
@@ -38,6 +39,7 @@ struct FakeRuntime {
     std::atomic<bool> decode_entered{false};
     std::atomic<bool> allow_decode{false};
     std::vector<std::size_t> decoded_indices;
+    std::vector<std::uint16_t> presented_pixels;
 };
 
 void* Allocate(void* raw, std::size_t size) {
@@ -102,12 +104,14 @@ std::uint64_t MonotonicMs(void* raw) {
     return static_cast<FakeRuntime*>(raw)->now_ms;
 }
 
-bool Present(void* raw, const std::uint16_t*, std::uint16_t width, std::uint16_t height,
+bool Present(void* raw, const std::uint16_t* pixels, std::uint16_t width, std::uint16_t height,
              std::size_t frame_index) {
     auto& fake = *static_cast<FakeRuntime*>(raw);
     Require(width == 480 && height == 320, "presentation is one full framebuffer");
+    if (fake.fail_present) return false;
     ++fake.presents;
     fake.last_frame = frame_index;
+    fake.presented_pixels.assign(pixels, pixels + width * height);
     return true;
 }
 
@@ -318,6 +322,41 @@ void TestDuplicateSequenceFingerprintAndActiveTickLifecycle() {
     tbot::SetActiveLessonCinematicRenderer(nullptr);
 }
 
+void TestLateCompletionPresentsFinalTripletAndPropagatesFailure() {
+    for (int fault : {0, 1, 2}) {
+        FakeRuntime fake;
+        tbot::LessonCinematicRenderer renderer(Ops(&fake));
+        Require(renderer.Prepare(Config(), 0).accepted && renderer.Start(8, "teach", 0).accepted,
+                "late final triplet fixture starts");
+        fake.fail_decode = fault == 1;
+        fake.fail_present = fault == 2;
+        const auto response = renderer.Tick(350);
+        if (fault != 0) {
+            Require(!response.accepted && response.error == (fault == 1
+                        ? tbot::LessonCinematicError::kDecodeFailed : tbot::LessonCinematicError::kPresentFailed),
+                    "final triplet decode or present failure cannot acknowledge completion");
+            Require(fake.presents == 1, "failed final triplet never presents partial layers");
+            Require(fake.closes == 3 && fake.frees == 2,
+                    "failed triplet immediately releases every stream and buffer");
+            const auto after_failure = renderer.Tick(400);
+            Require(!after_failure.accepted && fake.closes == 3 && fake.frees == 2,
+                    "failed renderer does not retry or release resources twice");
+            Require(renderer.Stop(9, "teach").accepted && fake.closes == 3 && fake.frees == 2,
+                    "terminal cleanup after render failure remains idempotent");
+        } else {
+            Require(response.accepted && response.type == tbot::LessonCinematicResponseType::kPhaseComplete,
+                    "late triplet completes after rendering");
+            Require(fake.last_frame == 2 && fake.presents == 2 &&
+                        fake.decoded_indices == std::vector<std::size_t>({0, 0, 0, 2, 2, 2}),
+                    "late triplet presents final frame for all layers without queuing skipped frames");
+            Require(fake.presented_pixels[0] == 0xffff && fake.presented_pixels[480 * 10 + 10] == 0x0202,
+                    "final triplet presents foreground and final background pixels");
+            Require(renderer.Tick(400).type != tbot::LessonCinematicResponseType::kPhaseComplete && fake.presents == 2,
+                    "later ticks cannot complete or present the once clip again");
+        }
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -326,6 +365,7 @@ int main() {
     TestPrepareAllowsMeasuredColdDecodeButPlaybackKeepsDeadline();
     TestPlaybackUsesBoundedLayerSpecificDecodeDeadlines();
     TestDuplicateSequenceFingerprintAndActiveTickLifecycle();
-    std::cout << "lesson_cinematic_renderer test passed\n";
+    TestLateCompletionPresentsFinalTripletAndPropagatesFailure();
+    std::cout << "lesson_cinematic_renderer tests: 6 passed, 0 failed, 0 skipped\n";
     return 0;
 }
