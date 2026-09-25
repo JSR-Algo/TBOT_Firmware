@@ -119,20 +119,20 @@ struct NetworkWorkItem {
     void* context;
 };
 
-DRAM_ATTR StaticTask_t open_channel_task_buffer;
-DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
-DRAM_ATTR StaticQueue_t open_channel_queue_buffer;
-DRAM_ATTR NetworkWorkItem open_channel_queue_storage[2];
+StaticTask_t open_channel_task_buffer;
+EXT_RAM_BSS_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
+StaticQueue_t open_channel_queue_buffer;
+NetworkWorkItem open_channel_queue_storage[2];
 QueueHandle_t open_channel_queue = nullptr;
 TaskHandle_t open_channel_task = nullptr;
-DRAM_ATTR StaticTask_t chat_outbound_task_buffer;
-DRAM_ATTR StackType_t chat_outbound_task_stack[kChatOutboundWorkerStackDepth];
-DRAM_ATTR StaticTask_t chat_audio_cleanup_task_buffer;
-DRAM_ATTR StackType_t chat_audio_cleanup_task_stack[kChatAudioCleanupWorkerStackDepth];
+StaticTask_t chat_outbound_task_buffer;
+EXT_RAM_BSS_ATTR StackType_t chat_outbound_task_stack[kChatOutboundWorkerStackDepth];
+StaticTask_t chat_audio_cleanup_task_buffer;
+EXT_RAM_BSS_ATTR StackType_t chat_audio_cleanup_task_stack[kChatAudioCleanupWorkerStackDepth];
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-DRAM_ATTR StaticTask_t lesson_message_task_buffer;
-DRAM_ATTR StaticQueue_t lesson_message_queue_buffer;
+StaticTask_t lesson_message_task_buffer;
+StaticQueue_t lesson_message_queue_buffer;
 EXT_RAM_BSS_ATTR StackType_t lesson_message_task_stack[kLessonMessageWorkerStackDepth];
 uint8_t* lesson_message_queue_storage = nullptr;
 
@@ -1234,6 +1234,7 @@ void Application::Run() {
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
+                SystemInfo::PrintTaskList();
                 if (chat_cleanup_enabled_) {
                     PlaybackDrainSnapshot snapshot;
                     const bool available = audio_service_.TryGetPlaybackDrainSnapshot(snapshot);
