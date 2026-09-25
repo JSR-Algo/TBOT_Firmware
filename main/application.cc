@@ -120,7 +120,7 @@ struct NetworkWorkItem {
 };
 
 StaticTask_t open_channel_task_buffer;
-EXT_RAM_BSS_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
+DRAM_ATTR StackType_t open_channel_task_stack[kOpenChannelWorkerStackDepth];
 StaticQueue_t open_channel_queue_buffer;
 NetworkWorkItem open_channel_queue_storage[2];
 QueueHandle_t open_channel_queue = nullptr;
@@ -133,7 +133,7 @@ EXT_RAM_BSS_ATTR StackType_t chat_audio_cleanup_task_stack[kChatAudioCleanupWork
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 StaticTask_t lesson_message_task_buffer;
 StaticQueue_t lesson_message_queue_buffer;
-EXT_RAM_BSS_ATTR StackType_t lesson_message_task_stack[kLessonMessageWorkerStackDepth];
+DRAM_ATTR StackType_t lesson_message_task_stack[kLessonMessageWorkerStackDepth];
 uint8_t* lesson_message_queue_storage = nullptr;
 
 void LogLessonWorkerStackWatermark(const char* stage) {
@@ -213,7 +213,7 @@ Application::Application() {
     }
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
         ESP_LOGE(TAG,
-                 "Failed to create persistent PSRAM lesson worker stack=%p storage=%p queue=%p task=%p",
+                 "Failed to create persistent lesson worker stack=%p storage=%p queue=%p task=%p",
                  lesson_message_task_stack, lesson_message_queue_storage,
                  lesson_message_queue_, lesson_message_task_handle_);
         if (lesson_message_task_handle_ != nullptr) {

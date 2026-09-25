@@ -598,6 +598,7 @@ CONFIG_PARTITION_TABLE_MD5=y
 #
 # Tbot Assistant
 #
+# CONFIG_TBOT_VOICE_DEMO is not set
 CONFIG_OTA_URL="https://esp.tjbot.vn/tbot/ota/"
 CONFIG_WEBSOCKET_URL="wss://esp.tjbot.vn/tbot/v1/"
 # CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT is not set

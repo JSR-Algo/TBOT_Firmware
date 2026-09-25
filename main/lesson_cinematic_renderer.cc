@@ -150,7 +150,7 @@ std::unique_ptr<LessonCinematicRenderer> g_production_renderer;
 
 constexpr uint32_t kProductionRendererStackDepth = 32 * 1024;
 DRAM_ATTR StaticTask_t g_production_renderer_task_buffer;
-EXT_RAM_BSS_ATTR StackType_t g_production_renderer_task_stack[kProductionRendererStackDepth];
+DRAM_ATTR StackType_t g_production_renderer_task_stack[kProductionRendererStackDepth];
 
 void* ProductionAllocate(void*, std::size_t size) {
     return heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
