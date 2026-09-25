@@ -334,7 +334,7 @@ public:
             .io_handle = panel_io_,
             .panel_handle = panel_,
             .control_handle = nullptr,
-            .buffer_size = static_cast<uint32_t>(native_w * 20),
+            .buffer_size = static_cast<uint32_t>((DISPLAY_WIDTH * DISPLAY_HEIGHT / 10) * 2),
             .double_buffer = false,
             .trans_size = 0,
             .hres = static_cast<uint32_t>(native_w),
@@ -350,8 +350,8 @@ public:
             .color_format = LV_COLOR_FORMAT_RGB565,
             .flags =
                 {
-                    .buff_dma = 1,
-                    .buff_spiram = 0,
+                    .buff_dma = 0,
+                    .buff_spiram = 1,
                     .sw_rotate = 0,
                     .swap_bytes = 1,
                     .full_refresh = 0,
