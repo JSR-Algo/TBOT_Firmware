@@ -1,58 +1,58 @@
 #include "application.h"
-#include "chat_runtime_timing.h"
-#include "lesson_queue_producer.h"
-#include "wifi_config_entry_policy.h"
+#include "app_manager.h"
+#include "assets.h"
+#include "assets/lang_config.h"
+#include "audio_codec.h"
 #include "board.h"
+#include "chat_runtime_timing.h"
 #include "display.h"
 #include "display/lvgl_display/lvgl_display.h"
-#include "system_info.h"
-#include "audio_codec.h"
-#include "mqtt_protocol.h"
-#include "websocket_protocol.h"
-#include "assets/lang_config.h"
+#include "lesson_queue_producer.h"
 #include "mcp_server.h"
-#include "assets.h"
-#include "settings.h"
+#include "mqtt_protocol.h"
 #include "robot_uart.h"
-#include "app_manager.h"
+#include "settings.h"
+#include "system_info.h"
 #include "tbot_connect_mapper.h"
+#include "websocket_protocol.h"
+#include "wifi_config_entry_policy.h"
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-#include "lesson_heap_probe.h"
 #include "lesson_asset_storage_coordinator.h"
+#include "lesson_heap_probe.h"
 #endif
+#include "esp_build_identity.h"
 #include "passive_reconnect_policy.h"
 #include "protocol_lifetime_token.h"
-#include "esp_build_identity.h"
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
+#include <ssid_manager.h>
+#include <wifi_manager.h>
 #include "boards/common/blufi.h"
 #include "boards/common/system_reset.h"
 #include "boards/common/wifi_board.h"
-#include <ssid_manager.h>
-#include <wifi_manager.h>
 #endif
 
-#include <algorithm>
-#include <ctime>
-#include <cstdio>
-#include <cstring>
-#include <new>
-#include <sys/stat.h>
+#include <driver/gpio.h>
 #include <esp_attr.h>
 #include <esp_err.h>
-#include <esp_log.h>
 #include <esp_heap_caps.h>
-#include <freertos/idf_additions.h>
+#include <esp_log.h>
 #include <esp_random.h>
-#include <esp_task_wdt.h>
 #include <esp_system.h>
-#include <cJSON.h>
-#include <driver/gpio.h>
+#include <esp_task_wdt.h>
 #include <arpa/inet.h>
+#include <cJSON.h>
 #include <font_awesome.h>
+#include <freertos/idf_additions.h>
+#include <sys/stat.h>
+#include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <new>
 #if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
-#include "course_mode_hil_sd_reader.h"
 #include <mbedtls/sha256.h>
 #include <mbedtls/version.h>
+#include "course_mode_hil_sd_reader.h"
 #endif
 
 #define TAG "Application"
@@ -139,8 +139,8 @@ uint8_t* lesson_message_queue_storage = nullptr;
 void LogLessonWorkerStackWatermark(const char* stage) {
     const UBaseType_t free_stack_bytes = uxTaskGetStackHighWaterMark(nullptr);
     if (free_stack_bytes < kLessonMessageWorkerMinimumFreeStackBytes) {
-        ESP_LOGE(TAG, "lesson_worker stack low stage=%s free=%u threshold=%u",
-                 stage, static_cast<unsigned>(free_stack_bytes),
+        ESP_LOGE(TAG, "lesson_worker stack low stage=%s free=%u threshold=%u", stage,
+                 static_cast<unsigned>(free_stack_bytes),
                  static_cast<unsigned>(kLessonMessageWorkerMinimumFreeStackBytes));
         return;
     }
@@ -184,9 +184,9 @@ Application::Application() {
         ESP_LOGE(TAG, "Failed to create persistent chat outbound worker");
     }
 
-    open_channel_queue = xQueueCreateStatic(
-        2, sizeof(NetworkWorkItem), reinterpret_cast<uint8_t*>(open_channel_queue_storage),
-        &open_channel_queue_buffer);
+    open_channel_queue = xQueueCreateStatic(2, sizeof(NetworkWorkItem),
+                                            reinterpret_cast<uint8_t*>(open_channel_queue_storage),
+                                            &open_channel_queue_buffer);
     if (open_channel_queue != nullptr) {
         open_channel_task = xTaskCreateStatic(
             &Application::OpenChannelTask, "lesson_ws", kOpenChannelWorkerStackDepth, this,
@@ -199,12 +199,11 @@ Application::Application() {
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     constexpr uint32_t kLessonWorkerMemoryCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     lesson_message_queue_storage = static_cast<uint8_t*>(heap_caps_malloc(
-        (kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem),
-        kLessonWorkerMemoryCaps));
+        (kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem), kLessonWorkerMemoryCaps));
     if (lesson_message_queue_storage != nullptr) {
-        lesson_message_queue_ = xQueueCreateStatic(
-            kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem),
-            lesson_message_queue_storage, &lesson_message_queue_buffer);
+        lesson_message_queue_ =
+            xQueueCreateStatic(kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem),
+                               lesson_message_queue_storage, &lesson_message_queue_buffer);
     }
     if (lesson_message_queue_ != nullptr) {
         lesson_message_task_handle_ = xTaskCreateStatic(
@@ -214,8 +213,8 @@ Application::Application() {
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
         ESP_LOGE(TAG,
                  "Failed to create persistent lesson worker stack=%p storage=%p queue=%p task=%p",
-                 lesson_message_task_stack, lesson_message_queue_storage,
-                 lesson_message_queue_, lesson_message_task_handle_);
+                 lesson_message_task_stack, lesson_message_queue_storage, lesson_message_queue_,
+                 lesson_message_task_handle_);
         if (lesson_message_task_handle_ != nullptr) {
             vTaskDelete(lesson_message_task_handle_);
             lesson_message_task_handle_ = nullptr;
@@ -236,16 +235,16 @@ Application::Application() {
     aec_mode_ = kAecOff;
 #endif
 
-    esp_timer_create_args_t clock_timer_args = {
-        .callback = [](void* arg) {
-            Application* app = (Application*)arg;
-            xEventGroupSetBits(app->event_group_, MAIN_EVENT_CLOCK_TICK);
-        },
-        .arg = this,
-        .dispatch_method = ESP_TIMER_TASK,
-        .name = "clock_timer",
-        .skip_unhandled_events = true
-    };
+    esp_timer_create_args_t clock_timer_args = {.callback =
+                                                    [](void* arg) {
+                                                        Application* app = (Application*)arg;
+                                                        xEventGroupSetBits(app->event_group_,
+                                                                           MAIN_EVENT_CLOCK_TICK);
+                                                    },
+                                                .arg = this,
+                                                .dispatch_method = ESP_TIMER_TASK,
+                                                .name = "clock_timer",
+                                                .skip_unhandled_events = true};
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
 }
 
@@ -299,15 +298,18 @@ Application::~Application() {
 
 void Application::StopLessonMessageTask() {
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-    if (!lesson_message_task_handle_) return;
+    if (!lesson_message_task_handle_)
+        return;
     lesson_message_stop_.store(true);
-    while (lesson_message_producers_.load()) vTaskDelay(pdMS_TO_TICKS(1));
+    while (lesson_message_producers_.load())
+        vTaskDelay(pdMS_TO_TICKS(1));
     LessonQueueItem wake{LessonQueueItemKind::kAbandonTransport, nullptr, 0};
     // A full queue already wakes the worker; never wait for an extra slot.
     xQueueSendToFront(lesson_message_queue_, &wake, 0);
     // IDF eTaskGetState holds the kernel lock and reports either running core
     // before eSuspended. This task has no resume path once its locals unwind.
-    while (!lesson_message_retired_.load() || eTaskGetState(lesson_message_task_handle_) != eSuspended)
+    while (!lesson_message_retired_.load() ||
+           eTaskGetState(lesson_message_task_handle_) != eSuspended)
         vTaskDelay(pdMS_TO_TICKS(1));
     vTaskDelete(lesson_message_task_handle_);
     lesson_message_task_handle_ = nullptr;
@@ -315,28 +317,22 @@ void Application::StopLessonMessageTask() {
 }
 
 void Application::EnqueueLessonVisualCompletion(
-    LessonQueueItemKind kind,
-    std::uint64_t transport_epoch,
-    std::uint64_t visual_generation,
-    std::int64_t server_sequence,
-    const char* assignment_id,
-    const char* session_id,
-    const char* step_id,
-    LessonVisualCompletionResult result,
-    const char* degraded_reason,
-    std::uint64_t visual_nonce
-) {
+    LessonQueueItemKind kind, std::uint64_t transport_epoch, std::uint64_t visual_generation,
+    std::int64_t server_sequence, const char* assignment_id, const char* session_id,
+    const char* step_id, LessonVisualCompletionResult result, const char* degraded_reason,
+    std::uint64_t visual_nonce) {
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     LessonQueueProducer producer(lesson_message_producers_, lesson_message_stop_);
-    if (!producer) return;
+    if (!producer)
+        return;
     if ((kind != LessonQueueItemKind::kVisualCompleted &&
          kind != LessonQueueItemKind::kVisualTimedOut) ||
         lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
         return;
     }
     LessonQueueItem item = MakeLessonVisualQueueItem(
-        kind, transport_epoch, visual_generation, server_sequence,
-        assignment_id, session_id, step_id, result, degraded_reason, visual_nonce);
+        kind, transport_epoch, visual_generation, server_sequence, assignment_id, session_id,
+        step_id, result, degraded_reason, visual_nonce);
     if (!lesson_queue_data_admission_.TryAcquire()) {
         ESP_LOGW(TAG, "lesson visual completion dropped: data capacity full seq=%ld",
                  static_cast<long>(server_sequence));
@@ -361,19 +357,16 @@ void Application::EnqueueLessonVisualCompletion(
 #endif
 }
 
-void Application::EnqueueLessonEmbodiedCompletion(
-    LessonQueueItemKind kind,
-    std::uint64_t transport_epoch,
-    const char* assignment_id,
-    const char* session_id,
-    const char* step_id,
-    const char* action_id,
-    std::uint64_t action_generation,
-    std::uint64_t embodied_nonce
-) {
+void Application::EnqueueLessonEmbodiedCompletion(LessonQueueItemKind kind,
+                                                  std::uint64_t transport_epoch,
+                                                  const char* assignment_id, const char* session_id,
+                                                  const char* step_id, const char* action_id,
+                                                  std::uint64_t action_generation,
+                                                  std::uint64_t embodied_nonce) {
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     LessonQueueProducer producer(lesson_message_producers_, lesson_message_stop_);
-    if (!producer) return;
+    if (!producer)
+        return;
     if ((kind != LessonQueueItemKind::kEmbodiedHoldCompleted &&
          kind != LessonQueueItemKind::kEmbodiedSettled) ||
         lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
@@ -388,7 +381,8 @@ void Application::EnqueueLessonEmbodiedCompletion(
     std::snprintf(item.session_id, sizeof(item.session_id), "%s", session_id);
     std::snprintf(item.step_id, sizeof(item.step_id), "%s", step_id);
     std::snprintf(item.action_id, sizeof(item.action_id), "%s", action_id);
-    if (!lesson_queue_data_admission_.TryAcquire()) return;
+    if (!lesson_queue_data_admission_.TryAcquire())
+        return;
     if (xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
         lesson_queue_data_admission_.Release();
     }
@@ -404,13 +398,12 @@ void Application::EnqueueLessonEmbodiedCompletion(
 #endif
 }
 
-void Application::EnqueueLessonMessage(
-    const cJSON* root,
-    std::uint64_t transport_epoch, ChatRequestContext context
-) {
+void Application::EnqueueLessonMessage(const cJSON* root, std::uint64_t transport_epoch,
+                                       ChatRequestContext context) {
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     LessonQueueProducer producer(lesson_message_producers_, lesson_message_stop_);
-    if (!producer) return;
+    if (!producer)
+        return;
     const cJSON* type = cJSON_GetObjectItem(root, "type");
     const cJSON* sequence = cJSON_GetObjectItem(root, "sequence");
     const char* type_value = cJSON_IsString(type) ? type->valuestring : "(missing)";
@@ -418,8 +411,8 @@ void Application::EnqueueLessonMessage(
 
     if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) {
         FailChatRequest(context);
-        ESP_LOGW(TAG, "lesson_* dropped: worker unavailable type=%s seq=%d",
-                 type_value, sequence_value);
+        ESP_LOGW(TAG, "lesson_* dropped: worker unavailable type=%s seq=%d", type_value,
+                 sequence_value);
         return;
     }
 
@@ -429,8 +422,8 @@ void Application::EnqueueLessonMessage(
     LogLessonHeapBoundary("enqueue.after_serialize", payload_bytes);
     if (payload == nullptr) {
         FailChatRequest(context);
-        ESP_LOGW(TAG, "lesson_* dropped: serialize failed type=%s seq=%d",
-                 type_value, sequence_value);
+        ESP_LOGW(TAG, "lesson_* dropped: serialize failed type=%s seq=%d", type_value,
+                 sequence_value);
         return;
     }
 
@@ -441,21 +434,26 @@ void Application::EnqueueLessonMessage(
     };
     if (context) {
         item.source_context = new (std::nothrow) ChatRequestContext(context);
-        if (!item.source_context) { cJSON_free(payload); FailChatRequest(context); return; }
+        if (!item.source_context) {
+            cJSON_free(payload);
+            FailChatRequest(context);
+            return;
+        }
     }
     const bool queue_full =
         uxQueueMessagesWaiting(lesson_message_queue_) >= kLessonMessageQueueDepth;
     const bool admitted = !queue_full && lesson_queue_data_admission_.TryAcquire();
     if (!admitted || xQueueSend(lesson_message_queue_, &item, 0) != pdTRUE) {
-        if (admitted) lesson_queue_data_admission_.Release();
-        ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d",
-                 type_value, sequence_value);
+        if (admitted)
+            lesson_queue_data_admission_.Release();
+        ESP_LOGW(TAG, "lesson_* dropped: worker queue full type=%s seq=%d", type_value,
+                 sequence_value);
         cJSON_free(payload);
         delete static_cast<ChatRequestContext*>(item.source_context);
         FailChatRequest(context);
     } else {
-        ESP_LOGI(TAG, "lesson_* enqueued type=%s seq=%d bytes=%u",
-                 type_value, sequence_value, (unsigned)payload_bytes);
+        ESP_LOGI(TAG, "lesson_* enqueued type=%s seq=%d bytes=%u", type_value, sequence_value,
+                 (unsigned)payload_bytes);
     }
 #else
     (void)root;
@@ -467,20 +465,23 @@ void Application::EnqueueLessonMessage(
 void Application::RequestLessonStorageAbandonment() {
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     LessonQueueProducer producer(lesson_message_producers_, lesson_message_stop_);
-    if (!producer) return;
+    if (!producer)
+        return;
     Schedule([]() { CancelLessonRobotEntranceOnDisplay(); });
-    if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr) return;
-    const std::uint64_t terminal_epoch =
-        lesson_transport_epoch_gate_.PublishTerminalEpoch();
+    if (lesson_message_queue_ == nullptr || lesson_message_task_handle_ == nullptr)
+        return;
+    const std::uint64_t terminal_epoch = lesson_transport_epoch_gate_.PublishTerminalEpoch();
     const auto terminal_request = lesson_terminal_control_.Publish(terminal_epoch);
-    if (!terminal_request.enqueue_control) return;
+    if (!terminal_request.enqueue_control)
+        return;
     LessonQueueItem item{
         LessonQueueItemKind::kAbandonTransport,
         nullptr,
         terminal_epoch,
     };
     if (xQueueSendToFront(lesson_message_queue_, &item, 0) != pdTRUE) {
-        ESP_LOGW(TAG, "lesson abandonment wakeup enqueue failed; worker will drain published epoch");
+        ESP_LOGW(TAG,
+                 "lesson abandonment wakeup enqueue failed; worker will drain published epoch");
     }
 #endif
 }
@@ -491,7 +492,9 @@ void Application::LessonMessageTask(void* arg) {
     LessonQueueItem item;
     struct LessonProtocolRead {
         std::atomic<uint32_t>& readers;
-        explicit LessonProtocolRead(std::atomic<uint32_t>& value) : readers(value) { readers.fetch_add(1); }
+        explicit LessonProtocolRead(std::atomic<uint32_t>& value) : readers(value) {
+            readers.fetch_add(1);
+        }
         ~LessonProtocolRead() { readers.fetch_sub(1); }
     };
     const auto drain_terminal = [self]() {
@@ -501,8 +504,7 @@ void Application::LessonMessageTask(void* arg) {
             return false;
         }
         for (;;) {
-            const std::uint64_t latest_epoch =
-                self->lesson_transport_epoch_gate_.PublishedEpoch();
+            const std::uint64_t latest_epoch = self->lesson_transport_epoch_gate_.PublishedEpoch();
             if (self->lesson_transport_epoch_gate_.WorkerApplyTerminal(latest_epoch)) {
                 InvalidateLessonVisualCompletionState(latest_epoch);
                 self->Schedule([]() { CancelLessonRobotEntranceOnDisplay(); });
@@ -530,7 +532,8 @@ void Application::LessonMessageTask(void* arg) {
     };
     const auto poll_cinematic_error = [self]() {
         const auto epoch = PendingLessonCinematicErrorEpoch();
-        if (epoch == 0) return;
+        if (epoch == 0)
+            return;
         LessonProtocolRead protocol_read(self->lesson_protocol_readers_);
         if (!self->chat_protocol_owned_.load() &&
             self->lesson_transport_epoch_gate_.WorkerAcceptFrame(epoch)) {
@@ -548,7 +551,8 @@ void Application::LessonMessageTask(void* arg) {
         if (xQueueReceive(self->lesson_message_queue_, &item, pdMS_TO_TICKS(100)) != pdTRUE) {
             continue;
         }
-        std::unique_ptr<ChatRequestContext> source_context(static_cast<ChatRequestContext*>(item.source_context));
+        std::unique_ptr<ChatRequestContext> source_context(
+            static_cast<ChatRequestContext*>(item.source_context));
         item.source_context = nullptr;
         const ChatRequestContext context = source_context ? *source_context : ChatRequestContext();
         if (item.kind == LessonQueueItemKind::kAbandonTransport) {
@@ -576,7 +580,8 @@ void Application::LessonMessageTask(void* arg) {
             DispatchLessonEmbodiedCompletion(item, self->protocol_.get());
             continue;
         }
-        if (item.kind != LessonQueueItemKind::kFrame || item.payload == nullptr) continue;
+        if (item.kind != LessonQueueItemKind::kFrame || item.payload == nullptr)
+            continue;
         const size_t payload_bytes = strlen(item.payload);
         LogLessonWorkerStackWatermark("before_parse");
         LogLessonHeapBoundary("worker.before_parse", payload_bytes);
@@ -589,8 +594,11 @@ void Application::LessonMessageTask(void* arg) {
                      cJSON_IsString(type) ? type->valuestring : "(missing)",
                      cJSON_IsNumber(sequence) ? sequence->valueint : -1);
             SetLessonTransportEpoch(item.transport_epoch);
-            try { self->HandleLessonMessage(root, context); }
-            catch (...) { self->FailChatRequest(context); }
+            try {
+                self->HandleLessonMessage(root, context);
+            } catch (...) {
+                self->FailChatRequest(context);
+            }
             LogLessonWorkerStackWatermark("after_handle");
             LogLessonHeapBoundary("worker.after_handle", payload_bytes);
             cJSON_Delete(root);
@@ -610,8 +618,10 @@ void Application::LessonMessageTask(void* arg) {
 #endif
 
 bool Application::SetDeviceState(DeviceState state) {
-    if (state != kDeviceStateIdle) lesson_asset_sync_wake_invalidated_.store(true);
-    if (state != kDeviceStateSpeaking) speaking_arm_dispatch_.Cancel();
+    if (state != kDeviceStateIdle)
+        lesson_asset_sync_wake_invalidated_.store(true);
+    if (state != kDeviceStateSpeaking)
+        speaking_arm_dispatch_.Cancel();
     return state_machine_.TransitionTo(state);
 }
 
@@ -624,8 +634,7 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
             chat_protocol_state_.load(std::memory_order_acquire) != 0 ||
             protocol_work_lifetime_.Pending() || protocol_work_lifetime_.Busy() ||
             chat_audio_state_.load(std::memory_order_acquire) != 0 ||
-            chat_audio_completed_revoked_ != wifi_config_audio_revoked_ ||
-            chat_audio_fault_) {
+            chat_audio_completed_revoked_ != wifi_config_audio_revoked_ || chat_audio_fault_) {
             return false;
         }
         preparation = wifi_config_preparation_;
@@ -634,9 +643,8 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
         return true;
     }
     const DeviceState state = GetDeviceState();
-    if (!WifiConfigEntryPolicy::CanPrepare(
-            state, lesson_runtime_active_.load(), connect_in_flight_.load(),
-            reset_pending_.load())) {
+    if (!WifiConfigEntryPolicy::CanPrepare(state, lesson_runtime_active_.load(),
+                                           connect_in_flight_.load(), reset_pending_.load())) {
         ESP_LOGW(TAG, "WiFi config preparation rejected: state=%d connect=%d reset=%d",
                  static_cast<int>(state), connect_in_flight_.load() ? 1 : 0,
                  reset_pending_.load() ? 1 : 0);
@@ -646,10 +654,9 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
     preparation.original_state = state;
     preparation.resume_mode = state == kDeviceStateConnecting ? reconnect_mode_ : listening_mode_;
     preparation.resume_realtime = state == kDeviceStateConnecting ||
-                                  state == kDeviceStateListening ||
-                                  state == kDeviceStateSpeaking;
-    preparation.resume_listening = state != kDeviceStateConnecting ||
-                                   reconnect_resume_listening_.load();
+                                  state == kDeviceStateListening || state == kDeviceStateSpeaking;
+    preparation.resume_listening =
+        state != kDeviceStateConnecting || reconnect_resume_listening_.load();
     preparation.valid = true;
     CancelChatRecovery();
 
@@ -663,7 +670,8 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
     reconnect_passive_.store(false);
 
     if (chat_cleanup_enabled_) {
-        if (chat_protocol_signals_) chat_protocol_signals_->Disable();
+        if (chat_protocol_signals_)
+            chat_protocol_signals_->Disable();
         tts_audio_accepting_.store(false);
         microphone_uplink_authorized_.store(false);
         speaking_arm_dispatch_.Cancel();
@@ -672,8 +680,8 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
         wifi_config_audio_revoked_ =
             RequestChatAudioCleanup(speaking_generation_.load(), true, false, false);
         CloseAudioChannelByIntent();
-        if (state != kDeviceStateStarting && state != kDeviceStateWifiConfiguring && state != kDeviceStateIdle &&
-            !SetDeviceState(kDeviceStateIdle)) {
+        if (state != kDeviceStateStarting && state != kDeviceStateWifiConfiguring &&
+            state != kDeviceStateIdle && !SetDeviceState(kDeviceStateIdle)) {
             preparation.valid = false;
             return false;
         }
@@ -702,8 +710,7 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
     audio_service_.EnableWakeWordDetection(false);
 
     const DeviceState settled_state = GetDeviceState();
-    if (settled_state != kDeviceStateStarting &&
-        settled_state != kDeviceStateWifiConfiguring &&
+    if (settled_state != kDeviceStateStarting && settled_state != kDeviceStateWifiConfiguring &&
         settled_state != kDeviceStateIdle) {
         if (!SetDeviceState(kDeviceStateIdle)) {
             ESP_LOGE(TAG, "WiFi config preparation could not settle state=%d",
@@ -718,8 +725,7 @@ bool Application::PrepareWifiConfigEntry(WifiConfigEntryPreparation& preparation
     return true;
 }
 
-bool Application::PublishWifiConfigEntry(
-        const WifiConfigEntryPreparation& preparation) {
+bool Application::PublishWifiConfigEntry(const WifiConfigEntryPreparation& preparation) {
     if (!preparation.valid) {
         return false;
     }
@@ -731,8 +737,7 @@ bool Application::PublishWifiConfigEntry(
     return true;
 }
 
-bool Application::RollbackWifiConfigEntry(
-        const WifiConfigEntryPreparation& preparation) {
+bool Application::RollbackWifiConfigEntry(const WifiConfigEntryPreparation& preparation) {
     if (!preparation.valid) {
         return false;
     }
@@ -765,9 +770,7 @@ bool Application::RollbackWifiConfigEntry(
     if (!SetDeviceState(kDeviceStateConnecting)) {
         return false;
     }
-    Schedule([this, mode = preparation.resume_mode]() {
-        ContinueOpenAudioChannel(mode);
-    });
+    Schedule([this, mode = preparation.resume_mode]() { ContinueOpenAudioChannel(mode); });
     return true;
 }
 
@@ -804,44 +807,57 @@ void Application::Initialize() {
         ESP_LOGI(TAG, "Unclaimed boot: deferring audio workers until claim confirmation");
     }
     robot_uart_.Initialize();
-    if (xTaskCreate([](void* context) {
-            auto* self = static_cast<Application*>(context);
-            while (true) {
-                if (self->GetDeviceState() == kDeviceStateSpeaking) self->speaking_arm_dispatch_.Poll(
-                    static_cast<uint64_t>(esp_timer_get_time() / 1000),
-                    self->GetDeviceState() == kDeviceStateSpeaking &&
-                        !self->lesson_runtime_active_.load(),
-                    [self](const SpeakingArmGesture::Target& target, auto owns) {
-                        return self->robot_uart_.TrySendAutomaticArm(
-                            target.left, target.percent, [self, owns]() {
-                                return owns() && self->GetDeviceState() == kDeviceStateSpeaking &&
-                                    !self->lesson_runtime_active_.load();
+    if (xTaskCreate(
+            [](void* context) {
+                auto* self = static_cast<Application*>(context);
+                while (true) {
+                    if (self->GetDeviceState() == kDeviceStateSpeaking)
+                        self->speaking_arm_dispatch_.Poll(
+                            static_cast<uint64_t>(esp_timer_get_time() / 1000),
+                            self->GetDeviceState() == kDeviceStateSpeaking &&
+                                !self->lesson_runtime_active_.load(),
+                            [self](const SpeakingArmGesture::Target& target, auto owns) {
+                                return self->robot_uart_.TrySendAutomaticArm(
+                                    target.left, target.percent, [self, owns]() {
+                                        return owns() &&
+                                               self->GetDeviceState() == kDeviceStateSpeaking &&
+                                               !self->lesson_runtime_active_.load();
+                                    });
                             });
-                    });
-                vTaskDelay(pdMS_TO_TICKS(25));
-            }
-        }, "speaking_arms", 3072, this, 1, nullptr) != pdPASS) {
+                    vTaskDelay(pdMS_TO_TICKS(25));
+                }
+            },
+            "speaking_arms", 3072, this, 1, nullptr) != pdPASS) {
         ESP_LOGW(TAG, "Speaking arm worker unavailable");
     }
 
     // App manager (Menu/Game overlay) + nhan su kien nut TTP223 tu slave qua UART.
     // Su kien den trong task doc UART -> marshal sang main task truoc khi dung LVGL.
     AppManagerInit();
-    AppManagerSetSlaveSender([this](const char* line) {
-        robot_uart_.SendControlLine(line);
-    });
-    AppManagerSetSoundPlayer([this](const std::vector<int16_t>& pcm) {
-        audio_service_.QueuePcmForPlayback(pcm);
-    });
+    AppManagerSetSlaveSender([this](const char* line) { robot_uart_.SendControlLine(line); });
+    AppManagerSetSoundPlayer(
+        [this](const std::vector<int16_t>& pcm) { audio_service_.QueuePcmForPlayback(pcm); });
     robot_uart_.SetEventCallback([this](RobotInputEvent evt) {
         Schedule([evt]() {
             switch (evt) {
-                case RobotInputEvent::LeftClick:  AppHandleInputLeft(); break;
-                case RobotInputEvent::RightClick: AppHandleInputRight(); break;
-                case RobotInputEvent::BothClick:  AppHandleInputBothClick(); break;
-                case RobotInputEvent::MenuHold:   AppHandleMenuHold(); break;
-                case RobotInputEvent::RightHold:  AppHandleRightHold(); break;
-                case RobotInputEvent::SlaveReady: AppOnSlaveReady(); break;
+                case RobotInputEvent::LeftClick:
+                    AppHandleInputLeft();
+                    break;
+                case RobotInputEvent::RightClick:
+                    AppHandleInputRight();
+                    break;
+                case RobotInputEvent::BothClick:
+                    AppHandleInputBothClick();
+                    break;
+                case RobotInputEvent::MenuHold:
+                    AppHandleMenuHold();
+                    break;
+                case RobotInputEvent::RightHold:
+                    AppHandleRightHold();
+                    break;
+                case RobotInputEvent::SlaveReady:
+                    AppOnSlaveReady();
+                    break;
             }
         });
     });
@@ -854,7 +870,7 @@ void Application::Initialize() {
     callbacks.on_output_completed = [this](uint32_t response, bool conversation, uint32_t now_ms) {
         speaking_arm_dispatch_.PublishOutput(response, conversation, now_ms);
         lesson_audio_playout_.PublishOutput(response, conversation,
-            static_cast<uint64_t>(esp_timer_get_time() / 1000));
+                                            static_cast<uint64_t>(esp_timer_get_time() / 1000));
         xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
     };
     callbacks.on_send_queue_available = [this]() {
@@ -880,7 +896,8 @@ void Application::Initialize() {
 
     // Add state change listeners
     state_machine_.AddStateChangeListener([this](DeviceState old_state, DeviceState new_state) {
-        if (new_state != kDeviceStateSpeaking) speaking_arm_dispatch_.Cancel();
+        if (new_state != kDeviceStateSpeaking)
+            speaking_arm_dispatch_.Cancel();
         xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
     });
 
@@ -896,7 +913,7 @@ void Application::Initialize() {
     board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
         const bool lesson_active = lesson_runtime_active_.load();
         auto display = Board::GetInstance().GetDisplay();
-        
+
         switch (event) {
             case NetworkEvent::Scanning:
                 if (!lesson_active) {
@@ -945,13 +962,16 @@ void Application::Initialize() {
                 }
                 break;
             case NetworkEvent::ModemErrorNoSim:
-                Alert(Lang::Strings::ERROR, Lang::Strings::PIN_ERROR, "triangle_exclamation", Lang::Sounds::OGG_ERR_PIN);
+                Alert(Lang::Strings::ERROR, Lang::Strings::PIN_ERROR, "triangle_exclamation",
+                      Lang::Sounds::OGG_ERR_PIN);
                 break;
             case NetworkEvent::ModemErrorRegDenied:
-                Alert(Lang::Strings::ERROR, Lang::Strings::REG_ERROR, "triangle_exclamation", Lang::Sounds::OGG_ERR_REG);
+                Alert(Lang::Strings::ERROR, Lang::Strings::REG_ERROR, "triangle_exclamation",
+                      Lang::Sounds::OGG_ERR_REG);
                 break;
             case NetworkEvent::ModemErrorInitFailed:
-                Alert(Lang::Strings::ERROR, Lang::Strings::MODEM_INIT_ERROR, "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+                Alert(Lang::Strings::ERROR, Lang::Strings::MODEM_INIT_ERROR, "triangle_exclamation",
+                      Lang::Sounds::OGG_EXCLAMATION);
                 break;
             case NetworkEvent::ModemErrorTimeout:
                 if (!lesson_active) {
@@ -982,26 +1002,17 @@ void Application::Run() {
     }
 
     const EventBits_t ALL_EVENTS =
-        MAIN_EVENT_SCHEDULE |
-        MAIN_EVENT_SEND_AUDIO |
-        MAIN_EVENT_WAKE_WORD_DETECTED |
-        MAIN_EVENT_VAD_CHANGE |
-        MAIN_EVENT_CLOCK_TICK |
-        MAIN_EVENT_ERROR |
-        MAIN_EVENT_NETWORK_CONNECTED |
-        MAIN_EVENT_NETWORK_DISCONNECTED |
-        MAIN_EVENT_TOGGLE_CHAT |
-        MAIN_EVENT_START_LISTENING |
-        MAIN_EVENT_STOP_LISTENING |
-        MAIN_EVENT_ACTIVATION_DONE |
-        MAIN_EVENT_STATE_CHANGED |
-        MAIN_EVENT_CHAT_OUTBOUND;
+        MAIN_EVENT_SCHEDULE | MAIN_EVENT_SEND_AUDIO | MAIN_EVENT_WAKE_WORD_DETECTED |
+        MAIN_EVENT_VAD_CHANGE | MAIN_EVENT_CLOCK_TICK | MAIN_EVENT_ERROR |
+        MAIN_EVENT_NETWORK_CONNECTED | MAIN_EVENT_NETWORK_DISCONNECTED | MAIN_EVENT_TOGGLE_CHAT |
+        MAIN_EVENT_START_LISTENING | MAIN_EVENT_STOP_LISTENING | MAIN_EVENT_ACTIVATION_DONE |
+        MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_CHAT_OUTBOUND;
 
     while (true) {
         // req#1: bounded wait (was portMAX_DELAY) so the loop always makes a pass,
         // feeds the watchdog, and never blocks forever.
         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE,
-            pdMS_TO_TICKS(lesson_playout_pending_.load() ? 20 : 2000));
+                                        pdMS_TO_TICKS(lesson_playout_pending_.load() ? 20 : 2000));
         PollLessonAudioPlayout();
         PollChatOutboundEvents(bits & MAIN_EVENT_CHAT_OUTBOUND);
         esp_task_wdt_reset();  // WDT-1: prove the main loop is iterating
@@ -1027,11 +1038,11 @@ void Application::Run() {
                 auto display = Board::GetInstance().GetDisplay();
                 display->SetStatus(Lang::Strings::PLEASE_WAIT);
             } else if (connect_attempt_active_.load() || passive_ws_intent_.load()) {
-                ESP_LOGI(TAG, "connect error suppressed (recoverable): attempt_active=%d passive=%d in_flight=%d reconnect_attempt=%d",
-                         connect_attempt_active_.load() ? 1 : 0,
-                         passive_ws_intent_.load() ? 1 : 0,
-                         connect_in_flight_.load() ? 1 : 0,
-                         reconnect_attempt_);
+                ESP_LOGI(TAG,
+                         "connect error suppressed (recoverable): attempt_active=%d passive=%d "
+                         "in_flight=%d reconnect_attempt=%d",
+                         connect_attempt_active_.load() ? 1 : 0, passive_ws_intent_.load() ? 1 : 0,
+                         connect_in_flight_.load() ? 1 : 0, reconnect_attempt_);
             } else {
                 // Resolve the connect state through the FSM mapper (backend_offline_
                 // is set on the ws/backend error) so this render is mapper-driven,
@@ -1039,12 +1050,12 @@ void Application::Run() {
                 // Retrying..."; any other resolved state keeps the generic ERROR
                 // banner. Detailed error stays in the chat body + log.
                 const TbotConnectState cs = TbotConnectMapper::ResolveState(
-                    GetDeviceState(), claim_substate_, GetBleSubstate(),
-                    backend_offline_.load());
+                    GetDeviceState(), claim_substate_, GetBleSubstate(), backend_offline_.load());
                 const char* status = (cs == TbotConnectState::OFFLINE_RETRY)
-                    ? Lang::Strings::SERVER_UNAVAILABLE_RETRYING
-                    : Lang::Strings::ERROR;
-                Alert(status, last_error_message_.c_str(), "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+                                         ? Lang::Strings::SERVER_UNAVAILABLE_RETRYING
+                                         : Lang::Strings::ERROR;
+                Alert(status, last_error_message_.c_str(), "circle_xmark",
+                      Lang::Sounds::OGG_EXCLAMATION);
             }
         }
 
@@ -1086,72 +1097,78 @@ void Application::Run() {
             } else if (chat_lesson_capture_token_) {
                 PollChatLessonCapture(static_cast<uint64_t>(esp_timer_get_time()));
             } else {
-            static uint32_t send_event_count = 0;
-            static uint32_t send_packet_count = 0;
-            static uint32_t lesson_render_defer_count = 0;
-            send_event_count++;
-            if (!IsMicrophoneUplinkAuthorized()) {
-                audio_service_.EnableVoiceProcessing(false);
-                uint32_t dropped_packets = 0;
-                while (audio_service_.PopPacketFromSendQueue() != nullptr) {
-                    ++dropped_packets;
-                }
-                if (dropped_packets > 0) {
-                    ESP_LOGW(TAG,
-                             "microphone_uplink_blocked state=%d passive=%d online=%d dropped=%lu",
-                             static_cast<int>(GetDeviceState()),
-                             passive_ws_intent_.load() ? 1 : 0,
-                             online_intent_.load() ? 1 : 0,
-                             static_cast<unsigned long>(dropped_packets));
-                }
-            } else if (IsLessonNetworkRenderQuiet()) {
-                lesson_render_defer_count++;
-                if (lesson_render_defer_count == 1 || lesson_render_defer_count % 25 == 0) {
-                    ESP_LOGI(TAG, "MAIN_EVENT_SEND_AUDIO deferred_for_lesson_render count=%lu",
-                             static_cast<unsigned long>(lesson_render_defer_count));
-                }
-                xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
-                vTaskDelay(pdMS_TO_TICKS(20));
-            } else {
-                uint32_t sent_packets = 0;
-                while (sent_packets < kMaxAudioPacketsPerMainLoop) {
-                    auto packet = audio_service_.PopPacketFromSendQueue();
-                    if (!packet) {
-                        break;
+                static uint32_t send_event_count = 0;
+                static uint32_t send_packet_count = 0;
+                static uint32_t lesson_render_defer_count = 0;
+                send_event_count++;
+                if (!IsMicrophoneUplinkAuthorized()) {
+                    audio_service_.EnableVoiceProcessing(false);
+                    uint32_t dropped_packets = 0;
+                    while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+                        ++dropped_packets;
                     }
-                    const uint32_t timestamp = packet->timestamp;
-                    const size_t payload_size = packet->payload.size();
-                    if (!protocol_) {
-                        ESP_LOGW(TAG, "MAIN_EVENT_SEND_AUDIO protocol_unavailable event=%lu payload_bytes=%u timestamp=%lu",
-                                 static_cast<unsigned long>(send_event_count),
-                                 static_cast<unsigned>(payload_size),
-                                 static_cast<unsigned long>(timestamp));
-                        break;
+                    if (dropped_packets > 0) {
+                        ESP_LOGW(
+                            TAG,
+                            "microphone_uplink_blocked state=%d passive=%d online=%d dropped=%lu",
+                            static_cast<int>(GetDeviceState()), passive_ws_intent_.load() ? 1 : 0,
+                            online_intent_.load() ? 1 : 0,
+                            static_cast<unsigned long>(dropped_packets));
                     }
-                    bool sent = protocol_->SendAudio(std::move(packet));
-                    if (!sent) {
-                        ESP_LOGW(TAG, "MAIN_EVENT_SEND_AUDIO send_failed event=%lu payload_bytes=%u timestamp=%lu",
-                                 static_cast<unsigned long>(send_event_count),
-                                 static_cast<unsigned>(payload_size),
-                                 static_cast<unsigned long>(timestamp));
-                        break;
+                } else if (IsLessonNetworkRenderQuiet()) {
+                    lesson_render_defer_count++;
+                    if (lesson_render_defer_count == 1 || lesson_render_defer_count % 25 == 0) {
+                        ESP_LOGI(TAG, "MAIN_EVENT_SEND_AUDIO deferred_for_lesson_render count=%lu",
+                                 static_cast<unsigned long>(lesson_render_defer_count));
                     }
-                    send_packet_count++;
-                    if (send_packet_count == 1 || send_packet_count % 25 == 0) {
-                        ESP_LOGI(TAG, "MAIN_EVENT_SEND_AUDIO packet count=%lu payload_bytes=%u timestamp=%lu",
-                                 static_cast<unsigned long>(send_packet_count),
-                                 static_cast<unsigned>(payload_size),
-                                 static_cast<unsigned long>(timestamp));
-                    }
-                    ++sent_packets;
-                    esp_task_wdt_reset();
-                }
-                if (sent_packets == kMaxAudioPacketsPerMainLoop) {
                     xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
+                    vTaskDelay(pdMS_TO_TICKS(20));
+                } else {
+                    uint32_t sent_packets = 0;
+                    while (sent_packets < kMaxAudioPacketsPerMainLoop) {
+                        auto packet = audio_service_.PopPacketFromSendQueue();
+                        if (!packet) {
+                            break;
+                        }
+                        const uint32_t timestamp = packet->timestamp;
+                        const size_t payload_size = packet->payload.size();
+                        if (!protocol_) {
+                            ESP_LOGW(TAG,
+                                     "MAIN_EVENT_SEND_AUDIO protocol_unavailable event=%lu "
+                                     "payload_bytes=%u timestamp=%lu",
+                                     static_cast<unsigned long>(send_event_count),
+                                     static_cast<unsigned>(payload_size),
+                                     static_cast<unsigned long>(timestamp));
+                            break;
+                        }
+                        bool sent = protocol_->SendAudio(std::move(packet));
+                        if (!sent) {
+                            ESP_LOGW(TAG,
+                                     "MAIN_EVENT_SEND_AUDIO send_failed event=%lu payload_bytes=%u "
+                                     "timestamp=%lu",
+                                     static_cast<unsigned long>(send_event_count),
+                                     static_cast<unsigned>(payload_size),
+                                     static_cast<unsigned long>(timestamp));
+                            break;
+                        }
+                        send_packet_count++;
+                        if (send_packet_count == 1 || send_packet_count % 25 == 0) {
+                            ESP_LOGI(TAG,
+                                     "MAIN_EVENT_SEND_AUDIO packet count=%lu payload_bytes=%u "
+                                     "timestamp=%lu",
+                                     static_cast<unsigned long>(send_packet_count),
+                                     static_cast<unsigned>(payload_size),
+                                     static_cast<unsigned long>(timestamp));
+                        }
+                        ++sent_packets;
+                        esp_task_wdt_reset();
+                    }
+                    if (sent_packets == kMaxAudioPacketsPerMainLoop) {
+                        xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(1));
                 }
-                vTaskDelay(pdMS_TO_TICKS(1));
-            }
-            RunScheduledTasks();
+                RunScheduledTasks();
             }
         }
 
@@ -1185,12 +1202,13 @@ void Application::Run() {
 
             bool passive_liveness_failed = false;
             const DeviceState passive_state = GetDeviceState();
-            const bool selected_chat_source = chat_protocol_signals_ && chat_protocol_signals_->SourceSelected();
-            if (passive_ws_intent_.load() &&
-                IsDeviceClaimed() &&
-                protocol_ != nullptr &&
+            const bool selected_chat_source =
+                chat_protocol_signals_ && chat_protocol_signals_->SourceSelected();
+            if (passive_ws_intent_.load() && IsDeviceClaimed() && protocol_ != nullptr &&
                 !connect_in_flight_.load() &&
-                !(selected_chat_source ? protocol_work_lifetime_.BusyExcept(chat_outbound_reservation_) : protocol_work_lifetime_.Busy()) &&
+                !(selected_chat_source
+                      ? protocol_work_lifetime_.BusyExcept(chat_outbound_reservation_)
+                      : protocol_work_lifetime_.Busy()) &&
                 !protocol_work_lifetime_.Pending() &&
                 // Do NOT tear down the passive WS while a lesson SD asset sync is
                 // in flight: hashing the ~116MB pack starves the WS receive task so
@@ -1200,11 +1218,11 @@ void Application::Run() {
                 // EndLessonAssetSyncQuiet() so liveness resumes cleanly afterward.
                 // (Short-circuits before MaintainPassiveLiveness so no ping/pong
                 // state is mutated during the sync.)
-                !IsLessonAssetSyncQuiet() &&
-                passive_state != kDeviceStateWifiConfiguring &&
+                !IsLessonAssetSyncQuiet() && passive_state != kDeviceStateWifiConfiguring &&
                 passive_state != kDeviceStateAudioTesting &&
                 (selected_chat_source || protocol_->IsAudioChannelOpened()) &&
-                !(selected_chat_source ? MaintainChatPassiveLiveness() : protocol_->MaintainPassiveLiveness())) {
+                !(selected_chat_source ? MaintainChatPassiveLiveness()
+                                       : protocol_->MaintainPassiveLiveness())) {
                 ESP_LOGW(TAG, "passive_lesson_ws_liveness_failed -> passive backoff");
                 backend_offline_.store(true);
                 if (chat_cleanup_enabled_) {
@@ -1217,20 +1235,14 @@ void Application::Run() {
                 passive_liveness_failed = true;
             }
 
-            if (!passive_liveness_failed &&
-                !selected_chat_source &&
-                !reconnect_passive_.load() &&
-                clock_ticks_ % 10 == 0 &&
-                IsDeviceClaimed() &&
-                !lesson_runtime_active_.load() &&
-                GetDeviceState() == kDeviceStateIdle &&
-                protocol_ != nullptr &&
-                !connect_in_flight_.load() &&
-                !protocol_->IsAudioChannelOpened()) {
+            if (!passive_liveness_failed && !selected_chat_source && !reconnect_passive_.load() &&
+                clock_ticks_ % 10 == 0 && IsDeviceClaimed() && !lesson_runtime_active_.load() &&
+                GetDeviceState() == kDeviceStateIdle && protocol_ != nullptr &&
+                !connect_in_flight_.load() && !protocol_->IsAudioChannelOpened()) {
                 ESP_LOGW(TAG, "passive_lesson_idle_socket_missing -> passive reconnect");
                 StartPassiveLessonWebsocket();
             }
-        
+
             // Print debug info every 10 seconds
             if (clock_ticks_ % 10 == 0) {
                 SystemInfo::PrintHeapStats();
@@ -1238,57 +1250,64 @@ void Application::Run() {
                 if (chat_cleanup_enabled_) {
                     PlaybackDrainSnapshot snapshot;
                     const bool available = audio_service_.TryGetPlaybackDrainSnapshot(snapshot);
-                    ESP_LOGI(TAG, "chat_metrics snapshot_available=%d source_selected=%d reconnects=%lu",
-                        available ? 1 : 0, chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() ? 1 : 0,
+                    ESP_LOGI(
+                        TAG, "chat_metrics snapshot_available=%d source_selected=%d reconnects=%lu",
+                        available ? 1 : 0,
+                        chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() ? 1 : 0,
                         static_cast<unsigned long>(reconnect_count_.load()));
                 } else {
-                // Audio realtime metrics snapshot: queue depths + drop/stale
-                // counters. Cheap, on the app task (NOT the audio hot path), so
-                // it never jitters capture/playback. Lets us measure backpressure
-                // (Patch 3.1/3.2) and barge-in stale-frame drops (Patch 3.3).
-                uint32_t decode_q = 0, send_q = 0, playback_q = 0;
-                audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
-                auto audio_stats = audio_service_.GetDebugStatistics();
-                auto wake_progress = audio_service_.GetWakeWordProgress();
-                ESP_LOGI(TAG, "audio_metrics decode_q=%lu send_q=%lu playback_q=%lu input_count=%lu wake_running=%d wake_feed=%lu wake_fetch=%lu wake_gen=%lu vp_running=%d decode_drop=%lu encode_drop=%lu stale_frames=%lu interrupts=%lu reconnects=%lu "
-                              "wake_chunks=%lu wake_rms_min=%lu wake_rms_max=%lu wake_peak_max=%lu wake_above_floor=%lu wake_above_total=%lu wake_last_above_us=%lld "
-                              "wn_none=%lu wn_transition=%lu wn_detected=%lu wn_other=%lu wn_model=%ld wn_bad_model=%lu",
-                         (unsigned long)decode_q, (unsigned long)send_q, (unsigned long)playback_q,
-                         (unsigned long)audio_stats.input_count,
-                         audio_service_.IsWakeWordRunning() ? 1 : 0,
-                         (unsigned long)wake_progress.feed_count,
-                         (unsigned long)wake_progress.fetch_count,
-                         (unsigned long)wake_progress.run_generation,
-                         audio_service_.IsAudioProcessorRunning() ? 1 : 0,
-                         (unsigned long)audio_stats.decode_drop_count,
-                         (unsigned long)audio_stats.encode_drop_count,
-                         (unsigned long)audio_stats.stale_frame_count,
-                         (unsigned long)interrupt_count_.load(),
-                         (unsigned long)reconnect_count_.load(),
-                         (unsigned long)wake_progress.telemetry.chunk_count,
-                         (unsigned long)wake_progress.telemetry.rms_min,
-                         (unsigned long)wake_progress.telemetry.rms_max,
-                         (unsigned long)wake_progress.telemetry.peak_max,
-                         (unsigned long)wake_progress.telemetry.above_floor_count,
-                         (unsigned long)wake_progress.telemetry.above_floor_total,
-                         (long long)wake_progress.telemetry.last_above_floor_us,
-                         (unsigned long)wake_progress.telemetry.state_none,
-                         (unsigned long)wake_progress.telemetry.state_transition,
-                         (unsigned long)wake_progress.telemetry.state_detected,
-                         (unsigned long)wake_progress.telemetry.state_other,
-                         (long)wake_progress.telemetry.last_valid_model_index,
-                         (unsigned long)wake_progress.telemetry.invalid_model_index_count);
-                // Stack high-water snapshots are sampled off the audio hot path.
-                auto stack_hwm = audio_service_.GetTaskStackHighWaterMarks();
-                ESP_LOGI(TAG, "sys_metrics stack_main_min=%u stack_audio_input_min=%ld "
-                              "stack_audio_output_min=%ld stack_opus_codec_min=%ld "
-                              "stack_afe_detection_min=%ld psram_free_b=%u",
-                         (unsigned)uxTaskGetStackHighWaterMark(nullptr),
-                         (long)stack_hwm.audio_input,
-                         (long)stack_hwm.audio_output,
-                         (long)stack_hwm.opus_codec,
-                         (long)stack_hwm.afe_detection,
-                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+                    // Audio realtime metrics snapshot: queue depths + drop/stale
+                    // counters. Cheap, on the app task (NOT the audio hot path), so
+                    // it never jitters capture/playback. Lets us measure backpressure
+                    // (Patch 3.1/3.2) and barge-in stale-frame drops (Patch 3.3).
+                    uint32_t decode_q = 0, send_q = 0, playback_q = 0;
+                    audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
+                    auto audio_stats = audio_service_.GetDebugStatistics();
+                    auto wake_progress = audio_service_.GetWakeWordProgress();
+                    ESP_LOGI(TAG,
+                             "audio_metrics decode_q=%lu send_q=%lu playback_q=%lu input_count=%lu "
+                             "wake_running=%d wake_feed=%lu wake_fetch=%lu wake_gen=%lu "
+                             "vp_running=%d decode_drop=%lu encode_drop=%lu stale_frames=%lu "
+                             "interrupts=%lu reconnects=%lu "
+                             "wake_chunks=%lu wake_rms_min=%lu wake_rms_max=%lu wake_peak_max=%lu "
+                             "wake_above_floor=%lu wake_above_total=%lu wake_last_above_us=%lld "
+                             "wn_none=%lu wn_transition=%lu wn_detected=%lu wn_other=%lu "
+                             "wn_model=%ld wn_bad_model=%lu",
+                             (unsigned long)decode_q, (unsigned long)send_q,
+                             (unsigned long)playback_q, (unsigned long)audio_stats.input_count,
+                             audio_service_.IsWakeWordRunning() ? 1 : 0,
+                             (unsigned long)wake_progress.feed_count,
+                             (unsigned long)wake_progress.fetch_count,
+                             (unsigned long)wake_progress.run_generation,
+                             audio_service_.IsAudioProcessorRunning() ? 1 : 0,
+                             (unsigned long)audio_stats.decode_drop_count,
+                             (unsigned long)audio_stats.encode_drop_count,
+                             (unsigned long)audio_stats.stale_frame_count,
+                             (unsigned long)interrupt_count_.load(),
+                             (unsigned long)reconnect_count_.load(),
+                             (unsigned long)wake_progress.telemetry.chunk_count,
+                             (unsigned long)wake_progress.telemetry.rms_min,
+                             (unsigned long)wake_progress.telemetry.rms_max,
+                             (unsigned long)wake_progress.telemetry.peak_max,
+                             (unsigned long)wake_progress.telemetry.above_floor_count,
+                             (unsigned long)wake_progress.telemetry.above_floor_total,
+                             (long long)wake_progress.telemetry.last_above_floor_us,
+                             (unsigned long)wake_progress.telemetry.state_none,
+                             (unsigned long)wake_progress.telemetry.state_transition,
+                             (unsigned long)wake_progress.telemetry.state_detected,
+                             (unsigned long)wake_progress.telemetry.state_other,
+                             (long)wake_progress.telemetry.last_valid_model_index,
+                             (unsigned long)wake_progress.telemetry.invalid_model_index_count);
+                    // Stack high-water snapshots are sampled off the audio hot path.
+                    auto stack_hwm = audio_service_.GetTaskStackHighWaterMarks();
+                    ESP_LOGI(TAG,
+                             "sys_metrics stack_main_min=%u stack_audio_input_min=%ld "
+                             "stack_audio_output_min=%ld stack_opus_codec_min=%ld "
+                             "stack_afe_detection_min=%ld psram_free_b=%u",
+                             (unsigned)uxTaskGetStackHighWaterMark(nullptr),
+                             (long)stack_hwm.audio_input, (long)stack_hwm.audio_output,
+                             (long)stack_hwm.opus_codec, (long)stack_hwm.afe_detection,
+                             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
                 }
             }
         }
@@ -1332,12 +1351,14 @@ void Application::HandleNetworkConnectedEvent() {
             return;
         }
 
-        BaseType_t created = xTaskCreate([](void* arg) {
-            Application* app = static_cast<Application*>(arg);
-            app->ActivationTask();
-            app->activation_task_handle_ = nullptr;
-            vTaskDelete(NULL);
-        }, "activation", 4096 * 2, this, 2, &activation_task_handle_);
+        BaseType_t created = xTaskCreate(
+            [](void* arg) {
+                Application* app = static_cast<Application*>(arg);
+                app->ActivationTask();
+                app->activation_task_handle_ = nullptr;
+                vTaskDelete(NULL);
+            },
+            "activation", 4096 * 2, this, 2, &activation_task_handle_);
         if (created != pdPASS) {
             ESP_LOGE(TAG, "Failed to create activation task (heap exhausted?)");
             activation_task_handle_ = nullptr;
@@ -1365,28 +1386,32 @@ void Application::HandleNetworkDisconnectedEvent() {
     // Close current conversation when network disconnected
     auto state = GetDeviceState();
     auto display = Board::GetInstance().GetDisplay();
-    if (chat_cleanup_enabled_ && chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
-        !IsLessonVoiceRoute() && (online_intent_.load() || passive_ws_intent_.load())) {
+    if (chat_cleanup_enabled_ && chat_protocol_signals_ &&
+        chat_protocol_signals_->SourceSelected() && !IsLessonVoiceRoute() &&
+        (online_intent_.load() || passive_ws_intent_.load())) {
         // Radio loss must retain recovery intent; an intentional close cancels it.
         ConnectionSource source;
         if (chat_protocol_signals_->TrySource(source)) {
             ESP_LOGW(TAG, "chat_source_fault reason=wifi_disconnected");
-            chat_protocol_signals_->PublishConnectionFault(source, chat_source_connect_generation_.load(),
-                ChatProtocolSignals::Error);
+            chat_protocol_signals_->PublishConnectionFault(
+                source, chat_source_connect_generation_.load(), ChatProtocolSignals::Error);
         }
         PollChatProtocolSignals();
         display->UpdateStatusBar(true);
         return;
     }
-    if (state == kDeviceStateConnecting || state == kDeviceStateListening || state == kDeviceStateSpeaking) {
+    if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
+        state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Closing audio channel due to network disconnection");
         backend_offline_.store(true);
         if (chat_cleanup_enabled_) {
-            if (chat_protocol_signals_) chat_protocol_signals_->Disable();
+            if (chat_protocol_signals_)
+                chat_protocol_signals_->Disable();
             tts_audio_accepting_.store(false);
             microphone_uplink_authorized_.store(false);
             RequestChatAudioCleanup(speaking_generation_.load(), true, false, false);
-        } else audio_service_.ResetDecoder();
+        } else
+            audio_service_.ResetDecoder();
         CloseAudioChannelByIntent();
         if (lesson_runtime_active_.load()) {
             lesson_interactive_listen_generation_.fetch_add(1);
@@ -1396,8 +1421,10 @@ void Application::HandleNetworkDisconnectedEvent() {
         } else {
             display->SetStatus(Lang::Strings::SERVER_UNAVAILABLE_RETRYING);
             display->SetEmotion("thinking");
-            if (chat_cleanup_enabled_) RequestChatCue(Lang::Sounds::OGG_EXCLAMATION);
-            else audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
+            if (chat_cleanup_enabled_)
+                RequestChatCue(Lang::Sounds::OGG_EXCLAMATION);
+            else
+                audio_service_.PlaySound(Lang::Sounds::OGG_EXCLAMATION);
         }
     }
 
@@ -1406,18 +1433,20 @@ void Application::HandleNetworkDisconnectedEvent() {
 }
 
 void Application::RearmClaimedIdleWakeWord() {
-    if (IsWifiConfigEntryPending()) return;
+    if (IsWifiConfigEntryPending())
+        return;
     if (chat_cleanup_enabled_) {
         ConnectionSource source;
-        if (IsDeviceClaimed() && !lesson_runtime_active_.load() && !lesson_asset_sync_quiet_.load() &&
-            GetDeviceState() == kDeviceStateIdle && !connect_in_flight_.load() &&
-            (!passive_ws_intent_.load() || (chat_protocol_signals_ && chat_protocol_signals_->TrySource(source))))
+        if (IsDeviceClaimed() && !lesson_runtime_active_.load() &&
+            !lesson_asset_sync_quiet_.load() && GetDeviceState() == kDeviceStateIdle &&
+            !connect_in_flight_.load() &&
+            (!passive_ws_intent_.load() ||
+             (chat_protocol_signals_ && chat_protocol_signals_->TrySource(source))))
             RequestChatAudioCleanup(speaking_generation_.load(), false, false, true);
         return;
     }
-    if (!IsDeviceClaimed() || lesson_runtime_active_.load() ||
-        lesson_asset_sync_quiet_.load() || GetDeviceState() != kDeviceStateIdle ||
-        connect_in_flight_.load() ||
+    if (!IsDeviceClaimed() || lesson_runtime_active_.load() || lesson_asset_sync_quiet_.load() ||
+        GetDeviceState() != kDeviceStateIdle || connect_in_flight_.load() ||
         (passive_ws_intent_.load() &&
          (protocol_ == nullptr || !protocol_->IsAudioChannelOpened()))) {
         return;
@@ -1433,8 +1462,7 @@ void Application::HandleActivationDoneEvent() {
         ESP_LOGI(TAG, "Activation done ignored because WiFi config mode is active");
         return;
     }
-    if (state == kDeviceStateConnecting ||
-        state == kDeviceStateListening ||
+    if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
         state == kDeviceStateSpeaking) {
         ESP_LOGI(TAG, "Activation done ignored because runtime audio is active");
         return;
@@ -1552,8 +1580,8 @@ void Application::RefreshPendingTbotClaim() {
             ESP_LOGI(TAG, "BLE connected; waiting for provisioning handoff to finish");
             return;
         }
-        if (!pending_tbot_claim_.active &&
-            ble_state == Blufi::BleState::kAdvertising && token.empty()) {
+        if (!pending_tbot_claim_.active && ble_state == Blufi::BleState::kAdvertising &&
+            token.empty()) {
             // Physical ESP32-S3 measurements show that Wi-Fi + BluFi advertising
             // can leave too little internal SRAM for DNS/TLS. Pause advertising
             // for the unauthenticated setup-liveness fetch; its result handler
@@ -1566,7 +1594,9 @@ void Application::RefreshPendingTbotClaim() {
                    ble_state == Blufi::BleState::kAdvertising) {
             // The phone is no longer connected, so no credential handoff can be
             // interrupted. Free advertising before the TLS claim fetch/confirm.
-            ESP_LOGW(TAG, "Bootstrap token present but BLE still active; stopping BLE to proceed with claim fetch/confirm");
+            ESP_LOGW(TAG,
+                     "Bootstrap token present but BLE still active; stopping BLE to proceed with "
+                     "claim fetch/confirm");
             Blufi::GetInstance().CancelBleSetupTimeout();
             StopBleAdvertising();
             paused_ble_for_fetch = true;
@@ -1585,10 +1615,11 @@ void Application::RefreshPendingTbotClaim() {
     if (api_url.empty()) {
         // H4(2): make the dead-feature state observable instead of silently
         // skipping. Warn in the log and surface a brief Alert so it is visible.
-        ESP_LOGW(TAG, "No backend api_url (OTA and bootstrap fallback both empty); "
-                      "claim/heartbeat feature is inert");
-        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_NOT_FOUND,
-              "triangle_exclamation", "");
+        ESP_LOGW(TAG,
+                 "No backend api_url (OTA and bootstrap fallback both empty); "
+                 "claim/heartbeat feature is inert");
+        Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SERVER_NOT_FOUND, "triangle_exclamation",
+              "");
         StopClaimPoll();
         // No backend api_url -> the claim feature is inert; we cannot reach a
         // standby state, so do not leave BLE advertising.
@@ -1618,7 +1649,8 @@ void Application::RefreshPendingTbotClaim() {
     }
 
     if (pending_tbot_claim_.active && token.empty()) {
-        ESP_LOGW(TAG, "Pending claim cached but no BLE bootstrap token yet; keeping BLE advertising");
+        ESP_LOGW(TAG,
+                 "Pending claim cached but no BLE bootstrap token yet; keeping BLE advertising");
         pending_tbot_claim_api_url_ = api_url;
         SecureClearString(pending_tbot_claim_token_);
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
@@ -1659,13 +1691,10 @@ void Application::RefreshPendingTbotClaim() {
 // mutation below stays serialized on the one task that owns them (OQ1). This is
 // the verbatim result-handling tail of the old RefreshPendingTbotClaim(); only
 // the blocking fetch moved off-task.
-void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
-                                                   const std::string& token,
-                                                   const PendingTbotClaim& pending_claim,
-                                                   bool fetched, int device_config_status,
-                                                   bool defer_confirmation,
-                                                   uint32_t expected_setup_generation,
-                                                   ClaimDeferredEffects* deferred_effects) {
+void Application::ApplyPendingTbotClaimFetchResult(
+    const std::string& api_url, const std::string& token, const PendingTbotClaim& pending_claim,
+    bool fetched, int device_config_status, bool defer_confirmation,
+    uint32_t expected_setup_generation, ClaimDeferredEffects* deferred_effects) {
     auto request_ble = [this, deferred_effects](ClaimBleLifecycleIntent intent) {
         if (deferred_effects != nullptr) {
             deferred_effects->ble_intent = intent;
@@ -1693,7 +1722,8 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
         // teardown -> HTTP 401 -> "Server unavailable". Treat this as a stale
         // local token, reopen claimable BLE, and wait for the phone to deliver a
         // fresh attempt token.
-        ESP_LOGW(TAG, "Device config rejected bootstrap token (HTTP %d); clearing stale claim token",
+        ESP_LOGW(TAG,
+                 "Device config rejected bootstrap token (HTTP %d); clearing stale claim token",
                  device_config_status);
         Settings websocket_settings("websocket", true);
         websocket_settings.SetString("bootstrap_token", "");
@@ -1771,7 +1801,9 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
         // internal heap on ESP32-S3. A 401/403 above reopens BLE for a new token.
         const int64_t now_ms = esp_timer_get_time() / 1000;
         if (now_ms - claim_poll_started_ms_ >= kClaimVisibilityRetryWindowMs) {
-            ESP_LOGW(TAG, "Claim visibility retry window elapsed; clearing stale token and restoring BLE standby");
+            ESP_LOGW(TAG,
+                     "Claim visibility retry window elapsed; clearing stale token and restoring "
+                     "BLE standby");
             Settings websocket_settings("websocket", true);
             websocket_settings.SetString("bootstrap_token", "");
             websocket_settings.SetInt("claim_ambiguous", 0);
@@ -1788,7 +1820,8 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
             return;
         }
         if (claim_fetch_failures_ >= 4 && IsDeviceClaimed()) {
-            ESP_LOGW(TAG, "claim_poll_giveup failures=%d (claimed; stop hammering backend)", claim_fetch_failures_);
+            ESP_LOGW(TAG, "claim_poll_giveup failures=%d (claimed; stop hammering backend)",
+                     claim_fetch_failures_);
             StopClaimPoll();
         } else {
             StartClaimPoll();
@@ -1811,7 +1844,8 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
         // consumed). Do NOT fall back to websocket.token here: that is the
         // realtime/OTA token, not claim-confirm auth. Keep BLE discoverable so
         // the phone can reconnect and send a fresh bootstrap token.
-        ESP_LOGW(TAG, "Pending claim detected but no BLE bootstrap token yet; keeping BLE advertising");
+        ESP_LOGW(TAG,
+                 "Pending claim detected but no BLE bootstrap token yet; keeping BLE advertising");
         claim_substate_ = TbotClaimSubstate::AvailableStandby;
         RenderClaimSubstate(claim_substate_);
         request_ble(ClaimBleLifecycleIntent::kEnsureAdvertising);
@@ -1848,12 +1882,13 @@ void Application::ApplyPendingTbotClaimFetchResult(const std::string& api_url,
     // it async would split those state transitions across callers. The
     // BOOT-button path stays wired as a manual fallback if a future build wants
     // to re-enable explicit consent.
-    ESP_LOGI(TAG, "Pending claim detected -> auto-confirming (press-to-allow skipped by product decision)");
+    ESP_LOGI(
+        TAG,
+        "Pending claim detected -> auto-confirming (press-to-allow skipped by product decision)");
     if (defer_confirmation) {
         if (deferred_effects != nullptr) {
             deferred_effects->dispatch_confirmation = true;
-        } else if (!DispatchPendingTbotClaimConfirmation(
-                       expected_setup_generation, true)) {
+        } else if (!DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
             StartClaimPoll();
         }
     } else {
@@ -1901,16 +1936,14 @@ bool Application::ConfirmPendingTbotClaim(bool trust_backend_expiry) {
     provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
 #endif
     const ClaimConfirmationResult confirmation_result = ClaimConfirmationReporter::Confirm(
-        pending_tbot_claim_,
-        pending_tbot_claim_api_url_, pending_tbot_claim_token_);
+        pending_tbot_claim_, pending_tbot_claim_api_url_, pending_tbot_claim_token_);
     return ApplyPendingTbotClaimConfirmationResult(confirmation_result, provisioning_token);
 }
 
 bool Application::ApplyPendingTbotClaimConfirmationResult(
     ClaimConfirmationResult confirmation_result,
     WakeWordLifecycleController::ProvisioningToken provisioning_token,
-    bool defer_successful_teardown,
-    ClaimDeferredEffects* deferred_effects) {
+    bool defer_successful_teardown, ClaimDeferredEffects* deferred_effects) {
     if (confirmation_result == ClaimConfirmationResult::RetryableFailure) {
         ESP_LOGW(TAG, "Claim confirmation retryable; retaining claim token for bounded retry");
         claim_substate_ = TbotClaimSubstate::WaitingConfirm;
@@ -1921,7 +1954,8 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
     }
 
     if (confirmation_result == ClaimConfirmationResult::AmbiguousSuccess) {
-        ESP_LOGE(TAG, "Claim confirmation 2xx response unusable; freezing attempt for support/reset");
+        ESP_LOGE(TAG,
+                 "Claim confirmation 2xx response unusable; freezing attempt for support/reset");
         Settings websocket_settings("websocket", true);
         websocket_settings.SetInt("claim_ambiguous", 1);
         claim_confirmation_ambiguous_ = true;
@@ -1967,8 +2001,8 @@ bool Application::ApplyPendingTbotClaimConfirmationResult(
     if (defer_successful_teardown && deferred_effects != nullptr) {
         deferred_effects->ble_intent = ClaimBleLifecycleIntent::kCompleteSuccessfulTeardown;
     } else if (!defer_successful_teardown) {
-        Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown(
-            "claim_confirmed", provisioning_token);
+        Blufi::GetInstance().CompleteSuccessfulProvisioningTeardown("claim_confirmed",
+                                                                    provisioning_token);
     }
 #else
     if (defer_successful_teardown && deferred_effects != nullptr) {
@@ -2023,8 +2057,8 @@ struct ClaimConfirmationContext {
 };
 }  // namespace
 
-bool Application::DispatchPendingTbotClaimConfirmation(
-    uint32_t expected_setup_generation, bool enforce_setup_generation) {
+bool Application::DispatchPendingTbotClaimConfirmation(uint32_t expected_setup_generation,
+                                                       bool enforce_setup_generation) {
     if (!pending_tbot_claim_.active || pending_tbot_claim_token_.empty()) {
         return false;
     }
@@ -2036,10 +2070,13 @@ bool Application::DispatchPendingTbotClaimConfirmation(
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     provisioning_token = Blufi::GetInstance().CaptureProvisioningSession();
 #endif
-    auto* ctx = new (std::nothrow) ClaimConfirmationContext{
-        this, pending_tbot_claim_, pending_tbot_claim_api_url_,
-        pending_tbot_claim_token_, provisioning_token, expected_setup_generation,
-        enforce_setup_generation};
+    auto* ctx = new (std::nothrow) ClaimConfirmationContext{this,
+                                                            pending_tbot_claim_,
+                                                            pending_tbot_claim_api_url_,
+                                                            pending_tbot_claim_token_,
+                                                            provisioning_token,
+                                                            expected_setup_generation,
+                                                            enforce_setup_generation};
     if (ctx == nullptr) {
         claim_confirm_inflight_.store(false);
         return false;
@@ -2068,32 +2105,29 @@ void Application::ClaimConfirmationTask(void* arg) {
         delete ctx;
 
         std::string success_response;
-        const ClaimConfirmationResult result = ClaimConfirmationReporter::Confirm(
-            claim, api_url, token, &success_response);
+        const ClaimConfirmationResult result =
+            ClaimConfirmationReporter::Confirm(claim, api_url, token, &success_response);
         self->Schedule([self, result, token = std::move(token), provisioning_token,
-                        success_response = std::move(success_response),
-                        expected_setup_generation, enforce_setup_generation]() mutable {
+                        success_response = std::move(success_response), expected_setup_generation,
+                        enforce_setup_generation]() mutable {
             self->claim_confirm_inflight_.store(false);
             ClaimDeferredEffects deferred_effects;
-            auto apply_result = [&](bool defer_successful_teardown,
-                                    ClaimDeferredEffects* effects) {
+            auto apply_result = [&](bool defer_successful_teardown, ClaimDeferredEffects* effects) {
                 ClaimConfirmationResult effective_result = result;
                 if (effective_result == ClaimConfirmationResult::Confirmed &&
                     !PersistTbotClaimConfirmationResponse(success_response)) {
                     effective_result = ClaimConfirmationResult::AmbiguousSuccess;
                 }
-                self->ApplyPendingTbotClaimConfirmationResult(
-                    effective_result, provisioning_token, defer_successful_teardown, effects);
+                self->ApplyPendingTbotClaimConfirmationResult(effective_result, provisioning_token,
+                                                              defer_successful_teardown, effects);
                 return effective_result == ClaimConfirmationResult::Confirmed;
             };
             if (enforce_setup_generation) {
                 const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
-                    expected_setup_generation, [&]() {
-                        apply_result(true, &deferred_effects);
-                    });
+                    expected_setup_generation, [&]() { apply_result(true, &deferred_effects); });
                 if (applied) {
-                    self->ExecuteClaimDeferredEffects(
-                        deferred_effects, expected_setup_generation, provisioning_token);
+                    self->ExecuteClaimDeferredEffects(deferred_effects, expected_setup_generation,
+                                                      provisioning_token);
                 }
             } else {
                 apply_result(false, nullptr);
@@ -2112,13 +2146,13 @@ void Application::SchedulePendingTbotClaimRefresh(uint32_t expected_setup_genera
         ClaimDeferredEffects deferred_effects;
         const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
             expected_setup_generation, [this, &deferred_effects]() {
-            // Serialize setup promotion and snapshot/dispatch with BOOT re-entry.
-            PromoteFromWifiConfigAfterProvisioning();
-            if (GetDeviceState() != kDeviceStateWifiConfiguring) {
-                deferred_effects.dispatch_refresh = true;
-            }
-            // If activation remains in progress, HandleActivationDoneEvent
-            // performs the normal refresh after reaching Idle.
+                // Serialize setup promotion and snapshot/dispatch with BOOT re-entry.
+                PromoteFromWifiConfigAfterProvisioning();
+                if (GetDeviceState() != kDeviceStateWifiConfiguring) {
+                    deferred_effects.dispatch_refresh = true;
+                }
+                // If activation remains in progress, HandleActivationDoneEvent
+                // performs the normal refresh after reaching Idle.
             });
         if (applied) {
             ExecuteClaimDeferredEffects(deferred_effects, expected_setup_generation);
@@ -2127,10 +2161,8 @@ void Application::SchedulePendingTbotClaimRefresh(uint32_t expected_setup_genera
 }
 
 void Application::CompleteCardputerWifiProvisioning(uint64_t ui_generation) {
-    uint64_t completed =
-        cardputer_wifi_completion_generation_.load(std::memory_order_acquire);
-    if (ui_generation <= completed ||
-        GetDeviceState() != kDeviceStateWifiConfiguring) {
+    uint64_t completed = cardputer_wifi_completion_generation_.load(std::memory_order_acquire);
+    if (ui_generation <= completed || GetDeviceState() != kDeviceStateWifiConfiguring) {
         return;
     }
     PromoteFromWifiConfigAfterProvisioning();
@@ -2139,15 +2171,14 @@ void Application::CompleteCardputerWifiProvisioning(uint64_t ui_generation) {
     }
     while (ui_generation > completed &&
            !cardputer_wifi_completion_generation_.compare_exchange_weak(
-               completed, ui_generation, std::memory_order_acq_rel,
-               std::memory_order_acquire)) {
+               completed, ui_generation, std::memory_order_acq_rel, std::memory_order_acquire)) {
     }
     HandleNetworkConnectedEvent();
 }
 
 void Application::ExecuteClaimDeferredEffects(
-        const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
-        WakeWordLifecycleController::ProvisioningToken provisioning_token) {
+    const ClaimDeferredEffects& effects, uint32_t expected_setup_generation,
+    WakeWordLifecycleController::ProvisioningToken provisioning_token) {
     auto commit_dispatch = [this, &effects, expected_setup_generation]() {
         if (effects.dispatch_confirmation &&
             !DispatchPendingTbotClaimConfirmation(expected_setup_generation, true)) {
@@ -2162,26 +2193,26 @@ void Application::ExecuteClaimDeferredEffects(
     bool lifecycle_ready = true;
     switch (effects.ble_intent) {
         case ClaimBleLifecycleIntent::kNone:
-            lifecycle_ready = RunClaimDispatchForSetupGeneration(
-                expected_setup_generation, commit_dispatch);
+            lifecycle_ready =
+                RunClaimDispatchForSetupGeneration(expected_setup_generation, commit_dispatch);
             break;
         case ClaimBleLifecycleIntent::kEnsureAdvertising:
             lifecycle_ready = EnsureBleAdvertisingForStandbyForSetupGeneration(
                 expected_setup_generation, commit_dispatch);
             break;
         case ClaimBleLifecycleIntent::kStopAdvertising:
-            lifecycle_ready = StopBleAdvertisingForSetupGeneration(
-                expected_setup_generation, commit_dispatch);
+            lifecycle_ready =
+                StopBleAdvertisingForSetupGeneration(expected_setup_generation, commit_dispatch);
             break;
         case ClaimBleLifecycleIntent::kCompleteSuccessfulTeardown:
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-            lifecycle_ready = Blufi::GetInstance()
-                .CompleteSuccessfulProvisioningTeardownForGeneration(
+            lifecycle_ready =
+                Blufi::GetInstance().CompleteSuccessfulProvisioningTeardownForGeneration(
                     "claim_confirmed", provisioning_token, expected_setup_generation,
                     commit_dispatch);
 #else
-            lifecycle_ready = StopBleAdvertisingForSetupGeneration(
-                expected_setup_generation, commit_dispatch);
+            lifecycle_ready =
+                StopBleAdvertisingForSetupGeneration(expected_setup_generation, commit_dispatch);
 #endif
             break;
     }
@@ -2194,11 +2225,10 @@ void Application::ExecuteClaimDeferredEffects(
     }
 }
 
-bool Application::RunClaimDispatchForSetupGeneration(
-        uint32_t expected_setup_generation, const std::function<void()>& action) {
+bool Application::RunClaimDispatchForSetupGeneration(uint32_t expected_setup_generation,
+                                                     const std::function<void()>& action) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-    return Blufi::GetInstance().RunWithSetupGenerationCurrent(
-        expected_setup_generation, action);
+    return Blufi::GetInstance().RunWithSetupGenerationCurrent(expected_setup_generation, action);
 #else
     (void)expected_setup_generation;
     action();
@@ -2216,8 +2246,8 @@ void Application::DispatchPendingTbotClaimRefreshForSetupGeneration(
 
     if (pending_tbot_claim_.active && !token.empty()) {
         ClaimDeferredEffects effects;
-        const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
-            expected_setup_generation, [&]() {
+        const bool applied =
+            Blufi::GetInstance().RunIfSetupGenerationCurrent(expected_setup_generation, [&]() {
                 if (!api_url.empty()) {
                     pending_tbot_claim_api_url_ = api_url;
                 }
@@ -2234,11 +2264,10 @@ void Application::DispatchPendingTbotClaimRefreshForSetupGeneration(
     }
 
     bool dispatched = false;
-    const bool current = RunClaimDispatchForSetupGeneration(
-        expected_setup_generation, [&]() {
-            dispatched = DispatchPendingTbotClaimFetch(
-                api_url, token, true, expected_setup_generation, true);
-        });
+    const bool current = RunClaimDispatchForSetupGeneration(expected_setup_generation, [&]() {
+        dispatched =
+            DispatchPendingTbotClaimFetch(api_url, token, true, expected_setup_generation, true);
+    });
     if (!current) {
         return;
     }
@@ -2408,8 +2437,8 @@ void Application::RenderClaimSubstate(TbotClaimSubstate substate) {
     // The connect-state contract row is the source of truth for which state we
     // are in; the on-screen copy is the localized Lang::Strings equivalent so
     // the VI build shows translated text (English literals live in the table).
-    const TbotConnectState state = TbotConnectMapper::ResolveState(
-        GetDeviceState(), substate, GetBleSubstate());
+    const TbotConnectState state =
+        TbotConnectMapper::ResolveState(GetDeviceState(), substate, GetBleSubstate());
     const char* copy = TbotConnectMapper::ScreenTextFor(state);
     switch (state) {
         case TbotConnectState::CLAIM_AVAILABLE:
@@ -2455,10 +2484,8 @@ bool Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
     // reset the window, so an unclaimed device keeps discovering a phone claim and
     // the 5-minute confirm cap (PollPendingTbotClaimTick) stays intact.
     const DeviceState state = GetDeviceState();
-    if (state == kDeviceStateConnecting ||
-        state == kDeviceStateListening ||
-        state == kDeviceStateSpeaking ||
-        connect_in_flight_.load()) {
+    if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
+        state == kDeviceStateSpeaking || connect_in_flight_.load()) {
         ESP_LOGD(TAG, "Skipping claim fetch this tick (runtime audio active)");
         return false;
     }
@@ -2470,9 +2497,12 @@ bool Application::DispatchPendingTbotClaimFetch(const std::string& api_url,
         return false;
     }
 
-    auto* ctx = new (std::nothrow) ClaimFetchContext{
-        this, api_url, token, apply_when_poll_inactive,
-        expected_setup_generation, enforce_setup_generation};
+    auto* ctx = new (std::nothrow) ClaimFetchContext{this,
+                                                     api_url,
+                                                     token,
+                                                     apply_when_poll_inactive,
+                                                     expected_setup_generation,
+                                                     enforce_setup_generation};
     if (ctx == nullptr) {
         ESP_LOGE(TAG, "claim_fetch context allocation failed; restoring standby");
         claim_poll_inflight_.store(false);
@@ -2519,9 +2549,9 @@ void Application::ClaimFetchTask(void* arg) {
         }
         PendingTbotClaim pending_claim;
         int device_config_status = 0;
-        const bool fetched = !api_url.empty() &&
-            FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim,
-                                                  &device_config_status);
+        const bool fetched =
+            !api_url.empty() && FetchPendingTbotClaimFromDeviceConfig(api_url, token, pending_claim,
+                                                                      &device_config_status);
 
         // Marshal result-application back onto the Application task (OQ1): all
         // claim_substate_/pending_tbot_claim_*/BLE/SetDeviceState mutation stays on
@@ -2557,13 +2587,12 @@ void Application::ClaimFetchTask(void* arg) {
                 const bool applied = Blufi::GetInstance().RunIfSetupGenerationCurrent(
                     expected_setup_generation, apply_result);
                 if (applied) {
-                    self->ExecuteClaimDeferredEffects(
-                        deferred_effects, expected_setup_generation);
+                    self->ExecuteClaimDeferredEffects(deferred_effects, expected_setup_generation);
                 }
             } else {
-                self->ApplyPendingTbotClaimFetchResult(
-                    api_url, token, pending_claim, fetched, device_config_status,
-                    false, expected_setup_generation, nullptr);
+                self->ApplyPendingTbotClaimFetchResult(api_url, token, pending_claim, fetched,
+                                                       device_config_status, false,
+                                                       expected_setup_generation, nullptr);
             }
             SecureClearString(token);
         });
@@ -2605,11 +2634,12 @@ void Application::StartClaimPoll() {
     }
     if (claim_poll_timer_ == nullptr) {
         esp_timer_create_args_t args = {
-            .callback = [](void* arg) {
-                Application* app = static_cast<Application*>(arg);
-                // Never do network I/O in the timer task — post to Application.
-                app->Schedule([app]() { app->PollPendingTbotClaimTick(); });
-            },
+            .callback =
+                [](void* arg) {
+                    Application* app = static_cast<Application*>(arg);
+                    // Never do network I/O in the timer task — post to Application.
+                    app->Schedule([app]() { app->PollPendingTbotClaimTick(); });
+                },
             .arg = this,
             .dispatch_method = ESP_TIMER_TASK,
             .name = "claim_poll",
@@ -2686,7 +2716,8 @@ void Application::ArmClaimExpiryTimer() {
     // the bounded poll's 5-minute window cap, which is monotonic and correct.
     static constexpr time_t kClockSanityFloor = 1704067200;  // 2024-01-01T00:00:00Z
     if (!has_server_time_ && now < kClockSanityFloor) {
-        ESP_LOGI(TAG, "Clock unsynced; not arming wall-clock claim expiry, relying on poll-window cap");
+        ESP_LOGI(TAG,
+                 "Clock unsynced; not arming wall-clock claim expiry, relying on poll-window cap");
         return;
     }
     int64_t remaining_s = static_cast<int64_t>(expires_epoch) - static_cast<int64_t>(now);
@@ -2697,10 +2728,11 @@ void Application::ArmClaimExpiryTimer() {
     }
 
     esp_timer_create_args_t args = {
-        .callback = [](void* arg) {
-            Application* app = static_cast<Application*>(arg);
-            app->Schedule([app]() { app->HandleClaimConfirmTimeout(); });
-        },
+        .callback =
+            [](void* arg) {
+                Application* app = static_cast<Application*>(arg);
+                app->Schedule([app]() { app->HandleClaimConfirmTimeout(); });
+            },
         .arg = this,
         .dispatch_method = ESP_TIMER_TASK,
         .name = "claim_expiry",
@@ -2741,8 +2773,8 @@ void Application::HandleClaimConfirmTimeout() {
     claim_confirmation_ambiguous_ = false;
     claim_substate_ = TbotClaimSubstate::ConfirmTimeout;
     // "Setup expired" (CLAIM_CONFIRM_TIMEOUT) — no silent failure, no spinner.
-    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SETUP_EXPIRED,
-          "triangle_exclamation", Lang::Sounds::OGG_EXCLAMATION);
+    Alert(Lang::Strings::TBOT_CONNECT, Lang::Strings::SETUP_EXPIRED, "triangle_exclamation",
+          Lang::Sounds::OGG_EXCLAMATION);
 }
 
 // ---------------------------------------------------------------------------
@@ -2817,21 +2849,19 @@ void Application::EnsureBleAdvertisingForStandby() {
 }
 
 bool Application::EnsureBleAdvertisingForStandbyForSetupGeneration(
-        uint32_t expected_generation, const std::function<void()>& on_current) {
+    uint32_t expected_generation, const std::function<void()>& on_current) {
     return EnsureBleAdvertisingForStandbyImpl(expected_generation, on_current);
 }
 
-bool Application::EnsureBleAdvertisingForStandbyImpl(
-        std::optional<uint32_t> expected_generation,
-        const std::function<void()>& on_current) {
+bool Application::EnsureBleAdvertisingForStandbyImpl(std::optional<uint32_t> expected_generation,
+                                                     const std::function<void()>& on_current) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto& blufi = Blufi::GetInstance();
 
     if (IsDeviceClaimed()) {
         return expected_generation.has_value()
-            ? StopBleAdvertisingForSetupGeneration(
-                  expected_generation.value(), on_current)
-            : StopBleAdvertisingImpl(std::nullopt);
+                   ? StopBleAdvertisingForSetupGeneration(expected_generation.value(), on_current)
+                   : StopBleAdvertisingImpl(std::nullopt);
     }
 
     auto provisioning_token = blufi.CaptureProvisioningSession();
@@ -2860,8 +2890,8 @@ bool Application::EnsureBleAdvertisingForStandbyImpl(
     };
     if (expected_generation.has_value()) {
         const bool ensured = blufi.EnsureAdvertisingForSetupGeneration(
-            expected_generation.value(), CONFIG_BLE_SETUP_TIMEOUT_SEC,
-            &provisioning_token, prepare, on_current);
+            expected_generation.value(), CONFIG_BLE_SETUP_TIMEOUT_SEC, &provisioning_token, prepare,
+            on_current);
         if (!ensured) {
             ESP_LOGE(TAG, "Claim standby BLE ensure failed or became stale");
         }
@@ -2906,28 +2936,26 @@ void Application::EnsureBleAdvertisingForUnclaimedSavedWifi() {
         return;
     }
 
-    ESP_LOGI(TAG, "Stored WiFi exists but device is unclaimed; keeping BLE advertising open for setup");
+    ESP_LOGI(TAG,
+             "Stored WiFi exists but device is unclaimed; keeping BLE advertising open for setup");
     EnsureBleAdvertisingForStandby();
 }
 
-void Application::StopBleAdvertising() {
-    StopBleAdvertisingImpl(std::nullopt);
-}
+void Application::StopBleAdvertising() { StopBleAdvertisingImpl(std::nullopt); }
 
-bool Application::StopBleAdvertisingForSetupGeneration(
-        uint32_t expected_generation, const std::function<void()>& on_current) {
+bool Application::StopBleAdvertisingForSetupGeneration(uint32_t expected_generation,
+                                                       const std::function<void()>& on_current) {
     return StopBleAdvertisingImpl(expected_generation, on_current);
 }
 
-bool Application::StopBleAdvertisingImpl(
-        std::optional<uint32_t> expected_generation,
-        const std::function<void()>& on_current) {
+bool Application::StopBleAdvertisingImpl(std::optional<uint32_t> expected_generation,
+                                         const std::function<void()>& on_current) {
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
     auto& blufi = Blufi::GetInstance();
     if (expected_generation.has_value()) {
         const bool was_active = blufi.GetBleState() != Blufi::BleState::kOff;
-        const esp_err_t result = blufi.DeinitForSetupGeneration(
-            expected_generation.value(), on_current);
+        const esp_err_t result =
+            blufi.DeinitForSetupGeneration(expected_generation.value(), on_current);
         if (result != ESP_OK) {
             return false;
         }
@@ -3011,10 +3039,8 @@ static std::string ExtractWifiSsid(cJSON* status_root) {
 }
 
 bool Application::ShouldKeepManagementHeartbeat() const {
-    return IsDeviceClaimed() &&
-           !lesson_runtime_active_.load() &&
-           GetDeviceState() == kDeviceStateIdle &&
-           !IsConnectSuccessPublicationSuppressed();
+    return IsDeviceClaimed() && !lesson_runtime_active_.load() &&
+           GetDeviceState() == kDeviceStateIdle && !IsConnectSuccessPublicationSuppressed();
 }
 
 static std::string BuildTbotHeartbeatBody(const std::string& status_json,
@@ -3080,14 +3106,15 @@ void Application::StartHeartbeat() {
     }
     if (heartbeat_timer_ == nullptr) {
         esp_timer_create_args_t args = {
-            .callback = [](void* arg) {
-                Application* app = static_cast<Application*>(arg);
-                // Post to the Application task, which gates + spawns the off-task
-                // HTTP worker. The blocking POST must never run on the prio-10
-                // main task (it starves the wake-word AFE pipeline -> "Hi ESP"
-                // needs several tries), so do NOT call SendDeviceHeartbeat() here.
-                app->Schedule([app]() { app->DispatchDeviceHeartbeat(); });
-            },
+            .callback =
+                [](void* arg) {
+                    Application* app = static_cast<Application*>(arg);
+                    // Post to the Application task, which gates + spawns the off-task
+                    // HTTP worker. The blocking POST must never run on the prio-10
+                    // main task (it starves the wake-word AFE pipeline -> "Hi ESP"
+                    // needs several tries), so do NOT call SendDeviceHeartbeat() here.
+                    app->Schedule([app]() { app->DispatchDeviceHeartbeat(); });
+                },
             .arg = this,
             .dispatch_method = ESP_TIMER_TASK,
             .name = "heartbeat",
@@ -3115,12 +3142,14 @@ void Application::StopHeartbeat() {
 
 void Application::HandleHeartbeatAuthFailure(int status_code) {
     if (lesson_runtime_active_.load()) {
-        ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d) during lesson; deferring claim recovery", status_code);
+        ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d) during lesson; deferring claim recovery",
+                 status_code);
         StopHeartbeat();
         deferred_heartbeat_auth_failure_status_.store(status_code);
         return;
     }
-    ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d); entering remote-unpair WiFi setup", status_code);
+    ESP_LOGW(TAG, "Heartbeat auth failed (HTTP %d); entering remote-unpair WiFi setup",
+             status_code);
     StopHeartbeat();
     StopClaimPoll();
     CloseAudioChannelByIntent();
@@ -3161,8 +3190,7 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
     // A revoked heartbeat is the durable fallback when the backend invalidates
     // ownership before its WebSocket unpair command reaches the robot. Forget
     // the old network so the normal boot path opens BLUFI without a BOOT press.
-    const auto wifi_clear_result =
-        SsidManager::GetInstance().ForceClearAndCancelTransaction();
+    const auto wifi_clear_result = SsidManager::GetInstance().ForceClearAndCancelTransaction();
     if (wifi_clear_result != SsidMutationResult::kApplied) {
         ESP_LOGE(TAG, "Heartbeat auth recovery could not clear saved WiFi");
         return;
@@ -3172,7 +3200,8 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
 }
 
 void Application::EnterRepairPairingMode(ChatRequestContext context) {
-    if (!IsChatRequestCurrent(context)) return;
+    if (!IsChatRequestCurrent(context))
+        return;
 #if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     ESP_LOGW(TAG, "Course-mode local endpoint blocks repair/reset networking");
     return;
@@ -3180,7 +3209,8 @@ void Application::EnterRepairPairingMode(ChatRequestContext context) {
     // Callable from the BOOT button task; marshal ALL claim-FSM + NVS mutation onto
     // the Application task (OQ1: the claim state machine is single-threaded).
     Schedule([this, context]() {
-        if (!IsChatRequestCurrent(context)) return;
+        if (!IsChatRequestCurrent(context))
+            return;
         if (lesson_runtime_active_.load()) {
             ESP_LOGW(TAG, "lesson re-pair ignored during lesson");
             return;
@@ -3216,7 +3246,8 @@ void Application::EnterRepairPairingMode(ChatRequestContext context) {
                      released ? "OK (backend freed for re-claim)"
                               : "FAILED (offline/auth?) -> deferred retry when online");
         } else {
-            ESP_LOGW(TAG, "BOOT re-pair: no cloud credentials to release (treating as already free)");
+            ESP_LOGW(TAG,
+                     "BOOT re-pair: no cloud credentials to release (treating as already free)");
         }
 
         // Local unclaim: drop the claimed flag + the live WS/claim tokens so the
@@ -3266,13 +3297,13 @@ void Application::EnterRepairPairingMode(ChatRequestContext context) {
         // networks (the reported "can't set a different Wi-Fi"). The cloud row was freed
         // synchronously above (while still online); the offline case keeps
         // release_pending so the deferred release fires once the NEW network connects.
-        const auto wifi_clear_result =
-            SsidManager::GetInstance().ForceClearAndCancelTransaction();
+        const auto wifi_clear_result = SsidManager::GetInstance().ForceClearAndCancelTransaction();
         if (wifi_clear_result != SsidMutationResult::kApplied) {
             ESP_LOGE(TAG, "BOOT re-pair could not clear saved WiFi");
             return;
         }
-        ESP_LOGW(TAG, "BOOT re-pair: Wi-Fi forgotten; rebooting into Wi-Fi setup for a new network");
+        ESP_LOGW(TAG,
+                 "BOOT re-pair: Wi-Fi forgotten; rebooting into Wi-Fi setup for a new network");
         vTaskDelay(pdMS_TO_TICKS(1500));
         esp_restart();
     });
@@ -3312,10 +3343,8 @@ void Application::MaybeDispatchDeferredCloudRelease() {
     // TLS POST while live audio is in flight, and single-flight so a stuck network
     // can't stack workers across refreshes.
     const DeviceState state = GetDeviceState();
-    if (state == kDeviceStateConnecting ||
-        state == kDeviceStateListening ||
-        state == kDeviceStateSpeaking ||
-        connect_in_flight_.load()) {
+    if (state == kDeviceStateConnecting || state == kDeviceStateListening ||
+        state == kDeviceStateSpeaking || connect_in_flight_.load()) {
         return;
     }
     bool expected = false;
@@ -3326,8 +3355,7 @@ void Application::MaybeDispatchDeferredCloudRelease() {
     // Low priority + not pinned to core 0 (same as ClaimFetchTask) so the blocking
     // POST waits on the network without starving the core-0 wake-word AFE pipeline.
     // Internal DRAM stack required: worker + result path touch NVS/flash (cache-off).
-    auto* ctx = new (std::nothrow) CloudReleaseContext{
-        this, api_url, device_id, device_secret};
+    auto* ctx = new (std::nothrow) CloudReleaseContext{this, api_url, device_id, device_secret};
     if (ctx == nullptr) {
         ESP_LOGE(TAG, "cloud_release context allocation failed; retrying next refresh");
         cloud_release_inflight_.store(false);
@@ -3351,7 +3379,8 @@ void Application::CloudReleaseTask(void* arg) {
 
         // Use the credentials captured before task creation. Reading NVS here could
         // release a newer claim that arrived while this worker was waiting to run.
-        const bool released = SystemReset::ReleaseCloudOwnership(ctx->api_url, ctx->device_id, ctx->device_secret);
+        const bool released =
+            SystemReset::ReleaseCloudOwnership(ctx->api_url, ctx->device_id, ctx->device_secret);
         std::string api_url = std::move(ctx->api_url);
         std::string device_id = std::move(ctx->device_id);
         std::string device_secret = std::move(ctx->device_secret);
@@ -3376,7 +3405,8 @@ void Application::CloudReleaseTask(void* arg) {
                 return;
             }
             if (!released) {
-                ESP_LOGW(TAG, "Deferred cloud ownership release failed; will retry on next refresh");
+                ESP_LOGW(TAG,
+                         "Deferred cloud ownership release failed; will retry on next refresh");
                 std::fill(device_secret.begin(), device_secret.end(), '\0');
                 return;
             }
@@ -3385,7 +3415,8 @@ void Application::CloudReleaseTask(void* arg) {
             backend_settings.SetString("device_id", "");
             backend_settings.SetString("device_secret", "");
             std::fill(device_secret.begin(), device_secret.end(), '\0');
-            ESP_LOGI(TAG, "Deferred cloud ownership released; robot is free for a new parent to claim");
+            ESP_LOGI(TAG,
+                     "Deferred cloud ownership released; robot is free for a new parent to claim");
             self->RefreshPendingTbotClaim();
         });
     }
@@ -3418,8 +3449,7 @@ void Application::DispatchDeviceHeartbeat() {
     // fire heartbeats. The timer can still be stopped late, so this is the
     // authoritative runtime gate.
     const DeviceState device_state = GetDeviceState();
-    if (device_state != kDeviceStateIdle &&
-        device_state != kDeviceStateListening &&
+    if (device_state != kDeviceStateIdle && device_state != kDeviceStateListening &&
         device_state != kDeviceStateSpeaking) {
         return;
     }
@@ -3482,7 +3512,8 @@ void Application::DispatchDeviceHeartbeat() {
 
 void Application::HeartbeatTask(void* arg) {
     auto* ctx = static_cast<HeartbeatContext*>(arg);
-    if (ctx == nullptr) return;
+    if (ctx == nullptr)
+        return;
     auto* self = ctx->app;
     ESP_LOGI(TAG, "Heartbeat worker received request");
     const std::string url = ctx->url;
@@ -3623,7 +3654,7 @@ void Application::CheckAssetsVersion() {
         ESP_LOGW(TAG, "Assets partition is disabled for board %s", BOARD_NAME);
         return;
     }
-    
+
     Settings settings("assets", true);
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
@@ -3633,27 +3664,30 @@ void Application::CheckAssetsVersion() {
 
         char message[256];
         snprintf(message, sizeof(message), Lang::Strings::FOUND_NEW_ASSETS, download_url.c_str());
-        Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_arrow_down", Lang::Sounds::OGG_UPGRADE);
-        
+        Alert(Lang::Strings::LOADING_ASSETS, message, "cloud_arrow_down",
+              Lang::Sounds::OGG_UPGRADE);
+
         // Wait for the audio service to be idle for 3 seconds
         vTaskDelay(pdMS_TO_TICKS(3000));
         SetDeviceState(kDeviceStateUpgrading);
         board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
         display->SetChatMessage("system", Lang::Strings::PLEASE_WAIT);
 
-        bool success = assets.Download(download_url, [this, display](int progress, size_t speed) -> void {
-            char buffer[32];
-            snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
-            Schedule([display, message = std::string(buffer)]() {
-                display->SetChatMessage("system", message.c_str());
+        bool success =
+            assets.Download(download_url, [this, display](int progress, size_t speed) -> void {
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "%d%% %uKB/s", progress, speed / 1024);
+                Schedule([display, message = std::string(buffer)]() {
+                    display->SetChatMessage("system", message.c_str());
+                });
             });
-        });
 
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         vTaskDelay(pdMS_TO_TICKS(1000));
 
         if (!success) {
-            Alert(Lang::Strings::ERROR, Lang::Strings::DOWNLOAD_ASSETS_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+            Alert(Lang::Strings::ERROR, Lang::Strings::DOWNLOAD_ASSETS_FAILED, "circle_xmark",
+                  Lang::Sounds::OGG_EXCLAMATION);
             vTaskDelay(pdMS_TO_TICKS(2000));
             SetDeviceState(kDeviceStateActivating);
             return;
@@ -3675,8 +3709,7 @@ void Application::CheckNewVersion() {
         for (int attempt = 0; attempt < kOtaCheckMaxAttempts; ++attempt) {
             auto current_state = GetDeviceState();
             if (current_state == kDeviceStateWifiConfiguring ||
-                current_state == kDeviceStateAudioTesting ||
-                current_state == kDeviceStateIdle) {
+                current_state == kDeviceStateAudioTesting || current_state == kDeviceStateIdle) {
                 ESP_LOGI(TAG, "Skipping OTA version check because activation ended");
                 return;
             }
@@ -3689,7 +3722,8 @@ void Application::CheckNewVersion() {
             if (attempt + 1 >= kOtaCheckMaxAttempts) {
                 char error_message[32];
                 snprintf(error_message, sizeof(error_message), "code=%d", err);
-                Alert(Lang::Strings::ERROR, error_message, "cloud_slash", Lang::Sounds::OGG_EXCLAMATION);
+                Alert(Lang::Strings::ERROR, error_message, "cloud_slash",
+                      Lang::Sounds::OGG_EXCLAMATION);
                 ESP_LOGE(TAG, "OTA version check exhausted its bounded retry budget, code=%d", err);
                 return;
             }
@@ -3714,7 +3748,7 @@ void Application::CheckNewVersion() {
 
         if (ota_->HasNewVersion()) {
             if (UpgradeFirmware(ota_->GetFirmwareUrl(), ota_->GetFirmwareVersion())) {
-                return; // This line will never be reached after reboot
+                return;  // This line will never be reached after reboot
             }
             // If upgrade failed, continue to normal operation
         }
@@ -3761,8 +3795,10 @@ void Application::RequestInitializeProtocol(ProtocolActivation activation) {
         protocol_work_lifetime_.Request(ProtocolWorkLifetime::Action::kReinitialize);
         CompletePendingProtocolWork();
     };
-    if (xTaskGetCurrentTaskHandle() == application_task_) request();
-    else Schedule(std::move(request));
+    if (xTaskGetCurrentTaskHandle() == application_task_)
+        request();
+    else
+        Schedule(std::move(request));
 }
 
 void Application::CompleteProtocolActivation() {
@@ -3777,9 +3813,11 @@ void Application::CompleteProtocolActivation() {
         claim_protocol_completion_pending_ = false;
         CompleteClaimProtocolActivation();
     }
-    if (activation == ProtocolActivation::kNone) return;
+    if (activation == ProtocolActivation::kNone)
+        return;
     SystemInfo::PrintHeapCheckpoint(activation == ProtocolActivation::kNormal
-        ? "activation.complete" : "wifi_reprovision_activation.complete");
+                                        ? "activation.complete"
+                                        : "wifi_reprovision_activation.complete");
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
 }
 
@@ -3802,14 +3840,11 @@ void Application::InitializeProtocol() {
     // call below). For MQTT, Start() brings up the control channel (not just an
     // audio preconnect), so we never gate it here.
     bool is_websocket_protocol = false;
-    std::string transient_evidence_journey_id =
-        ota_->TakeTransientEvidenceJourneyId();
+    std::string transient_evidence_journey_id = ota_->TakeTransientEvidenceJourneyId();
 #if !CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
     Settings websocket_settings("websocket", false);
-    const bool has_configured_websocket_url =
-        !websocket_settings.GetString("url", "").empty();
-    const bool prefer_claimed_websocket =
-        IsDeviceClaimed() && has_configured_websocket_url;
+    const bool has_configured_websocket_url = !websocket_settings.GetString("url", "").empty();
+    const bool prefer_claimed_websocket = IsDeviceClaimed() && has_configured_websocket_url;
     const bool has_available_websocket_url =
         !websocket_settings.GetString("url", CONFIG_WEBSOCKET_URL).empty();
     if (ota_->HasMqttConfig() && !prefer_claimed_websocket) {
@@ -3817,9 +3852,9 @@ void Application::InitializeProtocol() {
         protocol_ = std::make_unique<MqttProtocol>();
     } else if (ota_->HasWebsocketConfig() || has_available_websocket_url) {
         auto websocket_protocol = std::make_unique<WebsocketProtocol>();
-        websocket_protocol->SetTransientConfig(
-            ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
-            std::move(transient_evidence_journey_id));
+        websocket_protocol->SetTransientConfig(ota_->GetTransientWebsocketUrl(),
+                                               ota_->GetTransientWebsocketToken(),
+                                               std::move(transient_evidence_journey_id));
         websocket_protocol->SetUnclaimedPublicLessonOnly(!IsDeviceClaimed());
         protocol_ = std::move(websocket_protocol);
         is_websocket_protocol = true;
@@ -3830,9 +3865,9 @@ void Application::InitializeProtocol() {
     }
 #else
     auto websocket_protocol = std::make_unique<WebsocketProtocol>();
-    websocket_protocol->SetTransientConfig(
-        ota_->GetTransientWebsocketUrl(), ota_->GetTransientWebsocketToken(),
-        std::move(transient_evidence_journey_id));
+    websocket_protocol->SetTransientConfig(ota_->GetTransientWebsocketUrl(),
+                                           ota_->GetTransientWebsocketToken(),
+                                           std::move(transient_evidence_journey_id));
     websocket_protocol->SetUnclaimedPublicLessonOnly(false);
     protocol_ = std::move(websocket_protocol);
     is_websocket_protocol = true;
@@ -3857,67 +3892,75 @@ void Application::InitializeProtocol() {
     protocol_->OnConnected([this, callback_protocol_generation, callback_signals]() {
         const auto callback_era = callback_signals ? callback_signals->Capture() : 0;
         Schedule([this, callback_protocol_generation, callback_signals, callback_era]() {
-        if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era)) return;
-        if (callback_protocol_generation != protocol_generation_.load() ||
-            chat_protocol_owned_.load(std::memory_order_acquire)) return;
-        backend_recovery_window_.Reset();
-        if (IsConnectSuccessPublicationSuppressed()) {
-            ESP_LOGI(TAG, "connect success publication suppressed");
-            online_intent_.store(false);
-            StopHeartbeat();
-            return;
-        }
-        backend_offline_.store(false);  // healthy session -> ONLINE, not retry
-        DismissAlert();
-        const bool lesson_answer_turn =
-            lesson_interactive_listen_pending_.load() ||
-            lesson_interactive_listening_active_.load();
-        if (lesson_runtime_active_.load() && !lesson_answer_turn) {
-            ESP_LOGI(TAG, "lesson protocol connected without heartbeat");
-            StopHeartbeat();
-            return;
-        }
-        // Device session is up -> begin periodic heartbeat (C5). The sender is
-        // self-gated: it only POSTs once claim backend credentials are in NVS.
-        StartHeartbeat();
-        DispatchDeviceHeartbeat();
+            if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era))
+                return;
+            if (callback_protocol_generation != protocol_generation_.load() ||
+                chat_protocol_owned_.load(std::memory_order_acquire))
+                return;
+            backend_recovery_window_.Reset();
+            if (IsConnectSuccessPublicationSuppressed()) {
+                ESP_LOGI(TAG, "connect success publication suppressed");
+                online_intent_.store(false);
+                StopHeartbeat();
+                return;
+            }
+            backend_offline_.store(false);  // healthy session -> ONLINE, not retry
+            DismissAlert();
+            const bool lesson_answer_turn = lesson_interactive_listen_pending_.load() ||
+                                            lesson_interactive_listening_active_.load();
+            if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+                ESP_LOGI(TAG, "lesson protocol connected without heartbeat");
+                StopHeartbeat();
+                return;
+            }
+            // Device session is up -> begin periodic heartbeat (C5). The sender is
+            // self-gated: it only POSTs once claim backend credentials are in NVS.
+            StartHeartbeat();
+            DispatchDeviceHeartbeat();
         });
     });
 
-    protocol_->OnNetworkError([this, callback_protocol_generation, callback_signals](const std::string& message) {
-        const auto callback_era = callback_signals ? callback_signals->Capture() : 0;
-        if (callback_signals && callback_signals->Deferred()) {
-            if (callback_signals->Publish(callback_era, ChatProtocolSignals::Error)) {
+    protocol_->OnNetworkError(
+        [this, callback_protocol_generation, callback_signals](const std::string& message) {
+            const auto callback_era = callback_signals ? callback_signals->Capture() : 0;
+            if (callback_signals && callback_signals->Deferred()) {
+                if (callback_signals->Publish(callback_era, ChatProtocolSignals::Error)) {
+                    xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
+                }
+                return;
+            }
+            try {
+                Schedule([this, callback_protocol_generation, callback_signals, callback_era,
+                          message]() {
+                    if (callback_signals &&
+                        (!callback_era || callback_signals->Capture() != callback_era))
+                        return;
+                    if (callback_protocol_generation != protocol_generation_.load() ||
+                        chat_protocol_owned_.load(std::memory_order_acquire))
+                        return;
+                    backend_offline_.store(true);  // -> OFFLINE_RETRY copy via the mapper
+                    // The lesson WebSocket and management HTTP endpoint have independent
+                    // availability. Keep claimed-idle presence alive while the passive
+                    // lesson socket backs off; real network loss has its own stop path.
+                    if (ShouldKeepManagementHeartbeat()) {
+                        StartHeartbeat();
+                        DispatchDeviceHeartbeat();
+                    } else {
+                        StopHeartbeat();
+                    }
+                    last_error_message_ = message;
+                    xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
+                });
+            } catch (...) {
+                if (callback_signals)
+                    callback_signals->Publish(callback_era, ChatProtocolSignals::Error);
                 xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
             }
-            return;
-        }
-        try {
-        Schedule([this, callback_protocol_generation, callback_signals, callback_era, message]() {
-        if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era)) return;
-        if (callback_protocol_generation != protocol_generation_.load() ||
-            chat_protocol_owned_.load(std::memory_order_acquire)) return;
-        backend_offline_.store(true);   // -> OFFLINE_RETRY copy via the mapper
-        // The lesson WebSocket and management HTTP endpoint have independent
-        // availability. Keep claimed-idle presence alive while the passive
-        // lesson socket backs off; real network loss has its own stop path.
-        if (ShouldKeepManagementHeartbeat()) {
-            StartHeartbeat();
-            DispatchDeviceHeartbeat();
-        } else {
-            StopHeartbeat();
-        }
-        last_error_message_ = message;
-        xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
         });
-        } catch (...) {
-            if (callback_signals) callback_signals->Publish(callback_era, ChatProtocolSignals::Error);
-            xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
-        }
-    });
-    
+
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (!lesson_audio_playout_.AllowsAudio(speaking_generation_.load())) return;
+        if (!lesson_audio_playout_.AllowsAudio(speaking_generation_.load()))
+            return;
         if (GetDeviceState() == kDeviceStateSpeaking || tts_audio_accepting_.load()) {
             last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
             // Stamp the active response generation so a frame that slips in just
@@ -3927,8 +3970,9 @@ void Application::InitializeProtocol() {
             audio_service_.PushPacketToDecodeQueue(std::move(packet));
         }
     });
-    
-    protocol_->OnAudioChannelOpened([this, codec, &board, callback_protocol, callback_protocol_generation, callback_signals]() {
+
+    protocol_->OnAudioChannelOpened([this, codec, &board, callback_protocol,
+                                     callback_protocol_generation, callback_signals]() {
         const auto callback_era = callback_signals ? callback_signals->Capture() : 0;
         // Both protocols invoke this synchronously inside OpenAudioChannel.
         // No subsequent Open can reserve until this worker's completion releases.
@@ -3936,67 +3980,75 @@ void Application::InitializeProtocol() {
         const int callback_sample_rate = callback_protocol->server_sample_rate();
         Schedule([this, codec, &board, callback_protocol_generation, callback_connect_generation,
                   callback_signals, callback_era, callback_sample_rate]() {
-        if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era)) return;
-        if (callback_protocol_generation != protocol_generation_.load() ||
-            callback_connect_generation != connect_generation_.load() ||
-            chat_protocol_owned_.load(std::memory_order_acquire)) return;
-        backend_recovery_window_.Reset();
-        if (IsConnectSuccessPublicationSuppressed()) {
-            ESP_LOGI(TAG, "audio channel success publication suppressed");
-            online_intent_.store(false);
-            StopHeartbeat();
-            return;
-        }
-        // User-driven listen/wake sessions own reconnect intent. Passive lesson
-        // preconnect only makes the device reachable for server lesson pull/nudge;
-        // it must not later reconnect into Listening without a wake/button action.
-        if (passive_ws_intent_.load()) {
-            if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
-                ESP_LOGI(TAG, "claimed passive lesson websocket opened with management heartbeat");
-                StartHeartbeat();
-                DispatchDeviceHeartbeat();
-            }
-            if (!IsDeviceClaimed() || lesson_runtime_active_.load()) {
-                ESP_LOGI(TAG, "unclaimed passive lesson websocket opened without heartbeat");
-                StopHeartbeat();
-            }
-        } else {
-            const bool lesson_answer_turn =
-                lesson_interactive_listen_pending_.load() ||
-                lesson_interactive_listening_active_.load();
-            if (lesson_runtime_active_.load() && !lesson_answer_turn) {
-                ESP_LOGI(TAG, "lesson audio channel opened ignored");
+            if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era))
+                return;
+            if (callback_protocol_generation != protocol_generation_.load() ||
+                callback_connect_generation != connect_generation_.load() ||
+                chat_protocol_owned_.load(std::memory_order_acquire))
+                return;
+            backend_recovery_window_.Reset();
+            if (IsConnectSuccessPublicationSuppressed()) {
+                ESP_LOGI(TAG, "audio channel success publication suppressed");
                 online_intent_.store(false);
                 StopHeartbeat();
                 return;
             }
-            online_intent_.store(true);
-            StartHeartbeat();
-            DispatchDeviceHeartbeat();
-        }
-        backend_offline_.store(false);
-        board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-        // Once a claimed realtime WS is up, STOP the blocking claim-config
-        // HTTP/TLS poll. Unclaimed public lesson sync must not change claim
-        // provisioning semantics.
-        if (IsDeviceClaimed()) {
-            Schedule([this, callback_protocol_generation, callback_connect_generation,
-                      callback_signals, callback_era]() {
-                if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era)) return;
-                if (callback_protocol_generation != protocol_generation_.load() ||
-                    callback_connect_generation != connect_generation_.load() ||
-                    chat_protocol_owned_.load(std::memory_order_acquire)) return;
-                StopClaimPoll();
-            });
-        }
-        if (callback_sample_rate != codec->output_sample_rate()) {
-            ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
-                callback_sample_rate, codec->output_sample_rate());
-        }
+            // User-driven listen/wake sessions own reconnect intent. Passive lesson
+            // preconnect only makes the device reachable for server lesson pull/nudge;
+            // it must not later reconnect into Listening without a wake/button action.
+            if (passive_ws_intent_.load()) {
+                if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
+                    ESP_LOGI(TAG,
+                             "claimed passive lesson websocket opened with management heartbeat");
+                    StartHeartbeat();
+                    DispatchDeviceHeartbeat();
+                }
+                if (!IsDeviceClaimed() || lesson_runtime_active_.load()) {
+                    ESP_LOGI(TAG, "unclaimed passive lesson websocket opened without heartbeat");
+                    StopHeartbeat();
+                }
+            } else {
+                const bool lesson_answer_turn = lesson_interactive_listen_pending_.load() ||
+                                                lesson_interactive_listening_active_.load();
+                if (lesson_runtime_active_.load() && !lesson_answer_turn) {
+                    ESP_LOGI(TAG, "lesson audio channel opened ignored");
+                    online_intent_.store(false);
+                    StopHeartbeat();
+                    return;
+                }
+                online_intent_.store(true);
+                StartHeartbeat();
+                DispatchDeviceHeartbeat();
+            }
+            backend_offline_.store(false);
+            board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+            // Once a claimed realtime WS is up, STOP the blocking claim-config
+            // HTTP/TLS poll. Unclaimed public lesson sync must not change claim
+            // provisioning semantics.
+            if (IsDeviceClaimed()) {
+                Schedule([this, callback_protocol_generation, callback_connect_generation,
+                          callback_signals, callback_era]() {
+                    if (callback_signals &&
+                        (!callback_era || callback_signals->Capture() != callback_era))
+                        return;
+                    if (callback_protocol_generation != protocol_generation_.load() ||
+                        callback_connect_generation != connect_generation_.load() ||
+                        chat_protocol_owned_.load(std::memory_order_acquire))
+                        return;
+                    StopClaimPoll();
+                });
+            }
+            if (callback_sample_rate != codec->output_sample_rate()) {
+                ESP_LOGW(TAG,
+                         "Server sample rate %d does not match device output sample rate %d, "
+                         "resampling may cause distortion",
+                         callback_sample_rate, codec->output_sample_rate());
+            }
         });
     });
-    
-    protocol_->OnAudioChannelClosed([this, callback_protocol, callback_protocol_generation, callback_signals]() {
+
+    protocol_->OnAudioChannelClosed([this, callback_protocol, callback_protocol_generation,
+                                     callback_signals]() {
         const auto callback_era = callback_signals ? callback_signals->Capture() : 0;
         if (callback_signals && callback_signals->Deferred()) {
             if (callback_signals->Publish(callback_era, ChatProtocolSignals::Closed)) {
@@ -4004,13 +4056,15 @@ void Application::InitializeProtocol() {
             }
             return;
         }
-        Schedule([this, callback_protocol, callback_protocol_generation, callback_signals, callback_era]() {
-            if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era)) return;
-            if (chat_protocol_owned_.load(std::memory_order_acquire)) return;
-            if (!ProtocolLifetimeMatches(
-                    protocol_.get(), callback_protocol,
-                    protocol_generation_.load(std::memory_order_acquire),
-                    callback_protocol_generation)) {
+        Schedule([this, callback_protocol, callback_protocol_generation, callback_signals,
+                  callback_era]() {
+            if (callback_signals && (!callback_era || callback_signals->Capture() != callback_era))
+                return;
+            if (chat_protocol_owned_.load(std::memory_order_acquire))
+                return;
+            if (!ProtocolLifetimeMatches(protocol_.get(), callback_protocol,
+                                         protocol_generation_.load(std::memory_order_acquire),
+                                         callback_protocol_generation)) {
                 return;
             }
             speaking_arm_dispatch_.Cancel();
@@ -4036,11 +4090,13 @@ void Application::InitializeProtocol() {
                 // The close was caused by explicit setup entry. Keep the setup
                 // state/screen; do not fall back to ONLINE/Idle or schedule a
                 // websocket reconnect while Wi-Fi provisioning owns the radio.
-                while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+                while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+                }
                 return;
             }
             if (lesson_runtime_active_.load() && passive_ws_intent_.load()) {
-                while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+                while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+                }
                 RequestLessonStorageAbandonment();
                 if (PassiveReconnectHasOwner(reconnect_passive_.load(),
                                              connect_in_flight_.load())) {
@@ -4058,7 +4114,8 @@ void Application::InitializeProtocol() {
             SetDeviceState(kDeviceStateIdle);
             // WSS-7: drop stale mic backlog so a future session does not replay
             // seconds-old uplink audio after the channel reopens.
-            while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+            while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+            }
             // Claimed idle robots keep a passive lesson socket so admin/backend
             // nudges can reach the LCD without putting the device into Listening.
             // Idle WebSocket timeout is an unexpected drop for that passive path;
@@ -4102,7 +4159,7 @@ void Application::InitializeProtocol() {
             }
         });
     });
-    
+
     protocol_->OnIncomingJson([this, is_websocket_protocol](const cJSON* root, uint64_t epoch) {
         DispatchIncomingJson(root, epoch, is_websocket_protocol);
     });
@@ -4134,11 +4191,13 @@ void Application::InitializeProtocol() {
     } else {
         StartProtocolWorker();
     }
-    if (is_websocket_protocol) CompleteProtocolActivation();
+    if (is_websocket_protocol)
+        CompleteProtocolActivation();
 }
 
 bool Application::HandleRobotActionMessage(const cJSON* root, ChatRequestContext context) {
-    if (!IsChatRequestCurrent(context)) return false;
+    if (!IsChatRequestCurrent(context))
+        return false;
     if (lesson_runtime_active_.load()) {
         ESP_LOGI(TAG, "lesson robot action ignored");
         return false;
@@ -4153,17 +4212,20 @@ bool Application::HandleRobotActionMessage(const cJSON* root, ChatRequestContext
         auto angle = cJSON_GetObjectItem(root, "angle");
         int target_angle = cJSON_IsNumber(angle) ? angle->valueint : 90;
         Schedule([this, target_angle, context]() {
-            if (!IsChatRequestCurrent(context)) return;
+            if (!IsChatRequestCurrent(context))
+                return;
             SendHeadSetAngle(target_angle);
         });
         return true;
     }
 
-    auto schedule_percent_action = [this, root, context](bool (Application::*method)(int), int default_percent) {
+    auto schedule_percent_action = [this, root, context](bool (Application::*method)(int),
+                                                         int default_percent) {
         auto percent = cJSON_GetObjectItem(root, "percent");
         int target_percent = cJSON_IsNumber(percent) ? percent->valueint : default_percent;
         Schedule([this, method, target_percent, context]() {
-            if (!IsChatRequestCurrent(context)) return;
+            if (!IsChatRequestCurrent(context))
+                return;
             (this->*method)(target_percent);
         });
     };
@@ -4203,7 +4265,8 @@ bool Application::HandleRobotActionMessage(const cJSON* root, ChatRequestContext
     for (const auto& handler : handlers) {
         if (strcmp(action->valuestring, handler.action) == 0) {
             Schedule([this, method = handler.handler, context]() {
-                if (!IsChatRequestCurrent(context)) return;
+                if (!IsChatRequestCurrent(context))
+                    return;
                 (this->*method)();
             });
             return true;
@@ -4343,21 +4406,20 @@ bool Application::SendHeadSetPercent(int percent) {
 }
 
 LessonRuntimeToken Application::GetLessonRuntimeToken() const {
-    if (!lesson_runtime_active_.load()) return {};
+    if (!lesson_runtime_active_.load())
+        return {};
     return {lesson_runtime_generation_.load()};
 }
 
 LessonEmbodiedMotionResult Application::ApplyLessonEmbodiedPreset(
-    const LessonRuntimeToken& token,
-    const LessonEmbodiedPreset& preset) {
-    if (!IsLessonRuntimeTokenAuthorized(
-            lesson_runtime_active_.load(), lesson_runtime_generation_.load(), token)) {
+    const LessonRuntimeToken& token, const LessonEmbodiedPreset& preset) {
+    if (!IsLessonRuntimeTokenAuthorized(lesson_runtime_active_.load(),
+                                        lesson_runtime_generation_.load(), token)) {
         ESP_LOGI(TAG, "stale lesson embodied action token rejected");
         return LessonEmbodiedMotionResult::kRejected;
     }
     return ApplyLessonEmbodiedPresetCommands(
-        preset,
-        [this](int percent) { return robot_uart_.SendHeadSetPercent(percent); },
+        preset, [this](int percent) { return robot_uart_.SendHeadSetPercent(percent); },
         [this](int percent) { return robot_uart_.SendLeftArmSetPercent(percent); },
         [this](int percent) { return robot_uart_.SendRightArmSetPercent(percent); });
 }
@@ -4367,64 +4429,74 @@ LessonEmbodiedMotionResult Application::CancelLessonEmbodiedAction(
     return RestoreLessonRestPose(token);
 }
 
-LessonEmbodiedMotionResult Application::RestoreLessonRestPose(
-    const LessonRuntimeToken& token) {
-    return ApplyLessonEmbodiedPreset(
-        token, ResolveLessonEmbodiedPreset(LessonEmbodiedIntent::kRestWarm));
+LessonEmbodiedMotionResult Application::RestoreLessonRestPose(const LessonRuntimeToken& token) {
+    return ApplyLessonEmbodiedPreset(token,
+                                     ResolveLessonEmbodiedPreset(LessonEmbodiedIntent::kRestWarm));
 }
 
 #if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
 bool Application::RunCourseModeHilTftPattern() {
-    return ScheduleAndWait([] {
-        Display* display = Board::GetInstance().GetDisplay();
-        if (display == nullptr) return false;
-        lv_obj_t* screen = lv_screen_active();
-        if (screen == nullptr) return false;
-        lv_obj_t* pattern = lv_obj_create(screen);
-        if (pattern == nullptr) return false;
-        lv_obj_set_size(pattern, lv_pct(100), lv_pct(100));
-        lv_obj_center(pattern);
-        lv_obj_set_flex_flow(pattern, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_pad_all(pattern, 0, 0);
-        lv_obj_set_style_pad_gap(pattern, 0, 0);
-        lv_obj_set_style_border_width(pattern, 0, 0);
-        lv_obj_set_style_radius(pattern, 0, 0);
-        constexpr std::array<std::uint32_t, 3> colors = {
-            0xFF0000, 0x00FF00, 0x0000FF};
-        for (std::uint32_t color : colors) {
-            lv_obj_t* bar = lv_obj_create(pattern);
-            if (bar == nullptr) return false;
-            lv_obj_set_size(bar, lv_pct(34), lv_pct(100));
-            lv_obj_set_style_bg_color(bar, lv_color_hex(color), 0);
-            lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
-            lv_obj_set_style_border_width(bar, 0, 0);
-            lv_obj_set_style_radius(bar, 0, 0);
-        }
-        lv_timer_t* timer = lv_timer_create([](lv_timer_t* value) {
-            lv_obj_t* object = static_cast<lv_obj_t*>(lv_timer_get_user_data(value));
-            if (object != nullptr) lv_obj_delete(object);
-            lv_timer_delete(value);
-        }, 1000, pattern);
-        if (timer == nullptr) {
-            lv_obj_delete(pattern);
-            return false;
-        }
-        lv_timer_set_repeat_count(timer, 1);
-        return true;
-    }, 1000);
+    return ScheduleAndWait(
+        [] {
+            Display* display = Board::GetInstance().GetDisplay();
+            if (display == nullptr)
+                return false;
+            lv_obj_t* screen = lv_screen_active();
+            if (screen == nullptr)
+                return false;
+            lv_obj_t* pattern = lv_obj_create(screen);
+            if (pattern == nullptr)
+                return false;
+            lv_obj_set_size(pattern, lv_pct(100), lv_pct(100));
+            lv_obj_center(pattern);
+            lv_obj_set_flex_flow(pattern, LV_FLEX_FLOW_ROW);
+            lv_obj_set_style_pad_all(pattern, 0, 0);
+            lv_obj_set_style_pad_gap(pattern, 0, 0);
+            lv_obj_set_style_border_width(pattern, 0, 0);
+            lv_obj_set_style_radius(pattern, 0, 0);
+            constexpr std::array<std::uint32_t, 3> colors = {0xFF0000, 0x00FF00, 0x0000FF};
+            for (std::uint32_t color : colors) {
+                lv_obj_t* bar = lv_obj_create(pattern);
+                if (bar == nullptr)
+                    return false;
+                lv_obj_set_size(bar, lv_pct(34), lv_pct(100));
+                lv_obj_set_style_bg_color(bar, lv_color_hex(color), 0);
+                lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+                lv_obj_set_style_border_width(bar, 0, 0);
+                lv_obj_set_style_radius(bar, 0, 0);
+            }
+            lv_timer_t* timer = lv_timer_create(
+                [](lv_timer_t* value) {
+                    lv_obj_t* object = static_cast<lv_obj_t*>(lv_timer_get_user_data(value));
+                    if (object != nullptr)
+                        lv_obj_delete(object);
+                    lv_timer_delete(value);
+                },
+                1000, pattern);
+            if (timer == nullptr) {
+                lv_obj_delete(pattern);
+                return false;
+            }
+            lv_timer_set_repeat_count(timer, 1);
+            return true;
+        },
+        1000);
 }
 
-CourseModeHilSdEvidence Application::RunCourseModeHilSdRead(
-    const std::string& relative_path, const std::string& expected_sha256) {
+CourseModeHilSdEvidence Application::RunCourseModeHilSdRead(const std::string& relative_path,
+                                                            const std::string& expected_sha256) {
     constexpr char kRoot[] = "/sdcard/tbot/lesson-assets";
     constexpr std::size_t kMaxBytes = 16 * 1024 * 1024;
     constexpr std::int64_t kMaxReadUs = 5 * 1000 * 1000;
-    if (expected_sha256.size() != 64) return {};
+    if (expected_sha256.size() != 64)
+        return {};
     for (char ch : expected_sha256) {
-        if (!std::isdigit(static_cast<unsigned char>(ch)) && (ch < 'a' || ch > 'f')) return {};
+        if (!std::isdigit(static_cast<unsigned char>(ch)) && (ch < 'a' || ch > 'f'))
+            return {};
     }
     CourseModeHilAssetFile asset;
-    if (!OpenCourseModeHilAssetFile(kRoot, relative_path, kMaxBytes, &asset)) return {};
+    if (!OpenCourseModeHilAssetFile(kRoot, relative_path, kMaxBytes, &asset))
+        return {};
 
     auto hash_file = [&](std::uint32_t* bytes, std::string* sha256) {
         std::rewind(asset.file);
@@ -4437,7 +4509,7 @@ CourseModeHilSdEvidence Application::RunCourseModeHilSdRead(
 #else
         int result = mbedtls_sha256_starts_ret(&context, 0);
 #endif
-        std::array<unsigned char, 4096> buffer {};
+        std::array<unsigned char, 4096> buffer{};
         std::size_t total = 0;
         const std::int64_t deadline = esp_timer_get_time() + kMaxReadUs;
         while (result == 0) {
@@ -4455,13 +4527,14 @@ CourseModeHilSdEvidence Application::RunCourseModeHilSdRead(
 #endif
             }
             if (read < buffer.size()) {
-                if (std::ferror(asset.file)) result = -1;
+                if (std::ferror(asset.file))
+                    result = -1;
                 break;
             }
             esp_task_wdt_reset();
             taskYIELD();
         }
-        std::array<unsigned char, 32> digest {};
+        std::array<unsigned char, 32> digest{};
         if (result == 0) {
 #if MBEDTLS_VERSION_MAJOR >= 3
             result = mbedtls_sha256_finish(&context, digest.data());
@@ -4469,14 +4542,15 @@ CourseModeHilSdEvidence Application::RunCourseModeHilSdRead(
             result = mbedtls_sha256_finish_ret(&context, digest.data());
 #endif
         }
-        struct stat final_metadata {};
+        struct stat final_metadata{};
         if (result == 0 && (descriptor < 0 || fstat(descriptor, &final_metadata) != 0 ||
-                           !S_ISREG(final_metadata.st_mode) || total != asset.bytes ||
-                           static_cast<std::uint64_t>(final_metadata.st_size) != asset.bytes)) {
+                            !S_ISREG(final_metadata.st_mode) || total != asset.bytes ||
+                            static_cast<std::uint64_t>(final_metadata.st_size) != asset.bytes)) {
             result = -1;
         }
         mbedtls_sha256_free(&context);
-        if (result != 0 || total == 0 || total > UINT32_MAX) return false;
+        if (result != 0 || total == 0 || total > UINT32_MAX)
+            return false;
         constexpr char kHex[] = "0123456789abcdef";
         sha256->resize(64);
         for (std::size_t index = 0; index < digest.size(); ++index) {
@@ -4491,11 +4565,12 @@ CourseModeHilSdEvidence Application::RunCourseModeHilSdRead(
     std::uint32_t second_bytes = 0;
     std::string first_sha;
     std::string second_sha;
-    const bool verified = hash_file(&first_bytes, &first_sha) &&
-        first_sha == expected_sha256 && hash_file(&second_bytes, &second_sha) &&
-        second_bytes == first_bytes && second_sha == first_sha;
+    const bool verified = hash_file(&first_bytes, &first_sha) && first_sha == expected_sha256 &&
+                          hash_file(&second_bytes, &second_sha) && second_bytes == first_bytes &&
+                          second_sha == first_sha;
     CloseCourseModeHilAssetFile(&asset);
-    if (!verified) return {};
+    if (!verified)
+        return {};
     return {true, second_bytes, second_sha, "verifiedReadback"};
 }
 
@@ -4511,7 +4586,8 @@ bool Application::RunCourseModeHilStopAndRest() {
 
 bool Application::RunCourseModeHilSafeMotion(int duration_ms) {
     speaking_arm_dispatch_.Cancel();
-    if (duration_ms <= 0 || duration_ms > 750) return false;
+    if (duration_ms <= 0 || duration_ms > 750)
+        return false;
     bool sent = robot_uart_.SendRightArmRaise();
     sent = robot_uart_.SendHeadCenter() && sent;
     vTaskDelay(pdMS_TO_TICKS(duration_ms));
@@ -4524,32 +4600,27 @@ void Application::ShowActivationCode(const std::string& code, const std::string&
         char digit;
         const std::string_view& sound;
     };
-    static const std::array<digit_sound, 10> digit_sounds{{
-        digit_sound{'0', Lang::Sounds::OGG_0},
-        digit_sound{'1', Lang::Sounds::OGG_1},
-        digit_sound{'2', Lang::Sounds::OGG_2},
-        digit_sound{'3', Lang::Sounds::OGG_3},
-        digit_sound{'4', Lang::Sounds::OGG_4},
-        digit_sound{'5', Lang::Sounds::OGG_5},
-        digit_sound{'6', Lang::Sounds::OGG_6},
-        digit_sound{'7', Lang::Sounds::OGG_7},
-        digit_sound{'8', Lang::Sounds::OGG_8},
-        digit_sound{'9', Lang::Sounds::OGG_9}
-    }};
+    static const std::array<digit_sound, 10> digit_sounds{
+        {digit_sound{'0', Lang::Sounds::OGG_0}, digit_sound{'1', Lang::Sounds::OGG_1},
+         digit_sound{'2', Lang::Sounds::OGG_2}, digit_sound{'3', Lang::Sounds::OGG_3},
+         digit_sound{'4', Lang::Sounds::OGG_4}, digit_sound{'5', Lang::Sounds::OGG_5},
+         digit_sound{'6', Lang::Sounds::OGG_6}, digit_sound{'7', Lang::Sounds::OGG_7},
+         digit_sound{'8', Lang::Sounds::OGG_8}, digit_sound{'9', Lang::Sounds::OGG_9}}};
 
     // This sentence uses 9KB of SRAM, so we need to wait for it to finish
     Alert(Lang::Strings::ACTIVATION, message.c_str(), "link", Lang::Sounds::OGG_ACTIVATION);
 
     for (const auto& digit : code) {
         auto it = std::find_if(digit_sounds.begin(), digit_sounds.end(),
-            [digit](const digit_sound& ds) { return ds.digit == digit; });
+                               [digit](const digit_sound& ds) { return ds.digit == digit; });
         if (it != digit_sounds.end()) {
             audio_service_.PlaySound(it->sound);
         }
     }
 }
 
-void Application::Alert(const char* status, const char* message, const char* emotion, const std::string_view& sound) {
+void Application::Alert(const char* status, const char* message, const char* emotion,
+                        const std::string_view& sound) {
     ESP_LOGW(TAG, "Alert [%s] %s: %s", emotion, status, message);
     if (lesson_runtime_active_.load()) {
         ESP_LOGI(TAG, "lesson alert suppressed: %s", status);
@@ -4573,13 +4644,9 @@ void Application::DismissAlert() {
     }
 }
 
-void Application::ToggleChatState() {
-    xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT);
-}
+void Application::ToggleChatState() { xEventGroupSetBits(event_group_, MAIN_EVENT_TOGGLE_CHAT); }
 
-void Application::StartListening() {
-    xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING);
-}
+void Application::StartListening() { xEventGroupSetBits(event_group_, MAIN_EVENT_START_LISTENING); }
 
 uint32_t Application::BeginLessonInteractiveListeningRequest() {
     return lesson_interactive_listen_generation_.fetch_add(1) + 1;
@@ -4642,17 +4709,18 @@ void Application::CancelLessonInteractiveListening() {
 }
 
 void Application::SetLessonRuntimeActive(bool active) {
-    if (active) speaking_arm_dispatch_.Cancel();
+    if (active)
+        speaking_arm_dispatch_.Cancel();
     const bool was_active = lesson_runtime_active_.load();
     if (was_active != active) {
         if (active) {
-            lesson_runtime_generation_.store(NextLessonRuntimeGeneration(
-                lesson_runtime_generation_.load(), was_active, active));
+            lesson_runtime_generation_.store(
+                NextLessonRuntimeGeneration(lesson_runtime_generation_.load(), was_active, active));
             lesson_runtime_active_.store(true);
         } else {
             lesson_runtime_active_.store(false);
-            lesson_runtime_generation_.store(NextLessonRuntimeGeneration(
-                lesson_runtime_generation_.load(), was_active, active));
+            lesson_runtime_generation_.store(
+                NextLessonRuntimeGeneration(lesson_runtime_generation_.load(), was_active, active));
         }
     }
     if (active) {
@@ -4664,13 +4732,10 @@ void Application::SetLessonRuntimeActive(bool active) {
         lesson_interactive_listening_active_.store(false);
         const int status_code = deferred_heartbeat_auth_failure_status_.exchange(0);
         if (status_code != 0) {
-            Schedule([this, status_code]() {
-                HandleHeartbeatAuthFailure(status_code);
-            });
+            Schedule([this, status_code]() { HandleHeartbeatAuthFailure(status_code); });
         }
 #ifdef CONFIG_USE_ESP_BLUFI_WIFI_PROVISIONING
-        static_cast<WifiBoard&>(Board::GetInstance())
-            .ResumePendingWifiConfigMode();
+        static_cast<WifiBoard&>(Board::GetInstance()).ResumePendingWifiConfigMode();
 #endif
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
@@ -4678,7 +4743,8 @@ void Application::SetLessonRuntimeActive(bool active) {
 
 void Application::BeginLessonTerminalAudioQuiet() {
     std::lock_guard<std::mutex> lock(lesson_playout_mutex_);
-    if (auto token = std::atomic_load(&lesson_playout_authorization_)) token->store(false);
+    if (auto token = std::atomic_load(&lesson_playout_authorization_))
+        token->store(false);
     lesson_audio_playout_.Cancel();
     lesson_terminal_audio_generation_.store(
         static_cast<std::uint64_t>(speaking_generation_.load()) + 1);
@@ -4696,9 +4762,7 @@ void Application::BeginLessonTerminalAudioQuiet() {
     }
 }
 
-bool Application::IsLessonRuntimeActive() const {
-    return lesson_runtime_active_.load();
-}
+bool Application::IsLessonRuntimeActive() const { return lesson_runtime_active_.load(); }
 
 void Application::BeginLessonNetworkRenderQuiet() {
     int depth = lesson_network_render_quiet_.fetch_add(1) + 1;
@@ -4728,7 +4792,8 @@ bool Application::HasLessonAssetSyncWakeOpportunity() {
         lesson_asset_sync_wake_deadline_us_ = 0;
         return true;
     }
-    if (!lesson_asset_sync_wake_pending_) return true;
+    if (!lesson_asset_sync_wake_pending_)
+        return true;
     // A deferred stop/restart may complete between clock observations.
     if (lesson_asset_sync_wake_revoked_ != chat_audio_desired_.revoked) {
         lesson_asset_sync_wake_revoked_ = chat_audio_desired_.revoked;
@@ -4753,13 +4818,16 @@ bool Application::BeginLessonAssetSyncQuiet() {
     return false;
 #endif
     // Busy retries must not stop the settling timer or revoke the wake window.
-    if (!HasLessonAssetSyncWakeOpportunity()) return false;
+    if (!HasLessonAssetSyncWakeOpportunity())
+        return false;
     const DeviceState state = GetDeviceState();
     const bool passive_listening = state == kDeviceStateListening &&
-        !chat_cleanup_enabled_.load() && passive_ws_intent_.load() &&
-        !online_intent_.load() && !microphone_uplink_authorized_.load() && !IsVoiceDetected();
-    if ((state != kDeviceStateIdle && !passive_listening) ||
-        lesson_runtime_active_.load() || connect_in_flight_.load() || reset_pending_.load()) return false;
+                                   !chat_cleanup_enabled_.load() && passive_ws_intent_.load() &&
+                                   !online_intent_.load() &&
+                                   !microphone_uplink_authorized_.load() && !IsVoiceDetected();
+    if ((state != kDeviceStateIdle && !passive_listening) || lesson_runtime_active_.load() ||
+        connect_in_flight_.load() || reset_pending_.load())
+        return false;
     if (lesson_asset_sync_wake_pending_ && lesson_asset_sync_wake_invalidated_.exchange(false)) {
         lesson_asset_sync_wake_deadline_us_ = 0;
         return false;
@@ -4791,7 +4859,8 @@ bool Application::BeginLessonAssetSyncQuiet() {
     audio_service_.EnableVoiceProcessing(false);
     audio_service_.EnableWakeWordDetection(false);
     audio_service_.ResetDecoder();
-    while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+    while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+    }
     ESP_LOGI(TAG, "lesson asset sync quiet begin");
     return true;
 }
@@ -4804,7 +4873,8 @@ void Application::EndLessonAssetSyncQuiet() {
     tts_audio_accepting_.store(false);
     audio_service_.EnableVoiceProcessing(false);
     audio_service_.ResetDecoder();
-    while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+    while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+    }
     if (!lesson_asset_sync_quiet_.exchange(false)) {
         return;
     }
@@ -4819,11 +4889,8 @@ void Application::EndLessonAssetSyncQuiet() {
         protocol_->ResetPassiveLiveness();
     }
 
-    if (IsDeviceClaimed() && audio_service_.IsRunning() &&
-        GetDeviceState() == kDeviceStateIdle &&
-        !lesson_runtime_active_.load() &&
-        !connect_in_flight_.load() &&
-        !reset_pending_.load()) {
+    if (IsDeviceClaimed() && audio_service_.IsRunning() && GetDeviceState() == kDeviceStateIdle &&
+        !lesson_runtime_active_.load() && !connect_in_flight_.load() && !reset_pending_.load()) {
         ScheduleLessonAssetSyncWakeRearm();
     }
     ESP_LOGI(TAG, "lesson asset sync quiet end");
@@ -4860,8 +4927,7 @@ void Application::ScheduleLessonAssetSyncWakeRearm(uint64_t delay_us) {
 
 void Application::StopListening() {
     const bool lesson_answer_turn =
-        lesson_interactive_listen_pending_.load() ||
-        lesson_interactive_listening_active_.load();
+        lesson_interactive_listen_pending_.load() || lesson_interactive_listening_active_.load();
     if (lesson_runtime_active_.load() && !lesson_answer_turn) {
         ESP_LOGI(TAG, "lesson stop listening ignored state=%d", static_cast<int>(GetDeviceState()));
         return;
@@ -4873,7 +4939,8 @@ void Application::StopListening() {
 }
 
 void Application::HandleToggleChatEvent() {
-    if (IsWifiConfigEntryPending()) return;
+    if (IsWifiConfigEntryPending())
+        return;
     auto state = GetDeviceState();
 
     if (lesson_runtime_active_.load()) {
@@ -4943,9 +5010,12 @@ void Application::HandleToggleChatEvent() {
         return;
     }
     if (IsSelectedNormalChatRoute()) {
-        if (state == kDeviceStateIdle) BeginChatListen(GetDefaultListeningMode(), ChatListenOrigin::User);
-        else if (state == kDeviceStateSpeaking) HandleChatAbort(kAbortReasonNone, listening_mode_ != kListeningModeManualStop);
-        else if (state == kDeviceStateListening) CloseAudioChannelByIntent();
+        if (state == kDeviceStateIdle)
+            BeginChatListen(GetDefaultListeningMode(), ChatListenOrigin::User);
+        else if (state == kDeviceStateSpeaking)
+            HandleChatAbort(kAbortReasonNone, listening_mode_ != kListeningModeManualStop);
+        else if (state == kDeviceStateListening)
+            CloseAudioChannelByIntent();
         return;
     }
 
@@ -4954,9 +5024,7 @@ void Application::HandleToggleChatEvent() {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this, mode]() {
-                ContinueOpenAudioChannel(mode);
-            });
+            Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
             return;
         }
         SetListeningMode(mode);
@@ -4995,7 +5063,8 @@ void Application::StartPassiveLessonWebsocket() {
     uint32_t gen = ++connect_generation_;
     connect_in_flight_.store(true);
     ArmConnectWatchdog();
-    auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
+    auto* ctx =
+        new ConnectContext{this, GetDefaultListeningMode(), gen, std::string(), false, true};
     if (!StartOpenChannelWorker(ctx)) {
         delete ctx;
         connect_in_flight_.store(false);
@@ -5013,12 +5082,11 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
     }
     if (protocol_ == nullptr) {
         ESP_LOGE(TAG, "Protocol not initialized");
-        SetDeviceState(kDeviceStateIdle);   // SM-3: don't wedge CONNECTING
+        SetDeviceState(kDeviceStateIdle);  // SM-3: don't wedge CONNECTING
         return;
     }
     const bool lesson_answer_turn =
-        lesson_interactive_listen_pending_.load() ||
-        lesson_interactive_listening_active_.load();
+        lesson_interactive_listen_pending_.load() || lesson_interactive_listening_active_.load();
     if (lesson_runtime_active_.load() && !lesson_answer_turn) {
         ESP_LOGI(TAG, "lesson open channel ignored state=%d", static_cast<int>(GetDeviceState()));
         online_intent_.store(false);
@@ -5058,25 +5126,30 @@ void Application::ContinueOpenAudioChannel(ListeningMode mode) {
 
 bool Application::StartOpenChannelWorker(void* context) {
     RetireChatOutbound();
-    if (chat_protocol_infrastructure_fault_) return false;
+    if (chat_protocol_infrastructure_fault_)
+        return false;
     if (open_channel_queue == nullptr || open_channel_task == nullptr) {
         return false;
     }
     auto* ctx = static_cast<ConnectContext*>(context);
-    if (!protocol_ || protocol_work_lifetime_.Pending() || protocol_work_lifetime_.Busy()) return false;
+    if (!protocol_ || protocol_work_lifetime_.Pending() || protocol_work_lifetime_.Busy())
+        return false;
     ctx->reservation = protocol_work_lifetime_.Reserve();
-    if (!ctx->reservation) return false;
+    if (!ctx->reservation)
+        return false;
     ctx->protocol = protocol_.get();
     ctx->protocol_generation = protocol_generation_.load();
     const NetworkWorkItem work{NetworkWorkKind::kOpenChannel, context};
-    if (xQueueSend(open_channel_queue, &work, 0) == pdTRUE) return true;
+    if (xQueueSend(open_channel_queue, &work, 0) == pdTRUE)
+        return true;
     protocol_work_lifetime_.Release(ctx->reservation);
     ctx->reservation = 0;
     return false;
 }
 
 bool Application::InitializeChatOutboundWorker() {
-    if (chat_outbound_task_) return true;
+    if (chat_outbound_task_)
+        return true;
     chat_outbound_task_ = xTaskCreateStatic(
         &Application::ChatOutboundTask, "chat_outbound", kChatOutboundWorkerStackDepth, this,
         tskIDLE_PRIORITY + 3, chat_outbound_task_stack, &chat_outbound_task_buffer);
@@ -5084,7 +5157,8 @@ bool Application::InitializeChatOutboundWorker() {
 }
 
 bool Application::InitializeChatAudioCleanupWorker() {
-    if (chat_audio_task_) return true;
+    if (chat_audio_task_)
+        return true;
     chat_audio_task_ = xTaskCreateStatic(
         &Application::ChatAudioCleanupTask, "chat_audio_cleanup", kChatAudioCleanupWorkerStackDepth,
         this, tskIDLE_PRIORITY + 3, chat_audio_cleanup_task_stack, &chat_audio_cleanup_task_buffer);
@@ -5092,32 +5166,40 @@ bool Application::InitializeChatAudioCleanupWorker() {
 }
 
 bool Application::InitializeChatSourceRoute(bool is_websocket_protocol) {
-    if (!is_websocket_protocol) return true;
+    if (!is_websocket_protocol)
+        return true;
     chat_cleanup_enabled_.store(false);
     const auto* codec = Board::GetInstance().GetAudioCodec();
-    if (!codec || !codec->SupportsChatOutputDrain()) return true;
+    if (!codec || !codec->SupportsChatOutputDrain())
+        return true;
     try {
         if (protocol_ && chat_protocol_signals_ && chat_outbound_task_ && open_channel_queue &&
             open_channel_task && InitializeChatAudioCleanupWorker()) {
-            auto callbacks = MakeChatSourceCallbacks(protocol_generation_.load(), chat_protocol_signals_);
-            if (callbacks.audio && callbacks.json && callbacks.closed && callbacks.opened && callbacks.adopted && callbacks.error) {
+            auto callbacks =
+                MakeChatSourceCallbacks(protocol_generation_.load(), chat_protocol_signals_);
+            if (callbacks.audio && callbacks.json && callbacks.closed && callbacks.opened &&
+                callbacks.adopted && callbacks.error) {
                 protocol_->SetSourceCallbacks(std::move(callbacks));
                 chat_protocol_signals_->SelectDeferred();
                 chat_cleanup_enabled_.store(true);
-                static_cast<WebsocketProtocol*>(protocol_.get())->SetConversationAudioDrainAck(true);
+                static_cast<WebsocketProtocol*>(protocol_.get())
+                    ->SetConversationAudioDrainAck(true);
                 chat_protocol_fault_ = chat_protocol_infrastructure_fault_ = false;
                 return true;
             }
         }
-    } catch (...) {}
+    } catch (...) {
+    }
     chat_protocol_fault_ = chat_protocol_infrastructure_fault_ = true;
     return false;
 }
 
 uint32_t Application::RequestChatPlaybackCleanup(uint32_t playback_generation) {
-    if (chat_reboot_audio_requested_) return 0;
+    if (chat_reboot_audio_requested_)
+        return 0;
     chat_audio_reset_serial_ = audio_service_.RequestChatPlaybackReset();
-    if (chat_audio_reset_serial_ == UINT32_MAX) chat_audio_exhausted_ = true;
+    if (chat_audio_reset_serial_ == UINT32_MAX)
+        chat_audio_exhausted_ = true;
     audio_service_.SetPlaybackGeneration(playback_generation);
     chat_playback_desired_ = chat_audio_reset_serial_;
     chat_playback_fault_ = false;
@@ -5131,9 +5213,14 @@ uint32_t Application::RequestChatPlaybackCleanup(uint32_t playback_generation) {
 
 bool Application::RequestChatCue(std::string_view sound) {
     std::unique_lock<std::mutex> lock(chat_cue_mutex_, std::try_to_lock);
-    if (!lock.owns_lock() || chat_cue_pending_ || chat_cue_serial_ == UINT32_MAX || sound.empty() || sound.size() > 65536) return false;
-    try { chat_cue_owner_ = std::make_shared<const std::string>(sound); }
-    catch (...) { return false; }
+    if (!lock.owns_lock() || chat_cue_pending_ || chat_cue_serial_ == UINT32_MAX || sound.empty() ||
+        sound.size() > 65536)
+        return false;
+    try {
+        chat_cue_owner_ = std::make_shared<const std::string>(sound);
+    } catch (...) {
+        return false;
+    }
     ++chat_cue_serial_;
     chat_cue_sound_ = *chat_cue_owner_;
     chat_cue_generation_ = speaking_generation_.load();
@@ -5142,21 +5229,24 @@ bool Application::RequestChatCue(std::string_view sound) {
     chat_cue_pending_ = true;
     chat_cue_retry_ = false;
     lock.unlock();
-    if (xTaskGetCurrentTaskHandle() == application_task_) PollChatAudioCleanup();
+    if (xTaskGetCurrentTaskHandle() == application_task_)
+        PollChatAudioCleanup();
     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
     return true;
 }
 
 uint32_t Application::RequestChatAudioCleanup(uint32_t playback_generation, bool reset,
-                                             bool processing, bool wake, bool chat_scope,
-                                             bool stop_service, ChatWakePolicy wake_policy) {
-    if (chat_reboot_audio_requested_ && !stop_service) return chat_audio_desired_.revoked;
+                                              bool processing, bool wake, bool chat_scope,
+                                              bool stop_service, ChatWakePolicy wake_policy) {
+    if (chat_reboot_audio_requested_ && !stop_service)
+        return chat_audio_desired_.revoked;
     const uint32_t revoked = audio_service_.RevokeChatUplink();
     chat_audio_prepared_ = 0;
     if (reset) {
         chat_playback_desired_ = 0;
         chat_audio_reset_serial_ = audio_service_.RequestChatPlaybackReset();
-        if (chat_audio_reset_serial_ == UINT32_MAX) chat_audio_exhausted_ = true;
+        if (chat_audio_reset_serial_ == UINT32_MAX)
+            chat_audio_exhausted_ = true;
     }
     audio_service_.SetPlaybackGeneration(playback_generation);
     chat_audio_desired_ = {};
@@ -5173,7 +5263,8 @@ uint32_t Application::RequestChatAudioCleanup(uint32_t playback_generation, bool
 
 void Application::PollChatAudioCleanup() {
     std::unique_lock<std::mutex> cue_lock(chat_cue_mutex_, std::try_to_lock);
-    if (!cue_lock.owns_lock()) return;
+    if (!cue_lock.owns_lock())
+        return;
     if (chat_audio_state_.load(std::memory_order_acquire) == 2) {
         if (chat_audio_work_.cue) {
             if (chat_audio_work_.cue_serial == chat_cue_serial_) {
@@ -5194,7 +5285,8 @@ void Application::PollChatAudioCleanup() {
         }
     }
     if (chat_audio_state_.load(std::memory_order_acquire) == 2) {
-        if (chat_audio_work_.reset_done) chat_audio_reset_completed_ = chat_audio_work_.reset_serial;
+        if (chat_audio_work_.reset_done)
+            chat_audio_reset_completed_ = chat_audio_work_.reset_serial;
         if (chat_audio_work_.playback_only) {
             chat_playback_attempted_ = chat_audio_work_.reset_serial;
             if (chat_audio_work_.reset_serial == chat_playback_desired_)
@@ -5213,27 +5305,32 @@ void Application::PollChatAudioCleanup() {
                     chat_audio_prepared_ = chat_audio_work_.revoked;
                 }
                 if (chat_audio_work_.prepared && chat_audio_work_.stop_service) {
-                    chat_reboot_deadline_us_ = static_cast<uint64_t>(esp_timer_get_time()) + 1000000ULL;
+                    chat_reboot_deadline_us_ =
+                        static_cast<uint64_t>(esp_timer_get_time()) + 1000000ULL;
                 }
             }
         }
         chat_audio_state_.store(0, std::memory_order_release);
     }
-    if (chat_audio_state_.load(std::memory_order_acquire) != 0) return;
+    if (chat_audio_state_.load(std::memory_order_acquire) != 0)
+        return;
     if (chat_cue_pending_ && static_cast<uint64_t>(esp_timer_get_time()) >= chat_cue_deadline_us_) {
         chat_cue_pending_ = chat_cue_retry_ = false;
         chat_cue_result_ = 3;
     }
-    const bool prepare = chat_audio_desired_.revoked &&
-        chat_audio_completed_revoked_ != chat_audio_desired_.revoked;
+    const bool prepare =
+        chat_audio_desired_.revoked && chat_audio_completed_revoked_ != chat_audio_desired_.revoked;
     const bool playback = chat_playback_desired_ &&
-        chat_playback_desired_ != chat_audio_reset_completed_ &&
-        chat_playback_desired_ != chat_playback_attempted_;
+                          chat_playback_desired_ != chat_audio_reset_completed_ &&
+                          chat_playback_desired_ != chat_playback_attempted_;
     const bool cue = chat_cue_pending_ && !chat_cue_retry_;
-    if (!prepare && !playback && !chat_wake_read_pending_ && !cue) return;
+    if (!prepare && !playback && !chat_wake_read_pending_ && !cue)
+        return;
     if (!chat_audio_task_ || chat_audio_exhausted_) {
-        if (prepare) chat_audio_fault_ = true;
-        if (playback) chat_playback_fault_ = true;
+        if (prepare)
+            chat_audio_fault_ = true;
+        if (playback)
+            chat_playback_fault_ = true;
         return;
     }
     chat_audio_work_ = prepare ? chat_audio_desired_ : ChatAudioCleanup{};
@@ -5260,12 +5357,13 @@ void Application::PollChatAudioCleanup() {
 }
 
 void Application::RunChatAudioCleanup() {
-    if (chat_audio_state_.load(std::memory_order_acquire) != 1) return;
+    if (chat_audio_state_.load(std::memory_order_acquire) != 1)
+        return;
     try {
         if (chat_audio_work_.cue) {
             chat_audio_work_.cue_result = static_cast<int>(audio_service_.TryPlayChatCue(
-                chat_audio_work_.cue_sound, chat_audio_work_.cue_generation, chat_audio_work_.reset_serial,
-                chat_audio_work_.cue_deadline_us));
+                chat_audio_work_.cue_sound, chat_audio_work_.cue_generation,
+                chat_audio_work_.reset_serial, chat_audio_work_.cue_deadline_us));
         } else if (chat_audio_work_.read_wake) {
             chat_audio_work_.wake_text = audio_service_.GetLastWakeWord();
         } else if (chat_audio_work_.stop_service) {
@@ -5280,16 +5378,19 @@ void Application::RunChatAudioCleanup() {
 #endif
             }
             if (chat_audio_work_.reset) {
-                chat_audio_work_.reset_done = audio_service_.ResetChatDecoder(chat_audio_work_.reset_serial);
+                chat_audio_work_.reset_done =
+                    audio_service_.ResetChatDecoder(chat_audio_work_.reset_serial);
             }
             chat_audio_work_.prepared = (!chat_audio_work_.reset || chat_audio_work_.reset_done) &&
-                (chat_audio_work_.playback_only || audio_service_.PrepareChatAudioTransition(
-                    chat_audio_work_.revoked, chat_audio_work_.processing,
-                    chat_audio_work_.wake, chat_audio_work_.chat_scope));
+                                        (chat_audio_work_.playback_only ||
+                                         audio_service_.PrepareChatAudioTransition(
+                                             chat_audio_work_.revoked, chat_audio_work_.processing,
+                                             chat_audio_work_.wake, chat_audio_work_.chat_scope));
         }
     } catch (...) {
         chat_audio_work_.prepared = false;
-        if (chat_audio_work_.cue) chat_audio_work_.cue_result = 3;
+        if (chat_audio_work_.cue)
+            chat_audio_work_.cue_result = 3;
     }
     chat_audio_state_.store(2, std::memory_order_release);
     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
@@ -5297,7 +5398,8 @@ void Application::RunChatAudioCleanup() {
 
 void Application::RetryChatAudioCleanup() {
     std::unique_lock<std::mutex> cue_lock(chat_cue_mutex_, std::try_to_lock);
-    if (!cue_lock.owns_lock()) return;
+    if (!cue_lock.owns_lock())
+        return;
     // Called once per application clock tick, not on failure notification.
     const bool retry_cue = chat_cue_retry_;
     if (chat_cue_retry_) {
@@ -5308,7 +5410,8 @@ void Application::RetryChatAudioCleanup() {
         chat_cue_retry_ = false;
     }
     cue_lock.unlock();
-    if (retry_cue) PollChatAudioCleanup();
+    if (retry_cue)
+        PollChatAudioCleanup();
     if (chat_playback_fault_ && !chat_audio_exhausted_ &&
         chat_audio_state_.load(std::memory_order_acquire) == 0) {
         chat_playback_attempted_ = 0;
@@ -5324,7 +5427,8 @@ void Application::RetryChatAudioCleanup() {
 }
 
 void Application::BeginChatRebootAudioCleanup() {
-    if (chat_reboot_audio_requested_) return;
+    if (chat_reboot_audio_requested_)
+        return;
     chat_reboot_audio_requested_ = true;
     RequestChatAudioCleanup(speaking_generation_.load(), false, false, false, true, true);
 }
@@ -5347,17 +5451,21 @@ void Application::ChatAudioCleanupTask(void* context) {
 
 bool Application::PollChatProtocolCleanup() {
     using Action = ProtocolWorkLifetime::Action;
-    if (!chat_cleanup_enabled_) return false;
-    if (chat_reboot_audio_requested_) return true;
+    if (!chat_cleanup_enabled_)
+        return false;
+    if (chat_reboot_audio_requested_)
+        return true;
     auto state = chat_protocol_state_.load(std::memory_order_acquire);
-    if (state == 2) return true;
+    if (state == 2)
+        return true;
     if (state == 3) {
         const auto pending = protocol_work_lifetime_.TakeReady();
         if (!chat_protocol_work_.success) {
             chat_protocol_fault_ = true;
             chat_protocol_infrastructure_fault_ = true;
             protocol_work_lifetime_.Request(pending);
-            if (pending <= chat_protocol_work_.action) return true;
+            if (pending <= chat_protocol_work_.action)
+                return true;
         }
         if (pending > chat_protocol_work_.action) {
             chat_protocol_work_.action = pending;
@@ -5391,22 +5499,26 @@ bool Application::PollChatProtocolCleanup() {
         }
     }
     if (state == 0) {
-        if (!protocol_work_lifetime_.Pending()) return false;
+        if (!protocol_work_lifetime_.Pending())
+            return false;
         chat_protocol_owned_.store(true);
-        if (lesson_protocol_readers_.load() != 0) return true;
+        if (lesson_protocol_readers_.load() != 0)
+            return true;
         RetireChatOutbound();
         const auto action = protocol_work_lifetime_.TakeReady();
-        if (action == Action::kNone) return true;
+        if (action == Action::kNone)
+            return true;
         // TakeReady proved that every real user retired. Restore the barrier
         // before zero-wait admission so a full network queue cannot reopen it.
         protocol_work_lifetime_.Request(action);
-        if (chat_protocol_signals_) chat_protocol_signals_->Disable();
+        if (chat_protocol_signals_)
+            chat_protocol_signals_->Disable();
         chat_protocol_owned_.store(true, std::memory_order_release);
         chat_protocol_work_.protocol = std::move(protocol_);
         chat_protocol_work_.action = action;
         chat_protocol_work_.epoch = deferred_close_epoch_;
         chat_protocol_work_.intentional = connect_close_deferral_.TakeAfterWorker() ||
-            deferred_close_generation_ != protocol_generation_.load();
+                                          deferred_close_generation_ != protocol_generation_.load();
         chat_protocol_work_.success = false;
         chat_protocol_work_.destructive_prepared = false;
         connect_in_flight_ = false;
@@ -5415,7 +5527,8 @@ bool Application::PollChatProtocolCleanup() {
     }
     // Escalation while waiting for capacity updates the owned action in place.
     const auto pending = protocol_work_lifetime_.TakeReady();
-    if (pending > chat_protocol_work_.action) chat_protocol_work_.action = pending;
+    if (pending > chat_protocol_work_.action)
+        chat_protocol_work_.action = pending;
     protocol_work_lifetime_.Request(chat_protocol_work_.action);
     if (chat_protocol_work_.action != Action::kClose && !chat_protocol_work_.destructive_prepared) {
         RequestLessonStorageAbandonment();
@@ -5441,12 +5554,15 @@ bool Application::PollChatProtocolCleanup() {
 }
 
 void Application::RunChatProtocolCleanup() {
-    if (chat_protocol_state_.load(std::memory_order_acquire) != 2) return;
+    if (chat_protocol_state_.load(std::memory_order_acquire) != 2)
+        return;
     try {
         if (chat_protocol_work_.protocol) {
             if (chat_protocol_work_.action == ProtocolWorkLifetime::Action::kClose) {
-                if (chat_protocol_work_.intentional) chat_protocol_work_.protocol->CloseAudioChannel();
-                else chat_protocol_work_.protocol->CompleteDeferredClose(chat_protocol_work_.epoch);
+                if (chat_protocol_work_.intentional)
+                    chat_protocol_work_.protocol->CloseAudioChannel();
+                else
+                    chat_protocol_work_.protocol->CompleteDeferredClose(chat_protocol_work_.epoch);
             } else {
                 chat_protocol_work_.protocol.reset();
             }
@@ -5463,24 +5579,31 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
     uint64_t protocol_generation, std::shared_ptr<ChatProtocolSignals> signals) {
     // Install the complete immutable callback set before any Start/Open.
     Protocol::SourceCallbacks callbacks;
-    callbacks.opened = [this, protocol_generation, signals, callback_protocol = protocol_.get()](ConnectionSource source, uint64_t deadline_us) {
+    callbacks.opened = [this, protocol_generation, signals, callback_protocol = protocol_.get()](
+                           ConnectionSource source, uint64_t deadline_us) {
         const auto connect_generation = protocol_callback_connect_generation_.load();
         if (!signals || protocol_generation != protocol_generation_.load() ||
-            chat_protocol_owned_.load() || connect_generation != connect_generation_.load()) return;
-        signals->PublishOpened(source, connect_generation, callback_protocol->server_sample_rate(), deadline_us);
+            chat_protocol_owned_.load() || connect_generation != connect_generation_.load())
+            return;
+        signals->PublishOpened(source, connect_generation, callback_protocol->server_sample_rate(),
+                               deadline_us);
         xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
     };
     callbacks.adopted = [this, protocol_generation](ConnectionSource source) {
-        return IsChatConnectionCurrent(source, protocol_generation, chat_source_connect_generation_.load()) &&
-            (IsLessonVoiceRoute() || passive_ws_intent_.load() ||
+        return IsChatConnectionCurrent(source, protocol_generation,
+                                       chat_source_connect_generation_.load()) &&
+               (IsLessonVoiceRoute() || passive_ws_intent_.load() ||
                 (!connect_in_flight_.load() && GetDeviceState() != kDeviceStateConnecting));
     };
     auto publish = [this, protocol_generation, signals](ConnectionSource source, uint32_t flag) {
         if (!signals || protocol_generation != protocol_generation_.load() ||
             chat_protocol_owned_.load(std::memory_order_acquire) ||
-            protocol_callback_connect_generation_.load() != connect_generation_.load()) return;
-        ESP_LOGW(TAG, "chat_source_fault reason=transport flags=%lu", static_cast<unsigned long>(flag));
-        if (signals->PublishConnectionFault(source, protocol_callback_connect_generation_.load(), flag))
+            protocol_callback_connect_generation_.load() != connect_generation_.load())
+            return;
+        ESP_LOGW(TAG, "chat_source_fault reason=transport flags=%lu",
+                 static_cast<unsigned long>(flag));
+        if (signals->PublishConnectionFault(source, protocol_callback_connect_generation_.load(),
+                                            flag))
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
     };
     callbacks.error = [publish](ConnectionSource source, const std::string&) {
@@ -5489,122 +5612,172 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
     callbacks.closed = [publish](ConnectionSource source) {
         publish(source, ChatProtocolSignals::Closed);
     };
-    callbacks.json = [this, protocol_generation, signals, callback_protocol = protocol_.get()](ConnectionSource source, const cJSON* root, uint64_t lesson_epoch, ConnectionReceipt receipt) {
-        const ChatConnectionMessages::Owner owner{source, protocol_generation, chat_source_connect_generation_.load()};
-        if (!IsChatConnectionCurrent(owner.source, owner.protocol_generation, owner.connect_generation)) return;
+    callbacks.json = [this, protocol_generation, signals, callback_protocol = protocol_.get()](
+                         ConnectionSource source, const cJSON* root, uint64_t lesson_epoch,
+                         ConnectionReceipt receipt) {
+        const ChatConnectionMessages::Owner owner{source, protocol_generation,
+                                                  chat_source_connect_generation_.load()};
+        if (!IsChatConnectionCurrent(owner.source, owner.protocol_generation,
+                                     owner.connect_generation))
+            return;
         bool queued_json = false;
         try {
-        const auto* message_type = cJSON_GetObjectItem(root, "type");
-        if (lesson_asset_sync_quiet_.load() && cJSON_IsString(message_type) &&
-            (strcmp(message_type->valuestring, "tts") == 0 || strcmp(message_type->valuestring, "stt") == 0)) return;
-        const auto* message_state = cJSON_GetObjectItem(root, "state");
-#if CONFIG_TBOT_VOICE_DEMO
-        // Presentation bursts must not occupy the bounded control queue.
-        if (!IsLessonVoiceRoute() && cJSON_IsString(message_type) &&
-            (strcmp(message_type->valuestring, "stt") == 0 ||
-             strcmp(message_type->valuestring, "llm") == 0 ||
-             (strcmp(message_type->valuestring, "tts") == 0 && cJSON_IsString(message_state) &&
-              strcmp(message_state->valuestring, "sentence_start") == 0))) {
-            const auto* text = cJSON_GetObjectItem(root, "text");
-            if (strcmp(message_type->valuestring, "llm") != 0 && cJSON_IsString(text)) {
-                signals->captions.Publish({source, protocol_generation, owner.connect_generation,
-                    speaking_generation_.load(), 0}, strcmp(message_type->valuestring, "tts") == 0,
-                    text->valuestring);
-            }
-            return;
-        }
-#endif
-        if (IsLessonVoiceRoute() && cJSON_IsString(message_type) && strcmp(message_type->valuestring, "tts") == 0 &&
-            cJSON_IsString(message_state) && (strcmp(message_state->valuestring, "start") == 0 ||
-                strcmp(message_state->valuestring, "stop") == 0)) {
-            auto context = chat_inbound_messages_.Own(root,
-                {source, protocol_generation, chat_source_connect_generation_.load()},
-                receipt.received_us, lesson_epoch, callback_protocol->session_id());
-            if (!context) {
-                const auto snapshot = chat_inbound_messages_.TrySnapshot();
-                ESP_LOGW(TAG, "chat_json_queue available=%u queued=%u outstanding=%u",
-                    static_cast<unsigned>(snapshot.available), static_cast<unsigned>(snapshot.queued), static_cast<unsigned>(snapshot.outstanding));
-                ESP_LOGW(TAG, "chat_source_fault reason=lesson_json_admission");
-                signals->PublishConnectionFault(source, chat_source_connect_generation_.load(), ChatProtocolSignals::Error);
-                xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
+            const auto* message_type = cJSON_GetObjectItem(root, "type");
+            if (lesson_asset_sync_quiet_.load() && cJSON_IsString(message_type) &&
+                (strcmp(message_type->valuestring, "tts") == 0 ||
+                 strcmp(message_type->valuestring, "stt") == 0))
                 return;
-            }
-            if (!IsChatLessonRequestCurrent(context)) return;
-            signals->lesson_audio_epoch = lesson_epoch;
-            try { DispatchIncomingJson(context->root.get(), lesson_epoch, true, context); }
-            catch (...) { FailChatRequest(context); }
-            return;
-        }
-        HandleChatStart(signals, protocol_generation, source, root, receipt);
-        HandleChatTerminalStop(signals, protocol_generation, source, root, receipt.received_us);
-        const auto* type = cJSON_GetObjectItem(root, "type");
-        const auto* state = cJSON_GetObjectItem(root, "state");
-        if (cJSON_IsString(type) && strcmp(type->valuestring, "tts") == 0 && cJSON_IsString(state) &&
-            (strcmp(state->valuestring, "start") == 0 || strcmp(state->valuestring, "stop") == 0)) return;
-        queued_json = true;
-        using Admission = ChatInboundMessages::Admission;
-        const auto session_id = callback_protocol->session_id();
-        Admission outcome = Admission::Invalid;
-        uint32_t retries = 0;
-        const auto deadline_us = receipt.received_us <= UINT64_MAX - 250000ULL ?
-            receipt.received_us + 250000ULL : UINT64_MAX;
-        const auto admission_deadline_us = receipt.admission_deadline_us && receipt.admission_deadline_us < deadline_us ?
-            receipt.admission_deadline_us : deadline_us;
-        const auto current = [this, owner]() {
-            return IsChatConnectionCurrent(owner.source, owner.protocol_generation, owner.connect_generation);
-        };
-        const std::function<bool()> can_publish = [&]() {
-            const auto now_us = static_cast<uint64_t>(esp_timer_get_time());
-            return current() && now_us >= receipt.received_us && now_us < admission_deadline_us;
-        };
-        for (;;) {
-            if (!current()) return;
-            if (!can_publish()) break;
-            outcome = chat_inbound_messages_.TryAdmit(root, owner, receipt.received_us, lesson_epoch, session_id, can_publish);
-            if (outcome == Admission::Accepted) {
-                xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
-                if (retries) {
-                    const auto waited_us = static_cast<uint64_t>(esp_timer_get_time()) - receipt.received_us;
-                    ESP_LOGW(TAG, "chat_json_admission reason=json_admission outcome=%u retries=%lu wait_us_hi=%lu wait_us_lo=%lu",
-                        static_cast<unsigned>(outcome), static_cast<unsigned long>(retries),
-                        static_cast<unsigned long>(waited_us >> 32), static_cast<unsigned long>(static_cast<uint32_t>(waited_us)));
+            const auto* message_state = cJSON_GetObjectItem(root, "state");
+#if CONFIG_TBOT_VOICE_DEMO
+            // Presentation bursts must not occupy the bounded control queue.
+            if (!IsLessonVoiceRoute() && cJSON_IsString(message_type) &&
+                (strcmp(message_type->valuestring, "stt") == 0 ||
+                 strcmp(message_type->valuestring, "llm") == 0 ||
+                 (strcmp(message_type->valuestring, "tts") == 0 && cJSON_IsString(message_state) &&
+                  strcmp(message_state->valuestring, "sentence_start") == 0))) {
+                const auto* text = cJSON_GetObjectItem(root, "text");
+                if (strcmp(message_type->valuestring, "llm") != 0 && cJSON_IsString(text)) {
+                    signals->captions.Publish(
+                        {source, protocol_generation, owner.connect_generation,
+                         speaking_generation_.load(), 0},
+                        strcmp(message_type->valuestring, "tts") == 0, text->valuestring);
                 }
                 return;
             }
-            if (outcome != Admission::Busy && outcome != Admission::Full) break;
+#endif
+            if (IsLessonVoiceRoute() && cJSON_IsString(message_type) &&
+                strcmp(message_type->valuestring, "tts") == 0 && cJSON_IsString(message_state) &&
+                (strcmp(message_state->valuestring, "start") == 0 ||
+                 strcmp(message_state->valuestring, "stop") == 0)) {
+                auto context = chat_inbound_messages_.Own(
+                    root, {source, protocol_generation, chat_source_connect_generation_.load()},
+                    receipt.received_us, lesson_epoch, callback_protocol->session_id());
+                if (!context) {
+                    const auto snapshot = chat_inbound_messages_.TrySnapshot();
+                    ESP_LOGW(TAG, "chat_json_queue available=%u queued=%u outstanding=%u",
+                             static_cast<unsigned>(snapshot.available),
+                             static_cast<unsigned>(snapshot.queued),
+                             static_cast<unsigned>(snapshot.outstanding));
+                    ESP_LOGW(TAG, "chat_source_fault reason=lesson_json_admission");
+                    signals->PublishConnectionFault(source, chat_source_connect_generation_.load(),
+                                                    ChatProtocolSignals::Error);
+                    xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
+                    return;
+                }
+                if (!IsChatLessonRequestCurrent(context))
+                    return;
+                signals->lesson_audio_epoch = lesson_epoch;
+                try {
+                    DispatchIncomingJson(context->root.get(), lesson_epoch, true, context);
+                } catch (...) {
+                    FailChatRequest(context);
+                }
+                return;
+            }
+            HandleChatStart(signals, protocol_generation, source, root, receipt);
+            HandleChatTerminalStop(signals, protocol_generation, source, root, receipt.received_us);
+            const auto* type = cJSON_GetObjectItem(root, "type");
+            const auto* state = cJSON_GetObjectItem(root, "state");
+            if (cJSON_IsString(type) && strcmp(type->valuestring, "tts") == 0 &&
+                cJSON_IsString(state) &&
+                (strcmp(state->valuestring, "start") == 0 ||
+                 strcmp(state->valuestring, "stop") == 0))
+                return;
+            queued_json = true;
+            using Admission = ChatInboundMessages::Admission;
+            const auto session_id = callback_protocol->session_id();
+            Admission outcome = Admission::Invalid;
+            uint32_t retries = 0;
+            const auto deadline_us = receipt.received_us <= UINT64_MAX - 250000ULL
+                                         ? receipt.received_us + 250000ULL
+                                         : UINT64_MAX;
+            const auto admission_deadline_us =
+                receipt.admission_deadline_us && receipt.admission_deadline_us < deadline_us
+                    ? receipt.admission_deadline_us
+                    : deadline_us;
+            const auto current = [this, owner]() {
+                return IsChatConnectionCurrent(owner.source, owner.protocol_generation,
+                                               owner.connect_generation);
+            };
+            const std::function<bool()> can_publish = [&]() {
+                const auto now_us = static_cast<uint64_t>(esp_timer_get_time());
+                return current() && now_us >= receipt.received_us && now_us < admission_deadline_us;
+            };
+            for (;;) {
+                if (!current())
+                    return;
+                if (!can_publish())
+                    break;
+                outcome = chat_inbound_messages_.TryAdmit(root, owner, receipt.received_us,
+                                                          lesson_epoch, session_id, can_publish);
+                if (outcome == Admission::Accepted) {
+                    xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
+                    if (retries) {
+                        const auto waited_us =
+                            static_cast<uint64_t>(esp_timer_get_time()) - receipt.received_us;
+                        ESP_LOGW(TAG,
+                                 "chat_json_admission reason=json_admission outcome=%u retries=%lu "
+                                 "wait_us_hi=%lu wait_us_lo=%lu",
+                                 static_cast<unsigned>(outcome),
+                                 static_cast<unsigned long>(retries),
+                                 static_cast<unsigned long>(waited_us >> 32),
+                                 static_cast<unsigned long>(static_cast<uint32_t>(waited_us)));
+                    }
+                    return;
+                }
+                if (outcome != Admission::Busy && outcome != Admission::Full)
+                    break;
+                xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
+                ++retries;
+                vTaskDelay(1);
+            }
+            if (!current())
+                return;
+            const auto now_us = static_cast<uint64_t>(esp_timer_get_time());
+            const auto waited_us = now_us >= receipt.received_us ? now_us - receipt.received_us : 0;
+            const auto wait_hi = static_cast<unsigned long>(waited_us >> 32);
+            const auto wait_lo = static_cast<unsigned long>(static_cast<uint32_t>(waited_us));
+            const auto snapshot = chat_inbound_messages_.TrySnapshot();
+            ESP_LOGW(TAG, "chat_json_queue available=%u queued=%u outstanding=%u",
+                     static_cast<unsigned>(snapshot.available),
+                     static_cast<unsigned>(snapshot.queued),
+                     static_cast<unsigned>(snapshot.outstanding));
+            ESP_LOGW(TAG,
+                     "chat_source_fault reason=json_admission outcome=%u retries=%lu "
+                     "wait_us_hi=%lu wait_us_lo=%lu",
+                     static_cast<unsigned>(outcome), static_cast<unsigned long>(retries), wait_hi,
+                     wait_lo);
+            signals->PublishConnectionFault(owner.source, owner.connect_generation,
+                                            ChatProtocolSignals::Error);
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
-            ++retries;
-            vTaskDelay(1);
-        }
-        if (!current()) return;
-        const auto now_us = static_cast<uint64_t>(esp_timer_get_time());
-        const auto waited_us = now_us >= receipt.received_us ? now_us - receipt.received_us : 0;
-        const auto wait_hi = static_cast<unsigned long>(waited_us >> 32);
-        const auto wait_lo = static_cast<unsigned long>(static_cast<uint32_t>(waited_us));
-        const auto snapshot = chat_inbound_messages_.TrySnapshot();
-        ESP_LOGW(TAG, "chat_json_queue available=%u queued=%u outstanding=%u",
-            static_cast<unsigned>(snapshot.available), static_cast<unsigned>(snapshot.queued), static_cast<unsigned>(snapshot.outstanding));
-        ESP_LOGW(TAG, "chat_source_fault reason=json_admission outcome=%u retries=%lu wait_us_hi=%lu wait_us_lo=%lu",
-            static_cast<unsigned>(outcome), static_cast<unsigned long>(retries), wait_hi, wait_lo);
-        signals->PublishConnectionFault(owner.source, owner.connect_generation, ChatProtocolSignals::Error);
-        xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
         } catch (...) {
-            if (!IsChatConnectionCurrent(owner.source, owner.protocol_generation, owner.connect_generation)) return;
+            if (!IsChatConnectionCurrent(owner.source, owner.protocol_generation,
+                                         owner.connect_generation))
+                return;
             if (queued_json) {
                 const auto now_us = static_cast<uint64_t>(esp_timer_get_time());
-                const auto waited_us = now_us >= receipt.received_us ? now_us - receipt.received_us : 0;
+                const auto waited_us =
+                    now_us >= receipt.received_us ? now_us - receipt.received_us : 0;
                 const auto snapshot = chat_inbound_messages_.TrySnapshot();
                 ESP_LOGW(TAG, "chat_json_queue available=%u queued=%u outstanding=%u",
-                    static_cast<unsigned>(snapshot.available), static_cast<unsigned>(snapshot.queued), static_cast<unsigned>(snapshot.outstanding));
-                ESP_LOGW(TAG, "chat_source_fault reason=json_admission outcome=%u retries=0 wait_us_hi=%lu wait_us_lo=%lu",
-                    static_cast<unsigned>(ChatInboundMessages::Admission::NoMemory),
-                    static_cast<unsigned long>(waited_us >> 32), static_cast<unsigned long>(static_cast<uint32_t>(waited_us)));
-            } else ESP_LOGW(TAG, "chat_source_fault reason=json_exception");
-            signals->PublishConnectionFault(owner.source, owner.connect_generation, ChatProtocolSignals::Error);
+                         static_cast<unsigned>(snapshot.available),
+                         static_cast<unsigned>(snapshot.queued),
+                         static_cast<unsigned>(snapshot.outstanding));
+                ESP_LOGW(TAG,
+                         "chat_source_fault reason=json_admission outcome=%u retries=0 "
+                         "wait_us_hi=%lu wait_us_lo=%lu",
+                         static_cast<unsigned>(ChatInboundMessages::Admission::NoMemory),
+                         static_cast<unsigned long>(waited_us >> 32),
+                         static_cast<unsigned long>(static_cast<uint32_t>(waited_us)));
+            } else
+                ESP_LOGW(TAG, "chat_source_fault reason=json_exception");
+            signals->PublishConnectionFault(owner.source, owner.connect_generation,
+                                            ChatProtocolSignals::Error);
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
         }
     };
-    callbacks.audio = [this, protocol_generation, signals](ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet) {
+    callbacks.audio = [this, protocol_generation, signals](
+                          ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet) {
         if (IsLessonVoiceRoute()) {
             HandleChatLessonAudio(signals, protocol_generation, source, std::move(packet));
             return;
@@ -5616,30 +5789,48 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
 
 bool Application::IsLessonVoiceRoute() const {
     return lesson_runtime_active_.load() || lesson_interactive_listen_pending_.load() ||
-        lesson_interactive_listening_active_.load() || lesson_terminal_audio_generation_.load() != 0;
+           lesson_interactive_listening_active_.load() ||
+           lesson_terminal_audio_generation_.load() != 0;
 }
 
 bool Application::IsChatLessonRequestCurrent(const ChatRequestContext& context) const {
     return !context || (IsChatRequestCurrent(context) &&
-        context->lesson_epoch == lesson_transport_epoch_gate_.PublishedEpoch());
+                        context->lesson_epoch == lesson_transport_epoch_gate_.PublishedEpoch());
 }
 
 void Application::ScheduleChatLesson(ChatRequestContext context, std::function<void()> callback) {
-    if (!IsChatLessonRequestCurrent(context)) return;
+    if (!IsChatLessonRequestCurrent(context))
+        return;
     try {
         Schedule([this, context, callback = std::move(callback)]() {
-            if (!IsChatLessonRequestCurrent(context)) return;
-            try { callback(); }
-            catch (...) { if (!context) throw; FailChatRequest(context); }
+            if (!IsChatLessonRequestCurrent(context))
+                return;
+            try {
+                callback();
+            } catch (...) {
+                if (!context)
+                    throw;
+                FailChatRequest(context);
+            }
         });
-    } catch (...) { if (!context) throw; FailChatRequest(context); }
+    } catch (...) {
+        if (!context)
+            throw;
+        FailChatRequest(context);
+    }
 }
 
 void Application::HandleChatLessonAudio(const std::shared_ptr<ChatProtocolSignals>& signals,
-    uint64_t protocol_generation, ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet) {
-    if (!packet || !signals || !IsChatConnectionCurrent(source, protocol_generation, chat_source_connect_generation_.load()) ||
-        signals->lesson_audio_epoch != lesson_transport_epoch_gate_.PublishedEpoch() || lesson_asset_sync_quiet_.load()) return;
-    if (!lesson_audio_playout_.AllowsAudio(speaking_generation_.load())) return;
+                                        uint64_t protocol_generation, ConnectionSource source,
+                                        std::unique_ptr<AudioStreamPacket> packet) {
+    if (!packet || !signals ||
+        !IsChatConnectionCurrent(source, protocol_generation,
+                                 chat_source_connect_generation_.load()) ||
+        signals->lesson_audio_epoch != lesson_transport_epoch_gate_.PublishedEpoch() ||
+        lesson_asset_sync_quiet_.load())
+        return;
+    if (!lesson_audio_playout_.AllowsAudio(speaking_generation_.load()))
+        return;
     if (GetDeviceState() == kDeviceStateSpeaking || tts_audio_accepting_.load()) {
         last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
         packet->generation = speaking_generation_.load();
@@ -5649,20 +5840,22 @@ void Application::HandleChatLessonAudio(const std::shared_ptr<ChatProtocolSignal
 }
 
 void Application::HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& signals,
-    uint64_t protocol_generation, ConnectionSource source, const cJSON* root, ConnectionReceipt receipt) {
+                                  uint64_t protocol_generation, ConnectionSource source,
+                                  const cJSON* root, ConnectionReceipt receipt) {
     const auto* type = cJSON_GetObjectItem(root, "type");
     const auto* state = cJSON_GetObjectItem(root, "state");
-    if (!cJSON_IsString(type) || strcmp(type->valuestring, "tts") != 0 ||
-        !cJSON_IsString(state) || strcmp(state->valuestring, "start") != 0 ||
-        !signals || !signals->MatchesSource(source) || chat_protocol_owned_.load() ||
-        protocol_generation != protocol_generation_.load() ||
-        chat_source_connect_generation_.load() != connect_generation_.load()) return;
+    if (!cJSON_IsString(type) || strcmp(type->valuestring, "tts") != 0 || !cJSON_IsString(state) ||
+        strcmp(state->valuestring, "start") != 0 || !signals || !signals->MatchesSource(source) ||
+        chat_protocol_owned_.load() || protocol_generation != protocol_generation_.load() ||
+        chat_source_connect_generation_.load() != connect_generation_.load())
+        return;
     signals->start_audio = {};
-    ChatStartHandoff::Request request{source, protocol_generation, connect_generation_.load(), 0,
-        receipt.received_us, receipt.admission_deadline_us};
+    ChatStartHandoff::Request request{source, protocol_generation, connect_generation_.load(),
+                                      0,      receipt.received_us, receipt.admission_deadline_us};
     if (!signals->start.Publish(request)) {
         ESP_LOGW(TAG, "chat_source_fault reason=start_publication");
-        signals->PublishConnectionFault(source, chat_source_connect_generation_.load(), ChatProtocolSignals::Error);
+        signals->PublishConnectionFault(source, chat_source_connect_generation_.load(),
+                                        ChatProtocolSignals::Error);
         xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
         return;
     }
@@ -5672,9 +5865,10 @@ void Application::HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& si
     for (;;) {
         const auto now = static_cast<uint64_t>(esp_timer_get_time());
         ChatStartHandoff::Admission admission;
-        if (signals->start.TryAdmission(request, now, admission) && signals->start.Confirm(request, now)) {
+        if (signals->start.TryAdmission(request, now, admission) &&
+            signals->start.Confirm(request, now)) {
             signals->start_audio = {source, protocol_generation, request.connect_generation,
-                admission.response_generation, admission.reset_token};
+                                    admission.response_generation, admission.reset_token};
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
             return;
         }
@@ -5683,11 +5877,12 @@ void Application::HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& si
             request.connect_generation != connect_generation_.load() ||
             protocol_generation != protocol_generation_.load() || chat_protocol_owned_.load()) {
             unsigned termination_site = 302;
-            if (expired) termination_site = 301;
+            if (expired)
+                termination_site = 301;
             const auto elapsed_us = now >= request.received_us ? now - request.received_us : 0;
             ESP_LOGW(TAG, "chat_start_receiver_end site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
-                termination_site, static_cast<unsigned long>(elapsed_us >> 32),
-                static_cast<unsigned long>(static_cast<uint32_t>(elapsed_us)));
+                     termination_site, static_cast<unsigned long>(elapsed_us >> 32),
+                     static_cast<unsigned long>(static_cast<uint32_t>(elapsed_us)));
             break;
         }
         vTaskDelay(1);
@@ -5697,15 +5892,22 @@ void Application::HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& si
 }
 
 void Application::HandleChatAudio(const std::shared_ptr<ChatProtocolSignals>& signals,
-    uint64_t protocol_generation, ConnectionSource source, std::unique_ptr<AudioStreamPacket> packet) {
-    if (!signals || !packet) return;
+                                  uint64_t protocol_generation, ConnectionSource source,
+                                  std::unique_ptr<AudioStreamPacket> packet) {
+    if (!signals || !packet)
+        return;
     const auto response = signals->start_audio;
     if (!signals->MatchesSource(source) || chat_protocol_owned_.load() ||
-        response.source.source_id != source.source_id || response.source.connection_epoch != source.connection_epoch ||
-        response.protocol_generation != protocol_generation || protocol_generation != protocol_generation_.load() ||
+        response.source.source_id != source.source_id ||
+        response.source.connection_epoch != source.connection_epoch ||
+        response.protocol_generation != protocol_generation ||
+        protocol_generation != protocol_generation_.load() ||
         response.connect_generation != connect_generation_.load() ||
-        !response.response_generation || response.response_generation != speaking_generation_.load() ||
-        !tts_audio_accepting_.load() || !audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) return;
+        !response.response_generation ||
+        response.response_generation != speaking_generation_.load() ||
+        !tts_audio_accepting_.load() ||
+        !audio_service_.IsCurrentChatPlaybackReset(response.reset_token))
+        return;
     packet->generation = response.response_generation;
     packet->conversation_audio = true;
     if (audio_service_.PushChatPacketToDecodeQueue(std::move(packet), response.reset_token) &&
@@ -5719,7 +5921,9 @@ void Application::RecoverChatStart(const ChatStartHandoff::Request& request, uin
     if (!chat_protocol_signals_ || !chat_protocol_signals_->start.Current(request) ||
         !chat_protocol_signals_->MatchesSource(request.source) || chat_protocol_owned_.load() ||
         request.protocol_generation != protocol_generation_.load() ||
-        request.connect_generation != connect_generation_.load() || chat_start_failed_serial_ == request.serial) return;
+        request.connect_generation != connect_generation_.load() ||
+        chat_start_failed_serial_ == request.serial)
+        return;
     ESP_LOGW(TAG, "chat_recovery site=%u", static_cast<unsigned>(site));
     chat_start_failed_serial_ = request.serial;
     chat_rearm_voice_intent_ = false;
@@ -5729,11 +5933,12 @@ void Application::RecoverChatStart(const ChatStartHandoff::Request& request, uin
     RetireChatOutbound();
     tts_audio_accepting_.store(false);
     auto generation = speaking_generation_.load();
-    if (generation != UINT32_MAX) speaking_generation_.store(++generation);
+    if (generation != UINT32_MAX)
+        speaking_generation_.store(++generation);
     RequestChatAudioCleanup(generation, true, false, false);
     chat_rearm_phase_ = ChatRearmPhase::Recovery;
     chat_rearm_owner_ = {request.source, request.protocol_generation, request.connect_generation,
-        generation, chat_audio_reset_serial_};
+                         generation, chat_audio_reset_serial_};
     chat_rearm_signals_ = chat_protocol_signals_;
     chat_rearm_source_era_ = chat_protocol_signals_->Capture();
     microphone_uplink_authorized_.store(false);
@@ -5741,22 +5946,30 @@ void Application::RecoverChatStart(const ChatStartHandoff::Request& request, uin
 }
 
 void Application::PollChatStart(uint64_t now_us) {
-    if (!chat_protocol_signals_) return;
+    if (!chat_protocol_signals_)
+        return;
     auto& handoff = chat_protocol_signals_->start;
     ChatStartHandoff::Request request;
     if (!handoff.TryRequest(request) || !chat_protocol_signals_->MatchesSource(request.source) ||
         request.protocol_generation != protocol_generation_.load() || chat_protocol_owned_.load() ||
-        request.connect_generation != connect_generation_.load()) return;
+        request.connect_generation != connect_generation_.load())
+        return;
     // The receiver may publish START after the caller samples the poll clock.
-    if (now_us < request.received_us) now_us = static_cast<uint64_t>(esp_timer_get_time());
-    if (request.serial == UINT32_MAX || (!handoff.Confirmed(request) && handoff.Expired(request, now_us))) {
-        RecoverChatStart(request, 101); return;
+    if (now_us < request.received_us)
+        now_us = static_cast<uint64_t>(esp_timer_get_time());
+    if (request.serial == UINT32_MAX ||
+        (!handoff.Confirmed(request) && handoff.Expired(request, now_us))) {
+        RecoverChatStart(request, 101);
+        return;
     }
     if (handoff.Confirmed(request) && chat_start_handled_serial_ == request.serial &&
-        chat_start_failed_serial_ != request.serial && chat_start_effects_serial_ != request.serial) {
+        chat_start_failed_serial_ != request.serial &&
+        chat_start_effects_serial_ != request.serial) {
         const auto state = GetDeviceState();
-        if (state != kDeviceStateIdle && state != kDeviceStateListening && state != kDeviceStateSpeaking) {
-            RecoverChatStart(request, 102); return;
+        if (state != kDeviceStateIdle && state != kDeviceStateListening &&
+            state != kDeviceStateSpeaking) {
+            RecoverChatStart(request, 102);
+            return;
         }
         chat_start_effects_serial_ = request.serial;
         speaking_arm_dispatch_.BeginResponse(speaking_generation_.load());
@@ -5765,17 +5978,20 @@ void Application::PollChatStart(uint64_t now_us) {
         SetDeviceState(kDeviceStateSpeaking);
         ArmSpeakingTimeout();
     }
-    if (chat_start_handled_serial_ == request.serial || chat_start_failed_serial_ == request.serial) return;
+    if (chat_start_handled_serial_ == request.serial || chat_start_failed_serial_ == request.serial)
+        return;
     chat_start_handled_serial_ = request.serial;
     chat_control_intents_.Supersede();
-    if (chat_wake_read_serial_ != UINT32_MAX) ++chat_wake_read_serial_;
+    if (chat_wake_read_serial_ != UINT32_MAX)
+        ++chat_wake_read_serial_;
     chat_wake_read_pending_ = false;
     chat_wake_read_result_.reset();
-    if (chat_protocol_infrastructure_fault_ || chat_outbound_fault_ || chat_reboot_audio_requested_ ||
-        protocol_work_lifetime_.Pending() || (chat_protocol_fault_ &&
-        chat_protocol_fault_generation_ == request.protocol_generation &&
-        chat_protocol_fault_era_ == chat_protocol_signals_->Capture())) {
-        RecoverChatStart(request, 103); return;
+    if (chat_protocol_infrastructure_fault_ || chat_outbound_fault_ ||
+        chat_reboot_audio_requested_ || protocol_work_lifetime_.Pending() ||
+        (chat_protocol_fault_ && chat_protocol_fault_generation_ == request.protocol_generation &&
+         chat_protocol_fault_era_ == chat_protocol_signals_->Capture())) {
+        RecoverChatStart(request, 103);
+        return;
     }
     // Do not collect outbound here: final retirement can invoke protocol work.
     // A single retired generation bounds storage across arbitrarily many STARTs.
@@ -5786,7 +6002,10 @@ void Application::PollChatStart(uint64_t now_us) {
         RetireChatOutbound();
     }
     auto generation = speaking_generation_.load();
-    if (generation >= UINT32_MAX - 1) { RecoverChatStart(request, 104); return; }
+    if (generation >= UINT32_MAX - 1) {
+        RecoverChatStart(request, 104);
+        return;
+    }
     speaking_generation_.store(++generation);
     const auto reset = RequestChatPlaybackCleanup(generation);
     if (listening_mode_ != kListeningModeRealtime) {
@@ -5796,29 +6015,34 @@ void Application::PollChatStart(uint64_t now_us) {
         last_listening_activity_ms_.store(0);
     }
     const ChatPlayoutIntake::Response response{request.source, request.protocol_generation,
-        request.connect_generation, generation, reset};
+                                               request.connect_generation, generation, reset};
     tts_audio_accepting_.store(true);
     if (!reset || reset == UINT32_MAX || !EstablishChatPlayoutResponse(response) ||
         !handoff.Admit(request, generation, reset, static_cast<uint64_t>(esp_timer_get_time()))) {
-        RecoverChatStart(request, 105); return;
+        RecoverChatStart(request, 105);
+        return;
     }
 }
 
 bool Application::EstablishChatPlayoutResponse(const ChatPlayoutIntake::Response& response) {
     if (!chat_protocol_signals_ || !chat_protocol_signals_->MatchesSource(response.source) ||
-        chat_protocol_owned_.load() || response.protocol_generation != protocol_generation_.load() ||
+        chat_protocol_owned_.load() ||
+        response.protocol_generation != protocol_generation_.load() ||
         response.connect_generation != connect_generation_.load() ||
         response.response_generation != speaking_generation_.load() ||
         !audio_service_.IsCurrentChatPlaybackReset(response.reset_token) ||
         chat_playout_unhandled_completion_ ||
         (chat_playout_ack_admitted_ && !chat_playout_ready_ && chat_outbound_reservation_ &&
-         chat_start_obsolete_reservation_ != chat_outbound_reservation_)) return false;
+         chat_start_obsolete_reservation_ != chat_outbound_reservation_))
+        return false;
     const auto stamp = chat_protocol_signals_->intake.Establish(response);
-    if (!stamp) return false;
+    if (!stamp)
+        return false;
     const auto state = GetDeviceState();
-    const bool transfer_voice_intent = chat_rearm_voice_intent_ &&
-        (chat_rearm_phase_ == ChatRearmPhase::Pending || chat_rearm_phase_ == ChatRearmPhase::None ||
-         chat_rearm_phase_ == ChatRearmPhase::Armed) &&
+    const bool transfer_voice_intent =
+        chat_rearm_voice_intent_ &&
+        (chat_rearm_phase_ == ChatRearmPhase::Pending ||
+         chat_rearm_phase_ == ChatRearmPhase::None || chat_rearm_phase_ == ChatRearmPhase::Armed) &&
         chat_rearm_signals_ == chat_protocol_signals_ &&
         chat_rearm_owner_.source.source_id == response.source.source_id &&
         chat_rearm_owner_.source.connection_epoch == response.source.connection_epoch &&
@@ -5849,20 +6073,27 @@ bool Application::EstablishChatPlayoutResponse(const ChatPlayoutIntake::Response
 }
 
 void Application::HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSignals>& signals,
-    uint64_t protocol_generation, ConnectionSource source, const cJSON* root, uint64_t received_us) {
-    if (!received_us) received_us = static_cast<uint64_t>(esp_timer_get_time());
+                                         uint64_t protocol_generation, ConnectionSource source,
+                                         const cJSON* root, uint64_t received_us) {
+    if (!received_us)
+        received_us = static_cast<uint64_t>(esp_timer_get_time());
     const auto* type = cJSON_GetObjectItem(root, "type");
     const auto* state = cJSON_GetObjectItem(root, "state");
-    if (!cJSON_IsString(type) || strcmp(type->valuestring, "tts") != 0 ||
-        !cJSON_IsString(state) || strcmp(state->valuestring, "stop") != 0) return;
+    if (!cJSON_IsString(type) || strcmp(type->valuestring, "tts") != 0 || !cJSON_IsString(state) ||
+        strcmp(state->valuestring, "stop") != 0)
+        return;
     ChatPlayoutIntake::Stop stop;
     if (!signals || !signals->MatchesSource(source) ||
         protocol_generation != protocol_generation_.load() || chat_protocol_owned_.load() ||
-        !signals->intake.TryCapture(stop.capture)) return;
+        !signals->intake.TryCapture(stop.capture))
+        return;
     const auto& response = stop.capture.response;
-    if (response.source.source_id != source.source_id || response.source.connection_epoch != source.connection_epoch ||
-        response.protocol_generation != protocol_generation || response.connect_generation != connect_generation_.load() ||
-        response.response_generation != speaking_generation_.load()) return;
+    if (response.source.source_id != source.source_id ||
+        response.source.connection_epoch != source.connection_epoch ||
+        response.protocol_generation != protocol_generation ||
+        response.connect_generation != connect_generation_.load() ||
+        response.response_generation != speaking_generation_.load())
+        return;
     stop.received_us = received_us;
     const auto* reason = cJSON_GetObjectItem(root, "reason");
     stop.interrupt = cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0;
@@ -5870,13 +6101,16 @@ void Application::HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSigna
     const auto* mode = cJSON_GetObjectItem(root, "listen_mode");
     stop.continue_listening = cJSON_IsTrue(resume);
     stop.realtime = cJSON_IsString(mode) && strcmp(mode->valuestring, "realtime") == 0;
-    stop.explicit_manual_stop = cJSON_IsFalse(resume) && cJSON_IsString(mode) && strcmp(mode->valuestring, "manual") == 0;
+    stop.explicit_manual_stop =
+        cJSON_IsFalse(resume) && cJSON_IsString(mode) && strcmp(mode->valuestring, "manual") == 0;
     const auto* id = cJSON_GetObjectItem(root, "drainId");
     // A no-audio server keepalive refreshes an already active listener. It has
     // no drain identity and must not invalidate the previous completed reply.
     if (!id && !reason && stop.continue_listening && stop.realtime &&
         GetDeviceState() == kDeviceStateListening && microphone_uplink_authorized_.load() &&
-        !signals->start_audio.reset_token && audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) return;
+        !signals->start_audio.reset_token &&
+        audio_service_.IsCurrentChatPlaybackReset(response.reset_token))
+        return;
     // Seal only receiver-owned audio admission. Keep the application-published
     // intake identity intact so duplicate/conflicting STOPs retain their clock.
     signals->start_audio = {};
@@ -5889,14 +6123,15 @@ void Application::HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSigna
         }
     }
     stop.reset_captured = audio_service_.IsCurrentChatPlaybackReset(response.reset_token) &&
-        audio_service_.TryGetPlaybackResetEpoch(stop.reset_epoch) &&
-        audio_service_.IsCurrentChatPlaybackReset(response.reset_token);
+                          audio_service_.TryGetPlaybackResetEpoch(stop.reset_epoch) &&
+                          audio_service_.IsCurrentChatPlaybackReset(response.reset_token);
     signals->intake.PublishStop(stop);
     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
 }
 
 void Application::RecoverChatPlayout(uint32_t site) {
-    if (chat_playout_recovery_) return;
+    if (chat_playout_recovery_)
+        return;
     ESP_LOGW(TAG, "chat_recovery site=%u", static_cast<unsigned>(site));
     if (!chat_playout_stamp_ && chat_protocol_signals_) {
         chat_protocol_signals_->TrySource(chat_playout_response_.source);
@@ -5913,7 +6148,8 @@ void Application::RecoverChatPlayout(uint32_t site) {
     RetireChatOutbound();
     tts_audio_accepting_.store(false);
     auto generation = speaking_generation_.load();
-    if (generation != UINT32_MAX) speaking_generation_.store(++generation);
+    if (generation != UINT32_MAX)
+        speaking_generation_.store(++generation);
     RequestChatAudioCleanup(generation, true, false, false);
     chat_rearm_owner_ = chat_playout_response_;
     chat_rearm_owner_.response_generation = generation;
@@ -5925,7 +6161,8 @@ void Application::RecoverChatPlayout(uint32_t site) {
 void Application::PollChatPlayout(uint64_t now_us) {
     using Controller = ConversationPlayoutController;
     using Result = ChatOutboundMailbox::Result;
-    if (!chat_playout_stamp_ || chat_playout_recovery_) return;
+    if (!chat_playout_stamp_ || chat_playout_recovery_)
+        return;
     const auto& response = chat_playout_response_;
     if (!chat_protocol_signals_ || !chat_protocol_signals_->intake.Current(chat_playout_stamp_) ||
         !chat_protocol_signals_->MatchesSource(response.source) || chat_protocol_owned_.load() ||
@@ -5937,7 +6174,8 @@ void Application::PollChatPlayout(uint64_t now_us) {
         // obsolete drain work must not reset a successor response or reset token.
         if (response.response_generation == speaking_generation_.load() &&
             audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) {
-            RecoverChatPlayout(201); return;
+            RecoverChatPlayout(201);
+            return;
         }
         chat_playout_controller_.Cancel();
         if (chat_playout_ack_admitted_ && chat_playout_ack_.generation == chat_outbound_generation_)
@@ -5949,133 +6187,180 @@ void Application::PollChatPlayout(uint64_t now_us) {
     }
     // The original clock remains owned even while mailbox/audio/outbound work
     // is Busy. Ready retains this same clock for the later listen-state consumer.
-    if (chat_listen_origin_ == ChatListenOrigin::Drain && chat_playout_begun_ && chat_rearm_phase_ != ChatRearmPhase::Armed &&
+    if (chat_listen_origin_ == ChatListenOrigin::Drain && chat_playout_begun_ &&
+        chat_rearm_phase_ != ChatRearmPhase::Armed &&
         chat_rearm_phase_ != ChatRearmPhase::IdleComplete &&
         now_us - chat_playout_stop_.received_us >= Controller::kTimeoutUs) {
-        RecoverChatPlayout(202); return;
+        RecoverChatPlayout(202);
+        return;
     }
     ChatPlayoutIntake::Stop stop;
     // Local listen/abort ownership must not consume the retained server STOP.
     // A confirmed server START establishes a new Drain origin.
-    const auto read = chat_listen_origin_ == ChatListenOrigin::Drain ?
-        chat_protocol_signals_->intake.TryCollect(chat_playout_stamp_, stop) : ChatPlayoutIntake::Read::None;
-    if (read == ChatPlayoutIntake::Read::Fault) { RecoverChatPlayout(203); return; }
+    const auto read = chat_listen_origin_ == ChatListenOrigin::Drain
+                          ? chat_protocol_signals_->intake.TryCollect(chat_playout_stamp_, stop)
+                          : ChatPlayoutIntake::Read::None;
+    if (read == ChatPlayoutIntake::Read::Fault) {
+        RecoverChatPlayout(203);
+        return;
+    }
     if (read == ChatPlayoutIntake::Read::Ready && (stop.interrupt || stop.conflict)) {
         chat_playout_stop_ = stop;
-        RecoverChatPlayout(204); return;
+        RecoverChatPlayout(204);
+        return;
     }
     if (!chat_playout_begun_ && read == ChatPlayoutIntake::Read::Ready) {
         chat_playout_stop_ = stop;
         // Observe time after a newer STOP without moving its original deadline.
-        if (now_us < stop.received_us) now_us = static_cast<uint64_t>(esp_timer_get_time());
-        if (now_us - stop.received_us >= Controller::kTimeoutUs) { RecoverChatPlayout(205); return; }
-        const Controller::Ownership owner{response.source.connection_epoch,response.response_generation,stop.reset_epoch,false};
-        const Controller::Token token{owner.connection_epoch,owner.response_generation,owner.reset_epoch,
-                                     {stop.drain_id.data(),stop.drain_id_size}};
+        if (now_us < stop.received_us)
+            now_us = static_cast<uint64_t>(esp_timer_get_time());
+        if (now_us - stop.received_us >= Controller::kTimeoutUs) {
+            RecoverChatPlayout(205);
+            return;
+        }
+        const Controller::Ownership owner{response.source.connection_epoch,
+                                          response.response_generation, stop.reset_epoch, false};
+        const Controller::Token token{owner.connection_epoch,
+                                      owner.response_generation,
+                                      owner.reset_epoch,
+                                      {stop.drain_id.data(), stop.drain_id_size}};
         if (!stop.valid || !stop.reset_captured || stop.interrupt ||
-            !chat_playout_controller_.Begin(stop.received_us,token,owner).accepted) {
-            RecoverChatPlayout(206); return;
+            !chat_playout_controller_.Begin(stop.received_us, token, owner).accepted) {
+            RecoverChatPlayout(206);
+            return;
         }
         chat_playout_begun_ = true;
     }
-    if (chat_outbound_fault_ || chat_playback_fault_ || chat_protocol_infrastructure_fault_ || (chat_protocol_fault_ &&
-        chat_protocol_fault_generation_ == response.protocol_generation &&
-        chat_protocol_fault_era_ == chat_protocol_signals_->Capture())) {
-        RecoverChatPlayout(207); return;
+    if (chat_outbound_fault_ || chat_playback_fault_ || chat_protocol_infrastructure_fault_ ||
+        (chat_protocol_fault_ && chat_protocol_fault_generation_ == response.protocol_generation &&
+         chat_protocol_fault_era_ == chat_protocol_signals_->Capture())) {
+        RecoverChatPlayout(207);
+        return;
     }
     if (!chat_playout_unhandled_completion_) {
         ChatOutboundMailbox::Completion completion;
         if (PollChatOutbound(&completion)) {
-            if (chat_start_obsolete_generation_ && completion.job.generation == chat_start_obsolete_generation_) {
+            if (chat_start_obsolete_generation_ &&
+                completion.job.generation == chat_start_obsolete_generation_) {
                 // Retain obsolete identity until the worker's final retirement;
                 // its completion can never advance the successor controller.
             } else if (completion.job.kind == ChatOutboundMailbox::Kind::ListenStart &&
-                chat_rearm_admitted_ && completion.job.request_id == chat_rearm_job_.request_id &&
-                completion.job.generation == chat_rearm_job_.generation &&
-                completion.job.protocol_generation == chat_rearm_job_.protocol_generation &&
-                completion.job.connection_epoch == chat_rearm_job_.connection_epoch) {
+                       chat_rearm_admitted_ &&
+                       completion.job.request_id == chat_rearm_job_.request_id &&
+                       completion.job.generation == chat_rearm_job_.generation &&
+                       completion.job.protocol_generation == chat_rearm_job_.protocol_generation &&
+                       completion.job.connection_epoch == chat_rearm_job_.connection_epoch) {
                 chat_rearm_delivery_ = completion;
-                if (!IsChatOutboundCompletionCurrent(completion) || completion.result != Result::Sent) {
-                    RecoverChatPlayout(208); return;
+                if (!IsChatOutboundCompletionCurrent(completion) ||
+                    completion.result != Result::Sent) {
+                    RecoverChatPlayout(208);
+                    return;
                 }
                 xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
             } else if (completion.job.kind != ChatOutboundMailbox::Kind::DrainAck ||
-                !chat_playout_ack_admitted_ || completion.job.request_id != chat_playout_ack_.request_id) {
+                       !chat_playout_ack_admitted_ ||
+                       completion.job.request_id != chat_playout_ack_.request_id) {
                 chat_playout_unhandled_completion_ = completion;
-                RecoverChatPlayout(209); return;
+                RecoverChatPlayout(209);
+                return;
             } else {
-                const auto delivery = !IsChatOutboundCompletionCurrent(completion) ? Controller::Delivery::Stale :
-                    completion.result == Result::Sent ? Controller::Delivery::Sent :
-                    completion.result == Result::Busy ? Controller::Delivery::Busy :
-                    completion.result == Result::Stale ? Controller::Delivery::Stale : Controller::Delivery::Failed;
-                chat_playout_controller_.Deliver(chat_playout_ack_controller_id_,delivery);
+                const auto delivery =
+                    !IsChatOutboundCompletionCurrent(completion) ? Controller::Delivery::Stale
+                    : completion.result == Result::Sent          ? Controller::Delivery::Sent
+                    : completion.result == Result::Busy          ? Controller::Delivery::Busy
+                    : completion.result == Result::Stale         ? Controller::Delivery::Stale
+                                                                 : Controller::Delivery::Failed;
+                chat_playout_controller_.Deliver(chat_playout_ack_controller_id_, delivery);
                 // Delivery retires the physical ACK even if drain observation is Busy.
                 chat_playout_ack_admitted_ = false;
                 chat_playout_ack_controller_id_ = 0;
             }
         }
-        if (chat_outbound_fault_) { RecoverChatPlayout(210); return; }
+        if (chat_outbound_fault_) {
+            RecoverChatPlayout(210);
+            return;
+        }
     }
     if (chat_start_obsolete_reservation_) {
-        if (chat_outbound_reservation_ == chat_start_obsolete_reservation_) return;
+        if (chat_outbound_reservation_ == chat_start_obsolete_reservation_)
+            return;
         chat_start_obsolete_reservation_ = 0;
         chat_start_obsolete_generation_ = 0;
         chat_start_obsolete_ack_ = {};
         if (ActivateChatOutbound(response.source.connection_epoch) != Result::Sent) {
-            RecoverChatPlayout(211); return;
+            RecoverChatPlayout(211);
+            return;
         }
     }
     if (chat_playout_ready_ || chat_rearm_phase_ == ChatRearmPhase::Pending)
         xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
-    if (chat_listen_origin_ != ChatListenOrigin::Drain || !chat_playout_begun_ || chat_playout_ready_ || chat_rearm_phase_ == ChatRearmPhase::Armed ||
-        chat_rearm_phase_ == ChatRearmPhase::IdleComplete) return;
+    if (chat_listen_origin_ != ChatListenOrigin::Drain || !chat_playout_begun_ ||
+        chat_playout_ready_ || chat_rearm_phase_ == ChatRearmPhase::Armed ||
+        chat_rearm_phase_ == ChatRearmPhase::IdleComplete)
+        return;
     PlaybackDrainSnapshot snapshot;
     const bool observed = audio_service_.TryGetPlaybackDrainSnapshot(snapshot);
-    const Controller::Ownership owner{response.source.connection_epoch,response.response_generation,chat_playout_stop_.reset_epoch,false};
-    const auto effect = chat_playout_controller_.Poll(now_us,owner,observed ? &snapshot : nullptr);
+    const Controller::Ownership owner{response.source.connection_epoch,
+                                      response.response_generation, chat_playout_stop_.reset_epoch,
+                                      false};
+    const auto effect =
+        chat_playout_controller_.Poll(now_us, owner, observed ? &snapshot : nullptr);
     if (effect.kind == Controller::EffectKind::Complete) {
         chat_playout_ready_ = true;
         xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
         return;
     }
-    if (effect.kind == Controller::EffectKind::Cancel || effect.kind == Controller::EffectKind::Recover) {
-        RecoverChatPlayout(212); return;
+    if (effect.kind == Controller::EffectKind::Cancel ||
+        effect.kind == Controller::EffectKind::Recover) {
+        RecoverChatPlayout(212);
+        return;
     }
     if (effect.kind == Controller::EffectKind::SubmitAck) {
-        if (chat_playout_stop_.received_us > UINT64_MAX - Controller::kTimeoutUs) { RecoverChatPlayout(213); return; }
+        if (chat_playout_stop_.received_us > UINT64_MAX - Controller::kTimeoutUs) {
+            RecoverChatPlayout(213);
+            return;
+        }
         chat_playout_ack_ = {};
         chat_playout_ack_.kind = ChatOutboundMailbox::Kind::DrainAck;
         chat_playout_ack_.deadline_us = chat_playout_stop_.received_us + Controller::kTimeoutUs;
-        chat_playout_ack_.SetPayload(effect.drain_id.data(),effect.drain_id_size);
+        chat_playout_ack_.SetPayload(effect.drain_id.data(), effect.drain_id_size);
         chat_playout_ack_controller_id_ = effect.request_id;
         chat_playout_ack_admitted_ = false;
     }
     if (chat_playout_ack_controller_id_ && !chat_playout_ack_admitted_) {
         const auto admitted = SubmitChatOutbound(chat_playout_ack_);
-        if (admitted == Result::Sent) chat_playout_ack_admitted_ = true;
-        else if (admitted != Result::Busy) RecoverChatPlayout(214);
+        if (admitted == Result::Sent)
+            chat_playout_ack_admitted_ = true;
+        else if (admitted != Result::Busy)
+            RecoverChatPlayout(214);
     }
 }
 
 bool Application::SelectChatProtocolSource(ConnectionSource source, uint64_t protocol_generation,
-                                          uint32_t connect_generation) {
+                                           uint32_t connect_generation) {
     // Caller proves current successful Open/source identity under lifetime protection. No socket
     // lookup or implicit activation can turn an old callback into a new source.
     if (!chat_protocol_signals_ || chat_protocol_owned_.load(std::memory_order_acquire) ||
         protocol_generation != protocol_generation_.load() ||
-        connect_generation != connect_generation_.load()) return false;
+        connect_generation != connect_generation_.load())
+        return false;
     chat_source_connect_generation_.store(connect_generation);
-    if (!chat_protocol_signals_->EnableForSource(source)) return false;
+    if (!chat_protocol_signals_->EnableForSource(source))
+        return false;
     chat_start_handled_serial_ = chat_start_failed_serial_ = chat_start_effects_serial_ = 0;
     return true;
 }
 
 void Application::PollChatSourceOpen(uint64_t now_us) {
     if (chat_recovery_.kind != ChatRecoveryIntent::Kind::None &&
-        chat_recovery_.lesson_generation != lesson_runtime_generation_.load()) CancelChatRecovery();
-    if (!chat_protocol_signals_) return;
+        chat_recovery_.lesson_generation != lesson_runtime_generation_.load())
+        CancelChatRecovery();
+    if (!chat_protocol_signals_)
+        return;
     ChatProtocolSignals::Opened opened;
-    if (!chat_protocol_signals_->ReadOpened(opened) || opened.source.source_id <= chat_source_open_handled_) return;
+    if (!chat_protocol_signals_->ReadOpened(opened) ||
+        opened.source.source_id <= chat_source_open_handled_)
+        return;
     if (!protocol_ || opened.connect_generation != connect_generation_.load() ||
         IsConnectSuccessPublicationSuppressed()) {
         chat_source_open_handled_ = opened.source.source_id;
@@ -6084,13 +6369,18 @@ void Application::PollChatSourceOpen(uint64_t now_us) {
     if (opened.deadline_us && now_us >= opened.deadline_us) {
         chat_source_open_handled_ = opened.source.source_id;
         ESP_LOGW(TAG, "chat_source_fault reason=open_deadline");
-        chat_protocol_signals_->PublishConnectionFault(opened.source, opened.connect_generation, ChatProtocolSignals::Error);
+        chat_protocol_signals_->PublishConnectionFault(opened.source, opened.connect_generation,
+                                                       ChatProtocolSignals::Error);
         return;
     }
-    if (chat_protocol_owned_.load()) return;
+    if (chat_protocol_owned_.load())
+        return;
     chat_source_open_handled_ = opened.source.source_id;
-    if (protocol_->CurrentConnectionEpoch() != opened.source.connection_epoch) return;
-    if (!SelectChatProtocolSource(opened.source, protocol_generation_.load(), opened.connect_generation)) return;
+    if (protocol_->CurrentConnectionEpoch() != opened.source.connection_epoch)
+        return;
+    if (!SelectChatProtocolSource(opened.source, protocol_generation_.load(),
+                                  opened.connect_generation))
+        return;
     if (chat_recovery_.kind != ChatRecoveryIntent::Kind::None && chat_recovery_.attempted &&
         chat_recovery_.protocol_generation == protocol_generation_.load() &&
         chat_recovery_.connect_generation == opened.connect_generation) {
@@ -6104,9 +6394,11 @@ void Application::PollChatSourceOpen(uint64_t now_us) {
         if (IsDeviceClaimed() && !lesson_runtime_active_.load()) {
             StartHeartbeat();
             DispatchDeviceHeartbeat();
-        } else StopHeartbeat();
+        } else
+            StopHeartbeat();
     } else {
-        const bool lesson_answer_turn = lesson_interactive_listen_pending_.load() || lesson_interactive_listening_active_.load();
+        const bool lesson_answer_turn = lesson_interactive_listen_pending_.load() ||
+                                        lesson_interactive_listening_active_.load();
         if (lesson_runtime_active_.load() && !lesson_answer_turn) {
             online_intent_.store(false);
             StopHeartbeat();
@@ -6120,23 +6412,28 @@ void Application::PollChatSourceOpen(uint64_t now_us) {
     DismissAlert();
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
-    if (IsDeviceClaimed()) StopClaimPoll();
+    if (IsDeviceClaimed())
+        StopClaimPoll();
     if (opened.sample_rate != board.GetAudioCodec()->output_sample_rate())
         ESP_LOGW(TAG, "Server sample rate %d differs from device output rate", opened.sample_rate);
 }
 
 void Application::PollChatProtocolSignals() {
-    if (!chat_protocol_signals_) return;
+    if (!chat_protocol_signals_)
+        return;
     uint32_t flags = 0;
     chat_protocol_signals_->Collect(flags);
     ChatProtocolSignals::Failure failure;
-    const bool current_failure = chat_protocol_signals_->ReadFailure(failure) && failure.connect_generation == connect_generation_.load();
+    const bool current_failure = chat_protocol_signals_->ReadFailure(failure) &&
+                                 failure.connect_generation == connect_generation_.load();
     if (current_failure)
         flags |= failure.flags;
-    if (!flags) return;
+    if (!flags)
+        return;
     if (chat_protocol_signals_->SourceSelected() &&
         (chat_source_connect_generation_.load() != connect_generation_.load() ||
-         chat_protocol_owned_.load(std::memory_order_acquire))) return;
+         chat_protocol_owned_.load(std::memory_order_acquire)))
+        return;
     chat_protocol_fault_ = true;
     chat_protocol_fault_generation_ = protocol_generation_.load();
     chat_protocol_fault_era_ = chat_protocol_signals_->Capture();
@@ -6152,14 +6449,18 @@ void Application::PollChatProtocolSignals() {
 void Application::HandleChatSourceFailure() {
     if (!lesson_runtime_active_.load() && !passive_ws_intent_.load() && online_intent_.load() &&
         RetainChatRecovery(ChatRecoveryIntent::Kind::Background, GetDefaultListeningMode()) &&
-        chat_recovery_.kind == ChatRecoveryIntent::Kind::Background && chat_rearm_phase_ == ChatRearmPhase::Pending &&
-        (chat_listen_origin_ == ChatListenOrigin::Wake || chat_listen_origin_ == ChatListenOrigin::User)) {
-        chat_recovery_.kind = chat_listen_origin_ == ChatListenOrigin::Wake ?
-            ChatRecoveryIntent::Kind::Wake : ChatRecoveryIntent::Kind::Listen;
+        chat_recovery_.kind == ChatRecoveryIntent::Kind::Background &&
+        chat_rearm_phase_ == ChatRearmPhase::Pending &&
+        (chat_listen_origin_ == ChatListenOrigin::Wake ||
+         chat_listen_origin_ == ChatListenOrigin::User)) {
+        chat_recovery_.kind = chat_listen_origin_ == ChatListenOrigin::Wake
+                                  ? ChatRecoveryIntent::Kind::Wake
+                                  : ChatRecoveryIntent::Kind::Listen;
         chat_recovery_.received_us = chat_listen_received_us_;
         chat_recovery_.deadline_us = chat_rearm_job_.deadline_us;
         chat_recovery_.mode = chat_rearm_mode_;
-        if (const auto* wake = chat_control_intents_.Front(); wake && wake->job.kind == ChatOutboundMailbox::Kind::Wake) {
+        if (const auto* wake = chat_control_intents_.Front();
+            wake && wake->job.kind == ChatOutboundMailbox::Kind::Wake) {
             chat_recovery_.read_wake = wake->resolve_wake;
             chat_recovery_.wake_text = wake->job.payload;
             chat_recovery_.wake_size = wake->job.payload_size;
@@ -6172,30 +6473,38 @@ void Application::HandleChatSourceFailure() {
     speaking_arm_dispatch_.Cancel();
     RetireChatOutbound();
     auto generation = speaking_generation_.load();
-    if (generation != UINT32_MAX) speaking_generation_.store(++generation);
+    if (generation != UINT32_MAX)
+        speaking_generation_.store(++generation);
     RequestChatAudioCleanup(generation, true, false, false);
     RequestLessonStorageAbandonment();
     backend_offline_.store(true);
     auto& board = Board::GetInstance();
     board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
     const auto state = GetDeviceState();
-    if (state == kDeviceStateWifiConfiguring || state == kDeviceStateAudioTesting) return;
-    if (connect_in_flight_.load()) return;
+    if (state == kDeviceStateWifiConfiguring || state == kDeviceStateAudioTesting)
+        return;
+    if (connect_in_flight_.load())
+        return;
     deferred_close_generation_ = 0;
     protocol_work_lifetime_.Request(ProtocolWorkLifetime::Action::kClose);
     PollChatProtocolCleanup();
-    if (!lesson_runtime_active_.load() || !passive_ws_intent_.load()) SetDeviceState(kDeviceStateIdle);
+    if (!lesson_runtime_active_.load() || !passive_ws_intent_.load())
+        SetDeviceState(kDeviceStateIdle);
     if (ShouldKeepManagementHeartbeat()) {
         StartHeartbeat();
         DispatchDeviceHeartbeat();
-    } else StopHeartbeat();
+    } else
+        StopHeartbeat();
     auto* display = board.GetDisplay();
-    if (!lesson_runtime_active_.load()) display->SetChatMessage("system", "");
+    if (!lesson_runtime_active_.load())
+        display->SetChatMessage("system", "");
     if (passive_ws_intent_.load()) {
-        if (!reconnect_passive_.load()) SchedulePassiveLessonReconnect();
+        if (!reconnect_passive_.load())
+            SchedulePassiveLessonReconnect();
         return;
     }
-    if (!online_intent_.load()) return;
+    if (!online_intent_.load())
+        return;
     if (lesson_runtime_active_.load()) {
         online_intent_.store(false);
         lesson_interactive_listen_generation_.fetch_add(1);
@@ -6212,16 +6521,22 @@ void Application::HandleChatSourceFailure() {
 
 ChatOutboundMailbox::Result Application::ActivateChatOutbound(uint32_t connection_epoch) {
     using Result = ChatOutboundMailbox::Result;
-    if (!chat_outbound_task_ || !protocol_ || !connection_epoch ||
-        !protocol_generation_.load()) return Result::Failed;
+    if (!chat_outbound_task_ || !protocol_ || !connection_epoch || !protocol_generation_.load())
+        return Result::Failed;
     if (chat_outbound_reservation_ || protocol_work_lifetime_.Pending() ||
-        protocol_work_lifetime_.Busy()) return Result::Busy;
+        protocol_work_lifetime_.Busy())
+        return Result::Busy;
     const auto reservation = protocol_work_lifetime_.Reserve();
-    if (!reservation) return Result::Busy;
+    if (!reservation)
+        return Result::Busy;
     const auto generation = chat_outbound_worker_.AdvanceGeneration();
     const auto protocol_generation = protocol_generation_.load();
     const ChatOutboundWorker::Activation activation{
-        protocol_.get(), protocol_generation, connection_epoch, generation, this,
+        protocol_.get(),
+        protocol_generation,
+        connection_epoch,
+        generation,
+        this,
         [](void* context) {
             return static_cast<Application*>(context)->audio_service_.PopPacketFromSendQueue();
         },
@@ -6233,7 +6548,8 @@ ChatOutboundMailbox::Result Application::ActivateChatOutbound(uint32_t connectio
             xEventGroupSetBits(app->event_group_, MAIN_EVENT_CHAT_OUTBOUND);
         },
         [](void* context, ConnectionSource source, uint64_t protocol, uint32_t connect) {
-            return static_cast<Application*>(context)->IsChatConnectionCurrent(source, protocol, connect);
+            return static_cast<Application*>(context)->IsChatConnectionCurrent(source, protocol,
+                                                                               connect);
         }};
     if (!chat_outbound_worker_.Publish(activation)) {
         protocol_work_lifetime_.Release(reservation);
@@ -6251,9 +6567,11 @@ ChatOutboundMailbox::Result Application::ActivateChatOutbound(uint32_t connectio
 
 ChatOutboundMailbox::Result Application::SubmitChatOutbound(ChatOutboundMailbox::Job& job) {
     using Result = ChatOutboundMailbox::Result;
-    if (!chat_outbound_task_ || chat_outbound_fault_) return Result::Failed;
+    if (!chat_outbound_task_ || chat_outbound_fault_)
+        return Result::Failed;
     if (!chat_outbound_reservation_ || !chat_outbound_generation_ ||
-        protocol_work_lifetime_.Pending()) return Result::Stale;
+        protocol_work_lifetime_.Pending())
+        return Result::Stale;
     if (job.request_id == 0) {
         if (chat_outbound_request_id_ == UINT64_MAX) {
             chat_outbound_fault_ = true;
@@ -6265,7 +6583,8 @@ ChatOutboundMailbox::Result Application::SubmitChatOutbound(ChatOutboundMailbox:
         job.protocol_generation = chat_outbound_protocol_generation_;
         job.connection_epoch = chat_outbound_connection_epoch_;
         if (!job.deadline_us) {
-            if (job.kind == ChatOutboundMailbox::Kind::DrainAck) return Result::Failed;
+            if (job.kind == ChatOutboundMailbox::Kind::DrainAck)
+                return Result::Failed;
             job.deadline_us = static_cast<uint64_t>(esp_timer_get_time()) + 10000000ULL;
         }
     }
@@ -6273,16 +6592,20 @@ ChatOutboundMailbox::Result Application::SubmitChatOutbound(ChatOutboundMailbox:
         job.request_id <= chat_outbound_last_admitted_id_ ||
         job.request_id > chat_outbound_request_id_ ||
         job.protocol_generation != chat_outbound_protocol_generation_ ||
-        job.connection_epoch != chat_outbound_connection_epoch_) return Result::Stale;
-    if (!job.deadline_us || static_cast<uint64_t>(esp_timer_get_time()) >= job.deadline_us) return Result::Failed;
-    if (!chat_outbound_worker_.Submit(job)) return Result::Busy;
+        job.connection_epoch != chat_outbound_connection_epoch_)
+        return Result::Stale;
+    if (!job.deadline_us || static_cast<uint64_t>(esp_timer_get_time()) >= job.deadline_us)
+        return Result::Failed;
+    if (!chat_outbound_worker_.Submit(job))
+        return Result::Busy;
     chat_outbound_last_admitted_id_ = job.request_id;
     NotifyChatOutbound();
     return Result::Sent;
 }
 
 void Application::RetireChatOutbound() {
-    if (!chat_outbound_reservation_ || !chat_outbound_generation_) return;
+    if (!chat_outbound_reservation_ || !chat_outbound_generation_)
+        return;
     chat_outbound_worker_.AdvanceGeneration();
     chat_outbound_generation_ = 0;
     NotifyChatOutbound();
@@ -6294,13 +6617,17 @@ bool Application::PollChatOutbound(ChatOutboundMailbox::Completion* completion) 
         chat_outbound_fault_ = true;
         RetireChatOutbound();
     }
-    if (protocol_work_lifetime_.Pending()) RetireChatOutbound();
+    if (protocol_work_lifetime_.Pending())
+        RetireChatOutbound();
     ChatOutboundMailbox::Completion discarded;
-    if (completion || !chat_outbound_generation_ || chat_control_intents_.Size() || chat_connection_messages_.Size()) {
+    if (completion || !chat_outbound_generation_ || chat_control_intents_.Size() ||
+        chat_connection_messages_.Size()) {
         collected = chat_outbound_worker_.Collect(completion ? *completion : discarded);
-        if (collected) NotifyChatOutbound();
+        if (collected)
+            NotifyChatOutbound();
         if (collected && (chat_connection_messages_.Deliver(completion ? *completion : discarded) ||
-            DeliverChatControl(completion ? *completion : discarded))) collected = false;
+                          DeliverChatControl(completion ? *completion : discarded)))
+            collected = false;
     }
     if (chat_outbound_reservation_ && chat_outbound_worker_.TakeRetired()) {
         chat_connection_messages_.ObserveRetirement(chat_outbound_reservation_);
@@ -6311,29 +6638,35 @@ bool Application::PollChatOutbound(ChatOutboundMailbox::Completion* completion) 
     return collected;
 }
 
-bool Application::IsChatOutboundCompletionCurrent(const ChatOutboundMailbox::Completion& completion) const {
-    return !completion.stale && chat_outbound_generation_ != 0 &&
-        protocol_ && protocol_->CurrentConnectionEpoch() == completion.job.connection_epoch &&
-        chat_outbound_worker_.IsCurrent(completion.job.generation) &&
-        completion.job.protocol_generation == protocol_generation_.load() &&
-        completion.job.protocol_generation == chat_outbound_protocol_generation_ &&
-        completion.job.connection_epoch == chat_outbound_connection_epoch_ &&
-        !protocol_work_lifetime_.Pending();
+bool Application::IsChatOutboundCompletionCurrent(
+    const ChatOutboundMailbox::Completion& completion) const {
+    return !completion.stale && chat_outbound_generation_ != 0 && protocol_ &&
+           protocol_->CurrentConnectionEpoch() == completion.job.connection_epoch &&
+           chat_outbound_worker_.IsCurrent(completion.job.generation) &&
+           completion.job.protocol_generation == protocol_generation_.load() &&
+           completion.job.protocol_generation == chat_outbound_protocol_generation_ &&
+           completion.job.connection_epoch == chat_outbound_connection_epoch_ &&
+           !protocol_work_lifetime_.Pending();
 }
 
 void Application::NotifyChatOutbound() {
-    if (chat_outbound_task_) xTaskNotifyGive(chat_outbound_task_);
+    if (chat_outbound_task_)
+        xTaskNotifyGive(chat_outbound_task_);
 }
 
 void Application::PollChatOutboundEvents(uint32_t bits) {
-    if (bits & MAIN_EVENT_CLOCK_TICK) ++clock_ticks_;
-    if (bits & MAIN_EVENT_CLOCK_TICK) McpServer::GetInstance().PollLessonAssetSyncCompletion();
+    if (bits & MAIN_EVENT_CLOCK_TICK)
+        ++clock_ticks_;
+    if (bits & MAIN_EVENT_CLOCK_TICK)
+        McpServer::GetInstance().PollLessonAssetSyncCompletion();
     if (bits & (MAIN_EVENT_CHAT_OUTBOUND | MAIN_EVENT_CLOCK_TICK)) {
         PollChatSourceOpen(static_cast<uint64_t>(esp_timer_get_time()));
         PollChatProtocolSignals();
         PollChatStart(static_cast<uint64_t>(esp_timer_get_time()));
-        if (chat_playout_stamp_ && !chat_playout_recovery_) PollChatPlayout(static_cast<uint64_t>(esp_timer_get_time()));
-        else PollChatOutbound();
+        if (chat_playout_stamp_ && !chat_playout_recovery_)
+            PollChatPlayout(static_cast<uint64_t>(esp_timer_get_time()));
+        else
+            PollChatOutbound();
         PollChatControls(static_cast<uint64_t>(esp_timer_get_time()));
         PollChatConnectionMessages(static_cast<uint64_t>(esp_timer_get_time()));
         PollChatUnpair(static_cast<uint64_t>(esp_timer_get_time()));
@@ -6342,7 +6675,8 @@ void Application::PollChatOutboundEvents(uint32_t bits) {
             PollChatAudioCleanup();
             PollChatLessonCapture(static_cast<uint64_t>(esp_timer_get_time()));
             PollChatProtocolCleanup();
-            if (bits & MAIN_EVENT_CLOCK_TICK) RetryChatAudioCleanup();
+            if (bits & MAIN_EVENT_CLOCK_TICK)
+                RetryChatAudioCleanup();
             PollChatReboot();
             PollChatRecovery(static_cast<uint64_t>(esp_timer_get_time()));
         }
@@ -6358,8 +6692,8 @@ void Application::ChatOutboundTask(void* context) {
 }
 
 void Application::StartProtocolWorker() {
-    auto* ctx = new ConnectContext{this, GetDefaultListeningMode(),
-        connect_generation_.load(), std::string()};
+    auto* ctx = new ConnectContext{this, GetDefaultListeningMode(), connect_generation_.load(),
+                                   std::string()};
     ctx->start_protocol = true;
     if (!StartOpenChannelWorker(ctx)) {
         delete ctx;
@@ -6398,72 +6732,80 @@ void Application::OpenChannelTask(void* arg) {
         delete ctx;
         self->protocol_callback_connect_generation_.store(gen);
 
-    if (self->protocol_work_lifetime_.Pending() ||
-        (!start_protocol && gen != self->connect_generation_.load())) {
-        self->Schedule([self, reservation, start_protocol, worker_protocol_generation, gen]() {
-            if (!self->protocol_work_lifetime_.Release(reservation)) return;
-            if (!start_protocol) self->CompleteChatRecoveryOpen(gen, false);
-            if (start_protocol && worker_protocol_generation == self->protocol_generation_.load()) {
-                // A close may cancel queued audio work, but control startup is
-                // still owed unless the drain resets/replaces this protocol.
-                self->protocol_start_pending_generation_ = worker_protocol_generation;
-            }
-            self->CompletePendingProtocolWork();
-        });
-        continue;
-    }
+        if (self->protocol_work_lifetime_.Pending() ||
+            (!start_protocol && gen != self->connect_generation_.load())) {
+            self->Schedule([self, reservation, start_protocol, worker_protocol_generation, gen]() {
+                if (!self->protocol_work_lifetime_.Release(reservation))
+                    return;
+                if (!start_protocol)
+                    self->CompleteChatRecoveryOpen(gen, false);
+                if (start_protocol &&
+                    worker_protocol_generation == self->protocol_generation_.load()) {
+                    // A close may cancel queued audio work, but control startup is
+                    // still owed unless the drain resets/replaces this protocol.
+                    self->protocol_start_pending_generation_ = worker_protocol_generation;
+                }
+                self->CompletePendingProtocolWork();
+            });
+            continue;
+        }
 
-    if (start_protocol) {
-        worker_protocol->Start();
-        self->Schedule([self, reservation, worker_protocol_generation]() {
-            if (!self->protocol_work_lifetime_.Release(reservation)) return;
-            if (self->CompletePendingProtocolWork()) return;
-            if (worker_protocol_generation == self->protocol_generation_.load()) {
-                self->CompleteProtocolActivation();
-            }
-        });
-        continue;
-    }
+        if (start_protocol) {
+            worker_protocol->Start();
+            self->Schedule([self, reservation, worker_protocol_generation]() {
+                if (!self->protocol_work_lifetime_.Release(reservation))
+                    return;
+                if (self->CompletePendingProtocolWork())
+                    return;
+                if (worker_protocol_generation == self->protocol_generation_.load()) {
+                    self->CompleteProtocolActivation();
+                }
+            });
+            continue;
+        }
 
-    // The ONLY blocking call, now off the app task.
-    bool ok = false;
-    int max_attempts = wake_word_invoke ? kWakeWordAudioChannelOpenMaxAttempts : 1;
-    for (int attempt = 1;
-         !self->protocol_work_lifetime_.Pending() &&
-         gen == self->connect_generation_.load() &&
-         !worker_protocol->IsAudioChannelOpened() && attempt <= max_attempts;
-         ++attempt) {
-        worker_protocol->SetIncomingJsonTransportEpoch(
-            self->lesson_transport_epoch_gate_.PublishedEpoch());
-        ok = worker_protocol->OpenAudioChannel();
-        if (ok) {
-            break;
+        // The ONLY blocking call, now off the app task.
+        bool ok = false;
+        int max_attempts = wake_word_invoke ? kWakeWordAudioChannelOpenMaxAttempts : 1;
+        for (int attempt = 1;
+             !self->protocol_work_lifetime_.Pending() && gen == self->connect_generation_.load() &&
+             !worker_protocol->IsAudioChannelOpened() && attempt <= max_attempts;
+             ++attempt) {
+            worker_protocol->SetIncomingJsonTransportEpoch(
+                self->lesson_transport_epoch_gate_.PublishedEpoch());
+            ok = worker_protocol->OpenAudioChannel();
+            if (ok) {
+                break;
+            }
+            if (wake_word_invoke) {
+                ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d", attempt,
+                         kWakeWordAudioChannelOpenMaxAttempts);
+            }
+            if (wake_word_invoke && attempt < max_attempts) {
+                vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
+            }
         }
-        if (wake_word_invoke) {
-            ESP_LOGW(TAG, "wake_audio_channel_open_failed attempt=%d max=%d", attempt,
-                     kWakeWordAudioChannelOpenMaxAttempts);
+        if (worker_protocol->IsAudioChannelOpened()) {
+            ok = true;
         }
-        if (wake_word_invoke && attempt < max_attempts) {
-            vTaskDelay(pdMS_TO_TICKS(kWakeWordAudioChannelRetryDelayMs));
-        }
-    }
-    if (worker_protocol->IsAudioChannelOpened()) {
-        ok = true;
-    }
-    self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect,
-                    reservation, worker_protocol_generation]() {
-            if (!self->protocol_work_lifetime_.Release(reservation)) return;
+        self->Schedule([self, ok, mode, gen, wake_word, wake_word_invoke, passive_preconnect,
+                        reservation, worker_protocol_generation]() {
+            if (!self->protocol_work_lifetime_.Release(reservation))
+                return;
             if (gen == self->connect_generation_.load()) {
                 self->connect_in_flight_.store(false);
                 self->CancelConnectWatchdog();
             }
-            if (self->protocol_work_lifetime_.Pending()) self->CompleteChatRecoveryOpen(gen, false);
-            if (self->CompletePendingProtocolWork()) return;
+            if (self->protocol_work_lifetime_.Pending())
+                self->CompleteChatRecoveryOpen(gen, false);
+            if (self->CompletePendingProtocolWork())
+                return;
             if (gen != self->connect_generation_.load() ||
                 worker_protocol_generation != self->protocol_generation_.load()) {
                 return;  // superseded by a newer connect or the watchdog
             }
-            if (self->CompleteChatRecoveryOpen(gen, ok)) return;
+            if (self->CompleteChatRecoveryOpen(gen, ok))
+                return;
             if (!passive_preconnect) {
                 const DeviceState state = self->GetDeviceState();
                 if (wake_word_invoke) {
@@ -6623,8 +6965,8 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
     if (generation != connect_generation_.load()) {
         return;  // connect already resolved
     }
-    const bool recovery_watchdog = chat_recovery_.opening &&
-        chat_recovery_.connect_generation == generation &&
+    const bool recovery_watchdog =
+        chat_recovery_.opening && chat_recovery_.connect_generation == generation &&
         chat_recovery_.protocol_generation == protocol_generation_.load() &&
         chat_recovery_.lesson_generation == lesson_runtime_generation_.load();
     // Invalidate the still-running worker's eventual result, recover to Idle and
@@ -6640,9 +6982,8 @@ void Application::HandleConnectWatchdog(uint32_t generation) {
     }
     if (passive_ws_intent_.load()) {
         deferred_wake_word_.clear();
-        const bool lesson_answer_turn =
-            lesson_interactive_listen_pending_.load() ||
-            lesson_interactive_listening_active_.load();
+        const bool lesson_answer_turn = lesson_interactive_listen_pending_.load() ||
+                                        lesson_interactive_listening_active_.load();
         if (lesson_runtime_active_.load() && lesson_answer_turn) {
             ESP_LOGW(TAG, "lesson passive connect watchdog timeout -> wait");
             backend_offline_.store(true);
@@ -6735,8 +7076,8 @@ void Application::ScheduleReconnect(ListeningMode mode, bool resume_listening) {
         uint32_t jitter_ms = esp_random() % (base_ms / 2 + 1);
         delay_ms = base_ms + jitter_ms;
         reconnect_attempt_++;
-        ESP_LOGW(TAG, "reconnect_scheduled attempt=%d phase=fast delay_ms=%lu",
-                 reconnect_attempt_, (unsigned long)delay_ms);
+        ESP_LOGW(TAG, "reconnect_scheduled attempt=%d phase=fast delay_ms=%lu", reconnect_attempt_,
+                 (unsigned long)delay_ms);
     } else {
         // Long-horizon recovery: keep retrying slowly so a recovered endpoint
         // reconnects without another wake word or button press.
@@ -6802,10 +7143,12 @@ void Application::SchedulePassiveLessonReconnect() {
 }
 
 void Application::HandleReconnectTick() {
-    if (chat_cleanup_enabled_ && chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
-        !reconnect_passive_.load() && !lesson_runtime_active_.load()) {
+    if (chat_cleanup_enabled_ && chat_protocol_signals_ &&
+        chat_protocol_signals_->SourceSelected() && !reconnect_passive_.load() &&
+        !lesson_runtime_active_.load()) {
         if (chat_recovery_.kind == ChatRecoveryIntent::Kind::None ||
-            static_cast<uint64_t>(esp_timer_get_time()) < chat_recovery_.retry_at_us) return;
+            static_cast<uint64_t>(esp_timer_get_time()) < chat_recovery_.retry_at_us)
+            return;
         chat_recovery_.ready = true;
         PollChatRecovery(static_cast<uint64_t>(esp_timer_get_time()));
         return;
@@ -6842,12 +7185,10 @@ void Application::HandleReconnectTick() {
         }
         if (state != kDeviceStateIdle) {
             const bool lesson_answer_turn =
-                lesson_runtime_active_.load() &&
-                (lesson_interactive_listen_pending_.load() ||
-                 lesson_interactive_listening_active_.load());
+                lesson_runtime_active_.load() && (lesson_interactive_listen_pending_.load() ||
+                                                  lesson_interactive_listening_active_.load());
             if (lesson_answer_turn &&
-                (state == kDeviceStateSpeaking ||
-                 state == kDeviceStateListening ||
+                (state == kDeviceStateSpeaking || state == kDeviceStateListening ||
                  state == kDeviceStateConnecting)) {
                 ESP_LOGI(TAG, "passive_lesson_reconnect_tick answer_turn state=%d",
                          static_cast<int>(state));
@@ -6883,7 +7224,9 @@ void Application::HandleReconnectTick() {
         return;
     }
     if (connect_in_flight_.load() || protocol_work_lifetime_.Busy()) {
-        ScheduleReconnect(reconnect_mode_, reconnect_resume_listening_.load());  // previous worker still finishing; retry later
+        ScheduleReconnect(
+            reconnect_mode_,
+            reconnect_resume_listening_.load());  // previous worker still finishing; retry later
         return;
     }
     ESP_LOGI(TAG, "reconnect_tick attempt=%d", reconnect_attempt_);
@@ -6892,19 +7235,26 @@ void Application::HandleReconnectTick() {
 }
 
 void Application::HandleStartListeningEvent() {
-    if (IsWifiConfigEntryPending()) return;
-    if (chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() && !lesson_runtime_active_.load() &&
-        (chat_protocol_owned_.load() || chat_source_connect_generation_.load() != connect_generation_.load())) {
+    if (IsWifiConfigEntryPending())
+        return;
+    if (chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
+        !lesson_runtime_active_.load() &&
+        (chat_protocol_owned_.load() ||
+         chat_source_connect_generation_.load() != connect_generation_.load())) {
         BeginChatListen(kListeningModeManualStop, ChatListenOrigin::User);
         return;
     }
     if (IsSelectedNormalChatRoute()) {
         if (GetDeviceState() == kDeviceStateSpeaking &&
-            !(chat_rearm_phase_ == ChatRearmPhase::Pending && chat_rearm_mode_ == kListeningModeManualStop)) {
+            !(chat_rearm_phase_ == ChatRearmPhase::Pending &&
+              chat_rearm_mode_ == kListeningModeManualStop)) {
             ConnectionSource source;
             if (!protocol_ || lesson_asset_sync_quiet_.load() ||
-                !chat_protocol_signals_->TrySource(source) || protocol_->CurrentConnectionEpoch() != source.connection_epoch) return;
-            if (!HandleChatAbort(kAbortReasonNone, false) || chat_playout_recovery_) return;
+                !chat_protocol_signals_->TrySource(source) ||
+                protocol_->CurrentConnectionEpoch() != source.connection_epoch)
+                return;
+            if (!HandleChatAbort(kAbortReasonNone, false) || chat_playout_recovery_)
+                return;
         }
         BeginChatListen(kListeningModeManualStop, ChatListenOrigin::User);
         return;
@@ -6916,8 +7266,7 @@ void Application::HandleStartListeningEvent() {
         return;
     }
     const bool lesson_answer_turn =
-        lesson_interactive_listen_pending_.load() ||
-        lesson_interactive_listening_active_.load();
+        lesson_interactive_listen_pending_.load() || lesson_interactive_listening_active_.load();
     if (lesson_runtime_active_.load() && !lesson_answer_turn) {
         ESP_LOGI(TAG, "lesson start listening ignored state=%d", static_cast<int>(state));
         return;
@@ -6945,9 +7294,7 @@ void Application::HandleStartListeningEvent() {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this]() {
-                ContinueOpenAudioChannel(kListeningModeManualStop);
-            });
+            Schedule([this]() { ContinueOpenAudioChannel(kListeningModeManualStop); });
             return;
         }
         SetListeningMode(kListeningModeManualStop);
@@ -6967,7 +7314,8 @@ void Application::HandleStartListeningEvent() {
     } else if (state == kDeviceStateListening) {
         ESP_LOGI(TAG, "lesson/manual listening rearm");
         listening_mode_ = kListeningModeManualStop;
-        if (lesson_interactive_listening_active_.load() && !lesson_interactive_listen_pending_.load()) {
+        if (lesson_interactive_listening_active_.load() &&
+            !lesson_interactive_listen_pending_.load()) {
             ESP_LOGI(TAG, "lesson listening already active; duplicate start ignored");
             return;
         }
@@ -6987,7 +7335,8 @@ void Application::HandleStartListeningEvent() {
             last_listening_activity_ms_.store(now_ms);
         }
         protocol_->SendStartListening(kListeningModeManualStop);
-        if (!RequestChatLessonCapture()) audio_service_.EnableVoiceProcessing(true);
+        if (!RequestChatLessonCapture())
+            audio_service_.EnableVoiceProcessing(true);
     }
 }
 
@@ -6997,19 +7346,26 @@ bool Application::HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext c
     const auto* state = cJSON_GetObjectItem(root, "state");
     const auto* reason = cJSON_GetObjectItem(root, "reason");
     const bool interrupt = cJSON_IsString(state) && strcmp(state->valuestring, "stop") == 0 &&
-        cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0;
-    if (!id && lesson_playout_id_.empty()) return false;
-    if (!id && !interrupt) return true;
-    const std::string playout_id = id && cJSON_IsString(id) ? id->valuestring :
-        !id ? lesson_playout_id_ : std::string{};
+                           cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0;
+    if (!id && lesson_playout_id_.empty())
+        return false;
+    if (!id && !interrupt)
+        return true;
+    const std::string playout_id = id && cJSON_IsString(id) ? id->valuestring
+                                   : !id                    ? lesson_playout_id_
+                                                            : std::string{};
     if (!IsChatLessonRequestCurrent(context) || !lesson_runtime_active_.load() ||
-        lesson_terminal_audio_generation_.load() != 0 ||
-        !LessonAudioPlayout::ValidId(playout_id)) return true;
-    if (!cJSON_IsString(state)) return true;
+        lesson_terminal_audio_generation_.load() != 0 || !LessonAudioPlayout::ValidId(playout_id))
+        return true;
+    if (!cJSON_IsString(state))
+        return true;
     if (strcmp(state->valuestring, "start") == 0) {
-        lesson_audio_playout_.SetScope(protocol_generation_.load(), lesson_transport_epoch_gate_.PublishedEpoch());
-        if (lesson_audio_playout_.Seen(playout_id)) return true;
-        if (auto token = std::atomic_load(&lesson_playout_authorization_)) token->store(false);
+        lesson_audio_playout_.SetScope(protocol_generation_.load(),
+                                       lesson_transport_epoch_gate_.PublishedEpoch());
+        if (lesson_audio_playout_.Seen(playout_id))
+            return true;
+        if (auto token = std::atomic_load(&lesson_playout_authorization_))
+            token->store(false);
         tts_audio_accepting_.store(false);
         lesson_audio_playout_.Cancel();
         lesson_playout_id_.clear();
@@ -7021,7 +7377,8 @@ bool Application::HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext c
         audio_service_.ResetDecoder();
         uint64_t reset_epoch = 0;
         if (!audio_service_.TryGetPlaybackResetEpoch(reset_epoch) ||
-            !lesson_audio_playout_.Begin(speaking_generation_.load(), playout_id, reset_epoch)) return true;
+            !lesson_audio_playout_.Begin(speaking_generation_.load(), playout_id, reset_epoch))
+            return true;
         lesson_playout_context_ = context;
         lesson_playout_protocol_generation_ = protocol_generation_.load();
         lesson_playout_epoch_ = lesson_transport_epoch_gate_.PublishedEpoch();
@@ -7033,9 +7390,11 @@ bool Application::HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext c
         lesson_playout_drained_at_ms_ = 0;
         lesson_playout_start_sent_ = false;
         lesson_playout_stop_sent_ = false;
-        std::atomic_store(&lesson_playout_authorization_, std::make_shared<std::atomic<bool>>(true));
+        std::atomic_store(&lesson_playout_authorization_,
+                          std::make_shared<std::atomic<bool>>(true));
         aborted_ = false;
-        if (GetDeviceState() == kDeviceStateListening && listening_mode_ != kListeningModeRealtime) {
+        if (GetDeviceState() == kDeviceStateListening &&
+            listening_mode_ != kListeningModeRealtime) {
             audio_service_.EnableVoiceProcessing(false);
             listening_started_ms_.store(0);
             last_listening_activity_ms_.store(0);
@@ -7049,7 +7408,8 @@ bool Application::HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext c
     } else if (strcmp(state->valuestring, "stop") == 0 &&
                lesson_audio_playout_.Current(playout_id, speaking_generation_.load())) {
         if (cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0) {
-            if (auto token = std::atomic_load(&lesson_playout_authorization_)) token->store(false);
+            if (auto token = std::atomic_load(&lesson_playout_authorization_))
+                token->store(false);
             lesson_audio_playout_.Cancel();
             lesson_playout_id_.clear();
             lesson_playout_pending_.store(false);
@@ -7058,7 +7418,8 @@ bool Application::HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext c
             audio_service_.ResetDecoder();
             speaking_arm_dispatch_.Cancel();
             lesson_idle_repaint_suppressed_.store(true);
-            if (GetDeviceState() == kDeviceStateSpeaking) SetDeviceState(kDeviceStateIdle);
+            if (GetDeviceState() == kDeviceStateSpeaking)
+                SetDeviceState(kDeviceStateIdle);
         } else if (lesson_playout_stop_ms_ == 0 && lesson_audio_playout_.Stop(playout_id)) {
             const auto* drain = cJSON_GetObjectItem(root, "drainId");
             if (cJSON_IsString(drain) && strlen(drain->valuestring) <= 64)
@@ -7072,35 +7433,43 @@ bool Application::HandleLessonPlayoutTts(const cJSON* root, ChatRequestContext c
 
 bool Application::QueueLessonPlayoutAck(const char* state, uint64_t at_ms, bool drain) {
     if (!lesson_playout_context_ || chat_connection_messages_.Size() >= 2 ||
-        !IsChatLessonRequestCurrent(lesson_playout_context_)) return false;
+        !IsChatLessonRequestCurrent(lesson_playout_context_))
+        return false;
     const auto authorization = std::atomic_load(&lesson_playout_authorization_);
-    if (!authorization || !authorization->load(std::memory_order_acquire)) return false;
-    const auto text = drain
-        ? Protocol::EncodeTtsDrainAck(lesson_playout_drain_id_, lesson_playout_context_->session_id)
-        : Protocol::EncodeLessonPlayoutAck(lesson_playout_id_, state, at_ms, lesson_playout_context_->session_id);
-    return !text.empty() && RequestChatConnectionText(text, lesson_playout_context_, 0, authorization) != 0;
+    if (!authorization || !authorization->load(std::memory_order_acquire))
+        return false;
+    const auto text = drain ? Protocol::EncodeTtsDrainAck(lesson_playout_drain_id_,
+                                                          lesson_playout_context_->session_id)
+                            : Protocol::EncodeLessonPlayoutAck(lesson_playout_id_, state, at_ms,
+                                                               lesson_playout_context_->session_id);
+    return !text.empty() &&
+           RequestChatConnectionText(text, lesson_playout_context_, 0, authorization) != 0;
 }
 
 void Application::PollLessonAudioPlayout() {
     std::unique_lock<std::mutex> lock(lesson_playout_mutex_, std::try_to_lock);
-    if (!lock.owns_lock()) return;
-    if (lesson_playout_id_.empty()) return;
+    if (!lock.owns_lock())
+        return;
+    if (lesson_playout_id_.empty())
+        return;
     const auto now_ms = esp_timer_get_time() / 1000;
     const auto owned = [this]() {
         const auto authorization = std::atomic_load(&lesson_playout_authorization_);
-        return authorization && authorization->load(std::memory_order_acquire) &&
-        protocol_ && lesson_runtime_active_.load() &&
-        IsChatLessonRequestCurrent(lesson_playout_context_) &&
-        lesson_playout_protocol_generation_ == protocol_generation_.load() &&
-        lesson_playout_epoch_ == lesson_transport_epoch_gate_.PublishedEpoch() &&
-        lesson_audio_playout_.Current(lesson_playout_id_, speaking_generation_.load()); };
-    const bool timed_out = lesson_playout_stop_ms_ ?
-        now_ms - lesson_playout_stop_ms_ >= kTtsStopPlaybackDrainTimeoutMs :
-        now_ms - last_speaking_activity_ms_.load() >= kSpeakingTimeoutMs;
+        return authorization && authorization->load(std::memory_order_acquire) && protocol_ &&
+               lesson_runtime_active_.load() &&
+               IsChatLessonRequestCurrent(lesson_playout_context_) &&
+               lesson_playout_protocol_generation_ == protocol_generation_.load() &&
+               lesson_playout_epoch_ == lesson_transport_epoch_gate_.PublishedEpoch() &&
+               lesson_audio_playout_.Current(lesson_playout_id_, speaking_generation_.load());
+    };
+    const bool timed_out = lesson_playout_stop_ms_
+                               ? now_ms - lesson_playout_stop_ms_ >= kTtsStopPlaybackDrainTimeoutMs
+                               : now_ms - last_speaking_activity_ms_.load() >= kSpeakingTimeoutMs;
     auto retire = [this](bool flush) {
         if (flush) {
             const auto authorization = std::atomic_load(&lesson_playout_authorization_);
-            if (authorization) authorization->store(false, std::memory_order_release);
+            if (authorization)
+                authorization->store(false, std::memory_order_release);
         }
         lesson_audio_playout_.Cancel();
         lesson_playout_id_.clear();
@@ -7114,32 +7483,43 @@ void Application::PollLessonAudioPlayout() {
             }
             last_speaking_activity_ms_.store(0);
             lesson_idle_repaint_suppressed_.store(true);
-            if (GetDeviceState() == kDeviceStateSpeaking) SetDeviceState(kDeviceStateIdle);
+            if (GetDeviceState() == kDeviceStateSpeaking)
+                SetDeviceState(kDeviceStateIdle);
         }
     };
-    if (!owned()) { retire(true); return; }
+    if (!owned()) {
+        retire(true);
+        return;
+    }
     if (timed_out || lesson_audio_playout_.Failed()) {
         const auto context = lesson_playout_context_;
         retire(true);
-        if (context) FailChatRequest(context);
+        if (context)
+            FailChatRequest(context);
         return;
     }
-    if (!lesson_playout_start_sent_ && chat_connection_messages_.Size() >= 2) return;
+    if (!lesson_playout_start_sent_ && chat_connection_messages_.Size() >= 2)
+        return;
     if (const auto start = lesson_audio_playout_.TakeStart()) {
         if (start->generation != lesson_playout_generation_ ||
             !QueueLessonPlayoutAck("start", start->at_ms)) {
             retire(true);
             return;
         }
-        if (!owned()) { retire(true); return; }
+        if (!owned()) {
+            retire(true);
+            return;
+        }
         lesson_playout_start_sent_ = true;
         SetDeviceState(kDeviceStateSpeaking);
         ArmSpeakingTimeout();
     }
-    if (!lesson_playout_stop_ms_ || !lesson_playout_start_sent_) return;
+    if (!lesson_playout_stop_ms_ || !lesson_playout_start_sent_)
+        return;
     PlaybackDrainSnapshot snapshot;
     if (!audio_service_.TryGetPlaybackDrainSnapshot(snapshot) ||
-        !lesson_audio_playout_.Drained(snapshot)) return;
+        !lesson_audio_playout_.Drained(snapshot))
+        return;
     // Revalidate after the audio lock boundary and before sending either receipt.
     if (!protocol_ || !lesson_runtime_active_.load() ||
         lesson_playout_protocol_generation_ != protocol_generation_.load() ||
@@ -7149,25 +7529,32 @@ void Application::PollLessonAudioPlayout() {
         retire(true);
         return;
     }
-    if (!lesson_playout_drained_at_ms_) lesson_playout_drained_at_ms_ = static_cast<uint64_t>(now_ms);
+    if (!lesson_playout_drained_at_ms_)
+        lesson_playout_drained_at_ms_ = static_cast<uint64_t>(now_ms);
     lesson_idle_repaint_suppressed_.store(true);
     if (GetDeviceState() == kDeviceStateSpeaking) {
         const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load() ||
-            lesson_interactive_listening_active_.load();
+                                             lesson_interactive_listening_active_.load();
         SetDeviceState(lesson_interactive_turn && listening_mode_ != kListeningModeAutoStop
-            ? kDeviceStateListening : kDeviceStateIdle);
+                           ? kDeviceStateListening
+                           : kDeviceStateIdle);
     }
     if (!lesson_playout_stop_sent_) {
-        if (chat_connection_messages_.Size() >= 2) return;
+        if (chat_connection_messages_.Size() >= 2)
+            return;
         if (!QueueLessonPlayoutAck("stop", lesson_playout_drained_at_ms_)) {
             retire(true);
             return;
         }
         lesson_playout_stop_sent_ = true;
     }
-    if (!owned()) { retire(true); return; }
+    if (!owned()) {
+        retire(true);
+        return;
+    }
     if (!lesson_playout_drain_id_.empty()) {
-        if (chat_connection_messages_.Size() >= 2) return;
+        if (chat_connection_messages_.Size() >= 2)
+            return;
         if (!QueueLessonPlayoutAck("stop", lesson_playout_drained_at_ms_, true)) {
             retire(true);
             return;
@@ -7177,417 +7564,447 @@ void Application::PollLessonAudioPlayout() {
 }
 
 void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_transport_epoch,
-    bool is_websocket_protocol, ChatRequestContext context) {
-    ChatRuntimeTiming timing(1, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
+                                       bool is_websocket_protocol, ChatRequestContext context) {
+    ChatRuntimeTiming timing(
+        1, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
         [](uint32_t site, uint32_t hi, uint32_t lo) {
             ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
-                static_cast<unsigned>(site), static_cast<unsigned long>(hi), static_cast<unsigned long>(lo));
+                     static_cast<unsigned>(site), static_cast<unsigned long>(hi),
+                     static_cast<unsigned long>(lo));
         });
-    if (!IsChatRequestCurrent(context)) return;
+    if (!IsChatRequestCurrent(context))
+        return;
     auto* display = Board::GetInstance().GetDisplay();
-        // Parse JSON data
-        auto type = cJSON_GetObjectItem(root, "type");
-        // US-006 Slice-01 (DIV-FW-NULLDEREF): guard the type deref on the path the
-        // additive lesson_ branch joins. A missing/non-string type would null-deref
-        // type->valuestring below. Both transports already pre-guard this
-        // (websocket_protocol.cc, mqtt_protocol.cc), so no valid frame changes
-        // behavior — defense-in-depth on the shared dispatch path only.
-        if (!cJSON_IsString(type)) {
-            ESP_LOGW(TAG, "Missing or non-string message type, dropping frame");
+    // Parse JSON data
+    auto type = cJSON_GetObjectItem(root, "type");
+    // US-006 Slice-01 (DIV-FW-NULLDEREF): guard the type deref on the path the
+    // additive lesson_ branch joins. A missing/non-string type would null-deref
+    // type->valuestring below. Both transports already pre-guard this
+    // (websocket_protocol.cc, mqtt_protocol.cc), so no valid frame changes
+    // behavior — defense-in-depth on the shared dispatch path only.
+    if (!cJSON_IsString(type)) {
+        ESP_LOGW(TAG, "Missing or non-string message type, dropping frame");
+        return;
+    }
+    if (lesson_asset_sync_quiet_.load() &&
+        (strcmp(type->valuestring, "tts") == 0 || strcmp(type->valuestring, "stt") == 0)) {
+        ESP_LOGI(TAG, "lesson asset sync quiet dropped voice frame type=%s", type->valuestring);
+        return;
+    }
+    if (strcmp(type->valuestring, "tts") == 0) {
+        if (!IsChatLessonRequestCurrent(context))
+            return;
+        if (HandleLessonPlayoutTts(root, context))
+            return;
+        auto state = cJSON_GetObjectItem(root, "state");
+        // Guard the state deref: a tts frame with no "state" or a non-string
+        // state null-derefs state->valuestring below (deep-audit #4 HIGH — a
+        // malformed/MITM frame crashes the audio task). cJSON_IsString covers
+        // both the missing-key (null node) and wrong-type cases.
+        if (!cJSON_IsString(state)) {
+            ESP_LOGW(TAG, "tts frame missing or non-string state; dropping");
             return;
         }
-        if (lesson_asset_sync_quiet_.load() &&
-            (strcmp(type->valuestring, "tts") == 0 ||
-             strcmp(type->valuestring, "stt") == 0)) {
-            ESP_LOGI(TAG, "lesson asset sync quiet dropped voice frame type=%s",
-                     type->valuestring);
-            return;
-        }
-        if (strcmp(type->valuestring, "tts") == 0) {
-            if (!IsChatLessonRequestCurrent(context)) return;
-            if (HandleLessonPlayoutTts(root, context)) return;
-            auto state = cJSON_GetObjectItem(root, "state");
-            // Guard the state deref: a tts frame with no "state" or a non-string
-            // state null-derefs state->valuestring below (deep-audit #4 HIGH — a
-            // malformed/MITM frame crashes the audio task). cJSON_IsString covers
-            // both the missing-key (null node) and wrong-type cases.
-            if (!cJSON_IsString(state)) {
-                ESP_LOGW(TAG, "tts frame missing or non-string state; dropping");
-                return;
+        if (strcmp(state->valuestring, "start") == 0) {
+            audio_service_.ResetDecoder();
+            if (GetDeviceState() == kDeviceStateListening &&
+                listening_mode_ != kListeningModeRealtime) {
+                audio_service_.EnableVoiceProcessing(false);
+                listening_started_ms_.store(0);
+                last_listening_activity_ms_.store(0);
             }
-            if (strcmp(state->valuestring, "start") == 0) {
+            // Bump the response generation and publish it to the audio
+            // service BEFORE opening the intake gate, so every packet of
+            // this response is stamped with — and gated against — the same
+            // generation. Done synchronously here (same task as
+            // OnIncomingAudio) to avoid dropping the first frames.
+            audio_service_.SetPlaybackGeneration(++speaking_generation_);
+            speaking_arm_dispatch_.BeginResponse(speaking_generation_.load());
+            tts_audio_accepting_.store(true);
+            const auto started_generation = speaking_generation_.load();
+            Schedule([this, context, started_generation]() {
+                if (!IsChatLessonRequestCurrent(context) ||
+                    started_generation != speaking_generation_.load())
+                    return;
+                aborted_ = false;
+                auto current_generation = speaking_generation_.load();
+                last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
+                SetDeviceState(kDeviceStateSpeaking);
+                ESP_LOGI(TAG, "tts_start_received generation=%lu",
+                         (unsigned long)current_generation);
+                ArmSpeakingTimeout();
+            });
+        } else if (strcmp(state->valuestring, "stop") == 0) {
+            speaking_arm_dispatch_.Cancel();
+            tts_audio_accepting_.store(false);
+            int64_t t_recv = esp_timer_get_time() / 1000;
+            const auto t_recv_sec = static_cast<unsigned long>(t_recv / 1000);
+            const auto t_recv_ms = static_cast<unsigned long>(t_recv % 1000);
+            ESP_LOGI(TAG, "tts_stop_received ts=%lu%03lu", t_recv_sec, t_recv_ms);
+            // Patch 3.4: the backend tags an interrupt-driven stop with
+            // reason="interrupt" (barge-in) vs a normal end-of-turn stop.
+            auto reason = cJSON_GetObjectItem(root, "reason");
+            bool is_interrupt =
+                cJSON_IsString(reason) && strcmp(reason->valuestring, "interrupt") == 0;
+            auto drain_id = cJSON_GetObjectItem(root, "drainId");
+            std::string tts_drain_id;
+            if (cJSON_IsString(drain_id) && strlen(drain_id->valuestring) <= 64) {
+                tts_drain_id = drain_id->valuestring;
+            }
+            const std::uint64_t stopped_audio_generation =
+                static_cast<std::uint64_t>(speaking_generation_.load()) + 1;
+            if (is_interrupt) {
+                // Barge-in: cut NOW instead of draining. Bump+publish the
+                // generation so any in-flight frame is gen-gated (Patch 3.3),
+                // then clear the playback/decode queues. Idempotent if the
+                // local VAD path already aborted.
+                audio_service_.SetPlaybackGeneration(++speaking_generation_);
                 audio_service_.ResetDecoder();
-                if (GetDeviceState() == kDeviceStateListening && listening_mode_ != kListeningModeRealtime) {
+                ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lu%03lu", t_recv_sec, t_recv_ms);
+            }
+            auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
+            bool force_continue_listening = cJSON_IsTrue(continue_listening);
+            auto listen_mode = cJSON_GetObjectItem(root, "listen_mode");
+            bool force_realtime_listen =
+                cJSON_IsString(listen_mode) && strcmp(listen_mode->valuestring, "realtime") == 0;
+            bool explicit_stop_listening =
+                cJSON_IsBool(continue_listening) && !cJSON_IsTrue(continue_listening) &&
+                cJSON_IsString(listen_mode) && strcmp(listen_mode->valuestring, "manual") == 0;
+            // NOTE: for a NORMAL end-of-turn stop we deliberately do NOT
+            // ResetDecoder — that cut the final 200-500ms of every response
+            // because the server sends `tts state=stop` immediately after
+            // audio_end while the playback queue still holds buffered frames.
+            // User reported: "phản hồi không ổn định chưa trả lời hết câu
+            // chuyển sang đang lắng nghe". Normal stops rely on natural queue
+            // drain; only the interrupt branch above cuts early.
+            const auto stop_callback_generation = speaking_generation_.load();
+            Schedule([this, force_continue_listening, force_realtime_listen,
+                      explicit_stop_listening, stopped_audio_generation, is_interrupt, tts_drain_id,
+                      context, stop_callback_generation]() {
+                if (!IsChatLessonRequestCurrent(context) ||
+                    stop_callback_generation != speaking_generation_.load())
+                    return;
+                ++speaking_generation_;
+                last_speaking_activity_ms_.store(0);
+                if (!is_interrupt && !tts_drain_id.empty()) {
+                    const bool playback_drained =
+                        audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
+                    if (!IsChatLessonRequestCurrent(context))
+                        return;
+                    if (playback_drained) {
+                        if (protocol_)
+                            protocol_->SendTtsDrainAck(tts_drain_id);
+                    } else {
+                        ESP_LOGW(TAG,
+                                 "tts_stop_playback_drain_timeout timeout_ms=%lu action=drain_ack",
+                                 static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                    }
+                }
+                const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load() ||
+                                                     lesson_interactive_listening_active_.load();
+                const std::uint64_t terminal_audio_generation =
+                    lesson_terminal_audio_generation_.exchange(0);
+                if (terminal_audio_generation == stopped_audio_generation) {
+                    ESP_LOGI(TAG,
+                             "terminal lesson tts stop matched generation_hi=%lu generation_lo=%lu "
+                             "state=%d",
+                             static_cast<unsigned long>(stopped_audio_generation >> 32),
+                             static_cast<unsigned long>(stopped_audio_generation),
+                             static_cast<int>(GetDeviceState()));
+                    lesson_idle_repaint_suppressed_.store(true);
+                    SetDeviceState(kDeviceStateIdle);
+                    return;
+                }
+                if (terminal_audio_generation != 0) {
+                    ESP_LOGI(TAG,
+                             "stale terminal lesson tts stop ignored terminal_hi=%lu "
+                             "terminal_lo=%lu stopped_hi=%lu stopped_lo=%lu",
+                             static_cast<unsigned long>(terminal_audio_generation >> 32),
+                             static_cast<unsigned long>(terminal_audio_generation),
+                             static_cast<unsigned long>(stopped_audio_generation >> 32),
+                             static_cast<unsigned long>(stopped_audio_generation));
+                }
+                if (lesson_runtime_active_.load() && !lesson_interactive_turn) {
+                    ESP_LOGI(TAG, "lesson tts stop continue ignored state=%d",
+                             static_cast<int>(GetDeviceState()));
+                    lesson_idle_repaint_suppressed_.store(true);
+                    SetDeviceState(kDeviceStateIdle);
+                    return;
+                }
+                if (explicit_stop_listening && GetDeviceState() == kDeviceStateListening) {
                     audio_service_.EnableVoiceProcessing(false);
                     listening_started_ms_.store(0);
                     last_listening_activity_ms_.store(0);
+                    while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+                    }
+                    SetDeviceState(kDeviceStateIdle);
+                    ESP_LOGI(TAG, "manual_tts_stop -> idle from listening");
+                    return;
                 }
-                // Bump the response generation and publish it to the audio
-                // service BEFORE opening the intake gate, so every packet of
-                // this response is stamped with — and gated against — the same
-                // generation. Done synchronously here (same task as
-                // OnIncomingAudio) to avoid dropping the first frames.
-                audio_service_.SetPlaybackGeneration(++speaking_generation_);
-                speaking_arm_dispatch_.BeginResponse(speaking_generation_.load());
-                tts_audio_accepting_.store(true);
-                const auto started_generation = speaking_generation_.load();
-                Schedule([this, context, started_generation]() {
-                    if (!IsChatLessonRequestCurrent(context) ||
-                        started_generation != speaking_generation_.load()) return;
-                    aborted_ = false;
-                    auto current_generation = speaking_generation_.load();
-                    last_speaking_activity_ms_.store(esp_timer_get_time() / 1000);
-                    SetDeviceState(kDeviceStateSpeaking);
-                    ESP_LOGI(TAG, "tts_start_received generation=%lu", (unsigned long)current_generation);
-                    ArmSpeakingTimeout();
-                });
-            } else if (strcmp(state->valuestring, "stop") == 0) {
-                speaking_arm_dispatch_.Cancel();
-                tts_audio_accepting_.store(false);
-                int64_t t_recv = esp_timer_get_time() / 1000;
-                const auto t_recv_sec = static_cast<unsigned long>(t_recv / 1000);
-                const auto t_recv_ms = static_cast<unsigned long>(t_recv % 1000);
-                ESP_LOGI(TAG, "tts_stop_received ts=%lu%03lu", t_recv_sec, t_recv_ms);
-                // Patch 3.4: the backend tags an interrupt-driven stop with
-                // reason="interrupt" (barge-in) vs a normal end-of-turn stop.
-                auto reason = cJSON_GetObjectItem(root, "reason");
-                bool is_interrupt = cJSON_IsString(reason) &&
-                                    strcmp(reason->valuestring, "interrupt") == 0;
-                auto drain_id = cJSON_GetObjectItem(root, "drainId");
-                std::string tts_drain_id;
-                if (cJSON_IsString(drain_id) &&
-                    strlen(drain_id->valuestring) <= 64) {
-                    tts_drain_id = drain_id->valuestring;
+                const bool voice_turn_owned = microphone_uplink_authorized_.load() &&
+                                              !passive_ws_intent_.load() && online_intent_.load() &&
+                                              (GetDeviceState() == kDeviceStateSpeaking ||
+                                               GetDeviceState() == kDeviceStateListening);
+                if (force_continue_listening && !lesson_interactive_turn) {
+                    if (!voice_turn_owned) {
+                        ESP_LOGW(
+                            TAG,
+                            "tts_stop_continue_listening_rejected state=%d passive=%d online=%d",
+                            static_cast<int>(GetDeviceState()), passive_ws_intent_.load() ? 1 : 0,
+                            online_intent_.load() ? 1 : 0);
+                        return;
+                    }
+                    bool playback_drained =
+                        audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
+                    if (!IsChatLessonRequestCurrent(context))
+                        return;
+                    if (!playback_drained) {
+                        ESP_LOGW(TAG,
+                                 "tts_stop_playback_drain_timeout timeout_ms=%lu "
+                                 "action=continue_listening",
+                                 static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                    }
+                    if (force_realtime_listen) {
+                        listening_mode_ = kListeningModeRealtime;
+                    } else {
+                        listening_mode_ = GetDefaultListeningMode();
+                    }
+                    SetDeviceState(kDeviceStateListening);
+                    if (protocol_) {
+                        protocol_->SendStartListening(kListeningModeRealtime);
+                    }
+                    audio_service_.EnableVoiceProcessing(true);
+                    const uint64_t resumed_ms = esp_timer_get_time() / 1000;
+                    ESP_LOGI(TAG, "mic_loop_resumed ts=%lu%03lu reason=tts_stop_continue_listening",
+                             static_cast<unsigned long>(resumed_ms / 1000),
+                             static_cast<unsigned long>(resumed_ms % 1000));
+                    return;
                 }
-                const std::uint64_t stopped_audio_generation =
-                    static_cast<std::uint64_t>(speaking_generation_.load()) + 1;
-                if (is_interrupt) {
-                    // Barge-in: cut NOW instead of draining. Bump+publish the
-                    // generation so any in-flight frame is gen-gated (Patch 3.3),
-                    // then clear the playback/decode queues. Idempotent if the
-                    // local VAD path already aborted.
-                    audio_service_.SetPlaybackGeneration(++speaking_generation_);
-                    audio_service_.ResetDecoder();
-                    ESP_LOGI(TAG, "tts_stop_interrupt_flush ts=%lu%03lu",
-                             t_recv_sec, t_recv_ms);
-                }
-                auto continue_listening = cJSON_GetObjectItem(root, "continue_listening");
-                bool force_continue_listening = cJSON_IsTrue(continue_listening);
-                auto listen_mode = cJSON_GetObjectItem(root, "listen_mode");
-                bool force_realtime_listen = cJSON_IsString(listen_mode) &&
-                                             strcmp(listen_mode->valuestring, "realtime") == 0;
-                bool explicit_stop_listening =
-                    cJSON_IsBool(continue_listening) && !cJSON_IsTrue(continue_listening) &&
-                    cJSON_IsString(listen_mode) &&
-                    strcmp(listen_mode->valuestring, "manual") == 0;
-                // NOTE: for a NORMAL end-of-turn stop we deliberately do NOT
-                // ResetDecoder — that cut the final 200-500ms of every response
-                // because the server sends `tts state=stop` immediately after
-                // audio_end while the playback queue still holds buffered frames.
-                // User reported: "phản hồi không ổn định chưa trả lời hết câu
-                // chuyển sang đang lắng nghe". Normal stops rely on natural queue
-                // drain; only the interrupt branch above cuts early.
-                const auto stop_callback_generation = speaking_generation_.load();
-                Schedule([this, force_continue_listening, force_realtime_listen,
-                          explicit_stop_listening, stopped_audio_generation,
-                          is_interrupt, tts_drain_id, context, stop_callback_generation]() {
-                    if (!IsChatLessonRequestCurrent(context) ||
-                        stop_callback_generation != speaking_generation_.load()) return;
-                    ++speaking_generation_;
-                    last_speaking_activity_ms_.store(0);
-                    if (!is_interrupt && !tts_drain_id.empty()) {
-                        const bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(
-                            kTtsStopPlaybackDrainTimeoutMs);
-                        if (!IsChatLessonRequestCurrent(context)) return;
-                        if (playback_drained) {
-                            if (protocol_) protocol_->SendTtsDrainAck(tts_drain_id);
+                if (GetDeviceState() == kDeviceStateSpeaking) {
+                    if (listening_mode_ == kListeningModeManualStop) {
+                        if (lesson_interactive_turn) {
+                            bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(
+                                kTtsStopPlaybackDrainTimeoutMs);
+                            if (!IsChatLessonRequestCurrent(context))
+                                return;
+                            if (!playback_drained) {
+                                ESP_LOGW(
+                                    TAG,
+                                    "tts_stop_playback_drain_timeout timeout_ms=%lu "
+                                    "action=lesson_listening",
+                                    static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                            }
+                            SetDeviceState(kDeviceStateListening);
+                            ESP_LOGI(TAG, "lesson prompt complete -> listening");
                         } else {
-                            ESP_LOGW(TAG,
-                                     "tts_stop_playback_drain_timeout timeout_ms=%lu action=drain_ack",
-                                     static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+                            SetDeviceState(kDeviceStateIdle);
                         }
-                    }
-                    const bool lesson_interactive_turn =
-                        lesson_interactive_listen_pending_.load() ||
-                        lesson_interactive_listening_active_.load();
-                    const std::uint64_t terminal_audio_generation =
-                        lesson_terminal_audio_generation_.exchange(0);
-                    if (terminal_audio_generation == stopped_audio_generation) {
-                        ESP_LOGI(TAG,
-                                 "terminal lesson tts stop matched generation_hi=%lu generation_lo=%lu state=%d",
-                                 static_cast<unsigned long>(stopped_audio_generation >> 32),
-                                 static_cast<unsigned long>(stopped_audio_generation),
-                                 static_cast<int>(GetDeviceState()));
-                        lesson_idle_repaint_suppressed_.store(true);
-                        SetDeviceState(kDeviceStateIdle);
-                        return;
-                    }
-                    if (terminal_audio_generation != 0) {
-                        ESP_LOGI(TAG,
-                                 "stale terminal lesson tts stop ignored terminal_hi=%lu terminal_lo=%lu stopped_hi=%lu stopped_lo=%lu",
-                                 static_cast<unsigned long>(terminal_audio_generation >> 32),
-                                 static_cast<unsigned long>(terminal_audio_generation),
-                                 static_cast<unsigned long>(stopped_audio_generation >> 32),
-                                 static_cast<unsigned long>(stopped_audio_generation));
-                    }
-                    if (lesson_runtime_active_.load() && !lesson_interactive_turn) {
-                        ESP_LOGI(TAG, "lesson tts stop continue ignored state=%d",
-                                 static_cast<int>(GetDeviceState()));
-                        lesson_idle_repaint_suppressed_.store(true);
-                        SetDeviceState(kDeviceStateIdle);
-                        return;
-                    }
-                    if (explicit_stop_listening && GetDeviceState() == kDeviceStateListening) {
-                        audio_service_.EnableVoiceProcessing(false);
-                        listening_started_ms_.store(0);
-                        last_listening_activity_ms_.store(0);
-                        while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
-                        SetDeviceState(kDeviceStateIdle);
-                        ESP_LOGI(TAG, "manual_tts_stop -> idle from listening");
-                        return;
-                    }
-                    const bool voice_turn_owned =
-                        microphone_uplink_authorized_.load() &&
-                        !passive_ws_intent_.load() &&
-                        online_intent_.load() &&
-                        (GetDeviceState() == kDeviceStateSpeaking ||
-                         GetDeviceState() == kDeviceStateListening);
-                    if (force_continue_listening && !lesson_interactive_turn) {
-                        if (!voice_turn_owned) {
-                            ESP_LOGW(TAG,
-                                     "tts_stop_continue_listening_rejected state=%d passive=%d online=%d",
-                                     static_cast<int>(GetDeviceState()),
-                                     passive_ws_intent_.load() ? 1 : 0,
-                                     online_intent_.load() ? 1 : 0);
+                    } else if (listening_mode_ == kListeningModeAutoStop) {
+                        bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(
+                            kTtsStopPlaybackDrainTimeoutMs);
+                        if (!IsChatLessonRequestCurrent(context))
                             return;
-                        }
-                        bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
-                        if (!IsChatLessonRequestCurrent(context)) return;
                         if (!playback_drained) {
                             ESP_LOGW(TAG,
-                                     "tts_stop_playback_drain_timeout timeout_ms=%lu action=continue_listening",
+                                     "tts_stop_playback_drain_timeout timeout_ms=%lu action=idle",
                                      static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
                         }
-                        if (force_realtime_listen) {
-                            listening_mode_ = kListeningModeRealtime;
-                        } else {
-                            listening_mode_ = GetDefaultListeningMode();
-                        }
+                        SetDeviceState(kDeviceStateIdle);
+                    } else {
                         SetDeviceState(kDeviceStateListening);
-                        if (protocol_) {
-                            protocol_->SendStartListening(kListeningModeRealtime);
-                        }
-                        audio_service_.EnableVoiceProcessing(true);
                         const uint64_t resumed_ms = esp_timer_get_time() / 1000;
-                        ESP_LOGI(TAG,
-                                 "mic_loop_resumed ts=%lu%03lu reason=tts_stop_continue_listening",
+                        ESP_LOGI(TAG, "mic_loop_resumed ts=%lu%03lu",
                                  static_cast<unsigned long>(resumed_ms / 1000),
                                  static_cast<unsigned long>(resumed_ms % 1000));
-                        return;
-                    }
-                    if (GetDeviceState() == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            if (lesson_interactive_turn) {
-                                bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
-                                if (!IsChatLessonRequestCurrent(context)) return;
-                                if (!playback_drained) {
-                                    ESP_LOGW(TAG,
-                                             "tts_stop_playback_drain_timeout timeout_ms=%lu action=lesson_listening",
-                                             static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
-                                }
-                                SetDeviceState(kDeviceStateListening);
-                                ESP_LOGI(TAG, "lesson prompt complete -> listening");
-                            } else {
-                                SetDeviceState(kDeviceStateIdle);
-                            }
-                        } else if (listening_mode_ == kListeningModeAutoStop) {
-                            bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
-                            if (!IsChatLessonRequestCurrent(context)) return;
-                            if (!playback_drained) {
-                                ESP_LOGW(TAG,
-                                         "tts_stop_playback_drain_timeout timeout_ms=%lu action=idle",
-                                         static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
-                            }
-                            SetDeviceState(kDeviceStateIdle);
-                        } else {
-                            SetDeviceState(kDeviceStateListening);
-                            const uint64_t resumed_ms = esp_timer_get_time() / 1000;
-                            ESP_LOGI(TAG, "mic_loop_resumed ts=%lu%03lu",
-                                     static_cast<unsigned long>(resumed_ms / 1000),
-                                     static_cast<unsigned long>(resumed_ms % 1000));
-                        }
-                    }
-                });
-            } else if (strcmp(state->valuestring, "sentence_start") == 0) {
-                auto text = cJSON_GetObjectItem(root, "text");
-                if (cJSON_IsString(text)) {
-                    ESP_LOGD(TAG, "<< %s", text->valuestring);  // PRIV-1: transcript content debug-only (COPPA)
-                    if (!lesson_runtime_active_.load()) {
-                        if (context) display->SetChatMessage("assistant", text->valuestring);
-                        else Schedule([display, message = std::string(text->valuestring)]() {
-                            display->SetChatMessage("assistant", message.c_str());
-                        });
                     }
                 }
-            }
-        } else if (strcmp(type->valuestring, "stt") == 0) {
+            });
+        } else if (strcmp(state->valuestring, "sentence_start") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
-                ESP_LOGD(TAG, ">> %s", text->valuestring);  // PRIV-1: transcript content debug-only (COPPA)
+                ESP_LOGD(TAG, "<< %s",
+                         text->valuestring);  // PRIV-1: transcript content debug-only (COPPA)
                 if (!lesson_runtime_active_.load()) {
-                    if (context) display->SetChatMessage("user", text->valuestring);
-                    else Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("user", message.c_str());
-                    });
+                    if (context)
+                        display->SetChatMessage("assistant", text->valuestring);
+                    else
+                        Schedule([display, message = std::string(text->valuestring)]() {
+                            display->SetChatMessage("assistant", message.c_str());
+                        });
                 }
             }
-        } else if (strcmp(type->valuestring, "llm") == 0) {
+        }
+    } else if (strcmp(type->valuestring, "stt") == 0) {
+        auto text = cJSON_GetObjectItem(root, "text");
+        if (cJSON_IsString(text)) {
+            ESP_LOGD(TAG, ">> %s",
+                     text->valuestring);  // PRIV-1: transcript content debug-only (COPPA)
+            if (!lesson_runtime_active_.load()) {
+                if (context)
+                    display->SetChatMessage("user", text->valuestring);
+                else
+                    Schedule([display, message = std::string(text->valuestring)]() {
+                        display->SetChatMessage("user", message.c_str());
+                    });
+            }
+        }
+    } else if (strcmp(type->valuestring, "llm") == 0) {
 #if CONFIG_TBOT_VOICE_DEMO
-            // Keep the current animated face; transcript chunks can otherwise
-            // reconstruct a GIF faster than the screen can render it.
-            return;
+        // Keep the current animated face; transcript chunks can otherwise
+        // reconstruct a GIF faster than the screen can render it.
+        return;
 #endif
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
-            if (cJSON_IsString(emotion)) {
-                if (!lesson_runtime_active_.load()) {
-                    if (context) {
-                        display->SetEmotion(emotion->valuestring);
-                        HandleEmotionGesture(emotion->valuestring);
-                    } else Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
+        auto emotion = cJSON_GetObjectItem(root, "emotion");
+        if (cJSON_IsString(emotion)) {
+            if (!lesson_runtime_active_.load()) {
+                if (context) {
+                    display->SetEmotion(emotion->valuestring);
+                    HandleEmotionGesture(emotion->valuestring);
+                } else
+                    Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
                         display->SetEmotion(emotion_str.c_str());
                         HandleEmotionGesture(emotion_str.c_str());
                     });
-                }
             }
-        } else if (strcmp(type->valuestring, "mcp") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
-            if (cJSON_IsObject(payload)) {
-                McpServer::GetInstance().ParseMessage(payload, context);
-            }
-        } else if (strcmp(type->valuestring, "system") == 0) {
-            auto command = cJSON_GetObjectItem(root, "command");
-            if (cJSON_IsString(command)) {
-                ESP_LOGI(TAG, "System command: %s", command->valuestring);
-                if (strcmp(command->valuestring, "reboot") == 0) {
-                    if (lesson_runtime_active_.load()) {
-                        ESP_LOGI(TAG, "System reboot ignored during lesson");
-                        return;
-                    }
-                    // Do a reboot if user requests a OTA update
-                    if (context) Reboot(context);
-                    else Schedule([this]() {
-                        Reboot();
-                    });
-                } else if (strcmp(command->valuestring, "unpair") == 0) {
-                    if (context) {
-                        BeginChatUnpair(root, context);
-                        return;
-                    }
-                    if (lesson_runtime_active_.load()) {
-                        ESP_LOGI(TAG, "System unpair ignored during lesson");
-                        return;
-                    }
-                    const auto* request_id = cJSON_GetObjectItem(root, "request_id");
-                    if (cJSON_IsString(request_id) && request_id->valuestring != nullptr &&
-                        request_id->valuestring[0] != '\0' && std::strlen(request_id->valuestring) <= 64) {
-                        cJSON* ack = cJSON_CreateObject();
-                        if (ack != nullptr) {
-                            cJSON_AddStringToObject(ack, "type", "system_ack");
-                            cJSON_AddStringToObject(ack, "command", "unpair");
-                            cJSON_AddStringToObject(ack, "request_id", request_id->valuestring);
-                            char* encoded = cJSON_PrintUnformatted(ack);
-                            const bool sent = encoded != nullptr && protocol_ != nullptr &&
-                                              protocol_->SendLessonFrame(encoded);
-                            if (!sent) {
-                                ESP_LOGW(TAG, "System unpair acknowledgement could not be sent");
-                            }
-                            if (encoded != nullptr) cJSON_free(encoded);
-                            cJSON_Delete(ack);
-                        }
-                    }
-                    EnterRepairPairingMode();
-                } else if (strcmp(command->valuestring, "wifi_setup") == 0) {
-                    if (lesson_runtime_active_.load()) {
-                        ESP_LOGI(TAG, "System WiFi setup ignored during lesson");
-                        return;
-                    }
-                    static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
-                } else {
-                    ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
-                }
-            }
-        } else if (strcmp(type->valuestring, "alert") == 0) {
-            auto status = cJSON_GetObjectItem(root, "status");
-            auto message = cJSON_GetObjectItem(root, "message");
-            auto emotion = cJSON_GetObjectItem(root, "emotion");
-            if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
-                if (!lesson_runtime_active_.load()) {
-                    Alert(status->valuestring, message->valuestring, emotion->valuestring, Lang::Sounds::OGG_VIBRATION);
-                }
-            } else {
-                ESP_LOGW(TAG, "Alert command requires status, message and emotion");
-            }
-        } else if (strcmp(type->valuestring, "robot_action") == 0) {
-            if (!HandleRobotActionMessage(root, context)) {
-                ESP_LOGW(TAG, "Unsupported robot action");
-            }
-#if CONFIG_RECEIVE_CUSTOM_MESSAGE
-        } else if (strcmp(type->valuestring, "custom") == 0) {
-            auto payload = cJSON_GetObjectItem(root, "payload");
-            char* root_str = cJSON_PrintUnformatted(root);
-            ESP_LOGI(TAG, "Received custom message: %s", root_str ? root_str : "(null)");
-            if (root_str != nullptr) {
-                cJSON_free(root_str);
-            }
-            if (cJSON_IsObject(payload)) {
-                if (HandleRobotActionMessage(payload, context)) {
+        }
+    } else if (strcmp(type->valuestring, "mcp") == 0) {
+        auto payload = cJSON_GetObjectItem(root, "payload");
+        if (cJSON_IsObject(payload)) {
+            McpServer::GetInstance().ParseMessage(payload, context);
+        }
+    } else if (strcmp(type->valuestring, "system") == 0) {
+        auto command = cJSON_GetObjectItem(root, "command");
+        if (cJSON_IsString(command)) {
+            ESP_LOGI(TAG, "System command: %s", command->valuestring);
+            if (strcmp(command->valuestring, "reboot") == 0) {
+                if (lesson_runtime_active_.load()) {
+                    ESP_LOGI(TAG, "System reboot ignored during lesson");
                     return;
                 }
-                char* payload_str_raw = cJSON_PrintUnformatted(payload);
-                std::string payload_str = (payload_str_raw != nullptr) ? std::string(payload_str_raw) : std::string();
-                if (payload_str_raw != nullptr) {
-                    cJSON_free(payload_str_raw);
+                // Do a reboot if user requests a OTA update
+                if (context)
+                    Reboot(context);
+                else
+                    Schedule([this]() { Reboot(); });
+            } else if (strcmp(command->valuestring, "unpair") == 0) {
+                if (context) {
+                    BeginChatUnpair(root, context);
+                    return;
                 }
-                if (!lesson_runtime_active_.load()) {
-                    if (context) display->SetChatMessage("system", payload_str.c_str());
-                    else Schedule([this, display, payload_str = std::move(payload_str)]() {
-                        display->SetChatMessage("system", payload_str.c_str());
-                    });
+                if (lesson_runtime_active_.load()) {
+                    ESP_LOGI(TAG, "System unpair ignored during lesson");
+                    return;
                 }
+                const auto* request_id = cJSON_GetObjectItem(root, "request_id");
+                if (cJSON_IsString(request_id) && request_id->valuestring != nullptr &&
+                    request_id->valuestring[0] != '\0' &&
+                    std::strlen(request_id->valuestring) <= 64) {
+                    cJSON* ack = cJSON_CreateObject();
+                    if (ack != nullptr) {
+                        cJSON_AddStringToObject(ack, "type", "system_ack");
+                        cJSON_AddStringToObject(ack, "command", "unpair");
+                        cJSON_AddStringToObject(ack, "request_id", request_id->valuestring);
+                        char* encoded = cJSON_PrintUnformatted(ack);
+                        const bool sent = encoded != nullptr && protocol_ != nullptr &&
+                                          protocol_->SendLessonFrame(encoded);
+                        if (!sent) {
+                            ESP_LOGW(TAG, "System unpair acknowledgement could not be sent");
+                        }
+                        if (encoded != nullptr)
+                            cJSON_free(encoded);
+                        cJSON_Delete(ack);
+                    }
+                }
+                EnterRepairPairingMode();
+            } else if (strcmp(command->valuestring, "wifi_setup") == 0) {
+                if (lesson_runtime_active_.load()) {
+                    ESP_LOGI(TAG, "System WiFi setup ignored during lesson");
+                    return;
+                }
+                static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
             } else {
-                ESP_LOGW(TAG, "Invalid custom message format: missing payload");
+                ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
             }
-#endif
-#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-        } else if (strncmp(type->valuestring, "lesson_", 7) == 0) {
-            // US-006 Slice-01 (S10): additive lesson_* dispatch. Placed immediately
-            // ABOVE the unknown-type no-op so un-upgraded firmware keeps dropping
-            // lesson_* silently (backward-compat). Queue it so HTTP/TLS image fetch
-            // and decode never run on the WebSocket receive callback / lwIP stack.
-            if (!is_websocket_protocol) {
-                ESP_LOGW(TAG, "lesson_* ignored on non-WebSocket transport");
+        }
+    } else if (strcmp(type->valuestring, "alert") == 0) {
+        auto status = cJSON_GetObjectItem(root, "status");
+        auto message = cJSON_GetObjectItem(root, "message");
+        auto emotion = cJSON_GetObjectItem(root, "emotion");
+        if (cJSON_IsString(status) && cJSON_IsString(message) && cJSON_IsString(emotion)) {
+            if (!lesson_runtime_active_.load()) {
+                Alert(status->valuestring, message->valuestring, emotion->valuestring,
+                      Lang::Sounds::OGG_VIBRATION);
+            }
+        } else {
+            ESP_LOGW(TAG, "Alert command requires status, message and emotion");
+        }
+    } else if (strcmp(type->valuestring, "robot_action") == 0) {
+        if (!HandleRobotActionMessage(root, context)) {
+            ESP_LOGW(TAG, "Unsupported robot action");
+        }
+#if CONFIG_RECEIVE_CUSTOM_MESSAGE
+    } else if (strcmp(type->valuestring, "custom") == 0) {
+        auto payload = cJSON_GetObjectItem(root, "payload");
+        char* root_str = cJSON_PrintUnformatted(root);
+        ESP_LOGI(TAG, "Received custom message: %s", root_str ? root_str : "(null)");
+        if (root_str != nullptr) {
+            cJSON_free(root_str);
+        }
+        if (cJSON_IsObject(payload)) {
+            if (HandleRobotActionMessage(payload, context)) {
                 return;
             }
-            EnqueueLessonMessage(root, callback_transport_epoch, context);
-#endif
+            char* payload_str_raw = cJSON_PrintUnformatted(payload);
+            std::string payload_str =
+                (payload_str_raw != nullptr) ? std::string(payload_str_raw) : std::string();
+            if (payload_str_raw != nullptr) {
+                cJSON_free(payload_str_raw);
+            }
+            if (!lesson_runtime_active_.load()) {
+                if (context)
+                    display->SetChatMessage("system", payload_str.c_str());
+                else
+                    Schedule([this, display, payload_str = std::move(payload_str)]() {
+                        display->SetChatMessage("system", payload_str.c_str());
+                    });
+            }
         } else {
-            ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
+            ESP_LOGW(TAG, "Invalid custom message format: missing payload");
         }
+#endif
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
+    } else if (strncmp(type->valuestring, "lesson_", 7) == 0) {
+        // US-006 Slice-01 (S10): additive lesson_* dispatch. Placed immediately
+        // ABOVE the unknown-type no-op so un-upgraded firmware keeps dropping
+        // lesson_* silently (backward-compat). Queue it so HTTP/TLS image fetch
+        // and decode never run on the WebSocket receive callback / lwIP stack.
+        if (!is_websocket_protocol) {
+            ESP_LOGW(TAG, "lesson_* ignored on non-WebSocket transport");
+            return;
+        }
+        EnqueueLessonMessage(root, callback_transport_epoch, context);
+#endif
+    } else {
+        ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
+    }
 }
 
 bool Application::IsSelectedNormalChatRoute() const {
     return chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
-        !lesson_runtime_active_.load() && !chat_protocol_owned_.load() &&
-        chat_source_connect_generation_.load() == connect_generation_.load();
+           !lesson_runtime_active_.load() && !chat_protocol_owned_.load() &&
+           chat_source_connect_generation_.load() == connect_generation_.load();
 }
 
 void Application::CancelChatRecovery(uint32_t outcome) {
-    if (chat_recovery_.kind == ChatRecoveryIntent::Kind::None) return;
+    if (chat_recovery_.kind == ChatRecoveryIntent::Kind::None)
+        return;
     ESP_LOGI(TAG, "chat_recovery outcome=%lu", static_cast<unsigned long>(outcome));
     if (outcome == 2 && chat_recovery_.protocol_generation == protocol_generation_.load() &&
         chat_recovery_.connect_generation == connect_generation_.load()) {
-        if (chat_recovery_.lesson_generation == lesson_runtime_generation_.load()) online_intent_.store(false);
-        if (chat_recovery_.opening && connect_generation_.load() != UINT32_MAX) ++connect_generation_;
+        if (chat_recovery_.lesson_generation == lesson_runtime_generation_.load())
+            online_intent_.store(false);
+        if (chat_recovery_.opening && connect_generation_.load() != UINT32_MAX)
+            ++connect_generation_;
         connect_in_flight_.store(false);
         connect_attempt_active_.store(false);
         CancelConnectWatchdog();
@@ -7596,12 +8013,14 @@ void Application::CancelChatRecovery(uint32_t outcome) {
 }
 
 bool Application::RetainChatRecovery(ChatRecoveryIntent::Kind kind, ListeningMode mode) {
-    if (IsWifiConfigEntryPending()) return false;
+    if (IsWifiConfigEntryPending())
+        return false;
     using Kind = ChatRecoveryIntent::Kind;
     const auto state = GetDeviceState();
-    if (!chat_cleanup_enabled_ || !chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() ||
-        lesson_runtime_active_.load() || lesson_asset_sync_quiet_.load() || chat_unpair_context_ ||
-        reset_pending_.load() || protocol_reinit_pending_.load() || reboot_pending_.load() ||
+    if (!chat_cleanup_enabled_ || !chat_protocol_signals_ ||
+        !chat_protocol_signals_->SourceSelected() || lesson_runtime_active_.load() ||
+        lesson_asset_sync_quiet_.load() || chat_unpair_context_ || reset_pending_.load() ||
+        protocol_reinit_pending_.load() || reboot_pending_.load() ||
         state == kDeviceStateWifiConfiguring || state == kDeviceStateAudioTesting ||
         chat_protocol_infrastructure_fault_ || (!protocol_ && !chat_protocol_owned_.load()) ||
         (protocol_work_lifetime_.Pending() && !online_intent_.load() &&
@@ -7610,11 +8029,13 @@ bool Application::RetainChatRecovery(ChatRecoveryIntent::Kind kind, ListeningMod
         return false;
     }
     auto& intent = chat_recovery_;
-    if (intent.kind != Kind::None && (intent.protocol_generation != protocol_generation_.load() ||
-        intent.connect_generation != connect_generation_.load() ||
-        intent.lesson_generation != lesson_runtime_generation_.load())) {
+    if (intent.kind != Kind::None &&
+        (intent.protocol_generation != protocol_generation_.load() ||
+         intent.connect_generation != connect_generation_.load() ||
+         intent.lesson_generation != lesson_runtime_generation_.load())) {
         CancelChatRecovery();
-        if (kind == Kind::Background) return false;
+        if (kind == Kind::Background)
+            return false;
     }
     if (intent.kind == Kind::None) {
         intent.kind = Kind::Background;
@@ -7646,7 +8067,8 @@ bool Application::RetainChatRecovery(ChatRecoveryIntent::Kind kind, ListeningMod
 void Application::PollChatRecovery(uint64_t now_us) {
     using Kind = ChatRecoveryIntent::Kind;
     auto& intent = chat_recovery_;
-    if (intent.kind == Kind::None) return;
+    if (intent.kind == Kind::None)
+        return;
     const auto state = GetDeviceState();
     if (intent.protocol_generation != protocol_generation_.load() ||
         intent.lesson_generation != lesson_runtime_generation_.load() ||
@@ -7654,8 +8076,12 @@ void Application::PollChatRecovery(uint64_t now_us) {
         lesson_runtime_active_.load() || lesson_asset_sync_quiet_.load() || chat_unpair_context_ ||
         reset_pending_.load() || protocol_reinit_pending_.load() || reboot_pending_.load() ||
         state == kDeviceStateWifiConfiguring || state == kDeviceStateAudioTesting ||
-        chat_protocol_infrastructure_fault_) { CancelChatRecovery(); return; }
-    if (intent.kind != Kind::Background && (now_us < intent.received_us || now_us >= intent.deadline_us)) {
+        chat_protocol_infrastructure_fault_) {
+        CancelChatRecovery();
+        return;
+    }
+    if (intent.kind != Kind::Background &&
+        (now_us < intent.received_us || now_us >= intent.deadline_us)) {
         ESP_LOGI(TAG, "chat_recovery outcome=3");
         intent.kind = Kind::Background;
         intent.received_us = intent.deadline_us = 0;
@@ -7663,7 +8089,8 @@ void Application::PollChatRecovery(uint64_t now_us) {
         RearmClaimedIdleWakeWord();
     }
     if (intent.opening || protocol_work_lifetime_.Pending() || chat_protocol_owned_.load() ||
-        chat_protocol_state_.load() || connect_in_flight_.load() || !protocol_) return;
+        chat_protocol_state_.load() || connect_in_flight_.load() || !protocol_)
+        return;
     ConnectionSource source;
     if (intent.adopted && chat_protocol_signals_->TrySource(source) &&
         chat_source_connect_generation_.load() == intent.connect_generation &&
@@ -7676,34 +8103,43 @@ void Application::PollChatRecovery(uint64_t now_us) {
         }
         // Old controls keep their original source. Wait for bounded retirement,
         // then construct new controls with the original explicit deadline.
-        if (chat_control_intents_.Size() || (chat_outbound_reservation_ && !chat_outbound_generation_)) return;
+        if (chat_control_intents_.Size() ||
+            (chat_outbound_reservation_ && !chat_outbound_generation_))
+            return;
         const auto accepted = intent;
         chat_recovery_ = {};
         ESP_LOGI(TAG, "chat_recovery outcome=6");
         SetDeviceState(kDeviceStateIdle);
         try {
             if (accepted.kind == Kind::Wake)
-                HandleChatWake(std::string(accepted.wake_text.data(), accepted.wake_size), accepted.read_wake);
-            else BeginChatListen(accepted.mode, ChatListenOrigin::User);
+                HandleChatWake(std::string(accepted.wake_text.data(), accepted.wake_size),
+                               accepted.read_wake);
+            else
+                BeginChatListen(accepted.mode, ChatListenOrigin::User);
         } catch (...) {
             RequestChatAudioCleanup(speaking_generation_.load(), false, false, true);
             ESP_LOGI(TAG, "chat_recovery outcome=5");
             return;
         }
-        if (auto* wake = chat_control_intents_.Front()) wake->job.deadline_us = accepted.deadline_us;
+        if (auto* wake = chat_control_intents_.Front())
+            wake->job.deadline_us = accepted.deadline_us;
         if (chat_rearm_phase_ == ChatRearmPhase::Pending) {
             chat_listen_received_us_ = accepted.received_us;
             chat_rearm_job_.deadline_us = accepted.deadline_us;
         }
         return;
     }
-    if (!intent.ready || protocol_work_lifetime_.Busy()) return;
+    if (!intent.ready || protocol_work_lifetime_.Busy())
+        return;
     if (protocol_->IsAudioChannelOpened()) {
         protocol_work_lifetime_.Request(ProtocolWorkLifetime::Action::kClose);
         PollChatProtocolCleanup();
         return;
     }
-    if (connect_generation_.load() == UINT32_MAX) { CancelChatRecovery(); return; }
+    if (connect_generation_.load() == UINT32_MAX) {
+        CancelChatRecovery();
+        return;
+    }
     intent.ready = false;
     intent.opening = true;
     intent.attempted = true;
@@ -7714,7 +8150,8 @@ void Application::PollChatRecovery(uint64_t now_us) {
     reconnect_resume_listening_.store(false);
     SetDeviceState(kDeviceStateConnecting);
     ArmConnectWatchdog();
-    auto* context = new (std::nothrow) ConnectContext{this, intent.mode, intent.connect_generation, std::string(), false, false};
+    auto* context = new (std::nothrow)
+        ConnectContext{this, intent.mode, intent.connect_generation, std::string(), false, false};
     if (!context || !StartOpenChannelWorker(context)) {
         delete context;
         CompleteChatRecoveryOpen(intent.connect_generation, false);
@@ -7723,8 +8160,10 @@ void Application::PollChatRecovery(uint64_t now_us) {
 
 bool Application::CompleteChatRecoveryOpen(uint32_t generation, bool success) {
     if (chat_recovery_.kind == ChatRecoveryIntent::Kind::None || !chat_recovery_.opening ||
-        chat_recovery_.connect_generation != generation || generation != connect_generation_.load() ||
-        chat_recovery_.protocol_generation != protocol_generation_.load()) return false;
+        chat_recovery_.connect_generation != generation ||
+        generation != connect_generation_.load() ||
+        chat_recovery_.protocol_generation != protocol_generation_.load())
+        return false;
     if (chat_recovery_.lesson_generation != lesson_runtime_generation_.load()) {
         CancelChatRecovery();
         return true;
@@ -7746,38 +8185,47 @@ bool Application::CompleteChatRecoveryOpen(uint32_t generation, bool success) {
 }
 
 bool Application::RequestChatLessonCapture() {
-    if (!chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() || !IsLessonVoiceRoute()) return false;
+    if (!chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() ||
+        !IsLessonVoiceRoute())
+        return false;
     microphone_uplink_authorized_.store(false);
     ConnectionSource source;
-    if (!chat_protocol_signals_->TrySource(source)) return true;
+    if (!chat_protocol_signals_->TrySource(source))
+        return true;
     chat_lesson_capture_owner_ = {source, protocol_generation_.load(), connect_generation_.load()};
     chat_lesson_capture_epoch_ = lesson_transport_epoch_gate_.PublishedEpoch();
     chat_lesson_capture_deadline_us_ = static_cast<uint64_t>(esp_timer_get_time()) + 10000000ULL;
     chat_audio_fault_ = false;
-    chat_lesson_capture_token_ = RequestChatAudioCleanup(speaking_generation_.load(), false, true, false,
-        false, false, ChatWakePolicy::Listening);
+    chat_lesson_capture_token_ = RequestChatAudioCleanup(
+        speaking_generation_.load(), false, true, false, false, false, ChatWakePolicy::Listening);
     return true;
 }
 
 void Application::PollChatLessonCapture(uint64_t now_us) {
     const auto token = chat_lesson_capture_token_;
-    if (!token) return;
-    if (!IsLessonVoiceRoute() || GetDeviceState() != kDeviceStateListening || lesson_asset_sync_quiet_.load() ||
+    if (!token)
+        return;
+    if (!IsLessonVoiceRoute() || GetDeviceState() != kDeviceStateListening ||
+        lesson_asset_sync_quiet_.load() ||
         chat_lesson_capture_epoch_ != lesson_transport_epoch_gate_.PublishedEpoch() ||
-        !IsChatConnectionCurrent(chat_lesson_capture_owner_.source, chat_lesson_capture_owner_.protocol_generation,
-            chat_lesson_capture_owner_.connect_generation) || chat_audio_desired_.revoked != token) {
+        !IsChatConnectionCurrent(chat_lesson_capture_owner_.source,
+                                 chat_lesson_capture_owner_.protocol_generation,
+                                 chat_lesson_capture_owner_.connect_generation) ||
+        chat_audio_desired_.revoked != token) {
         chat_lesson_capture_token_ = 0;
         return;
     }
     if (now_us >= chat_lesson_capture_deadline_us_ || chat_audio_fault_) {
         chat_lesson_capture_token_ = 0;
         ESP_LOGW(TAG, "chat_source_fault reason=lesson_capture");
-        chat_protocol_signals_->PublishConnectionFault(chat_lesson_capture_owner_.source,
-            chat_lesson_capture_owner_.connect_generation, ChatProtocolSignals::Error);
+        chat_protocol_signals_->PublishConnectionFault(
+            chat_lesson_capture_owner_.source, chat_lesson_capture_owner_.connect_generation,
+            ChatProtocolSignals::Error);
         xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
         return;
     }
-    if (chat_audio_prepared_ != token || !audio_service_.ArmChatUplink(token, false)) return;
+    if (chat_audio_prepared_ != token || !audio_service_.ArmChatUplink(token, false))
+        return;
     chat_lesson_capture_token_ = 0;
     microphone_uplink_authorized_.store(true);
     xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
@@ -7793,47 +8241,57 @@ void Application::PollChatInboundMessages() {
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
             return;
         }
-        if (next.status == ChatInboundMessages::ReadStatus::Empty) return;
+        if (next.status == ChatInboundMessages::ReadStatus::Empty)
+            return;
         auto context = std::move(next.context);
-        if (!IsChatRequestCurrent(context)) continue;
+        if (!IsChatRequestCurrent(context))
+            continue;
         if (static_cast<uint64_t>(esp_timer_get_time()) >= context->deadline_us) {
             FailChatRequest(context);
             continue;
         }
-        try { DispatchIncomingJson(context->root.get(), context->lesson_epoch, true, context); }
-        catch (...) { FailChatRequest(context); }
+        try {
+            DispatchIncomingJson(context->root.get(), context->lesson_epoch, true, context);
+        } catch (...) {
+            FailChatRequest(context);
+        }
         PollChatStart(static_cast<uint64_t>(esp_timer_get_time()));
     }
-    if (chat_inbound_messages_.Pending()) xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
+    if (chat_inbound_messages_.Pending())
+        xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
 }
 
 void Application::FailChatRequest(const ChatRequestContext& context) {
-    if (!context || !IsChatRequestCurrent(context)) return;
+    if (!context || !IsChatRequestCurrent(context))
+        return;
     const auto signals = std::atomic_load(&chat_protocol_signals_);
-    if (!signals || !signals->MatchesSource(context->owner.source)) return;
+    if (!signals || !signals->MatchesSource(context->owner.source))
+        return;
     ESP_LOGW(TAG, "chat_source_fault reason=request_failed");
-    signals->PublishConnectionFault(context->owner.source,
-        context->owner.connect_generation, ChatProtocolSignals::Error);
+    signals->PublishConnectionFault(context->owner.source, context->owner.connect_generation,
+                                    ChatProtocolSignals::Error);
     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
 }
 
-bool Application::IsChatConnectionCurrent(ConnectionSource source, uint64_t protocol_generation, uint32_t connect_generation) const {
+bool Application::IsChatConnectionCurrent(ConnectionSource source, uint64_t protocol_generation,
+                                          uint32_t connect_generation) const {
     const auto signals = std::atomic_load(&chat_protocol_signals_);
-    return signals && signals->MatchesSource(source) &&
-        !chat_protocol_owned_.load() && protocol_generation == protocol_generation_.load() &&
-        connect_generation == connect_generation_.load();
+    return signals && signals->MatchesSource(source) && !chat_protocol_owned_.load() &&
+           protocol_generation == protocol_generation_.load() &&
+           connect_generation == connect_generation_.load();
 }
 
 bool Application::TakeChatCaption(ChatCaptionMailbox::Message& caption) {
 #if CONFIG_TBOT_VOICE_DEMO
     const auto signals = std::atomic_load(&chat_protocol_signals_);
-    if (!signals || !signals->captions.TryTake(caption)) return false;
+    if (!signals || !signals->captions.TryTake(caption))
+        return false;
     const auto state = GetDeviceState();
     return !IsLessonVoiceRoute() && !lesson_asset_sync_quiet_.load() &&
-        (state == kDeviceStateSpeaking || state == kDeviceStateListening) &&
-        caption.owner.response_generation == speaking_generation_.load() &&
-        IsChatConnectionCurrent(caption.owner.source, caption.owner.protocol_generation,
-            caption.owner.connect_generation);
+           (state == kDeviceStateSpeaking || state == kDeviceStateListening) &&
+           caption.owner.response_generation == speaking_generation_.load() &&
+           IsChatConnectionCurrent(caption.owner.source, caption.owner.protocol_generation,
+                                   caption.owner.connect_generation);
 #else
     (void)caption;
     return false;
@@ -7841,25 +8299,32 @@ bool Application::TakeChatCaption(ChatCaptionMailbox::Message& caption) {
 }
 
 bool Application::IsChatRequestCurrent(const ChatRequestContext& context) const {
-    return !context || IsChatConnectionCurrent(context->owner.source, context->owner.protocol_generation,
-        context->owner.connect_generation);
+    return !context ||
+           IsChatConnectionCurrent(context->owner.source, context->owner.protocol_generation,
+                                   context->owner.connect_generation);
 }
 
-uint64_t Application::RequestChatConnectionText(const std::string& text, ChatRequestContext context, uint64_t received_us,
-    std::shared_ptr<std::atomic<bool>> authorization) {
+uint64_t Application::RequestChatConnectionText(const std::string& text, ChatRequestContext context,
+                                                uint64_t received_us,
+                                                std::shared_ptr<std::atomic<bool>> authorization) {
     ChatConnectionMessages::Owner owner;
-    if (context) owner = context->owner;
+    if (context)
+        owner = context->owner;
     else {
-        if (!chat_protocol_signals_ || !chat_protocol_signals_->TrySource(owner.source)) return 0;
+        if (!chat_protocol_signals_ || !chat_protocol_signals_->TrySource(owner.source))
+            return 0;
         owner.protocol_generation = protocol_generation_.load();
         owner.connect_generation = connect_generation_.load();
     }
-    if (!IsChatConnectionCurrent(owner.source, owner.protocol_generation, owner.connect_generation)) return 0;
-    const auto id = chat_connection_messages_.Admit(owner, text,
-        received_us ? received_us : static_cast<uint64_t>(esp_timer_get_time()), std::move(authorization));
+    if (!IsChatConnectionCurrent(owner.source, owner.protocol_generation, owner.connect_generation))
+        return 0;
+    const auto id = chat_connection_messages_.Admit(
+        owner, text, received_us ? received_us : static_cast<uint64_t>(esp_timer_get_time()),
+        std::move(authorization));
     if (!id) {
         ESP_LOGW(TAG, "chat_source_fault reason=reply_admission");
-        chat_protocol_signals_->PublishConnectionFault(owner.source, owner.connect_generation, ChatProtocolSignals::Error);
+        chat_protocol_signals_->PublishConnectionFault(owner.source, owner.connect_generation,
+                                                       ChatProtocolSignals::Error);
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
     return id;
@@ -7869,44 +8334,55 @@ void Application::PollChatConnectionMessages(uint64_t now_us) {
     auto* record = chat_connection_messages_.Front();
     if (!record) {
         if (passive_ws_intent_.load() && !chat_control_intents_.Size() &&
-            chat_rearm_phase_ != ChatRearmPhase::Pending && !chat_playout_stamp_) RetireChatOutbound();
+            chat_rearm_phase_ != ChatRearmPhase::Pending && !chat_playout_stamp_)
+            RetireChatOutbound();
         return;
     }
     using Outcome = ChatConnectionMessages::Outcome;
     using Result = ChatOutboundMailbox::Result;
-    if (!IsChatConnectionCurrent(record->owner.source, record->owner.protocol_generation, record->owner.connect_generation) ||
+    if (!IsChatConnectionCurrent(record->owner.source, record->owner.protocol_generation,
+                                 record->owner.connect_generation) ||
         (record->outcome == Outcome::Pending && record->authorization &&
          !record->authorization->load(std::memory_order_acquire))) {
         record->outcome = Outcome::Cancelled;
-        if (record->submitted) RetireChatOutbound();
+        if (record->submitted)
+            RetireChatOutbound();
     }
     if (record->outcome == Outcome::Pending && now_us >= record->deadline_us) {
         record->outcome = Outcome::Failed;
-        if (record->authorization) record->authorization->store(false, std::memory_order_release);
-        if (record->submitted) RetireChatOutbound();
+        if (record->authorization)
+            record->authorization->store(false, std::memory_order_release);
+        if (record->submitted)
+            RetireChatOutbound();
     }
     if (record->outcome != Outcome::Pending) {
         if (record->outcome == Outcome::Failed && record->authorization && !record->submitted) {
             ESP_LOGW(TAG, "chat_source_fault reason=playout_receipt_delivery");
-            chat_protocol_signals_->PublishConnectionFault(record->owner.source,
-                record->owner.connect_generation, ChatProtocolSignals::Error);
+            chat_protocol_signals_->PublishConnectionFault(
+                record->owner.source, record->owner.connect_generation, ChatProtocolSignals::Error);
         }
-        if (record->id == chat_unpair_id_) chat_unpair_completed_ = !record->submitted;
+        if (record->id == chat_unpair_id_)
+            chat_unpair_completed_ = !record->submitted;
         if (!record->submitted && record->id == chat_passive_ping_id_) {
             chat_passive_ping_id_ = 0;
             if (record->outcome == Outcome::Failed) {
                 ESP_LOGW(TAG, "chat_source_fault reason=ping_delivery");
                 chat_protocol_signals_->PublishConnectionFault(record->owner.source,
-                    record->owner.connect_generation, ChatProtocolSignals::Error);
+                                                               record->owner.connect_generation,
+                                                               ChatProtocolSignals::Error);
             }
         }
-        if (!record->submitted) chat_connection_messages_.Pop();
+        if (!record->submitted)
+            chat_connection_messages_.Pop();
         return;
     }
-    if (record->submitted || chat_control_intents_.Size() || chat_start_obsolete_reservation_) return;
+    if (record->submitted || chat_control_intents_.Size() || chat_start_obsolete_reservation_)
+        return;
     if (!chat_outbound_generation_) {
-        if (chat_outbound_reservation_) return;
-        if (ActivateChatOutbound(record->owner.source.connection_epoch) != Result::Sent) return;
+        if (chat_outbound_reservation_)
+            return;
+        if (ActivateChatOutbound(record->owner.source.connection_epoch) != Result::Sent)
+            return;
     }
     auto& job = record->physical;
     job.kind = ChatOutboundMailbox::Kind::FullText;
@@ -7924,28 +8400,34 @@ void Application::PollChatConnectionMessages(uint64_t now_us) {
         record->physical = {};
     } else {
         record->outcome = Outcome::Failed;
-        if (record->authorization) record->authorization->store(false, std::memory_order_release);
+        if (record->authorization)
+            record->authorization->store(false, std::memory_order_release);
     }
 }
 
 bool Application::MaintainChatPassiveLiveness() {
     ConnectionSource source;
-    if (!protocol_ || !chat_protocol_signals_ || !chat_protocol_signals_->TrySource(source)) return false;
-    if (chat_passive_ping_id_) return true;
+    if (!protocol_ || !chat_protocol_signals_ || !chat_protocol_signals_->TrySource(source))
+        return false;
+    if (chat_passive_ping_id_)
+        return true;
     const int state = protocol_->ObserveChatPassiveLiveness(source);
     if (state < 0) {
         ESP_LOGW(TAG, "chat_source_fault reason=passive_liveness");
-        chat_protocol_signals_->PublishConnectionFault(source, chat_source_connect_generation_.load(), ChatProtocolSignals::Error);
+        chat_protocol_signals_->PublishConnectionFault(
+            source, chat_source_connect_generation_.load(), ChatProtocolSignals::Error);
         return false;
     }
-    if (state == 0 || chat_connection_messages_.Size() >= 2) return true;
+    if (state == 0 || chat_connection_messages_.Size() >= 2)
+        return true;
     chat_passive_ping_id_ = RequestChatConnectionText("{\"type\":\"ping\"}");
     return chat_passive_ping_id_ != 0;
 }
 
 void Application::BeginChatUnpair(const cJSON* root, ChatRequestContext context) {
     if (!context || !IsChatRequestCurrent(context) || chat_unpair_context_ ||
-        lesson_runtime_active_.load() || lesson_asset_sync_quiet_.load()) return;
+        lesson_runtime_active_.load() || lesson_asset_sync_quiet_.load())
+        return;
     chat_unpair_context_ = context;
     CancelChatRecovery();
     const auto received_us = static_cast<uint64_t>(esp_timer_get_time());
@@ -7962,32 +8444,43 @@ void Application::BeginChatUnpair(const cJSON* root, ChatRequestContext context)
         std::unique_ptr<cJSON, decltype(&cJSON_Delete)> ack(cJSON_CreateObject(), cJSON_Delete);
         if (!ack || !cJSON_AddStringToObject(ack.get(), "type", "system_ack") ||
             !cJSON_AddStringToObject(ack.get(), "command", "unpair") ||
-            !cJSON_AddStringToObject(ack.get(), "request_id", request_id->valuestring)) return;
-        std::unique_ptr<char, decltype(&cJSON_free)> encoded(cJSON_PrintUnformatted(ack.get()), cJSON_free);
-        if (encoded) chat_unpair_id_ = RequestChatConnectionText(encoded.get(), context, received_us);
+            !cJSON_AddStringToObject(ack.get(), "request_id", request_id->valuestring))
+            return;
+        std::unique_ptr<char, decltype(&cJSON_free)> encoded(cJSON_PrintUnformatted(ack.get()),
+                                                             cJSON_free);
+        if (encoded)
+            chat_unpair_id_ = RequestChatConnectionText(encoded.get(), context, received_us);
     } catch (...) {
         // Keep the original teardown deadline when ACK allocation/admission fails.
     }
 }
 
 void Application::PollChatUnpair(uint64_t now_us) {
-    if (!chat_unpair_context_) return;
-    if (!IsChatRequestCurrent(chat_unpair_context_) || lesson_runtime_active_.load() || lesson_asset_sync_quiet_.load()) {
+    if (!chat_unpair_context_)
+        return;
+    if (!IsChatRequestCurrent(chat_unpair_context_) || lesson_runtime_active_.load() ||
+        lesson_asset_sync_quiet_.load()) {
         chat_unpair_context_.reset();
         chat_unpair_id_ = 0;
         return;
     }
-    if (!chat_unpair_completed_ && now_us < chat_unpair_deadline_us_) return;
+    if (!chat_unpair_completed_ && now_us < chat_unpair_deadline_us_)
+        return;
     auto context = std::move(chat_unpair_context_);
     chat_unpair_id_ = 0;
     EnterRepairPairingMode(std::move(context));
 }
 
-bool Application::RequestChatControl(ChatOutboundMailbox::Kind kind, int32_t argument, const std::string& payload, bool read_wake) {
-    if (!IsSelectedNormalChatRoute()) return false;
-    if (chat_protocol_owned_.load() || chat_source_connect_generation_.load() != connect_generation_.load()) return false;
+bool Application::RequestChatControl(ChatOutboundMailbox::Kind kind, int32_t argument,
+                                     const std::string& payload, bool read_wake) {
+    if (!IsSelectedNormalChatRoute())
+        return false;
+    if (chat_protocol_owned_.load() ||
+        chat_source_connect_generation_.load() != connect_generation_.load())
+        return false;
     ChatControlIntents::Intent intent;
-    if (!chat_protocol_signals_->TrySource(intent.source)) return false;
+    if (!chat_protocol_signals_->TrySource(intent.source))
+        return false;
     intent.protocol_generation = protocol_generation_.load();
     intent.connect_generation = connect_generation_.load();
     intent.response_generation = speaking_generation_.load();
@@ -7997,7 +8490,8 @@ bool Application::RequestChatControl(ChatOutboundMailbox::Kind kind, int32_t arg
     intent.job.deadline_us = static_cast<uint64_t>(esp_timer_get_time()) + 10000000ULL;
     const size_t listen_slot = chat_rearm_phase_ == ChatRearmPhase::Pending ? 1 : 0;
     if (chat_control_intents_.Size() + listen_slot >= 4 ||
-        !intent.job.SetPayload(payload.data(), payload.size()) || !chat_control_intents_.Push(intent)) {
+        !intent.job.SetPayload(payload.data(), payload.size()) ||
+        !chat_control_intents_.Push(intent)) {
         chat_protocol_infrastructure_fault_ = true;
         RecoverChatPlayout(215);
         return false;
@@ -8008,10 +8502,12 @@ bool Application::RequestChatControl(ChatOutboundMailbox::Kind kind, int32_t arg
 
 void Application::PollChatControls(uint64_t now_us) {
     auto* intent = chat_control_intents_.Front();
-    if (!intent) return;
+    if (!intent)
+        return;
     if (intent->outcome == ChatControlIntents::Outcome::Superseded ||
         intent->outcome == ChatControlIntents::Outcome::Failed) {
-        if (!intent->admitted || intent->reservation != chat_outbound_reservation_) chat_control_intents_.Pop();
+        if (!intent->admitted || intent->reservation != chat_outbound_reservation_)
+            chat_control_intents_.Pop();
         return;
     }
     if (!chat_protocol_signals_ || !chat_protocol_signals_->MatchesSource(intent->source) ||
@@ -8021,7 +8517,8 @@ void Application::PollChatControls(uint64_t now_us) {
         RetireChatOutbound();
         chat_wake_read_pending_ = false;
         chat_wake_read_result_.reset();
-        if (chat_wake_read_serial_ != UINT32_MAX) ++chat_wake_read_serial_;
+        if (chat_wake_read_serial_ != UINT32_MAX)
+            ++chat_wake_read_serial_;
         return;
     }
     if (now_us >= intent->job.deadline_us) {
@@ -8032,14 +8529,18 @@ void Application::PollChatControls(uint64_t now_us) {
     if (intent->resolve_wake) {
         if (!chat_wake_read_result_) {
             if (!chat_wake_read_pending_) {
-                if (chat_wake_read_serial_ == UINT32_MAX) { RecoverChatPlayout(217); return; }
+                if (chat_wake_read_serial_ == UINT32_MAX) {
+                    RecoverChatPlayout(217);
+                    return;
+                }
                 ++chat_wake_read_serial_;
                 chat_wake_read_pending_ = true;
             }
             PollChatAudioCleanup();
             return;
         }
-        if (!intent->job.SetPayload(chat_wake_read_result_->data(), chat_wake_read_result_->size())) {
+        if (!intent->job.SetPayload(chat_wake_read_result_->data(),
+                                    chat_wake_read_result_->size())) {
             intent->outcome = ChatControlIntents::Outcome::Failed;
             chat_wake_read_result_.reset();
             RecoverChatPlayout(218);
@@ -8053,8 +8554,7 @@ void Application::PollChatControls(uint64_t now_us) {
         if (result == ChatOutboundMailbox::Result::Sent) {
             intent->admitted = true;
             intent->reservation = chat_outbound_reservation_;
-        }
-        else if (result != ChatOutboundMailbox::Result::Busy) {
+        } else if (result != ChatOutboundMailbox::Result::Busy) {
             intent->outcome = ChatControlIntents::Outcome::Failed;
             RecoverChatPlayout(219);
         }
@@ -8064,13 +8564,19 @@ void Application::PollChatControls(uint64_t now_us) {
 bool Application::DeliverChatControl(const ChatOutboundMailbox::Completion& completion) {
     auto* intent = chat_control_intents_.Front();
     if (!intent || !intent->admitted || intent->job.request_id != completion.job.request_id ||
-        intent->job.generation != completion.job.generation || intent->job.protocol_generation != completion.job.protocol_generation ||
-        intent->job.connection_epoch != completion.job.connection_epoch) return false;
+        intent->job.generation != completion.job.generation ||
+        intent->job.protocol_generation != completion.job.protocol_generation ||
+        intent->job.connection_epoch != completion.job.connection_epoch)
+        return false;
     if (intent->outcome == ChatControlIntents::Outcome::Superseded ||
-        intent->outcome == ChatControlIntents::Outcome::Failed) return true;
-    intent->outcome = IsChatOutboundCompletionCurrent(completion) && completion.result == ChatOutboundMailbox::Result::Sent ?
-        ChatControlIntents::Outcome::Sent : ChatControlIntents::Outcome::Failed;
-    if (intent->outcome == ChatControlIntents::Outcome::Failed) RecoverChatPlayout(220);
+        intent->outcome == ChatControlIntents::Outcome::Failed)
+        return true;
+    intent->outcome = IsChatOutboundCompletionCurrent(completion) &&
+                              completion.result == ChatOutboundMailbox::Result::Sent
+                          ? ChatControlIntents::Outcome::Sent
+                          : ChatControlIntents::Outcome::Failed;
+    if (intent->outcome == ChatControlIntents::Outcome::Failed)
+        RecoverChatPlayout(220);
     chat_control_intents_.Pop();
     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND | MAIN_EVENT_STATE_CHANGED);
     return true;
@@ -8103,23 +8609,28 @@ bool Application::RetainChatActiveListen() {
 bool Application::HandleChatStopListening() {
     CancelChatRecovery();
     if (!IsSelectedNormalChatRoute())
-        return chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() && !lesson_runtime_active_.load();
-    if (GetDeviceState() != kDeviceStateListening && chat_rearm_phase_ != ChatRearmPhase::Pending) return true;
+        return chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
+               !lesson_runtime_active_.load();
+    if (GetDeviceState() != kDeviceStateListening && chat_rearm_phase_ != ChatRearmPhase::Pending)
+        return true;
     if (!chat_playout_stamp_) {
         ConnectionSource source;
         if (!audio_service_.IsCurrentChatPlaybackReset(chat_audio_reset_serial_))
             chat_audio_reset_serial_ = RequestChatPlaybackCleanup(speaking_generation_.load());
         if (!chat_protocol_signals_->TrySource(source) ||
-            !EstablishChatPlayoutResponse({source, protocol_generation_.load(), connect_generation_.load(),
-                speaking_generation_.load(), chat_audio_reset_serial_})) {
+            !EstablishChatPlayoutResponse({source, protocol_generation_.load(),
+                                           connect_generation_.load(), speaking_generation_.load(),
+                                           chat_audio_reset_serial_})) {
             RecoverChatPlayout(222);
             return true;
         }
     }
-    if (!RetainChatActiveListen()) return true;
+    if (!RetainChatActiveListen())
+        return true;
     chat_rearm_voice_intent_ = false;
     microphone_uplink_authorized_.store(false);
-    RequestChatAudioCleanup(speaking_generation_.load(), false, false,
+    RequestChatAudioCleanup(
+        speaking_generation_.load(), false, false,
         IsDeviceClaimed() && !connect_in_flight_.load() && !lesson_asset_sync_quiet_.load());
     chat_rearm_phase_ = ChatRearmPhase::IdleComplete;
     RequestChatControl(ChatOutboundMailbox::Kind::ListenStop);
@@ -8130,23 +8641,32 @@ bool Application::HandleChatStopListening() {
 }
 
 bool Application::BeginChatListen(ListeningMode mode, ChatListenOrigin origin) {
-    if (IsWifiConfigEntryPending()) return false;
+    if (IsWifiConfigEntryPending())
+        return false;
     ConnectionSource available;
-    if (origin == ChatListenOrigin::User && chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
-        !lesson_runtime_active_.load() && (chat_recovery_.kind != ChatRecoveryIntent::Kind::None ||
-        chat_protocol_owned_.load() || !chat_protocol_signals_->TrySource(available) ||
-        chat_source_connect_generation_.load() != connect_generation_.load()))
+    if (origin == ChatListenOrigin::User && chat_protocol_signals_ &&
+        chat_protocol_signals_->SourceSelected() && !lesson_runtime_active_.load() &&
+        (chat_recovery_.kind != ChatRecoveryIntent::Kind::None || chat_protocol_owned_.load() ||
+         !chat_protocol_signals_->TrySource(available) ||
+         chat_source_connect_generation_.load() != connect_generation_.load()))
         return RetainChatRecovery(ChatRecoveryIntent::Kind::Listen, mode);
-    if (!IsSelectedNormalChatRoute() || (passive_ws_intent_.load() && origin != ChatListenOrigin::User)) return false;
+    if (!IsSelectedNormalChatRoute() ||
+        (passive_ws_intent_.load() && origin != ChatListenOrigin::User))
+        return false;
     const auto state = GetDeviceState();
     if (!protocol_ || lesson_asset_sync_quiet_.load() ||
-        (state != kDeviceStateIdle && state != kDeviceStateSpeaking && state != kDeviceStateListening &&
-         state != kDeviceStateConnecting)) return false;
+        (state != kDeviceStateIdle && state != kDeviceStateSpeaking &&
+         state != kDeviceStateListening && state != kDeviceStateConnecting))
+        return false;
     ConnectionSource source;
-    if (!chat_protocol_signals_->TrySource(source) || protocol_->CurrentConnectionEpoch() != source.connection_epoch) return false;
-    if (origin == ChatListenOrigin::User) passive_ws_intent_.store(false);
+    if (!chat_protocol_signals_->TrySource(source) ||
+        protocol_->CurrentConnectionEpoch() != source.connection_epoch)
+        return false;
+    if (origin == ChatListenOrigin::User)
+        passive_ws_intent_.store(false);
     online_intent_.store(true);
-    if (chat_rearm_phase_ == ChatRearmPhase::Pending) return true;
+    if (chat_rearm_phase_ == ChatRearmPhase::Pending)
+        return true;
     if (chat_control_intents_.Size() >= 4) {
         chat_protocol_infrastructure_fault_ = true;
         RecoverChatPlayout(223);
@@ -8155,7 +8675,8 @@ bool Application::BeginChatListen(ListeningMode mode, ChatListenOrigin origin) {
     if (!chat_outbound_generation_) {
         if (chat_outbound_reservation_) {
             chat_start_obsolete_reservation_ = chat_outbound_reservation_;
-        } else if (ActivateChatOutbound(source.connection_epoch) != ChatOutboundMailbox::Result::Sent) {
+        } else if (ActivateChatOutbound(source.connection_epoch) !=
+                   ChatOutboundMailbox::Result::Sent) {
             RecoverChatPlayout(224);
             return true;
         }
@@ -8167,10 +8688,13 @@ bool Application::BeginChatListen(ListeningMode mode, ChatListenOrigin origin) {
         chat_playout_response_.response_generation != speaking_generation_.load() ||
         !audio_service_.IsCurrentChatPlaybackReset(chat_playout_response_.reset_token)) {
         auto generation = speaking_generation_.load();
-        if (generation >= UINT32_MAX - 1) return false;
+        if (generation >= UINT32_MAX - 1)
+            return false;
         speaking_generation_.store(++generation);
         const auto reset = RequestChatPlaybackCleanup(generation);
-        if (!EstablishChatPlayoutResponse({source, protocol_generation_.load(), connect_generation_.load(), generation, reset})) return false;
+        if (!EstablishChatPlayoutResponse({source, protocol_generation_.load(),
+                                           connect_generation_.load(), generation, reset}))
+            return false;
     }
     chat_listen_origin_ = origin;
     chat_listen_received_us_ = static_cast<uint64_t>(esp_timer_get_time());
@@ -8183,11 +8707,13 @@ bool Application::BeginChatListen(ListeningMode mode, ChatListenOrigin origin) {
     chat_playout_recovery_ = false;
     chat_playout_ready_ = false;
     microphone_uplink_authorized_.store(false);
-    chat_rearm_prepared_ = RequestChatAudioCleanup(speaking_generation_.load(), false, true, false, true, false, ChatWakePolicy::Listening);
+    chat_rearm_prepared_ = RequestChatAudioCleanup(speaking_generation_.load(), false, true, false,
+                                                   true, false, ChatWakePolicy::Listening);
     chat_rearm_job_.kind = ChatOutboundMailbox::Kind::ListenStart;
     chat_rearm_job_.argument = mode;
     chat_rearm_job_.deadline_us = chat_listen_received_us_ + 10000000ULL;
-    if (state != kDeviceStateConnecting) SetDeviceState(kDeviceStateSpeaking);
+    if (state != kDeviceStateConnecting)
+        SetDeviceState(kDeviceStateSpeaking);
     xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
     return true;
 }
@@ -8195,8 +8721,10 @@ bool Application::BeginChatListen(ListeningMode mode, ChatListenOrigin origin) {
 bool Application::HandleChatAbort(AbortReason reason, bool resume) {
     CancelChatRecovery();
     if (!IsSelectedNormalChatRoute())
-        return chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() && !lesson_runtime_active_.load();
-    if (!RetainChatActiveListen()) return true;
+        return chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
+               !lesson_runtime_active_.load();
+    if (!RetainChatActiveListen())
+        return true;
     speaking_arm_dispatch_.Cancel();
     interrupt_count_.fetch_add(1, std::memory_order_relaxed);
     aborted_ = true;
@@ -8205,14 +8733,16 @@ bool Application::HandleChatAbort(AbortReason reason, bool resume) {
     chat_rearm_voice_intent_ = false;
     microphone_uplink_authorized_.store(false);
     RequestChatAudioCleanup(speaking_generation_.load(), true, false,
-        !resume && IsDeviceClaimed() && !connect_in_flight_.load() && !lesson_asset_sync_quiet_.load());
+                            !resume && IsDeviceClaimed() && !connect_in_flight_.load() &&
+                                !lesson_asset_sync_quiet_.load());
     RequestChatControl(ChatOutboundMailbox::Kind::Abort, reason);
     chat_playout_response_.reset_token = chat_audio_reset_serial_;
     chat_rearm_owner_ = chat_playout_response_;
     chat_listen_origin_ = ChatListenOrigin::Abort;
     chat_playout_begun_ = chat_playout_ready_ = false;
     chat_playout_controller_.Cancel();
-    if (resume) BeginChatListen(GetDefaultListeningMode(), ChatListenOrigin::Abort);
+    if (resume)
+        BeginChatListen(GetDefaultListeningMode(), ChatListenOrigin::Abort);
     else {
         chat_rearm_phase_ = ChatRearmPhase::IdleComplete;
         SetDeviceState(kDeviceStateIdle);
@@ -8222,16 +8752,23 @@ bool Application::HandleChatAbort(AbortReason reason, bool resume) {
 }
 
 bool Application::HandleChatWake(const std::string& wake_word, bool read_worker) {
-    if (IsWifiConfigEntryPending()) return true;
-    if (!chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() || lesson_runtime_active_.load()) return false;
+    if (IsWifiConfigEntryPending())
+        return true;
+    if (!chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() ||
+        lesson_runtime_active_.load())
+        return false;
     ConnectionSource available;
     if (chat_recovery_.kind != ChatRecoveryIntent::Kind::None || chat_protocol_owned_.load() ||
         !chat_protocol_signals_->TrySource(available) ||
         chat_source_connect_generation_.load() != connect_generation_.load()) {
         const bool new_wake = chat_recovery_.kind == ChatRecoveryIntent::Kind::None ||
-            chat_recovery_.kind == ChatRecoveryIntent::Kind::Background;
-        if (RetainChatRecovery(ChatRecoveryIntent::Kind::Wake, kListeningModeAutoStop) && new_wake) {
-            if (wake_word.size() > ChatOutboundMailbox::kMaxPayloadSize) { CancelChatRecovery(5); return true; }
+                              chat_recovery_.kind == ChatRecoveryIntent::Kind::Background;
+        if (RetainChatRecovery(ChatRecoveryIntent::Kind::Wake, kListeningModeAutoStop) &&
+            new_wake) {
+            if (wake_word.size() > ChatOutboundMailbox::kMaxPayloadSize) {
+                CancelChatRecovery(5);
+                return true;
+            }
             chat_recovery_.read_wake = read_worker;
             chat_recovery_.wake_size = wake_word.size();
             std::memcpy(chat_recovery_.wake_text.data(), wake_word.data(), wake_word.size());
@@ -8240,13 +8777,15 @@ bool Application::HandleChatWake(const std::string& wake_word, bool read_worker)
     }
     const auto state = GetDeviceState();
     if (!protocol_ || lesson_asset_sync_quiet_.load() ||
-        (state != kDeviceStateIdle && state != kDeviceStateSpeaking && state != kDeviceStateListening &&
-         state != kDeviceStateConnecting)) {
+        (state != kDeviceStateIdle && state != kDeviceStateSpeaking &&
+         state != kDeviceStateListening && state != kDeviceStateConnecting)) {
         ESP_LOGI(TAG, "chat_recovery outcome=5");
         return true;
     }
     ConnectionSource source;
-    if (!chat_protocol_signals_->TrySource(source) || protocol_->CurrentConnectionEpoch() != source.connection_epoch) return true;
+    if (!chat_protocol_signals_->TrySource(source) ||
+        protocol_->CurrentConnectionEpoch() != source.connection_epoch)
+        return true;
     ESP_LOGI(TAG, "chat_recovery outcome=6");
     passive_ws_intent_.store(false);
     online_intent_.store(true);
@@ -8254,25 +8793,29 @@ bool Application::HandleChatWake(const std::string& wake_word, bool read_worker)
     if (active)
         HandleChatAbort(kAbortReasonWakeWordDetected, false);
 #if CONFIG_SEND_WAKE_WORD_DATA
-    if (!active && !RequestChatControl(ChatOutboundMailbox::Kind::Wake, 0, wake_word, read_worker)) return true;
+    if (!active && !RequestChatControl(ChatOutboundMailbox::Kind::Wake, 0, wake_word, read_worker))
+        return true;
 #else
     (void)wake_word;
     (void)read_worker;
 #endif
-    BeginChatListen(active ? GetDefaultListeningMode() : kListeningModeAutoStop, ChatListenOrigin::Wake);
-    if (active && !RequestChatCue(Lang::Sounds::OGG_POPUP)) ESP_LOGW(TAG, "chat_popup_busy");
+    BeginChatListen(active ? GetDefaultListeningMode() : kListeningModeAutoStop,
+                    ChatListenOrigin::Wake);
+    if (active && !RequestChatCue(Lang::Sounds::OGG_POPUP))
+        ESP_LOGW(TAG, "chat_popup_busy");
 #if !CONFIG_SEND_WAKE_WORD_DATA
-    if (!active && !RequestChatCue(Lang::Sounds::OGG_POPUP)) ESP_LOGW(TAG, "chat_popup_busy");
+    if (!active && !RequestChatCue(Lang::Sounds::OGG_POPUP))
+        ESP_LOGW(TAG, "chat_popup_busy");
 #endif
     return true;
 }
 
 void Application::HandleStopListeningEvent() {
-    if (HandleChatStopListening()) return;
+    if (HandleChatStopListening())
+        return;
     auto state = GetDeviceState();
     const bool lesson_answer_turn =
-        lesson_interactive_listen_pending_.load() ||
-        lesson_interactive_listening_active_.load();
+        lesson_interactive_listen_pending_.load() || lesson_interactive_listening_active_.load();
     if (lesson_runtime_active_.load() && !lesson_answer_turn) {
         ESP_LOGI(TAG, "lesson stop listening ignored state=%d", static_cast<int>(state));
         return;
@@ -8298,7 +8841,8 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
-    if (HandleChatWake({}, true)) return;
+    if (HandleChatWake({}, true))
+        return;
     if (lesson_asset_sync_quiet_.load()) {
         ESP_LOGI(TAG, "lesson asset sync quiet ignored wake word");
         return;
@@ -8332,9 +8876,7 @@ void Application::HandleWakeWordDetectedEvent() {
             // Schedule to let the state change be processed first (UI update),
             // then continue on a worker because OpenAudioChannel can block on
             // TCP/TLS/server hello long enough to starve the app/audio loop.
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
-            });
+            Schedule([this, wake_word]() { ContinueWakeWordInvoke(wake_word); });
             return;
         }
         // Channel already opened, continue directly
@@ -8347,7 +8889,8 @@ void Application::HandleWakeWordDetectedEvent() {
         }
         AbortSpeaking(kAbortReasonWakeWordDetected);
         // Clear send queue to avoid sending residues to server
-        while (audio_service_.PopPacketFromSendQueue());
+        while (audio_service_.PopPacketFromSendQueue())
+            ;
 
         if (state == kDeviceStateListening) {
             protocol_->SendStartListening(GetDefaultListeningMode());
@@ -8367,7 +8910,8 @@ void Application::HandleWakeWordDetectedEvent() {
 }
 
 void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
-    if (HandleChatWake(wake_word)) return;
+    if (HandleChatWake(wake_word))
+        return;
     // Check state again in case it was changed during scheduling
     auto state = GetDeviceState();
     if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
@@ -8389,7 +8933,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
         reconnect_mode_ = GetDefaultListeningMode();
         uint32_t gen = ++connect_generation_;
         connect_in_flight_.store(true);
-        connect_attempt_active_.store(true);  // WSS-8: suppress per-attempt error banner until terminal
+        connect_attempt_active_.store(
+            true);  // WSS-8: suppress per-attempt error banner until terminal
         ArmConnectWatchdog();
         passive_ws_intent_.store(false);
         auto* ctx = new ConnectContext{this, reconnect_mode_, gen, wake_word, true, false};
@@ -8409,7 +8954,8 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word) {
 }
 
 void Application::FinishWakeWordInvoke(const std::string& wake_word) {
-    if (HandleChatWake(wake_word)) return;
+    if (HandleChatWake(wake_word))
+        return;
     auto state = GetDeviceState();
     if (state != kDeviceStateConnecting && state != kDeviceStateIdle) {
         return;
@@ -8435,9 +8981,7 @@ void Application::FinishWakeWordInvoke(const std::string& wake_word) {
     if (!protocol_->IsAudioChannelOpened()) {
         ESP_LOGW(TAG, "wake_detect_send_failed -> reopen audio channel");
         SetDeviceState(kDeviceStateConnecting);
-        Schedule([this, wake_word]() {
-            ContinueWakeWordInvoke(wake_word);
-        });
+        Schedule([this, wake_word]() { ContinueWakeWordInvoke(wake_word); });
         return;
     }
     SetListeningMode(kListeningModeAutoStop);
@@ -8479,17 +9023,15 @@ static const char* ConnectStateScreenCopy(const TbotConnectStateSpec* spec) {
 }
 
 bool Application::IsMicrophoneUplinkAuthorized() const {
-    if (!microphone_uplink_authorized_.load() ||
-        passive_ws_intent_.load() || !online_intent_.load()) {
+    if (!microphone_uplink_authorized_.load() || passive_ws_intent_.load() ||
+        !online_intent_.load()) {
         return false;
     }
     const DeviceState state = GetDeviceState();
     if (state == kDeviceStateListening) {
-        return !lesson_runtime_active_.load() ||
-               lesson_interactive_listening_active_.load();
+        return !lesson_runtime_active_.load() || lesson_interactive_listening_active_.load();
     }
-    return state == kDeviceStateSpeaking &&
-           listening_mode_ == kListeningModeRealtime &&
+    return state == kDeviceStateSpeaking && listening_mode_ == kListeningModeRealtime &&
            !lesson_runtime_active_.load();
 }
 
@@ -8521,21 +9063,22 @@ void Application::HandleListeningWatchdogTick() {
 
     const int64_t idle_ms = now_ms - last_activity_ms;
     const int64_t turn_ms = now_ms - started_ms;
-    const uint32_t idle_limit_ms = listening_mode_ == kListeningModeAutoStop
-        ? kListeningNoSpeechTimeoutMs
-        : (listening_mode_ == kListeningModeRealtime
-               ? kListeningRealtimeNoSpeechTimeoutMs
-               : kListeningMaxTurnMs);
+    const uint32_t idle_limit_ms =
+        listening_mode_ == kListeningModeAutoStop
+            ? kListeningNoSpeechTimeoutMs
+            : (listening_mode_ == kListeningModeRealtime ? kListeningRealtimeNoSpeechTimeoutMs
+                                                         : kListeningMaxTurnMs);
     const uint32_t turn_limit_ms = listening_mode_ == kListeningModeAutoStop
-        ? kListeningAutoStopMaxTurnMs
-        : kListeningMaxTurnMs;
+                                       ? kListeningAutoStopMaxTurnMs
+                                       : kListeningMaxTurnMs;
     const bool turn_timed_out =
         listening_mode_ != kListeningModeRealtime && turn_ms >= turn_limit_ms;
     if (idle_ms < idle_limit_ms && !turn_timed_out) {
         return;
     }
     if (HandleChatStopListening()) {
-        if (!RequestChatCue(Lang::Sounds::OGG_EXCLAMATION)) ESP_LOGW(TAG, "chat_timeout_cue_busy");
+        if (!RequestChatCue(Lang::Sounds::OGG_EXCLAMATION))
+            ESP_LOGW(TAG, "chat_timeout_cue_busy");
         return;
     }
 
@@ -8543,23 +9086,20 @@ void Application::HandleListeningWatchdogTick() {
     audio_service_.GetQueueDepths(decode_q, send_q, playback_q);
     auto audio_stats = audio_service_.GetDebugStatistics();
     ESP_LOGW(TAG,
-             "listening_watchdog_timeout mode=%d idle_ms=%ld turn_ms=%ld decode_q=%lu send_q=%lu playback_q=%lu decode_drop=%lu encode_drop=%lu reconnects=%lu",
-             static_cast<int>(listening_mode_),
-             static_cast<long>(idle_ms),
-             static_cast<long>(turn_ms),
-             (unsigned long)decode_q,
-             (unsigned long)send_q,
-             (unsigned long)playback_q,
-             (unsigned long)audio_stats.decode_drop_count,
-             (unsigned long)audio_stats.encode_drop_count,
-             (unsigned long)reconnect_count_.load());
+             "listening_watchdog_timeout mode=%d idle_ms=%ld turn_ms=%ld decode_q=%lu send_q=%lu "
+             "playback_q=%lu decode_drop=%lu encode_drop=%lu reconnects=%lu",
+             static_cast<int>(listening_mode_), static_cast<long>(idle_ms),
+             static_cast<long>(turn_ms), (unsigned long)decode_q, (unsigned long)send_q,
+             (unsigned long)playback_q, (unsigned long)audio_stats.decode_drop_count,
+             (unsigned long)audio_stats.encode_drop_count, (unsigned long)reconnect_count_.load());
 
     if (protocol_) {
         protocol_->SendStopListening();
     }
     audio_service_.EnableVoiceProcessing(false);
     microphone_uplink_authorized_.store(false);
-    while (audio_service_.PopPacketFromSendQueue() != nullptr) {}
+    while (audio_service_.PopPacketFromSendQueue() != nullptr) {
+    }
     listening_started_ms_.store(0);
     last_listening_activity_ms_.store(0);
     lesson_interactive_listen_pending_.store(false);
@@ -8577,117 +9117,161 @@ void Application::HandleListeningWatchdogTick() {
 
 bool Application::IsChatRearmRecoveryCurrent() const {
     return chat_protocol_signals_ && chat_protocol_signals_ == chat_rearm_signals_ &&
-        (chat_protocol_signals_->Capture() == chat_rearm_source_era_ || !chat_protocol_signals_->Capture()) &&
-        !chat_protocol_owned_.load() && chat_rearm_owner_.protocol_generation == protocol_generation_.load() &&
-        chat_rearm_owner_.connect_generation == connect_generation_.load() &&
-        chat_rearm_owner_.response_generation == speaking_generation_.load() &&
-        audio_service_.IsCurrentChatPlaybackReset(chat_rearm_owner_.reset_token);
+           (chat_protocol_signals_->Capture() == chat_rearm_source_era_ ||
+            !chat_protocol_signals_->Capture()) &&
+           !chat_protocol_owned_.load() &&
+           chat_rearm_owner_.protocol_generation == protocol_generation_.load() &&
+           chat_rearm_owner_.connect_generation == connect_generation_.load() &&
+           chat_rearm_owner_.response_generation == speaking_generation_.load() &&
+           audio_service_.IsCurrentChatPlaybackReset(chat_rearm_owner_.reset_token);
 }
 
 bool Application::AdvanceChatRearm(uint64_t now_us) {
     using Phase = ChatRearmPhase;
     using Result = ChatOutboundMailbox::Result;
     if (!chat_protocol_signals_ || !chat_protocol_signals_->SourceSelected() ||
-        lesson_runtime_active_.load()) return false;
+        lesson_runtime_active_.load())
+        return false;
     const auto state = GetDeviceState();
-    if (state != kDeviceStateSpeaking && state != kDeviceStateListening && state != kDeviceStateIdle &&
-        !(state == kDeviceStateConnecting && chat_rearm_phase_ == Phase::Pending)) return false;
+    if (state != kDeviceStateSpeaking && state != kDeviceStateListening &&
+        state != kDeviceStateIdle &&
+        !(state == kDeviceStateConnecting && chat_rearm_phase_ == Phase::Pending))
+        return false;
     if (chat_rearm_phase_ == Phase::Recovery) {
-        if (!IsChatRearmRecoveryCurrent()) return true;
+        if (!IsChatRearmRecoveryCurrent())
+            return true;
         microphone_uplink_authorized_.store(false);
         SetDeviceState(kDeviceStateIdle);
         return true;
     }
-    if (!chat_playout_stamp_) return false;
-    if (!chat_playout_ready_ && chat_rearm_phase_ == Phase::None) return true;
+    if (!chat_playout_stamp_)
+        return false;
+    if (!chat_playout_ready_ && chat_rearm_phase_ == Phase::None)
+        return true;
     const auto& response = chat_playout_response_;
     const bool current = chat_protocol_signals_->MatchesSource(response.source) &&
-        !chat_protocol_owned_.load() && response.protocol_generation == protocol_generation_.load() &&
-        response.connect_generation == connect_generation_.load() &&
-        response.response_generation == speaking_generation_.load() &&
-        audio_service_.IsCurrentChatPlaybackReset(response.reset_token);
+                         !chat_protocol_owned_.load() &&
+                         response.protocol_generation == protocol_generation_.load() &&
+                         response.connect_generation == connect_generation_.load() &&
+                         response.response_generation == speaking_generation_.load() &&
+                         audio_service_.IsCurrentChatPlaybackReset(response.reset_token);
     if (!current) {
         if (response.response_generation == speaking_generation_.load() &&
             chat_rearm_signals_ == chat_protocol_signals_ &&
-            (chat_protocol_signals_->Capture() == chat_rearm_source_era_ || !chat_protocol_signals_->Capture()) &&
+            (chat_protocol_signals_->Capture() == chat_rearm_source_era_ ||
+             !chat_protocol_signals_->Capture()) &&
             audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) {
-            RecoverChatPlayout(225); SetDeviceState(kDeviceStateIdle);
+            RecoverChatPlayout(225);
+            SetDeviceState(kDeviceStateIdle);
         }
         return true;
     }
     PollChatProtocolSignals();
     ChatPlayoutIntake::Stop terminal;
-    const auto terminal_read = chat_listen_origin_ == ChatListenOrigin::Drain ?
-        chat_protocol_signals_->intake.TryCollect(chat_playout_stamp_, terminal) : ChatPlayoutIntake::Read::None;
+    const auto terminal_read =
+        chat_listen_origin_ == ChatListenOrigin::Drain
+            ? chat_protocol_signals_->intake.TryCollect(chat_playout_stamp_, terminal)
+            : ChatPlayoutIntake::Read::None;
     if (terminal_read == ChatPlayoutIntake::Read::Fault ||
-        (terminal_read == ChatPlayoutIntake::Read::Ready && (terminal.interrupt || terminal.conflict))) {
-        RecoverChatPlayout(226); SetDeviceState(kDeviceStateIdle); return true;
+        (terminal_read == ChatPlayoutIntake::Read::Ready &&
+         (terminal.interrupt || terminal.conflict))) {
+        RecoverChatPlayout(226);
+        SetDeviceState(kDeviceStateIdle);
+        return true;
     }
-    const bool fault = chat_outbound_fault_ || chat_audio_fault_ || chat_playback_fault_ ||
-        chat_protocol_infrastructure_fault_ || protocol_work_lifetime_.Pending() ||
-        !protocol_ || protocol_->CurrentConnectionEpoch() != response.source.connection_epoch ||
+    const bool fault =
+        chat_outbound_fault_ || chat_audio_fault_ || chat_playback_fault_ ||
+        chat_protocol_infrastructure_fault_ || protocol_work_lifetime_.Pending() || !protocol_ ||
+        protocol_->CurrentConnectionEpoch() != response.source.connection_epoch ||
         (chat_protocol_fault_ && chat_protocol_fault_generation_ == response.protocol_generation &&
          chat_protocol_fault_era_ == chat_protocol_signals_->Capture());
     if (fault || !online_intent_.load() || passive_ws_intent_.load()) {
-        RecoverChatPlayout(227); SetDeviceState(kDeviceStateIdle); return true;
+        RecoverChatPlayout(227);
+        SetDeviceState(kDeviceStateIdle);
+        return true;
     }
-    if ((chat_rearm_phase_ == Phase::Pending && state != kDeviceStateSpeaking && state != kDeviceStateConnecting) ||
+    if ((chat_rearm_phase_ == Phase::Pending && state != kDeviceStateSpeaking &&
+         state != kDeviceStateConnecting) ||
         (chat_rearm_phase_ == Phase::Armed && state != kDeviceStateListening)) {
-        RecoverChatPlayout(228); SetDeviceState(kDeviceStateIdle); return true;
+        RecoverChatPlayout(228);
+        SetDeviceState(kDeviceStateIdle);
+        return true;
     }
-    if (chat_rearm_phase_ == Phase::Armed || chat_rearm_phase_ == Phase::IdleComplete) return true;
-    const auto received_us = chat_listen_origin_ == ChatListenOrigin::Drain ? chat_playout_stop_.received_us : chat_listen_received_us_;
-    if (now_us < received_us ||
-        now_us - received_us >= ConversationPlayoutController::kTimeoutUs ||
+    if (chat_rearm_phase_ == Phase::Armed || chat_rearm_phase_ == Phase::IdleComplete)
+        return true;
+    const auto received_us = chat_listen_origin_ == ChatListenOrigin::Drain
+                                 ? chat_playout_stop_.received_us
+                                 : chat_listen_received_us_;
+    if (now_us < received_us || now_us - received_us >= ConversationPlayoutController::kTimeoutUs ||
         !online_intent_.load() || passive_ws_intent_.load()) {
-        RecoverChatPlayout(229); SetDeviceState(kDeviceStateIdle); return true;
+        RecoverChatPlayout(229);
+        SetDeviceState(kDeviceStateIdle);
+        return true;
     }
     if (chat_rearm_phase_ == Phase::None) {
         const bool owned = (microphone_uplink_authorized_.load() || chat_rearm_voice_intent_) &&
-            (state == kDeviceStateSpeaking || state == kDeviceStateListening);
-        const bool resume = !chat_playout_stop_.explicit_manual_stop && owned &&
+                           (state == kDeviceStateSpeaking || state == kDeviceStateListening);
+        const bool resume =
+            !chat_playout_stop_.explicit_manual_stop && owned &&
             (chat_playout_stop_.continue_listening ||
              (state == kDeviceStateSpeaking && listening_mode_ == kListeningModeRealtime));
         microphone_uplink_authorized_.store(false);
         if (!resume) {
             ESP_LOGW(TAG, "chat_rearm_idle site=401 owned=%u manual=%u continuation=%u",
-                static_cast<unsigned>(owned), static_cast<unsigned>(chat_playout_stop_.explicit_manual_stop),
-                static_cast<unsigned>(chat_playout_stop_.continue_listening));
+                     static_cast<unsigned>(owned),
+                     static_cast<unsigned>(chat_playout_stop_.explicit_manual_stop),
+                     static_cast<unsigned>(chat_playout_stop_.continue_listening));
             chat_rearm_voice_intent_ = false;
             chat_rearm_phase_ = Phase::IdleComplete;
             chat_playout_ready_ = false;
             RequestChatAudioCleanup(response.response_generation, false, false,
-                IsDeviceClaimed() && !connect_in_flight_.load() && !lesson_asset_sync_quiet_.load());
+                                    IsDeviceClaimed() && !connect_in_flight_.load() &&
+                                        !lesson_asset_sync_quiet_.load());
             SetDeviceState(kDeviceStateIdle);
             return true;
         }
-        chat_rearm_mode_ = chat_playout_stop_.continue_listening ?
-            (chat_playout_stop_.realtime ? kListeningModeRealtime : GetDefaultListeningMode()) : listening_mode_;
+        chat_rearm_mode_ =
+            chat_playout_stop_.continue_listening
+                ? (chat_playout_stop_.realtime ? kListeningModeRealtime : GetDefaultListeningMode())
+                : listening_mode_;
         chat_rearm_phase_ = Phase::Pending;
         chat_rearm_voice_intent_ = true;
-        chat_rearm_prepared_ = RequestChatAudioCleanup(response.response_generation, false, true, false,
-            true, false, ChatWakePolicy::Listening);
+        chat_rearm_prepared_ =
+            RequestChatAudioCleanup(response.response_generation, false, true, false, true, false,
+                                    ChatWakePolicy::Listening);
         chat_rearm_job_ = {};
         chat_rearm_job_.kind = ChatOutboundMailbox::Kind::ListenStart;
         chat_rearm_job_.argument = chat_rearm_mode_;
-        chat_rearm_job_.deadline_us = chat_playout_stop_.received_us + ConversationPlayoutController::kTimeoutUs;
+        chat_rearm_job_.deadline_us =
+            chat_playout_stop_.received_us + ConversationPlayoutController::kTimeoutUs;
         SetDeviceState(kDeviceStateSpeaking);
     }
-    if (chat_control_intents_.Size()) return true;
-    if (chat_start_obsolete_reservation_) return true;
+    if (chat_control_intents_.Size())
+        return true;
+    if (chat_start_obsolete_reservation_)
+        return true;
     if (!chat_rearm_admitted_) {
         const auto result = SubmitChatOutbound(chat_rearm_job_);
-        if (result == Result::Sent) chat_rearm_admitted_ = true;
-        else if (result != Result::Busy) { RecoverChatPlayout(230); SetDeviceState(kDeviceStateIdle); }
+        if (result == Result::Sent)
+            chat_rearm_admitted_ = true;
+        else if (result != Result::Busy) {
+            RecoverChatPlayout(230);
+            SetDeviceState(kDeviceStateIdle);
+        }
         return true;
     }
     if (!chat_rearm_delivery_ || chat_audio_prepared_ != chat_rearm_prepared_ ||
-        audio_service_.IsChatPlaybackResetPending() || chat_audio_reset_completed_ != response.reset_token) return true;
+        audio_service_.IsChatPlaybackResetPending() ||
+        chat_audio_reset_completed_ != response.reset_token)
+        return true;
     if (!IsChatOutboundCompletionCurrent(*chat_rearm_delivery_) ||
         chat_rearm_delivery_->result != Result::Sent ||
-        static_cast<uint64_t>(esp_timer_get_time()) - received_us >= ConversationPlayoutController::kTimeoutUs ||
+        static_cast<uint64_t>(esp_timer_get_time()) - received_us >=
+            ConversationPlayoutController::kTimeoutUs ||
         !audio_service_.ArmChatUplink(chat_rearm_prepared_)) {
-        RecoverChatPlayout(231); SetDeviceState(kDeviceStateIdle); return true;
+        RecoverChatPlayout(231);
+        SetDeviceState(kDeviceStateIdle);
+        return true;
     }
     chat_rearm_phase_ = Phase::Armed;
     chat_playout_ready_ = false;
@@ -8702,18 +9286,22 @@ bool Application::AdvanceChatRearm(uint64_t now_us) {
 
 void Application::RenderChatRearm() {
     // START admission can precede its confirmed Speaking state event.
-    if (chat_rearm_phase_ == ChatRearmPhase::None && GetDeviceState() != kDeviceStateSpeaking) return;
-    if (chat_rearm_phase_ == ChatRearmPhase::Recovery && !IsChatRearmRecoveryCurrent()) return;
+    if (chat_rearm_phase_ == ChatRearmPhase::None && GetDeviceState() != kDeviceStateSpeaking)
+        return;
+    if (chat_rearm_phase_ == ChatRearmPhase::Recovery && !IsChatRearmRecoveryCurrent())
+        return;
     if (chat_rearm_phase_ != ChatRearmPhase::Recovery &&
         (!chat_protocol_signals_ || chat_rearm_signals_ != chat_protocol_signals_ ||
          !chat_protocol_signals_->MatchesSource(chat_rearm_owner_.source) ||
          chat_rearm_owner_.protocol_generation != protocol_generation_.load() ||
          chat_rearm_owner_.connect_generation != connect_generation_.load() ||
          chat_rearm_owner_.response_generation != speaking_generation_.load() ||
-         !audio_service_.IsCurrentChatPlaybackReset(chat_rearm_owner_.reset_token))) return;
+         !audio_service_.IsCurrentChatPlaybackReset(chat_rearm_owner_.reset_token)))
+        return;
     if (chat_rearm_phase_ == chat_rearm_rendered_phase_ &&
         chat_rearm_owner_.reset_token == chat_rearm_rendered_reset_ &&
-        backend_offline_.load() == chat_rearm_rendered_offline_) return;
+        backend_offline_.load() == chat_rearm_rendered_offline_)
+        return;
     // Polling audio readiness must not continuously rebuild the same GIF.
     chat_rearm_rendered_phase_ = chat_rearm_phase_;
     chat_rearm_rendered_reset_ = chat_rearm_owner_.reset_token;
@@ -8728,10 +9316,12 @@ void Application::RenderChatRearm() {
     } else if (chat_rearm_phase_ == ChatRearmPhase::Armed) {
         display->SetStatus(Lang::Strings::LISTENING);
         display->SetEmotion("thinking");
-    } else if (chat_rearm_phase_ == ChatRearmPhase::IdleComplete || chat_rearm_phase_ == ChatRearmPhase::Recovery) {
+    } else if (chat_rearm_phase_ == ChatRearmPhase::IdleComplete ||
+               chat_rearm_phase_ == ChatRearmPhase::Recovery) {
         listening_started_ms_.store(0);
         last_listening_activity_ms_.store(0);
-        const auto* spec = TbotConnectMapper::Resolve(GetDeviceState(), claim_substate_, GetBleSubstate(), backend_offline_.load());
+        const auto* spec = TbotConnectMapper::Resolve(GetDeviceState(), claim_substate_,
+                                                      GetBleSubstate(), backend_offline_.load());
         display->SetStatus(ConnectStateScreenCopy(spec));
         display->ClearChatMessages();
         display->SetEmotion(backend_offline_.load() ? "thinking" : "neutral");
@@ -8739,10 +9329,12 @@ void Application::RenderChatRearm() {
 }
 
 void Application::HandleStateChangedEvent() {
-    ChatRuntimeTiming timing(2, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
+    ChatRuntimeTiming timing(
+        2, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
         [](uint32_t site, uint32_t hi, uint32_t lo) {
             ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
-                static_cast<unsigned>(site), static_cast<unsigned long>(hi), static_cast<unsigned long>(lo));
+                     static_cast<unsigned>(site), static_cast<unsigned long>(hi),
+                     static_cast<unsigned long>(lo));
         });
     if (AdvanceChatRearm(static_cast<uint64_t>(esp_timer_get_time()))) {
         RenderChatRearm();
@@ -8774,7 +9366,8 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle: {
-            if (IsWifiConfigEntryPending()) break;
+            if (IsWifiConfigEntryPending())
+                break;
             const bool suppress_lesson_idle_repaint =
                 lesson_idle_repaint_suppressed_.exchange(false);
             if (lesson_runtime_active_.load()) {
@@ -8804,7 +9397,10 @@ void Application::HandleStateChangedEvent() {
             // ONLINE (or OFFLINE_RETRY / a claim overlay) per the mapper.
             display->SetStatus(connect_copy);
             display->ClearChatMessages();  // Clear messages first
-            display->SetEmotion(backend_offline_.load() ? "thinking" : "neutral"); // Then set emotion (wechat mode checks child count)
+            display->SetEmotion(
+                backend_offline_.load()
+                    ? "thinking"
+                    : "neutral");  // Then set emotion (wechat mode checks child count)
             listening_started_ms_.store(0);
             last_listening_activity_ms_.store(0);
             audio_service_.EnableVoiceProcessing(false);
@@ -8849,7 +9445,8 @@ void Application::HandleStateChangedEvent() {
                 listening_started_ms_.store(now_ms);
                 last_listening_activity_ms_.store(now_ms);
             }
-            const bool lesson_interactive_listen = lesson_interactive_listen_pending_.exchange(false);
+            const bool lesson_interactive_listen =
+                lesson_interactive_listen_pending_.exchange(false);
             const bool lesson_interactive_active = lesson_interactive_listening_active_.load();
             if (lesson_interactive_listen || lesson_interactive_active) {
                 lesson_interactive_listening_active_.store(true);
@@ -8867,40 +9464,44 @@ void Application::HandleStateChangedEvent() {
                 ListeningMode mode = listening_mode_;
                 audio_service_.EnableVoiceProcessing(false);
                 SetDeviceState(kDeviceStateConnecting);
-                Schedule([this, mode]() {
-                    ContinueOpenAudioChannel(mode);
-                });
+                Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
                 break;
             }
 
             const bool lesson_capture_requested = RequestChatLessonCapture();
-            if (!lesson_capture_requested) microphone_uplink_authorized_.store(true);
+            if (!lesson_capture_requested)
+                microphone_uplink_authorized_.store(true);
 
             // Make sure the audio processor is running
-            if (lesson_capture_requested || play_popup_on_listening_ || !audio_service_.IsAudioProcessorRunning()) {
-                // For auto mode, wait for playback queue to be empty before enabling voice processing
-                // This prevents audio truncation when STOP arrives late due to network jitter
+            if (lesson_capture_requested || play_popup_on_listening_ ||
+                !audio_service_.IsAudioProcessorRunning()) {
+                // For auto mode, wait for playback queue to be empty before enabling voice
+                // processing This prevents audio truncation when STOP arrives late due to network
+                // jitter
                 if (listening_mode_ == kListeningModeAutoStop && !aborted_) {
-                    bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kListenPlaybackDrainTimeoutMs);
+                    bool playback_drained =
+                        audio_service_.WaitForPlaybackQueueEmpty(kListenPlaybackDrainTimeoutMs);
                     if (!playback_drained) {
-                        ESP_LOGW(TAG,
-                                 "playback_queue_drain_timeout timeout_ms=%lu action=force_listening",
-                                 static_cast<unsigned long>(kListenPlaybackDrainTimeoutMs));
+                        ESP_LOGW(
+                            TAG,
+                            "playback_queue_drain_timeout timeout_ms=%lu action=force_listening",
+                            static_cast<unsigned long>(kListenPlaybackDrainTimeoutMs));
                     }
                 }
-                if (!lesson_capture_requested) audio_service_.EnableVoiceProcessing(true);
+                if (!lesson_capture_requested)
+                    audio_service_.EnableVoiceProcessing(true);
             }
 
             if (!lesson_capture_requested) {
 #ifdef CONFIG_WAKE_WORD_DETECTION_IN_LISTENING
-            // Enable wake word detection in listening mode (configured via Kconfig)
-            audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
+                // Enable wake word detection in listening mode (configured via Kconfig)
+                audio_service_.EnableWakeWordDetection(audio_service_.IsAfeWakeWord());
 #else
-            // Disable wake word detection in listening mode
-            audio_service_.EnableWakeWordDetection(false);
+                // Disable wake word detection in listening mode
+                audio_service_.EnableWakeWordDetection(false);
 #endif
             }
-            
+
             // Play popup sound after ResetDecoder (in EnableVoiceProcessing) has been called
             if (lesson_interactive_listen) {
                 play_popup_on_listening_ = false;
@@ -8951,7 +9552,8 @@ void Application::HandleStateChangedEvent() {
             display->SetStatus(connect_copy);
             StopHeartbeat();
             StopClaimPoll();
-            if (chat_cleanup_enabled_) RequestChatAudioCleanup(speaking_generation_.load(), false, false, false);
+            if (chat_cleanup_enabled_)
+                RequestChatAudioCleanup(speaking_generation_.load(), false, false, false);
             else {
                 audio_service_.EnableVoiceProcessing(false);
                 audio_service_.EnableWakeWordDetection(false);
@@ -8971,14 +9573,12 @@ void Application::Schedule(std::function<void()>&& callback) {
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
 }
 
-void Application::ScheduleDeferredProtocolClose(Protocol* expected,
-                                                uint32_t connection_epoch) {
+void Application::ScheduleDeferredProtocolClose(Protocol* expected, uint32_t connection_epoch) {
     const uint64_t expected_generation = protocol_generation_.load(std::memory_order_acquire);
     Schedule([this, expected, expected_generation, connection_epoch]() {
-        if (ProtocolLifetimeMatches(
-                protocol_.get(), expected,
-                protocol_generation_.load(std::memory_order_acquire),
-                expected_generation)) {
+        if (ProtocolLifetimeMatches(protocol_.get(), expected,
+                                    protocol_generation_.load(std::memory_order_acquire),
+                                    expected_generation)) {
             RetireChatOutbound();
             if (chat_cleanup_enabled_) {
                 deferred_close_generation_ = expected_generation;
@@ -9004,13 +9604,18 @@ bool Application::ScheduleAndWait(std::function<bool()>&& callback, int timeout_
         SemaphoreHandle_t done = xSemaphoreCreateBinary();
         std::atomic<Status> status{kPending};
         std::atomic<bool> result{false};
-        ~WaitState() { if (done != nullptr) vSemaphoreDelete(done); }
+        ~WaitState() {
+            if (done != nullptr)
+                vSemaphoreDelete(done);
+        }
     };
     auto state = std::make_shared<WaitState>();
-    if (state->done == nullptr) return false;
+    if (state->done == nullptr)
+        return false;
     Schedule([state, callback = std::move(callback)]() mutable {
         auto expected = WaitState::kPending;
-        if (!state->status.compare_exchange_strong(expected, WaitState::kRunning)) return;
+        if (!state->status.compare_exchange_strong(expected, WaitState::kRunning))
+            return;
         state->result.store(callback());
         state->status.store(WaitState::kDone);
         xSemaphoreGive(state->done);
@@ -9019,7 +9624,8 @@ bool Application::ScheduleAndWait(std::function<bool()>&& callback, int timeout_
         return state->result.load();
     }
     auto expected = WaitState::kPending;
-    if (state->status.compare_exchange_strong(expected, WaitState::kCancelled)) return false;
+    if (state->status.compare_exchange_strong(expected, WaitState::kCancelled))
+        return false;
     if (expected == WaitState::kRunning) {
         xSemaphoreTake(state->done, portMAX_DELAY);
     }
@@ -9040,18 +9646,17 @@ void Application::ArmSpeakingTimeout() {
     speaking_timeout_generation_.store(current_generation, std::memory_order_relaxed);
     if (speaking_timeout_timer_ == nullptr) {
         esp_timer_create_args_t timer_args = {
-            .callback = [](void* arg) {
-                auto* app = static_cast<Application*>(arg);
-                auto generation = app->speaking_timeout_generation_.load(std::memory_order_relaxed);
-                app->Schedule([app, generation]() {
-                    app->HandleSpeakingTimeout(generation);
-                });
-            },
+            .callback =
+                [](void* arg) {
+                    auto* app = static_cast<Application*>(arg);
+                    auto generation =
+                        app->speaking_timeout_generation_.load(std::memory_order_relaxed);
+                    app->Schedule([app, generation]() { app->HandleSpeakingTimeout(generation); });
+                },
             .arg = this,
             .dispatch_method = ESP_TIMER_TASK,
             .name = "speaking_timer",
-            .skip_unhandled_events = true
-        };
+            .skip_unhandled_events = true};
         auto err = esp_timer_create(&timer_args, &speaking_timeout_timer_);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "speaking_timeout_timer_create_failed err=%s generation=%lu",
@@ -9079,13 +9684,13 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
         return;
     }
     if (HandleChatAbort(kAbortReasonNone, listening_mode_ == kListeningModeRealtime)) {
-        if (listening_mode_ != kListeningModeRealtime && !RequestChatCue(Lang::Sounds::OGG_EXCLAMATION))
+        if (listening_mode_ != kListeningModeRealtime &&
+            !RequestChatCue(Lang::Sounds::OGG_EXCLAMATION))
             ESP_LOGW(TAG, "chat_timeout_cue_busy");
         return;
     }
 
-    ESP_LOGW(TAG, "speaking_timeout generation=%lu idle_ms=%ld",
-             (unsigned long)generation,
+    ESP_LOGW(TAG, "speaking_timeout generation=%lu idle_ms=%ld", (unsigned long)generation,
              static_cast<long>(last_activity_ms > 0 ? now_ms - last_activity_ms : -1));
     speaking_arm_dispatch_.Cancel();
     tts_audio_accepting_.store(false);
@@ -9135,7 +9740,8 @@ void Application::HandleSpeakingTimeout(uint32_t generation) {
 }
 
 void Application::AbortSpeaking(AbortReason reason) {
-    if (HandleChatAbort(reason, listening_mode_ != kListeningModeManualStop)) return;
+    if (HandleChatAbort(reason, listening_mode_ != kListeningModeManualStop))
+        return;
     speaking_arm_dispatch_.Cancel();
     ESP_LOGI(TAG, "Abort speaking");
     interrupt_count_.fetch_add(1, std::memory_order_relaxed);  // OBS-2
@@ -9154,14 +9760,14 @@ void Application::AbortSpeaking(AbortReason reason) {
     // themselves; guard so we only move when still SPEAKING (don't override a
     // caller that already advanced the state).
     if (GetDeviceState() == kDeviceStateSpeaking) {
-        SetDeviceState(listening_mode_ == kListeningModeManualStop
-                           ? kDeviceStateIdle
-                           : kDeviceStateListening);
+        SetDeviceState(listening_mode_ == kListeningModeManualStop ? kDeviceStateIdle
+                                                                   : kDeviceStateListening);
     }
 }
 
 void Application::SetListeningMode(ListeningMode mode) {
-    if (chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() && !lesson_runtime_active_.load()) {
+    if (chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
+        !lesson_runtime_active_.load()) {
         BeginChatListen(mode, ChatListenOrigin::User);
         return;
     }
@@ -9180,13 +9786,15 @@ ListeningMode Application::GetDefaultListeningMode() const {
 }
 
 void Application::Reboot(ChatRequestContext context) {
-    if (!IsChatRequestCurrent(context)) return;
+    if (!IsChatRequestCurrent(context))
+        return;
     if (lesson_runtime_active_.load()) {
         ESP_LOGI(TAG, "lesson reboot ignored");
         return;
     }
     Schedule([this, context]() {
-        if (!IsChatRequestCurrent(context)) return;
+        if (!IsChatRequestCurrent(context))
+            return;
         reboot_pending_.store(true);
         CloseAudioChannelByIntent();
         protocol_work_lifetime_.Request(ProtocolWorkLifetime::Action::kReboot);
@@ -9222,8 +9830,7 @@ void Application::CompleteReboot() {
 
 bool Application::IsConnectSuccessPublicationSuppressed() const {
     return protocol_work_lifetime_.Pending() || connect_close_deferral_.Pending() ||
-           reset_pending_.load() ||
-           reboot_pending_.load();
+           reset_pending_.load() || reboot_pending_.load();
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
@@ -9244,7 +9851,8 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
     }
     ESP_LOGI(TAG, "Starting firmware upgrade");
 
-    Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download", Lang::Sounds::OGG_UPGRADE);
+    Alert(Lang::Strings::OTA_UPGRADE, Lang::Strings::UPGRADING, "download",
+          Lang::Sounds::OGG_UPGRADE);
     vTaskDelay(pdMS_TO_TICKS(3000));
 
     SetDeviceState(kDeviceStateUpgrading);
@@ -9266,31 +9874,37 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
 
     if (!upgrade_success) {
         // Upgrade failed, restart audio service and continue running
-        ESP_LOGE(TAG, "Firmware upgrade failed, restarting audio service and continuing operation...");
+        ESP_LOGE(TAG,
+                 "Firmware upgrade failed, restarting audio service and continuing operation...");
         if (!audio_service_.Start()) {
             ESP_LOGE(TAG, "Firmware upgrade rollback could not restart audio service");
         }
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER); // Restore power save level
-        Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark", Lang::Sounds::OGG_EXCLAMATION);
+        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);  // Restore power save level
+        Alert(Lang::Strings::ERROR, Lang::Strings::UPGRADE_FAILED, "circle_xmark",
+              Lang::Sounds::OGG_EXCLAMATION);
         vTaskDelay(pdMS_TO_TICKS(3000));
         return false;
     } else {
         // Upgrade success, reboot immediately
         ESP_LOGI(TAG, "Firmware upgrade successful, rebooting...");
         display->SetChatMessage("system", "Upgrade successful, rebooting...");
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Brief pause to show message
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Brief pause to show message
         Reboot();
         return true;
     }
 }
 
 void Application::WakeWordInvoke(const std::string& wake_word) {
-    if (chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() && !lesson_runtime_active_.load()) {
-        if (lesson_asset_sync_quiet_.load()) return;
+    if (chat_protocol_signals_ && chat_protocol_signals_->SourceSelected() &&
+        !lesson_runtime_active_.load()) {
+        if (lesson_asset_sync_quiet_.load())
+            return;
         if (GetDeviceState() == kDeviceStateSpeaking)
             HandleChatAbort(kAbortReasonNone, listening_mode_ != kListeningModeManualStop);
-        else if (GetDeviceState() == kDeviceStateListening) CloseAudioChannelByIntent();
-        else HandleChatWake(wake_word);
+        else if (GetDeviceState() == kDeviceStateListening)
+            CloseAudioChannelByIntent();
+        else
+            HandleChatWake(wake_word);
         return;
     }
     if (lesson_asset_sync_quiet_.load()) {
@@ -9306,23 +9920,19 @@ void Application::WakeWordInvoke(const std::string& wake_word) {
         ESP_LOGI(TAG, "lesson direct wake ignored state=%d", static_cast<int>(state));
         return;
     }
-    
+
     if (state == kDeviceStateIdle) {
         if (!protocol_->IsAudioChannelOpened()) {
             SetDeviceState(kDeviceStateConnecting);
             // Schedule to let the state change be processed first (UI update)
-            Schedule([this, wake_word]() {
-                ContinueWakeWordInvoke(wake_word);
-            });
+            Schedule([this, wake_word]() { ContinueWakeWordInvoke(wake_word); });
             return;
         }
         // Channel already opened, continue directly
         ContinueWakeWordInvoke(wake_word);
     } else if (state == kDeviceStateSpeaking) {
-        Schedule([this]() {
-            AbortSpeaking(kAbortReasonNone);
-        });
-    } else if (state == kDeviceStateListening) {   
+        Schedule([this]() { AbortSpeaking(kAbortReasonNone); });
+    } else if (state == kDeviceStateListening) {
         Schedule([this]() {
             if (protocol_) {
                 CloseAudioChannelByIntent();
@@ -9356,18 +9966,26 @@ bool Application::CanEnterSleepMode() {
 void Application::SendMcpMessage(const std::string& payload, ChatRequestContext context) {
     const auto received_us = static_cast<uint64_t>(esp_timer_get_time());
     // Always schedule to run in main task for thread safety
-    try { Schedule([this, payload = std::move(payload), context, received_us]() {
-        if (!IsChatRequestCurrent(context)) return;
-        if (context) {
-            try { RequestChatConnectionText(context->EncodeMcpReply(payload), context, received_us); }
-            catch (...) { FailChatRequest(context); }
-            return;
-        }
-        if (protocol_) {
-            protocol_->SendMcpMessage(payload);
-        }
-    }); } catch (...) {
-        if (!context) throw;
+    try {
+        Schedule([this, payload = std::move(payload), context, received_us]() {
+            if (!IsChatRequestCurrent(context))
+                return;
+            if (context) {
+                try {
+                    RequestChatConnectionText(context->EncodeMcpReply(payload), context,
+                                              received_us);
+                } catch (...) {
+                    FailChatRequest(context);
+                }
+                return;
+            }
+            if (protocol_) {
+                protocol_->SendMcpMessage(payload);
+            }
+        });
+    } catch (...) {
+        if (!context)
+            throw;
         FailChatRequest(context);
     }
 }
@@ -9386,18 +10004,18 @@ void Application::SetAecMode(AecMode mode) {
         auto& board = Board::GetInstance();
         auto display = board.GetDisplay();
         switch (aec_mode_) {
-        case kAecOff:
-            audio_service_.EnableDeviceAec(false);
-            display->ShowNotification(Lang::Strings::RTC_MODE_OFF);
-            break;
-        case kAecOnServerSide:
-            audio_service_.EnableDeviceAec(false);
-            display->ShowNotification(Lang::Strings::RTC_MODE_ON);
-            break;
-        case kAecOnDeviceSide:
-            audio_service_.EnableDeviceAec(true);
-            display->ShowNotification(Lang::Strings::RTC_MODE_ON);
-            break;
+            case kAecOff:
+                audio_service_.EnableDeviceAec(false);
+                display->ShowNotification(Lang::Strings::RTC_MODE_OFF);
+                break;
+            case kAecOnServerSide:
+                audio_service_.EnableDeviceAec(false);
+                display->ShowNotification(Lang::Strings::RTC_MODE_ON);
+                break;
+            case kAecOnDeviceSide:
+                audio_service_.EnableDeviceAec(true);
+                display->ShowNotification(Lang::Strings::RTC_MODE_ON);
+                break;
         }
 
         // If the AEC mode is changed, close the audio channel
@@ -9409,7 +10027,8 @@ void Application::SetAecMode(AecMode mode) {
 
 void Application::PlaySound(const std::string_view& sound) {
     if (chat_cleanup_enabled_.load() && !IsLessonVoiceRoute()) {
-        if (!RequestChatCue(sound)) ESP_LOGW(TAG, "chat_cue_busy_or_unavailable");
+        if (!RequestChatCue(sound))
+            ESP_LOGW(TAG, "chat_cue_busy_or_unavailable");
         return;
     }
     audio_service_.PlaySound(sound);
@@ -9455,11 +10074,14 @@ void Application::CloseAudioChannelByIntent() {
 }
 
 bool Application::CompletePendingProtocolWork() {
-    if (chat_cleanup_enabled_) return PollChatProtocolCleanup();
-    if (protocol_work_lifetime_.Pending()) RetireChatOutbound();
+    if (chat_cleanup_enabled_)
+        return PollChatProtocolCleanup();
+    if (protocol_work_lifetime_.Pending())
+        RetireChatOutbound();
     using Action = ProtocolWorkLifetime::Action;
     const auto action = protocol_work_lifetime_.TakeReady();
-    if (action == Action::kNone) return protocol_work_lifetime_.Pending();
+    if (action == Action::kNone)
+        return protocol_work_lifetime_.Pending();
     connect_in_flight_.store(false);
     CancelConnectWatchdog();
     const bool intentional_close = connect_close_deferral_.TakeAfterWorker();
@@ -9493,13 +10115,15 @@ bool Application::CompletePendingProtocolWork() {
         return true;
     }
     if (protocol_) {
-        if (intentional_close) protocol_->CloseAudioChannel();
+        if (intentional_close)
+            protocol_->CloseAudioChannel();
         else if (deferred_close_generation_ == protocol_generation_.load()) {
             protocol_->CompleteDeferredClose(deferred_close_epoch_);
         }
     }
     deferred_close_generation_ = 0;
-    if (protocol_start_pending_generation_ == 0) CompleteProtocolActivation();
+    if (protocol_start_pending_generation_ == 0)
+        CompleteProtocolActivation();
     return true;
 }
 
