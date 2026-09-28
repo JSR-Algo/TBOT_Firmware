@@ -166,8 +166,11 @@ void ApplyRetainedSelection(const LessonAssetMutationLease& mutation, const Reta
     }
     if (current.revision && current.owner.device_id != owner.device_id) Refuse();
     if (current.active && (!SameSelection(current.owner, owner) || owner.request_revision <= current.owner.request_revision)) Refuse();
-    // A release may fence an acquisition that never arrived, but never another owner.
-    if (release && current.revision && !SameSelection(current.owner, owner)) Refuse();
+    // A newer cancellation can fence an unseen bind after the prior owner released.
+    // Never change an existing request's selection or cross a consumer boundary.
+    if (release && current.revision && !SameSelection(current.owner, owner) &&
+        (current.active || current.owner.request_id == owner.request_id ||
+         current.owner.consumer_id != owner.consumer_id)) Refuse();
     if (!release && !current.active && current.revision && owner.request_id == current.owner.request_id) Refuse();
     WriteRecord(Encode(next));
 }

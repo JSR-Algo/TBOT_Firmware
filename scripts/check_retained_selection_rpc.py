@@ -1,5 +1,6 @@
 """Explicit host-runner checks against the actual native selection callbacks."""
 import json
+import copy
 import os
 from pathlib import Path
 import subprocess
@@ -55,6 +56,48 @@ class RetainedSelectionRpcTest(unittest.TestCase):
         self.call('self.lesson_assets.sync_to_sd', success=False)
         self.call('self.lesson_assets.retained_selection', {'operation': {}}, success=False)
         self.assertEqual(self.call('self.lesson_assets.selection_state')['state'], 'unowned')
+
+    def unseen_release(self):
+        operation = copy.deepcopy(self.release['operation'])
+        operation.update(operationId='10000000-0000-0000-0000-000000000009',
+                         requestId='10000000-0000-0000-0000-000000000002',
+                         desiredSelectionRevision=6)
+        return operation
+
+    def test_unobserved_bind_release_after_old_release_is_durable_and_fences_late_bind(self):
+        self.call('self.lesson_assets.retained_selection', {'operation': self.bind['operation']})
+        self.call('self.lesson_assets.retained_selection', {'operation': self.release['operation']})
+        operation = self.unseen_release()
+        receipt = self.call('self.lesson_assets.retained_selection', {'operation': operation})
+        self.assertEqual(receipt['state'], 'released')
+        self.assertEqual(receipt['requestId'], operation['requestId'])
+        self.assertEqual(receipt['desiredSelectionRevision'], 6)
+        self.assertEqual(self.call('self.lesson_assets.selection_state'), receipt)
+        self.assertEqual(self.call('self.lesson_assets.retained_selection', {'operation': operation}), receipt)
+        late = copy.deepcopy(self.bind['operation'])
+        late.update(requestId=operation['requestId'], desiredSelectionRevision=5)
+        self.call('self.lesson_assets.retained_selection', {'operation': late}, success=False)
+        late['desiredSelectionRevision'] = 7
+        self.call('self.lesson_assets.retained_selection', {'operation': late}, success=False)
+        conflict = copy.deepcopy(operation)
+        conflict['operationId'] = '20000000-0000-0000-0000-000000000009'
+        self.call('self.lesson_assets.retained_selection', {'operation': conflict}, success=False)
+        self.assertEqual(self.call('self.lesson_assets.selection_state'), receipt)
+
+    def test_unseen_release_cannot_displace_active_owner_or_change_identity(self):
+        self.call('self.lesson_assets.retained_selection', {'operation': self.bind['operation']})
+        self.call('self.lesson_assets.retained_selection', {'operation': self.unseen_release()}, success=False)
+        self.assertEqual(self.call('self.lesson_assets.selection_state'), self.bind['receipt'])
+        self.call('self.lesson_assets.retained_selection', {'operation': self.release['operation']})
+        for field in ('deviceId', 'consumerIdentity'):
+            operation = self.unseen_release()
+            operation[field] = '90000000-0000-0000-0000-000000000009'
+            self.call('self.lesson_assets.retained_selection', {'operation': operation}, success=False)
+        changed = self.unseen_release()
+        changed['requestId'] = self.release['operation']['requestId']
+        changed['selection']['lessonRowId'] = '90000000-0000-0000-0000-000000000005'
+        self.call('self.lesson_assets.retained_selection', {'operation': changed}, success=False)
+        self.assertEqual(self.call('self.lesson_assets.selection_state'), self.release['receipt'])
 
 
 if __name__ == '__main__':
