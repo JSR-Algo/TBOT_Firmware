@@ -77,9 +77,7 @@ static inline void CancelLessonRobotEntranceOnDisplay() {
     }
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-static void SecureClearString(std::string& value) {
+inline void SecureClearString(std::string& value) {
     if (!value.empty()) {
         volatile char* bytes = &value[0];
         for (std::size_t i = 0; i < value.size(); ++i) {
@@ -88,7 +86,6 @@ static void SecureClearString(std::string& value) {
     }
     value.clear();
 }
-#pragma GCC diagnostic pop
 
 class SecureStringScope {
 public:
@@ -101,6 +98,26 @@ public:
 private:
     std::string& value_;
 };
+
+struct ConnectContext {
+    Application* app;
+    ListeningMode mode;
+    uint32_t generation;
+    std::string wake_word;
+    bool wake_word_invoke = false;
+    bool passive_preconnect = false;
+    Protocol* protocol = nullptr;
+    uint64_t protocol_generation = 0;
+    uint64_t reservation = 0;
+    bool start_protocol = false;
+};
+struct HeartbeatContext {
+    Application* app;
+    std::string url;
+    std::string device_secret;
+    std::string body;
+};
+
 
 static constexpr int kWakeWordAudioChannelOpenMaxAttempts = 3;
 static constexpr uint32_t kWakeWordAudioChannelRetryDelayMs = 700;

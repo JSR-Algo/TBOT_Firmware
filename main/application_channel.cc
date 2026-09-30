@@ -1,18 +1,6 @@
 #include "application_internal.h"
 
 namespace {
-struct ConnectContext {
-    Application* app;
-    ListeningMode mode;
-    uint32_t generation;
-    std::string wake_word;
-    bool wake_word_invoke = false;
-    bool passive_preconnect = false;
-    Protocol* protocol = nullptr;
-    uint64_t protocol_generation = 0;
-    uint64_t reservation = 0;
-    bool start_protocol = false;
-};
 }  // namespace
 
 void Application::StartPassiveLessonWebsocket() {

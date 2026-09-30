@@ -87,8 +87,9 @@ _orig_open = builtins.open
 def _custom_open(file, *args, **kwargs):
     s = str(file)
     if s.endswith("main/application.cc") or s.endswith("main/display/lcd_display.cc"):
+        mode = args[0] if args else kwargs.get("mode", "r")
         content = Path(file).read_text(encoding="utf-8")
-        if "b" in args or kwargs.get("mode", "").startswith("b"):
+        if "b" in mode:
             return io.BytesIO(content.encode("utf-8"))
         return io.StringIO(content)
     return _orig_open(file, *args, **kwargs)

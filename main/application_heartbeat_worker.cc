@@ -1,4 +1,105 @@
 #include "application_internal.h"
+static std::string FirmwareVersionForHeartbeat() {
+    const std::string user_agent = SystemInfo::GetUserAgent();
+    const std::size_t slash = user_agent.rfind('/');
+    if (slash == std::string::npos || slash + 1 >= user_agent.size()) {
+        return user_agent;
+    }
+    return user_agent.substr(slash + 1);
+}
+
+static std::string CopyStringField(cJSON* object, const char* key, const char* fallback) {
+    if (object == nullptr) {
+        return fallback;
+    }
+    cJSON* value = cJSON_GetObjectItem(object, key);
+    if (!cJSON_IsString(value) || value->valuestring == nullptr || value->valuestring[0] == '\0') {
+        return fallback;
+    }
+    return value->valuestring;
+}
+
+static int ClampInt(int value, int min_value, int max_value) {
+    if (value < min_value) {
+        return min_value;
+    }
+    if (value > max_value) {
+        return max_value;
+    }
+    return value;
+}
+
+static int ExtractWifiRssi(cJSON* status_root) {
+    cJSON* network = status_root == nullptr ? nullptr : cJSON_GetObjectItem(status_root, "network");
+    cJSON* rssi = network == nullptr ? nullptr : cJSON_GetObjectItem(network, "rssi");
+    if (!cJSON_IsNumber(rssi)) {
+        return -127;
+    }
+    return ClampInt(rssi->valueint, -127, 0);
+}
+
+static std::string ExtractWifiSsid(cJSON* status_root) {
+    cJSON* network = status_root == nullptr ? nullptr : cJSON_GetObjectItem(status_root, "network");
+    cJSON* ssid = network == nullptr ? nullptr : cJSON_GetObjectItem(network, "ssid");
+    if (!cJSON_IsString(ssid) || ssid->valuestring == nullptr) {
+        return "";
+    }
+    const std::size_t length = std::strlen(ssid->valuestring);
+    if (length == 0 || length > 32) {
+        return "";
+    }
+    return ssid->valuestring;
+}
+
+std::string BuildTbotHeartbeatBody(const std::string& status_json,
+                                   const std::string& device_id) {
+    cJSON* status_root = cJSON_Parse(status_json.c_str());
+    cJSON* root = cJSON_CreateObject();
+
+    cJSON_AddStringToObject(root, "device_id", device_id.c_str());
+    const std::string firmware_version = FirmwareVersionForHeartbeat();
+    cJSON_AddStringToObject(root, "firmware_version", firmware_version.c_str());
+
+    int battery_level = 0;
+    bool charging = false;
+    bool discharging = false;
+    if (!Board::GetInstance().GetBatteryLevel(battery_level, charging, discharging)) {
+        battery_level = 0;
+    }
+    battery_level = ClampInt(battery_level, 0, 100);
+    cJSON_AddNumberToObject(root, "battery_level", battery_level);
+
+    const int wifi_rssi = ExtractWifiRssi(status_root);
+    cJSON* connectivity = cJSON_CreateObject();
+    cJSON_AddStringToObject(connectivity, "connectivity_state", "online");
+    cJSON_AddNumberToObject(connectivity, "wifi_rssi", wifi_rssi);
+    const std::string wifi_ssid = ExtractWifiSsid(status_root);
+    if (!wifi_ssid.empty()) {
+        cJSON_AddStringToObject(connectivity, "wifi_ssid", wifi_ssid.c_str());
+    }
+    cJSON_AddItemToObject(root, "connectivity_metrics", connectivity);
+
+    const std::string ble_state = CopyStringField(status_root, "ble_state", "off");
+    const std::string ap_state = CopyStringField(status_root, "ap_state", "off");
+    cJSON_AddStringToObject(root, "ble_state", ble_state.c_str());
+    cJSON_AddStringToObject(root, "ap_state", ap_state.c_str());
+
+    float temp = 0.0f;
+    if (Board::GetInstance().GetTemperature(temp)) {
+        cJSON_AddNumberToObject(root, "temp", temp);
+    }
+
+    char* raw = cJSON_PrintUnformatted(root);
+    std::string body = raw == nullptr ? "{}" : raw;
+    if (raw != nullptr) {
+        cJSON_free(raw);
+    }
+    cJSON_Delete(root);
+    if (status_root != nullptr) {
+        cJSON_Delete(status_root);
+    }
+    return body;
+}
 
 void Application::DispatchDeviceHeartbeat() {
 #if CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT
