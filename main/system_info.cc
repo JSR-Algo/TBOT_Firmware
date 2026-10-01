@@ -9,15 +9,15 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_mac.h>
+#include <esp_memory_utils.h>
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_pm.h>
-#include <esp_memory_utils.h>
+#include <esp_private/freertos_debug.h>
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
-#include <esp_private/freertos_debug.h>
 #if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_wifi_remote.h"
 #endif
@@ -181,18 +181,33 @@ void SystemInfo::PrintTaskList() {
              "State", "Prio", "Base", "Core", "Stack", "UsedNow", "Peak", "MinFree", "Peak%", "Mem",
              "RunTime(us)", "CPU%");
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
-    uint32_t total_stack = 0;
+    uint32_t internal_stack = 0;
+    uint32_t external_stack = 0;
+    uint32_t internal_task_count = 0;
+    uint32_t external_task_count = 0;
     uint32_t low_stack_count = 0;
     for (UBaseType_t i = 0; i < count; i++) {
         const TaskStatus_t& t = tasks[i];
         const char* state;
         switch (t.eCurrentState) {
-            case eRunning:   state = "Run"; break;
-            case eReady:     state = "Ready"; break;
-            case eBlocked:   state = "Block"; break;
-            case eSuspended: state = "Susp"; break;
-            case eDeleted:   state = "Del"; break;
-            default:         state = "?"; break;
+            case eRunning:
+                state = "Run";
+                break;
+            case eReady:
+                state = "Ready";
+                break;
+            case eBlocked:
+                state = "Block";
+                break;
+            case eSuspended:
+                state = "Susp";
+                break;
+            case eDeleted:
+                state = "Del";
+                break;
+            default:
+                state = "?";
+                break;
         }
         BaseType_t core = xTaskGetCoreID(t.xHandle);
         char core_str[12];
@@ -203,7 +218,13 @@ void SystemInfo::PrintTaskList() {
         }
         // ESP-IDF StackType_t is uint8_t, so the high water mark is already in bytes
         uint32_t stack_free = t.usStackHighWaterMark;
-        const char* stack_mem = esp_ptr_external_ram(t.pxStackBase) ? "PSRAM" : "INT";
+        const bool stack_external = esp_ptr_external_ram(t.pxStackBase);
+        const char* stack_mem = stack_external ? "PSRAM" : "INT";
+        if (stack_external) {
+            external_task_count++;
+        } else {
+            internal_task_count++;
+        }
 
         // FreeRTOS has no public "stack size" getter, so read the stack bounds from the TCB.
         // pxEndOfStack is fixed at task creation. A task deleted after the snapshot above
@@ -219,7 +240,11 @@ void SystemInfo::PrintTaskList() {
             if (end > base) {
                 uint32_t size = end - base;
                 uint32_t peak = size > stack_free ? size - stack_free : 0;
-                total_stack += size;
+                if (stack_external) {
+                    external_stack += size;
+                } else {
+                    internal_stack += size;
+                }
                 snprintf(size_str, sizeof(size_str), "%lu", (unsigned long)size);
                 snprintf(peak_str, sizeof(peak_str), "%lu", (unsigned long)peak);
                 snprintf(pct_str, sizeof(pct_str), "%lu%%", (unsigned long)(peak * 100 / size));
@@ -254,7 +279,11 @@ void SystemInfo::PrintTaskList() {
                  (unsigned long)stack_free, pct_str, stack_mem, (unsigned long)t.ulRunTimeCounter,
                  cpu_percent, warn);
     }
-    ESP_LOGI(TAG, "Total task stack allocated: %lu bytes", (unsigned long)total_stack);
+    ESP_LOGI(TAG,
+             "Task stack SRAM: %lu kB in %lu task(s) "
+             "PSRAM: %lu kB in %lu task(s)",
+             (unsigned long)(internal_stack / 1024), (unsigned long)internal_task_count,
+             (unsigned long)(external_stack / 1024), (unsigned long)external_task_count);
     if (low_stack_count > 0) {
         ESP_LOGW(TAG, "%lu task(s) with < 512 bytes of stack left", (unsigned long)low_stack_count);
     }
@@ -266,8 +295,8 @@ void SystemInfo::PrintHeapStats() {
     int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     int largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     int free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    ESP_LOGI(TAG, "free SRAM: %u, min SRAM: %u largest_free_block: %u, free PSRAM: %u", free_sram,
-             min_free_sram, largest_free_block, free_psram);
+    ESP_LOGI(TAG, "free SRAM: %u, min SRAM: %u largest_free_block: %u, free PSRAM: %ukB", free_sram,
+             min_free_sram, largest_free_block, free_psram / 1024);
 }
 
 void SystemInfo::StartHeapPhaseMonitor() {
