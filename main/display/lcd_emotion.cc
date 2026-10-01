@@ -45,15 +45,21 @@ void LcdDisplay::SetEmotion(const char* emotion) {
     // Construct before either display guard so the timing log follows unlock.
     ChatRuntimeTiming timing(3, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
         [](uint32_t site, uint32_t hi, uint32_t lo) {
+#if TBOT_LCD_DISPLAY_WARN_LOG
             ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
                 static_cast<unsigned>(site), static_cast<unsigned long>(hi), static_cast<unsigned long>(lo));
+#endif
         });
     if (!setup_ui_called_) {
+#if TBOT_LCD_DISPLAY_WARN_LOG
         ESP_LOGW(TAG, "SetEmotion('%s') called before SetupUI() - emotion will not be displayed!", emotion);
+#endif
     }
     if (emoji_image_ == nullptr) {
         if (setup_ui_called_) {
+#if TBOT_LCD_DISPLAY_WARN_LOG
             ESP_LOGW(TAG, "SetEmotion('%s') failed: emoji_image_ is nullptr (SetupUI() was called but emoji image not created)", emotion);
+#endif
         }
         return;
     }

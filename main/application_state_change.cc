@@ -4,9 +4,11 @@ void Application::HandleStateChangedEvent() {
     ChatRuntimeTiming timing(2,
         []() { return static_cast<uint64_t>(esp_timer_get_time()); },
         [](uint32_t site, uint32_t hi, uint32_t lo) {
+#if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
                      static_cast<unsigned>(site), static_cast<unsigned long>(hi),
                      static_cast<unsigned long>(lo));
+#endif
         });
     if (AdvanceChatRearm(static_cast<uint64_t>(esp_timer_get_time()))) {
         RenderChatRearm();
@@ -129,7 +131,9 @@ void Application::HandleStateChangedEvent() {
 
             protocol_->SendStartListening(listening_mode_);
             if (!protocol_->IsAudioChannelOpened()) {
+#if TBOT_APPLICATION_WARN_LOG
                 ESP_LOGW(TAG, "listen_start_send_failed -> reconnect");
+#endif
                 ListeningMode mode = listening_mode_;
                 audio_service_.EnableVoiceProcessing(false);
                 SetDeviceState(kDeviceStateConnecting);
@@ -150,10 +154,12 @@ void Application::HandleStateChangedEvent() {
                     bool playback_drained =
                         audio_service_.WaitForPlaybackQueueEmpty(kListenPlaybackDrainTimeoutMs);
                     if (!playback_drained) {
+#if TBOT_APPLICATION_WARN_LOG
                         ESP_LOGW(
                             TAG,
                             "playback_queue_drain_timeout timeout_ms=%lu action=force_listening",
                             static_cast<unsigned long>(kListenPlaybackDrainTimeoutMs));
+#endif
                     }
                 }
                 if (!lesson_capture_requested)

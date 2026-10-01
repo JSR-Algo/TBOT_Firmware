@@ -4,9 +4,11 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                                        bool is_websocket_protocol, ChatRequestContext context) {
     ChatRuntimeTiming timing(1, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
         [](uint32_t site, uint32_t hi, uint32_t lo) {
+#if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
                      static_cast<unsigned>(site), static_cast<unsigned long>(hi),
                      static_cast<unsigned long>(lo));
+#endif
         });
     if (!IsChatRequestCurrent(context))
         return;
@@ -19,7 +21,9 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
     // (websocket_protocol.cc, mqtt_protocol.cc), so no valid frame changes
     // behavior — defense-in-depth on the shared dispatch path only.
     if (!cJSON_IsString(type)) {
+#if TBOT_APPLICATION_WARN_LOG
         ESP_LOGW(TAG, "Missing or non-string message type, dropping frame");
+#endif
         return;
     }
     if (lesson_asset_sync_quiet_.load() &&
@@ -38,7 +42,9 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
         // malformed/MITM frame crashes the audio task). cJSON_IsString covers
         // both the missing-key (null node) and wrong-type cases.
         if (!cJSON_IsString(state)) {
+#if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "tts frame missing or non-string state; dropping");
+#endif
             return;
         }
         if (strcmp(state->valuestring, "start") == 0) {
@@ -113,9 +119,11 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                         if (protocol_)
                             protocol_->SendTtsDrainAck(tts_drain_id);
                     } else {
+#if TBOT_APPLICATION_WARN_LOG
                         ESP_LOGW(TAG,
                                  "tts_stop_playback_drain_timeout timeout_ms=%lu action=drain_ack",
                                  static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+#endif
                     }
                 }
                 const bool lesson_interactive_turn = lesson_interactive_listen_pending_.load() ||
@@ -165,11 +173,13 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                                                GetDeviceState() == kDeviceStateListening);
                 if (force_continue_listening && !lesson_interactive_turn) {
                     if (!voice_turn_owned) {
+#if TBOT_APPLICATION_WARN_LOG
                         ESP_LOGW(
                             TAG,
                             "tts_stop_continue_listening_rejected state=%d passive=%d online=%d",
                             static_cast<int>(GetDeviceState()), passive_ws_intent_.load() ? 1 : 0,
                             online_intent_.load() ? 1 : 0);
+#endif
                         return;
                     }
                     bool playback_drained =
@@ -177,10 +187,12 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                     if (!IsChatLessonRequestCurrent(context))
                         return;
                     if (!playback_drained) {
+#if TBOT_APPLICATION_WARN_LOG
                         ESP_LOGW(TAG,
                                  "tts_stop_playback_drain_timeout timeout_ms=%lu "
                                  "action=continue_listening",
                                  static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+#endif
                     }
                     if (force_realtime_listen) {
                         listening_mode_ = kListeningModeRealtime;
@@ -205,11 +217,13 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                             if (!IsChatLessonRequestCurrent(context))
                                 return;
                             if (!playback_drained) {
+#if TBOT_APPLICATION_WARN_LOG
                                 ESP_LOGW(
                                     TAG,
                                     "tts_stop_playback_drain_timeout timeout_ms=%lu "
                                     "action=lesson_listening",
                                     static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+#endif
                             }
                             SetDeviceState(kDeviceStateListening);
                             ESP_LOGI(TAG, "lesson prompt complete -> listening");
@@ -221,9 +235,11 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                         if (!IsChatLessonRequestCurrent(context))
                             return;
                         if (!playback_drained) {
+#if TBOT_APPLICATION_WARN_LOG
                             ESP_LOGW(TAG,
                                      "tts_stop_playback_drain_timeout timeout_ms=%lu action=idle",
                                      static_cast<unsigned long>(kTtsStopPlaybackDrainTimeoutMs));
+#endif
                         }
                         SetDeviceState(kDeviceStateIdle);
                     } else {
@@ -321,7 +337,9 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                         const bool sent = encoded != nullptr && protocol_ != nullptr &&
                                           protocol_->SendLessonFrame(encoded);
                         if (!sent) {
+#if TBOT_APPLICATION_WARN_LOG
                             ESP_LOGW(TAG, "System unpair acknowledgement could not be sent");
+#endif
                         }
                         if (encoded != nullptr)
                             cJSON_free(encoded);
@@ -336,7 +354,9 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                 }
                 static_cast<WifiBoard&>(Board::GetInstance()).EnterWifiConfigMode();
             } else {
+#if TBOT_APPLICATION_WARN_LOG
                 ESP_LOGW(TAG, "Unknown system command: %s", command->valuestring);
+#endif
             }
         }
     } else if (strcmp(type->valuestring, "alert") == 0) {
@@ -349,11 +369,15 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                       Lang::Sounds::OGG_VIBRATION);
             }
         } else {
+#if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "Alert command requires status, message and emotion");
+#endif
         }
     } else if (strcmp(type->valuestring, "robot_action") == 0) {
         if (!HandleRobotActionMessage(root, context)) {
+#if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "Unsupported robot action");
+#endif
         }
 #if CONFIG_RECEIVE_CUSTOM_MESSAGE
     } else if (strcmp(type->valuestring, "custom") == 0) {
@@ -382,18 +406,24 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                     });
             }
         } else {
+#if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "Invalid custom message format: missing payload");
+#endif
         }
 #endif
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     } else if (strncmp(type->valuestring, "lesson_", 7) == 0) {
         if (!is_websocket_protocol) {
+#if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "lesson_* ignored on non-WebSocket transport");
+#endif
             return;
         }
         EnqueueLessonMessage(root, callback_transport_epoch, context);
 #endif
     } else {
+#if TBOT_APPLICATION_WARN_LOG
         ESP_LOGW(TAG, "Unknown message type: %s", type->valuestring);
+#endif
     }
 }

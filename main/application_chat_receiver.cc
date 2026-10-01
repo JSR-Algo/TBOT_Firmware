@@ -25,8 +25,10 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
             chat_protocol_owned_.load(std::memory_order_acquire) ||
             protocol_callback_connect_generation_.load() != connect_generation_.load())
             return;
+#if TBOT_APPLICATION_WARN_LOG
         ESP_LOGW(TAG, "chat_source_fault reason=transport flags=%lu",
                  static_cast<unsigned long>(flag));
+#endif
         if (signals->PublishConnectionFault(source, protocol_callback_connect_generation_.load(),
                                             flag))
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
@@ -78,12 +80,14 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
                     root, {source, protocol_generation, chat_source_connect_generation_.load()},
                     receipt.received_us, lesson_epoch, callback_protocol->session_id());
                 if (!context) {
+#if TBOT_APPLICATION_WARN_LOG
                     const auto snapshot = chat_inbound_messages_.TrySnapshot();
                     ESP_LOGW(TAG, "chat_json_queue available=%u queued=%u outstanding=%u",
                              static_cast<unsigned>(snapshot.available),
                              static_cast<unsigned>(snapshot.queued),
                              static_cast<unsigned>(snapshot.outstanding));
                     ESP_LOGW(TAG, "chat_source_fault reason=lesson_json_admission");
+#endif
                     signals->PublishConnectionFault(source, chat_source_connect_generation_.load(),
                                                     ChatProtocolSignals::Error);
                     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
@@ -138,6 +142,7 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
                 if (outcome == Admission::Accepted) {
                     xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
                     if (retries) {
+#if TBOT_APPLICATION_WARN_LOG
                         const auto waited_us =
                             static_cast<uint64_t>(esp_timer_get_time()) - receipt.received_us;
                         ESP_LOGW(TAG,
@@ -147,6 +152,7 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
                                  static_cast<unsigned long>(retries),
                                  static_cast<unsigned long>(waited_us >> 32),
                                  static_cast<unsigned long>(static_cast<uint32_t>(waited_us)));
+#endif
                     }
                     return;
                 }
@@ -158,6 +164,7 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
             }
             if (!current())
                 return;
+#if TBOT_APPLICATION_WARN_LOG
             const auto now_us = static_cast<uint64_t>(esp_timer_get_time());
             const auto waited_us = now_us >= receipt.received_us ? now_us - receipt.received_us : 0;
             const auto wait_hi = static_cast<unsigned long>(waited_us >> 32);
@@ -171,6 +178,7 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
                      "wait_us_hi=%lu wait_us_lo=%lu",
                      static_cast<unsigned>(outcome), static_cast<unsigned long>(retries), wait_hi,
                      wait_lo);
+#endif
             signals->PublishConnectionFault(owner.source, owner.connect_generation,
                                             ChatProtocolSignals::Error);
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
@@ -179,6 +187,7 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
                                          owner.connect_generation))
                 return;
             if (queued_json) {
+#if TBOT_APPLICATION_WARN_LOG
                 const auto now_us = static_cast<uint64_t>(esp_timer_get_time());
                 const auto waited_us =
                     now_us >= receipt.received_us ? now_us - receipt.received_us : 0;
@@ -192,8 +201,12 @@ Protocol::SourceCallbacks Application::MakeChatSourceCallbacks(
                          static_cast<unsigned>(ChatInboundMessages::Admission::NoMemory),
                          static_cast<unsigned long>(waited_us >> 32),
                          static_cast<unsigned long>(static_cast<uint32_t>(waited_us)));
-            } else
+#endif
+            } else {
+#if TBOT_APPLICATION_WARN_LOG
                 ESP_LOGW(TAG, "chat_source_fault reason=json_exception");
+#endif
+            }
             signals->PublishConnectionFault(owner.source, owner.connect_generation,
                                             ChatProtocolSignals::Error);
             xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
@@ -276,7 +289,9 @@ void Application::HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& si
     ChatStartHandoff::Request request{source, protocol_generation, connect_generation_.load(),
                                       0,      receipt.received_us, receipt.admission_deadline_us};
     if (!signals->start.Publish(request)) {
+#if TBOT_APPLICATION_WARN_LOG
         ESP_LOGW(TAG, "chat_source_fault reason=start_publication");
+#endif
         signals->PublishConnectionFault(source, chat_source_connect_generation_.load(),
                                         ChatProtocolSignals::Error);
         xEventGroupSetBits(event_group_, MAIN_EVENT_CHAT_OUTBOUND);
@@ -299,6 +314,7 @@ void Application::HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& si
         if (expired || !signals->MatchesSource(source) ||
             request.connect_generation != connect_generation_.load() ||
             protocol_generation != protocol_generation_.load() || chat_protocol_owned_.load()) {
+#if TBOT_APPLICATION_WARN_LOG
             unsigned termination_site = 302;
             if (expired)
                 termination_site = 301;
@@ -306,6 +322,7 @@ void Application::HandleChatStart(const std::shared_ptr<ChatProtocolSignals>& si
             ESP_LOGW(TAG, "chat_start_receiver_end site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
                      termination_site, static_cast<unsigned long>(elapsed_us >> 32),
                      static_cast<unsigned long>(static_cast<uint32_t>(elapsed_us)));
+#endif
             break;
         }
         vTaskDelay(1);

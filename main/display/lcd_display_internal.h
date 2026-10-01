@@ -4,6 +4,7 @@
 #include "lcd_display.h"
 #include "application.h"
 #include "chat_runtime_timing.h"
+#include "tbot_log_config.h"
 #include "gif/lvgl_gif.h"
 #include "settings.h"
 #include "lvgl_theme.h"

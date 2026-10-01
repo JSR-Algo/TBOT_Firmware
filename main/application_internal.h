@@ -8,6 +8,7 @@
 #include "audio_codec.h"
 #include "board.h"
 #include "chat_runtime_timing.h"
+#include "tbot_log_config.h"
 #include "display.h"
 #include "display/lvgl_display/lvgl_display.h"
 #include "lesson_queue_producer.h"
