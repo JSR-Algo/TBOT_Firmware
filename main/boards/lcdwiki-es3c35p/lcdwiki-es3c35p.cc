@@ -649,7 +649,7 @@ private:
             // incidental and cost 1452 bytes of MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA
             // heap (measured), which starved the BLE controller during BluFi
             // provisioning until it could no longer send its Wi-Fi list.
-            .max_transfer_sz = DISPLAY_WIDTH * 80 * static_cast<int>(sizeof(uint16_t)),
+            .max_transfer_sz = 4092,
             .flags = 0,
             .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
             .intr_flags = 0,
