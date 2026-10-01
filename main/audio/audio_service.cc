@@ -211,7 +211,7 @@ bool AudioService::CreateAudioWorker(AudioWorker worker) {
                         audio_service->audio_input_task_handle_ = nullptr;
                     }
                     vTaskDelete(NULL);
-                }, "audio_input", 2048 * 5, this, 8,
+                }, "audio_input", 1024*3, this, 8,
                 &audio_input_task_handle_, 0);
 #else
                 created = xTaskCreate([](void* arg) {

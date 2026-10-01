@@ -128,7 +128,7 @@ static constexpr uint32_t kChatOutboundWorkerStackDepth = 8192;
 static constexpr uint32_t kChatAudioCleanupWorkerStackDepth = 8192;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
-static constexpr uint32_t kLessonMessageWorkerStackDepth = 32768;
+static constexpr uint32_t kLessonMessageWorkerStackDepth = 8092;
 static constexpr uint32_t kLessonMessageWorkerMinimumFreeStackBytes = 4096;
 #endif
 
