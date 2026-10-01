@@ -71,7 +71,7 @@ LvglGif::LvglGif(const lv_img_dsc_t* img_dsc, bool opaque_scale_2x)
             img_dsc_.header.stride = 480 * sizeof(uint16_t);
             img_dsc_.data = reinterpret_cast<uint8_t*>(opaque_frame_);
             img_dsc_.data_size = kOpaqueFrameBytes;
-            ESP_LOGI(TAG, "Conversation GIF uses native RGB565 480x320");
+            // ESP_LOGI(TAG, "Conversation GIF uses native RGB565 480x320");
         }
     }
 
@@ -82,7 +82,7 @@ LvglGif::LvglGif(const lv_img_dsc_t* img_dsc, bool opaque_scale_2x)
     }
 
     loaded_ = true;
-    ESP_LOGD(TAG, "GIF loaded from image descriptor: %dx%d", gif_->width, gif_->height);
+    // ESP_LOGD(TAG, "GIF loaded from image descriptor: %dx%d", gif_->width, gif_->height);
 }
 
 // Destructor
@@ -285,11 +285,11 @@ void LvglGif::NextFrame() {
         if (elapsed > stats_max_gap_ms_) stats_max_gap_ms_ = elapsed;
         const uint32_t window_ms = lv_tick_elaps(stats_start_);
         if (window_ms >= 10000) {
-            ESP_LOGI(TAG, "gif_perf size=%ux%u fps_x10=%lu decode_avg_us=%lu max_gap_ms=%lu",
-                     gif_->width, gif_->height,
-                     static_cast<unsigned long>(stats_frames_ * 10000 / window_ms),
-                     static_cast<unsigned long>(stats_decode_us_ / stats_frames_),
-                     static_cast<unsigned long>(stats_max_gap_ms_));
+            // ESP_LOGI(TAG, "gif_perf size=%ux%u fps_x10=%lu decode_avg_us=%lu max_gap_ms=%lu",
+            //          gif_->width, gif_->height,
+            //          static_cast<unsigned long>(stats_frames_ * 10000 / window_ms),
+            //          static_cast<unsigned long>(stats_decode_us_ / stats_frames_),
+            //          static_cast<unsigned long>(stats_max_gap_ms_));
             stats_start_ = lv_tick_get();
             stats_frames_ = stats_decode_us_ = stats_max_gap_ms_ = 0;
         }

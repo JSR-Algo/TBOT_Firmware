@@ -116,9 +116,13 @@ EmojiWidget::~EmojiWidget()
 
 void EmojiWidget::SetEmotion(const char* emotion)
 {
-    if (!player_) {
+    static TickType_t last_tick;
+    TickType_t cur_tick = xTaskGetTickCount();
+    TickType_t tick = (TickType_t)(cur_tick - last_tick);
+    if (!player_ || (tick >= 500)) {
         return;
     }
+    last_tick = cur_tick;
 
     using Param = std::tuple<std::string, bool, int>;
     static const std::unordered_map<std::string, Param> emotion_map = {
@@ -141,7 +145,6 @@ void EmojiWidget::SetEmotion(const char* emotion)
         {"relaxed",     {"scorn_loop", true, 25}},
         {"confused",    {"scorn_loop", true, 25}},
     };
-
     auto it = emotion_map.find(emotion);
     if (it != emotion_map.end()) {
         const auto& [aaf, repeat, fps] = it->second;
