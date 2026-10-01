@@ -1,7 +1,5 @@
 #include "application_internal.h"
 
-
-
 bool Application::IsMicrophoneUplinkAuthorized() const {
     if (!microphone_uplink_authorized_.load() || passive_ws_intent_.load() ||
         !online_intent_.load()) {
@@ -223,7 +221,7 @@ bool Application::AdvanceChatRearm(uint64_t now_us) {
         chat_rearm_job_.kind = ChatOutboundMailbox::Kind::ListenStart;
         chat_rearm_job_.argument = chat_rearm_mode_;
         chat_rearm_job_.deadline_us =
-            chat_playout_stop_.received_us + ConversationPlayoutController::kTimeoutUs;
+            received_us + ConversationPlayoutController::kTimeoutUs;
         SetDeviceState(kDeviceStateSpeaking);
     }
     if (chat_control_intents_.Size())
@@ -305,88 +303,6 @@ void Application::RenderChatRearm() {
         display->SetStatus(ConnectStateScreenCopy(spec));
         display->ClearChatMessages();
         display->SetEmotion(backend_offline_.load() ? "thinking" : "neutral");
-    }
-}
-
-
-    if (state == kDeviceStateActivating) {
-        SetDeviceState(kDeviceStateIdle);
-        return;
-    } else if (state == kDeviceStateWifiConfiguring) {
-        if (!audio_service_.IsRunning()) {
-            ESP_LOGI(TAG, "Audio test unavailable while provisioning workers are deferred");
-            return;
-        }
-        audio_service_.EnableAudioTesting(true);
-        SetDeviceState(kDeviceStateAudioTesting);
-        return;
-    } else if (state == kDeviceStateAudioTesting) {
-        audio_service_.EnableAudioTesting(false);
-        SetDeviceState(kDeviceStateWifiConfiguring);
-        return;
-    }
-
-    if (pending_tbot_claim_.active) {
-        ConfirmPendingTbotClaim();
-        return;
-    }
-
-    if (claim_substate_ == TbotClaimSubstate::ConfirmTimeout) {
-        ESP_LOGI(TAG, "Claim confirm timeout -> retry: re-entering claim standby poll");
-        RefreshPendingTbotClaim();
-        return;
-    }
-
-    if (!IsDeviceClaimed() && backend_offline_.load() &&
-        (state == kDeviceStateIdle || state == kDeviceStateConnecting ||
-         state == kDeviceStateListening || state == kDeviceStateSpeaking)) {
-        ESP_LOGI(TAG, "Unclaimed BOOT tap from offline retry -> reopening phone scan standby");
-        backend_offline_.store(false);
-        if (state != kDeviceStateIdle) {
-            SetDeviceState(kDeviceStateIdle);
-        }
-        claim_substate_ = TbotClaimSubstate::AvailableStandby;
-        RenderClaimSubstate(claim_substate_);
-        RefreshPendingTbotClaim();
-        return;
-    }
-
-    if (!IsDeviceClaimed() && state == kDeviceStateIdle &&
-        (claim_substate_ == TbotClaimSubstate::AvailableStandby ||
-         claim_substate_ == TbotClaimSubstate::None)) {
-        ESP_LOGI(TAG, "Unclaimed BOOT tap -> refreshing claimable standby for phone scan");
-        claim_substate_ = TbotClaimSubstate::AvailableStandby;
-        RenderClaimSubstate(claim_substate_);
-        RefreshPendingTbotClaim();
-        return;
-    }
-
-    if (!protocol_) {
-        ESP_LOGE(TAG, "Protocol not initialized");
-        return;
-    }
-    if (IsSelectedNormalChatRoute()) {
-        if (state == kDeviceStateIdle)
-            BeginChatListen(GetDefaultListeningMode(), ChatListenOrigin::User);
-        else if (state == kDeviceStateSpeaking)
-            HandleChatAbort(kAbortReasonNone, listening_mode_ != kListeningModeManualStop);
-        else if (state == kDeviceStateListening)
-            CloseAudioChannelByIntent();
-        return;
-    }
-
-    if (state == kDeviceStateIdle) {
-        ListeningMode mode = GetDefaultListeningMode();
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            Schedule([this, mode]() { ContinueOpenAudioChannel(mode); });
-            return;
-        }
-        SetListeningMode(mode);
-    } else if (state == kDeviceStateSpeaking) {
-        AbortSpeaking(kAbortReasonNone);
-    } else if (state == kDeviceStateListening) {
-        CloseAudioChannelByIntent();
     }
 }
 
