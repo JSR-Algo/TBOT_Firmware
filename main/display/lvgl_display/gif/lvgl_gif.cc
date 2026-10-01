@@ -2,10 +2,40 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
+#include <esp_attr.h>
+#include <sdkconfig.h>
 #include "gif_rgb565.h"
 #include <cstring>
 
 #define TAG "LvglGif"
+
+namespace {
+constexpr size_t kOpaqueFrameBytes = 480 * 320 * sizeof(uint16_t);
+
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+// Static 480x320 RGB565 upscale target in PSRAM .bss, shared by all LvglGif
+// instances (only one face GIF is shown at a time).
+EXT_RAM_BSS_ATTR uint16_t s_opaque_frame[480 * 320] __attribute__((aligned(16)));
+bool s_opaque_frame_in_use = false;
+
+uint16_t* AcquireOpaqueFrame() {
+    if (s_opaque_frame_in_use) {
+        return nullptr;
+    }
+    s_opaque_frame_in_use = true;
+    return s_opaque_frame;
+}
+
+void ReleaseOpaqueFrame(uint16_t* frame) {
+    if (frame == s_opaque_frame) {
+        s_opaque_frame_in_use = false;
+    }
+}
+#else
+uint16_t* AcquireOpaqueFrame() { return nullptr; }
+void ReleaseOpaqueFrame(uint16_t*) {}
+#endif
+}  // namespace
 
 LvglGif::LvglGif(const lv_img_dsc_t* img_dsc, bool opaque_scale_2x)
     : gif_(nullptr), timer_(nullptr), last_call_(0), playing_(false), loaded_(false),
@@ -33,16 +63,14 @@ LvglGif::LvglGif(const lv_img_dsc_t* img_dsc, bool opaque_scale_2x)
     img_dsc_.data_size = gif_->width * gif_->height * 4;
 
     if (opaque_scale_2x && gif_->width == 240 && gif_->height == 160) {
-        const size_t bytes = 480 * 320 * sizeof(uint16_t);
-        opaque_frame_ = static_cast<uint16_t*>(heap_caps_malloc(
-            bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        opaque_frame_ = AcquireOpaqueFrame();
         if (opaque_frame_) {
             img_dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
             img_dsc_.header.w = 480;
             img_dsc_.header.h = 320;
             img_dsc_.header.stride = 480 * sizeof(uint16_t);
             img_dsc_.data = reinterpret_cast<uint8_t*>(opaque_frame_);
-            img_dsc_.data_size = bytes;
+            img_dsc_.data_size = kOpaqueFrameBytes;
             ESP_LOGI(TAG, "Conversation GIF uses native RGB565 480x320");
         }
     }
@@ -290,7 +318,7 @@ void LvglGif::Cleanup() {
     playing_ = false;
     loaded_ = false;
     if (opaque_frame_) {
-        heap_caps_free(opaque_frame_);
+        ReleaseOpaqueFrame(opaque_frame_);
         opaque_frame_ = nullptr;
     }
     

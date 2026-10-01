@@ -52,6 +52,14 @@ typedef struct _gd_GIF {
 #endif
 } gd_GIF;
 
+/* Largest GIF served from the static PSRAM decode buffer (largest face asset). */
+#ifndef GD_GIF_POOL_MAX_W
+#define GD_GIF_POOL_MAX_W 320
+#endif
+#ifndef GD_GIF_POOL_MAX_H
+#define GD_GIF_POOL_MAX_H 240
+#endif
+
 gd_GIF * gd_open_gif_file(const char * fname);
 
 gd_GIF * gd_open_gif_data(const void * data, size_t data_size);
