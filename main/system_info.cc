@@ -295,8 +295,14 @@ void SystemInfo::PrintHeapStats() {
     int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
     int largest_free_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     int free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    ESP_LOGI(TAG, "free SRAM: %u, min SRAM: %u largest_free_block: %u, free PSRAM: %ukB", free_sram,
-             min_free_sram, largest_free_block, free_psram / 1024);
+    // Fragmentation: share of free SRAM that is not in the largest contiguous block
+    float frag_percent = free_sram > 0
+                             ? 100.0f * (1.0f - (float)largest_free_block / (float)free_sram)
+                             : 0.0f;
+    ESP_LOGI(TAG,
+             "free SRAM: %u, min SRAM: %u largest_free_block: %u, SRAM frag: %.1f%%, "
+             "free PSRAM: %ukB",
+             free_sram, min_free_sram, largest_free_block, frag_percent, free_psram / 1024);
 }
 
 void SystemInfo::StartHeapPhaseMonitor() {
