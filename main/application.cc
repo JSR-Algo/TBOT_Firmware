@@ -67,6 +67,7 @@ bool Application::CanEnterSleepMode() {
 }
 
 void Application::LogPeriodicMetrics() {
+#if 0
     if (clock_ticks_ % 10 == 0) {
         // Audio realtime metrics snapshot: queue depths + drop/stale
         // counters. Cheap, on the app task (NOT the audio hot path), so
@@ -113,6 +114,6 @@ void Application::LogPeriodicMetrics() {
                  (long)stack_hwm.audio_input, (long)stack_hwm.audio_output,
                  (long)stack_hwm.opus_codec, (long)stack_hwm.afe_detection,
                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-    }
+                }
+#endif
 }
-

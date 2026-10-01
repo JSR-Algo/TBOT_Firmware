@@ -1,6 +1,7 @@
 #include "audio_service.h"
 #include "audio_playback_refill_policy.h"
 #include "audio_output_timing.h"
+#include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <cstring>
@@ -39,6 +40,9 @@
 #endif
 
 #define TAG "AudioService"
+
+// Opus encoder output scratch. A 60 ms Opus packet is at most 3 x 1275 bytes.
+EXT_RAM_BSS_ATTR static uint8_t s_opus_encode_scratch[4096];
 
 static bool ShouldLogAudioDiagnostic(uint32_t count) {
     return count <= 5 || (count % 20) == 0;
@@ -801,19 +805,25 @@ void AudioService::OpusCodecTask() {
             packet->capture_tag = task->capture_tag;
 
             if (opus_encoder_ != nullptr && task->pcm.size() == encoder_frame_size_) {
-                std::vector<uint8_t> buf(encoder_outbuf_size_);
+                // Only the opus_codec task encodes, so one static scratch suffices.
+                std::vector<uint8_t> oversized;
+                uint8_t* out_buffer = s_opus_encode_scratch;
+                if (static_cast<size_t>(encoder_outbuf_size_) > sizeof(s_opus_encode_scratch)) {
+                    oversized.resize(encoder_outbuf_size_);
+                    out_buffer = oversized.data();
+                }
                 esp_audio_enc_in_frame_t in = {
                     .buffer = (uint8_t *)(task->pcm.data()),
                     .len = (uint32_t)(encoder_frame_size_ * sizeof(int16_t)),
                 };
                 esp_audio_enc_out_frame_t out = {
-                    .buffer = buf.data(),
+                    .buffer = out_buffer,
                     .len = (uint32_t)encoder_outbuf_size_,
                     .encoded_bytes = 0,
                 };
                 auto ret = esp_opus_enc_process(opus_encoder_, &in, &out);
                 if (ret == ESP_AUDIO_ERR_OK) {
-                    packet->payload.assign(buf.data(), buf.data() + out.encoded_bytes);
+                    packet->payload.assign(out_buffer, out_buffer + out.encoded_bytes);
 
                     if (task->type == kAudioTaskTypeEncodeToSendQueue) {
                         static uint32_t uplink_packet_count = 0;

@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
+#include <esp_attr.h>
 #include <esp_app_desc.h>
 #include <esp_flash.h>
 #include <esp_heap_caps.h>
@@ -59,25 +61,26 @@ std::string SystemInfo::GetChipModelName() { return std::string(CONFIG_IDF_TARGE
 
 std::string SystemInfo::GetUserAgent() {
     auto app_desc = esp_app_get_description();
-    auto user_agent = std::string("JSR-Algo-TBOT/") + app_desc->version;
+    auto user_agent = std::string("TBOT V") + app_desc->version;
     return user_agent;
 }
 
 esp_err_t SystemInfo::PrintTaskCpuUsage(TickType_t xTicksToWait) {
 #define ARRAY_SIZE_OFFSET 5
-    TaskStatus_t *start_array = NULL, *end_array = NULL;
+    constexpr UBaseType_t kTaskSnapshotCapacity = 48;
+    static EXT_RAM_BSS_ATTR TaskStatus_t start_array[kTaskSnapshotCapacity];
+    static EXT_RAM_BSS_ATTR TaskStatus_t end_array[kTaskSnapshotCapacity];
+    static std::mutex snapshot_mutex;
+    std::unique_lock<std::mutex> snapshot_lock(snapshot_mutex, std::try_to_lock);
+    if (!snapshot_lock.owns_lock()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     UBaseType_t start_array_size, end_array_size;
     configRUN_TIME_COUNTER_TYPE start_run_time, end_run_time;
     esp_err_t ret;
     uint32_t total_elapsed_time;
 
-    // Allocate array to store current task states
-    start_array_size = uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET;
-    start_array = (TaskStatus_t*)malloc(sizeof(TaskStatus_t) * start_array_size);
-    if (start_array == NULL) {
-        ret = ESP_ERR_NO_MEM;
-        goto exit;
-    }
+    start_array_size = std::min(uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET, kTaskSnapshotCapacity);
     // Get current task states
     start_array_size = uxTaskGetSystemState(start_array, start_array_size, &start_run_time);
     if (start_array_size == 0) {
@@ -87,13 +90,7 @@ esp_err_t SystemInfo::PrintTaskCpuUsage(TickType_t xTicksToWait) {
 
     vTaskDelay(xTicksToWait);
 
-    // Allocate array to store tasks states post delay
-    end_array_size = uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET;
-    end_array = (TaskStatus_t*)malloc(sizeof(TaskStatus_t) * end_array_size);
-    if (end_array == NULL) {
-        ret = ESP_ERR_NO_MEM;
-        goto exit;
-    }
+    end_array_size = std::min(uxTaskGetNumberOfTasks() + ARRAY_SIZE_OFFSET, kTaskSnapshotCapacity);
     // Get post delay task states
     end_array_size = uxTaskGetSystemState(end_array, end_array_size, &end_run_time);
     if (end_array_size == 0) {
@@ -146,24 +143,27 @@ esp_err_t SystemInfo::PrintTaskCpuUsage(TickType_t xTicksToWait) {
     ret = ESP_OK;
 
 exit:  // Common return path
-    free(start_array);
-    free(end_array);
     return ret;
 }
 
 void SystemInfo::PrintTaskList() {
     // Headroom for tasks created between the count and the snapshot
+    static EXT_RAM_BSS_ATTR TaskStatus_t tasks[32];
     UBaseType_t capacity = uxTaskGetNumberOfTasks() + 5;
-    TaskStatus_t* tasks = (TaskStatus_t*)malloc(sizeof(TaskStatus_t) * capacity);
-    if (tasks == NULL) {
-        ESP_LOGE(TAG, "PrintTaskList: out of memory");
-        return;
+    if(capacity > 32)
+    {
+        capacity = 32;
     }
+    // TaskStatus_t* tasks = (TaskStatus_t*)malloc(sizeof(TaskStatus_t) * capacity);
+    // if (tasks == NULL) {
+    //     ESP_LOGE(TAG, "PrintTaskList: out of memory");
+    //     return;
+    // }
     configRUN_TIME_COUNTER_TYPE total_run_time = 0;
     UBaseType_t count = uxTaskGetSystemState(tasks, capacity, &total_run_time);
     if (count == 0) {
         ESP_LOGE(TAG, "PrintTaskList: snapshot failed");
-        free(tasks);
+        // free(tasks);
         return;
     }
 
@@ -287,7 +287,7 @@ void SystemInfo::PrintTaskList() {
     if (low_stack_count > 0) {
         ESP_LOGW(TAG, "%lu task(s) with < 512 bytes of stack left", (unsigned long)low_stack_count);
     }
-    free(tasks);
+    // free(tasks);
 }
 
 void SystemInfo::PrintHeapStats() {

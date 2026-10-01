@@ -1,6 +1,7 @@
 #include "speaking_arm_transport.h"
 #include <cassert>
 #include <functional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -13,15 +14,17 @@ struct FakeUart {
     bool Idle() { return idle; }
     size_t BufferSpace() { return free; }
     bool SelectProfile() { select(); return true; }
-    bool Write(const std::string& payload) { lines.push_back(payload); return true; }
+    bool Write(const char* data, size_t length) { lines.emplace_back(data, length); return true; }
 };
 
 int main() {
     std::recursive_mutex mutex;
     FakeUart uart;
     bool owner = true;
+    char buffer[128];
     auto send = [&](bool left, int percent = 100) {
-        return TrySpeakingArmWrite(mutex, left, percent, uart, [&] { return owner; });
+        return TrySpeakingArmWrite(mutex, left, percent, uart, [&] { return owner; },
+                                   buffer, sizeof(buffer));
     };
     assert(send(true));
     assert(uart.lines.back() == "{\"cmd\":\"servo\",\"part\":\"left_arm\",\"action\":\"set_percent\",\"from\":0,\"to\":60,\"step\":2,\"delay_ms\":20}\n");
@@ -40,5 +43,8 @@ int main() {
     mutex.unlock();
     uart.select = [&] { owner = false; };
     assert(!send(true)); // Explicit owner changes after lock/profile selection.
+    owner = true; uart.select = [] {};
+    char tiny[16];
+    assert(!TrySpeakingArmWrite(mutex, true, 100, uart, [] { return true; }, tiny, sizeof(tiny)));
     assert(uart.lines.size() == 4);
 }

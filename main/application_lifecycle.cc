@@ -10,12 +10,18 @@ StaticTask_t chat_outbound_task_buffer;
 EXT_RAM_BSS_ATTR StackType_t chat_outbound_task_stack[kChatOutboundWorkerStackDepth];
 StaticTask_t chat_audio_cleanup_task_buffer;
 EXT_RAM_BSS_ATTR StackType_t chat_audio_cleanup_task_stack[kChatAudioCleanupWorkerStackDepth];
+// Speaking arm worker: PSRAM stack, internal TCB (same split as chat_outbound).
+static constexpr uint32_t kSpeakingArmsTaskStackDepth = 4096;
+static StaticTask_t speaking_arms_task_buffer;
+EXT_RAM_BSS_ATTR static StackType_t speaking_arms_task_stack[kSpeakingArmsTaskStackDepth];
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 DRAM_ATTR StaticTask_t lesson_message_task_buffer;
 DRAM_ATTR StaticQueue_t lesson_message_queue_buffer;
 DRAM_ATTR StackType_t lesson_message_task_stack[kLessonMessageWorkerStackDepth];
-uint8_t* lesson_message_queue_storage = nullptr;
+EXT_RAM_BSS_ATTR uint8_t
+    lesson_message_queue_storage[(kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem)]
+    __attribute__((aligned(alignof(LessonQueueItem))));
 
 void LogLessonWorkerStackWatermark(const char* stage) {
     const UBaseType_t free_stack_bytes = uxTaskGetStackHighWaterMark(nullptr);
@@ -49,14 +55,9 @@ Application::Application() {
     }
 
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
-    constexpr uint32_t kLessonWorkerMemoryCaps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-    lesson_message_queue_storage = static_cast<uint8_t*>(heap_caps_malloc(
-        (kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem), kLessonWorkerMemoryCaps));
-    if (lesson_message_queue_storage != nullptr) {
-        lesson_message_queue_ =
-            xQueueCreateStatic(kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem),
-                               lesson_message_queue_storage, &lesson_message_queue_buffer);
-    }
+    lesson_message_queue_ =
+        xQueueCreateStatic(kLessonMessageQueueDepth + 1, sizeof(LessonQueueItem),
+                           lesson_message_queue_storage, &lesson_message_queue_buffer);
     if (lesson_message_queue_ != nullptr) {
         lesson_message_task_handle_ = xTaskCreateStatic(
             &Application::LessonMessageTask, "lesson_worker", kLessonMessageWorkerStackDepth, this,
@@ -72,8 +73,6 @@ Application::Application() {
             lesson_message_task_handle_ = nullptr;
         }
         lesson_message_queue_ = nullptr;
-        heap_caps_free(lesson_message_queue_storage);
-        lesson_message_queue_storage = nullptr;
     }
 #endif
 
@@ -142,8 +141,6 @@ Application::~Application() {
         }
         lesson_message_queue_ = nullptr;
     }
-    heap_caps_free(lesson_message_queue_storage);
-    lesson_message_queue_storage = nullptr;
 #endif
     vEventGroupDelete(event_group_);
 }
@@ -175,7 +172,7 @@ void Application::Initialize() {
         ESP_LOGI(TAG, "Unclaimed boot: deferring audio workers until claim confirmation");
     }
     robot_uart_.Initialize();
-    if (xTaskCreate(
+    if (xTaskCreateStatic(
             [](void* context) {
                 auto* self = static_cast<Application*>(context);
                 while (true) {
@@ -195,7 +192,8 @@ void Application::Initialize() {
                     vTaskDelay(pdMS_TO_TICKS(25));
                 }
             },
-            "speaking_arms", 3072, this, 1, nullptr) != pdPASS) {
+            "speaking_arms", kSpeakingArmsTaskStackDepth, this, 1, speaking_arms_task_stack,
+            &speaking_arms_task_buffer) == nullptr) {
         ESP_LOGW(TAG, "Speaking arm worker unavailable");
     }
 

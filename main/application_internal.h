@@ -159,7 +159,8 @@ extern EXT_RAM_BSS_ATTR StackType_t chat_audio_cleanup_task_stack[kChatAudioClea
 extern StaticTask_t lesson_message_task_buffer;
 extern StaticQueue_t lesson_message_queue_buffer;
 extern DRAM_ATTR StackType_t lesson_message_task_stack[kLessonMessageWorkerStackDepth];
-extern uint8_t* lesson_message_queue_storage;
+extern EXT_RAM_BSS_ATTR uint8_t
+    lesson_message_queue_storage[(kLessonMessageQueueDepth + 1) * sizeof(LessonQueueItem)];
 
 void LogLessonWorkerStackWatermark(const char* stage);
 #endif

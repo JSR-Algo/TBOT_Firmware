@@ -4,6 +4,7 @@
 #include "chat_outbound_mailbox.h"
 #include "protocols/connection_inbound_gate.h"
 #include "protocols/passive_websocket_liveness.h"
+#include "protocols/websocket_audio_frame.h"
 #include <arpa/inet.h>
 #include <cassert>
 #include <future>
@@ -20,6 +21,9 @@ void* operator new(size_t size) {
 void operator delete(void* pointer) noexcept { std::free(pointer); }
 
 #define ESP_LOGE(...) ((void)0)
+const size_t kWebsocketAudioFrameScratchBytes = 4096;
+uint8_t g_websocket_audio_frame_scratch[kWebsocketAudioFrameScratchBytes];
+std::mutex g_websocket_audio_frame_scratch_mutex;
 namespace Lang { namespace Strings { const char* SERVER_ERROR = "error"; } }
 using Result = ChatOutboundMailbox::Result;
 using Kind = ChatOutboundMailbox::Kind;
@@ -149,13 +153,22 @@ int main() {
         AudioStreamPacket packet;
         packet.payload.resize(1024);
         std::function<bool(const ChatCaptureTag&)> authorize = AuthorizeAudio;
+        // Frames that fit the static scratch need no allocation.
+        p.socket.bytes.reserve(2048);
+        cpp_allocations = 0;
+        assert(p.SendChatAudioIfCurrent(packet, p.websocket_connection_epoch_, authorize) == Result::Sent);
+        cpp_allocations = -1;
+        assert(p.socket.writes == 1);
+        // Oversized frames fall back to the heap; OOM there must not escape.
+        packet.payload.resize(kWebsocketAudioFrameScratchBytes);
         cpp_allocations = 0;
         bool escaped = false;
         Result result = Result::Sent;
         try { result = p.SendChatAudioIfCurrent(packet, p.websocket_connection_epoch_, authorize); }
         catch (const std::bad_alloc&) { escaped = true; }
         cpp_allocations = -1;
-        assert(!escaped && result == Result::Failed && p.socket.writes == 0 && packet.payload.size() == 1024);
+        assert(!escaped && result == Result::Failed && p.socket.writes == 1 &&
+               packet.payload.size() == kWebsocketAudioFrameScratchBytes);
     }
     for (auto kind : {Kind::ListenStart, Kind::ListenStop, Kind::Abort, Kind::Wake, Kind::DrainAck}) {
         WebsocketProtocol p;

@@ -1,4 +1,5 @@
 #include "websocket_protocol.h"
+#include "websocket_audio_frame.h"
 #include "board.h"
 #include "system_info.h"
 #include "application.h"
@@ -12,6 +13,7 @@
 
 #include <cstring>
 #include <cJSON.h>
+#include <esp_attr.h>
 #include <esp_log.h>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
@@ -25,6 +27,11 @@
 #include <esp_timer.h>
 
 #define TAG "WS"
+
+// Fits a 60 ms Opus packet (<= 3 x 1275 bytes) plus the v2/v3 header.
+const size_t kWebsocketAudioFrameScratchBytes = 4096;
+EXT_RAM_BSS_ATTR uint8_t g_websocket_audio_frame_scratch[kWebsocketAudioFrameScratchBytes];
+std::mutex g_websocket_audio_frame_scratch_mutex;
 
 namespace {
 struct ServerHelloSignal {
@@ -237,32 +244,8 @@ bool WebsocketProtocol::SendAudio(std::unique_ptr<AudioStreamPacket> packet) {
     }
 
     const size_t payload_size = packet->payload.size();
-    bool sent = false;
-    if (version_ == 2) {
-        std::string serialized;
-        serialized.resize(sizeof(BinaryProtocol2) + packet->payload.size());
-        auto bp2 = (BinaryProtocol2*)serialized.data();
-        bp2->version = htons(version_);
-        bp2->type = 0;
-        bp2->reserved = 0;
-        bp2->timestamp = htonl(packet->timestamp);
-        bp2->payload_size = htonl(packet->payload.size());
-        memcpy(bp2->payload, packet->payload.data(), packet->payload.size());
-
-        sent = websocket_->Send(serialized.data(), serialized.size(), true);
-    } else if (version_ == 3) {
-        std::string serialized;
-        serialized.resize(sizeof(BinaryProtocol3) + packet->payload.size());
-        auto bp3 = (BinaryProtocol3*)serialized.data();
-        bp3->type = 0;
-        bp3->reserved = 0;
-        bp3->payload_size = htons(packet->payload.size());
-        memcpy(bp3->payload, packet->payload.data(), packet->payload.size());
-
-        sent = websocket_->Send(serialized.data(), serialized.size(), true);
-    } else {
-        sent = websocket_->Send(packet->payload.data(), packet->payload.size(), true);
-    }
+    const bool sent = SendWebsocketAudioFrame(version_, packet->timestamp, packet->payload,
+        [this](const void* data, size_t size) { return websocket_->Send(data, size, true); });
     if (sent) {
         last_incoming_time_ = std::chrono::steady_clock::now();
     }
@@ -371,32 +354,16 @@ ChatOutboundMailbox::Result WebsocketProtocol::SendChatAudioIfCurrent(
         if (websocket_connection_epoch_ != expected_connection_epoch) return Result::Busy;
         if (!authorize || !authorize(packet.capture_tag)) return Result::Stale;
         if (!IsAudioChannelOpened()) return Result::Failed;
-        std::string serialized;
-        const void* data = packet.payload.data();
-        size_t size = packet.payload.size();
-        if (version_ == 2) {
-            serialized.resize(sizeof(BinaryProtocol2) + size);
-            auto* header = reinterpret_cast<BinaryProtocol2*>(serialized.data());
-            header->version = htons(version_);
-            header->type = 0;
-            header->reserved = 0;
-            header->timestamp = htonl(packet.timestamp);
-            header->payload_size = htonl(size);
-            memcpy(header->payload, data, size);
-        } else if (version_ == 3) {
-            serialized.resize(sizeof(BinaryProtocol3) + size);
-            auto* header = reinterpret_cast<BinaryProtocol3*>(serialized.data());
-            header->type = 0;
-            header->reserved = 0;
-            header->payload_size = htons(size);
-            memcpy(header->payload, data, size);
-        }
-        if (!serialized.empty()) {
-            data = serialized.data();
-            size = serialized.size();
-        }
-        if (!authorize(packet.capture_tag)) return Result::Stale;
-        const bool sent = websocket_->Send(data, size, true);
+        bool stale = false;
+        const bool sent = SendWebsocketAudioFrame(version_, packet.timestamp, packet.payload,
+            [&](const void* data, size_t size) {
+                if (!authorize(packet.capture_tag)) {
+                    stale = true;
+                    return false;
+                }
+                return websocket_->Send(data, size, true);
+            });
+        if (stale) return Result::Stale;
         if (sent) last_incoming_time_ = std::chrono::steady_clock::now();
         return sent ? Result::Sent : Result::Failed;
     } catch (const std::bad_alloc&) {
