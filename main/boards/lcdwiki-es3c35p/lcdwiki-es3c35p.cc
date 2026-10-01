@@ -324,9 +324,10 @@ public:
         ESP_LOGI(TAG, "Initialize LVGL port");
         lvgl_port_cfg_t port_cfg = ESP_LVGL_PORT_INIT_CONFIG();
         port_cfg.task_priority = 1;
+        port_cfg.task_stack_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_DEFAULT;
 #if CONFIG_SOC_CPU_CORES_NUM > 1
         port_cfg.task_affinity = APP_CPU_NUM;
-#endif
+#endif  
         lvgl_port_init(&port_cfg);
 
         ESP_LOGI(TAG, "Adding ST77922 QSPI LCD (native %dx%d, %s)", native_w, native_h,
@@ -649,9 +650,9 @@ private:
             // incidental and cost 1452 bytes of MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA
             // heap (measured), which starved the BLE controller during BluFi
             // provisioning until it could no longer send its Wi-Fi list.
-            .max_transfer_sz = 4092,
+            .max_transfer_sz = 8192,
             .flags = 0,
-            .isr_cpu_id = ESP_INTR_CPU_AFFINITY_AUTO,
+            .isr_cpu_id = ESP_INTR_CPU_AFFINITY_1,
             .intr_flags = 0,
         };
         ESP_ERROR_CHECK(spi_bus_initialize(DISPLAY_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
