@@ -2,7 +2,8 @@
 
 void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_transport_epoch,
                                        bool is_websocket_protocol, ChatRequestContext context) {
-    ChatRuntimeTiming timing(1, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
+    ChatRuntimeTiming timing(
+        1, []() { return static_cast<uint64_t>(esp_timer_get_time()); },
         [](uint32_t site, uint32_t hi, uint32_t lo) {
 #if TBOT_APPLICATION_WARN_LOG
             ESP_LOGW(TAG, "chat_slow_scope site=%u elapsed_us_hi=%lu elapsed_us_lo=%lu",
@@ -31,7 +32,7 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
         ESP_LOGI(TAG, "lesson asset sync quiet dropped voice frame type=%s", type->valuestring);
         return;
     }
-        if (strcmp(type->valuestring, "tts") == 0) {
+    if (strcmp(type->valuestring, "tts") == 0) {
         if (!IsChatLessonRequestCurrent(context))
             return;
         if (HandleLessonPlayoutTts(root, context))
@@ -213,7 +214,8 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                 if (GetDeviceState() == kDeviceStateSpeaking) {
                     if (listening_mode_ == kListeningModeManualStop) {
                         if (lesson_interactive_turn) {
-                            bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
+                            bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(
+                                kTtsStopPlaybackDrainTimeoutMs);
                             if (!IsChatLessonRequestCurrent(context))
                                 return;
                             if (!playback_drained) {
@@ -231,7 +233,8 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                             SetDeviceState(kDeviceStateIdle);
                         }
                     } else if (listening_mode_ == kListeningModeAutoStop) {
-                        bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(kTtsStopPlaybackDrainTimeoutMs);
+                        bool playback_drained = audio_service_.WaitForPlaybackQueueEmpty(
+                            kTtsStopPlaybackDrainTimeoutMs);
                         if (!IsChatLessonRequestCurrent(context))
                             return;
                         if (!playback_drained) {
@@ -254,8 +257,7 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
         } else if (strcmp(state->valuestring, "sentence_start") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
-                ESP_LOGD(TAG, "<< %s",
-                         text->valuestring);
+                ESP_LOGD(TAG, "<< %s", text->valuestring);
                 if (!lesson_runtime_active_.load()) {
                     if (context)
                         display->SetChatMessage("assistant", text->valuestring);
@@ -266,11 +268,10 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                 }
             }
         }
-        } else if (strcmp(type->valuestring, "stt") == 0) {
+    } else if (strcmp(type->valuestring, "stt") == 0) {
         auto text = cJSON_GetObjectItem(root, "text");
         if (cJSON_IsString(text)) {
-            ESP_LOGD(TAG, ">> %s",
-                     text->valuestring);
+            ESP_LOGD(TAG, ">> %s", text->valuestring);
             if (!lesson_runtime_active_.load()) {
                 if (context)
                     display->SetChatMessage("user", text->valuestring);
@@ -290,11 +291,12 @@ void Application::DispatchIncomingJson(const cJSON* root, uint64_t callback_tran
                 if (context) {
                     display->SetEmotion(emotion->valuestring);
                     HandleEmotionGesture(emotion->valuestring);
-                } else
+                } else {
                     Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
                         display->SetEmotion(emotion_str.c_str());
                         HandleEmotionGesture(emotion_str.c_str());
                     });
+                }
             }
         }
     } else if (strcmp(type->valuestring, "mcp") == 0) {
