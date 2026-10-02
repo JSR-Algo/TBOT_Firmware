@@ -793,7 +793,7 @@ CONFIG_BLE_SETUP_TIMEOUT_SEC=600
 # end of Camera Configuration
 
 CONFIG_TBOT_PROVISIONING_REPORT_ENABLED=y
-CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
+CONFIG_PROVISIONING_STATUS_URL="https://backend.tjbot.vn/v1/device/provisioning/status"
 # end of Tbot Assistant
 
 #
