@@ -32,7 +32,7 @@ sdkconfig.*
 .devcontainer/
 .clangd
 .cache
-.claude/
+# .claude/
 .omc/
 .idea/
 *.swp
