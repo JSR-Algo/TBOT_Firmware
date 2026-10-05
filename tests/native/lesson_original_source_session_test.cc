@@ -21,11 +21,10 @@ size_t original_source_injections(void);
 void original_source_fault_reset(size_t);
 void original_source_fail_at(size_t);
 void original_source_on_allocation(void (*)(size_t));
-void original_source_on_failure(void (*)(void));
+void original_source_bind(tbot::OriginalSourceAllocationState*);
 }
 using namespace tbot;
 static OriginalSourceAllocationState allocation_state;
-static void AllocationFailure() { allocation_state.NotifyFailure(); }
 static std::atomic<bool>* cancel_target;
 static size_t cancel_allocation, cancel_read, read_calls;
 static int cancel_receive_code = 1;
@@ -223,7 +222,8 @@ int main(int argc, char** argv) {
     const size_t shard=shard_env?std::stoul(shard_env):0;
     const size_t shards=count_env?std::stoul(count_env):1;
     assert(shards>0 && shard<shards);
-    original_source_on_failure(AllocationFailure);
+    // The production allocator owns hooks and notifies the shared session state.
+    original_source_bind(&allocation_state);
     std::ifstream manifest(argv[1]);
     std::string path, hash, reference;
     size_t bytes; unsigned width, height, frames, kind, cases = 0;

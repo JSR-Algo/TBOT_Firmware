@@ -36,6 +36,10 @@ bool OriginalSourceAllocator::Unbind() {
     if (owner == this) owner = nullptr;
     return true;
 }
+void OriginalSourceAllocator::ResetPeak() {
+    stats_.peak_requested = stats_.live_requested;
+    stats_.peak_charged = stats_.live_charged;
+}
 void OriginalSourceAllocator::NotifyFailure() {
     if (stats_.failures < std::numeric_limits<size_t>::max()) ++stats_.failures;
     failure_.NotifyFailure();

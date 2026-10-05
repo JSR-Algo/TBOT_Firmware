@@ -26,6 +26,8 @@ public:
     bool Bind();
     bool Unbind();
     const OriginalSourceAllocatorStats& stats() const { return stats_; }
+    // Restart peak measurement from the current live bytes (e.g. per session).
+    void ResetPeak();
     void* Allocate(size_t bytes, size_t alignment = 64);
     void* Reallocate(void*, size_t bytes);
     void Free(void*);

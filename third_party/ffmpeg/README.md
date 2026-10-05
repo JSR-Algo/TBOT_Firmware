@@ -51,8 +51,14 @@ branches) and `..._zlib_allocator_test.sh`; set `ORIGINAL_ALLOCATOR_UNPATCHED=1`
 to reproduce the unrouted failures. Stdio file input (`fopen`/`fdopen`) remains
 outside the allocator until the leased SD input replaces it.
 
+The host session proof (`run_host_native_lesson_original_source_session_test.sh`)
+links this production routing: patched `mem.c`, routed pinned zlib and the
+production allocator, with only the final heap call replaced by the
+deterministic fault backend in `tests/native/lesson_original_source_fault_backend.cc`.
+The runner fails if a routed object still references a libc allocator.
+
 The session is a serialized portable decoder checkpoint. It does not yet bind
-LessonAssetReadLease, route allocations to ESP-IDF heap capabilities, register a
+LessonAssetReadLease, register a
 scene runtime or advertise READY. Target footprint, RAM coexistence, timeline,
 DMA and physical performance require their separate integration gates. Never
 relabel an existing renderer identity or change partitions to hide a fit failure.

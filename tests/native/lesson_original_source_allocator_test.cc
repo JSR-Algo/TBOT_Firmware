@@ -64,6 +64,9 @@ int main() {
     for (size_t i = 0; i < 23; ++i) assert(static_cast<uint8_t*>(grown)[i] == 0xa5);
     assert(allocator.stats().peak_requested == 1047);
     assert(allocator.stats().peak_charged >= allocator.stats().live_charged + charged);
+    allocator.ResetPeak();
+    assert(allocator.stats().peak_requested == 1024);
+    assert(allocator.stats().peak_charged == allocator.stats().live_charged);
     p = tbot_original_realloc(grown, 7);
     assert(p && allocator.stats().live_requested == 7);
     for (size_t i = 0; i < 7; ++i) assert(static_cast<uint8_t*>(p)[i] == 0xa5);
