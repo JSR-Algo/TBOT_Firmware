@@ -113,6 +113,87 @@ void CompareState(const cJSON* expected, const TVideoFrameState& actual, const s
         ExpectNumber(Get(piece, "translateY"), p.translate_y, where + ".translateY");
     }
 }
+const char* const kPuffColors[] = {"#ffd166", "#79d8bd", "#ff8a6b", "#ffffff", "#b39ddb"};
+
+void CompareLayout(const cJSON* expected, const TVideoFrameLayout& actual, const std::string& at) {
+    ExpectNumber(Get(Get(expected, "background"), "mediaTimeMs"), actual.background_media_time_ms, at + ".bg.time");
+    const cJSON* object = Get(expected, "object");
+    ExpectNumber(Get(object, "x"), actual.object.x, at + ".object.x");
+    ExpectNumber(Get(object, "y"), actual.object.y, at + ".object.y");
+    ExpectNumber(Get(object, "size"), actual.object.size, at + ".object.size");
+    ExpectNumber(Get(object, "opacity"), actual.object.opacity, at + ".object.opacity");
+    ExpectNumber(Get(object, "centerX"), actual.object.center_x, at + ".object.centerX");
+    ExpectNumber(Get(object, "centerY"), actual.object.center_y, at + ".object.centerY");
+    const cJSON* pill = Get(expected, "wordPill");
+    ExpectBool(Get(pill, "visible"), actual.word_pill.visible, at + ".pill.visible");
+    ExpectNumber(Get(pill, "top"), actual.word_pill.top, at + ".pill.top");
+    const cJSON* robot = Get(expected, "robot");
+    ExpectNumber(Get(robot, "anchorX"), actual.robot.anchor_x, at + ".robot.anchorX");
+    ExpectNumber(Get(robot, "anchorY"), actual.robot.anchor_y, at + ".robot.anchorY");
+    ExpectNumber(Get(robot, "scaleX"), actual.robot.scale_x, at + ".robot.scaleX");
+    ExpectNumber(Get(robot, "scaleY"), actual.robot.scale_y, at + ".robot.scaleY");
+    ExpectNumber(Get(robot, "baseSize"), actual.robot.base_size, at + ".robot.baseSize");
+    ExpectNumber(Get(robot, "opacity"), actual.robot.opacity, at + ".robot.opacity");
+    ExpectString(Get(robot, "clipRole"), ClipRoleName(actual.robot.clip_role), at + ".robot.clipRole");
+    const cJSON* shadow = Get(expected, "shadow");
+    ++checks;
+    if (cJSON_IsNull(shadow) == actual.has_shadow) { if (failures++ < 20) std::fprintf(stderr, "FAIL %s shadow\n", at.c_str()); }
+    if (actual.has_shadow) {
+        ExpectNumber(Get(shadow, "centerY"), actual.shadow.center_y, at + ".shadow.centerY");
+        ExpectNumber(Get(shadow, "radiusX"), actual.shadow.radius_x, at + ".shadow.radiusX");
+        ExpectNumber(Get(shadow, "opacity"), actual.shadow.opacity, at + ".shadow.opacity");
+    }
+    const cJSON* puff = Get(expected, "puff");
+    ++checks;
+    if (cJSON_GetArraySize(puff) != actual.puff_count) { if (failures++ < 20) std::fprintf(stderr, "FAIL %s puff\n", at.c_str()); }
+    int index = 0;
+    for (const cJSON* particle = puff->child; particle != nullptr && index < actual.puff_count; particle = particle->next, ++index) {
+        const auto& p = actual.puff[index];
+        ExpectNumber(Get(particle, "centerX"), p.center_x, at + ".puff.centerX");
+        ExpectNumber(Get(particle, "centerY"), p.center_y, at + ".puff.centerY");
+        ExpectNumber(Get(particle, "radius"), p.radius, at + ".puff.radius");
+        ExpectNumber(Get(particle, "opacity"), p.opacity, at + ".puff.opacity");
+        ExpectString(Get(particle, "color"), kPuffColors[p.color_index], at + ".puff.color");
+    }
+    const cJSON* dots = Get(expected, "progressDots");
+    ++checks;
+    if (cJSON_GetArraySize(dots) != static_cast<int>(actual.progress_dots.size())) { if (failures++ < 20) std::fprintf(stderr, "FAIL %s dots\n", at.c_str()); }
+    index = 0;
+    for (const cJSON* dot = dots->child; dot != nullptr && index < static_cast<int>(actual.progress_dots.size()); dot = dot->next, ++index) {
+        ExpectNumber(Get(dot, "centerX"), actual.progress_dots[index].center_x, at + ".dot.centerX");
+        ExpectBool(Get(dot, "active"), actual.progress_dots[index].active, at + ".dot.active");
+    }
+    const cJSON* card = Get(expected, "card");
+    ++checks;
+    if (cJSON_IsNull(card) == actual.has_card) { if (failures++ < 20) std::fprintf(stderr, "FAIL %s card\n", at.c_str()); }
+    if (actual.has_card) {
+        ExpectNumber(Get(card, "offsetX"), actual.card.offset_x, at + ".card.offsetX");
+        ExpectNumber(Get(card, "offsetY"), actual.card.offset_y, at + ".card.offsetY");
+        ExpectNumber(Get(card, "opacity"), actual.card.opacity, at + ".card.opacity");
+        ExpectNumber(Get(card, "ringLineWidth"), actual.card.ring_line_width, at + ".card.ring");
+        ExpectString(Get(card, "cue"), CueName(actual.card.cue), at + ".card.cue");
+    }
+    const cJSON* chip = Get(expected, "correctChip");
+    ++checks;
+    if (cJSON_IsNull(chip) == actual.has_correct_chip) { if (failures++ < 20) std::fprintf(stderr, "FAIL %s chip\n", at.c_str()); }
+    if (actual.has_correct_chip) {
+        ExpectNumber(Get(chip, "scale"), actual.correct_chip.scale, at + ".chip.scale");
+        ExpectNumber(Get(chip, "opacity"), actual.correct_chip.opacity, at + ".chip.opacity");
+    }
+    const cJSON* confetti = Get(expected, "confetti");
+    ++checks;
+    if (cJSON_GetArraySize(confetti) != actual.confetti_count) { if (failures++ < 20) std::fprintf(stderr, "FAIL %s confetti\n", at.c_str()); }
+    index = 0;
+    for (const cJSON* piece = confetti->child; piece != nullptr && index < actual.confetti_count; piece = piece->next, ++index) {
+        const auto& c = actual.confetti[index];
+        ExpectNumber(Get(piece, "centerX"), c.center_x, at + ".confetti.centerX");
+        ExpectNumber(Get(piece, "centerY"), c.center_y, at + ".confetti.centerY");
+        ExpectNumber(Get(piece, "rotationRad"), c.rotation_rad, at + ".confetti.rotation");
+        ExpectNumber(Get(piece, "size"), c.size, at + ".confetti.size");
+        ExpectNumber(Get(piece, "opacity"), c.opacity, at + ".confetti.opacity");
+        ExpectString(Get(piece, "color"), kColors[c.color_index], at + ".confetti.color");
+    }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -143,14 +224,17 @@ int main(int argc, char** argv) {
             input.time_ms = Get(frame, "timeMs")->valuedouble;
             TVideoFrameState state;
             if (EvaluateTVideoFrame(input, &state) != nullptr) return 5;
-            CompareState(Get(frame, "state"), state,
-                         std::string(Get(cue, "cueId")->valuestring) + "@" + std::to_string(input.time_ms));
+            const std::string at = std::string(Get(cue, "cueId")->valuestring) + "@" + std::to_string(input.time_ms);
+            CompareState(Get(frame, "state"), state, at);
+            TVideoFrameLayout layout;
+            LayoutTVideoFrame(state, &layout);
+            CompareLayout(Get(frame, "layout"), layout, at + ".layout");
         }
     }
     if (failures != 0) {
         std::fprintf(stderr, "%d of %d checks failed\n", failures, checks);
         return 1;
     }
-    std::printf("PASS tvideo frame state: %d frames, %d exact checks against backend vectors\n", frames, checks);
+    std::printf("PASS tvideo frame state + layout: %d frames, %d exact checks against backend vectors\n", frames, checks);
     return 0;
 }

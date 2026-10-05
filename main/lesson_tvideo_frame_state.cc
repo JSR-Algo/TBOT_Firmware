@@ -323,6 +323,87 @@ double RoundTVideo6(double value) {
     return negative ? -rounded : rounded;
 }
 
+void LayoutTVideoFrame(const TVideoFrameState& state, TVideoFrameLayout* out) {
+    // Same constants and evaluation order as render-entry.mjs / tvideo-journey.layout.ts.
+    constexpr double kWidth = 480, kHeight = 320, kObjectSize = 95;
+    constexpr double kObjectOffsetX = 67.5 - .3 * kWidth, kObjectOffsetY = 215.5 - .66 * kHeight;
+    constexpr double kRobotBaseSize = 150 / .9;
+    constexpr double kRobotOffsetX = 193 - .465 * kWidth, kRobotOffsetY = 310 - .685 * kHeight;
+    static constexpr double kPuff[5][2] = {{-34, -26}, {28, -34}, {-16, -46}, {40, -14}, {6, -54}};
+    const auto unit = [](double value) { return std::fmin(1, std::fmax(0, std::isfinite(value) ? value : 0)); };
+    const auto or_zero = [](double value) { return value == 0 || std::isnan(value) ? 0.0 : value; };
+    TVideoFrameLayout layout;
+    layout.background_media_time_ms = state.time_ms;
+    const double object_x = state.object.x * kWidth + state.object.translate_x + kObjectOffsetX;
+    const double object_y = state.object.y * kHeight + state.object.bob_offset_y + kObjectOffsetY;
+    const double size = kObjectSize * state.object.scale;
+    layout.object = {object_x - size / 2, object_y - size / 2, size, state.object.opacity, object_x, object_y,
+                     state.time_ms};
+    layout.word_pill = {state.object.word_pill_visible, object_x, object_y + 49.5, 28, state.object.opacity};
+    const double robot_x = state.robot.x * kWidth + kRobotOffsetX;
+    const double robot_y = state.robot.y * kHeight + kRobotOffsetY;
+    layout.robot.anchor_x = robot_x;
+    layout.robot.anchor_y = robot_y;
+    layout.robot.scale_x = state.robot.scale_x;
+    layout.robot.scale_y = state.robot.scale_y;
+    layout.robot.base_size = kRobotBaseSize;
+    layout.robot.opacity = state.robot.opacity;
+    layout.robot.clip_role = state.robot.clip_role;
+    layout.robot.media_time_ms = state.time_ms;
+    layout.has_shadow = state.robot.shadow_opacity > 0;
+    if (layout.has_shadow) {
+        layout.shadow = {robot_x, robot_y + 5, 35 * state.robot.shadow_scale_x, 7, state.robot.shadow_opacity};
+    }
+    if (state.robot.puff_active && state.robot.puff_opacity > 0) {
+        layout.puff_count = 5;
+        for (int index = 0; index < 5; ++index) {
+            auto& particle = layout.puff[index];
+            particle.center_x = robot_x + kPuff[index][0] * state.robot.puff_scale;
+            particle.center_y = robot_y + kPuff[index][1] * state.robot.puff_scale;
+            particle.radius = 4.5 * state.robot.puff_scale;
+            particle.opacity = state.robot.puff_opacity;
+            particle.color_index = index;
+        }
+    }
+    for (int index = 0; index < state.card.total_dots; ++index) {
+        TVideoFrameLayout::Circle dot;
+        dot.center_x = 33 + index * 24;
+        dot.center_y = 18.5;
+        dot.radius = 7.5;
+        dot.active = index < state.card.active_dots;
+        layout.progress_dots.push_back(dot);
+    }
+    layout.has_card = state.card.visible;
+    if (layout.has_card) {
+        const auto& card = state.card;
+        layout.card.offset_x = or_zero(card.retry_offset_x);
+        layout.card.offset_y = or_zero(card.translate_y);
+        layout.card.opacity = card.opacity;
+        layout.card.x = 25;
+        layout.card.y = 35;
+        layout.card.width = 190;
+        layout.card.height = 92;
+        layout.card.radius = 18;
+        layout.card.cue = card.cue;
+        layout.card.ring_line_width = card.cue == TVideoCardCue::kListening ? 1.5 + 5 * unit(card.listening_glow)
+            : card.cue == TVideoCardCue::kThinking ? 1.5 + unit(card.gentle_pulse) * 2
+            : card.cue == TVideoCardCue::kRetry || card.cue == TVideoCardCue::kWordTransition ? 2 : 1.5;
+    }
+    layout.has_correct_chip = state.card.correct_chip_visible;
+    if (layout.has_correct_chip) {
+        layout.correct_chip = {25, 90, state.card.correct_chip_scale, state.card.correct_chip_opacity, 29};
+    }
+    if (state.has_confetti) {
+        layout.confetti_count = kTVideoConfettiPieces;
+        for (int index = 0; index < kTVideoConfettiPieces; ++index) {
+            const auto& piece = state.confetti[index];
+            layout.confetti[index] = {223 + piece.translate_x, 172 + piece.translate_y, piece.rotation * kPi / 180,
+                                      piece.size_px, piece.opacity, piece.color_index};
+        }
+    }
+    *out = std::move(layout);
+}
+
 const char* EvaluateTVideoFrame(const TVideoFrameInput& input, TVideoFrameState* out) {
     if (input.scene == nullptr || input.scene->walk.empty()) return "scene path missing";
     if (!std::isfinite(input.time_ms)) return "timeMs must be finite";
