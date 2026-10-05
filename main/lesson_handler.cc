@@ -25,6 +25,9 @@
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
 #include "lesson_layered_cinematic_renderer.h"
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+#include "lesson_original_source_runtime.h"
+#endif
 #include "lesson_trgb_size_policy.h"
 #include "system_info.h"
 #include "lesson_tvideo_template.h"
@@ -229,6 +232,10 @@ void AddLessonRendererFeatures(cJSON* features) {
     if (tbot::LessonLayeredCinematicRendererCapabilityReady()) {
         cJSON_AddItemToArray(renderers, cJSON_CreateString(tbot::kLessonRendererV5));
     }
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+    // Only with an active runtime and CONFIG_TBOT_LESSON_RENDERER_V6_ADVERTISE.
+    tbot::AddOriginalSourceRendererFeatures(features, renderers);
+#endif
     cJSON_AddItemToObject(features, "renderer", renderers);
 
     cJSON* renderer_v2 = cJSON_CreateObject();
@@ -1716,13 +1723,13 @@ const char* CinematicErrorName(tbot::LessonCinematicError error) {
     return "CINEMATIC_METADATA_MISMATCH";
 }
 
-void RetainCinematicRuntimeOrigin(const cJSON* root, ChatRequestContext context,
-                                tbot::LessonLayeredCinematicRenderer* renderer,
-                                std::uint64_t sequence, const char* phase_id) {
+void RetainCinematicRuntimeOriginAt(const cJSON* root, ChatRequestContext context,
+                                    std::uint64_t renderer_generation,
+                                    std::uint64_t sequence, const char* phase_id) {
     LessonCinematicRuntimeOrigin origin;
     origin.source_context = std::move(context);
     origin.transport_epoch = g_session.current_transport_epoch;
-    origin.renderer_generation = renderer->RuntimeGeneration();
+    origin.renderer_generation = renderer_generation;
     origin.command_sequence_id = sequence;
     origin.protocol_version = Str(root, "protocolVersion");
     origin.assignment_id = Str(root, "assignmentId");
@@ -1736,6 +1743,13 @@ void RetainCinematicRuntimeOrigin(const cJSON* root, ChatRequestContext context,
     origin.step_id = step_id != nullptr ? step_id : "";
     origin.has_lesson_version = Num(root, "lessonVersion", origin.lesson_version);
     g_session.cinematic_runtime_origin = std::move(origin);
+}
+
+void RetainCinematicRuntimeOrigin(const cJSON* root, ChatRequestContext context,
+                                tbot::LessonLayeredCinematicRenderer* renderer,
+                                std::uint64_t sequence, const char* phase_id) {
+    RetainCinematicRuntimeOriginAt(root, std::move(context), renderer->RuntimeGeneration(),
+                                   sequence, phase_id);
 }
 
 // FW-01 / FW-LESSON-01 — per-step completion class. The frozen contract splits the 9
@@ -2591,18 +2605,25 @@ std::uint64_t PendingLessonCinematicErrorEpoch() {
     return origin.source_context ? origin.transport_epoch : 0;
 }
 
-bool DispatchPendingLessonCinematicError(Protocol* protocol) {
+namespace {
+// Reports one asynchronous playback failure of a renderer with the runtime-error
+// interface (v5 layered renderer, v6 original-source runtime), then releases the
+// local runtime, the display and the storage session, in that order.
+template <typename Renderer>
+bool DispatchPendingCinematicRuntimeError(Protocol* protocol, const char* renderer_id,
+                                          Renderer* (*active_renderer)(),
+                                          const char* identity_field) {
     auto& origin = g_session.cinematic_runtime_origin;
     auto& app = Application::GetInstance();
     if (!origin.source_context) return false;
     if (!app.IsChatLessonRequestCurrent(origin.source_context) ||
         origin.transport_epoch != g_session.current_transport_epoch ||
         origin.assignment_id != g_session.assignment_id || origin.session_id != g_session.session_id ||
-        g_session.cinematic_renderer_id != tbot::kLessonRendererV5) {
+        g_session.cinematic_renderer_id != renderer_id) {
         origin = {};
         return false;
     }
-    auto* renderer = tbot::ActiveLessonLayeredCinematicRenderer();
+    auto* renderer = active_renderer();
     if (renderer == nullptr || renderer->RuntimeGeneration() != origin.renderer_generation) {
         origin = {};
         return false;
@@ -2621,7 +2642,7 @@ bool DispatchPendingLessonCinematicError(Protocol* protocol) {
             LessonJsonAddString(envelope, "protocolVersion", origin.protocol_version.c_str()) &&
             LessonJsonAddString(envelope, "assignmentId", origin.assignment_id.c_str()) &&
             LessonJsonAddString(envelope, "sessionId", origin.session_id.c_str()) &&
-            LessonJsonAddString(detail, "phaseId", failure->phase_id.c_str()) &&
+            LessonJsonAddString(detail, identity_field, failure->phase_id.c_str()) &&
             LessonJsonAddNumber(detail, "commandSequenceId", static_cast<double>(failure->command_sequence_id));
         if (built && origin.has_lesson_id)
             built = LessonJsonAddString(envelope, "lessonId", origin.lesson_id.c_str()) != nullptr;
@@ -2677,10 +2698,10 @@ bool DispatchPendingLessonCinematicError(Protocol* protocol) {
         const auto receipt = origin.display_release;
         receipt->store(1);
         try {
-            app.Schedule([display, lvgl_display, renderer, generation, context, receipt]() {
+            app.Schedule([display, lvgl_display, renderer, active_renderer, generation, context, receipt]() {
                 try {
                     if (Application::GetInstance().IsChatLessonRequestCurrent(context) &&
-                        tbot::ActiveLessonLayeredCinematicRenderer() == renderer) {
+                        active_renderer() == renderer) {
                         renderer->WithRuntimeGeneration(generation, [display, lvgl_display]() {
                             if (lvgl_display) {
                                 lvgl_display->CancelLessonRobotEntrance();
@@ -2711,6 +2732,18 @@ bool DispatchPendingLessonCinematicError(Protocol* protocol) {
     renderer->AcknowledgeRuntimeError(failure->generation, failure->command_sequence_id);
     origin = {};
     return true;
+}
+}  // namespace
+
+bool DispatchPendingLessonCinematicError(Protocol* protocol) {
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+    if (g_session.cinematic_renderer_id == tbot::kLessonRendererV6) {
+        return DispatchPendingCinematicRuntimeError(protocol, tbot::kLessonRendererV6,
+                                                    &tbot::ActiveOriginalSourceRuntime, "cueId");
+    }
+#endif
+    return DispatchPendingCinematicRuntimeError(protocol, tbot::kLessonRendererV5,
+                                                &tbot::ActiveLessonLayeredCinematicRenderer, "phaseId");
 }
 
 bool AcceptLessonVisualCompletion(
@@ -2944,6 +2977,12 @@ bool Application::AbandonLessonStorageSession() {
     // Renderer file handles retain exact-generation read leases. Discard them
     // before ending the owner so transport teardown cannot leave SD mutation
     // blocked by the renderer it is trying to abandon.
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+    if (renderer_id == tbot::kLessonRendererV6) {
+        tbot::SetLessonCinematicTimerRouteV6(false);
+        if (auto* runtime = tbot::ActiveOriginalSourceRuntime()) runtime->DiscardSession();
+    } else
+#endif
     if (renderer_id == tbot::kLessonRendererV5) {
         if (auto* renderer = tbot::ActiveLessonLayeredCinematicRenderer()) {
             renderer->DiscardSession();
@@ -3590,6 +3629,223 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
         return;
     }
 
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+    // Renderer v6 (original-source-scene.v1): the scene player owns command ordering,
+    // replay and the frame-zero ACK; this branch owns the storage session, display
+    // ownership and the lesson stream, as the v4/v5 branches do.
+    if (protocol_version != nullptr && strcmp(protocol_version, tbot::kLessonRendererV6) == 0) {
+        const bool prepare_frame = strcmp(type, "lesson_prepare") == 0;
+        const bool start_frame = strcmp(type, "lesson_start") == 0;
+        const bool stop_frame = strcmp(type, "lesson_stop") == 0;
+        const bool control_frame = strcmp(type, "lesson_cinematic_control") == 0;
+        if (!prepare_frame && !start_frame && !stop_frame && !control_frame) {
+            emit(root, "lesson_error", MakeErrorBody(
+                "CINEMATIC_COMMAND_UNSUPPORTED", "unsupported cinematic command frame",
+                false, "command"));
+            return;
+        }
+        tbot::OriginalSourceRuntime* runtime = tbot::ActiveOriginalSourceRuntime();
+        if (runtime == nullptr) {
+            emit_isolated_prepare_error(root, MakeErrorBody(
+                "CINEMATIC_CAPABILITY_UNSUPPORTED", "renderer v6 is not available",
+                false, "cinematicPhase"));
+            return;
+        }
+        const bool same_session = g_session.assignment_id == assignment_id &&
+            g_session.session_id == session_id;
+        if (!prepare_frame &&
+            (!g_session.prepared || !same_session || g_session.cinematic_renderer_id != protocol_version)) {
+            emit_isolated_prepare_error(root, MakeErrorBody(
+                "CINEMATIC_SESSION_MISMATCH", "cinematic command session is not active",
+                false, "cinematicPhase"));
+            return;
+        }
+        if (prepare_frame && same_session && g_session.prepared &&
+            !g_session.cinematic_renderer_id.empty() &&
+            g_session.cinematic_renderer_id != protocol_version) {
+            emit_isolated_prepare_error(root, MakeErrorBody(
+                "CINEMATIC_SESSION_MISMATCH", "another renderer owns this lesson session",
+                false, "cinematicPhase"));
+            return;
+        }
+        const cJSON* phase = prepare_frame || start_frame || stop_frame ? Obj(body, "cinematicPhase") : body;
+        const char* command = Str(phase, "command");
+        const char* cue_id = Str(phase, "cueId");
+        LessonAssetSessionResult reservation{};
+        if (prepare_frame) {
+            if (!IsValidLessonIdentity(assignment_id) || !IsValidLessonIdentity(session_id)) {
+                emit_isolated_prepare_error(root, MakeErrorBody(
+                    "LESSON_IDENTITY_INVALID", "lesson identity is invalid", false, "invalid_identity"));
+                return;
+            }
+            reservation = BeginCinematicLessonSession(assignment_id, session_id);
+            if (!reservation.acquired) {
+                const auto error = MapLessonReservationRefusal(reservation.code);
+                emit_isolated_prepare_error(
+                    root, MakeErrorBody(error.code, error.message, error.retryable, error.reason));
+                return;
+            }
+            if (!RetainedPrepareAllowed(body, assignment_id)) {
+                if (!reservation.idempotent) {
+                    LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                        assignment_id, session_id, reservation.generation);
+                }
+                emit(root, "lesson_error", MakeErrorBody("RETAINED_SELECTION_MISMATCH",
+                    "lesson selection owner or revision changed", true, "retainedSelection"));
+                return;
+            }
+            // A renderer still prepared from an earlier session hands over first.
+            const std::string previous = g_session.prepared ? g_session.cinematic_renderer_id : std::string();
+            bool previous_released = true;
+            if (previous == tbot::kLessonRendererV3) {
+                if (auto* renderer = tbot::ActiveLessonCinematicRenderer()) {
+                    renderer->DiscardSession();
+                    previous_released = !renderer->prepared();
+                }
+            } else if (previous == tbot::kLessonRendererV4) {
+                tbot::SetLessonCinematicTimerRouteV4(false);
+                if (auto* renderer = tbot::ActiveLessonFlattenedCinematicRenderer()) {
+                    renderer->DiscardSession();
+                    previous_released = !renderer->prepared();
+                }
+            } else if (previous == tbot::kLessonRendererV5) {
+                tbot::SetLessonCinematicTimerRouteV5(false);
+                if (auto* renderer = tbot::ActiveLessonLayeredCinematicRenderer()) {
+                    renderer->DiscardSession();
+                    previous_released = !renderer->prepared();
+                }
+            }
+            if (!previous_released) {
+                if (!reservation.idempotent) {
+                    LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                        assignment_id, session_id, reservation.generation);
+                }
+                emit_isolated_prepare_error(root, MakeErrorBody(
+                    CinematicErrorName(tbot::LessonCinematicError::kSessionReleaseFailed),
+                    "cinematic command rejected", false, "cinematicPhase"));
+                return;
+            }
+            // A new lesson session restarts the player's command ordering.
+            if (!same_session || !g_session.prepared) runtime->DiscardSession();
+            tbot::ConfigureProductionOriginalSourceSession(assignment_id, session_id, reservation.generation);
+        }
+        const std::uint64_t now_ms = static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+        tbot::OriginalSourceControlResult result = runtime->Handle(type, body, now_ms);
+        if (!result.accepted) {
+            if (prepare_frame && !reservation.idempotent) {
+                LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                    assignment_id, session_id, reservation.generation);
+            }
+            cJSON* error_body = MakeErrorBody(
+                CinematicErrorName(tbot::OriginalSourceErrorCode(result.error)),
+                "cinematic command rejected", false, "cinematicPhase");
+            if (prepare_frame && !same_session) emit_isolated_prepare_error(root, error_body);
+            else emit(root, "lesson_error", error_body);
+            return;
+        }
+        auto claim_display = [this, context]() {
+            LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
+            if (lvgl_display == nullptr) return;
+            ScheduleChatLesson(context, [lvgl_display]() { lvgl_display->SetLessonMode(true); });
+        };
+        auto release_display = [this, context]() {
+            LvglDisplay* lvgl_display = dynamic_cast<LvglDisplay*>(Board::GetInstance().GetDisplay());
+            if (lvgl_display == nullptr) return;
+            ScheduleChatLesson(context, [lvgl_display]() {
+                lvgl_display->SetLessonBackground(nullptr);
+                lvgl_display->SetLessonObject(nullptr);
+                lvgl_display->SetLessonRobotOverlay(nullptr);
+                lvgl_display->SetLessonMode(false);
+            });
+        };
+        const bool terminal_command = result.terminal;
+        if (prepare_frame) {
+            if (!same_session || !g_session.prepared) {
+                InvalidateLessonVisualCompletionState(frame_transport_epoch);
+                Application::GetInstance().CancelLessonInteractiveListening();
+                Application::GetInstance().SetLessonRuntimeActive(false);
+                g_layer_state.ClearAll();
+                g_session = LessonSession{};
+                g_session.assignment_id = assignment_id;
+                g_session.session_id = session_id;
+                RestoreLessonEmbodiedLedger(assignment_id, session_id);
+                g_session.current_transport_epoch = frame_transport_epoch;
+            }
+            g_session.lesson_asset_generation = reservation.generation;
+            g_session.last_in_sequence = std::max(g_session.last_in_sequence, sequence);
+            g_session.cinematic_renderer_id = protocol_version;
+            g_session.cinematic_runtime_origin = {};
+            g_session.cinematic_runtime_failed = false;
+            g_session.cinematic_failed_display_released = false;
+            g_session.prepared = true;
+            g_session.running = false;
+            g_session.paused = false;
+            tbot::SetLessonCinematicTimerRouteV6(true);
+        } else if (start_frame) {
+            g_session.running = true;
+            g_session.paused = false;
+            SetLessonRuntimeActive(true);
+            claim_display();
+        } else if (control_frame && command != nullptr && strcmp(command, "pause") == 0) {
+            g_session.paused = true;
+        } else if (control_frame && command != nullptr && strcmp(command, "resume") == 0) {
+            g_session.paused = false;
+        }
+        bool reset_session_after_ack = false;
+        if (terminal_command) {
+            const bool display_already_released = g_session.cinematic_failed_display_released ||
+                (g_session.cinematic_runtime_origin.display_release &&
+                 g_session.cinematic_runtime_origin.display_release->load() == 2);
+            g_session.cinematic_runtime_origin = {};
+            Application::GetInstance().BeginLessonTerminalAudioQuiet();
+            SetLessonRuntimeActive(false);
+            if (!display_already_released) release_display();
+            g_session.running = false;
+            g_session.paused = false;
+            tbot::SetLessonCinematicTimerRouteV6(false);
+            runtime->DiscardSession();
+            if (g_session.lesson_asset_generation == 0 ||
+                LessonAssetStorageCoordinator::GetInstance().EndLessonSession(
+                    g_session.assignment_id, g_session.session_id, g_session.lesson_asset_generation)) {
+                reset_session_after_ack = true;
+            } else {
+                emit(root, "lesson_error", MakeErrorBody(
+                    CinematicErrorName(tbot::LessonCinematicError::kSessionReleaseFailed),
+                    "cinematic command rejected", false, "cinematicPhase"));
+                return;
+            }
+        } else if (!prepare_frame && !g_session.cinematic_runtime_failed) {
+            // Playback failures of this cue are reported against this command.
+            RetainCinematicRuntimeOriginAt(root, context, runtime->RuntimeGeneration(),
+                                           static_cast<std::uint64_t>(
+                                               cJSON_GetNumberValue(cJSON_GetObjectItem(phase, "commandSequenceId"))),
+                                           cue_id != nullptr ? cue_id : "");
+        }
+        cJSON* ack_body = CinematicJsonCreateObject();
+        cJSON* ack = cJSON_Parse(result.ack_json.c_str());
+        bool built = ack_body != nullptr && ack != nullptr &&
+            CinematicJsonAddNumber(ack_body, "acks", static_cast<double>(sequence));
+        if (built && result.asset_pack_ready) {
+            cJSON* pack = CinematicJsonCreateObject();
+            built = pack != nullptr && CinematicJsonAddBool(pack, "ready", true) &&
+                CinematicJsonAddString(pack, "cacheKey", result.cache_key.c_str()) &&
+                cJSON_AddItemToObject(ack_body, "assetPack", pack);
+            if (!built) cJSON_Delete(pack);
+        }
+        if (!built || !CinematicJsonOperationAllowed() ||
+            !cJSON_AddItemToObject(ack_body, "cinematicPhase", ack)) {
+            cJSON_Delete(ack);
+            cJSON_Delete(ack_body);
+            if (reset_session_after_ack) g_session = LessonSession{};
+            return;
+        }
+        LogLessonAckEvidence(root, ack_body);
+        emit(root, "lesson_ack", ack_body);
+        if (reset_session_after_ack) g_session = LessonSession{};
+        return;
+    }
+#endif
+
     const bool cinematic_v3 = protocol_version != nullptr &&
         strcmp(protocol_version, tbot::kLessonRendererV3) == 0;
     const bool cinematic_v4 = protocol_version != nullptr &&
@@ -3864,6 +4120,13 @@ void Application::HandleLessonMessage(const cJSON* root, ChatRequestContext cont
                     renderer_v5->DiscardSession();
                     old_renderer_released = !renderer_v5->prepared();
                 }
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+                else if (g_session.cinematic_renderer_id == tbot::kLessonRendererV6) {
+                    tbot::SetLessonCinematicTimerRouteV6(false);
+                    if (auto* runtime = tbot::ActiveOriginalSourceRuntime()) runtime->DiscardSession();
+                    old_renderer_released = true;
+                }
+#endif
                 if (!old_renderer_released) {
                     if (route_v5) renderer_v5->DiscardSession();
                     else if (route_v4) renderer_v4->DiscardSession();

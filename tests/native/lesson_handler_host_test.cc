@@ -26,6 +26,9 @@
 #include "lesson_cinematic_renderer.h"
 #include "lesson_flattened_cinematic_renderer.h"
 #include "lesson_layered_cinematic_renderer.h"
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+#include "lesson_original_source_runtime.h"
+#endif
 
 namespace tbot {
 bool LessonCourseDeliveryAppliedForTest(const char* session_id, const char* delivery_id);
@@ -48,7 +51,10 @@ void FailNextLessonCourseDeliveryWriteForTest(int write_number);
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <memory>
+#include <sstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -2035,6 +2041,296 @@ void test_renderer_v5_capability_exact_layers_and_lifecycle() {
 
     tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
 }
+
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+// ---- renderer v6 (original-source scenes) --------------------------------------
+// The real Farm scene from the backend contract vectors; media come from a fake
+// provider (solid RGBA frames), the panel is counted.
+struct V6Media final : tbot::OriginalSourceMediaProvider {
+    int live = 0, opened = 0;
+    std::string fail_open;
+    int fail_decode_after = -1;
+    struct Stream final : tbot::OriginalSourceStream {
+        V6Media* owner;
+        bool single;
+        int next = 0;
+        std::vector<std::uint8_t> pixels = std::vector<std::uint8_t>(8 * 8 * 4, 200);
+        Stream(V6Media* media, bool one) : owner(media), single(one) { ++owner->live; }
+        ~Stream() override { --owner->live; }
+        tbot::OriginalSourceStatus Next(tbot::OriginalSourceFrame* frame) override {
+            if (owner->fail_decode_after >= 0 && next >= owner->fail_decode_after) return tbot::OriginalSourceStatus::kDecode;
+            if (next >= (single ? 1 : 100)) return tbot::OriginalSourceStatus::kEnd;
+            *frame = tbot::OriginalSourceFrame{};
+            frame->planes[0] = pixels.data();
+            frame->strides[0] = 32;
+            frame->width = frame->height = 8;
+            frame->rgba = true;
+            frame->pts = next++ * 40;
+            frame->time_base_num = 1;
+            frame->time_base_den = 1000;
+            return tbot::OriginalSourceStatus::kOk;
+        }
+    };
+    tbot::OriginalSourceStatus Open(const std::string&, const tbot::OriginalSourceOriginal& original,
+                                    std::unique_ptr<tbot::OriginalSourceStream>* out) override {
+        if (original.asset_version_id == fail_open) return tbot::OriginalSourceStatus::kIntegrity;
+        ++opened;
+        out->reset(new Stream(this, original.codec == tbot::OriginalSourceCodecId::kPng));
+        return tbot::OriginalSourceStatus::kOk;
+    }
+};
+
+struct V6Fixture {
+    std::string scene, sha;
+    V6Media media;
+    int presents = 0;
+    std::unique_ptr<tbot::OriginalSourceRuntime> runtime;
+    V6Fixture() {
+        const char* vectors = std::getenv("ORIGINAL_SOURCE_CONTRACT_VECTORS");
+        require(vectors != nullptr, "v6 tests need ORIGINAL_SOURCE_CONTRACT_VECTORS");
+        std::ifstream file(vectors, std::ios::binary);
+        std::stringstream text;
+        text << file.rdbuf();
+        cJSON* root = cJSON_Parse(text.str().c_str());
+        const cJSON* valid = cJSON_GetObjectItem(cJSON_GetObjectItem(root, "scenes"), "valid");
+        const cJSON* farm = valid != nullptr ? valid->child : nullptr;  // farm-real-originals
+        require(farm != nullptr, "farm scene vector");
+        scene = cJSON_GetObjectItem(farm, "canonicalJson")->valuestring;
+        sha = cJSON_GetObjectItem(farm, "canonicalSha256")->valuestring;
+        cJSON_Delete(root);
+        const std::string scene_copy = scene, sha_copy = sha;
+        runtime = std::make_unique<tbot::OriginalSourceRuntime>(std::make_unique<tbot::OriginalSourceScenePlayer>(
+            [scene_copy, sha_copy](const std::string&, const std::string& digest, std::uint32_t,
+                                   std::string* json) -> const char* {
+                if (digest != sha_copy) return "scene sha256 differs from the reference";
+                *json = scene_copy;
+                return nullptr;
+            },
+            &media, nullptr, [this](const std::uint16_t*, int, int) { ++presents; return true; }));
+        tbot::SetActiveOriginalSourceRuntime(runtime.get());
+    }
+    ~V6Fixture() {
+        tbot::SetActiveOriginalSourceRuntime(nullptr);
+        tbot::SetOriginalSourceRendererAdvertised(false);
+        tbot::SetLessonCinematicTimerRouteV6(false);
+    }
+    std::string Frame(const char* type, int sequence, const std::string& body) const {
+        return std::string("{\"type\":\"") + type + "\",\"protocolVersion\":\"teebot-lesson-renderer.v6\","
+               "\"assignmentId\":\"" + AID() + "\",\"sessionId\":\"" + SID() + "\",\"sequence\":" +
+               std::to_string(sequence) + ",\"body\":" + body + "}";
+    }
+    std::string Prepare(int sequence, const char* cue, int command_sequence) const {
+        return Frame("lesson_prepare", sequence,
+            std::string("{\"cinematicPhase\":{\"command\":\"prepare\",\"cueId\":\"") + cue +
+            "\",\"commandSequenceId\":" + std::to_string(command_sequence) +
+            ",\"scene\":{\"cacheKey\":\"farm-original/v1-" + std::string(64, 'a') + "\",\"sha256\":\"" + sha +
+            "\",\"bytes\":" + std::to_string(scene.size()) + "}}}");
+    }
+    std::string Phase(const char* type, int sequence, const char* command, const char* cue, int command_sequence,
+                      const char* stop_reason = nullptr) const {
+        // resume carries its clock rebase, as original-source-scene.v1 shapes it.
+        const std::string rebase = std::strcmp(command, "resume") == 0
+            ? ",\"clockRebaseSequenceId\":" + std::to_string(command_sequence) : std::string();
+        const std::string phase = std::string("{\"command\":\"") + command + "\",\"cueId\":\"" + cue +
+                                  "\",\"commandSequenceId\":" + std::to_string(command_sequence) + rebase + "}";
+        if (std::strcmp(type, "lesson_cinematic_control") == 0) return Frame(type, sequence, phase);
+        return Frame(type, sequence, std::string("{") +
+                     (stop_reason ? std::string("\"reason\":\"") + stop_reason + "\"," : std::string()) +
+                     "\"cinematicPhase\":" + phase + "}");
+    }
+};
+
+void test_renderer_v6_capability_requires_runtime_and_advertisement() {
+    const auto advertises = []() {
+        cJSON* features = cJSON_CreateObject();
+        AddLessonRendererFeatures(features);
+        char* encoded = cJSON_PrintUnformatted(features);
+        const std::string text = encoded != nullptr ? encoded : "";
+        cJSON_free(encoded);
+        cJSON_Delete(features);
+        return text;
+    };
+    tbot::SetActiveOriginalSourceRuntime(nullptr);
+    tbot::SetOriginalSourceRendererAdvertised(true);
+    require(advertises().find("teebot-lesson-renderer.v6") == std::string::npos,
+            "no v6 capability without an active runtime");
+    V6Fixture v6;
+    tbot::SetOriginalSourceRendererAdvertised(false);
+    require(advertises().find("teebot-lesson-renderer.v6") == std::string::npos,
+            "an active runtime is not advertised before qualification");
+    tbot::SetOriginalSourceRendererAdvertised(true);
+    const std::string text = advertises();
+    require(text.find("teebot-lesson-renderer.v6") != std::string::npos &&
+                text.find("\"lessonRendererV6\":{\"originalSourceScene\":true,\"sdAssetPack\":true,"
+                          "\"capabilities\":[\"decode.h264.high.yuv420p8\",\"decode.png.rgba8\","
+                          "\"decode.vp9.profile0.yuv420p8.alpha-blockadditional\",\"scene.tvideo-journey.v1\"]}") !=
+                    std::string::npos,
+            "advertised v6 capability has the exact shape the ESP decodes");
+}
+
+void test_renderer_v6_lifecycle_acks_display_and_storage() {
+    ResetObservable();
+    FreshSession();
+    V6Fixture v6;
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    Handle(v6.Prepare(1, "barn-opening", 1));
+    require(FrameType(0) == "lesson_ack" && FrameSeq(0) == 1 &&
+                FrameBodyStr(0, "cinematicPhase", "event") == "frameZeroReady" &&
+                FrameBodyStr(0, "cinematicPhase", "cueId") == "barn-opening" &&
+                FrameAssetPackReady(0) && FrameBodyStr(0, "assetPack", "cacheKey") == "farm-original/v1-" + std::string(64, 'a'),
+            "v6 prepare ACKs frame zero with the pack identity");
+    require(v6.presents == 1 && v6.media.live == 2 && tbot::LessonCinematicTimerRoutesV6(),
+            "prepare presented frame zero, keeps background+robot streams and routes the frame task to v6");
+    require(LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "prepare holds the lesson storage session");
+    Handle(v6.Phase("lesson_start", 2, "start", "barn-opening", 2));
+    require(FrameType(1) == "lesson_ack" && FrameBodyStr(1, "cinematicPhase", "event") == "phaseReady" &&
+                display.lesson_mode_calls == std::vector<bool>({true}) && App().lesson_runtime_active,
+            "v6 start claims the display and the lesson runtime");
+    const std::uint64_t now = static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+    require(tbot::TickActiveOriginalSourceRuntime(now + 450) && v6.presents > 1,
+            "the frame task presents the running cue");
+    Handle(v6.Phase("lesson_cinematic_control", 3, "pause", "barn-opening", 3));
+    Handle(v6.Phase("lesson_cinematic_control", 4, "resume", "barn-opening", 4));
+    require(FrameType(2) == "lesson_ack" && FrameBodyStr(2, "cinematicPhase", "event") == "commandApplied" &&
+                FrameType(3) == "lesson_ack" && FrameBodyStr(3, "cinematicPhase", "command") == "resume",
+            "pause and resume are applied");
+    // Conversation cue within the same session: no new storage session, pack ACK only once.
+    Handle(v6.Prepare(5, "barn-greet", 5));
+    require(FrameType(4) == "lesson_ack" && FrameBodyStr(4, "cinematicPhase", "cueId") == "barn-greet" &&
+                !FrameHasAssetPack(4),
+            "a later cue prepare ACKs frame zero without repeating the pack");
+    Handle(v6.Phase("lesson_start", 6, "start", "barn-greet", 6));
+    // Stale and out-of-session commands.
+    Handle(v6.Phase("lesson_cinematic_control", 7, "pause", "barn-greet", 2));
+    require(FrameType(6) == "lesson_error" && FrameBodyStr(6, nullptr, "code") == "CINEMATIC_STALE_COMMAND",
+            "a stale command sequence is refused");
+    const size_t sent = Sent().size();
+    Handle(v6.Phase("lesson_stop", 8, "stop", "barn-greet", 8, "COMPLETED"));
+    require(Sent().size() == sent + 1 && FrameType(sent) == "lesson_ack" &&
+                FrameBodyStr(sent, "cinematicPhase", "command") == "stop",
+            "stop is acknowledged");
+    require(!display.lesson_mode_calls.empty() && !display.lesson_mode_calls.back() &&
+                !App().lesson_runtime_active && App().lesson_terminal_audio_quiet &&
+                !tbot::LessonCinematicTimerRoutesV6() && v6.media.live == 0 &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "stop releases display, runtime, frame task route, streams and the storage session");
+    Handle(v6.Phase("lesson_cinematic_control", 9, "pause", "barn-greet", 9));
+    require(FrameType(Sent().size() - 1) == "lesson_error" &&
+                FrameBodyStr(Sent().size() - 1, nullptr, "code") == "CINEMATIC_SESSION_MISMATCH",
+            "commands after stop are outside any session");
+
+    // The next lesson session restarts command sequences at 1.
+    ResetObservable();
+    FreshSession();
+    Handle(v6.Prepare(1, "barn-opening", 1));
+    require(FrameType(0) == "lesson_ack" && FrameAssetPackReady(0), "next session prepare restarts at sequence 1");
+    Handle(v6.Phase("lesson_cinematic_control", 2, "cancel", "barn-opening", 2));
+    require(FrameType(Sent().size() - 1) == "lesson_error",
+            "cancel without its reason is refused by the contract");
+    Handle(v6.Frame("lesson_cinematic_control", 3,
+        "{\"command\":\"cancel\",\"cueId\":\"barn-opening\",\"commandSequenceId\":3,\"reason\":\"child-left\"}"));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+            "cancel is terminal and releases the storage session");
+    Board::GetInstance().display_ = nullptr;
+}
+
+// A renderer still prepared from an earlier session hands over to the next one in
+// both directions: a failed v6 lesson must not block a v5 lesson, and the reverse.
+void test_renderer_v6_handoff_between_sessions() {
+    ResetObservable();
+    FreshSession();
+    V3RendererFake fake;
+    tbot::LessonLayeredCinematicRenderer renderer(
+        {&fake, V3Allocate, V3Free, V5DecodeJpeg, V5DecodePng,
+         V3Open, V3Close, V3Decode, V3Present, V3LastError, V3MonotonicMs});
+    tbot::SetActiveLessonLayeredCinematicRenderer(&renderer);
+    V6Fixture v6;
+    Handle(V5PrepareFrame(1));
+    require(FrameType(0) == "lesson_ack" && renderer.prepared(), "v5 session prepared");
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    FreshSession();
+    Handle(v6.Prepare(1, "barn-opening", 1));
+    require(FrameType(Sent().size() - 1) == "lesson_ack" && !renderer.prepared() && fake.closes == fake.opens,
+            "a v6 prepare for a new session releases the v5 renderer still prepared");
+    LessonAssetStorageCoordinator::GetInstance().ForceEndLessonSession();
+    FreshSession();
+    const size_t before = Sent().size();
+    Handle(V5PrepareFrame(1));
+    require(Sent().size() == before + 1 && FrameType(before) == "lesson_ack" && renderer.prepared() &&
+                v6.media.live == 0,
+            "a v5 prepare for a new session releases the v6 runtime still prepared");
+    tbot::SetActiveLessonLayeredCinematicRenderer(nullptr);
+}
+
+void test_renderer_v6_refusals_and_runtime_error() {
+    ResetObservable();
+    FreshSession();
+    tbot::SetActiveOriginalSourceRuntime(nullptr);
+    {
+        V6Fixture probe;
+        tbot::SetActiveOriginalSourceRuntime(nullptr);
+        Handle(probe.Prepare(1, "barn-opening", 1));
+        require(FrameType(0) == "lesson_error" &&
+                    FrameBodyStr(0, nullptr, "code") == "CINEMATIC_CAPABILITY_UNSUPPORTED" &&
+                    !LessonAssetStorageCoordinator::GetInstance().HasLessonSession(),
+                "without a runtime v6 is refused before any storage reservation");
+    }
+    ResetObservable();
+    FreshSession();
+    V6Fixture v6;
+    v6.media.fail_open = "20000000-0000-4000-8000-000000000001";  // flight clip of the opening cue
+    Handle(v6.Prepare(1, "barn-opening", 1));
+    require(FrameType(0) == "lesson_error" && FrameBodyStr(0, nullptr, "code") == "CINEMATIC_FILE_READ_FAILED" &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession() && v6.presents == 0,
+            "an original that fails integrity refuses the prepare and releases the new storage session");
+    v6.media.fail_open.clear();
+
+    ResetObservable();
+    FreshSession();
+    LvglDisplay display;
+    Board::GetInstance().display_ = &display;
+    auto context = std::make_shared<ChatInboundMessage>();
+    context->owner = App().host_chat_owner;
+    context->lesson_epoch = App().lesson_transport_epoch_gate_.PublishedEpoch();
+    SetLessonTransportEpoch(context->lesson_epoch);
+    auto handle_current = [&](const std::string& frame) {
+        cJSON* root = cJSON_Parse(frame.c_str());
+        require(root != nullptr, "v6 fixture parses");
+        App().HandleLessonMessage(root, context);
+        cJSON_Delete(root);
+    };
+    handle_current(v6.Prepare(1, "barn-teach", 1));
+    handle_current(v6.Phase("lesson_start", 2, "start", "barn-teach", 2));
+    require(Sent().size() == 2 && PendingLessonCinematicErrorEpoch() == context->lesson_epoch,
+            "accepted v6 start retains its asynchronous error origin");
+    v6.media.fail_decode_after = 0;
+    const std::uint64_t now = static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+    require(!tbot::TickActiveOriginalSourceRuntime(now + 5000) && v6.runtime->PendingRuntimeError().has_value(),
+            "a decode failure while running becomes the pending runtime error");
+    require(!tbot::TickActiveOriginalSourceRuntime(now + 5100), "a failed runtime stops presenting");
+    const size_t before = Sent().size();
+    bool dispatched = false;
+    for (int attempt = 0; attempt < 4 && !dispatched; ++attempt) {
+        dispatched = DispatchPendingLessonCinematicError(App().protocol_.get());
+        for (auto& callback : App().deferred_callbacks) callback();
+        App().deferred_callbacks.clear();
+    }
+    require(dispatched && Sent().size() == before + 1 && FrameType(before) == "lesson_error" &&
+                FrameBodyStr(before, nullptr, "code") == "CINEMATIC_DECODE_FAILED" &&
+                FrameBodyStr(before, "context", "cueId") == "barn-teach",
+            "the runtime failure is reported once with its cue");
+    require(!v6.runtime->PendingRuntimeError() && !App().lesson_runtime_active && v6.media.live == 0 &&
+                !LessonAssetStorageCoordinator::GetInstance().HasLessonSession() &&
+                !display.lesson_mode_calls.empty() && !display.lesson_mode_calls.back(),
+            "reporting releases the runtime, display and storage session");
+    require(!DispatchPendingLessonCinematicError(App().protocol_.get()) && Sent().size() == before + 1,
+            "the failure is not reported twice");
+    Board::GetInstance().display_ = nullptr;
+}
+#endif
 
 void test_renderer_v5_async_error_identity_retry_and_stale_source() {
     for (int scenario = 0; scenario < 12; ++scenario) {
@@ -9943,6 +10239,12 @@ int main() {
     test_cinematic_renderer_failures_use_stable_error_mapping();
     test_cinematic_prepare_reservation_refusal_and_v3_rejection_cleanup();
     test_renderer_v5_capability_exact_layers_and_lifecycle();
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+    test_renderer_v6_capability_requires_runtime_and_advertisement();
+    test_renderer_v6_lifecycle_acks_display_and_storage();
+    test_renderer_v6_refusals_and_runtime_error();
+    test_renderer_v6_handoff_between_sessions();
+#endif
     test_renderer_v5_async_error_identity_retry_and_stale_source();
     test_renderer_v5_async_error_transient_json_oom_is_atomic();
     test_renderer_v5_course_mode_activity_fallback_without_object();

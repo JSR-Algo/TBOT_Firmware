@@ -64,6 +64,26 @@ config TBOT_LESSON_ASSET_MAX_PACK_BYTES
         Reject a lesson asset pack whose declared file sizes exceed this aggregate
         before creating the background storage worker or starting network I/O.
 
+config TBOT_LESSON_RENDERER_V6
+    bool "Build the renderer-v6 original-source scene runtime"
+    default n
+    depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P
+    help
+        Builds the teebot-lesson-renderer.v6 runtime: pinned original sources from
+        the SD asset pack decoded by the R01 session and painted on the canonical
+        tvideoJourney timeline. Requires TBOT_ORIGINAL_SOURCE_FFMPEG_DIR (the pinned
+        R01 decoder build). Building it does not advertise it. Keep disabled until
+        the app-slot layout fits the larger image.
+
+config TBOT_LESSON_RENDERER_V6_ADVERTISE
+    bool "Advertise renderer v6 to the lesson server"
+    default n
+    depends on TBOT_LESSON_RENDERER_V6
+    help
+        Adds teebot-lesson-renderer.v6 and features.lessonRendererV6 to the device
+        features. Enable only after on-device RAM and timing qualification of the
+        v6 runtime with the published originals.
+
 config TBOT_HIL_CINEMATIC_TELEMETRY
     bool "Enable cinematic HIL terminal telemetry"
     default n

@@ -881,6 +881,35 @@ if(CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P)
         "lesson_layer_state.cc"
     )
 
+    # Renderer v6 is opt-in (Kconfig TBOT_LESSON_RENDERER_V6, default n). It links the
+    # pinned R01 decoder build, which this repository does not vendor: routed
+    # libavformat, VP9-patched libavcodec, libavutil with the routed mem.o and routed
+    # zlib (third_party/ffmpeg/README.md).
+    if(CONFIG_TBOT_LESSON_RENDERER_V6)
+        if(NOT TBOT_ORIGINAL_SOURCE_FFMPEG_INCLUDE_DIRS OR NOT TBOT_ORIGINAL_SOURCE_FFMPEG_LIBS)
+            message(FATAL_ERROR
+                "CONFIG_TBOT_LESSON_RENDERER_V6 needs the pinned R01 decoder build: set "
+                "TBOT_ORIGINAL_SOURCE_FFMPEG_INCLUDE_DIRS (FFmpeg source and its config dir) and "
+                "TBOT_ORIGINAL_SOURCE_FFMPEG_LIBS (libavformat, patched libavcodec, routed libavutil, "
+                "routed libz, in link order)")
+        endif()
+        set(TBOT_LESSON_RENDERER_V6_SOURCES
+            "lesson_original_source_allocator.cc"
+            "lesson_original_source_session.cc"
+            "lesson_original_source_contract.cc"
+            "lesson_original_source_scene_controller.cc"
+            "lesson_original_source_compositor.cc"
+            "lesson_original_source_player.cc"
+            "lesson_original_source_pack_media.cc"
+            "lesson_original_source_runtime.cc"
+            "lesson_original_source_device.cc"
+            "lesson_tvideo_frame_state.cc"
+            "lesson_tvideo_painter.cc"
+            "lesson_tvideo_raster_canvas.cc"
+        )
+        list(APPEND SOURCES ${TBOT_LESSON_RENDERER_V6_SOURCES})
+    endif()
+
     if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
         list(APPEND SOURCES
             "physical_sd_identity.cc"
@@ -1179,6 +1208,13 @@ add_custom_target(lang_header ALL
     DEPENDS ${LANG_HEADER}
 )
 add_dependencies(${COMPONENT_LIB} lang_header)
+
+if(CONFIG_TBOT_LESSON_RENDERER_V6)
+    target_include_directories(${COMPONENT_LIB} PRIVATE ${TBOT_ORIGINAL_SOURCE_FFMPEG_INCLUDE_DIRS})
+    # The canonical timeline is pinned to the backend's JS evaluation: no FP contraction.
+    set_source_files_properties(${TBOT_LESSON_RENDERER_V6_SOURCES} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    target_link_libraries(${COMPONENT_LIB} PRIVATE ${TBOT_ORIGINAL_SOURCE_FFMPEG_LIBS})
+endif()
 
 # Find ESP-SR component dynamically
 find_component_by_pattern("espressif__esp-sr" ESP_SR_COMPONENT ESP_SR_COMPONENT_PATH)

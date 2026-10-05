@@ -2,6 +2,10 @@
 #include "lesson_storage_hil_u64_format.h"
 #include "lesson_flattened_cinematic_renderer.h"
 #include "lesson_layered_cinematic_renderer.h"
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+#include "lesson_original_source_device.h"
+#include "lesson_original_source_runtime.h"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -277,6 +281,13 @@ void ProductionRendererTask(void* raw) {
 
         const std::uint64_t now_ms =
             static_cast<std::uint64_t>(esp_timer_get_time() / 1000);
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+        if (LessonCinematicTimerRoutesV6()) {
+            // Failures become the runtime's pending error; the lesson worker reports them.
+            TickActiveOriginalSourceRuntime(now_ms);
+            continue;
+        }
+#endif
         const auto response = LessonCinematicTimerRoutesV5()
             ? TickActiveLessonLayeredCinematicRenderer(now_ms)
             : LessonCinematicTimerRoutesV4()
@@ -359,6 +370,11 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
     SetActiveLessonCinematicRenderer(g_production_renderer.get());
     InitializeProductionLessonFlattenedCinematicRenderer(display);
     InitializeProductionLessonLayeredCinematicRenderer();
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+    if (!InitializeProductionOriginalSourceDevice(display)) {
+        ESP_LOGW("LessonCinematic", "renderer v6 runtime unavailable");
+    }
+#endif
     return LessonCinematicRendererCapabilityReady();
 #else
     (void)display;
@@ -419,6 +435,9 @@ void ShutdownProductionLessonCinematicRenderer() {
     SetActiveLessonCinematicRenderer(nullptr);
     ShutdownProductionLessonFlattenedCinematicRenderer();
     ShutdownProductionLessonLayeredCinematicRenderer();
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6
+    ShutdownProductionOriginalSourceRuntime();
+#endif
     g_production_renderer.reset();
     g_production_context.reset();
 #endif
