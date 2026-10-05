@@ -79,6 +79,11 @@ void OriginalSourceScenePlayer::Release() {
     shown_valid_ = false;
 }
 
+void OriginalSourceScenePlayer::Reset() {
+    Release();
+    controller_.Reset();
+}
+
 void OriginalSourceScenePlayer::Keep(Layer* layer) {
     const OriginalSourceFrame& frame = layer->pending;
     const int width = static_cast<int>(frame.width), height = static_cast<int>(frame.height);

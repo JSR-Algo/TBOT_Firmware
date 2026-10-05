@@ -55,6 +55,8 @@ public:
     const char* Tick(std::uint64_t now_ms);
     // Closes every stream (session end or teardown).
     void Release();
+    // Ends the lesson session: Release plus the controller's ordering state and scene.
+    void Reset();
 
     const OriginalSourceSceneController& controller() const { return controller_; }
     std::uint64_t presented_frames() const { return presented_frames_; }

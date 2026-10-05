@@ -222,6 +222,21 @@ OriginalSourceControlResult OriginalSourceSceneController::Handle(const char* fr
     return result;
 }
 
+void OriginalSourceSceneController::Reset() {
+    control_ = OriginalSourceControlState{};
+    scene_info_ = OriginalSourceSceneInfo{};
+    scene_assets_ = OriginalSourceSceneAssets{};
+    scene_sha256_.clear();
+    cache_key_.clear();
+    scene_path_ = TVideoScenePath{};
+    cues_.clear();
+    cue_index_ = -1;
+    prepared_once_ = false;
+    started_at_ms_ = paused_at_ms_ = 0;
+    last_ack_.clear();
+    last_asset_pack_ready_ = false;
+}
+
 double OriginalSourceSceneController::CueTimeMs(std::uint64_t now_ms) const {
     const OriginalSourceCue& cue = cues_[cue_index_];
     const double duration = TVideoEffectDurationMs(cue.effect);

@@ -71,6 +71,8 @@ public:
     explicit OriginalSourceSceneController(OriginalSourceSceneLoader loader) : loader_(std::move(loader)) {}
 
     void SetPrepareCheck(OriginalSourcePrepareCheck check) { prepare_check_ = std::move(check); }
+    // Forgets the session: ordering state, loaded scene and cue (loader and check stay).
+    void Reset();
 
     OriginalSourceControlResult Handle(const char* frame_type, const cJSON* body, std::uint64_t now_ms);
     // Canonical frame for the active cue at `now_ms`; false when no cue is playing.
@@ -83,6 +85,7 @@ public:
     const OriginalSourceSceneAssets& scene_assets() const { return scene_assets_; }
     const std::vector<OriginalSourceCue>& cues() const { return cues_; }
     const std::string& cache_key() const { return cache_key_; }
+    std::uint64_t last_sequence() const { return control_.last_sequence; }
 
 private:
     struct LoadedScene {

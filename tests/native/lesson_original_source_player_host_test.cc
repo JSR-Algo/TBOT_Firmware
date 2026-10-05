@@ -233,6 +233,18 @@ int main(int argc, char** argv) {
         Expect(player.Tick(32000) == nullptr && player.controller().active_cue() == nullptr, "idle after stop");
     }
 
+    // A new lesson session restarts command sequences and reports its asset pack:
+    // Reset forgets the previous session's ordering state and scene.
+    {
+        player.Reset();
+        auto prepare = control("prepare", "barn-greet", 1);
+        const auto fresh = player.Handle("lesson_prepare", prepare.get(), 40000);
+        Expect(fresh.accepted && fresh.asset_pack_ready, "next session restarts at sequence 1 with its pack ACK");
+        auto start = control("start", "barn-greet", 2);
+        Expect(player.Handle("lesson_start", start.get(), 40000).accepted, "next session start");
+        player.Reset();
+        Expect(player.controller().active_cue() == nullptr && media.live == 0, "reset releases streams and the cue");
+    }
     if (failures != 0) {
         std::fprintf(stderr, "%d failures of %d checks\n", failures, checks);
         return 1;
