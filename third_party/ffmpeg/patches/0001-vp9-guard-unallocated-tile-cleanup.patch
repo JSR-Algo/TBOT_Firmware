@@ -1,0 +1,15 @@
+--- a/libavcodec/vp9.c
++++ b/libavcodec/vp9.c
+@@ -1228,8 +1228,10 @@
+     int i;
+ 
+     av_freep(&s->intra_pred_data[0]);
+-    for (i = 0; i < s->active_tile_cols; i++)
+-        vp9_tile_data_free(&s->td[i]);
++    if (s->td) {
++        for (i = 0; i < s->active_tile_cols; i++)
++            vp9_tile_data_free(&s->td[i]);
++    }
+ }
+ 
+ static av_cold int vp9_decode_free(AVCodecContext *avctx)
