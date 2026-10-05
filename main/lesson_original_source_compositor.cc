@@ -64,9 +64,10 @@ Rgba Sample(const ComposeSource& source, float u, float v) {
     return out;
 }
 
-// drawImage(source, x, y, w, h) with globalAlpha, source-over onto opaque RGB.
-void DrawImage(const ComposeSource& source, double x, double y, double w, double h, double opacity,
-               std::uint8_t* rgb) {
+}  // namespace
+
+void DrawComposeSource(const ComposeSource& source, double x, double y, double w, double h, double opacity,
+                       std::uint8_t* rgb) {
     if (w <= 0 || h <= 0 || opacity <= 0 || source.width <= 0 || source.height <= 0) return;
     const int x0 = std::max(0, static_cast<int>(std::floor(x))), x1 = std::min(kTVideoStageWidth, static_cast<int>(std::ceil(x + w)));
     const int y0 = std::max(0, static_cast<int>(std::floor(y))), y1 = std::min(kTVideoStageHeight, static_cast<int>(std::ceil(y + h)));
@@ -88,8 +89,6 @@ void DrawImage(const ComposeSource& source, double x, double y, double w, double
     }
 }
 
-}  // namespace
-
 void ComposeTVideoMediaLayers(const TVideoFrameLayout& layout, const ComposeSource& background,
                               const ComposeSource& teaching_object, const ComposeSource& robot, std::uint8_t* rgb) {
     // Stage colour #fff7df under everything, as the canonical renderer fills first.
@@ -98,11 +97,11 @@ void ComposeTVideoMediaLayers(const TVideoFrameLayout& layout, const ComposeSour
         rgb[index * 3 + 1] = 0xf7;
         rgb[index * 3 + 2] = 0xdf;
     }
-    DrawImage(background, 0, 0, kTVideoStageWidth, kTVideoStageHeight, 1, rgb);
-    DrawImage(teaching_object, layout.object.x, layout.object.y, layout.object.size, layout.object.size,
+    DrawComposeSource(background, 0, 0, kTVideoStageWidth, kTVideoStageHeight, 1, rgb);
+    DrawComposeSource(teaching_object, layout.object.x, layout.object.y, layout.object.size, layout.object.size,
               layout.object.opacity, rgb);
     const double base = layout.robot.base_size;
-    DrawImage(robot, layout.robot.anchor_x + (-base / 2) * layout.robot.scale_x,
+    DrawComposeSource(robot, layout.robot.anchor_x + (-base / 2) * layout.robot.scale_x,
               layout.robot.anchor_y + (-base) * layout.robot.scale_y, base * layout.robot.scale_x,
               base * layout.robot.scale_y, layout.robot.opacity, rgb);
 }

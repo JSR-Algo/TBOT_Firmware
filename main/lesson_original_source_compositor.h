@@ -26,6 +26,11 @@ struct ComposeSource {
     bool alpha = false;  // YUV: planes[3] carries alpha
 };
 
+// drawImage(source, x, y, w, h) with globalAlpha, source-over onto the opaque
+// 480x320 RGB stage. Width and height must be positive.
+void DrawComposeSource(const ComposeSource& source, double x, double y, double w, double h, double opacity,
+                       std::uint8_t* rgb /* 480 * 320 * 3 */);
+
 // Unspecified colour metadata (all current originals) is decoded as BT.601 limited
 // range, matching what browsers apply to the same streams.
 void ComposeTVideoMediaLayers(const TVideoFrameLayout& layout, const ComposeSource& background,
