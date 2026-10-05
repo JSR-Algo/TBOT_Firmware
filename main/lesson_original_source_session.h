@@ -1,5 +1,6 @@
 #ifndef LESSON_ORIGINAL_SOURCE_SESSION_H
 #define LESSON_ORIGINAL_SOURCE_SESSION_H
+#include "lesson_asset_storage_coordinator.h"
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +11,8 @@ struct AVPacket;
 struct AVFrame;
 namespace tbot {
 enum class OriginalSourceStatus { kOk, kEnd, kInvalid, kIntegrity, kIo, kNoMemory,
-                                  kCancelled, kUnsupported, kDecode, kMetadata };
+                                  kCancelled, kUnsupported, kDecode, kMetadata,
+                                  kLeaseUnavailable };
 enum class OriginalSourceCodec { kH264, kVp9Alpha, kPng };
 struct OriginalSourceExpected {
     size_t bytes;
@@ -55,7 +57,10 @@ public:
     ~OriginalSourceSession();
     OriginalSourceSession(const OriginalSourceSession&) = delete;
     OriginalSourceSession& operator=(const OriginalSourceSession&) = delete;
+    // The lesson read lease fences SD mutation while the file is snapshotted and
+    // verified; it is released when Open returns. Decoding uses only the snapshot.
     OriginalSourceStatus Open(const char* path, const OriginalSourceExpected& expected,
+                              LessonAssetReadLease lease,
                               OriginalSourceAllocationState* allocations,
                               const std::atomic<bool>* cancelled = nullptr);
     OriginalSourceStatus Next(OriginalSourceFrame* frame);

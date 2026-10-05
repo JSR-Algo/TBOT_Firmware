@@ -94,10 +94,11 @@ OriginalSourceStatus OriginalSourceSession::Fail(OriginalSourceStatus status) {
     return status;
 }
 OriginalSourceStatus OriginalSourceSession::Open(
-    const char* path, const OriginalSourceExpected& expected,
+    const char* path, const OriginalSourceExpected& expected, LessonAssetReadLease lease,
     OriginalSourceAllocationState* allocations, const std::atomic<bool>* cancelled) {
     Close();
     if (!allocations) return OriginalSourceStatus::kInvalid;
+    if (!lease) return OriginalSourceStatus::kLeaseUnavailable;
     allocations_ = allocations;
     allocations_->Acquire();
     if (AllocationFailed()) return Fail(OriginalSourceStatus::kNoMemory);
@@ -118,6 +119,8 @@ OriginalSourceStatus OriginalSourceSession::Open(
     }
     std::unique_ptr<FILE, decltype(&std::fclose)> file(std::fopen(path, "rb"), &std::fclose);
     if (!file) return Fail(OriginalSourceStatus::kIo);
+    // Unbuffered: reads are already 4 KiB and stdio must not allocate a hidden buffer.
+    if (std::setvbuf(file.get(), nullptr, _IONBF, 0)) return Fail(OriginalSourceStatus::kIo);
     if (std::fseek(file.get(), 0, SEEK_END)) return Fail(OriginalSourceStatus::kIo);
     const long size = std::ftell(file.get());
     if (size < 0) return Fail(OriginalSourceStatus::kIo);

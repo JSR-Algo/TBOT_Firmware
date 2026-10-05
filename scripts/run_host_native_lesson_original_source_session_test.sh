@@ -33,8 +33,9 @@ done
 "${CXX:-clang++}" -std=c++17 "${SAN[@]}" -Wall -Wextra -Werror \
  -Dfread=source_fread -Dav_read_frame=source_read_frame -Davcodec_receive_frame=source_receive_frame -Davcodec_send_packet=source_send_packet -I"$ROOT/main" -I"$SRC" -I"$LIB" \
  -c "$ROOT/main/lesson_original_source_session.cc" -o "$BUILD_DIR/session.o"
-"${CXX:-clang++}" -std=c++17 "${SAN[@]}" -Wall -Wextra -Werror \
+"${CXX:-clang++}" -std=c++17 -pthread "${SAN[@]}" -Wall -Wextra -Werror \
  -I"$ROOT/main" -I"$SRC" -I"$LIB" "$BUILD_DIR/session.o" \
+ "$ROOT/main/lesson_asset_storage_coordinator.cc" "$ROOT/main/sd_fat_session_guard.cc" \
  "$ROOT/main/lesson_original_source_allocator.cc" \
  "$ROOT/tests/native/lesson_original_source_fault_backend.cc" \
  "$ROOT/tests/native/lesson_original_source_session_test.cc" \
