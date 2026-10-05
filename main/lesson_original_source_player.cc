@@ -156,16 +156,21 @@ const char* OriginalSourceScenePlayer::Select(Layer* layer, const std::string& c
     const double seconds = CanonicalMediaSeconds(media_time_ms, 1e30);
     const bool rewound = layer->has_shown && static_cast<double>(layer->shown_pts) * layer->shown_num >
                                                  seconds * layer->shown_den + 1e-9;
-    if (layer->cache_key != cache_key || layer->asset_id != asset_id || rewound || !layer->stream) {
+    // An ended layer has no stream but keeps its last frame; it reopens only when
+    // its identity changes or its media time goes back.
+    if (layer->cache_key != cache_key || layer->asset_id != asset_id || rewound || !layer->has_shown) {
         if (const char* error = Reopen(layer, cache_key, *original)) return error;
     }
     while (layer->has_pending && (!layer->has_shown || NotAfter(layer->pending, seconds))) {
         Keep(layer);
         const OriginalSourceStatus next = layer->stream->Next(&layer->pending);
         if (next == OriginalSourceStatus::kEnd) {
+            // The last frame is copied: release the decoder and its file snapshot.
             layer->has_pending = false;
+            layer->stream.reset();
         } else if (next != OriginalSourceStatus::kOk) {
             layer->has_pending = false;
+            layer->stream.reset();
             layer->asset_id.clear();  // reopen on the next frame
             return OriginalSourceStatusName(next);
         }

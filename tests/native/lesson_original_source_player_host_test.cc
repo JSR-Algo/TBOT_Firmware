@@ -49,7 +49,8 @@ struct FakeMedia final : OriginalSourceMediaProvider {
                 owner->fail_decode_after = -1;
                 return OriginalSourceStatus::kDecode;
             }
-            if (next >= 50) return OriginalSourceStatus::kEnd;
+            // Teaching objects are single-frame images, like the pinned PNGs.
+            if (next >= (id.rfind("30000000-", 0) == 0 ? 1 : 50)) return OriginalSourceStatus::kEnd;
             for (std::size_t index = 0; index < pixels.size(); index += 4) {
                 pixels[index] = static_cast<std::uint8_t>(next * 5);
                 pixels[index + 1] = static_cast<std::uint8_t>(255 - next * 5);
@@ -143,7 +144,9 @@ int main(int argc, char** argv) {
         const auto accepted = player.Handle("lesson_prepare", prepare.get(), 0);
         Expect(accepted.accepted && accepted.asset_pack_ready, "prepare accepted once frame zero is ready");
         Expect(presents == presents_before + 1, "frame zero presented before the ACK");
-        Expect(media.live == 3, "one stream per media layer");
+        // The single-frame teaching object keeps its decoded copy and releases its
+        // decoder and snapshot; background and robot streams stay open.
+        Expect(media.live == 2, "ended streams are released (live " + std::to_string(media.live) + ")");
         Expect(media.last_cache_key == "farm-original/v1-" + std::string(64, 'a'), "streams open from the prepared pack");
     }
     TVideoFrameState state;
@@ -152,6 +155,7 @@ int main(int argc, char** argv) {
     Expect(background_at() == expected_background(layout.background_media_time_ms), "frame zero background frame");
     Expect(player.Tick(50) == nullptr && presents == presents_before + 1, "prepared cue is not repainted");
 
+    const int opened_after_prepare = media.opened;
     {
         auto start = control("start", "barn-teach", 2);
         Expect(player.Handle("lesson_start", start.get(), 1000).accepted, "start");
@@ -169,6 +173,7 @@ int main(int argc, char** argv) {
         repaint_checks += presents > before;
     }
     Expect(repaint_checks > 10, "frames advance on the 100 ms clock");
+    Expect(media.opened == opened_after_prepare, "an ended layer is not reopened while its frame stays valid");
 
     // Pause holds the frame; resume continues from it.
     {
