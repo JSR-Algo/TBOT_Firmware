@@ -1,0 +1,124 @@
+--- a/libavutil/mem.c
++++ b/libavutil/mem.c
+@@ -62,6 +62,14 @@
+ 
+ #endif /* MALLOC_PREFIX */
+ 
++#ifdef TBOT_FFMPEG_ALLOC_FAILURE
++/* Refusals that never reach the prefixed allocator still fail the owner. */
++void tbot_original_allocation_failure(void);
++#define ALLOC_REFUSED() tbot_original_allocation_failure()
++#else
++#define ALLOC_REFUSED() do { } while (0)
++#endif
++
+ #define ALIGN (HAVE_SIMD_ALIGN_64 ? 64 : (HAVE_SIMD_ALIGN_32 ? 32 : 16))
+ 
+ #define FF_MEMORY_POISON 0x2a
+@@ -99,8 +107,10 @@
+ {
+     void *ptr = NULL;
+ 
+-    if (size > atomic_load_explicit(&max_alloc_size, memory_order_relaxed))
++    if (size > atomic_load_explicit(&max_alloc_size, memory_order_relaxed)) {
++        ALLOC_REFUSED();
+         return NULL;
++    }
+ 
+ #if HAVE_POSIX_MEMALIGN
+     if (size) //OS X on SDK 10.6 has a broken posix_memalign implementation
+@@ -155,8 +165,10 @@
+ void *av_realloc(void *ptr, size_t size)
+ {
+     void *ret;
+-    if (size > atomic_load_explicit(&max_alloc_size, memory_order_relaxed))
++    if (size > atomic_load_explicit(&max_alloc_size, memory_order_relaxed)) {
++        ALLOC_REFUSED();
+         return NULL;
++    }
+ 
+ #if HAVE_ALIGNED_MALLOC
+     ret = _aligned_realloc(ptr, size + !size, ALIGN);
+@@ -176,6 +188,7 @@
+     void *r;
+ 
+     if (size_mult(elsize, nelem, &size)) {
++        ALLOC_REFUSED();
+         av_free(ptr);
+         return NULL;
+     }
+@@ -209,16 +222,20 @@
+ void *av_malloc_array(size_t nmemb, size_t size)
+ {
+     size_t result;
+-    if (size_mult(nmemb, size, &result) < 0)
++    if (size_mult(nmemb, size, &result) < 0) {
++        ALLOC_REFUSED();
+         return NULL;
++    }
+     return av_malloc(result);
+ }
+ 
+ void *av_realloc_array(void *ptr, size_t nmemb, size_t size)
+ {
+     size_t result;
+-    if (size_mult(nmemb, size, &result) < 0)
++    if (size_mult(nmemb, size, &result) < 0) {
++        ALLOC_REFUSED();
+         return NULL;
++    }
+     return av_realloc(ptr, result);
+ }
+ 
+@@ -264,8 +281,10 @@
+ void *av_calloc(size_t nmemb, size_t size)
+ {
+     size_t result;
+-    if (size_mult(nmemb, size, &result) < 0)
++    if (size_mult(nmemb, size, &result) < 0) {
++        ALLOC_REFUSED();
+         return NULL;
++    }
+     return av_mallocz(result);
+ }
+ 
+@@ -321,6 +340,7 @@
+         tab[*nb_ptr] = elem;
+         memcpy(tab_ptr, &tab, sizeof(tab));
+     }, {
++        ALLOC_REFUSED();
+         return AVERROR(ENOMEM);
+     });
+     return 0;
+@@ -335,6 +355,7 @@
+         tab[*nb_ptr] = elem;
+         memcpy(tab_ptr, &tab, sizeof(tab));
+     }, {
++        ALLOC_REFUSED();
+         *nb_ptr = 0;
+         av_freep(tab_ptr);
+     });
+@@ -352,6 +373,7 @@
+         else if (CONFIG_MEMORY_POISONING)
+             memset(tab_elem_data, FF_MEMORY_POISON, elem_size);
+     }, {
++        ALLOC_REFUSED();
+         av_freep(tab_ptr);
+         *nb_ptr = 0;
+     });
+@@ -506,6 +528,7 @@
+     max_size = FFMIN(max_size, UINT_MAX);
+ 
+     if (min_size > max_size) {
++        ALLOC_REFUSED();
+         *size = 0;
+         return NULL;
+     }
+@@ -540,6 +563,7 @@
+     max_size = FFMIN(max_size, UINT_MAX);
+ 
+     if (min_size > max_size) {
++        ALLOC_REFUSED();
+         av_freep(ptr);
+         *size = 0;
+         return;
