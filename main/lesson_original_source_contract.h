@@ -52,6 +52,8 @@ struct OriginalSourceCommandInfo {
     std::string cue_id;
     std::uint64_t command_sequence_id = 0;
     std::string reason;
+    // lesson_stop only: lesson-level terminal reason (COMPLETED, CANCELLED, FAILED).
+    std::string stop_reason;
     std::string scene_cache_key, scene_sha256;
     std::uint32_t scene_bytes = 0;
 };

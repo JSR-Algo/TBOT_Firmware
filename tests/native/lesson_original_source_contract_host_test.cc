@@ -79,6 +79,9 @@ int main(int argc, char** argv) {
         const char* error = ParseOriginalSourceCommand(Get(vector, "frameType")->valuestring, Get(vector, "body"), &info);
         Expect(error == nullptr, "valid command " + Name(vector) + ": " + (error ? error : ""));
         const cJSON* expected = Get(vector, "command");
+        const cJSON* stop_reason = Get(expected, "stopReason");
+        Expect(info.stop_reason == (cJSON_IsString(stop_reason) ? stop_reason->valuestring : ""),
+               "stop reason " + Name(vector));
         Expect(info.cue_id == Get(expected, "cueId")->valuestring &&
                static_cast<double>(info.command_sequence_id) == Get(expected, "commandSequenceId")->valuedouble,
                "command fields " + Name(vector));

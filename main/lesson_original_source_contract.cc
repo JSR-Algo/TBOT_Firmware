@@ -344,6 +344,7 @@ std::string Fingerprint(const OriginalSourceCommandInfo& command) {
     if (command.command == OriginalSourceCommandName::kPrepare) {
         print += command.scene_cache_key + '|' + command.scene_sha256 + '|' + std::to_string(command.scene_bytes);
     }
+    print += '|' + command.stop_reason;
     return print;
 }
 
@@ -410,8 +411,16 @@ const char* ParseOriginalSourceCommand(const char* frame_type, const cJSON* body
     if (!prepare && !start && !stop && !control) return "unsupported frame type";
     const cJSON* command = body;
     if (!control) {
-        if (!ExactKeys(body, {"cinematicPhase"})) return "body must wrap cinematicPhase";
+        const bool keys_ok = stop ? ExactKeys(body, {"reason", "cinematicPhase"}) : ExactKeys(body, {"cinematicPhase"});
+        if (!keys_ok) return "body must wrap cinematicPhase";
         command = Get(body, "cinematicPhase");
+    }
+    std::string stop_reason;
+    if (stop) {
+        const cJSON* reason = Get(body, "reason");
+        if (!StringEquals(reason, "COMPLETED") && !StringEquals(reason, "CANCELLED") && !StringEquals(reason, "FAILED"))
+            return "lesson_stop reason must be COMPLETED, CANCELLED or FAILED";
+        stop_reason = reason->valuestring;
     }
     if (!cJSON_IsObject(command)) return "command must be an object";
     const cJSON* name = Get(command, "command");
@@ -440,6 +449,7 @@ const char* ParseOriginalSourceCommand(const char* frame_type, const cJSON* body
     const cJSON* cue = Get(command, "cueId");
     if (!cJSON_IsString(cue) || !Slug(cue->valuestring, kMaxCueBytes)) return "cueId must be a canonical slug";
     info.cue_id = cue->valuestring;
+    info.stop_reason = stop_reason;
     if (!Integer(Get(command, "commandSequenceId"), 1, kMaxSafeInteger, &info.command_sequence_id))
         return "commandSequenceId";
     if (info.command == OriginalSourceCommandName::kResume) {
