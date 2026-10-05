@@ -49,6 +49,16 @@ int main(int argc, char** argv) {
         Expect(plan[index].cue_id == Get(cue, "cueId")->valuestring && plan[index].effect == effect &&
                plan[index].step_key == Get(cue, "stepKey")->valuestring &&
                plan[index].progress_index == Get(Get(cue, "progress"), "index")->valueint, "cue " + plan[index].cue_id);
+        const cJSON* copy = Get(cue, "copy");
+        Expect(plan[index].copy.label == Get(copy, "label")->valuestring &&
+               plan[index].copy.prompt == Get(copy, "prompt")->valuestring &&
+               plan[index].copy.correct == Get(copy, "correct")->valuestring &&
+               plan[index].copy.retry == Get(copy, "retry")->valuestring, "copy " + plan[index].cue_id);
+        // The teaching object is the owning step's: a word transition shows the next word.
+        const cJSON* owner = Get(Get(scene.get(), "journey"), "steps")->child;
+        while (owner != nullptr && plan[index].step_key != Get(owner, "stepKey")->valuestring) owner = owner->next;
+        Expect(owner != nullptr && plan[index].teaching_object_id ==
+                   Get(Get(owner, "teachingObject"), "assetVersionId")->valuestring, "object " + plan[index].cue_id);
     }
 
     // Shared ordering vectors: accepted iff applied/replayed, state follows the contract.

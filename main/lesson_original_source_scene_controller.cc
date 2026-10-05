@@ -41,19 +41,29 @@ std::string AckJson(const OriginalSourceCommandInfo& command) {
 const char* DeriveOriginalSourceCuePlan(const cJSON* journey, std::vector<OriginalSourceCue>* out) {
     const cJSON* steps = cJSON_GetObjectItemCaseSensitive(journey, "steps");
     if (!cJSON_IsArray(steps) || cJSON_GetArraySize(steps) == 0) return "journey steps";
-    struct Step { std::string key; int index, count; };
+    struct Step { std::string key; int index, count; TVideoCopy copy; std::string object_id; };
     std::vector<Step> parsed;
     for (const cJSON* step = steps->child; step != nullptr; step = step->next) {
         const cJSON* key = cJSON_GetObjectItemCaseSensitive(step, "stepKey");
         const cJSON* progress = cJSON_GetObjectItemCaseSensitive(step, "progress");
         const cJSON* index = cJSON_GetObjectItemCaseSensitive(progress, "index");
         const cJSON* count = cJSON_GetObjectItemCaseSensitive(progress, "count");
-        if (!cJSON_IsString(key) || !cJSON_IsNumber(index) || !cJSON_IsNumber(count)) return "journey step";
-        parsed.push_back({key->valuestring, index->valueint, count->valueint});
+        const cJSON* word = cJSON_GetObjectItemCaseSensitive(step, "targetWord");
+        const cJSON* prompt =
+            cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(step, "teachingCopy"), "prompt");
+        const cJSON* object = cJSON_GetObjectItemCaseSensitive(
+            cJSON_GetObjectItemCaseSensitive(step, "teachingObject"), "assetVersionId");
+        if (!cJSON_IsString(key) || !cJSON_IsNumber(index) || !cJSON_IsNumber(count) || !cJSON_IsString(word) ||
+            !cJSON_IsString(prompt) || !cJSON_IsString(object)) {
+            return "journey step";
+        }
+        parsed.push_back({key->valuestring, index->valueint, count->valueint,
+                          TVideoCopy{word->valuestring, prompt->valuestring, kTVideoCorrectLabel, kTVideoRetryLabel},
+                          object->valuestring});
     }
     std::vector<OriginalSourceCue> plan;
     const auto add = [&](const std::string& id, TVideoEffect effect, bool loop, const Step& owner) {
-        plan.push_back({id, owner.key, effect, loop, owner.index, owner.count});
+        plan.push_back({id, owner.key, effect, loop, owner.index, owner.count, owner.copy, owner.object_id});
     };
     add(parsed[0].key + "-opening", TVideoEffect::kOpening, false, parsed[0]);
     add(parsed[0].key + "-greet", TVideoEffect::kGreet, true, parsed[0]);

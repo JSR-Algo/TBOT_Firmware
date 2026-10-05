@@ -3,6 +3,7 @@
 
 #include "lesson_original_source_contract.h"
 #include "lesson_tvideo_frame_state.h"
+#include "lesson_tvideo_painter.h"
 
 #include <cJSON.h>
 
@@ -22,6 +23,8 @@ struct OriginalSourceCue {
     TVideoEffect effect = TVideoEffect::kOpening;
     bool loop = false;
     int progress_index = 0, progress_count = 0;
+    TVideoCopy copy;                 // card text of the owning step
+    std::string teaching_object_id;  // owning step's teachingObject assetVersionId
 };
 
 // Cue plan of a tvideoJourney.v1 journey, in the backend's order.
