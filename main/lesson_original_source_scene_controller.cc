@@ -182,7 +182,8 @@ OriginalSourceControlResult OriginalSourceSceneController::Handle(const char* fr
             return result;
         }
         if (prepare_check_) {
-            if (const char* error = prepare_check_(loaded.cues[cue_index], loaded.info, loaded.assets)) {
+            if (const char* error =
+                    prepare_check_({loaded.cache_key, loaded.cues[cue_index], loaded.info, loaded.assets, loaded.path})) {
                 result.error = std::string("media: ") + error;
                 return result;
             }

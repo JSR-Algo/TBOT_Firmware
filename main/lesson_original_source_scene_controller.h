@@ -57,8 +57,14 @@ struct OriginalSourceControlResult {
 // Runs after a prepare passed every contract check and before it is committed:
 // returns nullptr when the cue's first frame is ready, otherwise a reason, and the
 // prepare is then refused without consuming its sequence.
-using OriginalSourcePrepareCheck = std::function<const char*(
-    const OriginalSourceCue& cue, const OriginalSourceSceneInfo& scene, const OriginalSourceSceneAssets& assets)>;
+struct OriginalSourcePrepareContext {
+    const std::string& cache_key;
+    const OriginalSourceCue& cue;
+    const OriginalSourceSceneInfo& scene;
+    const OriginalSourceSceneAssets& assets;
+    const TVideoScenePath& path;
+};
+using OriginalSourcePrepareCheck = std::function<const char*(const OriginalSourcePrepareContext& context)>;
 
 class OriginalSourceSceneController {
 public:
@@ -76,6 +82,7 @@ public:
     const OriginalSourceSceneInfo& scene_info() const { return scene_info_; }
     const OriginalSourceSceneAssets& scene_assets() const { return scene_assets_; }
     const std::vector<OriginalSourceCue>& cues() const { return cues_; }
+    const std::string& cache_key() const { return cache_key_; }
 
 private:
     struct LoadedScene {

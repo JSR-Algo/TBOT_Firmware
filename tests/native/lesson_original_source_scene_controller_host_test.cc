@@ -176,9 +176,8 @@ int main(int argc, char** argv) {
         OriginalSourceSceneController checked(loader);
         bool fail_check = true;
         std::string checked_cue;
-        checked.SetPrepareCheck([&](const OriginalSourceCue& cue, const OriginalSourceSceneInfo&,
-                                    const OriginalSourceSceneAssets&) -> const char* {
-            checked_cue = cue.cue_id;
+        checked.SetPrepareCheck([&](const OriginalSourcePrepareContext& context) -> const char* {
+            checked_cue = context.cue.cue_id;
             return fail_check ? "first frame unavailable" : nullptr;
         });
         CheckedCJsonPtr prepare(cJSON_Parse(prepare_body("barn-greet", 1, sha_a).c_str()));
