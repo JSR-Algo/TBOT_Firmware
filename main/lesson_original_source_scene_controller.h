@@ -7,6 +7,7 @@
 
 #include <cJSON.h>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -27,6 +28,15 @@ struct OriginalSourceCue {
     std::string teaching_object_id;  // owning step's teachingObject assetVersionId
 };
 
+// Media layers named by the journey: the background and one robot clip per role
+// (indexed by TVideoClipRole), as assetVersionIds of pinned originals.
+struct OriginalSourceSceneAssets {
+    std::string background_id;
+    std::array<std::string, 4> robot_clip_ids;
+};
+
+const char* ParseOriginalSourceSceneAssets(const cJSON* journey, OriginalSourceSceneAssets* out);
+
 // Cue plan of a tvideoJourney.v1 journey, in the backend's order.
 const char* DeriveOriginalSourceCuePlan(const cJSON* journey, std::vector<OriginalSourceCue>* out);
 
@@ -44,9 +54,17 @@ struct OriginalSourceControlResult {
     bool terminal = false;      // stop / cancel ended the cue
 };
 
+// Runs after a prepare passed every contract check and before it is committed:
+// returns nullptr when the cue's first frame is ready, otherwise a reason, and the
+// prepare is then refused without consuming its sequence.
+using OriginalSourcePrepareCheck = std::function<const char*(
+    const OriginalSourceCue& cue, const OriginalSourceSceneInfo& scene, const OriginalSourceSceneAssets& assets)>;
+
 class OriginalSourceSceneController {
 public:
     explicit OriginalSourceSceneController(OriginalSourceSceneLoader loader) : loader_(std::move(loader)) {}
+
+    void SetPrepareCheck(OriginalSourcePrepareCheck check) { prepare_check_ = std::move(check); }
 
     OriginalSourceControlResult Handle(const char* frame_type, const cJSON* body, std::uint64_t now_ms);
     // Canonical frame for the active cue at `now_ms`; false when no cue is playing.
@@ -54,13 +72,29 @@ public:
 
     const OriginalSourceCue* active_cue() const { return cue_index_ < 0 ? nullptr : &cues_[cue_index_]; }
     OriginalSourceRendererPhase phase() const { return control_.phase; }
+    // Valid once a prepare loaded the scene.
+    const OriginalSourceSceneInfo& scene_info() const { return scene_info_; }
+    const OriginalSourceSceneAssets& scene_assets() const { return scene_assets_; }
+    const std::vector<OriginalSourceCue>& cues() const { return cues_; }
 
 private:
-    const char* LoadScene(const OriginalSourceCommandInfo& command);
+    struct LoadedScene {
+        std::string sha256, cache_key;
+        TVideoScenePath path;
+        std::vector<OriginalSourceCue> cues;
+        OriginalSourceSceneInfo info;
+        OriginalSourceSceneAssets assets;
+    };
+    // Loads (or reuses) the referenced scene into `out` without changing the
+    // controller; a prepare commits it only once every check passed.
+    const char* LoadScene(const OriginalSourceCommandInfo& command, LoadedScene* out) const;
     double CueTimeMs(std::uint64_t now_ms) const;
 
     OriginalSourceSceneLoader loader_;
+    OriginalSourcePrepareCheck prepare_check_;
     OriginalSourceControlState control_;
+    OriginalSourceSceneInfo scene_info_;
+    OriginalSourceSceneAssets scene_assets_;
     std::string scene_sha256_, cache_key_;
     TVideoScenePath scene_path_;
     std::vector<OriginalSourceCue> cues_;

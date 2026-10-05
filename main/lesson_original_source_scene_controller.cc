@@ -38,6 +38,34 @@ std::string AckJson(const OriginalSourceCommandInfo& command) {
 
 }  // namespace
 
+const char* ParseOriginalSourceSceneAssets(const cJSON* journey, OriginalSourceSceneAssets* out) {
+    static const char* const kRoles[] = {"flight", "walking", "greeting-teaching", "celebration"};
+    const cJSON* assets = cJSON_GetObjectItemCaseSensitive(journey, "assets");
+    const cJSON* background =
+        cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(assets, "background"), "assetVersionId");
+    if (!cJSON_IsString(background)) return "journey background";
+    OriginalSourceSceneAssets parsed;
+    parsed.background_id = background->valuestring;
+    const cJSON* clips = cJSON_GetObjectItemCaseSensitive(assets, "robotClips");
+    if (!cJSON_IsArray(clips)) return "journey robot clips";
+    for (const cJSON* clip = clips->child; clip != nullptr; clip = clip->next) {
+        const cJSON* role = cJSON_GetObjectItemCaseSensitive(clip, "role");
+        const cJSON* id = cJSON_GetObjectItemCaseSensitive(clip, "assetVersionId");
+        if (!cJSON_IsString(role) || !cJSON_IsString(id)) return "journey robot clip";
+        int index = -1;
+        for (int candidate = 0; candidate < 4; ++candidate) {
+            if (std::strcmp(role->valuestring, kRoles[candidate]) == 0) index = candidate;
+        }
+        if (index < 0 || !parsed.robot_clip_ids[index].empty()) return "journey robot clip role";
+        parsed.robot_clip_ids[index] = id->valuestring;
+    }
+    for (const std::string& id : parsed.robot_clip_ids) {
+        if (id.empty()) return "journey robot clip role missing";
+    }
+    *out = std::move(parsed);
+    return nullptr;
+}
+
 const char* DeriveOriginalSourceCuePlan(const cJSON* journey, std::vector<OriginalSourceCue>* out) {
     const cJSON* steps = cJSON_GetObjectItemCaseSensitive(journey, "steps");
     if (!cJSON_IsArray(steps) || cJSON_GetArraySize(steps) == 0) return "journey steps";
@@ -78,25 +106,41 @@ const char* DeriveOriginalSourceCuePlan(const cJSON* journey, std::vector<Origin
     return nullptr;
 }
 
-const char* OriginalSourceSceneController::LoadScene(const OriginalSourceCommandInfo& command) {
-    if (command.scene_sha256 == scene_sha256_ && command.scene_cache_key == cache_key_ && !cues_.empty()) return nullptr;
+const char* OriginalSourceSceneController::LoadScene(const OriginalSourceCommandInfo& command,
+                                                     LoadedScene* out) const {
+    if (command.scene_sha256 == scene_sha256_ && command.scene_cache_key == cache_key_ && !cues_.empty()) {
+        *out = {scene_sha256_, cache_key_, scene_path_, cues_, scene_info_, scene_assets_};
+        return nullptr;
+    }
     std::string json;
     if (!loader_) return "scene loader unavailable";
     if (const char* error = loader_(command.scene_cache_key, command.scene_sha256, command.scene_bytes, &json)) return error;
     if (json.size() != command.scene_bytes) return "scene length differs from the reference";
     CheckedCJsonPtr scene(cJSON_Parse(json.c_str()));
     if (!scene) return "scene is not JSON";
-    OriginalSourceSceneInfo info;
-    if (const char* error = ParseOriginalSourceScene(scene.get(), &info)) return error;
+    LoadedScene loaded;
+    if (const char* error = ParseOriginalSourceScene(scene.get(), &loaded.info)) return error;
     const cJSON* journey = cJSON_GetObjectItemCaseSensitive(scene.get(), "journey");
-    TVideoScenePath path;
-    std::vector<OriginalSourceCue> cues;
-    if (const char* error = ParseTVideoScenePath(journey, &path)) return error;
-    if (const char* error = DeriveOriginalSourceCuePlan(journey, &cues)) return error;
-    scene_path_ = std::move(path);
-    cues_ = std::move(cues);
-    scene_sha256_ = command.scene_sha256;
-    cache_key_ = command.scene_cache_key;
+    if (const char* error = ParseTVideoScenePath(journey, &loaded.path)) return error;
+    if (const char* error = DeriveOriginalSourceCuePlan(journey, &loaded.cues)) return error;
+    if (const char* error = ParseOriginalSourceSceneAssets(journey, &loaded.assets)) return error;
+    // Every layer the journey names must be one of the scene's pinned originals.
+    const auto pinned = [&](const std::string& id) {
+        for (const auto& original : loaded.info.originals) {
+            if (original.asset_version_id == id) return true;
+        }
+        return false;
+    };
+    if (!pinned(loaded.assets.background_id)) return "background is not a pinned original";
+    for (const std::string& id : loaded.assets.robot_clip_ids) {
+        if (!pinned(id)) return "robot clip is not a pinned original";
+    }
+    for (const auto& cue : loaded.cues) {
+        if (!pinned(cue.teaching_object_id)) return "teaching object is not a pinned original";
+    }
+    loaded.sha256 = command.scene_sha256;
+    loaded.cache_key = command.scene_cache_key;
+    *out = std::move(loaded);
     return nullptr;
 }
 
@@ -123,22 +167,38 @@ OriginalSourceControlResult OriginalSourceSceneController::Handle(const char* fr
         return result;
     }
     int cue_index = cue_index_;
+    LoadedScene loaded;
     if (command.command == OriginalSourceCommandName::kPrepare) {
-        if (const char* error = LoadScene(command)) {
+        if (const char* error = LoadScene(command, &loaded)) {
             result.error = std::string("scene: ") + error;
             return result;
         }
         cue_index = -1;
-        for (std::size_t index = 0; index < cues_.size(); ++index) {
-            if (cues_[index].cue_id == command.cue_id) cue_index = static_cast<int>(index);
+        for (std::size_t index = 0; index < loaded.cues.size(); ++index) {
+            if (loaded.cues[index].cue_id == command.cue_id) cue_index = static_cast<int>(index);
         }
         if (cue_index < 0) {
             result.error = "scene: cue is not in the scene plan";
             return result;
         }
+        if (prepare_check_) {
+            if (const char* error = prepare_check_(loaded.cues[cue_index], loaded.info, loaded.assets)) {
+                result.error = std::string("media: ") + error;
+                return result;
+            }
+        }
     }
-    // Commit only after every check passed: rejections never consume a sequence.
+    // Commit only after every check passed: rejections never consume a sequence
+    // and never replace the loaded scene or the playing cue.
     control_ = next;
+    if (command.command == OriginalSourceCommandName::kPrepare) {
+        scene_sha256_ = std::move(loaded.sha256);
+        cache_key_ = std::move(loaded.cache_key);
+        scene_path_ = std::move(loaded.path);
+        cues_ = std::move(loaded.cues);
+        scene_info_ = std::move(loaded.info);
+        scene_assets_ = std::move(loaded.assets);
+    }
     cue_index_ = cue_index;
     switch (command.command) {
         case OriginalSourceCommandName::kPrepare: started_at_ms_ = paused_at_ms_ = now_ms; break;

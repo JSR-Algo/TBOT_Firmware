@@ -124,6 +124,74 @@ int main(int argc, char** argv) {
         Expect(controller.active_cue()->loop ? state.time_ms == 0 : state.time_ms == duration,
                std::string(cue_id) + " wraps only when looping");
     }
+    // A refused prepare leaves the loaded scene and the playing cue untouched: scene B
+    // (same bytes, renamed step) loads, but its plan has no "barn-teach", so the
+    // prepare is refused and frames still come from scene A's "barn-teach".
+    {
+        std::string renamed = scene_json;
+        for (std::size_t at = renamed.find("\"stepKey\":\"barn\""); at != std::string::npos;
+             at = renamed.find("\"stepKey\":\"barn\"", at + 1)) {
+            renamed.replace(at, 16, "\"stepKey\":\"bxrn\"");
+        }
+        const std::string sha_b(64, 'b');
+        const auto two_scenes = [&](const std::string& key, const std::string& sha, std::uint32_t bytes,
+                                    std::string* json) -> const char* {
+            if (sha == sha_b) {
+                *json = renamed;
+                return nullptr;
+            }
+            return loader(key, sha, bytes, json);
+        };
+        const auto prepare_body = [&](const char* cue_id, int sequence, const std::string& sha) {
+            return std::string("{\"cinematicPhase\":{\"command\":\"prepare\",\"cueId\":\"") + cue_id +
+                   "\",\"commandSequenceId\":" + std::to_string(sequence) + ",\"scene\":{\"cacheKey\":\"farm-original/v1-" +
+                   std::string(64, 'a') + "\",\"sha256\":\"" + sha + "\",\"bytes\":" +
+                   std::to_string(scene_json.size()) + "}}}";
+        };
+        const std::string sha_a = Get(farm, "canonicalSha256")->valuestring;
+        OriginalSourceSceneController reference(loader), controller(two_scenes);
+        for (auto* each : {&reference, &controller}) {
+            CheckedCJsonPtr prepare(cJSON_Parse(prepare_body("barn-teach", 1, sha_a).c_str()));
+            CheckedCJsonPtr start(cJSON_Parse(
+                "{\"cinematicPhase\":{\"command\":\"start\",\"cueId\":\"barn-teach\",\"commandSequenceId\":2}}"));
+            each->Handle("lesson_prepare", prepare.get(), 0);
+            each->Handle("lesson_start", start.get(), 0);
+        }
+        CheckedCJsonPtr scene_b(cJSON_Parse(prepare_body("bxrn-teach", 3, sha_b).c_str()));
+        CheckedCJsonPtr missing(cJSON_Parse(prepare_body("barn-teach", 3, sha_b).c_str()));
+        Expect(!controller.Handle("lesson_prepare", missing.get(), 100).accepted, "cue missing from scene B is refused");
+        Expect(controller.active_cue() != nullptr && controller.active_cue()->cue_id == "barn-teach",
+               "refused prepare keeps the playing cue");
+        TVideoFrameState expected, actual;
+        TVideoFrameLayout expected_layout, actual_layout;
+        reference.FrameAt(1500, &expected, &expected_layout);
+        Expect(controller.FrameAt(1500, &actual, &actual_layout) && actual.time_ms == expected.time_ms &&
+                   actual_layout.robot.anchor_x == expected_layout.robot.anchor_x,
+               "refused prepare keeps scene A frames");
+        // The refused sequence was not consumed and scene B is still loadable.
+        Expect(controller.Handle("lesson_prepare", scene_b.get(), 200).accepted &&
+                   controller.active_cue()->cue_id == "bxrn-teach", "scene B prepare at the same sequence");
+
+        // A failing prepare check refuses the prepare without consuming its sequence.
+        OriginalSourceSceneController checked(loader);
+        bool fail_check = true;
+        std::string checked_cue;
+        checked.SetPrepareCheck([&](const OriginalSourceCue& cue, const OriginalSourceSceneInfo&,
+                                    const OriginalSourceSceneAssets&) -> const char* {
+            checked_cue = cue.cue_id;
+            return fail_check ? "first frame unavailable" : nullptr;
+        });
+        CheckedCJsonPtr prepare(cJSON_Parse(prepare_body("barn-greet", 1, sha_a).c_str()));
+        const auto refused = checked.Handle("lesson_prepare", prepare.get(), 0);
+        Expect(!refused.accepted && refused.error == "media: first frame unavailable" && checked_cue == "barn-greet" &&
+                   checked.active_cue() == nullptr, "prepare check refusal");
+        fail_check = false;
+        Expect(checked.Handle("lesson_prepare", prepare.get(), 0).accepted && checked.active_cue() != nullptr,
+               "same prepare accepted once the first frame is ready");
+        Expect(checked.scene_assets().background_id == "10000000-0000-4000-8000-000000000001" &&
+                   checked.scene_assets().robot_clip_ids[0] == "20000000-0000-4000-8000-000000000001" &&
+                   checked.scene_info().originals.size() == 7, "scene assets of the loaded scene");
+    }
     if (failures != 0) {
         std::fprintf(stderr, "%d of %d checks failed\n", failures, checks);
         return 1;
