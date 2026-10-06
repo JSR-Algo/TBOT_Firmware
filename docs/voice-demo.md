@@ -20,6 +20,10 @@ commands, system/MCP controls and lesson-routed frames retain their handlers.
 The animated face and speaking/listening status remain available. This option
 defaults off; disable it to restore normal lesson downloads and expressions.
 
+Never ship it to production robots: 2.2.93 and 2.2.94 were built from a local
+sdkconfig that still had it enabled, so those robots refused every lesson SD
+sync. The production config gate and artifact audit now reject this option.
+
 ## Fixes In This Candidate
 
 - Admit a newly arrived TTS START between JSON presentation operations, retaining
