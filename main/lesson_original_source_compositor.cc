@@ -71,17 +71,37 @@ void DrawComposeSource(const ComposeSource& source, double x, double y, double w
     if (w <= 0 || h <= 0 || opacity <= 0 || source.width <= 0 || source.height <= 0) return;
     const int x0 = std::max(0, static_cast<int>(std::floor(x))), x1 = std::min(kTVideoStageWidth, static_cast<int>(std::ceil(x + w)));
     const int y0 = std::max(0, static_cast<int>(std::floor(y))), y1 = std::min(kTVideoStageHeight, static_cast<int>(std::ceil(y + h)));
+    if (x0 >= x1 || y0 >= y1) return;
     const float scale_x = static_cast<float>(source.width / w), scale_y = static_cast<float>(source.height / h);
+    const float layer_opacity = static_cast<float>(opacity);
+    // The ESP32-S3 FPU is single precision: every double operation is emulated. The
+    // per-row and per-column double terms are therefore computed once, with exactly
+    // the expressions the per-pixel loop used, so the output is bit-identical.
+    float columns[kTVideoStageWidth];
+    bool column_inside[kTVideoStageWidth];
+    for (int px = x0; px < x1; ++px) {
+        const double cx = px + 0.5;
+        column_inside[px] = !(cx < x || cx >= x + w);
+        columns[px] = static_cast<float>((cx - x) * scale_x);
+    }
     for (int py = y0; py < y1; ++py) {
         const double cy = py + 0.5;
         if (cy < y || cy >= y + h) continue;
+        const float v = static_cast<float>((cy - y) * scale_y);
+        std::uint8_t* row = rgb + py * kTVideoStageWidth * 3;
         for (int px = x0; px < x1; ++px) {
-            const double cx = px + 0.5;
-            if (cx < x || cx >= x + w) continue;
-            const Rgba texel = Sample(source, static_cast<float>((cx - x) * scale_x), static_cast<float>((cy - y) * scale_y));
-            const float alpha = texel.a * static_cast<float>(opacity);
+            if (!column_inside[px]) continue;
+            const Rgba texel = Sample(source, columns[px], v);
+            const float alpha = texel.a * layer_opacity;
             if (alpha <= 0) continue;
-            std::uint8_t* pixel = rgb + (py * kTVideoStageWidth + px) * 3;
+            std::uint8_t* pixel = row + px * 3;
+            if (alpha == 1.0f) {
+                // texel * 1 + pixel * 0 is exactly texel.
+                pixel[0] = static_cast<std::uint8_t>(std::lround(texel.r));
+                pixel[1] = static_cast<std::uint8_t>(std::lround(texel.g));
+                pixel[2] = static_cast<std::uint8_t>(std::lround(texel.b));
+                continue;
+            }
             pixel[0] = static_cast<std::uint8_t>(std::lround(texel.r * alpha + pixel[0] * (1 - alpha)));
             pixel[1] = static_cast<std::uint8_t>(std::lround(texel.g * alpha + pixel[1] * (1 - alpha)));
             pixel[2] = static_cast<std::uint8_t>(std::lround(texel.b * alpha + pixel[2] * (1 - alpha)));

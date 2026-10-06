@@ -40,6 +40,12 @@ using OriginalSourcePresent = std::function<bool(const std::uint16_t* rgb565, in
 
 const char* OriginalSourceStatusName(OriginalSourceStatus status);
 
+// Cumulative time per playback phase (microseconds), for on-device profiling.
+struct OriginalSourcePlayerTimings {
+    std::uint64_t open_us = 0, decode_us = 0, paint_us = 0, convert_us = 0, present_us = 0;
+    std::uint64_t opens = 0, decoded_frames = 0, renders = 0;
+};
+
 class OriginalSourceScenePlayer {
 public:
     OriginalSourceScenePlayer(OriginalSourceSceneLoader loader, OriginalSourceMediaProvider* media,
@@ -61,6 +67,8 @@ public:
     const OriginalSourceSceneController& controller() const { return controller_; }
     std::uint64_t presented_frames() const { return presented_frames_; }
     std::uint64_t opened_streams() const { return opened_streams_; }
+    const OriginalSourcePlayerTimings& timings() const { return timings_; }
+    void ResetTimings() { timings_ = {}; }
 
 private:
     struct Layer {
@@ -93,6 +101,7 @@ private:
     bool shown_valid_ = false;
     std::string shown_cue_;
     double shown_frame_index_ = -1;
+    OriginalSourcePlayerTimings timings_;
     std::uint64_t presented_frames_ = 0, opened_streams_ = 0;
 };
 

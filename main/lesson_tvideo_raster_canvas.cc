@@ -289,6 +289,11 @@ void TVideoRasterCanvas::FillPolygons(const std::vector<std::vector<Point>>& pol
     std::vector<const Edge*> active;
     std::vector<std::pair<double, int>> crossings;
     std::size_t next = 0;
+    const float full_sub_coverage = static_cast<float>(1.0 / kSubScanlines);
+    // Clip overlap per column, once per fill instead of per pixel (same values).
+    std::vector<double> column_clip(static_cast<std::size_t>(x1 - x0));
+    for (int px = x0; px < x1; ++px) column_clip[px - x0] = Overlap(px, px + 1, clip.x0, clip.x1);
+    const float layer_alpha = static_cast<float>(state_.alpha);
     for (int row = y0; row < y1; ++row) {
         std::fill(coverage.begin(), coverage.end(), 0.0f);
         bool any = false;
@@ -315,7 +320,18 @@ void TVideoRasterCanvas::FillPolygons(const std::vector<std::vector<Point>>& pol
                 } else if (before != 0 && winding == 0) {
                     const double a = std::max(span_start, static_cast<double>(x0));
                     const double b = std::min(crossing.first, static_cast<double>(x1));
-                    for (int px = static_cast<int>(std::floor(a)); px < b && px < x1; ++px) {
+                    // Integer bounds, once per span (the ESP32-S3 emulates double math):
+                    // px < b <=> px < ceil(b); pixels in [ceil(a), floor(b)) overlap the
+                    // span by exactly 1.0, as Overlap() would return.
+                    const int end = std::min(x1, static_cast<int>(std::ceil(b)));
+                    const int full_begin = static_cast<int>(std::ceil(a));
+                    const int full_end = static_cast<int>(std::floor(b));
+                    for (int px = static_cast<int>(std::floor(a)); px < end; ++px) {
+                        if (px >= full_begin && px < full_end) {
+                            coverage[px - x0] += full_sub_coverage;
+                            any = true;
+                            continue;
+                        }
                         const double covered = Overlap(a, b, px, px + 1);
                         if (covered > 0) {
                             coverage[px - x0] += static_cast<float>(covered / kSubScanlines);
@@ -326,8 +342,21 @@ void TVideoRasterCanvas::FillPolygons(const std::vector<std::vector<Point>>& pol
             }
         }
         if (!any) continue;
+        const double row_clip = Overlap(row, row + 1, clip.y0, clip.y1);
+        std::uint8_t* pixels = rgb_ + row * kTVideoStageWidth * 3;
         for (int px = x0; px < x1; ++px) {
-            if (coverage[px - x0] > 0) Blend(px, row, coverage[px - x0], color);
+            float covered = coverage[px - x0];
+            if (covered <= 0) continue;
+            // Same arithmetic as Blend(): a clip overlap of exactly 1.0 x 1.0 leaves
+            // the coverage unchanged, so only clip-edge pixels multiply in double.
+            const double clip_overlap = column_clip[px - x0];
+            if (!(clip_overlap == 1.0 && row_clip == 1.0)) covered *= static_cast<float>(clip_overlap * row_clip);
+            const float alpha = std::min(1.0f, covered) * color.a * layer_alpha;
+            if (alpha <= 0) continue;
+            std::uint8_t* pixel = pixels + px * 3;
+            pixel[0] = static_cast<std::uint8_t>(std::lround(color.r * alpha + pixel[0] * (1 - alpha)));
+            pixel[1] = static_cast<std::uint8_t>(std::lround(color.g * alpha + pixel[1] * (1 - alpha)));
+            pixel[2] = static_cast<std::uint8_t>(std::lround(color.b * alpha + pixel[2] * (1 - alpha)));
         }
     }
 }

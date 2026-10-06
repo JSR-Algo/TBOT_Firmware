@@ -124,6 +124,11 @@ std::uint64_t OriginalSourceRuntime::PresentedFrames() const {
     return player_->presented_frames();
 }
 
+OriginalSourcePlayerTimings OriginalSourceRuntime::Timings() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return player_->timings();
+}
+
 std::uint64_t OriginalSourceRuntime::OpenedStreams() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return player_->opened_streams();

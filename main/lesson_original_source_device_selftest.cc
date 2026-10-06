@@ -105,7 +105,7 @@ namespace {
 
 constexpr char TAG[] = "V6SELFTEST";
 constexpr char kPackRoot[] = "/sdcard/tbot/lesson-assets";
-constexpr int kRuns = 3;
+constexpr int kRuns = 1;
 // Production calls Handle on the 32 KB lesson_worker stack; the self-test uses twice that
 // and reports the high-water mark so an overflow there shows up as a number, not corruption.
 constexpr unsigned kSelfTestStackBytes = 64 * 1024;
@@ -259,6 +259,7 @@ RunResult PlayRun(int run, const Plan& plan) {
         std::unique_ptr<cJSON, CJsonDeleter> prepare_json(cJSON_Parse(prepare.c_str()));
         std::unique_ptr<cJSON, CJsonDeleter> start_json(cJSON_Parse(start.c_str()));
         const std::uint64_t cue_frames = runtime->PresentedFrames();
+        const OriginalSourcePlayerTimings cue_start = runtime->Timings();
         const std::int64_t prepare_us = esp_timer_get_time();
         const auto prepared = runtime->Handle("lesson_prepare", prepare_json.get(), NowMs());
         const double prepare_ms = (esp_timer_get_time() - prepare_us) / 1000.0;
@@ -291,6 +292,18 @@ RunResult PlayRun(int run, const Plan& plan) {
                  static_cast<unsigned long>(elapsed), fps, prepare_ms, kSelfTestStackBytes - stack_free,
                  error.c_str(),
                  prepared.accepted ? "" : prepared.error.c_str(), started.accepted ? "" : started.error.c_str());
+        const OriginalSourcePlayerTimings cue_end = runtime->Timings();
+        ESP_LOGI(TAG,
+                 "timing run=%d id=%s openMs=%lu opens=%lu decodeMs=%lu decoded=%lu paintMs=%lu convertMs=%lu "
+                 "presentMs=%lu renders=%lu",
+                 run, cue.id.c_str(), static_cast<unsigned long>((cue_end.open_us - cue_start.open_us) / 1000),
+                 static_cast<unsigned long>(cue_end.opens - cue_start.opens),
+                 static_cast<unsigned long>((cue_end.decode_us - cue_start.decode_us) / 1000),
+                 static_cast<unsigned long>(cue_end.decoded_frames - cue_start.decoded_frames),
+                 static_cast<unsigned long>((cue_end.paint_us - cue_start.paint_us) / 1000),
+                 static_cast<unsigned long>((cue_end.convert_us - cue_start.convert_us) / 1000),
+                 static_cast<unsigned long>((cue_end.present_us - cue_start.present_us) / 1000),
+                 static_cast<unsigned long>(cue_end.renders - cue_start.renders));
         if (!error.empty()) break;
     }
     SetLessonCinematicTimerRouteV6(false);

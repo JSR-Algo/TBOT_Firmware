@@ -1,9 +1,18 @@
 #include "lesson_original_source_player.h"
 
+#include <chrono>
+
 #include <algorithm>
 #include <cstring>
 
 namespace tbot {
+namespace {
+std::uint64_t ElapsedUs(std::chrono::steady_clock::time_point since) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - since).count());
+}
+}  // namespace
+
 namespace {
 
 const OriginalSourceOriginal* FindOriginal(const OriginalSourceSceneInfo& scene, const std::string& id) {
@@ -138,10 +147,13 @@ const char* OriginalSourceScenePlayer::Reopen(Layer* layer, const std::string& c
     layer->cache_key.clear();
     if (media_ == nullptr) return "no media provider";
     std::unique_ptr<OriginalSourceStream> stream;
+    const auto open_start = std::chrono::steady_clock::now();
     const OriginalSourceStatus opened = media_->Open(cache_key, original, &stream);
     if (opened != OriginalSourceStatus::kOk || !stream) return OriginalSourceStatusName(opened);
     ++opened_streams_;
     const OriginalSourceStatus first = stream->Next(&layer->pending);
+    timings_.open_us += ElapsedUs(open_start);
+    ++timings_.opens;
     if (first == OriginalSourceStatus::kEnd) return "original has no frames";
     if (first != OriginalSourceStatus::kOk) return OriginalSourceStatusName(first);
     layer->stream = std::move(stream);
@@ -168,7 +180,10 @@ const char* OriginalSourceScenePlayer::Select(Layer* layer, const std::string& c
     }
     while (layer->has_pending && (!layer->has_shown || NotAfter(layer->pending, seconds))) {
         Keep(layer);
+        const auto decode_start = std::chrono::steady_clock::now();
         const OriginalSourceStatus next = layer->stream->Next(&layer->pending);
+        timings_.decode_us += ElapsedUs(decode_start);
+        ++timings_.decoded_frames;
         if (next == OriginalSourceStatus::kEnd) {
             // The last frame is copied: release the decoder and its file snapshot.
             layer->has_pending = false;
@@ -201,11 +216,18 @@ const char* OriginalSourceScenePlayer::Render(const std::string& cache_key, cons
     canvas.SetMedia(TVideoMedia::kBackground, &background_.shown);
     canvas.SetMedia(TVideoMedia::kTeachingObject, &object_.shown);
     canvas.SetMedia(RobotMedia(layout.robot.clip_role), &robot_.shown);
+    const auto paint_start = std::chrono::steady_clock::now();
     if (const char* error = PaintTVideoFrame(&canvas, state, layout, cue.copy)) return error;
     if (canvas.unsupported() != nullptr) return canvas.unsupported();
+    timings_.paint_us += ElapsedUs(paint_start);
+    const auto convert_start = std::chrono::steady_clock::now();
     rgb565_.resize(static_cast<std::size_t>(kTVideoStageWidth) * kTVideoStageHeight);
     ConvertRgb888ToRgb565(stage_.data(), rgb565_.data(), rgb565_.size());
+    timings_.convert_us += ElapsedUs(convert_start);
+    const auto present_start = std::chrono::steady_clock::now();
     if (!present_ || !present_(rgb565_.data(), kTVideoStageWidth, kTVideoStageHeight)) return "panel refused the frame";
+    timings_.present_us += ElapsedUs(present_start);
+    ++timings_.renders;
     ++presented_frames_;
     return nullptr;
 }
