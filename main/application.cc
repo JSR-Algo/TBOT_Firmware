@@ -106,7 +106,12 @@ static constexpr uint32_t kChatOutboundWorkerStackDepth = 8192;
 static constexpr uint32_t kChatAudioCleanupWorkerStackDepth = 8192;
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
 static constexpr UBaseType_t kLessonMessageQueueDepth = kLessonMessageDataQueueDepth;
+#if CONFIG_TBOT_LESSON_RENDERER_V6
+// Renderer v6 prepare decodes on this worker: 47,496 bytes measured on the robot (BE08 R14).
+static constexpr uint32_t kLessonMessageWorkerStackDepth = 65536;
+#else
 static constexpr uint32_t kLessonMessageWorkerStackDepth = 32768;
+#endif
 static constexpr uint32_t kLessonMessageWorkerMinimumFreeStackBytes = 4096;
 #endif
 

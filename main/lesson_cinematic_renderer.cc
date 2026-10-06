@@ -274,6 +274,13 @@ void ProductionRendererTimerCallback(void* raw) {
     }
 }
 
+#if CONFIG_TBOT_LESSON_RENDERER_V6
+// Renderer v6 ticks decode H.264/VP9 on this task (prepare measured 47,496 bytes, BE08 R14).
+constexpr std::uint32_t kProductionRendererStackBytes = 64 * 1024;
+#else
+constexpr std::uint32_t kProductionRendererStackBytes = 32 * 1024;
+#endif
+
 void ProductionRendererTask(void* raw) {
     auto* context = static_cast<ProductionRendererContext*>(raw);
     while (context != nullptr) {
@@ -349,7 +356,7 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
         ProductionMonotonicMs});
     g_production_context->frame_task_stopped = xSemaphoreCreateBinary();
     if (g_production_context->frame_task_stopped == nullptr ||
-        xTaskCreateWithCaps(ProductionRendererTask, "lesson_cinematic", 32 * 1024,
+        xTaskCreateWithCaps(ProductionRendererTask, "lesson_cinematic", kProductionRendererStackBytes,
                             g_production_context.get(), tskIDLE_PRIORITY + 2,
                             &g_production_context->frame_task,
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {

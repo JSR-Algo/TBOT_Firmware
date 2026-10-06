@@ -1,0 +1,11 @@
+# ESP-IDF Partition Table for renderer-v6 builds (CONFIG_TBOT_LESSON_RENDERER_V6) only.
+# The v6 image (~5.2 MB with the pinned decoders) does not fit the 0x3f0000 slots of
+# 16m.csv. Changing a robot's partition table needs a full USB reflash (OTA cannot), so
+# production images keep 16m.csv; select this file only for v6 lab/qualification builds.
+# Name,   Type, SubType, Offset,   Size,     Flags
+nvs,      data, nvs,     0x9000,   0x4000,
+otadata,  data, ota,     0xd000,   0x2000,
+phy_init, data, phy,     0xf000,   0x1000,
+ota_0,    app,  ota_0,   0x20000,  0x500000,
+ota_1,    app,  ota_1,   0x520000, 0x500000,
+assets,   data, spiffs,  0xA20000, 0x5E0000,
