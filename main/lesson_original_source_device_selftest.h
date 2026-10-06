@@ -48,6 +48,10 @@ std::string ParseV6SelfTestMediaIndex(const std::uint8_t* index, std::size_t ind
 // Starts the self-test task once (no-op unless the lab option is built).
 void StartOriginalSourceDeviceSelfTest();
 
+// True while the lab self-test owns the lesson storage session; the application must
+// not abandon that session on lesson transport churn (the lab endpoint is unreachable).
+bool OriginalSourceDeviceSelfTestActive();
+
 }  // namespace tbot
 
 #endif

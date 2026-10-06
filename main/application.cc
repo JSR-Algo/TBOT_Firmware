@@ -1,4 +1,7 @@
 #include "application.h"
+#if CONFIG_TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST
+#include "lesson_original_source_device_selftest.h"
+#endif
 #include "chat_runtime_timing.h"
 #include "lesson_queue_producer.h"
 #include "wifi_config_entry_policy.h"
@@ -471,6 +474,11 @@ void Application::EnqueueLessonMessage(
 }
 
 void Application::RequestLessonStorageAbandonment() {
+#if CONFIG_TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST
+    // Attended-lab image only: the self-test owns the lesson storage session and the
+    // private-LAN lesson transport is deliberately unreachable.
+    if (tbot::OriginalSourceDeviceSelfTestActive()) return;
+#endif
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     LessonQueueProducer producer(lesson_message_producers_, lesson_message_stop_);
     if (!producer) return;

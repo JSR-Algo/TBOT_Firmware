@@ -15,6 +15,7 @@
 #include <esp_partition.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <mbedtls/sha256.h>
 #include <sys/stat.h>
@@ -105,8 +106,12 @@ namespace {
 constexpr char TAG[] = "V6SELFTEST";
 constexpr char kPackRoot[] = "/sdcard/tbot/lesson-assets";
 constexpr int kRuns = 3;
+// Production calls Handle on the 32 KB lesson_worker stack; the self-test uses twice that
+// and reports the high-water mark so an overflow there shows up as a number, not corruption.
+constexpr unsigned kSelfTestStackBytes = 64 * 1024;
 constexpr std::uint32_t kTickMs = 100;
 constexpr std::size_t kCopyChunk = 16 * 1024;
+std::atomic<bool> g_selftest_active{false};
 
 struct Cue {
     std::string id;
@@ -171,7 +176,8 @@ bool MakeDirs(const std::string& path, std::vector<std::string>& created) {
     return true;
 }
 
-bool CopyEntry(const esp_partition_t* partition, const V6SelfTestMediaEntry& entry, const std::string& path,
+// `image` is the memory-mapped "v6media" partition (see CopyTask).
+bool CopyEntry(const std::uint8_t* image, const V6SelfTestMediaEntry& entry, const std::string& path,
                std::uint8_t* buffer) {
     FILE* file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) return false;
@@ -181,8 +187,8 @@ bool CopyEntry(const esp_partition_t* partition, const V6SelfTestMediaEntry& ent
     bool ok = true;
     for (std::uint32_t done = 0; ok && done < entry.size;) {
         const std::uint32_t chunk = std::min<std::uint32_t>(kCopyChunk, entry.size - done);
-        ok = esp_partition_read(partition, entry.offset + done, buffer, chunk) == ESP_OK &&
-             std::fwrite(buffer, 1, chunk, file) == chunk;
+        std::memcpy(buffer, image + entry.offset + done, chunk);
+        ok = std::fwrite(buffer, 1, chunk, file) == chunk;
         if (ok) mbedtls_sha256_update(&sha, buffer, chunk);
         done += chunk;
     }
@@ -216,6 +222,8 @@ struct RunResult {
 };
 
 RunResult PlayRun(int run, const Plan& plan) {
+    // Playback uses the production route: the lesson_cinematic task (PSRAM stack, 10 ms
+    // esp_timer) ticks the runtime; this task only sends the frames and samples.
     RunResult result;
     auto* runtime = ActiveOriginalSourceRuntime();
     auto& storage = LessonAssetStorageCoordinator::GetInstance();
@@ -237,9 +245,10 @@ RunResult PlayRun(int run, const Plan& plan) {
     std::size_t psram_min = psram_start, internal_min = internal_start;
     std::size_t internal_largest_min = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     std::uint64_t sequence = 0;
-    double slowest_ms = 0, total_ms = 0;
-    int ticks = 0, late = 0;
+    double min_fps = 1e9;
     const std::uint64_t frames_start = runtime->PresentedFrames();
+    const std::uint64_t run_start = NowMs();
+    SetLessonCinematicTimerRouteV6(true);
     for (const Cue& cue : plan.cues) {
         const std::string prepare = "{\"cinematicPhase\":{\"command\":\"prepare\",\"cueId\":\"" + cue.id +
                                     "\",\"commandSequenceId\":" + std::to_string(++sequence) +
@@ -253,126 +262,161 @@ RunResult PlayRun(int run, const Plan& plan) {
         const std::int64_t prepare_us = esp_timer_get_time();
         const auto prepared = runtime->Handle("lesson_prepare", prepare_json.get(), NowMs());
         const double prepare_ms = (esp_timer_get_time() - prepare_us) / 1000.0;
+        const unsigned stack_free = uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
         const auto started = runtime->Handle("lesson_start", start_json.get(), NowMs());
         const std::uint64_t origin = NowMs();
         std::string error;
-        double cue_slowest = 0;
         TickType_t wake = xTaskGetTickCount();
-        while (prepared.accepted && started.accepted && NowMs() - origin <= cue.duration_ms) {
-            const std::int64_t tick_us = esp_timer_get_time();
-            const bool active = runtime->Tick(NowMs());
-            const double ms = (esp_timer_get_time() - tick_us) / 1000.0;
+        while (prepared.accepted && started.accepted && NowMs() - origin < cue.duration_ms) {
+            vTaskDelayUntil(&wake, pdMS_TO_TICKS(kTickMs));
             if (auto pending = runtime->PendingRuntimeError()) {
                 error = "runtime error code " + std::to_string(static_cast<int>(pending->error));
                 break;
             }
-            if (!active) break;
-            ++ticks;
-            total_ms += ms;
-            slowest_ms = std::max(slowest_ms, ms);
-            cue_slowest = std::max(cue_slowest, ms);
-            late += ms > kTickMs;
             psram_min = std::min(psram_min, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
             internal_min = std::min(internal_min, heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             internal_largest_min =
                 std::min(internal_largest_min, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-            vTaskDelayUntil(&wake, pdMS_TO_TICKS(kTickMs));
         }
+        const std::uint64_t elapsed = std::max<std::uint64_t>(1, NowMs() - origin);
+        const std::uint64_t frames = runtime->PresentedFrames() - cue_frames;
+        const double fps = frames * 1000.0 / elapsed;
         const bool failed = !prepared.accepted || !started.accepted || !error.empty();
+        if (!failed) min_fps = std::min(min_fps, fps);
         result.errors += failed;
-        ESP_LOGI(TAG, "cue run=%d id=%s prepared=%d started=%d frames=%llu prepareMs=%.1f slowestTickMs=%.1f error=%s%s%s",
-                 run, cue.id.c_str(), prepared.accepted, started.accepted,
-                 static_cast<unsigned long long>(runtime->PresentedFrames() - cue_frames), prepare_ms, cue_slowest,
-                 error.c_str(), prepared.accepted ? "" : prepared.error.c_str(),
-                 started.accepted ? "" : started.error.c_str());
+        ESP_LOGI(TAG,
+                 "cue run=%d id=%s prepared=%d started=%d frames=%llu ms=%llu fps=%.1f prepareMs=%.1f "
+                 "stackUsedBytes=%u error=%s%s%s",
+                 run, cue.id.c_str(), prepared.accepted, started.accepted, static_cast<unsigned long long>(frames),
+                 static_cast<unsigned long long>(elapsed), fps, prepare_ms, kSelfTestStackBytes - stack_free,
+                 error.c_str(),
+                 prepared.accepted ? "" : prepared.error.c_str(), started.accepted ? "" : started.error.c_str());
+        if (!error.empty()) break;
     }
+    SetLessonCinematicTimerRouteV6(false);
+    vTaskDelay(pdMS_TO_TICKS(200));
     result.frames = runtime->PresentedFrames() - frames_start;
+    const std::uint64_t run_ms = NowMs() - run_start;
     ProductionOriginalSourceAllocatorStats(&stats, false);
     runtime->DiscardSession();
     storage.EndLessonSession(assignment, session, reservation.generation);
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGI(TAG,
-             "summary run=%d cues=%u errors=%d frames=%llu ticks=%d lateTicks=%d meanTickMs=%.1f slowestTickMs=%.1f "
-             "streams=%llu decoderPeakBytes=%u decoderLiveBytes=%u decoderFailures=%u psramStart=%u psramMin=%u "
-             "psramEnd=%u internalStart=%u internalMin=%u internalLargestMin=%u",
+             "summary run=%d cues=%u errors=%d frames=%llu runMs=%llu meanFps=%.1f minCueFps=%.1f streams=%llu "
+             "decoderPeakBytes=%u decoderLiveBytes=%u decoderFailures=%u psramStart=%u psramMin=%u psramEnd=%u "
+             "internalStart=%u internalMin=%u internalLargestMin=%u stackFreeMinBytes=%u",
              run, static_cast<unsigned>(plan.cues.size()), result.errors,
-             static_cast<unsigned long long>(result.frames), ticks, late, ticks ? total_ms / ticks : 0.0, slowest_ms,
+             static_cast<unsigned long long>(result.frames), static_cast<unsigned long long>(run_ms),
+             result.frames * 1000.0 / std::max<std::uint64_t>(1, run_ms), min_fps > 1e8 ? 0.0 : min_fps,
              static_cast<unsigned long long>(runtime->OpenedStreams()), static_cast<unsigned>(stats.peak_charged),
              static_cast<unsigned>(stats.live_charged), static_cast<unsigned>(stats.failures),
              static_cast<unsigned>(psram_start), static_cast<unsigned>(psram_min),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)), static_cast<unsigned>(internal_start),
-             static_cast<unsigned>(internal_min), static_cast<unsigned>(internal_largest_min));
+             static_cast<unsigned>(internal_min), static_cast<unsigned>(internal_largest_min),
+             static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
     return result;
 }
 
-void SelfTestTask(void*) {
-    vTaskDelay(pdMS_TO_TICKS(30000));
-    ESP_LOGI(TAG, "start");
+// Flash and MMU operations (esp_partition_mmap) freeze the cache, which a PSRAM task stack
+// must not do: the media copy runs in a short internal-stack task.
+struct CopyJob {
+    std::vector<V6SelfTestMediaEntry>* entries;
+    Plan* plan;
+    std::vector<std::string>* files;
+    std::vector<std::string>* dirs;
+    SemaphoreHandle_t done;
     bool ok = false;
+};
+
+void CopyTask(void* raw) {
+    auto* job = static_cast<CopyJob*>(raw);
+    job->ok = false;
     const esp_partition_t* partition =
         esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "v6media");
-    std::vector<V6SelfTestMediaEntry> entries;
-    Plan plan;
-    std::vector<std::string> files, dirs;
+    const void* mapped = nullptr;
+    esp_partition_mmap_handle_t mapping = 0;
     std::unique_ptr<std::uint8_t, decltype(&heap_caps_free)> buffer(
         static_cast<std::uint8_t*>(heap_caps_malloc(kCopyChunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), heap_caps_free);
+    if (partition != nullptr &&
+        esp_partition_mmap(partition, 0, partition->size, ESP_PARTITION_MMAP_DATA, &mapped, &mapping) != ESP_OK) {
+        mapped = nullptr;
+    }
+    const auto* image = static_cast<const std::uint8_t*>(mapped);
     do {
-        if (partition == nullptr || !buffer) {
-            ESP_LOGE(TAG, "v6media partition or copy buffer unavailable");
+        if (image == nullptr || !buffer) {
+            ESP_LOGE(TAG, "v6media partition mapping or copy buffer unavailable");
             break;
         }
-        std::uint8_t header[kV6SelfTestHeaderBytes];
-        if (esp_partition_read(partition, 0, header, sizeof(header)) != ESP_OK) break;
-        const std::uint32_t count = V6SelfTestMediaEntryCount(header, sizeof(header));
-        std::vector<std::uint8_t> index(V6SelfTestIndexBytes(count));
-        if (count == 0 || esp_partition_read(partition, 0, index.data(), index.size()) != ESP_OK) {
-            ESP_LOGE(TAG, "media header unreadable");
+        const std::uint32_t count = V6SelfTestMediaEntryCount(image, kV6SelfTestHeaderBytes);
+        if (count == 0) {
+            ESP_LOGE(TAG, "media header invalid");
             break;
         }
-        const std::string parse = ParseV6SelfTestMediaIndex(index.data(), index.size(), partition->size, entries);
+        const std::string parse =
+            ParseV6SelfTestMediaIndex(image, V6SelfTestIndexBytes(count), partition->size, *job->entries);
         if (!parse.empty()) {
             ESP_LOGE(TAG, "media index: %s", parse.c_str());
             break;
         }
-        const auto plan_entry = std::find_if(entries.begin(), entries.end(),
+        const auto plan_entry = std::find_if(job->entries->begin(), job->entries->end(),
                                              [](const auto& e) { return e.name == kV6SelfTestPlanName; });
-        std::string plan_text(plan_entry->size, '\0');
-        if (esp_partition_read(partition, plan_entry->offset, plan_text.data(), plan_text.size()) != ESP_OK ||
-            !ParsePlan(plan_text, plan)) {
+        const std::string plan_text(reinterpret_cast<const char*>(image) + plan_entry->offset, plan_entry->size);
+        if (!ParsePlan(plan_text, *job->plan)) {
             ESP_LOGE(TAG, "self-test plan invalid");
             break;
         }
-        const std::string pack = std::string(kPackRoot) + "/" + plan.cache_key;
+        const std::string pack = std::string(kPackRoot) + "/" + job->plan->cache_key;
         const std::int64_t copy_us = esp_timer_get_time();
-        ok = WithMutation("copy", [&]() {
-            if (!MakeDirs(pack, dirs)) {
+        job->ok = WithMutation("copy", [&]() {
+            if (!MakeDirs(pack, *job->dirs)) {
                 ESP_LOGE(TAG, "cannot create %s", pack.c_str());
                 return false;
             }
-            for (const auto& entry : entries) {
+            for (const auto& entry : *job->entries) {
                 if (entry.name == kV6SelfTestPlanName) continue;
                 const std::string path = pack + "/" + entry.name;
-                if (!CopyEntry(partition, entry, path, buffer.get())) {
+                if (!CopyEntry(image, entry, path, buffer.get())) {
                     ESP_LOGE(TAG, "copy failed: %s", entry.name.c_str());
                     return false;
                 }
-                files.push_back(path);
+                job->files->push_back(path);
             }
             return true;
         });
-        if (!ok) break;
-        ESP_LOGI(TAG, "pack ready cacheKey=%s files=%u copyMs=%lld", plan.cache_key.c_str(),
-                 static_cast<unsigned>(files.size()), static_cast<long long>((esp_timer_get_time() - copy_us) / 1000));
+        if (job->ok) {
+            ESP_LOGI(TAG, "pack ready cacheKey=%s files=%u copyMs=%lld", job->plan->cache_key.c_str(),
+                     static_cast<unsigned>(job->files->size()),
+                     static_cast<long long>((esp_timer_get_time() - copy_us) / 1000));
+        }
+    } while (false);
+    if (mapped != nullptr) esp_partition_munmap(mapping);
+    xSemaphoreGive(job->done);
+    vTaskDelete(nullptr);
+}
+
+void SelfTestTask(void*) {
+    vTaskDelay(pdMS_TO_TICKS(30000));
+    g_selftest_active.store(true);
+    ESP_LOGI(TAG, "start");
+    std::vector<V6SelfTestMediaEntry> entries;
+    Plan plan;
+    std::vector<std::string> files, dirs;
+    CopyJob job{&entries, &plan, &files, &dirs, xSemaphoreCreateBinary()};
+    bool ok = job.done != nullptr &&
+              xTaskCreate(&CopyTask, "v6_selftest_copy", 8192, &job, tskIDLE_PRIORITY + 2, nullptr) == pdPASS &&
+              xSemaphoreTake(job.done, portMAX_DELAY) == pdTRUE && job.ok;
+    if (ok) {
         int errors = 0;
         for (int run = 1; run <= kRuns; ++run) errors += PlayRun(run, plan).errors;
         ok = errors == 0;
-    } while (false);
+    }
     const bool cleaned = WithMutation("cleanup", [&]() {
         bool all = true;
         for (const auto& file : files) all = (unlink(file.c_str()) == 0) && all;
         for (auto it = dirs.rbegin(); it != dirs.rend(); ++it) all = (rmdir(it->c_str()) == 0) && all;
         return all;
     });
+    g_selftest_active.store(false);
     ESP_LOGI(TAG, "complete pass=%d cleaned=%d", ok, cleaned);
     vTaskDeleteWithCaps(nullptr);
 }
@@ -382,13 +426,15 @@ void SelfTestTask(void*) {
 void StartOriginalSourceDeviceSelfTest() {
     static std::atomic<bool> started{false};
     if (started.exchange(true)) return;
-    if (xTaskCreateWithCaps(&SelfTestTask, "v6_selftest", 16384, nullptr, tskIDLE_PRIORITY + 2, nullptr,
+    if (xTaskCreateWithCaps(&SelfTestTask, "v6_selftest", kSelfTestStackBytes, nullptr, tskIDLE_PRIORITY + 2, nullptr,
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         ESP_LOGE(TAG, "task creation failed");
     }
 }
+bool OriginalSourceDeviceSelfTestActive() { return g_selftest_active.load(); }
 #else
 void StartOriginalSourceDeviceSelfTest() {}
+bool OriginalSourceDeviceSelfTestActive() { return false; }
 #endif
 
 }  // namespace tbot
