@@ -285,10 +285,10 @@ RunResult PlayRun(int run, const Plan& plan) {
         if (!failed) min_fps = std::min(min_fps, fps);
         result.errors += failed;
         ESP_LOGI(TAG,
-                 "cue run=%d id=%s prepared=%d started=%d frames=%llu ms=%llu fps=%.1f prepareMs=%.1f "
+                 "cue run=%d id=%s prepared=%d started=%d frames=%lu ms=%lu fps=%.1f prepareMs=%.1f "
                  "stackUsedBytes=%u error=%s%s%s",
-                 run, cue.id.c_str(), prepared.accepted, started.accepted, static_cast<unsigned long long>(frames),
-                 static_cast<unsigned long long>(elapsed), fps, prepare_ms, kSelfTestStackBytes - stack_free,
+                 run, cue.id.c_str(), prepared.accepted, started.accepted, static_cast<unsigned long>(frames),
+                 static_cast<unsigned long>(elapsed), fps, prepare_ms, kSelfTestStackBytes - stack_free,
                  error.c_str(),
                  prepared.accepted ? "" : prepared.error.c_str(), started.accepted ? "" : started.error.c_str());
         if (!error.empty()) break;
@@ -302,13 +302,13 @@ RunResult PlayRun(int run, const Plan& plan) {
     storage.EndLessonSession(assignment, session, reservation.generation);
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGI(TAG,
-             "summary run=%d cues=%u errors=%d frames=%llu runMs=%llu meanFps=%.1f minCueFps=%.1f streams=%llu "
+             "summary run=%d cues=%u errors=%d frames=%lu runMs=%lu meanFps=%.1f minCueFps=%.1f streams=%lu "
              "decoderPeakBytes=%u decoderLiveBytes=%u decoderFailures=%u psramStart=%u psramMin=%u psramEnd=%u "
              "internalStart=%u internalMin=%u internalLargestMin=%u stackFreeMinBytes=%u",
              run, static_cast<unsigned>(plan.cues.size()), result.errors,
-             static_cast<unsigned long long>(result.frames), static_cast<unsigned long long>(run_ms),
+             static_cast<unsigned long>(result.frames), static_cast<unsigned long>(run_ms),
              result.frames * 1000.0 / std::max<std::uint64_t>(1, run_ms), min_fps > 1e8 ? 0.0 : min_fps,
-             static_cast<unsigned long long>(runtime->OpenedStreams()), static_cast<unsigned>(stats.peak_charged),
+             static_cast<unsigned long>(runtime->OpenedStreams()), static_cast<unsigned>(stats.peak_charged),
              static_cast<unsigned>(stats.live_charged), static_cast<unsigned>(stats.failures),
              static_cast<unsigned>(psram_start), static_cast<unsigned>(psram_min),
              static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)), static_cast<unsigned>(internal_start),
@@ -384,9 +384,9 @@ void CopyTask(void* raw) {
             return true;
         });
         if (job->ok) {
-            ESP_LOGI(TAG, "pack ready cacheKey=%s files=%u copyMs=%lld", job->plan->cache_key.c_str(),
+            ESP_LOGI(TAG, "pack ready cacheKey=%s files=%u copyMs=%ld", job->plan->cache_key.c_str(),
                      static_cast<unsigned>(job->files->size()),
-                     static_cast<long long>((esp_timer_get_time() - copy_us) / 1000));
+                     static_cast<long>((esp_timer_get_time() - copy_us) / 1000));
         }
     } while (false);
     if (mapped != nullptr) esp_partition_munmap(mapping);
