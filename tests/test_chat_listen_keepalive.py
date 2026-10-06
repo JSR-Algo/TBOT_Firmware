@@ -53,7 +53,8 @@ def test_no_audio_refresh_preserves_active_listener(tmp_path, sanitize):
     }
     assert(listening.chat_playout_ready_ && !listening.chat_playout_recovery_);
 
-    // Never hide missing drain IDs on active speech, interrupts or invalid IDs.
+    // Never hide missing drain IDs on active speech or invalid IDs. A qualified
+    // interrupt revokes input and enters cleanup; it is not a no-audio refresh.
     for(int guard=0;guard<5;++guard) {
         now_us=100;
         Application guarded;arm_listener(guarded);
@@ -63,7 +64,11 @@ def test_no_audio_refresh_preserves_active_listener(tmp_path, sanitize):
         refresh(guarded,guard==3 ? R"(,"drainId":"invalid")" :
             guard==4 ? R"(,"reason":"interrupt")" : "");
         guarded.PollChatPlayout(now_us);
-        assert(guarded.chat_playout_recovery_);
+        if(guard==4) {
+            assert(!guarded.chat_playout_recovery_ && !guarded.microphone_uplink_authorized_);
+            assert(guarded.chat_rearm_phase_==Application::ChatRearmPhase::Pending);
+            assert(guarded.cleanups==2 && !guarded.chat_playout_ready_);
+        } else assert(guarded.chat_playout_recovery_);
     }
     now_us=100;
     Application stale;arm_listener(stale);
