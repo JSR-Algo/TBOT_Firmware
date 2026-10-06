@@ -67,13 +67,16 @@ config TBOT_LESSON_ASSET_MAX_PACK_BYTES
 config TBOT_LESSON_RENDERER_V6
     bool "Build the renderer-v6 original-source scene runtime"
     default n
-    depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P
+    depends on IDF_TARGET_ESP32S3 && BOARD_TYPE_LCDWIKI_ES3C35P && SPIRAM
+    select SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
     help
         Builds the teebot-lesson-renderer.v6 runtime: pinned original sources from
         the SD asset pack decoded by the R01 session and painted on the canonical
         tvideoJourney timeline. Requires TBOT_ORIGINAL_SOURCE_FFMPEG_DIR (the pinned
         R01 decoder build). Building it does not advertise it. Keep disabled until
-        the app-slot layout fits the larger image.
+        the app-slot layout fits the larger image. Selects PSRAM .bss so the decoder
+        tables (linker_v6.lf) do not exhaust internal RAM; that option also moves the
+        Wi-Fi/lwIP .bss to PSRAM.
 
 config TBOT_LESSON_RENDERER_V6_ADVERTISE
     bool "Advertise renderer v6 to the lesson server"
@@ -83,6 +86,17 @@ config TBOT_LESSON_RENDERER_V6_ADVERTISE
         Adds teebot-lesson-renderer.v6 and features.lessonRendererV6 to the device
         features. Enable only after on-device RAM and timing qualification of the
         v6 runtime with the published originals.
+
+config TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST
+    bool "Attended-lab renderer v6 on-device self-test"
+    default n
+    depends on TBOT_LESSON_RENDERER_V6 && TBOT_COURSE_MODE_LOCAL_ENDPOINT && !TBOT_LESSON_RENDERER_V6_ADVERTISE
+    help
+        Lab-only qualification image. After boot, copies the published original-source
+        scene and originals from the "v6media" flash partition into an SD pack, plays
+        every cue in real time three times through the production v6 runtime, logs
+        V6SELFTEST timing/memory lines and removes the pack. Requires the private-LAN
+        endpoint mode so the image never contacts production. Never ship it.
 
 config TBOT_HIL_CINEMATIC_TELEMETRY
     bool "Enable cinematic HIL terminal telemetry"

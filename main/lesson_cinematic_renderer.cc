@@ -4,6 +4,7 @@
 #include "lesson_layered_cinematic_renderer.h"
 #ifdef CONFIG_TBOT_LESSON_RENDERER_V6
 #include "lesson_original_source_device.h"
+#include "lesson_original_source_device_selftest.h"
 #include "lesson_original_source_runtime.h"
 #endif
 
@@ -374,6 +375,11 @@ bool InitializeProductionLessonCinematicRenderer(::LcdDisplay* display) {
     if (!InitializeProductionOriginalSourceDevice(display)) {
         ESP_LOGW("LessonCinematic", "renderer v6 runtime unavailable");
     }
+#ifdef CONFIG_TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST
+    else {
+        StartOriginalSourceDeviceSelfTest();
+    }
+#endif
 #endif
     return LessonCinematicRendererCapabilityReady();
 #else

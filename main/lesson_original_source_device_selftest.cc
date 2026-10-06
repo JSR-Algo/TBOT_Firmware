@@ -1,0 +1,394 @@
+#include "lesson_original_source_device_selftest.h"
+
+#include <cstring>
+#include <set>
+
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"
+#endif
+
+#if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST)
+#include <cJSON.h>
+#include <dirent.h>
+#include <esp_heap_caps.h>
+#include <esp_log.h>
+#include <esp_partition.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <mbedtls/sha256.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <cstdio>
+#include <memory>
+
+#include "lesson_asset_storage_coordinator.h"
+#include "lesson_original_source_allocator.h"
+#include "lesson_original_source_runtime.h"
+#endif
+
+namespace tbot {
+namespace {
+
+std::uint32_t ReadU32(const std::uint8_t* bytes) {
+    return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+bool SafeName(const std::string& name) {
+    if (name.empty() || name[0] == '.') return false;
+    for (char c : name) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' ||
+                        c == '-' || c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+std::uint32_t V6SelfTestMediaEntryCount(const std::uint8_t* header, std::size_t header_bytes) {
+    if (header == nullptr || header_bytes < kV6SelfTestHeaderBytes) return 0;
+    if (std::memcmp(header, kV6SelfTestMediaMagic, sizeof(kV6SelfTestMediaMagic)) != 0) return 0;
+    if (ReadU32(header + 12) != 0) return 0;
+    const std::uint32_t count = ReadU32(header + 8);
+    return count <= kV6SelfTestMaxEntries ? count : 0;
+}
+
+std::string ParseV6SelfTestMediaIndex(const std::uint8_t* index, std::size_t index_bytes, std::size_t image_bytes,
+                                      std::vector<V6SelfTestMediaEntry>& entries) {
+    const std::uint32_t count = V6SelfTestMediaEntryCount(index, index_bytes);
+    if (count == 0) return "not a v6 self-test media image";
+    const std::size_t data_start = V6SelfTestIndexBytes(count);
+    if (index_bytes < data_start || image_bytes < data_start) return "index truncated";
+    std::vector<V6SelfTestMediaEntry> parsed;
+    std::set<std::string> names;
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const std::uint8_t* entry = index + kV6SelfTestHeaderBytes + static_cast<std::size_t>(i) * kV6SelfTestEntryBytes;
+        const auto* name_end = static_cast<const std::uint8_t*>(std::memchr(entry, 0, kV6SelfTestNameBytes));
+        if (name_end == nullptr) return "entry name is not terminated";
+        for (const std::uint8_t* p = name_end; p < entry + kV6SelfTestNameBytes; ++p) {
+            if (*p != 0) return "entry name padding is not zero";
+        }
+        V6SelfTestMediaEntry item;
+        item.name.assign(reinterpret_cast<const char*>(entry), static_cast<std::size_t>(name_end - entry));
+        if (!SafeName(item.name)) return "unsafe entry name";
+        if (!names.insert(item.name).second) return "duplicate entry name";
+        item.offset = ReadU32(entry + kV6SelfTestNameBytes);
+        item.size = ReadU32(entry + kV6SelfTestNameBytes + 4);
+        std::memcpy(item.sha256, entry + kV6SelfTestNameBytes + 8, sizeof(item.sha256));
+        if (item.size == 0) return "empty entry";
+        if (item.offset < data_start) return "entry overlaps the index";
+        if (static_cast<std::uint64_t>(item.offset) + item.size > image_bytes) return "entry exceeds the image";
+        parsed.push_back(std::move(item));
+    }
+    std::vector<const V6SelfTestMediaEntry*> order;
+    for (const auto& item : parsed) order.push_back(&item);
+    std::sort(order.begin(), order.end(), [](const auto* a, const auto* b) { return a->offset < b->offset; });
+    for (std::size_t i = 1; i < order.size(); ++i) {
+        if (static_cast<std::uint64_t>(order[i - 1]->offset) + order[i - 1]->size > order[i]->offset) {
+            return "entries overlap";
+        }
+    }
+    if (names.count(kV6SelfTestPlanName) == 0) return "missing self-test plan";
+    entries = std::move(parsed);
+    return "";
+}
+
+#if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST)
+namespace {
+
+constexpr char TAG[] = "V6SELFTEST";
+constexpr char kPackRoot[] = "/sdcard/tbot/lesson-assets";
+constexpr int kRuns = 3;
+constexpr std::uint32_t kTickMs = 100;
+constexpr std::size_t kCopyChunk = 16 * 1024;
+
+struct Cue {
+    std::string id;
+    std::uint32_t duration_ms = 0;
+};
+
+struct Plan {
+    std::string cache_key, scene_sha256;
+    std::uint32_t scene_bytes = 0;
+    std::vector<Cue> cues;
+};
+
+struct CJsonDeleter {
+    void operator()(cJSON* json) const { cJSON_Delete(json); }
+};
+
+std::uint64_t NowMs() { return static_cast<std::uint64_t>(esp_timer_get_time() / 1000); }
+
+std::string Hex(const std::uint8_t* bytes, std::size_t size) {
+    static const char digits[] = "0123456789abcdef";
+    std::string out;
+    for (std::size_t i = 0; i < size; ++i) {
+        out.push_back(digits[bytes[i] >> 4]);
+        out.push_back(digits[bytes[i] & 0xf]);
+    }
+    return out;
+}
+
+bool ParsePlan(const std::string& text, Plan& plan) {
+    std::unique_ptr<cJSON, CJsonDeleter> root(cJSON_Parse(text.c_str()));
+    if (!root) return false;
+    const cJSON* key = cJSON_GetObjectItem(root.get(), "cacheKey");
+    const cJSON* sha = cJSON_GetObjectItem(root.get(), "sceneSha256");
+    const cJSON* bytes = cJSON_GetObjectItem(root.get(), "sceneBytes");
+    const cJSON* cues = cJSON_GetObjectItem(root.get(), "cues");
+    if (!cJSON_IsString(key) || !cJSON_IsString(sha) || !cJSON_IsNumber(bytes) || !cJSON_IsArray(cues)) return false;
+    plan.cache_key = key->valuestring;
+    plan.scene_sha256 = sha->valuestring;
+    plan.scene_bytes = static_cast<std::uint32_t>(bytes->valuedouble);
+    for (const cJSON* cue = cues->child; cue != nullptr; cue = cue->next) {
+        const cJSON* id = cJSON_GetObjectItem(cue, "cueId");
+        const cJSON* duration = cJSON_GetObjectItem(cue, "durationMs");
+        if (!cJSON_IsString(id) || !cJSON_IsNumber(duration) || duration->valuedouble <= 0) return false;
+        plan.cues.push_back({id->valuestring, static_cast<std::uint32_t>(duration->valuedouble)});
+    }
+    return !plan.cache_key.empty() && plan.scene_sha256.size() == 64 && !plan.cues.empty();
+}
+
+// mkdir -p for every component of `path` below the pack root; records created directories.
+bool MakeDirs(const std::string& path, std::vector<std::string>& created) {
+    for (std::size_t pos = 1; pos != std::string::npos;) {
+        pos = path.find('/', pos + 1);
+        const std::string part = path.substr(0, pos);
+        struct stat st {};
+        if (stat(part.c_str(), &st) == 0) {
+            if (!S_ISDIR(st.st_mode)) return false;
+            continue;
+        }
+        if (mkdir(part.c_str(), 0775) != 0 && errno != EEXIST) return false;
+        if (part.size() > std::strlen(kPackRoot)) created.push_back(part);
+    }
+    return true;
+}
+
+bool CopyEntry(const esp_partition_t* partition, const V6SelfTestMediaEntry& entry, const std::string& path,
+               std::uint8_t* buffer) {
+    FILE* file = std::fopen(path.c_str(), "wb");
+    if (file == nullptr) return false;
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    bool ok = true;
+    for (std::uint32_t done = 0; ok && done < entry.size;) {
+        const std::uint32_t chunk = std::min<std::uint32_t>(kCopyChunk, entry.size - done);
+        ok = esp_partition_read(partition, entry.offset + done, buffer, chunk) == ESP_OK &&
+             std::fwrite(buffer, 1, chunk, file) == chunk;
+        if (ok) mbedtls_sha256_update(&sha, buffer, chunk);
+        done += chunk;
+    }
+    std::uint8_t digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    ok = ok && std::fflush(file) == 0 && fsync(fileno(file)) == 0;
+    ok = (std::fclose(file) == 0) && ok;
+    if (ok && std::memcmp(digest, entry.sha256, sizeof(digest)) != 0) {
+        ESP_LOGE(TAG, "sha256 mismatch for %s: %s", entry.name.c_str(), Hex(digest, sizeof(digest)).c_str());
+        ok = false;
+    }
+    if (!ok) unlink(path.c_str());
+    return ok;
+}
+
+template <typename Body>
+bool WithMutation(const char* what, Body body) {
+    for (int attempt = 0; attempt < 60; ++attempt) {
+        auto mutation = LessonAssetStorageCoordinator::GetInstance().TryBeginMutation("sync");
+        if (mutation) return body();
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    ESP_LOGE(TAG, "%s: lesson storage mutation unavailable", what);
+    return false;
+}
+
+struct RunResult {
+    int errors = 0;
+    std::uint64_t frames = 0;
+};
+
+RunResult PlayRun(int run, const Plan& plan) {
+    RunResult result;
+    auto* runtime = ActiveOriginalSourceRuntime();
+    auto& storage = LessonAssetStorageCoordinator::GetInstance();
+    const std::string assignment = "assignment-v6-selftest";
+    const std::string session = "session-v6-selftest-" + std::to_string(run);
+    const LessonAssetSessionResult reservation = storage.TryBeginLessonSession(assignment, session);
+    if (runtime == nullptr || !reservation.acquired) {
+        ESP_LOGE(TAG, "run=%d runtime=%d session=%d", run, runtime != nullptr, reservation.acquired);
+        result.errors = 1;
+        return result;
+    }
+    runtime->DiscardSession();
+    ConfigureProductionOriginalSourceSession(assignment, session, reservation.generation);
+    OriginalSourceAllocatorStats stats{};
+    ProductionOriginalSourceAllocatorStats(&stats, true);
+
+    const std::size_t psram_start = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const std::size_t internal_start = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    std::size_t psram_min = psram_start, internal_min = internal_start;
+    std::size_t internal_largest_min = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    std::uint64_t sequence = 0;
+    double slowest_ms = 0, total_ms = 0;
+    int ticks = 0, late = 0;
+    const std::uint64_t frames_start = runtime->PresentedFrames();
+    for (const Cue& cue : plan.cues) {
+        const std::string prepare = "{\"cinematicPhase\":{\"command\":\"prepare\",\"cueId\":\"" + cue.id +
+                                    "\",\"commandSequenceId\":" + std::to_string(++sequence) +
+                                    ",\"scene\":{\"cacheKey\":\"" + plan.cache_key + "\",\"sha256\":\"" +
+                                    plan.scene_sha256 + "\",\"bytes\":" + std::to_string(plan.scene_bytes) + "}}}";
+        const std::string start = "{\"cinematicPhase\":{\"command\":\"start\",\"cueId\":\"" + cue.id +
+                                  "\",\"commandSequenceId\":" + std::to_string(++sequence) + "}}";
+        std::unique_ptr<cJSON, CJsonDeleter> prepare_json(cJSON_Parse(prepare.c_str()));
+        std::unique_ptr<cJSON, CJsonDeleter> start_json(cJSON_Parse(start.c_str()));
+        const std::uint64_t cue_frames = runtime->PresentedFrames();
+        const std::int64_t prepare_us = esp_timer_get_time();
+        const auto prepared = runtime->Handle("lesson_prepare", prepare_json.get(), NowMs());
+        const double prepare_ms = (esp_timer_get_time() - prepare_us) / 1000.0;
+        const auto started = runtime->Handle("lesson_start", start_json.get(), NowMs());
+        const std::uint64_t origin = NowMs();
+        std::string error;
+        double cue_slowest = 0;
+        TickType_t wake = xTaskGetTickCount();
+        while (prepared.accepted && started.accepted && NowMs() - origin <= cue.duration_ms) {
+            const std::int64_t tick_us = esp_timer_get_time();
+            const bool active = runtime->Tick(NowMs());
+            const double ms = (esp_timer_get_time() - tick_us) / 1000.0;
+            if (auto pending = runtime->PendingRuntimeError()) {
+                error = "runtime error code " + std::to_string(static_cast<int>(pending->error));
+                break;
+            }
+            if (!active) break;
+            ++ticks;
+            total_ms += ms;
+            slowest_ms = std::max(slowest_ms, ms);
+            cue_slowest = std::max(cue_slowest, ms);
+            late += ms > kTickMs;
+            psram_min = std::min(psram_min, heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+            internal_min = std::min(internal_min, heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+            internal_largest_min =
+                std::min(internal_largest_min, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            vTaskDelayUntil(&wake, pdMS_TO_TICKS(kTickMs));
+        }
+        const bool failed = !prepared.accepted || !started.accepted || !error.empty();
+        result.errors += failed;
+        ESP_LOGI(TAG, "cue run=%d id=%s prepared=%d started=%d frames=%llu prepareMs=%.1f slowestTickMs=%.1f error=%s%s%s",
+                 run, cue.id.c_str(), prepared.accepted, started.accepted,
+                 static_cast<unsigned long long>(runtime->PresentedFrames() - cue_frames), prepare_ms, cue_slowest,
+                 error.c_str(), prepared.accepted ? "" : prepared.error.c_str(),
+                 started.accepted ? "" : started.error.c_str());
+    }
+    result.frames = runtime->PresentedFrames() - frames_start;
+    ProductionOriginalSourceAllocatorStats(&stats, false);
+    runtime->DiscardSession();
+    storage.EndLessonSession(assignment, session, reservation.generation);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGI(TAG,
+             "summary run=%d cues=%u errors=%d frames=%llu ticks=%d lateTicks=%d meanTickMs=%.1f slowestTickMs=%.1f "
+             "streams=%llu decoderPeakBytes=%u decoderLiveBytes=%u decoderFailures=%u psramStart=%u psramMin=%u "
+             "psramEnd=%u internalStart=%u internalMin=%u internalLargestMin=%u",
+             run, static_cast<unsigned>(plan.cues.size()), result.errors,
+             static_cast<unsigned long long>(result.frames), ticks, late, ticks ? total_ms / ticks : 0.0, slowest_ms,
+             static_cast<unsigned long long>(runtime->OpenedStreams()), static_cast<unsigned>(stats.peak_charged),
+             static_cast<unsigned>(stats.live_charged), static_cast<unsigned>(stats.failures),
+             static_cast<unsigned>(psram_start), static_cast<unsigned>(psram_min),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)), static_cast<unsigned>(internal_start),
+             static_cast<unsigned>(internal_min), static_cast<unsigned>(internal_largest_min));
+    return result;
+}
+
+void SelfTestTask(void*) {
+    vTaskDelay(pdMS_TO_TICKS(30000));
+    ESP_LOGI(TAG, "start");
+    bool ok = false;
+    const esp_partition_t* partition =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "v6media");
+    std::vector<V6SelfTestMediaEntry> entries;
+    Plan plan;
+    std::vector<std::string> files, dirs;
+    std::unique_ptr<std::uint8_t, decltype(&heap_caps_free)> buffer(
+        static_cast<std::uint8_t*>(heap_caps_malloc(kCopyChunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), heap_caps_free);
+    do {
+        if (partition == nullptr || !buffer) {
+            ESP_LOGE(TAG, "v6media partition or copy buffer unavailable");
+            break;
+        }
+        std::uint8_t header[kV6SelfTestHeaderBytes];
+        if (esp_partition_read(partition, 0, header, sizeof(header)) != ESP_OK) break;
+        const std::uint32_t count = V6SelfTestMediaEntryCount(header, sizeof(header));
+        std::vector<std::uint8_t> index(V6SelfTestIndexBytes(count));
+        if (count == 0 || esp_partition_read(partition, 0, index.data(), index.size()) != ESP_OK) {
+            ESP_LOGE(TAG, "media header unreadable");
+            break;
+        }
+        const std::string parse = ParseV6SelfTestMediaIndex(index.data(), index.size(), partition->size, entries);
+        if (!parse.empty()) {
+            ESP_LOGE(TAG, "media index: %s", parse.c_str());
+            break;
+        }
+        const auto plan_entry = std::find_if(entries.begin(), entries.end(),
+                                             [](const auto& e) { return e.name == kV6SelfTestPlanName; });
+        std::string plan_text(plan_entry->size, '\0');
+        if (esp_partition_read(partition, plan_entry->offset, plan_text.data(), plan_text.size()) != ESP_OK ||
+            !ParsePlan(plan_text, plan)) {
+            ESP_LOGE(TAG, "self-test plan invalid");
+            break;
+        }
+        const std::string pack = std::string(kPackRoot) + "/" + plan.cache_key;
+        const std::int64_t copy_us = esp_timer_get_time();
+        ok = WithMutation("copy", [&]() {
+            if (!MakeDirs(pack, dirs)) {
+                ESP_LOGE(TAG, "cannot create %s", pack.c_str());
+                return false;
+            }
+            for (const auto& entry : entries) {
+                if (entry.name == kV6SelfTestPlanName) continue;
+                const std::string path = pack + "/" + entry.name;
+                if (!CopyEntry(partition, entry, path, buffer.get())) {
+                    ESP_LOGE(TAG, "copy failed: %s", entry.name.c_str());
+                    return false;
+                }
+                files.push_back(path);
+            }
+            return true;
+        });
+        if (!ok) break;
+        ESP_LOGI(TAG, "pack ready cacheKey=%s files=%u copyMs=%lld", plan.cache_key.c_str(),
+                 static_cast<unsigned>(files.size()), static_cast<long long>((esp_timer_get_time() - copy_us) / 1000));
+        int errors = 0;
+        for (int run = 1; run <= kRuns; ++run) errors += PlayRun(run, plan).errors;
+        ok = errors == 0;
+    } while (false);
+    const bool cleaned = WithMutation("cleanup", [&]() {
+        bool all = true;
+        for (const auto& file : files) all = (unlink(file.c_str()) == 0) && all;
+        for (auto it = dirs.rbegin(); it != dirs.rend(); ++it) all = (rmdir(it->c_str()) == 0) && all;
+        return all;
+    });
+    ESP_LOGI(TAG, "complete pass=%d cleaned=%d", ok, cleaned);
+    vTaskDeleteWithCaps(nullptr);
+}
+
+}  // namespace
+
+void StartOriginalSourceDeviceSelfTest() {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true)) return;
+    if (xTaskCreateWithCaps(&SelfTestTask, "v6_selftest", 16384, nullptr, tskIDLE_PRIORITY + 2, nullptr,
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        ESP_LOGE(TAG, "task creation failed");
+    }
+}
+#else
+void StartOriginalSourceDeviceSelfTest() {}
+#endif
+
+}  // namespace tbot

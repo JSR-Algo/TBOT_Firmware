@@ -46,6 +46,8 @@ public:
     bool AcknowledgeRuntimeError(std::uint64_t generation, std::uint64_t sequence);
     bool ReleaseFailedRuntimeResources(std::uint64_t generation, std::uint64_t sequence);
     bool WithRuntimeGeneration(std::uint64_t generation, const std::function<void()>& operation);
+    std::uint64_t PresentedFrames() const;
+    std::uint64_t OpenedStreams() const;
 
 private:
     void AdvanceRuntimeGeneration();
@@ -80,6 +82,10 @@ bool InitializeProductionOriginalSourceRuntime(LcdDisplayPresenter* panel, TVide
 void ConfigureProductionOriginalSourceSession(const std::string& assignment_id, const std::string& session_id,
                                               std::uint64_t generation);
 void ShutdownProductionOriginalSourceRuntime();
+struct OriginalSourceAllocatorStats;
+// Decoder allocator stats of the production runtime (false when not initialized);
+// reset_peak restarts peak measurement from the live bytes.
+bool ProductionOriginalSourceAllocatorStats(OriginalSourceAllocatorStats* stats, bool reset_peak);
 
 }  // namespace tbot
 

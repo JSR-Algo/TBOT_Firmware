@@ -908,6 +908,9 @@ if(CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P)
             "lesson_tvideo_raster_canvas.cc"
         )
         list(APPEND SOURCES ${TBOT_LESSON_RENDERER_V6_SOURCES})
+        if(CONFIG_TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST)
+            list(APPEND SOURCES "lesson_original_source_device_selftest.cc")
+        endif()
     endif()
 
     if(CONFIG_TBOT_HIL_STORAGE_FAULTS)
@@ -1120,9 +1123,15 @@ if(TBOT_NATIVE_COVERAGE)
     set(COMMON_SOUNDS "")
 endif()
 
+set(MAIN_LDFRAGMENTS "")
+if(CONFIG_TBOT_LESSON_RENDERER_V6)
+    list(APPEND MAIN_LDFRAGMENTS "linker_v6.lf")
+endif()
+
 idf_component_register(SRCS ${SOURCES}
                     EMBED_FILES ${LANG_SOUNDS} ${COMMON_SOUNDS}
                     INCLUDE_DIRS ${INCLUDE_DIRS}
+                    LDFRAGMENTS ${MAIN_LDFRAGMENTS}
                     WHOLE_ARCHIVE
                     PRIV_REQUIRES
                         esp_pm
@@ -1213,7 +1222,18 @@ if(CONFIG_TBOT_LESSON_RENDERER_V6)
     target_include_directories(${COMPONENT_LIB} PRIVATE ${TBOT_ORIGINAL_SOURCE_FFMPEG_INCLUDE_DIRS})
     # The canonical timeline is pinned to the backend's JS evaluation: no FP contraction.
     set_source_files_properties(${TBOT_LESSON_RENDERER_V6_SOURCES} PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
-    target_link_libraries(${COMPONENT_LIB} PRIVATE ${TBOT_ORIGINAL_SOURCE_FFMPEG_LIBS})
+    # Global imported targets, not bare paths: ldgen only maps archives it can see as
+    # targets, and linker_v6.lf moves the decoder .bss to PSRAM.
+    set(TBOT_ORIGINAL_SOURCE_FFMPEG_TARGETS "")
+    set(ffmpeg_index 0)
+    foreach(ffmpeg_lib ${TBOT_ORIGINAL_SOURCE_FFMPEG_LIBS})
+        set(ffmpeg_target "tbot_original_source_ffmpeg_${ffmpeg_index}")
+        add_library(${ffmpeg_target} STATIC IMPORTED GLOBAL)
+        set_target_properties(${ffmpeg_target} PROPERTIES IMPORTED_LOCATION "${ffmpeg_lib}")
+        list(APPEND TBOT_ORIGINAL_SOURCE_FFMPEG_TARGETS ${ffmpeg_target})
+        math(EXPR ffmpeg_index "${ffmpeg_index} + 1")
+    endforeach()
+    target_link_libraries(${COMPONENT_LIB} PRIVATE ${TBOT_ORIGINAL_SOURCE_FFMPEG_TARGETS})
 endif()
 
 # Find ESP-SR component dynamically

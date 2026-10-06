@@ -1,0 +1,17 @@
+# Renderer v6 (CONFIG_TBOT_LESSON_RENDERER_V6): the pinned R01 decoder archives carry
+# ~89 KB of static .bss (codec tables). Left in internal DRAM they starve boot-time
+# allocations (Wi-Fi/lwIP init aborted on device, BE08 R14), so place them in PSRAM.
+[mapping:tbot_original_source_avcodec]
+archive: libavcodec.a
+entries:
+    * (extram_bss)
+
+[mapping:tbot_original_source_avutil]
+archive: libavutil.a
+entries:
+    * (extram_bss)
+
+[mapping:tbot_original_source_avformat]
+archive: libavformat.a
+entries:
+    * (extram_bss)

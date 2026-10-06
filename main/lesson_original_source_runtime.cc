@@ -119,6 +119,16 @@ bool OriginalSourceRuntime::WithRuntimeGeneration(std::uint64_t generation, cons
     return true;
 }
 
+std::uint64_t OriginalSourceRuntime::PresentedFrames() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return player_->presented_frames();
+}
+
+std::uint64_t OriginalSourceRuntime::OpenedStreams() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return player_->opened_streams();
+}
+
 void SetActiveOriginalSourceRuntime(OriginalSourceRuntime* runtime) {
     std::lock_guard<std::mutex> lock(g_active_mutex);
     g_active_runtime.store(runtime, std::memory_order_release);
@@ -215,6 +225,13 @@ void ConfigureProductionOriginalSourceSession(const std::string& assignment_id, 
     g_production->session.generation = generation;
 }
 
+bool ProductionOriginalSourceAllocatorStats(OriginalSourceAllocatorStats* stats, bool reset_peak) {
+    if (!g_production || stats == nullptr) return false;
+    if (reset_peak) g_production->allocator->ResetPeak();
+    *stats = g_production->allocator->stats();
+    return true;
+}
+
 void ShutdownProductionOriginalSourceRuntime() {
     SetActiveOriginalSourceRuntime(nullptr);
     SetLessonCinematicTimerRouteV6(false);
@@ -227,6 +244,7 @@ void ShutdownProductionOriginalSourceRuntime() {
 #else
 bool InitializeProductionOriginalSourceRuntime(LcdDisplayPresenter*, TVideoTextRenderer*) { return false; }
 void ConfigureProductionOriginalSourceSession(const std::string&, const std::string&, std::uint64_t) {}
+bool ProductionOriginalSourceAllocatorStats(OriginalSourceAllocatorStats*, bool) { return false; }
 void ShutdownProductionOriginalSourceRuntime() {
     SetActiveOriginalSourceRuntime(nullptr);
     SetLessonCinematicTimerRouteV6(false);
