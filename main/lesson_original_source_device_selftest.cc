@@ -10,6 +10,8 @@
 #if defined(ESP_PLATFORM) && defined(CONFIG_TBOT_LESSON_RENDERER_V6_DEVICE_SELFTEST)
 #include <cJSON.h>
 #include <dirent.h>
+#include <driver/sdmmc_host.h>
+#include <fcntl.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_partition.h>
@@ -29,6 +31,7 @@
 
 #include "lesson_asset_storage_coordinator.h"
 #include "lesson_original_source_allocator.h"
+#include "lesson_original_source_profile.h"
 #include "lesson_original_source_runtime.h"
 #endif
 
@@ -260,6 +263,7 @@ RunResult PlayRun(int run, const Plan& plan) {
         std::unique_ptr<cJSON, CJsonDeleter> start_json(cJSON_Parse(start.c_str()));
         const std::uint64_t cue_frames = runtime->PresentedFrames();
         const OriginalSourcePlayerTimings cue_start = runtime->Timings();
+        const OriginalSourceProfile profile_start = OriginalSourceProfileCounters();
         const std::int64_t prepare_us = esp_timer_get_time();
         const auto prepared = runtime->Handle("lesson_prepare", prepare_json.get(), NowMs());
         const double prepare_ms = (esp_timer_get_time() - prepare_us) / 1000.0;
@@ -304,6 +308,20 @@ RunResult PlayRun(int run, const Plan& plan) {
                  static_cast<unsigned long>((cue_end.convert_us - cue_start.convert_us) / 1000),
                  static_cast<unsigned long>((cue_end.present_us - cue_start.present_us) / 1000),
                  static_cast<unsigned long>(cue_end.renders - cue_start.renders));
+        const OriginalSourceProfile& profile = OriginalSourceProfileCounters();
+        ESP_LOGI(TAG,
+                 "profile run=%d id=%s readMs=%lu hashMs=%lu demuxOpenMs=%lu codecOpenMs=%lu drawMediaMs=%lu "
+                 "fillMs=%lu textMs=%lu firstReadMs=%lu maxReadMsSoFar=%lu slowReads=%lu",
+                 run, cue.id.c_str(), static_cast<unsigned long>((profile.read_us - profile_start.read_us) / 1000),
+                 static_cast<unsigned long>((profile.hash_us - profile_start.hash_us) / 1000),
+                 static_cast<unsigned long>((profile.demux_open_us - profile_start.demux_open_us) / 1000),
+                 static_cast<unsigned long>((profile.codec_open_us - profile_start.codec_open_us) / 1000),
+                 static_cast<unsigned long>((profile.draw_media_us - profile_start.draw_media_us) / 1000),
+                 static_cast<unsigned long>((profile.fill_us - profile_start.fill_us) / 1000),
+                 static_cast<unsigned long>((profile.text_us - profile_start.text_us) / 1000),
+                 static_cast<unsigned long>((profile.first_read_us - profile_start.first_read_us) / 1000),
+                 static_cast<unsigned long>(profile.max_read_us / 1000),
+                 static_cast<unsigned long>(profile.slow_reads - profile_start.slow_reads));
         if (!error.empty()) break;
     }
     SetLessonCinematicTimerRouteV6(false);
@@ -407,6 +425,69 @@ void CopyTask(void* raw) {
     vTaskDelete(nullptr);
 }
 
+// SD throughput with nothing else running: the SDMMC clock, a 256 KiB write + fsync, and
+// reads of that file via POSIX read() into internal DMA memory and via unbuffered fread()
+// into PSRAM (as OriginalSourceSession::Open reads).
+void SdBenchmark(const std::string& cache_key) {
+    for (int slot : {0, 1}) {
+        int khz = 0;
+        const esp_err_t err = sdmmc_host_get_real_freq(slot, &khz);
+        ESP_LOGI(TAG, "sdbench slot=%d realFreqKhz=%d err=%d", slot, khz, static_cast<int>(err));
+    }
+    constexpr std::size_t kBytes = 256 * 1024, kChunk = 4096;
+    const std::string path = std::string(kPackRoot) + "/" + cache_key + "/sdbench.tmp";
+    std::unique_ptr<std::uint8_t, decltype(&heap_caps_free)> internal(
+        static_cast<std::uint8_t*>(heap_caps_malloc(kChunk, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)), heap_caps_free);
+    std::unique_ptr<std::uint8_t, decltype(&heap_caps_free)> psram(
+        static_cast<std::uint8_t*>(heap_caps_malloc(kChunk, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), heap_caps_free);
+    if (!internal || !psram) {
+        ESP_LOGW(TAG, "sdbench buffers unavailable");
+        return;
+    }
+    std::memset(psram.get(), 0x5a, kChunk);
+    WithMutation("sdbench", [&]() {
+        std::int64_t at = esp_timer_get_time();
+        FILE* out = std::fopen(path.c_str(), "wb");
+        bool ok = out != nullptr;
+        for (std::size_t done = 0; ok && done < kBytes; done += kChunk) ok = std::fwrite(psram.get(), 1, kChunk, out) == kChunk;
+        ok = ok && std::fflush(out) == 0 && fsync(fileno(out)) == 0;
+        if (out) std::fclose(out);
+        ESP_LOGI(TAG, "sdbench write bytes=%u ms=%ld ok=%d", static_cast<unsigned>(kBytes),
+                 static_cast<long>((esp_timer_get_time() - at) / 1000), ok);
+        at = esp_timer_get_time();
+        const int fd = ::open(path.c_str(), O_RDONLY);
+        std::size_t total = 0;
+        std::int64_t slowest = 0;
+        for (ssize_t got = 1; fd >= 0 && got > 0;) {
+            const std::int64_t t = esp_timer_get_time();
+            got = ::read(fd, internal.get(), kChunk);
+            slowest = std::max<std::int64_t>(slowest, esp_timer_get_time() - t);
+            if (got > 0) total += static_cast<std::size_t>(got);
+        }
+        if (fd >= 0) ::close(fd);
+        ESP_LOGI(TAG, "sdbench posixReadInternal bytes=%u ms=%ld slowestReadMs=%ld", static_cast<unsigned>(total),
+                 static_cast<long>((esp_timer_get_time() - at) / 1000), static_cast<long>(slowest / 1000));
+        at = esp_timer_get_time();
+        FILE* in = std::fopen(path.c_str(), "rb");
+        total = 0;
+        slowest = 0;
+        if (in) {
+            std::setvbuf(in, nullptr, _IONBF, 0);
+            for (std::size_t got = kChunk; got == kChunk;) {
+                const std::int64_t t = esp_timer_get_time();
+                got = std::fread(psram.get(), 1, kChunk, in);
+                slowest = std::max<std::int64_t>(slowest, esp_timer_get_time() - t);
+                total += got;
+            }
+            std::fclose(in);
+        }
+        ESP_LOGI(TAG, "sdbench freadPsramUnbuffered bytes=%u ms=%ld slowestReadMs=%ld", static_cast<unsigned>(total),
+                 static_cast<long>((esp_timer_get_time() - at) / 1000), static_cast<long>(slowest / 1000));
+        unlink(path.c_str());
+        return true;
+    });
+}
+
 void SelfTestTask(void*) {
     vTaskDelay(pdMS_TO_TICKS(30000));
     g_selftest_active.store(true);
@@ -419,6 +500,7 @@ void SelfTestTask(void*) {
               xTaskCreate(&CopyTask, "v6_selftest_copy", 8192, &job, tskIDLE_PRIORITY + 2, nullptr) == pdPASS &&
               xSemaphoreTake(job.done, portMAX_DELAY) == pdTRUE && job.ok;
     if (ok) {
+        SdBenchmark(plan.cache_key);
         int errors = 0;
         for (int run = 1; run <= kRuns; ++run) errors += PlayRun(run, plan).errors;
         ok = errors == 0;

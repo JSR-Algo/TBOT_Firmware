@@ -3,6 +3,7 @@
 
 #include "lesson_tvideo_frame_state.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -15,6 +16,15 @@ namespace tbot {
 
 inline constexpr int kTVideoStageWidth = 480;
 inline constexpr int kTVideoStageHeight = 320;
+
+// std::lround for the non-negative pixel values of the render path, without the libm call
+// (a library call per channel on the ESP32-S3). Exact: below 2^23 the integer part is exact
+// and so is value - integer part, so ">= 0.5" is round-half-away-from-zero.
+inline long RoundPixel(float value) {
+    if (!(value >= 0.0f && value < 8388608.0f)) return std::lround(value);
+    const long whole = static_cast<long>(value);
+    return value - static_cast<float>(whole) >= 0.5f ? whole + 1 : whole;
+}
 
 // A decoded source frame. YUV 4:2:0 frames (optionally with a full-resolution
 // alpha plane) use planes[0..2] (+[3]); RGBA frames use planes[0] only.

@@ -8,13 +8,13 @@ namespace {
 
 struct Rgba { float r, g, b, a; };
 
-float Clamp255(float value) { return std::fmin(255.0f, std::fmax(0.0f, value)); }
+float Clamp255(float value) { return std::min(255.0f, std::max(0.0f, value)); }
 
 // Bilinear sample of one 8-bit plane at continuous coordinates (pixel centres at
 // integer + 0.5), clamped to the edge as canvas drawImage does.
 float SamplePlane(const std::uint8_t* plane, int stride, int width, int height, float x, float y) {
-    const float fx = std::fmin(std::fmax(x - 0.5f, 0.0f), static_cast<float>(width - 1));
-    const float fy = std::fmin(std::fmax(y - 0.5f, 0.0f), static_cast<float>(height - 1));
+    const float fx = std::min(std::max(x - 0.5f, 0.0f), static_cast<float>(width - 1));
+    const float fy = std::min(std::max(y - 0.5f, 0.0f), static_cast<float>(height - 1));
     const int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy);
     const int x1 = std::min(x0 + 1, width - 1), y1 = std::min(y0 + 1, height - 1);
     const float tx = fx - x0, ty = fy - y0;
@@ -30,8 +30,8 @@ Rgba Sample(const ComposeSource& source, float u, float v) {
         // return straight colour (canvas filtering is premultiplied).
         const std::uint8_t* plane = source.planes[0];
         const int stride = source.strides[0];
-        const float fx = std::fmin(std::fmax(u - 0.5f, 0.0f), static_cast<float>(source.width - 1));
-        const float fy = std::fmin(std::fmax(v - 0.5f, 0.0f), static_cast<float>(source.height - 1));
+        const float fx = std::min(std::max(u - 0.5f, 0.0f), static_cast<float>(source.width - 1));
+        const float fy = std::min(std::max(v - 0.5f, 0.0f), static_cast<float>(source.height - 1));
         const int x0 = static_cast<int>(fx), y0 = static_cast<int>(fy);
         const int x1 = std::min(x0 + 1, source.width - 1), y1 = std::min(y0 + 1, source.height - 1);
         const float tx = fx - x0, ty = fy - y0;
@@ -97,14 +97,14 @@ void DrawComposeSource(const ComposeSource& source, double x, double y, double w
             std::uint8_t* pixel = row + px * 3;
             if (alpha == 1.0f) {
                 // texel * 1 + pixel * 0 is exactly texel.
-                pixel[0] = static_cast<std::uint8_t>(std::lround(texel.r));
-                pixel[1] = static_cast<std::uint8_t>(std::lround(texel.g));
-                pixel[2] = static_cast<std::uint8_t>(std::lround(texel.b));
+                pixel[0] = static_cast<std::uint8_t>(RoundPixel(texel.r));
+                pixel[1] = static_cast<std::uint8_t>(RoundPixel(texel.g));
+                pixel[2] = static_cast<std::uint8_t>(RoundPixel(texel.b));
                 continue;
             }
-            pixel[0] = static_cast<std::uint8_t>(std::lround(texel.r * alpha + pixel[0] * (1 - alpha)));
-            pixel[1] = static_cast<std::uint8_t>(std::lround(texel.g * alpha + pixel[1] * (1 - alpha)));
-            pixel[2] = static_cast<std::uint8_t>(std::lround(texel.b * alpha + pixel[2] * (1 - alpha)));
+            pixel[0] = static_cast<std::uint8_t>(RoundPixel(texel.r * alpha + pixel[0] * (1 - alpha)));
+            pixel[1] = static_cast<std::uint8_t>(RoundPixel(texel.g * alpha + pixel[1] * (1 - alpha)));
+            pixel[2] = static_cast<std::uint8_t>(RoundPixel(texel.b * alpha + pixel[2] * (1 - alpha)));
         }
     }
 }

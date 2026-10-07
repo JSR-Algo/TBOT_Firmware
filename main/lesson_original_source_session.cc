@@ -1,9 +1,13 @@
 #include "lesson_original_source_session.h"
+#include "lesson_original_source_profile.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <climits>
 #include <memory>
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -13,6 +17,36 @@ extern "C" {
 }
 namespace tbot {
 namespace {
+// The snapshot is read with POSIX read(): on the ESP32-S3, unbuffered stdio fread()
+// reads byte by byte (~90 ms per 4 KiB measured on the robot, 256 KiB in 5.8 s versus
+// 53 ms with read(), BE08 R16), and a buffered FILE would allocate a hidden buffer.
+class SnapshotFile {
+public:
+    explicit SnapshotFile(const char* path) : fd_(::open(path, O_RDONLY)) {}
+    ~SnapshotFile() { Close(); }
+    SnapshotFile(const SnapshotFile&) = delete;
+    SnapshotFile& operator=(const SnapshotFile&) = delete;
+    explicit operator bool() const { return fd_ >= 0; }
+    int fd() const { return fd_; }
+    void Close() {
+        if (fd_ >= 0) ::close(fd_);
+        fd_ = -1;
+    }
+    // Reads exactly `count` bytes; false on error or early end of file.
+    bool ReadFully(uint8_t* output, size_t count) {
+        while (count > 0) {
+            const ssize_t got = ::read(fd_, output, count);
+            if (got < 0 && errno == EINTR) continue;
+            if (got <= 0) return false;
+            output += got;
+            count -= static_cast<size_t>(got);
+        }
+        return true;
+    }
+
+private:
+    int fd_;
+};
 OriginalSourceStatus Error(int error) {
     return error == AVERROR(ENOMEM) ? OriginalSourceStatus::kNoMemory
                                    : OriginalSourceStatus::kDecode;
@@ -117,15 +151,12 @@ OriginalSourceStatus OriginalSourceSession::Open(
         case OriginalSourceCodec::kPng: id = AV_CODEC_ID_PNG; break;
         default: return Fail(OriginalSourceStatus::kUnsupported);
     }
-    std::unique_ptr<FILE, decltype(&std::fclose)> file(std::fopen(path, "rb"), &std::fclose);
+    SnapshotFile file(path);
     if (!file) return Fail(OriginalSourceStatus::kIo);
-    // Unbuffered: reads are already 4 KiB and stdio must not allocate a hidden buffer.
-    if (std::setvbuf(file.get(), nullptr, _IONBF, 0)) return Fail(OriginalSourceStatus::kIo);
-    if (std::fseek(file.get(), 0, SEEK_END)) return Fail(OriginalSourceStatus::kIo);
-    const long size = std::ftell(file.get());
+    const off_t size = ::lseek(file.fd(), 0, SEEK_END);
     if (size < 0) return Fail(OriginalSourceStatus::kIo);
     if (static_cast<size_t>(size) != expected.bytes) return Fail(OriginalSourceStatus::kIntegrity);
-    if (std::fseek(file.get(), 0, SEEK_SET)) return Fail(OriginalSourceStatus::kIo);
+    if (::lseek(file.fd(), 0, SEEK_SET) != 0) return Fail(OriginalSourceStatus::kIo);
     bytes_ = static_cast<uint8_t*>(av_malloc(expected.bytes));
     if (!bytes_) return Fail(OriginalSourceStatus::kNoMemory);
     std::unique_ptr<AVSHA, decltype(&av_free)> sha(av_sha_alloc(), &av_free);
@@ -135,18 +166,38 @@ OriginalSourceStatus OriginalSourceSession::Open(
         if (Cancelled()) return Fail(OriginalSourceStatus::kCancelled);
         if (AllocationFailed()) return Fail(OriginalSourceStatus::kNoMemory);
         size_t count = std::min(size_t{4096}, expected.bytes - read);
-        if (std::fread(bytes_ + read, 1, count, file.get()) != count)
-            return Fail(OriginalSourceStatus::kIo);
-        av_sha_update(sha.get(), bytes_ + read, count);
+        {
+            auto& profile = tbot::OriginalSourceProfileCounters();
+            std::uint64_t read_us = 0;
+            bool ok;
+            {
+                tbot::OriginalSourceProfileScope timed(&read_us);
+                ok = file.ReadFully(bytes_ + read, count);
+            }
+            profile.read_us += read_us;
+            if (read == 0) profile.first_read_us += read_us;
+            profile.max_read_us = std::max(profile.max_read_us, read_us);
+            profile.slow_reads += read_us > 100000;
+            if (!ok) return Fail(OriginalSourceStatus::kIo);
+        }
+        {
+            tbot::OriginalSourceProfileScope timed(&tbot::OriginalSourceProfileCounters().hash_us);
+            av_sha_update(sha.get(), bytes_ + read, count);
+        }
         read += count;
     }
-    if (std::fgetc(file.get()) != EOF || std::ferror(file.get()))
-        return Fail(OriginalSourceStatus::kIntegrity);
+    {
+        // The snapshot must end exactly at the expected length.
+        uint8_t extra = 0;
+        ssize_t tail;
+        do tail = ::read(file.fd(), &extra, 1); while (tail < 0 && errno == EINTR);
+        if (tail != 0) return Fail(OriginalSourceStatus::kIntegrity);
+    }
     uint8_t hash[32];
     av_sha_final(sha.get(), hash);
     if (std::memcmp(hash, expected.sha256, sizeof(hash)))
         return Fail(OriginalSourceStatus::kIntegrity);
-    file.reset();
+    file.Close();
     sha.reset();
     if (Cancelled()) return Fail(OriginalSourceStatus::kCancelled);
     if (AllocationFailed()) return Fail(OriginalSourceStatus::kNoMemory);
@@ -162,7 +213,11 @@ OriginalSourceStatus OriginalSourceSession::Open(
     format_->pb = io_;
     format_->flags |= AVFMT_FLAG_CUSTOM_IO;
     format_->interrupt_callback = {&Interrupted, this};
-    int result = avformat_open_input(&format_, nullptr, nullptr, nullptr);
+    int result;
+    {
+        tbot::OriginalSourceProfileScope timed(&tbot::OriginalSourceProfileCounters().demux_open_us);
+        result = avformat_open_input(&format_, nullptr, nullptr, nullptr);
+    }
     if (Cancelled()) return Fail(OriginalSourceStatus::kCancelled);
     if (AllocationFailed()) return Fail(OriginalSourceStatus::kNoMemory);
     if (result < 0) return Fail(Error(result));
@@ -182,7 +237,10 @@ OriginalSourceStatus OriginalSourceSession::Open(
     codec_->thread_count = 1;
     codec_->max_pixels = expected.width * expected.height;
     codec_->pkt_timebase = format_->streams[stream_]->time_base;
-    result = avcodec_open2(codec_, decoder, nullptr);
+    {
+        tbot::OriginalSourceProfileScope timed(&tbot::OriginalSourceProfileCounters().codec_open_us);
+        result = avcodec_open2(codec_, decoder, nullptr);
+    }
     if (Cancelled()) return Fail(OriginalSourceStatus::kCancelled);
     if (AllocationFailed()) return Fail(OriginalSourceStatus::kNoMemory);
     if (result < 0) return Fail(Error(result));
@@ -200,7 +258,10 @@ OriginalSourceStatus OriginalSourceSession::Open(
         vp9_[1].codec->thread_count = 1;
         vp9_[1].codec->max_pixels = expected.width * expected.height;
         vp9_[1].codec->pkt_timebase = format_->streams[stream_]->time_base;
-        result = avcodec_open2(vp9_[1].codec, decoder, nullptr);
+        {
+            tbot::OriginalSourceProfileScope timed(&tbot::OriginalSourceProfileCounters().codec_open_us);
+            result = avcodec_open2(vp9_[1].codec, decoder, nullptr);
+        }
         if (Cancelled()) return Fail(OriginalSourceStatus::kCancelled);
         if (AllocationFailed()) return Fail(OriginalSourceStatus::kNoMemory);
         if (result < 0) return Fail(Error(result));

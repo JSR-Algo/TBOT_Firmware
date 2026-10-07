@@ -1,4 +1,5 @@
 #include "lesson_tvideo_raster_canvas.h"
+#include "lesson_original_source_profile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -127,6 +128,7 @@ TVideoRasterCanvas::Point TVideoRasterCanvas::Transform(Point point) const {
 }
 
 void TVideoRasterCanvas::DrawMedia(TVideoMedia media, double x, double y, double width, double height) {
+    OriginalSourceProfileScope timed(&OriginalSourceProfileCounters().draw_media_us);
     const ComposeSource* source = media_[static_cast<std::size_t>(media)];
     if (source == nullptr || source->width <= 0 || source->height <= 0) return;
     const Matrix& m = state_.matrix;
@@ -257,12 +259,13 @@ void TVideoRasterCanvas::Blend(int x, int y, float coverage, const Color& color)
     const float alpha = std::min(1.0f, coverage) * color.a * static_cast<float>(state_.alpha);
     if (alpha <= 0) return;
     std::uint8_t* pixel = rgb_ + (y * kTVideoStageWidth + x) * 3;
-    pixel[0] = static_cast<std::uint8_t>(std::lround(color.r * alpha + pixel[0] * (1 - alpha)));
-    pixel[1] = static_cast<std::uint8_t>(std::lround(color.g * alpha + pixel[1] * (1 - alpha)));
-    pixel[2] = static_cast<std::uint8_t>(std::lround(color.b * alpha + pixel[2] * (1 - alpha)));
+    pixel[0] = static_cast<std::uint8_t>(RoundPixel(color.r * alpha + pixel[0] * (1 - alpha)));
+    pixel[1] = static_cast<std::uint8_t>(RoundPixel(color.g * alpha + pixel[1] * (1 - alpha)));
+    pixel[2] = static_cast<std::uint8_t>(RoundPixel(color.b * alpha + pixel[2] * (1 - alpha)));
 }
 
 void TVideoRasterCanvas::FillPolygons(const std::vector<std::vector<Point>>& polygons, const Color& color) {
+    OriginalSourceProfileScope timed(&OriginalSourceProfileCounters().fill_us);
     std::vector<Edge> edges;
     double min_x = 1e30, max_x = -1e30, min_y = 1e30, max_y = -1e30;
     for (const auto& polygon : polygons) {
@@ -354,9 +357,9 @@ void TVideoRasterCanvas::FillPolygons(const std::vector<std::vector<Point>>& pol
             const float alpha = std::min(1.0f, covered) * color.a * layer_alpha;
             if (alpha <= 0) continue;
             std::uint8_t* pixel = pixels + px * 3;
-            pixel[0] = static_cast<std::uint8_t>(std::lround(color.r * alpha + pixel[0] * (1 - alpha)));
-            pixel[1] = static_cast<std::uint8_t>(std::lround(color.g * alpha + pixel[1] * (1 - alpha)));
-            pixel[2] = static_cast<std::uint8_t>(std::lround(color.b * alpha + pixel[2] * (1 - alpha)));
+            pixel[0] = static_cast<std::uint8_t>(RoundPixel(color.r * alpha + pixel[0] * (1 - alpha)));
+            pixel[1] = static_cast<std::uint8_t>(RoundPixel(color.g * alpha + pixel[1] * (1 - alpha)));
+            pixel[2] = static_cast<std::uint8_t>(RoundPixel(color.b * alpha + pixel[2] * (1 - alpha)));
         }
     }
 }
@@ -442,6 +445,7 @@ double TVideoRasterCanvas::MeasureText(const std::string& text) {
 }
 
 void TVideoRasterCanvas::FillText(const std::string& text, double x, double y) {
+    OriginalSourceProfileScope timed(&OriginalSourceProfileCounters().text_us);
     if (text_ == nullptr) return;
     const Matrix& m = state_.matrix;
     if (m.b != 0 || m.c != 0 || m.a <= 0 || m.a != m.d) {
