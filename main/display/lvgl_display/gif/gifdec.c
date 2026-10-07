@@ -72,7 +72,11 @@ static size_t gif_alloc_size(uint16_t width, uint16_t height)
 #endif
 }
 
-#if CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+/* Renderer-v6 images keep these ~386 KB of PSRAM for the v6 decoder region instead
+ * (BE08 R20): v6 owns the panel while a lesson plays, and GIFs use lv_malloc as before. */
+#define GD_GIF_STATIC_POOL (CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY && !CONFIG_TBOT_LESSON_RENDERER_V6)
+
+#if GD_GIF_STATIC_POOL
 /* One static decoder buffer (gd_GIF + canvas + frame [+ LZW cache]) in PSRAM .bss,
  * reused by every GIF up to GD_GIF_POOL_MAX_W x GD_GIF_POOL_MAX_H so switching
  * faces never needs a fresh ~384 KB contiguous heap block. Only one GIF can hold
@@ -89,7 +93,7 @@ static bool s_pool_in_use = false;
 static gd_GIF * gif_alloc(uint16_t width, uint16_t height)
 {
     size_t size = gif_alloc_size(width, height);
-#if CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+#if GD_GIF_STATIC_POOL
     if(!s_pool_in_use && size <= sizeof(s_pool)) {
         s_pool_in_use = true;
         return (gd_GIF *)s_pool;
@@ -100,7 +104,7 @@ static gd_GIF * gif_alloc(uint16_t width, uint16_t height)
 
 static void gif_free(gd_GIF * gif)
 {
-#if CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+#if GD_GIF_STATIC_POOL
     if(gif != NULL && (uint8_t *)gif == s_pool) {
         s_pool_in_use = false;
         return;
