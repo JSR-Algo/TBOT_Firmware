@@ -9,9 +9,14 @@ Build production cho robot LCDWiki ES3C35P dùng cấu hình mặc định đã 
 
 ## Endpoint đang dùng để nạp code
 
-- API/bootstrap seed: `https://esp.tjbot.vn/tbot/v1`
+- API/bootstrap: `https://backend.tjbot.vn/v1/device/bootstrap`
+- Provisioning status: `https://backend.tjbot.vn/v1/device/provisioning/status`
 - OTA seed: `https://esp.tjbot.vn/tbot/ota/`
 - WS: do OTA/bootstrap trả về từ managed robot-server endpoint. Không commit quick-tunnel host.
+
+Firmware build mới dùng backend VPS. Robot đã cài firmware cần flash/reload bản
+mới; nếu NVS `wifi/provisioning_url` đã được cấu hình riêng thì giá trị đó ưu tiên
+hơn URL compile-time. Backend mới dùng database mới nên cần đăng ký/ghép đôi lại.
 
 ## Cách flash 1 — USB (nhanh nhất, ~30s)
 

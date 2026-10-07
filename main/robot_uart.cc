@@ -3,6 +3,7 @@
 #include "speaking_arm_transport.h"
 
 #include <driver/uart.h>
+#include <esp_attr.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -46,6 +47,9 @@
 #endif
 
 #define TAG "RobotUart"
+
+// Scratch for TrySpeakingArmWrite; guarded by RobotUart::uart_mutex_.
+EXT_RAM_BSS_ATTR static char s_speaking_arm_payload[256];
 
 static bool has_uart_profile(gpio_num_t tx_pin, gpio_num_t rx_pin) {
     return tx_pin != GPIO_NUM_NC && rx_pin != GPIO_NUM_NC;
@@ -147,7 +151,6 @@ bool RobotUart::Initialize() {
     }
 
     initialized_ = true;
-    StartAckReader();
     return true;
 }
 
@@ -251,11 +254,12 @@ bool RobotUart::TrySendAutomaticArm(bool left, int percent, const std::function<
         bool SelectProfile() {
             return robot.SelectUartProfile("automatic", ROBOT_UART_NUM, ROBOT_UART_TX_PIN, ROBOT_UART_RX_PIN);
         }
-        bool Write(const std::string& payload) {
-            return uart_write_bytes(ROBOT_UART_NUM, payload.data(), payload.size()) == static_cast<int>(payload.size());
+        bool Write(const char* data, size_t length) {
+            return uart_write_bytes(ROBOT_UART_NUM, data, length) == static_cast<int>(length);
         }
     } adapter{*this};
-    const bool sent = TrySpeakingArmWrite(uart_mutex_, left, percent, adapter, owns);
+    const bool sent = TrySpeakingArmWrite(uart_mutex_, left, percent, adapter, owns,
+        s_speaking_arm_payload, sizeof(s_speaking_arm_payload));
     ESP_LOGI(TAG, "speaking_arm_target part=%s percent=%d result=%s",
              left ? "left" : "right", percent, sent ? "sent" : "skipped");
     return sent;

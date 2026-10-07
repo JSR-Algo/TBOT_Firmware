@@ -2,6 +2,8 @@
 #include "board.h"
 #include "display.h"
 #include "application.h"
+#include <mutex>
+#include <esp_attr.h>
 #include "lvgl_theme.h"
 #include "emote_display.h"
 #include "expression_emote.h"
@@ -487,9 +489,13 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
              SECTOR_SIZE, content_length, sectors_to_erase, total_erase_size);
     
     // 写入新的资源文件到分区，一边erase一边写入
-    char* buffer = (char*)heap_caps_malloc(SECTOR_SIZE, MALLOC_CAP_INTERNAL);
-    if (buffer == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate buffer");
+    // esp_partition_write bounces non-internal buffers through internal RAM itself.
+    static EXT_RAM_BSS_ATTR char buffer[4096];
+    static std::mutex buffer_mutex;
+    std::unique_lock<std::mutex> buffer_lock(buffer_mutex, std::try_to_lock);
+    if (SECTOR_SIZE > sizeof(buffer) || !buffer_lock.owns_lock()) {
+        ESP_LOGE(TAG, "Assets download buffer unavailable (sector=%u busy=%d)",
+                 SECTOR_SIZE, buffer_lock.owns_lock() ? 0 : 1);
         return false;
     }
     size_t total_written = 0;
@@ -501,7 +507,6 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
         int ret = http->Read(buffer, SECTOR_SIZE);
         if (ret < 0) {
             ESP_LOGE(TAG, "Failed to read HTTP data: %s", esp_err_to_name(ret));
-            heap_caps_free(buffer);
             return false;
         }
 
@@ -521,7 +526,6 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
             // 确保擦除范围不超过分区大小
             if (sector_end > partition_->size) {
                 ESP_LOGE(TAG, "Sector end (%u) exceeds partition size (%lu)", sector_end, partition_->size);
-                heap_caps_free(buffer);
                 return false;
             }
             
@@ -529,7 +533,6 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
             esp_err_t err = esp_partition_erase_range(partition_, sector_start, SECTOR_SIZE);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to erase sector %u at offset %u: %s", current_sector, sector_start, esp_err_to_name(err));
-                heap_caps_free(buffer);
                 return false;
             }
             
@@ -540,7 +543,6 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
         esp_err_t err = esp_partition_write(partition_, total_written, buffer, ret);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write to assets partition at offset %u: %s", total_written, esp_err_to_name(err));
-            heap_caps_free(buffer);
             return false;
         }
 
@@ -562,7 +564,6 @@ bool Assets::Download(std::string url, std::function<void(int progress, size_t s
     }
     
     http->Close();
-    heap_caps_free(buffer);
 
     if (total_written != content_length) {
         ESP_LOGE(TAG, "Downloaded size (%u) does not match expected size (%u)", total_written, content_length);

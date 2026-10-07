@@ -83,6 +83,15 @@ public:
         published_stamp_.store(stamp,std::memory_order_release);
         return true;
     }
+    // App publisher only: this drained response, or its armed listener, completed
+    // to idle. A later drainless listen refresh/end for it is then not terminal.
+    void CompleteListener(uint32_t stamp) {
+        listener_idle_.store(Current(stamp) ? stamp : 0,std::memory_order_seq_cst);
+    }
+    void ReopenListener() { listener_idle_.store(0,std::memory_order_seq_cst); }
+    bool ListenerIdle(uint32_t stamp) const {
+        return Current(stamp) && listener_idle_.load(std::memory_order_seq_cst)==stamp;
+    }
     Read TryCollect(uint32_t stamp,Stop& out) {
         if (!Current(stamp)) return Read::None;
         if (fault_stamp_.load(std::memory_order_acquire)==stamp)
@@ -102,7 +111,7 @@ public:
 private:
     std::atomic<uint32_t> sequence_{0},source_{0},connection_{0},protocol_low_{0},protocol_high_{0};
     std::atomic<uint32_t> connect_{0},response_{0},reset_{0};
-    std::atomic<uint32_t> published_stamp_{0},fault_stamp_{0},writing_stamp_{0};
+    std::atomic<uint32_t> published_stamp_{0},fault_stamp_{0},writing_stamp_{0},listener_idle_{0};
     std::mutex mutex_;
     Stop stop_;
 };

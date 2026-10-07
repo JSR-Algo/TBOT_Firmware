@@ -5,7 +5,7 @@ CONFIG_APP_REPRODUCIBLE_BUILD=y
 CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE=y
 # Stable backend bootstrap seed. The OTA response returns the final websocket.url.
 CONFIG_OTA_URL="https://esp.tjbot.vn/tbot/ota/"
-CONFIG_PROVISIONING_STATUS_URL="https://tbot-backend-8wmh.onrender.com/v1/device/provisioning/status"
+CONFIG_PROVISIONING_STATUS_URL="https://backend.tjbot.vn/v1/device/provisioning/status"
 CONFIG_WEBSOCKET_URL="wss://esp.tjbot.vn/tbot/v1/"
 # Keep BluFi discoverable for the contract maximum; phone setup and Wi-Fi
 # password entry can exceed the five-minute default.

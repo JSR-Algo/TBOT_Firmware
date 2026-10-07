@@ -12,6 +12,7 @@
 #if TBOT_NATIVE_COVERAGE
 #else
 #include "application.h"
+#include "tbot_log_config.h"
 #include "lesson_cinematic_evidence.h"
 #if CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS
 #include "course_mode_hil_console.h"
@@ -56,6 +57,10 @@ extern "C" void app_main(void)
     esp_log_level_set("wifi", ESP_LOG_WARN);
     esp_log_level_set("esp_netif_handlers", ESP_LOG_WARN);
     esp_log_level_set("BLE_INIT", ESP_LOG_WARN);
+#if !TBOT_AFE_WARN_LOG
+    // "Ringbuffer of AFE is empty" floods the log; see tbot_log_config.h to enable again.
+    esp_log_level_set("AFE", ESP_LOG_ERROR);
+#endif
 
     esp_err_t heap_hook_err =
         heap_caps_register_failed_alloc_callback(AllocationFailureHook);

@@ -21,6 +21,7 @@ struct AudioStreamPacket {
 struct esp_audio_enc_in_frame_t { uint8_t* buffer; uint32_t len; };
 struct esp_audio_enc_out_frame_t { uint8_t* buffer; uint32_t len; uint32_t encoded_bytes; };
 std::function<void()> encode_hook;
+static uint8_t s_opus_encode_scratch[4096];
 int esp_opus_enc_process(void*, esp_audio_enc_in_frame_t*, esp_audio_enc_out_frame_t* out) {
     if (encode_hook) encode_hook();
     out->buffer[0] = 42;

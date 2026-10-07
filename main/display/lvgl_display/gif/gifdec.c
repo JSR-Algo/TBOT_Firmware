@@ -5,6 +5,9 @@
 #include <stdbool.h>
 #include <inttypes.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
+#include <esp_attr.h>
+#include <sdkconfig.h>
 
 #define TAG "GIF"
 
@@ -58,6 +61,52 @@ gd_open_gif_file(const char * fname)
     if(!res) return NULL;
 
     return gif_open(&gif_base);
+}
+
+static size_t gif_alloc_size(uint16_t width, uint16_t height)
+{
+#if LV_GIF_CACHE_DECODE_DATA
+    return sizeof(gd_GIF) + 5 * (size_t)width * height + LZW_CACHE_SIZE;
+#else
+    return sizeof(gd_GIF) + 5 * (size_t)width * height;
+#endif
+}
+
+#if CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+/* One static decoder buffer (gd_GIF + canvas + frame [+ LZW cache]) in PSRAM .bss,
+ * reused by every GIF up to GD_GIF_POOL_MAX_W x GD_GIF_POOL_MAX_H so switching
+ * faces never needs a fresh ~384 KB contiguous heap block. Only one GIF can hold
+ * it at a time; larger or concurrent GIFs fall back to lv_malloc. */
+#if LV_GIF_CACHE_DECODE_DATA
+#define GD_GIF_POOL_SIZE (sizeof(gd_GIF) + 5 * GD_GIF_POOL_MAX_W * GD_GIF_POOL_MAX_H + LZW_CACHE_SIZE)
+#else
+#define GD_GIF_POOL_SIZE (sizeof(gd_GIF) + 5 * GD_GIF_POOL_MAX_W * GD_GIF_POOL_MAX_H)
+#endif
+EXT_RAM_BSS_ATTR static uint8_t s_pool[GD_GIF_POOL_SIZE] __attribute__((aligned(16)));
+static bool s_pool_in_use = false;
+#endif
+
+static gd_GIF * gif_alloc(uint16_t width, uint16_t height)
+{
+    size_t size = gif_alloc_size(width, height);
+#if CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+    if(!s_pool_in_use && size <= sizeof(s_pool)) {
+        s_pool_in_use = true;
+        return (gd_GIF *)s_pool;
+    }
+#endif
+    return lv_malloc(size);
+}
+
+static void gif_free(gd_GIF * gif)
+{
+#if CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+    if(gif != NULL && (uint8_t *)gif == s_pool) {
+        s_pool_in_use = false;
+        return;
+    }
+#endif
+    lv_free(gif);
 }
 
 gd_GIF *
@@ -122,15 +171,20 @@ static gd_GIF * gif_open(gd_GIF * gif_base)
         ESP_LOGW(TAG, "Image dimensions are too large");
         goto fail;
     } 
-    gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height + LZW_CACHE_SIZE);
 #else
     if(0 == (INT_MAX - sizeof(gd_GIF)) / width / height / 5){
         ESP_LOGW(TAG, "Image dimensions are too large");
         goto fail;
     } 
-    gif = lv_malloc(sizeof(gd_GIF) + 5 * width * height);
 #endif
-    if(!gif) goto fail;
+    gif = gif_alloc(width, height);
+    if(!gif) {
+        ESP_LOGW(TAG, "alloc failed for %ux%u GIF (%u bytes); largest free PSRAM block=%u, internal=%u",
+                 width, height, (unsigned)gif_alloc_size(width, height),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        goto fail;
+    }
     memcpy(gif, gif_base, sizeof(gd_GIF));
     gif->width  = width;
     gif->height = height;
@@ -767,7 +821,7 @@ void
 gd_close_gif(gd_GIF * gif)
 {
     f_gif_close(gif);
-    lv_free(gif);
+    gif_free(gif);
 }
 
 static bool f_gif_open(gd_GIF * gif, const void * path, bool is_file, size_t data_size)

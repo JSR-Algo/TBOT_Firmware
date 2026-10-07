@@ -141,7 +141,6 @@ void EmojiWidget::SetEmotion(const char* emotion)
         {"relaxed",     {"scorn_loop", true, 25}},
         {"confused",    {"scorn_loop", true, 25}},
     };
-
     auto it = emotion_map.find(emotion);
     if (it != emotion_map.end()) {
         const auto& [aaf, repeat, fps] = it->second;

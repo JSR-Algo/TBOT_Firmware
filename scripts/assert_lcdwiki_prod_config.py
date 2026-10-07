@@ -5,6 +5,12 @@ from pathlib import Path
 
 PRODUCTION_OTA_URL = "https://esp.tjbot.vn/tbot/ota/"
 PRODUCTION_WEBSOCKET_URL = "wss://esp.tjbot.vn/tbot/v1/"
+# Attended demo/lab options; the voice demo refuses every lesson SD sync.
+ATTENDED_ONLY_FLAGS = (
+    "CONFIG_TBOT_VOICE_DEMO",
+    "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT",
+    "CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS",
+)
 
 
 def configuration_failures(sdkconfig: str, *, profile: str = "production") -> list[str]:
@@ -62,9 +68,12 @@ def configuration_failures(sdkconfig: str, *, profile: str = "production") -> li
             failures.append("M1 staging requires supported BluFi claiming")
         if not re.search(r"^CONFIG_TBOT_PROVISIONING_REPORT_ENABLED=y$", sdkconfig, re.MULTILINE):
             failures.append("M1 staging requires provisioning reports")
-        for flag in ("CONFIG_TBOT_VOICE_DEMO", "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT", "CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS", "CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY", "CONFIG_TBOT_HIL_STORAGE_FAULTS"):
+        for flag in ("CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY", "CONFIG_TBOT_HIL_STORAGE_FAULTS"):
             if re.search(rf"^{flag}=y$", sdkconfig, re.MULTILINE):
                 failures.append(f"M1 staging forbids {flag}")
+    for flag in ATTENDED_ONLY_FLAGS:
+        if re.search(rf"^{flag}=y$", sdkconfig, re.MULTILINE):
+            failures.append(f"{flag} is attended-only and forbidden in {profile} builds")
     return failures
 
 

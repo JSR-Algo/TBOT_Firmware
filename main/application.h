@@ -95,6 +95,7 @@ public:
      * It handles all events including network, state changes, and user interactions.
      */
     void Run();
+    void LogPeriodicMetrics();
 
     DeviceState GetDeviceState() const { return state_machine_.GetState(); }
     bool TakeChatCaption(ChatCaptionMailbox::Message& caption);
@@ -517,7 +518,7 @@ private:
     bool IsSelectedNormalChatRoute() const;
     bool HandleChatStopListening();
     bool RetainChatActiveListen();
-    enum class ChatListenOrigin { Drain, User, Wake, Abort };
+    enum class ChatListenOrigin { Drain, User, Wake, Abort, Interrupt };
     ChatListenOrigin chat_listen_origin_ = ChatListenOrigin::Drain;
     uint64_t chat_listen_received_us_ = 0;
     bool BeginChatListen(ListeningMode mode, ChatListenOrigin origin);
@@ -557,6 +558,7 @@ private:
     void HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSignals>& signals,
         uint64_t protocol_generation, ConnectionSource source, const cJSON* root, uint64_t received_us = 0);
     void PollChatPlayout(uint64_t now_us);
+    bool HandleChatPlayoutInterrupt(const ChatPlayoutIntake::Stop& stop, uint64_t now_us);
     void RecoverChatPlayout(uint32_t site = 0);
     ConversationPlayoutController chat_playout_controller_;
     ChatPlayoutIntake::Response chat_playout_response_;

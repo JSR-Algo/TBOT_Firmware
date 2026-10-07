@@ -54,6 +54,12 @@ CRITICAL_BOOLEAN_CONFIGS = (
     "CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY",
     "CONFIG_TBOT_HIL_STORAGE_FAULTS",
 )
+# Same attended-only options as scripts/assert_lcdwiki_prod_config.py.
+ATTENDED_ONLY_FLAGS = (
+    "CONFIG_TBOT_VOICE_DEMO",
+    "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT",
+    "CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS",
+)
 GIT_HEAD_COMMAND = "git rev-parse HEAD"
 GIT_STATUS_COMMAND = "git status --porcelain"
 GIT_COMMIT_TIME_COMMAND = "git show -s --format=%ct HEAD"
@@ -486,6 +492,9 @@ def audit_profile_configuration(
                 "production cinematic telemetry HIL must be disabled")
         require(not checks["hilStorageFaults"],
                 "production storage faults HIL must be disabled")
+        for flag in ATTENDED_ONLY_FLAGS:
+            require(sdkconfig.get(flag) != "y",
+                    f"{flag} is attended-only and forbidden in {profile} builds")
     return checks
 
 

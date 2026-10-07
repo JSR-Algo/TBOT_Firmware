@@ -4,11 +4,18 @@
 #include <cstring>
 #include <cstdio>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <unistd.h>
 
 #include <esp_heap_caps.h>
 #include <esp_task_wdt.h>
+#if defined(ESP_PLATFORM)
+#include <esp_attr.h>
+#endif
+#ifndef EXT_RAM_BSS_ATTR
+#define EXT_RAM_BSS_ATTR
+#endif
 
 #include "lesson_asset_download_raii.h"
 #include "lesson_trgb_size_policy.h"
@@ -21,6 +28,10 @@
 namespace {
 
 constexpr std::size_t kLessonAssetDownloadBufferBytes = 4096;
+// Downloads are serialized by the asset mutation lease; the heap path below
+// only covers an unexpected concurrent download.
+EXT_RAM_BSS_ATTR char g_lesson_asset_download_buffer[kLessonAssetDownloadBufferBytes];
+std::mutex g_lesson_asset_download_buffer_mutex;
 constexpr int kLessonAssetMaxResumeAttempts = 3;
 #if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \
     defined(TBOT_LESSON_STORAGE_HIL_HOOKS_TESTING)
@@ -146,12 +157,17 @@ void DownloadLessonAssetHttpBodyToFile(
     ScopedTempPath tmp_path(destination + ".tmp");
     tmp_path.RemoveIfPresent();
 
-    void* raw_buffer = AllocateLessonAssetDownloadBuffer();
-    if (raw_buffer == nullptr) {
+    std::unique_lock<std::mutex> static_buffer_lock(
+        g_lesson_asset_download_buffer_mutex, std::try_to_lock);
+    void* raw_buffer = static_buffer_lock.owns_lock()
+        ? nullptr : AllocateLessonAssetDownloadBuffer();
+    if (!static_buffer_lock.owns_lock() && raw_buffer == nullptr) {
         throw std::runtime_error("failed to allocate download buffer");
     }
     ScopedHeapAllocation buffer_allocation(raw_buffer, heap_caps_free);
-    char* buffer = static_cast<char*>(buffer_allocation.get());
+    char* buffer = static_buffer_lock.owns_lock()
+        ? g_lesson_asset_download_buffer
+        : static_cast<char*>(buffer_allocation.get());
 
     bool failed = false;
 #if defined(CONFIG_TBOT_HIL_STORAGE_FAULTS) || \

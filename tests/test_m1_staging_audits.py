@@ -22,6 +22,25 @@ def test_production_artifact_audit_rejects_staging_flag():
         })
 
 
+@pytest.mark.parametrize("profile", ["production", "m1-staging"])
+def test_admission_artifact_audit_rejects_voice_demo(profile):
+    with pytest.raises(AUDITOR.AuditFailure, match="CONFIG_TBOT_VOICE_DEMO"):
+        AUDITOR.audit_profile_configuration(profile, {
+            "CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE": "y",
+            "CONFIG_TBOT_M1_STAGING": "y" if profile == "m1-staging" else "n",
+            "CONFIG_TBOT_VOICE_DEMO": "y",
+        })
+
+
+def test_admission_audits_share_attended_only_flags():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from assert_lcdwiki_prod_config import ATTENDED_ONLY_FLAGS
+    finally:
+        sys.path.remove(str(ROOT / "scripts"))
+    assert AUDITOR.ATTENDED_ONLY_FLAGS == ATTENDED_ONLY_FLAGS
+
+
 def test_staging_audit_requires_its_own_embedded_identity():
     artifacts = {name: b"TBOT_EMBEDDED_PROFILE=m1-staging-v1\0" for name in ("bin", "elf", "mainArchive")}
     snapshots = {name: type("Snapshot", (), {"data": blob})() for name, blob in artifacts.items()}

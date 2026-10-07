@@ -228,6 +228,8 @@ class Application;
              "bool Application::PollChatOutbound","bool Application::IsChatOutboundCompletionCurrent","void Application::NotifyChatOutbound",
              "void Application::ChatOutboundTask", "Protocol::SourceCallbacks Application::MakeChatSourceCallbacks",
              "void Application::PollChatProtocolSignals", "void Application::PollChatOutboundEvents"]
+    if "bool Application::HandleChatPlayoutInterrupt" in app:
+        methods.append("bool Application::HandleChatPlayoutInterrupt")
     state_handler=method(app,"void Application::HandleStateChangedEvent")
     state_handler=state_handler[:state_handler.index("    DeviceState new_state")] + '    assert(false && "legacy state effects reached");\n}'
     entries=[]

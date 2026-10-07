@@ -17,6 +17,8 @@
 #include <esp_efuse.h>
 #include <esp_efuse_table.h>
 #include <esp_heap_caps.h>
+#include <mutex>
+#include <esp_attr.h>
 #include <esp_timer.h>
 #ifdef SOC_HMAC_SUPPORTED
 #include <esp_hmac.h>
@@ -710,9 +712,13 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
     }
 
     constexpr size_t PAGE_SIZE = 4096;
-    char* buffer = (char*)heap_caps_malloc(PAGE_SIZE, MALLOC_CAP_INTERNAL);
-    if (buffer == nullptr) {
-        ESP_LOGE(TAG, "Failed to allocate buffer");
+    // esp_ota_write bounces non-internal buffers through internal RAM itself.
+    static EXT_RAM_BSS_ATTR char buffer[PAGE_SIZE];
+    static std::mutex buffer_mutex;
+    std::unique_lock<std::mutex> buffer_lock(buffer_mutex, std::try_to_lock);
+    if (!buffer_lock.owns_lock()) {
+        ESP_LOGE(TAG, "Firmware upgrade already in progress");
+        http->Close();
         return false;
     }
 
@@ -723,7 +729,6 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
         int ret = http->Read(buffer + buffer_offset, PAGE_SIZE - buffer_offset);
         if (ret < 0) {
             ESP_LOGE(TAG, "Failed to read HTTP data: %s", esp_err_to_name(ret));
-            heap_caps_free(buffer);
             return false;
         }
 
@@ -753,7 +758,6 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
                 if (begin_err != ESP_OK) {
                     esp_ota_abort(update_handle);
                     ESP_LOGE(TAG, "Failed to begin OTA: %s", esp_err_to_name(begin_err));
-                    heap_caps_free(buffer);
                     http->Close();
                     return false;
                 }
@@ -770,7 +774,6 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(err));
                 esp_ota_abort(update_handle);
-                heap_caps_free(buffer);
                 return false;
             }
 
@@ -789,14 +792,12 @@ bool Ota::Upgrade(const std::string& firmware_url, std::function<void(int progre
             esp_ota_abort(update_handle);
         }
         http->Close();
-        heap_caps_free(buffer);
         return false;
     }
 
     ESP_LOGI(TAG, "Firmware download complete: total_read=%zu content_length=%zu",
              total_read, content_length);
     http->Close();
-    heap_caps_free(buffer);
 
     esp_err_t err = esp_ota_end(update_handle);
     if (err != ESP_OK) {
