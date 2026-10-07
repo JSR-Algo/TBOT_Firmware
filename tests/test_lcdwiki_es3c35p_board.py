@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -261,6 +263,33 @@ def test_lcdwiki_es3c35p_prod_gate_rejects_cinematic_hil_telemetry(tmp_path):
 
     assert result.returncode != 0
     assert "Cinematic HIL telemetry must stay disabled" in result.stderr
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "CONFIG_TBOT_VOICE_DEMO",
+        "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT",
+        "CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS",
+    ],
+)
+def test_lcdwiki_es3c35p_prod_gate_rejects_attended_only_profiles(tmp_path, flag):
+    # 2.2.94 shipped with the attended voice demo, which refuses every lesson SD sync.
+    sdkconfig = tmp_path / "sdkconfig.es3c35p-attended"
+    sdkconfig.write_text(lcdwiki_reference_sdkconfig() + f"\n{flag}=y\n", encoding="utf-8")
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/assert_lcdwiki_prod_config.py"),
+            str(sdkconfig),
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert f"{flag} is attended-only" in result.stderr
+
 
 def test_release_sdkconfig_append_replaces_existing_values_for_ci_gate(tmp_path):
     spec = importlib.util.spec_from_file_location("release", ROOT / "scripts/release.py")

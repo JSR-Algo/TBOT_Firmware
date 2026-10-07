@@ -153,6 +153,9 @@ bool Application::AdvanceChatRearm(uint64_t now_us) {
     if (terminal_read == ChatPlayoutIntake::Read::Fault ||
         (terminal_read == ChatPlayoutIntake::Read::Ready &&
          (terminal.interrupt || terminal.conflict))) {
+        if (terminal_read == ChatPlayoutIntake::Read::Ready &&
+            HandleChatPlayoutInterrupt(terminal, now_us))
+            return true;
         RecoverChatPlayout(226);
         SetDeviceState(kDeviceStateIdle);
         return true;
@@ -205,6 +208,8 @@ bool Application::AdvanceChatRearm(uint64_t now_us) {
             RequestChatAudioCleanup(response.response_generation, false, false,
                                     IsDeviceClaimed() && !connect_in_flight_.load() &&
                                         !lesson_asset_sync_quiet_.load());
+            if (chat_listen_origin_ == ChatListenOrigin::Drain)
+                chat_protocol_signals_->intake.CompleteListener(chat_playout_stamp_);
             SetDeviceState(kDeviceStateIdle);
             return true;
         }
@@ -259,6 +264,9 @@ bool Application::AdvanceChatRearm(uint64_t now_us) {
     listening_started_ms_.store(now_ms);
     last_listening_activity_ms_.store(now_ms);
     SetDeviceState(kDeviceStateListening);
+    if (chat_listen_origin_ == ChatListenOrigin::Interrupt)
+        ESP_LOGI(TAG, "chat_interrupt_resume state=armed generation=%lu",
+                 static_cast<unsigned long>(response.response_generation));
     return true;
 }
 

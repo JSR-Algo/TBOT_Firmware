@@ -216,8 +216,13 @@ void Application::Run() {
             const DeviceState passive_state = GetDeviceState();
             const bool selected_chat_source =
                 chat_protocol_signals_ && chat_protocol_signals_->SourceSelected();
-            if (passive_ws_intent_.load() && IsDeviceClaimed() && protocol_ != nullptr &&
-                !connect_in_flight_.load() &&
+            // Wake/user listen clears passive intent, but the selected chat
+            // socket still needs JSON probes through speech and subsequent idle.
+            // Lesson answer turns retain their existing liveness ownership.
+            if ((passive_ws_intent_.load() ||
+                 (selected_chat_source && online_intent_.load() &&
+                  !lesson_runtime_active_.load())) &&
+                IsDeviceClaimed() && protocol_ != nullptr && !connect_in_flight_.load() &&
                 !(selected_chat_source
                       ? protocol_work_lifetime_.BusyExcept(chat_outbound_reservation_)
                       : protocol_work_lifetime_.Busy()) &&
@@ -235,15 +240,22 @@ void Application::Run() {
                 (selected_chat_source || protocol_->IsAudioChannelOpened()) &&
                 !(selected_chat_source ? MaintainChatPassiveLiveness()
                                        : protocol_->MaintainPassiveLiveness())) {
-                ESP_LOGW(TAG, "passive_lesson_ws_liveness_failed -> passive backoff");
-                backend_offline_.store(true);
-                if (chat_cleanup_enabled_) {
-                    protocol_work_lifetime_.Request(ProtocolWorkLifetime::Action::kClose);
-                    PollChatProtocolCleanup();
+                if (selected_chat_source && !passive_ws_intent_.load()) {
+                    // MaintainChatPassiveLiveness publishes the source fault.
+                    // Let normal chat recovery retire audio and own reconnect;
+                    // passive reconnect would discard the conversation intent.
+                    PollChatProtocolSignals();
                 } else {
-                    protocol_->CloseAudioChannel();
+                    ESP_LOGW(TAG, "passive_lesson_ws_liveness_failed -> passive backoff");
+                    backend_offline_.store(true);
+                    if (chat_cleanup_enabled_) {
+                        protocol_work_lifetime_.Request(ProtocolWorkLifetime::Action::kClose);
+                        PollChatProtocolCleanup();
+                    } else {
+                        protocol_->CloseAudioChannel();
+                    }
+                    SchedulePassiveLessonReconnect();
                 }
-                SchedulePassiveLessonReconnect();
                 passive_liveness_failed = true;
             }
 

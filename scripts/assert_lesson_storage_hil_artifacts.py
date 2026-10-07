@@ -54,6 +54,12 @@ CRITICAL_BOOLEAN_CONFIGS = (
     "CONFIG_TBOT_HIL_CINEMATIC_TELEMETRY",
     "CONFIG_TBOT_HIL_STORAGE_FAULTS",
 )
+# Same attended-only options as scripts/assert_lcdwiki_prod_config.py.
+ATTENDED_ONLY_FLAGS = (
+    "CONFIG_TBOT_VOICE_DEMO",
+    "CONFIG_TBOT_COURSE_MODE_LOCAL_ENDPOINT",
+    "CONFIG_TBOT_COURSE_MODE_HIL_DIAGNOSTICS",
+)
 GIT_HEAD_COMMAND = "git rev-parse HEAD"
 GIT_STATUS_COMMAND = "git status --porcelain"
 GIT_COMMIT_TIME_COMMAND = "git show -s --format=%ct HEAD"
@@ -142,7 +148,7 @@ def parse_sdkconfig_data(data: bytes) -> dict[str, str]:
     for raw_line in data.decode("utf-8").splitlines():
         line = raw_line.strip()
         critical = next(
-            (key for key in CRITICAL_BOOLEAN_CONFIGS if key in line), None
+            (key for key in (*CRITICAL_BOOLEAN_CONFIGS, "CONFIG_TBOT_M1_STAGING") if key in line), None
         )
         if critical is not None:
             require(critical not in critical_seen,
@@ -441,7 +447,7 @@ def audit_symbols(
         present = has_api_family(elf_symbols, symbol)
         require(present == (profile == "hil"),
                 f"HIL symbol profile mismatch: {symbol}")
-    if profile == "production":
+    if profile in ("production", "m1-staging"):
         for symbol in RELEASE_CINEMATIC_SYMBOLS:
             require(has_terminal_api(elf_symbols, symbol),
                     f"linked ELF missing defined symbol: {symbol}")
@@ -465,6 +471,8 @@ def audit_profile_configuration(
         "CONFIG_TBOT_HIL_PROFILE" not in sdkconfig,
         "manual profile override forbidden",
     )
+    require((sdkconfig.get("CONFIG_TBOT_M1_STAGING") == "y") == (profile == "m1-staging"),
+            "M1 staging profile mismatch")
     checks = {
         "releaseCinematicEvidence":
             sdkconfig.get("CONFIG_TBOT_RELEASE_CINEMATIC_EVIDENCE") == "y",
@@ -477,20 +485,23 @@ def audit_profile_configuration(
         checks["hilStorageFaults"] == (profile == "hil"),
         "HIL storage faults profile mismatch",
     )
-    if profile == "production":
+    if profile in ("production", "m1-staging"):
         require(checks["releaseCinematicEvidence"],
                 "production release cinematic evidence must be enabled")
         require(not checks["hilCinematicTelemetry"],
                 "production cinematic telemetry HIL must be disabled")
         require(not checks["hilStorageFaults"],
                 "production storage faults HIL must be disabled")
+        for flag in ATTENDED_ONLY_FLAGS:
+            require(sdkconfig.get(flag) != "y",
+                    f"{flag} is attended-only and forbidden in {profile} builds")
     return checks
 
 
 def audit_profile_literals(
     profile: str, artifacts: dict[str, Path | ArtifactSnapshot]
 ) -> str:
-    expected = "task14-hil-v1" if profile == "hil" else "production"
+    expected = {"hil": "task14-hil-v1", "production": "production", "m1-staging": "m1-staging-v1"}[profile]
     prefix = b"TBOT_EMBEDDED_PROFILE="
     expected_token = expected.encode("ascii")
     token_pattern = re.compile(re.escape(prefix) + rb"([^\x00\s]+)")
@@ -512,13 +523,13 @@ def audit_literals(profile: str, artifacts: dict[str, Path | ArtifactSnapshot]) 
     for literal in (*TOOL_NAMES, BANNER):
         encoded = literal.encode("ascii")
         locations = {name for name, content in searchable.items() if encoded in content}
-        if profile == "production":
+        if profile in ("production", "m1-staging"):
             require(not locations, f"production artifact contains HIL literal: {literal}")
         else:
             required = {"bin", "elf", "mainArchive"}
             require(required.issubset(locations),
                     f"HIL literal missing from artifacts: {literal}")
-    if profile == "production":
+    if profile in ("production", "m1-staging"):
         for name in ("bin", "elf"):
             for marker in RELEASE_CINEMATIC_MARKERS:
                 pattern = rb"(?<![A-Za-z0-9_])" + re.escape(marker.encode("ascii"))
@@ -767,7 +778,7 @@ def audit(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--profile", required=True, choices=("production", "hil"))
+    parser.add_argument("--profile", required=True, choices=("production", "hil", "m1-staging"))
     parser.add_argument("--build-dir", required=True)
     parser.add_argument(
         "--nm",

@@ -692,12 +692,14 @@ bool WifiManager::Initialize(const WifiManagerConfig& config) {
     if (!wifi_runtime_ready_) {
         // Initialize NVS
         esp_err_t ret = nvs_flash_init();
+#if !CONFIG_TBOT_M1_STAGING
         if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
             ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
             ESP_LOGW(TAG, "Erasing NVS...");
             ESP_ERROR_CHECK(nvs_flash_erase());
             ret = nvs_flash_init();
         }
+#endif
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
             return false;

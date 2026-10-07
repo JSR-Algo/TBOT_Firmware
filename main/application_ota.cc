@@ -16,6 +16,7 @@ void Application::CheckAssetsVersion() {
         return;
     }
 
+#if !CONFIG_TBOT_M1_STAGING
     Settings settings("assets", true);
     // Check if there is a new assets need to be downloaded
     std::string download_url = settings.GetString("download_url");
@@ -54,6 +55,8 @@ void Application::CheckAssetsVersion() {
             return;
         }
     }
+
+#endif
 
     // Apply assets
     assets.Apply();
@@ -194,6 +197,9 @@ bool Application::IsConnectSuccessPublicationSuppressed() const {
 }
 
 bool Application::UpgradeFirmware(const std::string& url, const std::string& version) {
+#if CONFIG_TBOT_M1_STAGING
+    return false;
+#else
     if (lesson_runtime_active_.load()) {
         ESP_LOGI(TAG, "lesson firmware upgrade ignored");
         return false;
@@ -252,4 +258,6 @@ bool Application::UpgradeFirmware(const std::string& url, const std::string& ver
         Reboot();
         return true;
     }
+
+#endif
 }

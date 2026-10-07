@@ -20,12 +20,95 @@ void Application::RecoverChatPlayout(uint32_t site) {
     auto generation = speaking_generation_.load();
     if (generation != UINT32_MAX)
         speaking_generation_.store(++generation);
-    RequestChatAudioCleanup(generation, true, false, false);
+    // Recovery fails closed for this conversation only. The worker resets before
+    // applying wake: claimed safe idle keeps local Hi ESP for a fresh turn.
+    RequestChatAudioCleanup(generation, true, false,
+                            IsDeviceClaimed() && !connect_in_flight_.load() &&
+                                !lesson_asset_sync_quiet_.load() && !lesson_runtime_active_.load());
     chat_rearm_owner_ = chat_playout_response_;
     chat_rearm_owner_.response_generation = generation;
     chat_rearm_owner_.reset_token = chat_audio_reset_serial_;
     microphone_uplink_authorized_.store(false);
     xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED);
+}
+
+bool Application::HandleChatPlayoutInterrupt(const ChatPlayoutIntake::Stop& stop, uint64_t now_us) {
+    // STOP can be published after the caller samples its poll clock.
+    if (now_us < stop.received_us)
+        now_us = static_cast<uint64_t>(esp_timer_get_time());
+    const auto state = GetDeviceState();
+    const auto& response = chat_playout_response_;
+    // Interrupt cancels playback; it never proves drain or successful ACK. Only
+    // the current conversation's already owned listen intent may continue.
+    if (!stop.interrupt || stop.conflict || !stop.continue_listening || !stop.realtime ||
+        stop.explicit_manual_stop || !stop.reset_captured || !stop.received_us ||
+        now_us < stop.received_us ||
+        now_us - stop.received_us >= ConversationPlayoutController::kTimeoutUs ||
+        stop.received_us > UINT64_MAX - ConversationPlayoutController::kTimeoutUs ||
+        chat_listen_origin_ != ChatListenOrigin::Drain || chat_playout_recovery_ ||
+        !chat_playout_stamp_ || stop.capture.stamp != chat_playout_stamp_ ||
+        !chat_protocol_signals_ || chat_rearm_signals_ != chat_protocol_signals_ ||
+        !chat_protocol_signals_->intake.Current(chat_playout_stamp_) ||
+        !chat_protocol_signals_->MatchesSource(response.source) ||
+        chat_protocol_signals_->Capture() != chat_rearm_source_era_ ||
+        !IsSelectedNormalChatRoute() || !protocol_ ||
+        protocol_->CurrentConnectionEpoch() != response.source.connection_epoch ||
+        response.protocol_generation != protocol_generation_.load() ||
+        response.connect_generation != connect_generation_.load() ||
+        response.response_generation != speaking_generation_.load() ||
+        response.response_generation >= UINT32_MAX - 1 ||
+        !audio_service_.IsCurrentChatPlaybackReset(response.reset_token) ||
+        !online_intent_.load() || passive_ws_intent_.load() || lesson_asset_sync_quiet_.load() ||
+        IsWifiConfigEntryPending() || chat_reboot_audio_requested_ ||
+        (state != kDeviceStateSpeaking && state != kDeviceStateListening) ||
+        !(microphone_uplink_authorized_.load() || chat_rearm_voice_intent_) ||
+        chat_rearm_phase_ == ChatRearmPhase::IdleComplete ||
+        chat_rearm_phase_ == ChatRearmPhase::Recovery || chat_outbound_fault_ ||
+        chat_audio_fault_ || chat_playback_fault_ || chat_protocol_infrastructure_fault_ ||
+        protocol_work_lifetime_.Pending() || chat_playout_unhandled_completion_ ||
+        (chat_protocol_fault_ && chat_protocol_fault_generation_ == response.protocol_generation &&
+         chat_protocol_fault_era_ == chat_protocol_signals_->Capture()))
+        return false;
+    chat_playout_stop_ = stop;
+    chat_playout_controller_.Cancel();
+    chat_playout_ready_ = chat_playout_begun_ = false;
+    // An in-flight ACK/listen belongs to the cancelled playback generation. Wait
+    // for its real retirement before activating the continuation's wire worker.
+    if (chat_outbound_generation_ && chat_outbound_reservation_) {
+        chat_start_obsolete_generation_ = chat_outbound_generation_;
+        chat_start_obsolete_reservation_ = chat_outbound_reservation_;
+        chat_start_obsolete_ack_ = chat_rearm_admitted_ ? chat_rearm_job_ : chat_playout_ack_;
+        RetireChatOutbound();
+    }
+    tts_audio_accepting_.store(false);
+    microphone_uplink_authorized_.store(false);
+    speaking_arm_dispatch_.Cancel();
+    last_speaking_activity_ms_.store(0);
+    const auto generation = response.response_generation + 1;
+    speaking_generation_.store(generation);
+    chat_rearm_prepared_ = RequestChatAudioCleanup(generation, true, true, false, true, false,
+                                                   ChatWakePolicy::Listening);
+    chat_playout_response_.response_generation = generation;
+    chat_playout_response_.reset_token = chat_audio_reset_serial_;
+    chat_rearm_owner_ = chat_playout_response_;
+    chat_listen_origin_ = ChatListenOrigin::Interrupt;
+    chat_listen_received_us_ = stop.received_us;
+    chat_rearm_phase_ = ChatRearmPhase::Pending;
+    chat_rearm_voice_intent_ = true;
+    chat_rearm_mode_ = kListeningModeRealtime;
+    chat_rearm_job_ = {};
+    chat_rearm_delivery_.reset();
+    chat_rearm_admitted_ = false;
+    chat_playout_ack_admitted_ = false;
+    chat_playout_ack_controller_id_ = 0;
+    chat_rearm_job_.kind = ChatOutboundMailbox::Kind::ListenStart;
+    chat_rearm_job_.argument = chat_rearm_mode_;
+    chat_rearm_job_.deadline_us = stop.received_us + ConversationPlayoutController::kTimeoutUs;
+    ESP_LOGI(TAG, "chat_interrupt_resume state=pending generation=%lu",
+             static_cast<unsigned long>(generation));
+    SetDeviceState(kDeviceStateSpeaking);
+    xEventGroupSetBits(event_group_, MAIN_EVENT_STATE_CHANGED | MAIN_EVENT_CHAT_OUTBOUND);
+    return true;
 }
 
 void Application::PollChatPlayout(uint64_t now_us) {
@@ -76,6 +159,8 @@ void Application::PollChatPlayout(uint64_t now_us) {
     }
     if (read == ChatPlayoutIntake::Read::Ready && (stop.interrupt || stop.conflict)) {
         chat_playout_stop_ = stop;
+        if (HandleChatPlayoutInterrupt(stop, now_us))
+            return;
         RecoverChatPlayout(204);
         return;
     }

@@ -38,3 +38,5 @@ PY
   "${ROOT}/main/lesson_asset_sync_attestation.cc" \
   "${BUILD_DIR}/cJSON.o" -o "${BUILD_DIR}/retained-mcp-test"
 "${BUILD_DIR}/retained-mcp-test" "${RETAINED_CONTRACT_VECTORS:?shared vectors required}"
+python3 "${ROOT}/scripts/check_retained_selection_rpc.py" \
+  "${BUILD_DIR}/retained-mcp-test" "${RETAINED_CONTRACT_VECTORS}"

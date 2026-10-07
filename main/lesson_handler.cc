@@ -1,3 +1,4 @@
+#include "m1_staging_policy.h"
 // US-006 Slice-01 — additive lesson_* renderer (LANE-FIRMWARE / S10 / CP-6).
 // See lesson_handler.h for the contract, the backward-compat anchor, and the
 // D-PRELOAD-OWNER byte-source decision. THIN renderer: owns NO lesson business
@@ -1050,7 +1051,7 @@ void LoadLessonCourseDeliveryLedger() {
 #elif defined(ESP_PLATFORM)
     std::string serialized;
     nvs_handle_t handle = 0;
-    esp_err_t result = nvs_open("lesson_course", NVS_READONLY, &handle);
+    esp_err_t result = nvs_open(M1Staging::StorageNamespace("lesson_course").c_str(), NVS_READONLY, &handle);
     if (result == ESP_OK) {
         size_t size = 0;
         result = nvs_get_str(handle, "deliveries", nullptr, &size);
@@ -1167,7 +1168,7 @@ bool PersistLessonCourseDeliveryLedger() {
     g_course_delivery_test_storage = serialized;
 #elif defined(ESP_PLATFORM)
     nvs_handle_t handle = 0;
-    if (nvs_open("lesson_course", NVS_READWRITE, &handle) != ESP_OK) return false;
+    if (nvs_open(M1Staging::StorageNamespace("lesson_course").c_str(), NVS_READWRITE, &handle) != ESP_OK) return false;
     const esp_err_t set_result = nvs_set_str(handle, "deliveries", serialized.c_str());
     const esp_err_t commit_result = set_result == ESP_OK ? nvs_commit(handle) : set_result;
     nvs_close(handle);

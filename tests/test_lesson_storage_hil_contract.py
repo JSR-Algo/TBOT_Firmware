@@ -459,7 +459,7 @@ def test_hil_artifact_auditor_has_fail_closed_profiles_and_atomic_outputs():
     auditor = read("scripts/assert_lesson_storage_hil_artifacts.py")
 
     for token in (
-        'choices=("production", "hil")',
+        'choices=("production", "hil", "m1-staging")',
         '"xiaozhi.bin"', '"xiaozhi.elf"', '"xiaozhi.map"',
         'libmain.a', '"project_description.json"', '"sdkconfig"',
         'lesson-storage-hil-build.json', 'lesson-storage-hil-build.sha256',

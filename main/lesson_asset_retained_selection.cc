@@ -1,3 +1,4 @@
+#include "m1_staging_policy.h"
 #include "lesson_asset_retained_selection.h"
 #include "lesson_asset_cache_evict.h"
 #include "lesson_asset_storage_coordinator.h"
@@ -87,7 +88,7 @@ std::string StatePath() {
 std::string ReadRecord() {
 #ifdef ESP_PLATFORM
     nvs_handle_t handle;
-    esp_err_t error = nvs_open("lesson_select", NVS_READONLY, &handle);
+    esp_err_t error = nvs_open(M1Staging::StorageNamespace("lesson_select").c_str(), NVS_READONLY, &handle);
     if (error == ESP_ERR_NVS_NOT_FOUND) return {};
     if (error != ESP_OK) Refuse();
     std::size_t size = 0;
@@ -115,7 +116,7 @@ std::string ReadRecord() {
 void WriteRecord(const std::string& text) {
 #ifdef ESP_PLATFORM
     nvs_handle_t handle;
-    if (nvs_open("lesson_select", NVS_READWRITE, &handle) != ESP_OK) Refuse();
+    if (nvs_open(M1Staging::StorageNamespace("lesson_select").c_str(), NVS_READWRITE, &handle) != ESP_OK) Refuse();
     const esp_err_t set = nvs_set_blob(handle, "owner", text.data(), text.size());
     const esp_err_t commit = set == ESP_OK ? nvs_commit(handle) : set;
     nvs_close(handle);
@@ -165,8 +166,11 @@ void ApplyRetainedSelection(const LessonAssetMutationLease& mutation, const Reta
     }
     if (current.revision && current.owner.device_id != owner.device_id) Refuse();
     if (current.active && (!SameSelection(current.owner, owner) || owner.request_revision <= current.owner.request_revision)) Refuse();
-    // A release may fence an acquisition that never arrived, but never another owner.
-    if (release && current.revision && !SameSelection(current.owner, owner)) Refuse();
+    // A newer cancellation can fence an unseen bind after the prior owner released.
+    // Never change an existing request's selection or cross a consumer boundary.
+    if (release && current.revision && !SameSelection(current.owner, owner) &&
+        (current.active || current.owner.request_id == owner.request_id ||
+         current.owner.consumer_id != owner.consumer_id)) Refuse();
     if (!release && !current.active && current.revision && owner.request_id == current.owner.request_id) Refuse();
     WriteRecord(Encode(next));
 }

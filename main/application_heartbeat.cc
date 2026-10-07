@@ -100,11 +100,13 @@ void Application::HandleHeartbeatAuthFailure(int status_code) {
     claim_substate_ = TbotClaimSubstate::AvailableStandby;
     backend_offline_.store(false);
 
+#if !CONFIG_TBOT_M1_STAGING
     const auto wifi_clear_result = SsidManager::GetInstance().ForceClearAndCancelTransaction();
     if (wifi_clear_result != SsidMutationResult::kApplied) {
         ESP_LOGE(TAG, "Heartbeat auth recovery could not clear saved WiFi");
         return;
     }
+#endif
     vTaskDelay(pdMS_TO_TICKS(500));
     esp_restart();
 }
@@ -180,11 +182,13 @@ void Application::EnterRepairPairingMode(ChatRequestContext context) {
         backend_offline_.store(false);
         RenderClaimSubstate(claim_substate_);
 
+#if !CONFIG_TBOT_M1_STAGING
         const auto wifi_clear_result = SsidManager::GetInstance().ForceClearAndCancelTransaction();
         if (wifi_clear_result != SsidMutationResult::kApplied) {
             ESP_LOGE(TAG, "BOOT re-pair could not clear saved WiFi");
             return;
         }
+#endif
         ESP_LOGW(TAG,
                  "BOOT re-pair: Wi-Fi forgotten; rebooting into Wi-Fi setup for a new network");
         vTaskDelay(pdMS_TO_TICKS(1500));

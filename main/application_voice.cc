@@ -23,6 +23,10 @@ bool Application::HandleChatStopListening() {
             return true;
         }
     }
+    // Only an armed listener after a drained reply proves that reply complete.
+    const bool drained_listener = GetDeviceState() == kDeviceStateListening &&
+                                  chat_rearm_phase_ == ChatRearmPhase::Armed &&
+                                  chat_listen_origin_ == ChatListenOrigin::Drain;
     if (!RetainChatActiveListen())
         return true;
     chat_rearm_voice_intent_ = false;
@@ -31,6 +35,8 @@ bool Application::HandleChatStopListening() {
         speaking_generation_.load(), false, false,
         IsDeviceClaimed() && !connect_in_flight_.load() && !lesson_asset_sync_quiet_.load());
     chat_rearm_phase_ = ChatRearmPhase::IdleComplete;
+    if (drained_listener)
+        chat_protocol_signals_->intake.CompleteListener(chat_playout_stamp_);
     RequestChatControl(ChatOutboundMailbox::Kind::ListenStop);
     chat_playout_ready_ = false;
     SetDeviceState(kDeviceStateIdle);
@@ -98,6 +104,7 @@ bool Application::BeginChatListen(ListeningMode mode, ChatListenOrigin origin) {
     chat_listen_received_us_ = static_cast<uint64_t>(esp_timer_get_time());
     chat_rearm_mode_ = mode;
     chat_rearm_phase_ = ChatRearmPhase::Pending;
+    chat_protocol_signals_->intake.ReopenListener();
     chat_rearm_voice_intent_ = true;
     chat_rearm_job_ = {};
     chat_rearm_delivery_.reset();

@@ -17,7 +17,11 @@ void Application::RecoverChatStart(const ChatStartHandoff::Request& request, uin
     auto generation = speaking_generation_.load();
     if (generation != UINT32_MAX)
         speaking_generation_.store(++generation);
-    RequestChatAudioCleanup(generation, true, false, false);
+    // Recovery fails closed for this conversation only. The worker resets before
+    // applying wake: claimed safe idle keeps local Hi ESP for a fresh turn.
+    RequestChatAudioCleanup(generation, true, false,
+                            IsDeviceClaimed() && !connect_in_flight_.load() &&
+                                !lesson_asset_sync_quiet_.load() && !lesson_runtime_active_.load());
     chat_rearm_phase_ = ChatRearmPhase::Recovery;
     chat_rearm_owner_ = {request.source, request.protocol_generation, request.connect_generation,
                          generation, chat_audio_reset_serial_};
@@ -186,13 +190,24 @@ void Application::HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSigna
     stop.explicit_manual_stop =
         cJSON_IsFalse(resume) && cJSON_IsString(mode) && strcmp(mode->valuestring, "manual") == 0;
     const auto* id = cJSON_GetObjectItem(root, "drainId");
-    // A no-audio server keepalive refreshes an already active listener. It has
-    // no drain identity and must not invalidate the previous completed reply.
-    if (!id && !reason && stop.continue_listening && stop.realtime &&
-        GetDeviceState() == kDeviceStateListening && microphone_uplink_authorized_.load() &&
+    // A no-audio server keepalive refreshes an already active listener. Once the
+    // drained reply or its listener completed to idle, its realtime keepalive or
+    // manual listen end is already satisfied. Neither has a drain identity, and
+    // neither may invalidate the previous completed reply.
+    const bool keepalive = stop.continue_listening && stop.realtime;
+    if (!id && !reason && (keepalive || stop.explicit_manual_stop) &&
         !signals->start_audio.reset_token &&
-        audio_service_.IsCurrentChatPlaybackReset(response.reset_token))
-        return;
+        audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) {
+        const auto device_state = GetDeviceState();
+        if (keepalive && device_state == kDeviceStateListening &&
+            microphone_uplink_authorized_.load())
+            return;
+        if (device_state == kDeviceStateIdle && signals->intake.ListenerIdle(stop.capture.stamp)) {
+            ESP_LOGI(TAG, "chat_listen_keepalive_ignored state=idle manual=%u",
+                     static_cast<unsigned>(stop.explicit_manual_stop));
+            return;
+        }
+    }
     // Seal only receiver-owned audio admission. Keep the application-published
     // intake identity intact so duplicate/conflicting STOPs retain their clock.
     signals->start_audio = {};

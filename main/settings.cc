@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "m1_staging_policy.h"
 
 #include <esp_log.h>
 #include <nvs_flash.h>
@@ -6,7 +7,7 @@
 #define TAG "Settings"
 
 Settings::Settings(const std::string& ns, bool read_write) : ns_(ns), read_write_(read_write) {
-    nvs_open(ns.c_str(), read_write_ ? NVS_READWRITE : NVS_READONLY, &nvs_handle_);
+    nvs_open(M1Staging::StorageNamespace(ns).c_str(), read_write_ ? NVS_READWRITE : NVS_READONLY, &nvs_handle_);
 }
 
 Settings::~Settings() {
@@ -19,6 +20,7 @@ Settings::~Settings() {
 }
 
 std::string Settings::GetString(const std::string& key, const std::string& default_value) {
+    if (const char* pinned = M1Staging::PinnedSetting(ns_, key)) return pinned;
     if (nvs_handle_ == 0) {
         return default_value;
     }
@@ -38,6 +40,7 @@ std::string Settings::GetString(const std::string& key, const std::string& defau
 }
 
 void Settings::SetString(const std::string& key, const std::string& value) {
+    if (M1Staging::PinnedSetting(ns_, key)) return;
     if (read_write_) {
         ESP_ERROR_CHECK(nvs_set_str(nvs_handle_, key.c_str(), value.c_str()));
         dirty_ = true;
@@ -89,6 +92,7 @@ void Settings::SetBool(const std::string& key, bool value) {
 }
 
 void Settings::EraseKey(const std::string& key) {
+    if (M1Staging::PinnedSetting(ns_, key)) return;
     if (read_write_) {
         auto ret = nvs_erase_key(nvs_handle_, key.c_str());
         if (ret != ESP_ERR_NVS_NOT_FOUND) {
