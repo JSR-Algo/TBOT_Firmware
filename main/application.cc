@@ -5895,15 +5895,18 @@ void Application::HandleChatTerminalStop(const std::shared_ptr<ChatProtocolSigna
     stop.realtime = cJSON_IsString(mode) && strcmp(mode->valuestring, "realtime") == 0;
     stop.explicit_manual_stop = cJSON_IsFalse(resume) && cJSON_IsString(mode) && strcmp(mode->valuestring, "manual") == 0;
     const auto* id = cJSON_GetObjectItem(root, "drainId");
-    // A no-audio server keepalive refreshes an already active listener, or finds
-    // that same drained listener already completed to idle. It has no drain
-    // identity and must not invalidate the previous completed reply.
-    if (!id && !reason && stop.continue_listening && stop.realtime &&
+    // A no-audio server keepalive refreshes an already active listener. Once the
+    // drained reply or its listener completed to idle, its realtime keepalive or
+    // manual listen end is already satisfied. Neither has a drain identity, and
+    // neither may invalidate the previous completed reply.
+    const bool keepalive = stop.continue_listening && stop.realtime;
+    if (!id && !reason && (keepalive || stop.explicit_manual_stop) &&
         !signals->start_audio.reset_token && audio_service_.IsCurrentChatPlaybackReset(response.reset_token)) {
         const auto device_state = GetDeviceState();
-        if (device_state == kDeviceStateListening && microphone_uplink_authorized_.load()) return;
+        if (keepalive && device_state == kDeviceStateListening && microphone_uplink_authorized_.load()) return;
         if (device_state == kDeviceStateIdle && signals->intake.ListenerIdle(stop.capture.stamp)) {
-            ESP_LOGI(TAG, "chat_listen_keepalive_ignored state=idle");
+            ESP_LOGI(TAG, "chat_listen_keepalive_ignored state=idle manual=%u",
+                static_cast<unsigned>(stop.explicit_manual_stop));
             return;
         }
     }
@@ -8770,6 +8773,8 @@ bool Application::AdvanceChatRearm(uint64_t now_us) {
             chat_playout_ready_ = false;
             RequestChatAudioCleanup(response.response_generation, false, false,
                 IsDeviceClaimed() && !connect_in_flight_.load() && !lesson_asset_sync_quiet_.load());
+            if (chat_listen_origin_ == ChatListenOrigin::Drain)
+                chat_protocol_signals_->intake.CompleteListener(chat_playout_stamp_);
             SetDeviceState(kDeviceStateIdle);
             return true;
         }

@@ -83,8 +83,8 @@ public:
         published_stamp_.store(stamp,std::memory_order_release);
         return true;
     }
-    // App publisher only: this response's drained listener completed to idle.
-    // A later drainless keepalive for the same response is then not terminal.
+    // App publisher only: this drained response, or its armed listener, completed
+    // to idle. A later drainless listen refresh/end for it is then not terminal.
     void CompleteListener(uint32_t stamp) {
         listener_idle_.store(Current(stamp) ? stamp : 0,std::memory_order_seq_cst);
     }

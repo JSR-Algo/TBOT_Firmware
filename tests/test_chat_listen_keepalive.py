@@ -114,9 +114,13 @@ def test_no_audio_refresh_after_listen_timeout_keeps_idle_wake(tmp_path, sanitiz
         assert(app.cleanup_wake && "listen timeout must restore claimed idle wake");
     };
     // Exact envelope from GoogleLiveProvider._send_user_audio_window_expired_feedback.
-    auto refresh=[](Application& app, const char* extra="", ConnectionSource source={1,7}) {
-        std::string wire=R"({"type":"tts","state":"stop","session_id":"session",
-            "continue_listening":true,"listen_mode":"realtime")";
+    // Exact dormant-mode envelope from the same server method.
+    static const char* manual=R"({"type":"tts","state":"stop","session_id":"session",
+            "continue_listening":false,"listen_mode":"manual")";
+    auto refresh=[](Application& app, const char* extra="", ConnectionSource source={1,7},
+        const char* base=R"({"type":"tts","state":"stop","session_id":"session",
+            "continue_listening":true,"listen_mode":"realtime")") {
+        std::string wire=base;
         wire+=extra;wire+="}";
         auto* frame=cJSON_Parse(wire.c_str());assert(frame);
         app.HandleChatTerminalStop(app.chat_protocol_signals_,1,source,frame,now_us);
@@ -147,8 +151,11 @@ def test_no_audio_refresh_after_listen_timeout_keeps_idle_wake(tmp_path, sanitiz
         {
             std::lock_guard<std::mutex> lock(runtime_log_mutex);
             assert(std::count(informational_logs.begin(),informational_logs.end(),
-                std::string("chat_listen_keepalive_ignored state=idle"))==3);
+                std::string("chat_listen_keepalive_ignored state=idle manual=0"))==3);
         }
+        // The dormant-mode drainless listen end is equally satisfied by idle.
+        refresh(idle,"",{1,7},manual);idle.PollChatPlayout(now_us);idle.HandleStateChangedEvent();
+        assert(!recovered() && !idle.chat_playout_recovery_ && idle.cleanups==cleanups && idle.cleanup_wake);
         // Hi ESP still starts a fresh listen, and the next real reply drains normally.
         now_us+=1000000;
         assert(idle.HandleChatWake("Hi ESP",false));
@@ -180,6 +187,30 @@ def test_no_audio_refresh_after_listen_timeout_keeps_idle_wake(tmp_path, sanitiz
         refresh(guarded,guard==0 ? R"(,"drainId":"invalid")" : "");
         guarded.PollChatPlayout(now_us);
         assert(guarded.chat_playout_recovery_);
+    }
+    // A dormant drainless listen end on an active listener is not satisfied.
+    {
+        now_us=1000;
+        Application active;arm_listener(active);
+        refresh(active,"",{1,7},manual);active.PollChatPlayout(now_us);
+        assert(active.chat_playout_recovery_);
+    }
+    // A drained reply that completed straight to idle (site 401) is equally
+    // satisfied, but an invalid drain identity still recovers.
+    for(int variant=0;variant<3;++variant) {
+        now_us=1000;
+        Application replied;Setup(replied);replied.state=kDeviceStateSpeaking;replied.online_intent_=true;
+        Stop(replied);replied.PollChatPlayout(now_us);replied.chat_outbound_worker_.RunOnce(now_us);
+        replied.PollChatPlayout(now_us);replied.HandleStateChangedEvent();
+        assert(replied.state==kDeviceStateIdle && replied.cleanup_wake);
+        assert(replied.chat_rearm_phase_==Application::ChatRearmPhase::IdleComplete);
+        const auto cleanups=replied.cleanups;
+        now_us+=4000000;
+        if(variant==1) refresh(replied,"",{1,7},manual);
+        else refresh(replied,variant==2 ? R"(,"drainId":"invalid")" : "");
+        replied.PollChatPlayout(now_us);replied.HandleStateChangedEvent();
+        if(variant==2) assert(replied.chat_playout_recovery_);
+        else assert(!replied.chat_playout_recovery_ && replied.cleanups==cleanups && replied.cleanup_wake);
     }
     // A replaced source cannot reach this intake.
     now_us=1000;
