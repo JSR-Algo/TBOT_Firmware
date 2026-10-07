@@ -242,11 +242,15 @@ RunResult PlayRun(int run, const Plan& plan) {
     ConfigureProductionOriginalSourceSession(assignment, session, reservation.generation);
     OriginalSourceAllocatorStats stats{};
     ProductionOriginalSourceAllocatorStats(&stats, true);
+    OriginalSourceRetentionStats retention_start{}, retention{};
+    OriginalSourceRegionStats region_start{}, region{};
+    ProductionOriginalSourceRetentionStats(&retention_start, &region_start);
 
     const std::size_t psram_start = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     const std::size_t internal_start = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     std::size_t psram_min = psram_start, internal_min = internal_start;
     std::size_t internal_largest_min = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    std::size_t psram_largest_min = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     std::uint64_t sequence = 0;
     double min_fps = 1e9;
     const std::uint64_t frames_start = runtime->PresentedFrames();
@@ -282,6 +286,7 @@ RunResult PlayRun(int run, const Plan& plan) {
             internal_min = std::min(internal_min, heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
             internal_largest_min =
                 std::min(internal_largest_min, heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            psram_largest_min = std::min(psram_largest_min, heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
         }
         const std::uint64_t elapsed = std::max<std::uint64_t>(1, NowMs() - origin);
         const std::uint64_t frames = runtime->PresentedFrames() - cue_frames;
@@ -329,12 +334,15 @@ RunResult PlayRun(int run, const Plan& plan) {
     result.frames = runtime->PresentedFrames() - frames_start;
     const std::uint64_t run_ms = NowMs() - run_start;
     ProductionOriginalSourceAllocatorStats(&stats, false);
+    ProductionOriginalSourceRetentionStats(&retention, &region);
     runtime->DiscardSession();
     storage.EndLessonSession(assignment, session, reservation.generation);
     vTaskDelay(pdMS_TO_TICKS(500));
     ESP_LOGI(TAG,
              "summary run=%d cues=%u errors=%d frames=%lu runMs=%lu meanFps=%.1f minCueFps=%.1f streams=%lu "
              "decoderPeakBytes=%u decoderLiveBytes=%u decoderFailures=%u psramStart=%u psramMin=%u psramEnd=%u "
+             "psramLargestMin=%u retainedBytes=%u retainHits=%u retainMisses=%u retainFlushes=%u "
+             "regionBytes=%u regionMinFree=%u regionOverflows=%u regionReserveFailures=%u "
              "internalStart=%u internalMin=%u internalLargestMin=%u stackFreeMinBytes=%u",
              run, static_cast<unsigned>(plan.cues.size()), result.errors,
              static_cast<unsigned long>(result.frames), static_cast<unsigned long>(run_ms),
@@ -342,7 +350,15 @@ RunResult PlayRun(int run, const Plan& plan) {
              static_cast<unsigned long>(runtime->OpenedStreams()), static_cast<unsigned>(stats.peak_charged),
              static_cast<unsigned>(stats.live_charged), static_cast<unsigned>(stats.failures),
              static_cast<unsigned>(psram_start), static_cast<unsigned>(psram_min),
-             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)), static_cast<unsigned>(internal_start),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+             static_cast<unsigned>(psram_largest_min), static_cast<unsigned>(retention.retained_charged),
+             static_cast<unsigned>(retention.hits - retention_start.hits),
+             static_cast<unsigned>(retention.misses - retention_start.misses),
+             static_cast<unsigned>(retention.refusal_flushes - retention_start.refusal_flushes),
+             static_cast<unsigned>(region.reserved_bytes), static_cast<unsigned>(region.region_min_free),
+             static_cast<unsigned>(region.overflows - region_start.overflows),
+             static_cast<unsigned>(region.reservation_failures - region_start.reservation_failures),
+             static_cast<unsigned>(internal_start),
              static_cast<unsigned>(internal_min), static_cast<unsigned>(internal_largest_min),
              static_cast<unsigned>(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)));
     return result;

@@ -33,7 +33,9 @@ LessonCinematicError OriginalSourceErrorCode(const std::string& reason);
 
 class OriginalSourceRuntime {
 public:
-    explicit OriginalSourceRuntime(std::unique_ptr<OriginalSourceScenePlayer> player);
+    // `on_discard` runs under the runtime lock after DiscardSession closed every stream.
+    explicit OriginalSourceRuntime(std::unique_ptr<OriginalSourceScenePlayer> player,
+                                   std::function<void()> on_discard = {});
 
     OriginalSourceControlResult Handle(const char* frame_type, const cJSON* body, std::uint64_t now_ms);
     // Presents the frame at `now_ms`. The first failure stops playback and becomes
@@ -55,6 +57,7 @@ private:
 
     mutable std::mutex mutex_;
     std::unique_ptr<OriginalSourceScenePlayer> player_;
+    std::function<void()> on_discard_;
     std::uint64_t runtime_generation_ = 1;
     bool failed_ = false;
     std::optional<LessonLayeredRuntimeError> pending_runtime_error_;
@@ -84,9 +87,14 @@ void ConfigureProductionOriginalSourceSession(const std::string& assignment_id, 
                                               std::uint64_t generation);
 void ShutdownProductionOriginalSourceRuntime();
 struct OriginalSourceAllocatorStats;
+struct OriginalSourceRetentionStats;
+struct OriginalSourceRegionStats;
 // Decoder allocator stats of the production runtime (false when not initialized);
 // reset_peak restarts peak measurement from the live bytes.
 bool ProductionOriginalSourceAllocatorStats(OriginalSourceAllocatorStats* stats, bool reset_peak);
+// Large-block retention and dedicated region of the production decoder allocator (false
+// when not initialized).
+bool ProductionOriginalSourceRetentionStats(OriginalSourceRetentionStats* stats, OriginalSourceRegionStats* region);
 
 }  // namespace tbot
 

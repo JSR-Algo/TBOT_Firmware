@@ -44,8 +44,9 @@ LessonCinematicError OriginalSourceErrorCode(const std::string& reason) {
     return LessonCinematicError::kMetadataMismatch;
 }
 
-OriginalSourceRuntime::OriginalSourceRuntime(std::unique_ptr<OriginalSourceScenePlayer> player)
-    : player_(std::move(player)) {}
+OriginalSourceRuntime::OriginalSourceRuntime(std::unique_ptr<OriginalSourceScenePlayer> player,
+                                             std::function<void()> on_discard)
+    : player_(std::move(player)), on_discard_(std::move(on_discard)) {}
 
 OriginalSourceControlResult OriginalSourceRuntime::Handle(const char* frame_type, const cJSON* body,
                                                           std::uint64_t now_ms) {
@@ -76,6 +77,7 @@ bool OriginalSourceRuntime::Tick(std::uint64_t now_ms) {
 void OriginalSourceRuntime::DiscardSession() {
     std::lock_guard<std::mutex> lock(mutex_);
     player_->Reset();
+    if (on_discard_) on_discard_();
     AdvanceRuntimeGeneration();
     failed_ = false;
 }
@@ -176,6 +178,11 @@ bool LessonCinematicTimerRoutesV6() { return g_timer_routes_v6.load(std::memory_
 namespace {
 
 constexpr char kPackRoot[] = "/sdcard/tbot/lesson-assets";
+// Decoder memory for a lesson session (BE08 R19): one PSRAM region reserved at the first
+// decoder allocation, sized to the Farm scene's ~5.5 MB decoder peak so other PSRAM owners
+// keep their share; freed blocks of >= 256 KiB are retained for the next open.
+constexpr std::size_t kDecoderRegionBytes = 5632 * 1024;
+constexpr std::size_t kDecoderRetentionBytes = 4 * 1024 * 1024;
 
 struct ProductionSession {
     std::mutex mutex;
@@ -186,6 +193,8 @@ struct ProductionSession {
 struct ProductionContext {
     ProductionSession session;
     OriginalSourceAllocationState allocations;
+    std::unique_ptr<OriginalSourceRegionBackend> region;
+    std::unique_ptr<OriginalSourceRetainingBackend> retention;
     std::unique_ptr<OriginalSourceAllocator> allocator;
     std::unique_ptr<OriginalSourcePackMedia> media;
     std::unique_ptr<OriginalSourceRuntime> runtime;
@@ -208,14 +217,23 @@ bool InitializeProductionOriginalSourceRuntime(LcdDisplayPresenter* panel, TVide
     if (panel == nullptr || g_production) return false;
     auto context = std::make_unique<ProductionContext>();
     context->panel = panel;
-    context->allocator =
-        std::make_unique<OriginalSourceAllocator>(context->allocations, OriginalSourceAllocator::EspBackend());
+    context->region = std::make_unique<OriginalSourceRegionBackend>(
+        OriginalSourceAllocator::EspBackend(), OriginalSourceRegionBackend::EspHeapOps(), kDecoderRegionBytes);
+    context->retention =
+        std::make_unique<OriginalSourceRetainingBackend>(context->region->backend(), kDecoderRetentionBytes);
+    context->allocator = std::make_unique<OriginalSourceAllocator>(context->allocations, context->retention->backend());
     if (!context->allocator->Bind()) return false;
     context->media = std::make_unique<OriginalSourcePackMedia>(kPackRoot, ProductionLease, &context->allocations, nullptr);
     auto player = std::make_unique<OriginalSourceScenePlayer>(
         MakeOriginalSourcePackSceneLoader(kPackRoot, ProductionLease), context->media.get(), text,
         [panel](const std::uint16_t* rgb565, int width, int height) { return panel->Present(rgb565, width, height); });
-    context->runtime = std::make_unique<OriginalSourceRuntime>(std::move(player));
+    // The lesson session ended and every stream is closed: return the decoder memory.
+    OriginalSourceRetainingBackend* retention = context->retention.get();
+    OriginalSourceRegionBackend* region = context->region.get();
+    context->runtime = std::make_unique<OriginalSourceRuntime>(std::move(player), [retention, region] {
+        retention->ReleaseRetained();
+        region->ReleaseRegion();
+    });
     g_production = std::move(context);
     SetActiveOriginalSourceRuntime(g_production->runtime.get());
     return true;
@@ -237,6 +255,13 @@ bool ProductionOriginalSourceAllocatorStats(OriginalSourceAllocatorStats* stats,
     return true;
 }
 
+bool ProductionOriginalSourceRetentionStats(OriginalSourceRetentionStats* stats, OriginalSourceRegionStats* region) {
+    if (!g_production || stats == nullptr || region == nullptr) return false;
+    *stats = g_production->retention->stats();
+    *region = g_production->region->stats();
+    return true;
+}
+
 void ShutdownProductionOriginalSourceRuntime() {
     SetActiveOriginalSourceRuntime(nullptr);
     SetLessonCinematicTimerRouteV6(false);
@@ -250,6 +275,9 @@ void ShutdownProductionOriginalSourceRuntime() {
 bool InitializeProductionOriginalSourceRuntime(LcdDisplayPresenter*, TVideoTextRenderer*) { return false; }
 void ConfigureProductionOriginalSourceSession(const std::string&, const std::string&, std::uint64_t) {}
 bool ProductionOriginalSourceAllocatorStats(OriginalSourceAllocatorStats*, bool) { return false; }
+bool ProductionOriginalSourceRetentionStats(OriginalSourceRetentionStats*, OriginalSourceRegionStats*) {
+    return false;
+}
 void ShutdownProductionOriginalSourceRuntime() {
     SetActiveOriginalSourceRuntime(nullptr);
     SetLessonCinematicTimerRouteV6(false);

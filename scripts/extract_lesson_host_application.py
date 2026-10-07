@@ -3,7 +3,10 @@
 from pathlib import Path
 import sys
 
-source = Path(sys.argv[1]).read_text()
+# application.cc is split into application_*.cc translation units; search them all.
+application = Path(sys.argv[1])
+source = '\n'.join(path.read_text() for path in
+                   [application, *sorted(application.parent.glob('application_*.cc'))])
 methods = []
 for signature in (
     'bool Application::IsChatRequestCurrent',
