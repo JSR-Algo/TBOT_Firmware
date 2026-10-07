@@ -202,6 +202,19 @@ const char* OriginalSourceScenePlayer::Render(const std::string& cache_key, cons
                                               const OriginalSourceSceneInfo& scene,
                                               const OriginalSourceSceneAssets& assets, const TVideoFrameState& state,
                                               const TVideoFrameLayout& layout) {
+    const char* error = RenderFrame(cache_key, cue, scene, assets, state, layout);
+    // A refused decoder allocation latches the shared allocation state until no stream
+    // holds it. Close every layer so the next prepare can open its streams again.
+    if (error != nullptr && std::strcmp(error, OriginalSourceStatusName(OriginalSourceStatus::kNoMemory)) == 0) {
+        Release();
+    }
+    return error;
+}
+
+const char* OriginalSourceScenePlayer::RenderFrame(const std::string& cache_key, const OriginalSourceCue& cue,
+                                                   const OriginalSourceSceneInfo& scene,
+                                                   const OriginalSourceSceneAssets& assets,
+                                                   const TVideoFrameState& state, const TVideoFrameLayout& layout) {
     const std::string& robot_id = assets.robot_clip_ids[static_cast<std::size_t>(layout.robot.clip_role)];
     if (const char* error =
             Select(&background_, cache_key, scene, assets.background_id, layout.background_media_time_ms)) {

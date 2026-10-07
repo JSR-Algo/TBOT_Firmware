@@ -86,6 +86,9 @@ private:
     const char* Render(const std::string& cache_key, const OriginalSourceCue& cue,
                        const OriginalSourceSceneInfo& scene, const OriginalSourceSceneAssets& assets,
                        const TVideoFrameState& state, const TVideoFrameLayout& layout);
+    const char* RenderFrame(const std::string& cache_key, const OriginalSourceCue& cue,
+                            const OriginalSourceSceneInfo& scene, const OriginalSourceSceneAssets& assets,
+                            const TVideoFrameState& state, const TVideoFrameLayout& layout);
     const char* Select(Layer* layer, const std::string& cache_key, const OriginalSourceSceneInfo& scene,
                        const std::string& asset_id, double media_time_ms);
     const char* Reopen(Layer* layer, const std::string& cache_key, const OriginalSourceOriginal& original);
