@@ -5,9 +5,6 @@
 #include <cstring>
 #include <climits>
 #include <memory>
-#include <cerrno>
-#include <fcntl.h>
-#include <unistd.h>
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -17,36 +14,6 @@ extern "C" {
 }
 namespace tbot {
 namespace {
-// The snapshot is read with POSIX read(): on the ESP32-S3, unbuffered stdio fread()
-// reads byte by byte (~90 ms per 4 KiB measured on the robot, 256 KiB in 5.8 s versus
-// 53 ms with read(), BE08 R16), and a buffered FILE would allocate a hidden buffer.
-class SnapshotFile {
-public:
-    explicit SnapshotFile(const char* path) : fd_(::open(path, O_RDONLY)) {}
-    ~SnapshotFile() { Close(); }
-    SnapshotFile(const SnapshotFile&) = delete;
-    SnapshotFile& operator=(const SnapshotFile&) = delete;
-    explicit operator bool() const { return fd_ >= 0; }
-    int fd() const { return fd_; }
-    void Close() {
-        if (fd_ >= 0) ::close(fd_);
-        fd_ = -1;
-    }
-    // Reads exactly `count` bytes; false on error or early end of file.
-    bool ReadFully(uint8_t* output, size_t count) {
-        while (count > 0) {
-            const ssize_t got = ::read(fd_, output, count);
-            if (got < 0 && errno == EINTR) continue;
-            if (got <= 0) return false;
-            output += got;
-            count -= static_cast<size_t>(got);
-        }
-        return true;
-    }
-
-private:
-    int fd_;
-};
 OriginalSourceStatus Error(int error) {
     return error == AVERROR(ENOMEM) ? OriginalSourceStatus::kNoMemory
                                    : OriginalSourceStatus::kDecode;
@@ -151,12 +118,21 @@ OriginalSourceStatus OriginalSourceSession::Open(
         case OriginalSourceCodec::kPng: id = AV_CODEC_ID_PNG; break;
         default: return Fail(OriginalSourceStatus::kUnsupported);
     }
-    SnapshotFile file(path);
+    // An explicit, routed 4 KiB stdio buffer: newlib's unbuffered fread() reads byte by
+    // byte (256 KiB in 5.8 s on the robot versus 53 ms in 4 KiB reads, BE08 R16), and a
+    // default buffered FILE would allocate a hidden buffer. Declared before the file so
+    // it outlives it.
+    std::unique_ptr<uint8_t, decltype(&av_free)> stdio_buffer(static_cast<uint8_t*>(av_malloc(4096)), &av_free);
+    if (!stdio_buffer) return Fail(OriginalSourceStatus::kNoMemory);
+    std::unique_ptr<FILE, decltype(&std::fclose)> file(std::fopen(path, "rb"), &std::fclose);
     if (!file) return Fail(OriginalSourceStatus::kIo);
-    const off_t size = ::lseek(file.fd(), 0, SEEK_END);
+    if (std::setvbuf(file.get(), reinterpret_cast<char*>(stdio_buffer.get()), _IOFBF, 4096))
+        return Fail(OriginalSourceStatus::kIo);
+    if (std::fseek(file.get(), 0, SEEK_END)) return Fail(OriginalSourceStatus::kIo);
+    const long size = std::ftell(file.get());
     if (size < 0) return Fail(OriginalSourceStatus::kIo);
     if (static_cast<size_t>(size) != expected.bytes) return Fail(OriginalSourceStatus::kIntegrity);
-    if (::lseek(file.fd(), 0, SEEK_SET) != 0) return Fail(OriginalSourceStatus::kIo);
+    if (std::fseek(file.get(), 0, SEEK_SET)) return Fail(OriginalSourceStatus::kIo);
     bytes_ = static_cast<uint8_t*>(av_malloc(expected.bytes));
     if (!bytes_) return Fail(OriginalSourceStatus::kNoMemory);
     std::unique_ptr<AVSHA, decltype(&av_free)> sha(av_sha_alloc(), &av_free);
@@ -172,7 +148,7 @@ OriginalSourceStatus OriginalSourceSession::Open(
             bool ok;
             {
                 tbot::OriginalSourceProfileScope timed(&read_us);
-                ok = file.ReadFully(bytes_ + read, count);
+                ok = std::fread(bytes_ + read, 1, count, file.get()) == count;
             }
             profile.read_us += read_us;
             if (read == 0) profile.first_read_us += read_us;
@@ -186,18 +162,14 @@ OriginalSourceStatus OriginalSourceSession::Open(
         }
         read += count;
     }
-    {
-        // The snapshot must end exactly at the expected length.
-        uint8_t extra = 0;
-        ssize_t tail;
-        do tail = ::read(file.fd(), &extra, 1); while (tail < 0 && errno == EINTR);
-        if (tail != 0) return Fail(OriginalSourceStatus::kIntegrity);
-    }
+    if (std::fgetc(file.get()) != EOF || std::ferror(file.get()))
+        return Fail(OriginalSourceStatus::kIntegrity);
     uint8_t hash[32];
     av_sha_final(sha.get(), hash);
     if (std::memcmp(hash, expected.sha256, sizeof(hash)))
         return Fail(OriginalSourceStatus::kIntegrity);
-    file.Close();
+    file.reset();
+    stdio_buffer.reset();
     sha.reset();
     if (Cancelled()) return Fail(OriginalSourceStatus::kCancelled);
     if (AllocationFailed()) return Fail(OriginalSourceStatus::kNoMemory);
