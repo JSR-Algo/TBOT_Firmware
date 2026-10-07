@@ -5753,7 +5753,10 @@ void Application::RecoverChatStart(const ChatStartHandoff::Request& request, uin
     tts_audio_accepting_.store(false);
     auto generation = speaking_generation_.load();
     if (generation != UINT32_MAX) speaking_generation_.store(++generation);
-    RequestChatAudioCleanup(generation, true, false, false);
+    // Recovery fails closed for this conversation only. The worker resets before
+    // applying wake: claimed safe idle keeps local Hi ESP for a fresh turn.
+    RequestChatAudioCleanup(generation, true, false, IsDeviceClaimed() && !connect_in_flight_.load() &&
+        !lesson_asset_sync_quiet_.load() && !lesson_runtime_active_.load());
     chat_rearm_phase_ = ChatRearmPhase::Recovery;
     chat_rearm_owner_ = {request.source, request.protocol_generation, request.connect_generation,
         generation, chat_audio_reset_serial_};
@@ -5947,7 +5950,10 @@ void Application::RecoverChatPlayout(uint32_t site) {
     tts_audio_accepting_.store(false);
     auto generation = speaking_generation_.load();
     if (generation != UINT32_MAX) speaking_generation_.store(++generation);
-    RequestChatAudioCleanup(generation, true, false, false);
+    // Recovery fails closed for this conversation only. The worker resets before
+    // applying wake: claimed safe idle keeps local Hi ESP for a fresh turn.
+    RequestChatAudioCleanup(generation, true, false, IsDeviceClaimed() && !connect_in_flight_.load() &&
+        !lesson_asset_sync_quiet_.load() && !lesson_runtime_active_.load());
     chat_rearm_owner_ = chat_playout_response_;
     chat_rearm_owner_.response_generation = generation;
     chat_rearm_owner_.reset_token = chat_audio_reset_serial_;
