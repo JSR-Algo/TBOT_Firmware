@@ -81,6 +81,8 @@ class LcdDisplayPresenter {
 public:
     virtual ~LcdDisplayPresenter() = default;
     virtual bool Present(const std::uint16_t* rgb565, int width, int height) = 0;
+    // Shows a frame `fill` writes into the panel's RGB565 surface; false when refused.
+    virtual bool PresentInto(int width, int height, const std::function<void(std::uint16_t*)>& fill) = 0;
 };
 bool InitializeProductionOriginalSourceRuntime(LcdDisplayPresenter* panel, TVideoTextRenderer* text);
 void ConfigureProductionOriginalSourceSession(const std::string& assignment_id, const std::string& session_id,

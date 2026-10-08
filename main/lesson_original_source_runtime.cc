@@ -226,7 +226,10 @@ bool InitializeProductionOriginalSourceRuntime(LcdDisplayPresenter* panel, TVide
     context->media = std::make_unique<OriginalSourcePackMedia>(kPackRoot, ProductionLease, &context->allocations, nullptr);
     auto player = std::make_unique<OriginalSourceScenePlayer>(
         MakeOriginalSourcePackSceneLoader(kPackRoot, ProductionLease), context->media.get(), text,
-        [panel](const std::uint16_t* rgb565, int width, int height) { return panel->Present(rgb565, width, height); });
+        [panel](const std::uint16_t* rgb565, int width, int height) { return panel->Present(rgb565, width, height); },
+        [panel](int width, int height, const std::function<void(std::uint16_t*)>& fill) {
+            return panel->PresentInto(width, height, fill);
+        });
     // The lesson session ended and every stream is closed: return the decoder memory.
     OriginalSourceRetainingBackend* retention = context->retention.get();
     OriginalSourceRegionBackend* region = context->region.get();

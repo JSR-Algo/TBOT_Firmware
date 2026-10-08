@@ -3,6 +3,7 @@
 // frame zero was presented, refusals never consume a sequence, unchanged frames
 // are not repainted, rewinds reopen, decode errors surface and recover, and
 // terminal commands release every stream.
+#include <functional>
 #include "checked_cjson.h"
 #include "lesson_original_source_player.h"
 
@@ -244,6 +245,49 @@ int main(int argc, char** argv) {
         Expect(player.Handle("lesson_start", start.get(), 40000).accepted, "next session start");
         player.Reset();
         Expect(player.controller().active_cue() == nullptr && media.live == 0, "reset releases streams and the cue");
+    }
+    // The device presents by filling the panel surface in place (no player frame copy):
+    // the same cue presents the same pixels, frame for frame, as the copying path.
+    {
+        FakeMedia copy_media, fill_media;
+        copy_media.salt = fill_media.salt = {{"10000000-0000-4000-8000-000000000001", 11}};
+        std::vector<std::uint16_t> copied, surface(480 * 320, 0xdead);
+        int copies = 0, fills = 0;
+        bool fill_ok = true;
+        OriginalSourceScenePlayer copying(loader, &copy_media, nullptr, [&](const std::uint16_t* rgb565, int w, int h) {
+            copied.assign(rgb565, rgb565 + w * h);
+            ++copies;
+            return true;
+        });
+        OriginalSourceScenePlayer filling(
+            loader, &fill_media, nullptr, [](const std::uint16_t*, int, int) { return false; },
+            [&](int w, int h, const std::function<void(std::uint16_t*)>& fill) {
+                if (w != 480 || h != 320) return false;
+                fill(surface.data());
+                ++fills;
+                return fill_ok;
+            });
+        for (auto* each : {&copying, &filling}) {
+            auto prepare = control("prepare", "barn-teach", 1);
+            auto start = control("start", "barn-teach", 2);
+            Expect(each->Handle("lesson_prepare", prepare.get(), 0).accepted &&
+                       each->Handle("lesson_start", start.get(), 1000).accepted,
+                   "fill-in-place twin prepares and starts");
+        }
+        Expect(fills == 1 && surface == copied, "frame zero fills the panel surface with the copied pixels");
+        int compared = 0;
+        for (std::uint64_t now = 1000; now <= 1000 + 2400; now += 37) {
+            Expect(copying.Tick(now) == nullptr && filling.Tick(now) == nullptr, "twin tick");
+            compared += surface == copied;
+            Expect(surface == copied && fills == copies, "filled surface equals the copied frame at " + std::to_string(now));
+        }
+        Expect(compared > 50 && copies > 10, "fill-in-place compared across repainted frames");
+        fill_ok = false;
+        auto pause_free = filling.Tick(30000);
+        Expect(pause_free != nullptr && std::string(pause_free) == "panel refused the frame",
+               "a refused in-place present is a panel refusal");
+        fill_ok = true;
+        Expect(filling.Tick(30000) == nullptr, "in-place frame retried after refusal");
     }
     if (failures != 0) {
         std::fprintf(stderr, "%d failures of %d checks\n", failures, checks);

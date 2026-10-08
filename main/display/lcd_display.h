@@ -190,6 +190,7 @@ private:
 #include <font_emoji.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 
 #define PREVIEW_IMAGE_DURATION_MS 5000
@@ -215,6 +216,10 @@ protected:
 #if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P
     std::unique_ptr<LvglImage> lesson_cinematic_framebuffer_ = nullptr;
     std::uint16_t* lesson_cinematic_pixels_ = nullptr;
+    // The surface may be the face GIF's static frame, lent while a lesson owns the panel.
+    lv_img_dsc_t lesson_cinematic_lent_dsc_{};
+    bool lesson_cinematic_lent_ = false;
+    void ReturnLentLessonFramebuffer();
 #endif
     lv_obj_t* lesson_object_ = nullptr;  // US-006: foreground teaching object layer
     std::unique_ptr<LvglImage> lesson_object_cached_ = nullptr;
@@ -295,6 +300,10 @@ public:
     virtual void EndLessonCinematic();
     bool PresentLessonFramebuffer(const std::uint16_t* pixels, std::uint16_t width,
                                   std::uint16_t height);
+    // Presents a frame that `fill` writes straight into the persistent lesson surface
+    // (width x height RGB565, stride width), under the display lock.
+    bool PresentLessonFramebufferWith(std::uint16_t width, std::uint16_t height,
+                                      const std::function<void(std::uint16_t*)>& fill);
     virtual bool StartLessonRobotEntrance(
         const LessonRobotEntrancePlan& plan, LessonVisualCompletion completion) override;
     virtual void CancelLessonRobotEntrance() override;

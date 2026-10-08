@@ -12,8 +12,7 @@
 namespace {
 constexpr size_t kOpaqueFrameBytes = 480 * 320 * sizeof(uint16_t);
 
-#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY && \
-    !CONFIG_TBOT_LESSON_RENDERER_V6
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
 // Static 480x320 RGB565 upscale target in PSRAM .bss, shared by all LvglGif
 // instances (only one face GIF is shown at a time).
 EXT_RAM_BSS_ATTR uint16_t s_opaque_frame[480 * 320] __attribute__((aligned(16)));
@@ -32,19 +31,25 @@ void ReleaseOpaqueFrame(uint16_t* frame) {
         s_opaque_frame_in_use = false;
     }
 }
-#elif CONFIG_TBOT_LESSON_RENDERER_V6
-// Renderer-v6 images keep these 300 KB of PSRAM for the v6 decoder region (BE08 R20):
-// the upscale target is allocated while a GIF shows, as before the static buffer.
-uint16_t* AcquireOpaqueFrame() {
-    return static_cast<uint16_t*>(heap_caps_malloc(kOpaqueFrameBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-}
-
-void ReleaseOpaqueFrame(uint16_t* frame) { heap_caps_free(frame); }
 #else
 uint16_t* AcquireOpaqueFrame() { return nullptr; }
 void ReleaseOpaqueFrame(uint16_t*) {}
 #endif
 }  // namespace
+
+uint16_t* LvglGifLendOpaqueFrame(size_t bytes) {
+    return bytes == kOpaqueFrameBytes ? AcquireOpaqueFrame() : nullptr;
+}
+
+void LvglGifReturnOpaqueFrame(uint16_t* frame) { ReleaseOpaqueFrame(frame); }
+
+bool LvglGifHasStaticOpaqueFrame() {
+#if CONFIG_BOARD_TYPE_LCDWIKI_ES3C35P && !CONFIG_USE_WECHAT_MESSAGE_STYLE && CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY
+    return true;
+#else
+    return false;
+#endif
+}
 
 LvglGif::LvglGif(const lv_img_dsc_t* img_dsc, bool opaque_scale_2x)
     : gif_(nullptr), timer_(nullptr), last_call_(0), playing_(false), loaded_(false),

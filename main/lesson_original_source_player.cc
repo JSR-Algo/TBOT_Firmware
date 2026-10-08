@@ -58,8 +58,13 @@ const char* OriginalSourceStatusName(OriginalSourceStatus status) {
 
 OriginalSourceScenePlayer::OriginalSourceScenePlayer(OriginalSourceSceneLoader loader,
                                                      OriginalSourceMediaProvider* media, TVideoTextRenderer* text,
-                                                     OriginalSourcePresent present)
-    : controller_(std::move(loader)), media_(media), text_(text), present_(std::move(present)) {
+                                                     OriginalSourcePresent present,
+                                                     OriginalSourcePresentInto present_into)
+    : controller_(std::move(loader)),
+      media_(media),
+      text_(text),
+      present_(std::move(present)),
+      present_into_(std::move(present_into)) {
     controller_.SetPrepareCheck([this](const OriginalSourcePrepareContext& context) -> const char* {
         // Frame zero of the cue, from the scene being prepared (not yet committed).
         TVideoFrameInput input;
@@ -139,6 +144,10 @@ void OriginalSourceScenePlayer::Keep(Layer* layer) {
     layer->shown_den = frame.time_base_den;
 }
 
+int OriginalSourceScenePlayer::LayerIndex(const Layer* layer) const {
+    return layer == &background_ ? 0 : layer == &object_ ? 1 : 2;
+}
+
 const char* OriginalSourceScenePlayer::Reopen(Layer* layer, const std::string& cache_key,
                                              const OriginalSourceOriginal& original) {
     layer->stream.reset();
@@ -152,7 +161,9 @@ const char* OriginalSourceScenePlayer::Reopen(Layer* layer, const std::string& c
     if (opened != OriginalSourceStatus::kOk || !stream) return OriginalSourceStatusName(opened);
     ++opened_streams_;
     const OriginalSourceStatus first = stream->Next(&layer->pending);
-    timings_.open_us += ElapsedUs(open_start);
+    const std::uint64_t open_us = ElapsedUs(open_start);
+    timings_.open_us += open_us;
+    timings_.layer_open_us[LayerIndex(layer)] += open_us;
     ++timings_.opens;
     if (first == OriginalSourceStatus::kEnd) return "original has no frames";
     if (first != OriginalSourceStatus::kOk) return OriginalSourceStatusName(first);
@@ -182,8 +193,11 @@ const char* OriginalSourceScenePlayer::Select(Layer* layer, const std::string& c
         Keep(layer);
         const auto decode_start = std::chrono::steady_clock::now();
         const OriginalSourceStatus next = layer->stream->Next(&layer->pending);
-        timings_.decode_us += ElapsedUs(decode_start);
+        const std::uint64_t decode_us = ElapsedUs(decode_start);
+        timings_.decode_us += decode_us;
         ++timings_.decoded_frames;
+        timings_.layer_decode_us[LayerIndex(layer)] += decode_us;
+        ++timings_.layer_decoded_frames[LayerIndex(layer)];
         if (next == OriginalSourceStatus::kEnd) {
             // The last frame is copied: release the decoder and its file snapshot.
             layer->has_pending = false;
@@ -233,13 +247,29 @@ const char* OriginalSourceScenePlayer::RenderFrame(const std::string& cache_key,
     if (const char* error = PaintTVideoFrame(&canvas, state, layout, cue.copy)) return error;
     if (canvas.unsupported() != nullptr) return canvas.unsupported();
     timings_.paint_us += ElapsedUs(paint_start);
-    const auto convert_start = std::chrono::steady_clock::now();
-    rgb565_.resize(static_cast<std::size_t>(kTVideoStageWidth) * kTVideoStageHeight);
-    ConvertRgb888ToRgb565(stage_.data(), rgb565_.data(), rgb565_.size());
-    timings_.convert_us += ElapsedUs(convert_start);
-    const auto present_start = std::chrono::steady_clock::now();
-    if (!present_ || !present_(rgb565_.data(), kTVideoStageWidth, kTVideoStageHeight)) return "panel refused the frame";
-    timings_.present_us += ElapsedUs(present_start);
+    constexpr std::size_t kPixels = static_cast<std::size_t>(kTVideoStageWidth) * kTVideoStageHeight;
+    if (present_into_) {
+        std::uint64_t convert_us = 0;
+        const auto present_start = std::chrono::steady_clock::now();
+        const bool shown = present_into_(kTVideoStageWidth, kTVideoStageHeight, [&](std::uint16_t* rgb565) {
+            const auto convert_start = std::chrono::steady_clock::now();
+            ConvertRgb888ToRgb565(stage_.data(), rgb565, kPixels);
+            convert_us = ElapsedUs(convert_start);
+        });
+        if (!shown) return "panel refused the frame";
+        timings_.convert_us += convert_us;
+        timings_.present_us += ElapsedUs(present_start) - convert_us;
+    } else {
+        const auto convert_start = std::chrono::steady_clock::now();
+        rgb565_.resize(kPixels);
+        ConvertRgb888ToRgb565(stage_.data(), rgb565_.data(), rgb565_.size());
+        timings_.convert_us += ElapsedUs(convert_start);
+        const auto present_start = std::chrono::steady_clock::now();
+        if (!present_ || !present_(rgb565_.data(), kTVideoStageWidth, kTVideoStageHeight)) {
+            return "panel refused the frame";
+        }
+        timings_.present_us += ElapsedUs(present_start);
+    }
     ++timings_.renders;
     ++presented_frames_;
     return nullptr;

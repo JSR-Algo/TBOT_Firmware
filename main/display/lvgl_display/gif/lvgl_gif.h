@@ -5,6 +5,18 @@
 #include <lvgl.h>
 #include <memory>
 #include <functional>
+#include <cstddef>
+#include <cstdint>
+
+// The face GIF's static 480x320 RGB565 upscale frame (PSRAM .bss) is lent to the lesson
+// scene surface while no GIF holds it: a lesson owns the panel and releases the face GIF
+// on entry (LcdDisplay::SetLessonMode). Returns nullptr when the frame is held, `bytes`
+// differs from its size, or the build has no static frame. While lent, a new GIF uses
+// its allocation fallback. Callers hold the display lock.
+uint16_t* LvglGifLendOpaqueFrame(size_t bytes);
+void LvglGifReturnOpaqueFrame(uint16_t* frame);
+// True when the build has the static frame, i.e. lending can succeed.
+bool LvglGifHasStaticOpaqueFrame();
 
 /**
  * C++ implementation of LVGL GIF widget

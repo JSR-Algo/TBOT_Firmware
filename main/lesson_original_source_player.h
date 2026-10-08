@@ -37,6 +37,10 @@ public:
 
 // Shows one 480x320 RGB565 frame; false when the panel refused it.
 using OriginalSourcePresent = std::function<bool(const std::uint16_t* rgb565, int width, int height)>;
+// Shows one frame that `fill` writes into the panel's own RGB565 surface (stride = width),
+// sparing the player its own frame copy; false when the panel refused it.
+using OriginalSourcePresentInto =
+    std::function<bool(int width, int height, const std::function<void(std::uint16_t* rgb565)>& fill)>;
 
 const char* OriginalSourceStatusName(OriginalSourceStatus status);
 
@@ -44,12 +48,16 @@ const char* OriginalSourceStatusName(OriginalSourceStatus status);
 struct OriginalSourcePlayerTimings {
     std::uint64_t open_us = 0, decode_us = 0, paint_us = 0, convert_us = 0, present_us = 0;
     std::uint64_t opens = 0, decoded_frames = 0, renders = 0;
+    // Per media layer: 0 background, 1 teaching object, 2 robot clip.
+    std::uint64_t layer_decode_us[3]{}, layer_decoded_frames[3]{}, layer_open_us[3]{};
 };
 
 class OriginalSourceScenePlayer {
 public:
+    // With `present_into`, frames go straight to the panel surface and `present` is unused.
     OriginalSourceScenePlayer(OriginalSourceSceneLoader loader, OriginalSourceMediaProvider* media,
-                              TVideoTextRenderer* text, OriginalSourcePresent present);
+                              TVideoTextRenderer* text, OriginalSourcePresent present,
+                              OriginalSourcePresentInto present_into = {});
     OriginalSourceScenePlayer(const OriginalSourceScenePlayer&) = delete;
     OriginalSourceScenePlayer& operator=(const OriginalSourceScenePlayer&) = delete;
 
@@ -93,11 +101,13 @@ private:
                        const std::string& asset_id, double media_time_ms);
     const char* Reopen(Layer* layer, const std::string& cache_key, const OriginalSourceOriginal& original);
     void Keep(Layer* layer);
+    int LayerIndex(const Layer* layer) const;
 
     OriginalSourceSceneController controller_;
     OriginalSourceMediaProvider* media_;
     TVideoTextRenderer* text_;
     OriginalSourcePresent present_;
+    OriginalSourcePresentInto present_into_;
     Layer background_, object_, robot_;
     std::vector<std::uint8_t> stage_;
     std::vector<std::uint16_t> rgb565_;

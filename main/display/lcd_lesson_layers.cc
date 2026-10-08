@@ -4,27 +4,53 @@
 bool LcdDisplay::PresentLessonFramebuffer(const std::uint16_t* pixels,
                                           std::uint16_t width,
                                           std::uint16_t height) {
-    if (pixels == nullptr || display_ == nullptr || lesson_background_ == nullptr ||
-        width != width_ || height != height_) {
+    if (pixels == nullptr) return false;
+    const std::size_t framebuffer_bytes =
+        static_cast<std::size_t>(width) * height * sizeof(std::uint16_t);
+    return PresentLessonFramebufferWith(width, height, [pixels, framebuffer_bytes](std::uint16_t* surface) {
+        std::memcpy(surface, pixels, framebuffer_bytes);
+    });
+}
+
+bool LcdDisplay::PresentLessonFramebufferWith(std::uint16_t width, std::uint16_t height,
+                                              const std::function<void(std::uint16_t*)>& fill) {
+    if (!fill || display_ == nullptr || lesson_background_ == nullptr || width != width_ ||
+        height != height_) {
         return false;
     }
     DisplayLockGuard lock(this);
+    // Enter lesson mode first: it releases the face GIF, whose static frame the
+    // surface can then borrow instead of a fresh 300 KB PSRAM block.
+    SetLessonMode(true);
     const std::size_t framebuffer_bytes =
         static_cast<std::size_t>(width) * height * sizeof(std::uint16_t);
     if (lesson_cinematic_framebuffer_ == nullptr) {
-        void* storage = heap_caps_malloc(
-            framebuffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (storage == nullptr) {
-            ESP_LOGE(TAG, "Failed to allocate persistent cinematic LVGL surface");
-            return false;
+        if (std::uint16_t* lent = LvglGifLendOpaqueFrame(framebuffer_bytes)) {
+            lesson_cinematic_lent_dsc_ = {};
+            lesson_cinematic_lent_dsc_.header.magic = LV_IMAGE_HEADER_MAGIC;
+            lesson_cinematic_lent_dsc_.header.cf = LV_COLOR_FORMAT_RGB565;
+            lesson_cinematic_lent_dsc_.header.w = width;
+            lesson_cinematic_lent_dsc_.header.h = height;
+            lesson_cinematic_lent_dsc_.header.stride = width * sizeof(std::uint16_t);
+            lesson_cinematic_lent_dsc_.data_size = framebuffer_bytes;
+            lesson_cinematic_lent_dsc_.data = reinterpret_cast<const std::uint8_t*>(lent);
+            lesson_cinematic_pixels_ = lent;
+            lesson_cinematic_lent_ = true;
+            lesson_cinematic_framebuffer_ = std::make_unique<LvglSourceImage>(&lesson_cinematic_lent_dsc_);
+        } else {
+            void* storage = heap_caps_malloc(
+                framebuffer_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (storage == nullptr) {
+                ESP_LOGE(TAG, "Failed to allocate persistent cinematic LVGL surface");
+                return false;
+            }
+            lesson_cinematic_pixels_ = static_cast<std::uint16_t*>(storage);
+            lesson_cinematic_framebuffer_ = std::make_unique<LvglAllocatedImage>(
+                storage, framebuffer_bytes, width, height, width * sizeof(std::uint16_t),
+                LV_COLOR_FORMAT_RGB565);
         }
-        lesson_cinematic_pixels_ = static_cast<std::uint16_t*>(storage);
-        lesson_cinematic_framebuffer_ = std::make_unique<LvglAllocatedImage>(
-            storage, framebuffer_bytes, width, height, width * sizeof(std::uint16_t),
-            LV_COLOR_FORMAT_RGB565);
     }
-    std::memcpy(lesson_cinematic_pixels_, pixels, framebuffer_bytes);
-    SetLessonMode(true);
+    fill(lesson_cinematic_pixels_);
     const lv_img_dsc_t* image = lesson_cinematic_framebuffer_->image_dsc();
     lv_image_set_src(lesson_background_, image);
     lv_image_set_scale(lesson_background_, LessonImageCoverScale(
@@ -39,6 +65,20 @@ bool LcdDisplay::PresentLessonFramebuffer(const std::uint16_t* pixels,
     lv_obj_invalidate(lesson_background_);
     lv_refr_now(display_);
     return true;
+}
+
+void LcdDisplay::ReturnLentLessonFramebuffer() {
+    if (!lesson_cinematic_lent_) return;
+    // The face GIF writes into this frame once it is back: drop every LVGL reference first.
+    if (lesson_background_ != nullptr &&
+        lv_image_get_src(lesson_background_) == lesson_cinematic_framebuffer_->image_dsc()) {
+        lv_obj_add_flag(lesson_background_, LV_OBJ_FLAG_HIDDEN);
+        lv_image_set_src(lesson_background_, nullptr);
+    }
+    lesson_cinematic_framebuffer_.reset();
+    LvglGifReturnOpaqueFrame(lesson_cinematic_pixels_);
+    lesson_cinematic_pixels_ = nullptr;
+    lesson_cinematic_lent_ = false;
 }
 
 void LcdDisplay::SetLessonBackground(std::unique_ptr<LvglImage> image) {
@@ -437,6 +477,10 @@ void LcdDisplay::SetLessonRobotOverlayBounds(int left, int top, int width, int h
 }
 void LcdDisplay::SetLessonRobotOverlay(std::unique_ptr<LvglImage> image) { (void)image; }
 bool LcdDisplay::PresentLessonFramebuffer(const std::uint16_t*, std::uint16_t, std::uint16_t) { return false; }
+bool LcdDisplay::PresentLessonFramebufferWith(std::uint16_t, std::uint16_t,
+                                              const std::function<void(std::uint16_t*)>&) {
+    return false;
+}
 bool LcdDisplay::StartLessonRobotEntrance(const LessonRobotEntrancePlan&, LessonVisualCompletion completion) {
     if (completion) completion(LessonVisualApplyResult::kRejected, "unsupportedContract");
     return false;

@@ -102,6 +102,8 @@ void LcdDisplay::SetLessonMode(bool active) {
     } else if (status_label_) {
         lv_obj_remove_flag(status_label_, LV_OBJ_FLAG_HIDDEN);
     }
+    // Lesson over: the face GIF that SetEmotion re-creates gets its static frame back.
+    if (!active) ReturnLentLessonFramebuffer();
     if (!active && lesson_focus_cue_ != nullptr) {
         lv_obj_add_flag(lesson_focus_cue_, LV_OBJ_FLAG_HIDDEN);
     }
@@ -112,6 +114,12 @@ void LcdDisplay::SetLessonMode(bool active) {
         // Pause any animated face so it does not run invisibly behind the lesson scene.
         if (gif_controller_) {
             gif_controller_->Stop();
+            // With the static face-GIF buffers, release the face so the lesson surface can
+            // borrow its frame; the SetEmotion after the lesson re-creates it.
+            if (LvglGifHasStaticOpaqueFrame()) {
+                if (emoji_image_ != nullptr) lv_image_set_src(emoji_image_, nullptr);
+                gif_controller_.reset();
+            }
         }
         if (emoji_box_ != nullptr) lv_obj_add_flag(emoji_box_, LV_OBJ_FLAG_HIDDEN);
         if (emoji_image_ != nullptr) lv_obj_add_flag(emoji_image_, LV_OBJ_FLAG_HIDDEN);

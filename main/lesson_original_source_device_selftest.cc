@@ -313,6 +313,19 @@ RunResult PlayRun(int run, const Plan& plan) {
                  static_cast<unsigned long>((cue_end.convert_us - cue_start.convert_us) / 1000),
                  static_cast<unsigned long>((cue_end.present_us - cue_start.present_us) / 1000),
                  static_cast<unsigned long>(cue_end.renders - cue_start.renders));
+        ESP_LOGI(TAG,
+                 "layers run=%d id=%s bgDecodeMs=%lu bgDecoded=%lu bgOpenMs=%lu objDecodeMs=%lu objDecoded=%lu "
+                 "objOpenMs=%lu robotDecodeMs=%lu robotDecoded=%lu robotOpenMs=%lu",
+                 run, cue.id.c_str(),
+                 static_cast<unsigned long>((cue_end.layer_decode_us[0] - cue_start.layer_decode_us[0]) / 1000),
+                 static_cast<unsigned long>(cue_end.layer_decoded_frames[0] - cue_start.layer_decoded_frames[0]),
+                 static_cast<unsigned long>((cue_end.layer_open_us[0] - cue_start.layer_open_us[0]) / 1000),
+                 static_cast<unsigned long>((cue_end.layer_decode_us[1] - cue_start.layer_decode_us[1]) / 1000),
+                 static_cast<unsigned long>(cue_end.layer_decoded_frames[1] - cue_start.layer_decoded_frames[1]),
+                 static_cast<unsigned long>((cue_end.layer_open_us[1] - cue_start.layer_open_us[1]) / 1000),
+                 static_cast<unsigned long>((cue_end.layer_decode_us[2] - cue_start.layer_decode_us[2]) / 1000),
+                 static_cast<unsigned long>(cue_end.layer_decoded_frames[2] - cue_start.layer_decoded_frames[2]),
+                 static_cast<unsigned long>((cue_end.layer_open_us[2] - cue_start.layer_open_us[2]) / 1000));
         const OriginalSourceProfile& profile = OriginalSourceProfileCounters();
         ESP_LOGI(TAG,
                  "profile run=%d id=%s readMs=%lu hashMs=%lu demuxOpenMs=%lu codecOpenMs=%lu drawMediaMs=%lu "

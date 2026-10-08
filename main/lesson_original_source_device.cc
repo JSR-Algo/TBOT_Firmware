@@ -126,6 +126,10 @@ public:
         return display_->PresentLessonFramebuffer(rgb565, static_cast<std::uint16_t>(width),
                                                   static_cast<std::uint16_t>(height));
     }
+    bool PresentInto(int width, int height, const std::function<void(std::uint16_t*)>& fill) override {
+        return display_->PresentLessonFramebufferWith(static_cast<std::uint16_t>(width),
+                                                      static_cast<std::uint16_t>(height), fill);
+    }
 
 private:
     ::LcdDisplay* display_;
