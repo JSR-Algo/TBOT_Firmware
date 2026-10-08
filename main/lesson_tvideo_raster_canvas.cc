@@ -288,18 +288,53 @@ void TVideoRasterCanvas::FillPolygons(const std::vector<std::vector<Point>>& pol
     const int y1 = std::min(kTVideoStageHeight, static_cast<int>(std::ceil(std::min(max_y, clip.y1))));
     if (x0 >= x1 || y0 >= y1) return;
     std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) { return a.y0 < b.y0; });
-    std::vector<float> coverage(static_cast<std::size_t>(x1 - x0));
+    const int columns = x1 - x0;
+    std::vector<float> coverage(static_cast<std::size_t>(columns));
     std::vector<const Edge*> active;
     std::vector<std::pair<double, int>> crossings;
     std::size_t next = 0;
     const float full_sub_coverage = static_cast<float>(1.0 / kSubScanlines);
     // Clip overlap per column, once per fill instead of per pixel (same values).
-    std::vector<double> column_clip(static_cast<std::size_t>(x1 - x0));
-    for (int px = x0; px < x1; ++px) column_clip[px - x0] = Overlap(px, px + 1, clip.x0, clip.x1);
+    std::vector<double> column_clip(static_cast<std::size_t>(columns));
+    std::vector<std::uint8_t> column_unclipped(static_cast<std::size_t>(columns));
+    for (int px = x0; px < x1; ++px) {
+        column_clip[px - x0] = Overlap(px, px + 1, clip.x0, clip.x1);
+        column_unclipped[px - x0] = column_clip[px - x0] == 1.0;
+    }
     const float layer_alpha = static_cast<float>(state_.alpha);
+    // Fully covered, unclipped pixels share one alpha; their blended byte depends only on
+    // the byte below. The table holds exactly the per-pixel expression's results.
+    std::uint8_t interior[3][256];
+    bool interior_ready = false;
+    float interior_alpha = 0;
+    const auto BuildInterior = [&]() {
+        const float covered = 1.0f;
+        interior_alpha = std::min(1.0f, covered) * color.a * layer_alpha;
+        for (int value = 0; value < 256; ++value) {
+            const std::uint8_t below = static_cast<std::uint8_t>(value);
+            const float alpha = interior_alpha;
+            interior[0][value] = static_cast<std::uint8_t>(RoundPixel(color.r * alpha + below * (1 - alpha)));
+            interior[1][value] = static_cast<std::uint8_t>(RoundPixel(color.g * alpha + below * (1 - alpha)));
+            interior[2][value] = static_cast<std::uint8_t>(RoundPixel(color.b * alpha + below * (1 - alpha)));
+        }
+        interior_ready = true;
+    };
+    // Per row, a pixel's coverage is the float sum, in sub-scanline order, of 1/16 for each
+    // sub-scanline whose span covers it fully and covered/16 where a span edge crosses it.
+    // Sums of 1/16 alone are exact (n/16), so pixels never crossed by an edge take n/16 from
+    // a difference array; only edge-crossed pixels replay the ordered float sum. Same values
+    // as accumulating every pixel on every sub-scanline, without the 16 x width work.
+    struct Span {
+        double a, b;
+        int lo, full_begin, full_end, end;
+    };
+    std::vector<Span> spans;
+    std::vector<int> full_delta(static_cast<std::size_t>(columns) + 1);
+    std::vector<std::uint8_t> crossed(static_cast<std::size_t>(columns));
+    std::vector<int> crossed_columns;
     for (int row = y0; row < y1; ++row) {
-        std::fill(coverage.begin(), coverage.end(), 0.0f);
-        bool any = false;
+        spans.clear();
+        std::fill(full_delta.begin(), full_delta.end(), 0);
         for (int sub = 0; sub < kSubScanlines; ++sub) {
             const double sample_y = row + (sub + 0.5) / kSubScanlines;
             while (next < edges.size() && edges[next].y0 <= sample_y) active.push_back(&edges[next++]);
@@ -327,36 +362,83 @@ void TVideoRasterCanvas::FillPolygons(const std::vector<std::vector<Point>>& pol
                     // px < b <=> px < ceil(b); pixels in [ceil(a), floor(b)) overlap the
                     // span by exactly 1.0, as Overlap() would return.
                     const int end = std::min(x1, static_cast<int>(std::ceil(b)));
-                    const int full_begin = static_cast<int>(std::ceil(a));
-                    const int full_end = static_cast<int>(std::floor(b));
-                    for (int px = static_cast<int>(std::floor(a)); px < end; ++px) {
-                        if (px >= full_begin && px < full_end) {
-                            coverage[px - x0] += full_sub_coverage;
-                            any = true;
-                            continue;
-                        }
-                        const double covered = Overlap(a, b, px, px + 1);
-                        if (covered > 0) {
-                            coverage[px - x0] += static_cast<float>(covered / kSubScanlines);
-                            any = true;
-                        }
+                    const int lo = static_cast<int>(std::floor(a));
+                    if (lo >= end) continue;
+                    const Span span{a, b, lo, static_cast<int>(std::ceil(a)), static_cast<int>(std::floor(b)), end};
+                    spans.push_back(span);
+                    const int full_lo = std::max(span.lo, span.full_begin);
+                    const int full_hi = std::min(span.end, span.full_end);
+                    if (full_lo < full_hi) {
+                        ++full_delta[full_lo - x0];
+                        --full_delta[full_hi - x0];
                     }
                 }
             }
         }
+        if (spans.empty()) continue;
+        // Columns an edge crosses on some sub-scanline: [lo, full) and [full_end, end).
+        crossed_columns.clear();
+        for (const Span& span : spans) {
+            for (int px = span.lo; px < span.end; ++px) {
+                if (px >= span.full_begin && px < span.full_end) {
+                    px = std::max(px, span.full_end - 1);
+                    continue;
+                }
+                if (!crossed[px - x0]) {
+                    crossed[px - x0] = 1;
+                    crossed_columns.push_back(px);
+                }
+            }
+        }
+        bool any = false;
+        int full_count = 0;
+        for (int column = 0; column < columns; ++column) {
+            full_count += full_delta[column];
+            coverage[column] = static_cast<float>(full_count) * full_sub_coverage;
+            any = any || full_count > 0;
+        }
+        for (const int px : crossed_columns) {
+            float sum = 0.0f;
+            for (const Span& span : spans) {  // sub-scanline order, then span order
+                if (px < span.lo || px >= span.end) continue;
+                if (px >= span.full_begin && px < span.full_end) {
+                    sum += full_sub_coverage;
+                    any = true;
+                    continue;
+                }
+                const double covered = Overlap(span.a, span.b, px, px + 1);
+                if (covered > 0) {
+                    sum += static_cast<float>(covered / kSubScanlines);
+                    any = true;
+                }
+            }
+            coverage[px - x0] = sum;
+            crossed[px - x0] = 0;
+        }
         if (!any) continue;
         const double row_clip = Overlap(row, row + 1, clip.y0, clip.y1);
+        const bool row_unclipped = row_clip == 1.0;
         std::uint8_t* pixels = rgb_ + row * kTVideoStageWidth * 3;
         for (int px = x0; px < x1; ++px) {
             float covered = coverage[px - x0];
             if (covered <= 0) continue;
+            std::uint8_t* pixel = pixels + px * 3;
+            const bool unclipped = row_unclipped && column_unclipped[px - x0];
+            if (covered == 1.0f && unclipped) {
+                // Fully covered, unclipped: the alpha of every such pixel is interior_alpha,
+                // so the blend is the per-byte table built from the same expression.
+                if (!interior_ready) BuildInterior();
+                if (interior_alpha <= 0) continue;
+                pixel[0] = interior[0][pixel[0]];
+                pixel[1] = interior[1][pixel[1]];
+                pixel[2] = interior[2][pixel[2]];
+                continue;
+            }
             // Same arithmetic as Blend(): a clip overlap of exactly 1.0 x 1.0 leaves
             // the coverage unchanged, so only clip-edge pixels multiply in double.
-            const double clip_overlap = column_clip[px - x0];
-            if (!(clip_overlap == 1.0 && row_clip == 1.0)) covered *= static_cast<float>(clip_overlap * row_clip);
+            if (!unclipped) covered *= static_cast<float>(column_clip[px - x0] * row_clip);
             const float alpha = std::min(1.0f, covered) * color.a * layer_alpha;
             if (alpha <= 0) continue;
-            std::uint8_t* pixel = pixels + px * 3;
             pixel[0] = static_cast<std::uint8_t>(RoundPixel(color.r * alpha + pixel[0] * (1 - alpha)));
             pixel[1] = static_cast<std::uint8_t>(RoundPixel(color.g * alpha + pixel[1] * (1 - alpha)));
             pixel[2] = static_cast<std::uint8_t>(RoundPixel(color.b * alpha + pixel[2] * (1 - alpha)));
